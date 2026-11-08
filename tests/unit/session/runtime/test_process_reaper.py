@@ -116,6 +116,37 @@ def test_wake_beyond_warm_window_does_not_hold() -> None:
     assert _should_exit(handle, FakeRegistrant()) is True
 
 
+class MonitorHandle(FakeHandle):
+    """An idle handle whose only reason to stay is an armed monitor."""
+
+    def __init__(self, *, next_monitor_ms: int | None, draining: bool = False) -> None:
+        super().__init__()
+        self._next_monitor_ms = next_monitor_ms
+        self._draining = draining
+
+    def next_monitor_due_at(self) -> int | None:
+        return self._next_monitor_ms
+
+
+def test_an_armed_monitor_inside_its_window_holds_and_a_drain_overrides_it() -> None:
+    # (g) The measured miss: a monitor's runtime idle-exited six minutes after
+    # the arm and no tick ran for 260 minutes. A monitor due within
+    # MONITOR_WARM_WINDOW_S (900 s — the scheduler's retry cap) now holds the
+    # runtime; one due further out is left to the supervisor's monitors pass;
+    # and a committed drain (rollover, lop-update) still wins.
+    from local_operator.buildwatch import MONITOR_WARM_WINDOW_S
+    from local_operator.monitors.scheduler import RETRY_CAP_MS
+
+    assert MONITOR_WARM_WINDOW_S * 1000 == RETRY_CAP_MS
+    held = MonitorHandle(next_monitor_ms=_now_ms() + 600_000)
+    assert _should_exit(held, FakeRegistrant()) is False
+    far = MonitorHandle(next_monitor_ms=_now_ms() + 1_200_000)
+    assert _should_exit(far, FakeRegistrant()) is True
+    draining = MonitorHandle(next_monitor_ms=_now_ms() + 600_000, draining=True)
+    assert _should_exit(draining, FakeRegistrant()) is True
+    assert _should_exit(MonitorHandle(next_monitor_ms=None), FakeRegistrant()) is True
+
+
 def test_warm_window_exceeds_min_wake_interval() -> None:
     # The constant pairs with MIN_WAKE_INTERVAL_MS: the window must be wider
     # than the tightest allowed recurrence or a 1-minute wake thrashes

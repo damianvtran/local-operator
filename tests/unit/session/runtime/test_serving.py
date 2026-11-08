@@ -1649,6 +1649,21 @@ def test_a_committed_departure_ignores_the_warm_window() -> None:
     assert handle.may_refresh() == ""
 
 
+def test_an_armed_monitor_never_refuses_a_planned_retirement() -> None:
+    """A monitor holds IDLE-EXIT residency (``process._should_exit``) but not
+    ``may_refresh``: that predicate gates every planned retirement through
+    ``begin_retire`` (a refresh, a queued move), and a monitor is always due
+    within its 900 s window, so a monitor term there refused them forever."""
+    import time as _time
+
+    handle, _ = make_handle()
+    handle.next_wake_due_at = lambda: None  # type: ignore[method-assign]
+    soon = int(_time.time() * 1000) + 60_000
+    handle.next_monitor_due_at = lambda: soon  # type: ignore[method-assign]
+    handle._draining = False
+    assert handle.may_refresh() == ""
+
+
 # --- next_wake_due_at: the reaper's warmth signal ----------------------------
 
 

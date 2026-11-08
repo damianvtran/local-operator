@@ -3268,6 +3268,14 @@ class ServingSessionHandle(SessionHandle):
                 # and the fail-open except below turned that into "no wake",
                 # silently disabling the warm-window term (#3028 CI shard 2).
                 return "wake due within the warm window"
+            # NO MONITOR LEG HERE, deliberately (unlike `process._should_exit`).
+            # This predicate gates every PLANNED retirement — `begin_retire`
+            # asks it for a refresh and for a queued cross-device move — and a
+            # monitor at any common cadence is always due within its 900 s
+            # window, so a monitor term here refused those retirements forever
+            # (the move-queue e2e stuck at `finishing`). A retirement is a
+            # handover, not a loss: the successor (or, with no viewer, the wake
+            # supervisor's monitors pass) resumes the watch from its counters.
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             logger.debug("warm-window probe failed; treating as no wake", exc_info=True)
         return ""

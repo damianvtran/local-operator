@@ -451,6 +451,212 @@ def _is_stale(entry: dict[str, Any], now_ms: int) -> bool:
     return all(_is_stale_ms(due, now_ms) for due in due_times)
 
 
+# -- the monitors pass ------------------------------------------------------
+#
+# WHY THE WAKE SUPERVISOR ENGAGES SESSIONS FOR MONITORS (docs/design/
+# monitor-tool.md §10.4, reversed). A monitor ticks only inside its session's
+# runtime, and that runtime exits when idle; before this pass nothing ever
+# brought it back, so a watch went dark until the operator next opened the
+# session — measured at 260 minutes for the reply the watch was armed to catch.
+# This pass is the guarantee; the runtime's residency term
+# (``buildwatch.monitor_within_window``) is only the cheap path between ticks.
+#
+# READ-ONLY, BY CONSTRUCTION. The session's ``MonitorScheduler`` stays the one
+# writer of monitor state: this pass reads the index and the counters files and
+# only ever ENGAGES the session — the engaged runtime's ``MonitorScheduler.load``
+# re-arms an overdue row within seconds, and that IS the tick. There is no new
+# errand and no write here, so a tick cannot run twice.
+#
+# WHAT IT DOES NOT SHARE WITH WAKES, deliberately:
+# * no staleness bound — a durable watch overdue by days still owes the check
+#   that tells the operator what changed while it was dark;
+# * no owed-fire ledger (``deliveries``) — a monitor's owed check is already
+#   durable in its counters file, so a failed engage is retried from an
+#   in-memory backoff (:class:`_MonitorBackoff`) instead.
+
+#: First retry delay after a failed monitor engagement; doubles per failure up
+#: to :data:`MONITOR_ENGAGE_BACKOFF_CAP_S`. One slice, so a transient failure is
+#: retried at the cadence the loop already runs.
+MONITOR_ENGAGE_BACKOFF_S = SLICE_S
+
+#: The cap, equal to the monitor scheduler's ``RETRY_CAP_MS`` (15 min): a
+#: session that cannot be raised costs at most one engage per 15 minutes of
+#: the shared :data:`_MAX_CONCURRENT_ENGAGES` slots, which is also the longest a
+#: monitor's own backoff ever leaves it unchecked.
+MONITOR_ENGAGE_BACKOFF_CAP_S = 900.0
+
+#: Engagement outcomes that back a monitor engagement off. ``wedged`` is here
+#: because a lease held by a silent owner repeats identically every slice;
+#: ``live`` and ``started`` clear the backoff (the session is hosted).
+_MONITOR_BACKOFF_OUTCOMES = frozenset({"failed", "raised", "wedged"})
+
+
+class _MonitorBackoff:
+    """In-memory, per-session backoff for failed monitor engagements.
+
+    In memory on purpose (see the section comment): losing it on a supervisor
+    restart costs one early retry, never a missed check.
+    """
+
+    def __init__(self) -> None:
+        self._next_at_ms: dict[str, int] = {}
+        self._delay_s: dict[str, float] = {}
+
+    def holds(self, session_id: str, now_ms: int) -> bool:
+        nxt = self._next_at_ms.get(session_id)
+        return nxt is not None and nxt > now_ms
+
+    def note(self, session_id: str, outcome: str, now_ms: int | None = None) -> None:
+        if outcome in _MONITOR_BACKOFF_OUTCOMES:
+            delay = self._delay_s.get(session_id)
+            delay = (
+                MONITOR_ENGAGE_BACKOFF_S
+                if delay is None
+                else min(MONITOR_ENGAGE_BACKOFF_CAP_S, delay * 2)
+            )
+            self._delay_s[session_id] = delay
+            moment = int(time.time() * 1000) if now_ms is None else now_ms
+            self._next_at_ms[session_id] = moment + int(delay * 1000)
+        elif outcome in ("started", "live"):
+            self._next_at_ms.pop(session_id, None)
+            self._delay_s.pop(session_id, None)
+
+
+_monitor_backoff = _MonitorBackoff()
+
+
+def _read_monitor_index(config_dir: Path) -> dict[str, dict[str, Any]]:
+    """The monitor index, each row's due time taken from its COUNTERS file.
+
+    The index row's ``next_due_at`` is not rewritten on quiet ticks (§10.2: a
+    30 s monitor would rewrite it 2,880×/day), so a live session's index says
+    "due" long after the counters moved on — trusting it would re-engage every
+    slice. The counters file is what the scheduler writes on every check; the
+    index row is the fallback only when no counters file exists yet (an arm
+    whose first counters write has not landed). ``disabled`` is OR-ed in from
+    the counters for the same reason. Never raises: a monitors read that fails
+    must not take the wake pass with it.
+    """
+    from local_operator.monitors import state as monitor_state
+    from local_operator.monitors import store as monitor_store
+
+    try:
+        index = monitor_store.read_index(config_dir)
+    except Exception:  # noqa: BLE001 — the wake pass must survive a bad monitors dir
+        logger.warning("monitor index unreadable; skipping the monitors pass", exc_info=True)
+        return {}
+    for session_id, entry in index.items():
+        rows: list[dict[str, Any]] = []
+        for raw in entry.get("monitors") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            row = dict(raw)
+            monitor_id = row.get("id")
+            if isinstance(monitor_id, str) and monitor_id:
+                try:
+                    counters = monitor_state.read_counters(config_dir, session_id, monitor_id)
+                except Exception:  # noqa: BLE001 — one bad file costs one row's freshness
+                    counters = None
+                if counters is not None:
+                    row["next_due_at"] = counters.get("next_due_at")
+                    row["disabled"] = bool(row.get("disabled") or counters.get("disabled"))
+            rows.append(row)
+        entry["monitors"] = rows
+    return index
+
+
+def _armed_monitor_dues(entry: Mapping[str, Any], now_ms: int) -> list[tuple[int, str]]:
+    """``(due_ms, monitor_id)`` for every row that can still fire.
+
+    Disabled and expired (``until_at`` passed) rows are excluded with the
+    store's own predicate (``has_armed``), row by row, so one finished watch
+    cannot speak for a live sibling. A row with no readable due time is not
+    fireable here: there is nothing to engage it for, and counting it would
+    keep the supervisor resident on a row that never comes due.
+    """
+    from local_operator.monitors.store import has_armed
+
+    out: list[tuple[int, str]] = []
+    for raw in entry.get("monitors") or ():
+        if not isinstance(raw, Mapping) or not has_armed({"monitors": [raw]}, now_ms):
+            continue
+        due = raw.get("next_due_at")
+        if isinstance(due, bool) or not isinstance(due, int):
+            continue
+        out.append((due, str(raw.get("id") or "")))
+    return out
+
+
+def _monitor_entry_live(
+    session_id: str, entry: Any, now_ms: int, config_dir: Path | None
+) -> list[tuple[int, str]]:
+    """The armed dues of an entry worth supervising: not held, not a ghost.
+
+    ``[]`` for a held entry (``stopped_at`` — the kill switch; firing would
+    resurrect a stopped session) and for a ghost (no transcript — it can never
+    be engaged). ``config_dir`` absent skips the ghost check, erring towards
+    staying up, like :func:`_has_fireable_wakes`.
+    """
+    from local_operator.monitors.store import is_held
+
+    if not isinstance(entry, Mapping) or is_held(entry):
+        return []
+    dues = _armed_monitor_dues(entry, now_ms)
+    if not dues:
+        return []
+    if config_dir is not None and not _session_exists(config_dir, session_id):
+        return []
+    return dues
+
+
+def _due_monitor_rows(
+    monitors: Mapping[str, dict[str, Any]],
+    now_ms: int,
+    *,
+    config_dir: Path | None,
+    exclude: set[str],
+) -> list[tuple[str, str, int, str]]:
+    """``(session_id, cwd, due_ms, monitor_id)`` for every session owed a check."""
+    rows: list[tuple[str, str, int, str]] = []
+    for session_id, entry in monitors.items():
+        if session_id in exclude or _monitor_backoff.holds(session_id, now_ms):
+            continue
+        due_now = [
+            row
+            for row in _monitor_entry_live(session_id, entry, now_ms, config_dir)
+            if row[0] <= now_ms
+        ]
+        if not due_now:
+            continue
+        due_ms, monitor_id = min(due_now)
+        cwd = entry.get("cwd")
+        rows.append((session_id, cwd if isinstance(cwd, str) else "", due_ms, monitor_id))
+    return rows
+
+
+def _next_monitor_ms(
+    monitors: Mapping[str, dict[str, Any]] | None,
+    now_ms: int | None = None,
+    *,
+    config_dir: Path | None = None,
+) -> int | None:
+    """Earliest armed monitor due time across live entries, or ``None``.
+
+    The same live/held/ghost rule as :func:`_due_sessions` (via
+    :func:`_monitor_entry_live`): a ghost — an orphaned entry whose session has
+    no transcript — is never engaged, so letting its overdue due time size the
+    sleep would pin the loop to one slice forever beside a real far-off watch.
+    ``config_dir`` absent skips the ghost check, erring towards waking.
+    """
+    moment = int(time.time() * 1000) if now_ms is None else now_ms
+    earliest: int | None = None
+    for session_id, entry in (monitors or {}).items():
+        for due, _monitor_id in _monitor_entry_live(session_id, entry, moment, config_dir):
+            if earliest is None or due < earliest:
+                earliest = due
+    return earliest
+
+
 def _due_sessions(
     index: dict[str, dict[str, Any]],
     now_ms: int,
@@ -459,8 +665,18 @@ def _due_sessions(
     deliveries: Mapping[str, dict[str, Any]] | None = None,
     spooled: Mapping[str, dict[str, Any]] | None = None,
     triggers: Mapping[str, dict[str, Any]] | None = None,
+    monitors: Mapping[str, dict[str, Any]] | None = None,
+    origins: dict[str, str] | None = None,
 ) -> list[tuple[str, str, int]]:
     """``(session_id, cwd, due_ms)`` for every session with a wake due now.
+
+    ``monitors`` is the counters-merged monitor index (:func:`_read_monitor_index`):
+    a session with an armed, non-held, non-ghost monitor whose COUNTERS say it
+    is due joins after the wakes and before spooled turns/triggers, so a session
+    owed both ways is engaged once. ``origins``, when given, is filled with
+    ``session_id -> "monitor:<id>"`` for the rows the monitors pass contributed,
+    because those engagements skip the wake ledger (see the section comment
+    above :class:`_MonitorBackoff`) and the sweep has to know which is which.
 
     Reads the index defensively — it is written by other processes and a
     hand-edited or half-written entry must cost one session's wake, never the
@@ -614,8 +830,23 @@ def _due_sessions(
         # Only the common spawn boundary may default it after reading a move.
         cwd = entry.get("cwd")
         due.append((session_id, cwd if isinstance(cwd, str) else "", fireable))
-    # Older first: if several are due at once, the one that has waited
-    # longest gets its runtime first.
+    # MONITORS, after the wakes (a session owed both is engaged once, on its wake
+    # row) and before spooled turns/triggers. No staleness bound and no ledger:
+    # see the section comment above `_MonitorBackoff`.
+    if monitors:
+        for session_id, cwd, due_ms, monitor_id in _due_monitor_rows(
+            monitors,
+            now_ms,
+            config_dir=config_dir,
+            exclude={row[0] for row in due},
+        ):
+            if not cwd:
+                entry = index.get(session_id)
+                index_cwd = entry.get("cwd") if isinstance(entry, dict) else None
+                cwd = index_cwd if isinstance(index_cwd, str) else ""
+            due.append((session_id, cwd, due_ms))
+            if origins is not None:
+                origins[session_id] = f"monitor:{monitor_id}"
     # SPOOLED TURNS, AFTER the index's own rows so a session that is due both ways
     # fires once (the index row is the more specific occurrence: it names a
     # schedule the runtime advances, while a spooled turn simply stops being
@@ -666,6 +897,8 @@ def _due_sessions(
                 int(noted) if isinstance(noted, int) and not isinstance(noted, bool) else now_ms,
             )
         )
+    # Older first: if several are due at once, the one that has waited
+    # longest gets its runtime first.
     due.sort(key=lambda row: row[2])
     return due
 
@@ -706,8 +939,14 @@ def _load_and_reconcile_state(
     dict[str, dict[str, Any]],
     dict[str, dict[str, Any]],
     dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
 ]:
     """Read the index and the ledgers in ONE thread hop, RECONCILED here.
+
+    The fifth element is the counters-merged MONITOR index
+    (:func:`_read_monitor_index`). It is read in the same hop for the same
+    reason the ledgers are, and it is never reconciled or written here: the
+    monitors pass only reads (the session's scheduler is the one writer).
 
     ONE hop, not two. This runs once per slice pass, in a process whose whole
     justification is staying cheap, and the reads must agree anyway: each
@@ -735,7 +974,8 @@ def _load_and_reconcile_state(
     _reconcile_deliveries(config_dir, index, deliveries)
     _reconcile_spooled(config_dir, spooled)
     trigger_mod.reconcile(config_dir, pending_triggers)
-    return index, deliveries, spooled, pending_triggers
+    monitors = _read_monitor_index(config_dir)
+    return index, deliveries, spooled, pending_triggers, monitors
 
 
 def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> None:
@@ -815,11 +1055,21 @@ def _reconcile_deliveries(
             del deliveries[session_id]
 
 
-def _next_wake_ms(index: dict[str, dict[str, Any]]) -> int | None:
-    """Earliest future due time across the whole index, or None."""
+def _next_wake_ms(
+    index: dict[str, dict[str, Any]],
+    *,
+    monitors: Mapping[str, dict[str, Any]] | None = None,
+    config_dir: Path | None = None,
+) -> int | None:
+    """Earliest due time across the whole index — and the armed monitors — or None.
+
+    Monitors join so the loop sleeps toward a monitor's due time instead of
+    ``MAX_SLEEP_S`` when it is the only thing armed; their due time comes from
+    the counters file (see :func:`_read_monitor_index`).
+    """
     from local_operator.wakes.store import next_due_at
 
-    earliest: int | None = None
+    earliest: int | None = _next_monitor_ms(monitors, config_dir=config_dir)
     for entry in index.values():
         if not isinstance(entry, dict) or _is_held_entry(entry):
             continue
@@ -904,8 +1154,15 @@ async def _engage_one(
     semaphore: asyncio.Semaphore,
     *,
     on_outcome: Callable[[str], None] | None = None,
+    schedule_id: str = "",
 ) -> bool:
     """Engage one due session. Returns whether a runtime was started.
+
+    ``schedule_id="monitor:<id>"`` marks a monitors-pass engagement: the same
+    live/ghost/wedged rules apply, but NOTHING is written to the wake ledger —
+    no live-stall record (a live runtime owns its monitors; a monitor is not an
+    owed wake), no failure record and no delivered record. The monitor's owed
+    check is already durable in its counters file.
 
     Split out so the sweep can run these concurrently; every skip and failure
     is contained here so one session can never fail the pass.
@@ -922,6 +1179,7 @@ async def _engage_one(
     task, so it must not block or raise — ``_note_spooled_attempt`` neither does.
     """
     outcome: Callable[[str], None] = on_outcome or (lambda _reason: None)
+    ledger = not schedule_id.startswith("monitor:")
     from local_operator.session.runtime.launch import WakeErrand, engage_runtime
 
     overdue_s = (moment - due_ms) / 1000.0
@@ -940,7 +1198,7 @@ async def _engage_one(
             # scheduler having stopped firing while its record still answers
             # "live" (the constant names the shape this does and does not
             # cover).
-            if overdue_s >= LIVE_STALL_WARN_S:
+            if overdue_s >= LIVE_STALL_WARN_S and ledger:
                 if _skip_log.should_log(session_id, "live-stalled"):
                     # THE FIRE IS RECORDED AS OWED, DURABLY — AT THIS WARNING'S
                     # OWN THROTTLE POINT. A live skip used to throw the
@@ -1035,8 +1293,9 @@ async def _engage_one(
         # pass — see `_SkipLog.forget`.
         _skip_log.forget(session_id, "live", "live-stalled", "ghost", "wedged", "stale")
         logger.info(
-            "engaging %s: wake due %d, %.1fs overdue (deadline %.0fs)",
+            "engaging %s: %s due %d, %.1fs overdue (deadline %.0fs)",
             session_id,
+            schedule_id or "wake",
             due_ms,
             overdue_s,
             WAKE_DEADLINE_S,
@@ -1056,7 +1315,12 @@ async def _engage_one(
                 session_id,
                 cwd,
                 WakeErrand(
-                    schedule_id="",
+                    # "" for a wake; "monitor:<id>" for a monitors-pass row, so
+                    # the runtime's launch log names what it was raised for.
+                    # Either way no op is sent: the engaged runtime's own
+                    # schedulers (`MonitorScheduler.load` re-arming the overdue
+                    # row) are the tick.
+                    schedule_id=schedule_id,
                     occurrence_ms=due_ms,
                     command_id=f"wake-{session_id}-{due_ms}",
                 ),
@@ -1099,16 +1363,21 @@ async def _engage_one(
             # to the operator. The record carries the next attempt time, which
             # is also what bounds the retry's cost against the engagement
             # slots (see `deliveries.RETRY_CAP_S`).
-            await asyncio.to_thread(
-                _note_failure, config_dir, session_id, due_ms, str(exc), overdue_s
-            )
+            if ledger:
+                await asyncio.to_thread(
+                    _note_failure, config_dir, session_id, due_ms, str(exc), overdue_s
+                )
             outcome("failed")
             return False
         # RECOVERED: the failure keys are cleared only once an engage actually
         # succeeds, so the next failure after a working run is announced at
         # full volume instead of inheriting the old silence.
         _skip_log.forget(session_id, "failed", "error", "backoff", "undelivered", "ledger")
-        cleared = await asyncio.to_thread(_note_delivered, config_dir, session_id, due_ms)
+        cleared = (
+            await asyncio.to_thread(_note_delivered, config_dir, session_id, due_ms)
+            if ledger
+            else 0
+        )
         if cleared:
             # A recovery is worth its own line: the operator's question is not
             # "did it fire" (the schedule answers that) but "how close did my
@@ -1122,8 +1391,9 @@ async def _engage_one(
                 cleared,
             )
         logger.info(
-            "started a runtime for %s (wake due %d, %.1fs overdue, took %.1fs)",
+            "started a runtime for %s (%s due %d, %.1fs overdue, took %.1fs)",
             session_id,
+            schedule_id or "wake",
             due_ms,
             overdue_s,
             time.monotonic() - started,
@@ -1791,8 +2061,24 @@ class _Sweeper:
             if failure is not None and failure is not self._failure:
                 self._record_failure(failure)
 
-    def engage(self, config_dir: Path, session_id: str, cwd: str, due_ms: int, moment: int) -> bool:
-        """Start one engagement in the background. False when already running."""
+    def engage(
+        self,
+        config_dir: Path,
+        session_id: str,
+        cwd: str,
+        due_ms: int,
+        moment: int,
+        *,
+        schedule_id: str = "",
+    ) -> bool:
+        """Start one engagement in the background. False when already running.
+
+        ``schedule_id`` is ``"monitor:<id>"`` for a monitors-pass row: that
+        engagement shares this sweeper's semaphore (``_MAX_CONCURRENT_ENGAGES``)
+        but skips the wake ledger and backs off in memory
+        (:class:`_MonitorBackoff`) instead.
+        """
+        is_monitor = schedule_id.startswith("monitor:")
         self.raise_if_failed()
         key = (session_id, due_ms)
         if key in self._in_flight:
@@ -1822,6 +2108,13 @@ class _Sweeper:
                 that did not happen, which is exactly what ``failed`` means.
                 """
                 outcomes.append(reason)
+                if is_monitor:
+                    # A monitor row is not a trigger record or a spooled turn:
+                    # its only bookkeeping is the in-memory backoff.
+                    # Measured from the pass's own clock, the one
+                    # `_due_monitor_rows` compares against.
+                    _monitor_backoff.note(session_id, reason, now_ms=moment)
+                    return
                 _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
@@ -1833,6 +2126,9 @@ class _Sweeper:
                     moment,
                     self._semaphore,
                     on_outcome=_outcome,
+                    # Only a monitor row passes it, so a wake engagement's call
+                    # is exactly what it was before the monitors pass existed.
+                    **({"schedule_id": schedule_id} if is_monitor else {}),
                 )
             except asyncio.CancelledError:
                 # Shutdown, not a failure: `shutdown()` cancels in-flight work
@@ -1872,7 +2168,7 @@ class _Sweeper:
                     # Persist backoff before releasing retry ownership, even on
                     # cancellation. Failed bookkeeping latches this engagement
                     # against a hot retry; task error stays observable to owner.
-                    for reason in outcomes:
+                    for reason in outcomes if not is_monitor else ():
                         await await_spool_write(
                             _note_spooled_attempt, config_dir, session_id, reason=reason
                         )
@@ -1942,10 +2238,12 @@ class _Sweeper:
         deliveries: Mapping[str, dict[str, Any]] | None = None,
         spooled: Mapping[str, dict[str, Any]] | None = None,
         triggers: Mapping[str, dict[str, Any]] | None = None,
+        monitors: Mapping[str, dict[str, Any]] | None = None,
     ) -> int:
         """Start an engagement for every due session. Returns how many started."""
         self.raise_if_failed()
         launched = 0
+        origins: dict[str, str] = {}
         for session_id, cwd, due_ms in _due_sessions(
             index,
             moment,
@@ -1953,8 +2251,16 @@ class _Sweeper:
             deliveries=deliveries,
             spooled=spooled,
             triggers=triggers,
+            monitors=monitors,
+            origins=origins,
         ):
-            if self.engage(config_dir, session_id, cwd, due_ms, moment):
+            origin = origins.get(session_id)
+            engaged = (
+                self.engage(config_dir, session_id, cwd, due_ms, moment, schedule_id=origin)
+                if origin
+                else self.engage(config_dir, session_id, cwd, due_ms, moment)
+            )
+            if engaged:
                 launched += 1
         return launched
 
@@ -2155,7 +2461,7 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
     the loop (see that class for why).
     """
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
-    index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
+    index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
         _load_and_reconcile_state, config_dir
     )
     sweeper = _Sweeper()
@@ -2167,6 +2473,7 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
             deliveries=deliveries,
             spooled=spooled,
             triggers=pending_triggers,
+            monitors=monitors,
         )
         return await sweeper.drain()
     finally:
@@ -2194,8 +2501,15 @@ def _has_fireable_wakes(
     deliveries: Mapping[str, dict[str, Any]] | None = None,
     spooled: Mapping[str, dict[str, Any]] | None = None,
     triggers: Mapping[str, dict[str, Any]] | None = None,
+    monitors: Mapping[str, dict[str, Any]] | None = None,
 ) -> bool:
     """Whether anything in the index could ever cause THIS process to fire.
+
+    ``monitors`` (the counters-merged monitor index) counts too: an armed,
+    non-held, non-ghost monitor with a due time is work this process does —
+    it re-engages the session — so a store holding only monitors keeps the
+    supervisor up. Disabled/expired rows, held entries and ghosts do not,
+    for this docstring's own reason: none is work this process can ever do.
 
     Not the same question as "is the index non-empty", and the difference was
     a leak: an index holding only DORMANT entries (every session stopped) kept
@@ -2249,6 +2563,9 @@ def _has_fireable_wakes(
     from local_operator.wakes import triggers as trigger_mod
 
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
+    for session_id, entry in (monitors or {}).items():
+        if _monitor_entry_live(session_id, entry, moment, config_dir):
+            return True
     if spooled:
         for session_id, record in spooled.items():
             if not isinstance(record, dict):
@@ -2437,6 +2754,28 @@ def _retirement_reason(config_dir: Path) -> str:
         parts.append(f"{ghost} with no session on disk")
     if unreadable:
         parts.append(f"{unreadable} with no readable due time — rewritten when its session opens")
+    # Monitors are counted by the same buckets that can end in retirement
+    # (`_has_fireable_wakes` counts the armed, non-held, non-ghost ones as work):
+    # a held monitor entry is dormant, a monitor with no transcript is a ghost,
+    # and one whose every row is disabled or expired has finished.
+    from local_operator.monitors.store import is_held as monitor_is_held
+
+    m_dormant = m_ghost = m_finished = 0
+    for session_id, entry in _read_monitor_index(config_dir).items():
+        if not entry.get("monitors"):
+            continue
+        if monitor_is_held(entry):
+            m_dormant += 1
+        elif not _armed_monitor_dues(entry, now_ms):
+            m_finished += 1
+        elif not _session_exists(config_dir, session_id):
+            m_ghost += 1
+    if m_dormant:
+        parts.append(f"{m_dormant} monitored session(s) dormant — reopening re-arms them")
+    if m_ghost:
+        parts.append(f"{m_ghost} monitored session(s) missing on disk")
+    if m_finished:
+        parts.append(f"{m_finished} monitored session(s) with every watch disabled or expired")
     if not parts:
         return "nothing is scheduled; the next persist reinstalls it"
     return "; ".join(parts)
@@ -2459,7 +2798,7 @@ async def _should_retire(config_dir: Path) -> bool:
     genuinely empty index is still prompt.
     """
     await asyncio.sleep(min(SLICE_S, MAX_SLEEP_S))
-    index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
+    index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
         _load_and_reconcile_state, config_dir
     )
     return not _has_fireable_wakes(
@@ -2468,6 +2807,7 @@ async def _should_retire(config_dir: Path) -> bool:
         deliveries=deliveries,
         spooled=spooled,
         triggers=pending_triggers,
+        monitors=monitors,
     )
 
 
@@ -2554,7 +2894,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 await triggers_seat.run_once()
             else:
                 triggers_seat.kick()
-            index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
+            index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
             if not _has_fireable_wakes(
@@ -2563,6 +2903,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 deliveries=deliveries,
                 spooled=spooled,
                 triggers=pending_triggers,
+                monitors=monitors,
             ):
                 if once:
                     # `--once` IS THE DIAGNOSTIC, so it must not be the quiet
@@ -2613,6 +2954,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 deliveries=deliveries,
                 spooled=spooled,
                 triggers=pending_triggers,
+                monitors=monitors,
             )
             if once:
                 await sweeper.drain()
@@ -2622,7 +2964,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # Recomputed from the index AFTER the sweep started, so a schedule
             # an already-finished runtime advanced is reflected rather than
             # re-read stale.
-            index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
+            index, deliveries, spooled, pending_triggers, monitors = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
             if not _has_fireable_wakes(
@@ -2631,10 +2973,11 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 deliveries=deliveries,
                 spooled=spooled,
                 triggers=pending_triggers,
+                monitors=monitors,
             ):
                 continue  # retirement is decided at the top, with its grace
 
-            upcoming = _next_wake_ms(index)
+            upcoming = _next_wake_ms(index, monitors=monitors, config_dir=config_dir)
             now_ms = int(time.time() * 1000)
             if upcoming is None:
                 delay = MAX_SLEEP_S
@@ -2811,9 +3154,13 @@ async def _sleep_in_slices(
         if remaining <= 0:
             return
         index = await asyncio.to_thread(read_index, config_dir)
-        if not _has_fireable_wakes(index, config_dir=config_dir):
+        # Monitors are re-read beside the index: without them a monitor-only
+        # store reads as "nothing fireable" here and every sleep collapses to
+        # one slice, and a monitor armed mid-sleep would wait out the delay.
+        monitors = await asyncio.to_thread(_read_monitor_index, config_dir)
+        if not _has_fireable_wakes(index, config_dir=config_dir, monitors=monitors):
             return  # retirement (with its grace) is decided by the caller's loop
-        earliest = _next_wake_ms(index)
+        earliest = _next_wake_ms(index, monitors=monitors, config_dir=config_dir)
         if earliest is None:
             return
         if upcoming is None or earliest < upcoming or earliest <= int(time.time() * 1000):

@@ -66,9 +66,9 @@ In scope:
 
 Out of scope, deliberately:
 
-- **Cold-session engagement.** Monitors tick only while the session is hosted.
-  The boundary is documented in §10.4 with numbers, per the brief's
-  "document the boundary explicitly" branch.
+- ~~**Cold-session engagement.**~~ Reversed (2026-11-07, §10.4): an armed
+  monitor now keeps its session hosted, and the wake supervisor re-engages a
+  cold one when a monitor is due.
 - **`eval` / arbitrary Python as a monitor target.** Rejected in v1; §6.6.
 - **A per-turn "notify me now" hatch** beyond the delivery's own parameter; §14.5.
 - **Cross-session dedupe** (two sessions may watch the same URL); §20/§21.
@@ -1035,36 +1035,77 @@ transcript entry per tick" rule (R2) exists to prevent, and transcript size is
 the compaction machinery's rival. Snapshots are cache-like derived state: if
 lost, the next check re-establishes a baseline silently (§7.2).
 
-### 10.4 Cold-session engagement — the boundary, documented
+### 10.4 Cold-session engagement — reversed: an armed monitor keeps its session hosted
 
-**Decision: monitors never engage a cold session.** They tick only while the
-session is hosted (a TUI/terminal is open on it, or a serve/desktop runtime
-owns it). If the session goes cold, monitors are dormant; they resume with the
-session and deliver one consolidated delta (§9.3).
+**Decision (2026-11-07, reversing v1's "monitors never engage a cold
+session"): an armed monitor keeps its session hosted, or gets it re-engaged.**
+A keep-alive wake beside a monitor is no longer needed.
 
-Why not the wake-supervisor model (`wakes/supervisor.py` engaging a runtime
-for a due wake):
+**Why v1's boundary did not hold — measured.** v1 assumed the watching pattern
+"already has the session hosted". It does not: a session runtime idle-exits
+when it has no work, no viewer and no wake inside the 90 s warm window, and
+monitors were not one of those reasons.
 
-- A wake engagement makes a runtime **exist**; the runtime then fires its own
-  overdue wake. Wakes are spaced for this (typically hours/days; the floor is
-  60 s but real schedules are far apart) and engagements are bounded at 2
-  concurrent with a 180 s deadline (`_MAX_CONCURRENT_ENGAGES`,
-  `WAKE_DEADLINE_S = 180`, `wakes/supervisor.py:204-222`).
-- A 60 s monitor under engagement policy would demand a runtime **permanently
-  resident** — 1,440 engagements/day per monitor — each one a full harness
-  boot. That converts the cheapest primitive in the system into its most
-  expensive one, and the supervisor's own design notes call a runtime boot on
-  a loaded box the thing `_MAX_CONCURRENT_ENGAGES` exists to ration.
-- The watching pattern's real deployment shape already has the session
-  hosted: the desktop app's runtime, or the terminal the user set the watch
-  from. The dormant window is exactly the window where "tell me when it
-  changes" has a human returning shortly anyway — and the resume delivery
-  makes the gap honest.
+- The original miss: a Slack-thread monitor armed at 20:08 lost its runtime at
+  20:14; the reply it was armed to catch landed at 20:17; no tick ran for
+  260 minutes, until the operator opened the session again.
+- The `#product-feedback` watch (every 5 min) was then kept alive only by a
+  2-hourly wake: between 05:27 and 07:27 it ran exactly ONE check where 24
+  were due.
 
-Recorded as an open question (§21): a "slow monitors only" engagement policy
-(e.g. interval ≥ 15 min, engaged like a wake). What would settle it: a
-measured cold-boot cost on this fleet plus a real demand case; the boundary
-above is the v1 contract.
+Two causes, both closed:
+
+1. **Residency.** `process._should_exit` idle-exited without consulting
+   monitors. Term 2 of the
+   residency predicate now has a monitor leg — `buildwatch.monitor_within_window`,
+   reading `handle.next_monitor_due_at()` (armed rows only: disabled and
+   expired rows do not count) — with a window of **900 s**, equal to the
+   scheduler's `RETRY_CAP_MS`, so every backoff a live monitor can be in
+   re-checks inside it. The monitor leg sits under the `_draining` latch: a
+   rollover or `lop-update` drain still wins, and the successor resumes the
+   watch from the counters file. The leg is deliberately NOT in
+   `ServingSessionHandle.may_refresh`: that predicate gates every planned
+   retirement (`begin_retire` — an idle refresh, a queued cross-device move),
+   and a monitor is always due inside its 900 s window, so a monitor term there
+   refused those handovers forever. A retirement hands the watch to a
+   successor (or to the monitors pass below), so it costs no check.
+2. **Re-engagement.** `wakes/supervisor.py` read only the wakes index. It now
+   runs a **monitors pass** after the wakes and before spooled turns and
+   triggers (a session owed both ways is engaged once):
+   - the due time is each row's **counters** `next_due_at`
+     (`monitors/state.read_counters`), falling back to the index row only when
+     no counters file exists — the index is not rewritten on quiet ticks
+     (§10.2), so trusting it would re-engage every slice;
+   - a live record, a held entry (`stopped_at`), disabled/expired rows and a
+     ghost (no transcript) are never engaged and never hold the supervisor up;
+   - **no staleness bound**: a durable watch overdue by days fires once;
+   - **no owed-fire ledger**: the owed check is already durable in the
+     counters file, so a failed engage backs off in memory (doubling from one
+     slice, 15 min cap) and nothing is written to `deliveries/`;
+   - it shares `_MAX_CONCURRENT_ENGAGES` and logs the engagement as
+     `schedule_id="monitor:<id>"`. There is no new errand: an engaged runtime's
+     `MonitorScheduler.load` re-arms the overdue row within seconds, and that
+     is the tick. The supervisor only reads; the session's scheduler stays the
+     single writer, so a tick cannot run twice.
+   - `_has_fireable_wakes`, `_next_wake_ms` and the retirement reason count
+     armed, non-held, non-ghost monitors, so a monitor-only store keeps the
+     supervisor up and sizes its sleep. Arming a monitor (the session's persist
+     or the external `monitors/arm.py` writer) installs the supervisor, as
+     arming a wake does.
+
+**Why the v1 cost argument does not bite.** v1 feared "1,440 engagements/day
+per 60 s monitor". With the 900 s residency window a runtime holding a monitor
+at any common cadence (1–15 min) never exits between its own ticks, so the
+supervisor engages it once per cold start (after a reboot, a drain, or a
+deliberate stop being lifted), not once per tick. Monitors due further out than
+15 minutes cost one engagement per tick, which is the wake model v1 already
+accepted for wakes.
+
+A third, smaller fix rides along: a monitor whose MCP tool was not connected
+yet backs off as "unavailable" (up to 15 min). `Session.refresh_tools` — the
+MCP `on_tools_changed` hook — now calls `MonitorScheduler.retry_unavailable()`,
+which moves those rows (and only those) to the first-check window, without
+touching the episode counters.
 
 ### 10.5 Park, pristine, and retire parity
 
@@ -1624,9 +1665,10 @@ contract for all of them.
 
 ## 21. Open questions
 
-1. **Slow-monitor cold engagement** (§10.4): engage runtimes for monitors with
-   interval ≥ 15 min, wake-style? Evidence that would settle it: measured
-   cold-boot cost on this fleet + a real demand case; until then, dormant.
+1. ~~**Slow-monitor cold engagement**~~ — **answered (2026-11-07, §10.4):**
+   every armed monitor, at any interval, keeps its session resident within
+   900 s of its next check and is re-engaged by the wake supervisor when cold.
+   The demand case was a watched Slack thread that went 260 minutes unchecked.
 2. **Per-turn notify hatch** (§14.5): needs a real case of a quiet monitor's
    urgent outcome being missed.
 3. **eval support** (§6.6): a sandboxed eval worker with enforced no-write

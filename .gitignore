@@ -84,3 +84,8 @@ bench/
 /.tmp/
 /.tmp-tmp/
 /.tmp-home/
+
+# Written by tests/unit/session/test_quiet_product_qa.py (proof artifacts); never committed.
+# Anchored: the tests write it at the repo root only, and an unanchored rule would
+# have to be restated in the mobile web tree (test_web_package_data mirrors them).
+/test-artifacts/

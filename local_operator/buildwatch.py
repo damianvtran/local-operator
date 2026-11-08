@@ -419,6 +419,49 @@ def wake_within_window(handle: object, *, now_ms: int | None = None) -> bool:
     return due_at - now <= WARM_WINDOW_S * 1000
 
 
+#: A runtime whose own MONITOR scheduler has a check due within this window
+#: stays resident. Wider than :data:`WARM_WINDOW_S` on purpose, and equal to
+#: the monitor scheduler's ``RETRY_CAP_MS`` (900 s): every backoff a monitor
+#: can be in — an unavailable MCP tool, failing checks — re-checks inside
+#: 15 minutes, so a session holding ANY live monitor at the common cadences
+#: (1–15 min) never idle-exits between its own ticks. The measured defect this
+#: closes: a monitor armed at 20:08 lost its runtime at 20:14 (the 90 s wake
+#: window never saw it), the reply it was watching for landed at 20:17, and no
+#: tick ran for 260 minutes. A monitor due further out than this is left to the
+#: wake supervisor's monitors pass, which re-engages the session at its due
+#: time — residency is a cost optimisation, the supervisor is the guarantee.
+#: Kept a literal rather than imported from ``monitors.scheduler`` because
+#: this module must stay stdlib-only (see :func:`wake_within_window` for why a
+#: draining runtime still has to be able to import it).
+MONITOR_WARM_WINDOW_S = 900.0
+
+
+def monitor_within_window(handle: object, *, now_ms: int | None = None) -> bool:
+    """Term 2's monitor leg: is one of this runtime's armed monitors due
+    within :data:`MONITOR_WARM_WINDOW_S`?
+
+    The sibling of :func:`wake_within_window`, with the same probe-and-fail-open
+    policy: read through ``handle.next_monitor_due_at()`` (which already
+    excludes disabled and expired rows), and treat a missing or broken accessor
+    as "no monitor" so it can never pin a runtime it cannot read. It does NOT
+    look at the drain latch — the callers own that, because "a rollover or
+    lop-update drain must still win" is a residency rule, not a fact about the
+    schedule.
+    """
+    accessor = getattr(handle, "next_monitor_due_at", None)
+    if not callable(accessor):
+        return False
+    try:
+        due_at = accessor()
+    except Exception:  # noqa: BLE001 — a broken accessor must not pin the runtime
+        logger.debug("next_monitor_due_at failed; treating as no monitor", exc_info=True)
+        return False
+    if not isinstance(due_at, int) or isinstance(due_at, bool):
+        return False
+    now = int(time.time() * 1000) if now_ms is None else now_ms
+    return due_at - now <= MONITOR_WARM_WINDOW_S * 1000
+
+
 def build_prefix() -> str | None:
     """Where to read THIS process's install stamp from: ``sys.prefix``.
 

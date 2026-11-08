@@ -1768,3 +1768,40 @@ async def test_a_legacy_snapshot_delivers_a_real_change_and_nothing_else(
     assert counters["content_hash"] == monitor_diff.content_hash(
         monitor_diff.normalize(_envelope(third, first, second))
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_unavailable_pulls_only_unavailable_rows_forward(tmp_path: Any) -> None:
+    """(h, scheduler half) An MCP tool arriving re-checks the rows waiting on it.
+
+    The unavailable row is pulled into the first-check window; a healthy row
+    keeps its due time; the episode counters are left for the check to settle.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec("m1"), spec("m2", name="other")])
+        sick = harness.scheduler._entries["m1"].counters
+        sick.update(
+            {
+                "unavailable_since": NOW - 60_000,
+                "unavailable_ticks": 2,
+                "next_due_at": NOW + 900_000,
+            }
+        )
+        healthy_due = NOW + 600_000
+        harness.scheduler._entries["m2"].counters["next_due_at"] = healthy_due
+
+        moved = await harness.scheduler.retry_unavailable()
+
+        assert moved == 1
+        assert NOW < sick["next_due_at"] <= NOW + 3_000
+        assert sick["unavailable_since"] == NOW - 60_000
+        assert sick["unavailable_ticks"] == 2
+        assert harness.scheduler._entries["m2"].counters["next_due_at"] == healthy_due
+        # Durable, so a supervisor reading the counters sees the new due time.
+        assert harness.counters("m1")["next_due_at"] == sick["next_due_at"]
+        # Nothing to move is a no-op.
+        sick["unavailable_since"] = 0
+        assert await harness.scheduler.retry_unavailable() == 0
+    finally:
+        harness.scheduler.dispose()

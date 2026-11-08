@@ -296,6 +296,17 @@ async def arm_monitor(
     finally:
         await asyncio.to_thread(lock.release)
 
+    # This writer only ever arms a COLD session (``_refuse_if_owned``), so
+    # nothing ticks the new row until something engages that session — which
+    # is the wake supervisor's monitors pass. Install it here exactly as the
+    # session's own persist does; without this an externally armed watch on a
+    # machine with no armed wakes would sit due forever. Unconditional because
+    # a successful arm always leaves at least one fireable row (the one just
+    # armed, re-activated or found already in force). Best-effort: the
+    # install hook promises not to raise, and a refusal is not this write's
+    # failure — the row is durable and fires the next time the session opens.
+    await asyncio.to_thread(_ensure_supervisor, config_dir)
+
     return MonitorWriteOutcome(
         session_id=session_id,
         monitor_id=result.monitor_id,
@@ -703,6 +714,19 @@ def _write_index(
         monitors=rows,
         preserve=preserve,
     )
+
+
+def _ensure_supervisor(config_dir: Path) -> None:
+    """Install the wake supervisor for an armed monitor (see ``arm_monitor``)."""
+    from local_operator.wakes.install import ensure_supervisor_installed
+
+    try:
+        outcome = ensure_supervisor_installed(Path(config_dir))
+    except Exception:  # noqa: BLE001 — the arm is already durable
+        logger.warning("wake supervisor install hook failed", exc_info=True)
+        return
+    if not outcome.installed:
+        logger.warning("wake supervisor not installed: %s", outcome.reason)
 
 
 def _refusal(outcome: Mapping[str, Any]) -> MonitorWriteError:

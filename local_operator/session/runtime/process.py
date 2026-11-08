@@ -243,6 +243,7 @@ BUILD_STAGGER_S = _buildwatch.BUILD_STAGGER_S
 # exit was unreachable (QA round 1, Q-1). See that module's docstring.
 WARM_WINDOW_S = _buildwatch.WARM_WINDOW_S
 _wake_within_window = _buildwatch.wake_within_window
+_monitor_within_window = _buildwatch.monitor_within_window
 _build_changed = _buildwatch.build_changed
 _build_pair = _buildwatch.build_pair
 _build_prefix = _buildwatch.build_prefix
@@ -1151,6 +1152,24 @@ def _work_in_flight(handle: object) -> bool:
     return _busy_verdict(handle)[0]
 
 
+def _monitor_holds(handle: object) -> bool:
+    """Term 2's monitor leg, under the drain latch.
+
+    A session's monitors tick only inside its own runtime, so a runtime that
+    idle-exits between ticks leaves the watch dark until something else
+    engages the session — the measured miss was 260 minutes. An armed monitor
+    due within ``MONITOR_WARM_WINDOW_S`` therefore holds residency the way an
+    imminent wake does. ``_draining`` wins over it: a rollover or lop-update
+    drain is a committed departure, and the successor (re-engaged by the wake
+    supervisor's monitors pass) inherits the watch from its counters file.
+    Read through ``getattr`` like serving.py's latch reads, so a reduced test
+    handle without the latch behaves as "not draining".
+    """
+    if getattr(handle, "_draining", False):
+        return False
+    return _monitor_within_window(handle)
+
+
 def _should_exit(handle: object, runtime: object) -> bool:
     """The residency predicate (design §6.1): exit when ALL three hold.
 
@@ -1160,7 +1179,9 @@ def _should_exit(handle: object, runtime: object) -> bool:
        predicate is shared with the signal drain, so "would lose nothing" has
        exactly one definition on this process.
     2. No wake is due within :data:`WARM_WINDOW_S` — a runtime about to fire
-       its own wake is cheaper kept than re-spawned (see the constant).
+       its own wake is cheaper kept than re-spawned (see the constant) — and
+       no armed monitor is due within ``MONITOR_WARM_WINDOW_S``
+       (:func:`_monitor_holds`; a drain overrides that leg).
     3. No interactive viewer is attached — a user looking at the session is
        about to type, and holding the process warm turns "every message after
        a 3 s pause costs a cold start" into "the first message of a
@@ -1202,7 +1223,7 @@ def _should_exit(handle: object, runtime: object) -> bool:
         _probe_defers.evaluated()
         if busy:
             return False
-        if _wake_within_window(handle):
+        if _wake_within_window(handle) or _monitor_holds(handle):
             return False
         if _viewer_attached(runtime):
             return False
@@ -1212,7 +1233,7 @@ def _should_exit(handle: object, runtime: object) -> bool:
     # a viewer or an imminent wake is a reason to stay of its own, and counting
     # through one would spend the bound on a runtime whose residency was never
     # the probe's doing.
-    if _wake_within_window(handle) or _viewer_attached(runtime):
+    if _wake_within_window(handle) or _monitor_holds(handle) or _viewer_attached(runtime):
         _probe_defers.reset()
         return False
     streak = _probe_defers.unevaluable(unevaluable)
