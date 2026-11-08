@@ -1329,6 +1329,26 @@ def remove_owner_row(session_dir: Path, command_id: str) -> bool:
     except OSError:
         logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
         return False
+    # A READ BATCH OWNS THE SPOOL FOR ITS WHOLE CLAIM -> COMMIT SPAN (#3610).
+    # The inode flock below is not what a batch holds: ``claim_inbox_batch`` holds
+    # ``.inbox-reader.lock`` and snapshots the bytes, then ``commit_inbox_batch``
+    # refuses with "inbox snapshot prefix changed" if anything rewrote the file
+    # between. This rewrite is exactly that: a steer admitted by the batch runs
+    # its turn while the batch is still open, and its boundary lands here. Take
+    # the reader lock without waiting; busy means a batch is mid-flight, so skip
+    # as the contract above already allows (replay dedupes by the durable index,
+    # and the batch's own commit removes the row it handled).
+    reader = WakeWriteLock(session_dir, name=".inbox-reader.lock", timeout_s=0)
+    try:
+        reader.acquire()
+    except WakeLockBusy:
+        os.close(fd)
+        logger.info("inbox removal for steer %s skipped: a reader owns the spool", command_id)
+        return False
+    except (WakeLockUnavailable, OSError):
+        os.close(fd)
+        logger.warning("could not lock inbox for %s", session_dir.name, exc_info=True)
+        return False
     try:
         with _NonBlockingLock(fd) as lock:
             if not lock.acquired:
@@ -1346,6 +1366,7 @@ def remove_owner_row(session_dir: Path, command_id: str) -> bool:
         logger.warning("inbox removal failed for %s", session_dir.name, exc_info=True)
         return False
     finally:
+        reader.release()
         os.close(fd)
 
 

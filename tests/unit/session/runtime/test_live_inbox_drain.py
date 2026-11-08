@@ -513,3 +513,38 @@ async def test_a_refused_spool_commit_does_not_fail_the_owners_turn(
         assert peek_inbox(directory) == []
     finally:
         await handle.dispose()
+
+
+def test_owner_row_removal_waits_out_an_open_read_batch(tmp_path: Path) -> None:
+    """#3610: a steer boundary must not rewrite the spool under an open read batch.
+
+    ``remove_owner_row`` rewrote the file while a batch held its snapshot, so the
+    batch's commit refused ("inbox snapshot prefix changed") and the successor's
+    boot drain failed. With the batch open the removal is skipped and the commit
+    lands; once the batch closes the same removal succeeds.
+    """
+    from local_operator.session.runtime.inbox import (
+        claim_inbox_batch,
+        commit_inbox_batch,
+        leave_read_batch,
+        release_inbox_batch,
+        remove_owner_row,
+        try_enter_read_batch,
+    )
+
+    append_inbox(tmp_path, _owner_row("first", "row-1"))
+    append_inbox(tmp_path, _owner_row("second", "row-2"))
+    batch = try_enter_read_batch(tmp_path)
+    assert batch is not None
+    claim_inbox_batch(batch)
+    try:
+        batch.handled.update(i for i, _ in batch.rows)
+        assert remove_owner_row(tmp_path, "row-1") is False, "a batch owns the spool"
+        commit_inbox_batch(batch)  # raised OSError before the fix
+    finally:
+        release_inbox_batch(batch)
+        leave_read_batch(batch)
+    assert peek_inbox(tmp_path) == []
+    append_inbox(tmp_path, _owner_row("third", "row-3"))
+    assert remove_owner_row(tmp_path, "row-3") is True
+    assert peek_inbox(tmp_path) == []
