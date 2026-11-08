@@ -345,10 +345,13 @@ no `MESH_PROTOCOL_VERSION` bump (`types.py:42`, which must not move for an op th
 is not a handshake/transcript/framing change), and no new `OP_CAPABILITY` row.
 
 **Convergence cost.** `refresh_membership` pulls a due table from every live link
-(`relay.py:5210`), gated at `MEMBERSHIP_PULL_MIN_INTERVAL_S = 15.0` (`:252`) and
-ticked at `MEMBERSHIP_PULL_PASS_S = 5.0` (`:262`), with `contact_peers`
+(`relay.py:5210`), gated at that link's own interval: `MEMBERSHIP_PULL_MIN_INTERVAL_S =
+15.0` (`:252`) is the floor and `MEMBERSHIP_PULL_MAX_INTERVAL_S = 30.0` the ceiling a
+settled link doubles towards (see `PeerLink.member_pull_interval_s`), ticked at
+`MEMBERSHIP_PULL_PASS_S = 5.0` (`:262`), with `contact_peers`
 (`:5293`) forcing a pass before `show`/`ls`/`peers` answer. So a rename reaches a
-peer within ~20 s, or before the next listing, with no surface and no restart —
+peer within ~20 s on an unsettled link and at most ~35 s on one that has backed off,
+or before the next listing, with no surface and no restart —
 the same convergence story the membership table already has.
 
 **Direction is irrelevant.** The pull runs over any live link regardless of who

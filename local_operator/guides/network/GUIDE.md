@@ -190,7 +190,10 @@ and `lop tunnel setup --json`, not mesh admission.
    MEMBERSHIP CONVERGES ON A SCHEDULE, NOT ON A LINK BEING ESTABLISHED. A member
    admitted after this device joined becomes visible without anything being
    restarted and without anyone running a command: a live link is asked for its
-   member table again every fifteen seconds or so, and because a table transfers
+   member table again every fifteen to thirty seconds — fifteen while anything is
+   moving, doubling towards thirty once the peer's answers keep matching the table
+   this device already holds, and straight back to fifteen the moment one differs —
+   and because a table transfers
    transitively, a device two hops from the newcomer learns it too — including on a
    dial-only machine whose only neighbour never holds a link to the newcomer. A
    peer that accepts the connection and then does not answer its table read is
