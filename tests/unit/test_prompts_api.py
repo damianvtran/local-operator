@@ -582,10 +582,10 @@ def test_bridge_clause_is_membership_gated_and_costs_nothing_when_absent() -> No
 
     # The explicit override renders the other arm without a tool list, the way
     # ``has_notify`` does, so a test never has to fabricate a bridge runtime.
-    assert "guide://team-bridge" in build_system_blocks(TOOLS, SKILLS, ENV, DATE, has_bridge=True)[0]
-    assert (
-        "guide://team-bridge" not in build_system_blocks(TOOLS, SKILLS, ENV, DATE, has_bridge=False)[0]
-    )
+    bridge_prompt = build_system_blocks(TOOLS, SKILLS, ENV, DATE, has_bridge=True)[0]
+    solo_prompt = build_system_blocks(TOOLS, SKILLS, ENV, DATE, has_bridge=False)[0]
+    assert "guide://team-bridge" in bridge_prompt
+    assert "guide://team-bridge" not in solo_prompt
 
 
 def test_the_system_prompt_names_user_run_bang_receipts() -> None:

@@ -86,9 +86,18 @@ def _session_probe(tmp_path: Path, *, enrolled: bool, enabled: bool = True) -> A
     return runtime, tool, (lambda: Session._team_bridge_available(fake))  # type: ignore[arg-type]
 
 
-def _hooks(probe: Any) -> _KnowledgeHooks:
+def _hooks(probe: Any, *, guide: bool = True) -> _KnowledgeHooks:
+    """Hooks as a session build leaves them: the probe PLUS the catalogue.
+
+    The recommendation keys on both, because the guide it names has a
+    ``requires:`` gate — a session with the bridge runtime but no ``team-bridge``
+    in ``guides_by_name`` cannot open the guide, so recommending it is a dead end.
+    """
     hooks = _KnowledgeHooks()
     hooks.team_bridge_available = probe
+    if guide:
+        as_guide = SimpleNamespace(name="team-bridge")
+        hooks.guides_by_name = {"team-bridge": as_guide}  # type: ignore[dict-item]
     return hooks
 
 
@@ -122,10 +131,28 @@ def test_a_known_negative_admission_does_not_recommend(tmp_path: Path, state: st
     assert _team_bridge_recommendation(INCIDENT, _hooks(probe)) is not None
 
 
+def test_a_guide_missing_from_the_catalogue_is_never_recommended(tmp_path: Path) -> None:
+    """QA round 1, Q1: the trigger must not outlive the guide it names.
+
+    ``team_bridge_available`` answers over the bridge RUNTIME and can stay true
+    while ``guides_by_name`` — built from the post-``requires:`` catalogue — has
+    dropped ``team-bridge`` (a lapsed or absent ``hub/org_catalogue.json`` cache is
+    the reproduction). Rendering ``guide://team-bridge`` then hands the model a
+    resolver answer of ``Unknown guide: team-bridge``, so the recommendation is
+    itself the defect. Both answers must come from one question.
+    """
+    _runtime, _tool, probe = _session_probe(tmp_path, enrolled=True)
+    # The runtime really does say yes on its own...
+    assert _team_bridge_recommendation(INCIDENT, _hooks(probe)) is not None
+    # ...and it must still be silent once the gated guide is not in the catalogue.
+    assert _team_bridge_recommendation(INCIDENT, _hooks(probe, guide=False)) is None
+
+
 def test_unknown_membership_is_silent_and_offline() -> None:
     # No probe attached (not signed in / hooks built before the session) and a
     # probe that raises: both fail closed; the autouse fixture proves no fetch.
     assert _team_bridge_recommendation(INCIDENT, _KnowledgeHooks()) is None
+    assert _team_bridge_recommendation(INCIDENT, _hooks(None)) is None
 
     def _boom() -> bool:
         raise RuntimeError("store unreadable")
@@ -160,6 +187,10 @@ def test_unknown_membership_is_silent_and_offline() -> None:
         "QA coordination is at 3pm today",
         "ask the team which review slot works",
         "sync with the team on the QA rotation",
+        # The incident's own wording: "the bridge room" is what the Slack thread
+        # the rule came from actually called it.
+        "post the update in the bridge room",
+        "share it with the bridge room",
     ],
 )
 def test_coordination_intent_fires(query: str) -> None:
@@ -199,6 +230,15 @@ def test_coordination_intent_fires(query: str) -> None:
         "QA the build before you ship",
         "share the test results in the channel",
         "set up the team channel integration",
+        # Round 1 remediation: the noun arm's object is the TAIL of the sentence,
+        # so these read as coordination while the only technical word sits after
+        # the phrase. Each one fired before the tail scan existed.
+        "coordinate the deploy in the team channel",
+        "sync with the team on the API",
+        "fix the QA coordination script",
+        "the QA coordination module has a bug",
+        # ...and the bridge room obeys the same lead+tail scan.
+        "fix the bridge room config script",
     ],
 )
 def test_technical_and_self_addressed_turns_stay_quiet(query: str) -> None:
@@ -271,6 +311,20 @@ async def _boot_and_render(
     return session, await _select_knowledge_block(hooks, INCIDENT, task_id="real")
 
 
+def _on_a_radient_team(monkeypatch: pytest.MonkeyPatch, *, member: bool) -> None:
+    """Make the ``requires: radient-team`` predicate answer ``member``.
+
+    Team membership is what keeps the gated guide in the catalogue, and the
+    recommendation now keys on the catalogue rather than on the runtime probe
+    alone — so a real-boot test has to say which side of the gate the session is
+    on. Patched through the lazy import ``guides.discovery`` itself performs, so
+    the production code path is the one under test.
+    """
+    from local_operator.hub_org import eligibility
+
+    monkeypatch.setattr(eligibility, "is_eligible", lambda _root: member)
+
+
 @pytest.mark.asyncio
 async def test_a_real_factory_session_attaches_the_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -283,13 +337,43 @@ async def test_a_real_factory_session_attaches_the_probe(
     guide index is ungated, and when it listed the guide the advisory copy was
     deduped away (review round 1, R1/Q2) — so the guide's frontmatter stays
     receiver-shaped and the incident turn must reach THIS line.
+
+    Membership is part of the precondition, not a detail: the guide carries
+    ``requires: radient-team``, and a session that cannot open the guide must not
+    be told to read it (QA round 1, Q1). Enrolled + on a team is the state a real
+    chief of staff is in.
     """
+    _on_a_radient_team(monkeypatch, member=True)
     session, block = await _boot_and_render(tmp_path, monkeypatch, enrolled=True)
     try:
         assert session.bridge_runtime is not None
         assert "bridge" in {row.name for row in session._knowledge_hooks.tool_roster}
+        assert "team-bridge" in session._knowledge_hooks.guides_by_name
         assert block.count(f"- guide://team-bridge — {_TEAM_BRIDGE_RULE}") == 1, block
         assert "- team-bridge:" not in block, "the ungated listing must not carry it"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_real_session_with_the_runtime_but_no_gated_guide_is_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1 through the REAL boot path: the trigger must not outlive the guide.
+
+    Enrolled (so ``bridge_runtime`` and therefore the probe exist) but NOT on a
+    team, which is what an expired ``hub/org_catalogue.json`` cache looks like:
+    ``guides_by_name`` has no ``team-bridge`` entry, so rendering the rule line
+    would hand the model a resolver answer of ``Unknown guide: team-bridge``.
+    Silence is the fix; advertising a guide that cannot open is the defect.
+    """
+    _on_a_radient_team(monkeypatch, member=False)
+    session, block = await _boot_and_render(tmp_path, monkeypatch, enrolled=True)
+    try:
+        assert session.bridge_runtime is not None, "the runtime half must be live"
+        assert "team-bridge" not in session._knowledge_hooks.guides_by_name
+        assert "guide://team-bridge" not in block, block
+        assert _TEAM_BRIDGE_RULE not in block, block
     finally:
         await session.dispose()
 
