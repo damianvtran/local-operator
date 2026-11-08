@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -155,13 +156,27 @@ def strip_base_credentials(base_url: str) -> tuple[str, bool]:
     :data:`INVALID_HUB_BASE_PLACEHOLDER`. Such a base is refused anyway, so
     the result only has to be credential-free, not faithful.
 
+    A COMPATIBILITY ``@`` IS CREDENTIALS TOO (security round 3, S-6): ``＠``
+    (U+FF20) and ``﹫`` (U+FE6B) are NFKC-equal to ``@``, and an NFKC step
+    downstream (IDNA host mapping does one) can turn either back into a real
+    userinfo split. There is no ASCII ``@`` to cut at, so a value whose NFKC
+    form still has an ``@`` after the last ASCII one becomes the placeholder.
+    Those two are the COMPLETE set: an exhaustive scan of U+0000..U+10FFFF
+    (security review, PR #3604) found no other code point that NFKC, NFKD,
+    NFKC+casefold or IDNA UTS-46 mapping turns into ``@``, so do not add a
+    hand-rolled lookalike list here; checking the NFKC form already covers them.
+    ``%40`` is not touched: NFKC leaves percent-escapes alone, and decoding
+    them is the server's business, not a credential in the URL.
+
     Pure string work, never ``urlsplit`` (which raises on an unclosed ``[``),
     so it cannot fail on a malformed base and leave it unstripped.
     """
 
+    remainder = base_url.rpartition("@")[2]
+    if "@" in unicodedata.normalize("NFKC", remainder):
+        return INVALID_HUB_BASE_PLACEHOLDER, True
     if "@" not in base_url:
         return base_url, False
-    remainder = base_url.rpartition("@")[2]
     scheme = _SCHEME_PREFIX.match(base_url)
     if scheme is None:
         return INVALID_HUB_BASE_PLACEHOLDER, True
