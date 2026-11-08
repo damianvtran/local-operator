@@ -1347,7 +1347,7 @@ session-plane handlers belong to doc 2 and are listed for completeness):
 |---|---|---|---|
 | `net_reconcile` | either | `list` | learn the current epoch+secret+member list when authenticated at the previous epoch (phase `reconcile` only) |
 | `net_catalog` | either | `list` | this peer's session rows (§9.2) |
-| `net_member_list` | either | `list` | member rows of one network (no key material) |
+| `net_member_list` | either | `list` | member rows of one network (no key material); with `member-list-digest-v1` negotiated the asker may send `if_digest` and a matching table answers `unchanged` with no rows |
 | `net_epoch` | either | `admin` | a rotation: new epoch, new secret, member list |
 | `net_leave` | either | `list` | a peer announcing its own departure (self-signed) |
 | `net_panic` | either | `list` | incident broadcast; receivers go untrusted (§8.5) |
