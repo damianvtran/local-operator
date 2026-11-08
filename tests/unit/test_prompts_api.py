@@ -554,6 +554,40 @@ def test_blocks_isolate_volatile_content() -> None:
     assert len(blocks) == 4
 
 
+def test_bridge_clause_is_membership_gated_and_costs_nothing_when_absent() -> None:
+    """Coordination prose appears ONLY in a session that holds `bridge`.
+
+    Operator constraint (Team Bridge discoverability, conditional half): a solo
+    or signed-out user has no bridge, so the clause must be ABSENT rather than
+    empty — the prompt has to be byte-identical to one that never knew the
+    clause existed, with no blank line where a sentence used to be.
+
+    The flag is a SINGLE, membership-gated one like ``has_notify``: it reads the
+    tool list, not visibility, because a hidden-but-callable `bridge` still
+    coordinates. There is deliberately no ``no_bridge`` negation — the tool is
+    either there (usage prose) or absent (no clause at all).
+    """
+    solo = build_system_blocks(TOOLS, SKILLS, ENV, DATE)[0]
+    assert "guide://team-bridge" not in solo
+
+    bridged = build_system_blocks([*TOOLS, _tool("bridge", "Agent bridge.")], SKILLS, ENV, DATE)[0]
+    assert "guide://team-bridge" in bridged
+    assert "never a second channel for the same ask" in bridged
+
+    # INLINE: excising the clause must restore the exact absent bytes, which is
+    # what proves the marker adds nothing of its own when the flag is false.
+    start = bridged.index(" Coordination with another person's agent")
+    end = bridged.index("same ask.", start) + len("same ask.")
+    assert bridged[:start] + bridged[end:] == solo
+
+    # The explicit override renders the other arm without a tool list, the way
+    # ``has_notify`` does, so a test never has to fabricate a bridge runtime.
+    bridge_prompt = build_system_blocks(TOOLS, SKILLS, ENV, DATE, has_bridge=True)[0]
+    solo_prompt = build_system_blocks(TOOLS, SKILLS, ENV, DATE, has_bridge=False)[0]
+    assert "guide://team-bridge" in bridge_prompt
+    assert "guide://team-bridge" not in solo_prompt
+
+
 def test_the_system_prompt_names_user_run_bang_receipts() -> None:
     """The model must be able to tell a command the USER ran (bang-mode) from
     one it issued itself: a `! <command>` user message + bash call + result is

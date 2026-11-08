@@ -3427,7 +3427,8 @@ def _memory_recommendation(query: str) -> _ClassificationCandidate | None:
 #: Coordination with a PERSON or their agent. Deliberately COMPOUND: a
 #: messaging verb alone fires on "send a message to the queue", "ask the API" or
 #: "notify via webhook"; a person noun alone on "tell me about the chief of
-#: staff role". Two arms, see :func:`_team_bridge_intent`.
+#: staff role". Two person arms, plus the noun-shaped coordination arm below —
+#: see :func:`_team_bridge_intent`.
 _TEAM_BRIDGE_VERB = (
     r"(?:message|dm|ping|tell|ask|notify|e-?mail|slack|reach\s+out(?:\s+to)?|"
     r"follow\s+up(?:\s+with)?|coordinate(?:\s+with)?|loop\s+in|check\s+with|"
@@ -3487,22 +3488,85 @@ _TEAM_BRIDGE_NOT_A_NAME = frozenset(
 _TEAM_BRIDGE_TECHNICAL = re.compile(
     r"(?i)\b(?:message\s+(?:queue|broker|bus)|webhooks?|api\b|http|kafka|rabbitmq|sqs|"
     r"pub/?sub|unit\s+tests?|implement\w*|refactor\w*|function|endpoint|code|script|"
-    r"cron|bot)\b"
+    r"cron|bot|deploy\w*|release\w*|pipelines?|ci|build\w*|branch\w*|merge\w*|modules?)\b"
 )
 _TEAM_BRIDGE_LEAD_IN = 40
+#: How far PAST a noun-shaped coordination phrase the technical scan reads. The
+#: person arms deliberately stop at the target ("message Sarah about the
+#: implementation plan" is still a person ask), but a room phrase has no target to
+#: stop at: its object is whatever the sentence goes on to do IN that room. Without
+#: this window "sync with the team on the API" and "fix the QA coordination
+#: script" read as coordination because the only technical word sits after the
+#: phrase — the whole class of ordinary engineering work this rule must never
+#: touch. Bounded like the lead-in so a long message cannot smuggle a distant
+#: "deploy" in from an unrelated clause.
+_TEAM_BRIDGE_TAIL = 40
+#: Coordination phrasing that names NO person: a shared QA window, the QA room,
+#: "post it in the team channel", "sync with the team". Both arms above need a
+#: person noun or a name, so the ask where the duplicate-thread incident actually
+#: happened — a shared QA window between two teams — matched nothing and carried
+#: no rule. Deliberately NOUN-SHAPED rather than a third verb list: "coordinate
+#: the deploy", "sync the branch" and "QA the build" are ordinary work and must
+#: stay quiet, so the phrase itself has to name the room/window/team. The
+#: ``in|to|on the <x> channel|room`` arm requires the preposition for the same
+#: reason: "the team channel integration" is a config task, "in the team
+#: channel" is a post.
+_TEAM_BRIDGE_COORDINATION = re.compile(
+    r"(?i)(?:"
+    r"\bqa\s+coordination\b"
+    r"|\bshared\s+(?:qa|review|test)\s+(?:window|session|slot)\b"
+    r"|\bthe\s+qa\s+room\b"
+    # The incident's own wording. Agents called it "the bridge room", so the
+    # phrase a user is most likely to reuse has to reach the same rule; it is
+    # noun-shaped and still passes the lead+tail technical scan below, so "fix the
+    # bridge room config script" stays quiet.
+    r"|\bthe\s+bridge\s+room\b"
+    r"|\b(?:in|to|into|on)\s+the\s+(?:agent|team|qa|review)\s+(?:channel|room)\b"
+    r"|\bask\s+the\s+(?:team|group)\b"
+    r"|\bsync\s+(?:up\s+)?with\s+the\s+team\b"
+    r")"
+)
+
+
+def _team_bridge_technical_window(text: str, match: re.Match[str], *, scan_tail: bool) -> str:
+    """The slice of ``text`` around one arm match that decides system vs person.
+
+    Person arms read the lead-in plus their own ``gap`` (verb -> target) and stop
+    there: what FOLLOWS a person is the ask's subject, and "message Sarah about
+    the implementation plan" is still a message to Sarah. A room phrase has no
+    target, so its object is the tail — hence ``scan_tail``, applied only to the
+    noun-shaped arm.
+    """
+    lead = text[max(0, match.start() - _TEAM_BRIDGE_LEAD_IN) : match.start()]
+    window = lead + " " + (match.groupdict().get("gap") or "")
+    if scan_tail:
+        window += " " + text[match.end() : match.end() + _TEAM_BRIDGE_TAIL]
+    return window
 
 
 def _team_bridge_intent(text: str) -> bool:
-    """Whether some verb in ``text`` targets a person with no technical object."""
+    """Whether ``text`` targets a person, or names a coordination room, with no
+    technical object.
+
+    The third arm exists because the one-channel rule matters MOST on the turns
+    that name no person at all (a shared QA window): there the model has no
+    addressee to infer from and reaches for whatever channel it finds first.
+    """
     for arm in (_TEAM_BRIDGE_PERSON_ARM, _TEAM_BRIDGE_NAMED_ARM):
         for match in arm.finditer(text):
             name = match.groupdict().get("name")
             if name is not None and name in _TEAM_BRIDGE_NOT_A_NAME:
                 continue
-            lead = text[max(0, match.start() - _TEAM_BRIDGE_LEAD_IN) : match.start()]
-            if _TEAM_BRIDGE_TECHNICAL.search(lead + " " + (match.groupdict().get("gap") or "")):
+            window = _team_bridge_technical_window(text, match, scan_tail=False)
+            if _TEAM_BRIDGE_TECHNICAL.search(window):
                 continue
             return True
+    for match in _TEAM_BRIDGE_COORDINATION.finditer(text):
+        if _TEAM_BRIDGE_TECHNICAL.search(
+            _team_bridge_technical_window(text, match, scan_tail=True)
+        ):
+            continue
+        return True
     return False
 
 
@@ -3537,6 +3601,17 @@ def _team_bridge_recommendation(
     already look like person-to-person coordination.
     """
     if not _team_bridge_intent(query[:2048]):
+        return None
+    # The trigger and the guide must answer the SAME question. ``guides_by_name``
+    # is the post-``requires:`` catalogue — a session with no team membership, or
+    # one whose ``hub/org_catalogue.json`` cache has lapsed, has no ``team-bridge``
+    # entry — while ``team_bridge_available`` is the bridge RUNTIME probe, which can
+    # still say yes on its own. Keying only on the probe advertised a guide the
+    # resolver answers ``Unknown guide: team-bridge`` for: a dead end rendered as a
+    # recommendation. Taking the guide's own presence as the gate makes the two
+    # agree by construction, and it is a dict lookup, so a trigger still never pays
+    # a fetch.
+    if "team-bridge" not in hooks.guides_by_name:
         return None
     probe = hooks.team_bridge_available
     if probe is None:
@@ -4111,6 +4186,22 @@ def _make_system_blocks_provider(
         # zero. Ask the owning Session, never infer from host type or a stub.
         notify_probe = getattr(provider, "notify_available", None)
         has_notify = bool(notify_probe()) if callable(notify_probe) else None
+        # The coordination clause and the ``guide://team-bridge`` it names are
+        # ONE unit, so the clause takes the SAME answer the guide resolver and
+        # the bridge recommendation above take: does this session actually have
+        # the guide. Tool membership is not that answer —
+        # ``bridge_runtime_for_session`` never re-checks current eligibility by
+        # its own docstring, while the guide is gated on ``requires:
+        # radient-team`` through a cached, fail-closed ``hub/org_catalogue.json``
+        # that lapses after seven days and is per-Radient-base. The tool without
+        # the guide (cache absent, expired, or recorded for another base) used to
+        # render a pointer whose read answers ``Unknown guide: team-bridge`` — a
+        # dangling reference on every turn of such a session, which is the same
+        # dead end the recommendation trigger was fixed for above. Enrolled and
+        # fresh is unchanged: both halves hold, so the clause still renders.
+        has_bridge = (
+            any(tool.name == "bridge" for tool in tools) and "team-bridge" in hooks.guides_by_name
+        )
         # ``model_label`` is passed live by the Session on each provider step, so
         # a deliberate ``set_model`` or a failover fallback is reflected in the
         # env block at the next safe call boundary without rebuilding this
@@ -4220,6 +4311,7 @@ def _make_system_blocks_provider(
             open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
             has_notify,
+            has_bridge,
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
         # ``key``: this render is the CACHED head only, and the session
@@ -4251,6 +4343,7 @@ def _make_system_blocks_provider(
             channel=channel,
             open_asks=open_asks or "",
             has_notify=has_notify,
+            has_bridge=has_bridge,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
             identity_name=identity_name,
