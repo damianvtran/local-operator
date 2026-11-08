@@ -64,33 +64,29 @@ def urdu_corpus(tmp_path, monkeypatch):
     # re-materialize as message codes from this deliberately tiny corpus.
     from local_operator.tui.widgets import transcript
 
+    # Captured BEFORE the patch below: read afterwards it is the fake corpus root.
+    real_root = catalogues.catalogue_root()
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en", "ur"))
     monkeypatch.setattr(text, "_active_locale", "en")
     monkeypatch.setattr(text, "_refreshers", [transcript._reload_copy])
     messages._namespace_for.cache_clear()
-    real_root = catalogues.catalogue_root()
     set_active_locale("ur")
     yield
-    # Restore against the REAL root before the locale moves back: teardown can
-    # otherwise re-materialise every scoped constant from a deleted tmp tree and
-    # leave message CODES for the next test sharing this worker.
-    patched = catalogues._CATALOGUES
-    catalogues._CATALOGUES = real_root
-    try:
-        set_active_locale("en")
-        # ``set_active_locale`` runs the refreshers only on a CHANGE. A test that
-        # already moved back to en inside the fake corpus
-        # (``test_ur_to_en_recovery…``) makes the call above a no-op, which left
-        # ``QUEUED_ROW_TEXT`` reading this corpus's "Queued — press up to recall"
-        # for the rest of the worker. ``test_retiring_refusal`` then failed
-        # whenever xdist co-located it after this file (PR #3558's shard 5).
-        # Re-materialise from the real catalogue unconditionally.
-        messages._namespace_for.cache_clear()
-        transcript._reload_copy()
-    finally:
-        catalogues._CATALOGUES = patched
+    # Undo EVERY patch first (the real catalogue root, the shipped set, the
+    # active locale and the refresher list), THEN drop the namespace cache, THEN
+    # re-materialise the transcript's import-time rows. The reload has to be
+    # explicit: ``set_active_locale`` refreshes only on a CHANGE, so a test that
+    # already moved back to en inside this corpus (``test_ur_to_en_recovery…``)
+    # leaves nothing to trigger it, and ``QUEUED_ROW_TEXT`` kept this corpus's
+    # "Queued — press up to recall" for the rest of the worker.
+    # ``test_retiring_refusal`` then failed whenever xdist co-located it after
+    # this file (PR #3558, shard 5). Reloading BEFORE the undo would read the
+    # fake root again (review round 5, R6).
+    monkeypatch.undo()
+    assert catalogues.catalogue_root() == real_root
     messages._namespace_for.cache_clear()
+    transcript._reload_copy()
 
 
 def test_parameter_spans_cover_repeated_nested_placeholders_and_raw_stays_clean(urdu_corpus):
@@ -179,6 +175,21 @@ def test_ur_to_en_recovery_removes_import_time_and_new_paint_controls(urdu_corpu
         == f"Run /run for {RLI}; again /run"
     )
     assert technical_display(RLI).plain == RLI
+
+
+def test_the_corpus_leaves_the_real_queued_rows_behind() -> None:
+    """Probe, deliberately placed right AFTER the recovery test and without the
+    fixture: the rows the next test on this worker reads must be the shipped en
+    catalogue's, read here from the file itself rather than through the i18n
+    runtime that the corpus patched (review round 5, R6)."""
+    from local_operator.tui.widgets import transcript
+
+    shipped = json.loads(
+        (catalogues.catalogue_root() / "en" / "tui.transcript.json").read_text(encoding="utf-8")
+    )
+    assert transcript.QUEUED_ROW_TEXT == shipped["tui.transcript.queued.newest"]
+    assert transcript.QUEUED_ROW_TEXT_OLDER == shipped["tui.transcript.queued.older"]
+    assert transcript.QUEUED_ROW_TEXT == "· queued for the next runtime — esc takes it back"
 
 
 @pytest.fixture()
