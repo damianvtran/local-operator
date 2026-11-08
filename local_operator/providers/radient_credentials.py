@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -124,20 +125,66 @@ def org_destination_refused_sentence(base_url: str, default_url: str) -> str:
     )
 
 
+#: What a credentialed base is shown as when no trustworthy scheme precedes its
+#: credentials (security round 2 on #3588, S-4). Fixed text, so nothing from
+#: the configured value can ride along, and no ``@`` so a log scan for one stays
+#: a clean leak signal.
+INVALID_HUB_BASE_PLACEHOLDER = "<invalid hub base>"
+
+#: A leading ``scheme://``. The character class has no ``@``, so a match is by
+#: construction a prefix with no ``@`` before it — the one condition under
+#: which the scheme is provably not part of a credential.
+_SCHEME_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+
+
+def strip_base_credentials(base_url: str) -> tuple[str, bool]:
+    """``base_url`` with every byte up to its LAST ``@`` gone, and whether it had one.
+
+    ANY ``@`` IS CREDENTIALS: a hub API base never legitimately carries one,
+    so this deliberately ignores RFC 3986's authority boundary (security round 1
+    on #3588, S-1: a password with a raw ``/``, ``?`` or ``#`` ends that
+    authority early).
+
+    THE LAST ``@`` ACROSS THE WHOLE VALUE, not only after the first ``://``
+    (security round 2, S-4): a missing-slashes typo with a URL later in the
+    query (``https:ops:<pw>@hub/?r=https://x``) or a bare ``<pw>@https://hub``
+    puts the credential BEFORE the first ``://``, and splitting on that first
+    separator kept it as the "scheme". The scheme is re-attached only when the
+    value itself starts with a valid ``scheme://`` (which cannot contain an
+    ``@``); otherwise the whole value becomes
+    :data:`INVALID_HUB_BASE_PLACEHOLDER`. Such a base is refused anyway, so
+    the result only has to be credential-free, not faithful.
+
+    Pure string work, never ``urlsplit`` (which raises on an unclosed ``[``),
+    so it cannot fail on a malformed base and leave it unstripped.
+    """
+
+    if "@" not in base_url:
+        return base_url, False
+    remainder = base_url.rpartition("@")[2]
+    scheme = _SCHEME_PREFIX.match(base_url)
+    if scheme is None:
+        return INVALID_HUB_BASE_PLACEHOLDER, True
+    return scheme.group(0) + remainder, True
+
+
 def _sanitized_origin(base_url: str) -> str:
     """``scheme://host[:port]`` of ``base_url``, lower-cased, with no credential byte.
 
     The ``hub_origin`` shape, built by hand so it can never raise on a malformed
-    base (``urlsplit`` does on an unclosed ``[``) and so it drops everything up
-    to the LAST ``@`` anywhere in the value rather than only inside the RFC 3986
-    authority: a password with a raw ``/``, ``?`` or ``#`` ends that authority
-    early, and an RFC split would then quote the password as the host. A hub
-    base never legitimately carries an ``@``, so nothing real is lost.
+    base (``urlsplit`` does on an unclosed ``[``). Credentials go first, through
+    :func:`strip_base_credentials`, so no byte from before ANY ``@`` survives —
+    including an ``@`` placed before the first ``://`` (security round 2 on
+    #3588, S-4) — and a credentialed base without a trustworthy scheme is shown
+    only as :data:`INVALID_HUB_BASE_PLACEHOLDER`.
     """
-    scheme, separator, rest = str(base_url or "").strip().partition("://")
+    stripped, _had_credentials = strip_base_credentials(str(base_url or "").strip())
+    if stripped == INVALID_HUB_BASE_PLACEHOLDER:
+        return stripped
+    scheme, separator, rest = stripped.partition("://")
     if not separator:
         scheme, rest = "", scheme
-    authority = rest.rpartition("@")[2]
+    authority = rest
     for mark in "/?#\\":
         authority = authority.split(mark, 1)[0]
     origin = f"{scheme}://{authority}" if separator else authority

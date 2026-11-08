@@ -86,6 +86,7 @@ from local_operator.providers.auth_store import AuthStoreError, OAuthAccess
 from local_operator.providers.radient_credentials import (
     org_destination_refused_sentence,
     org_oauth_destination_allowed,
+    strip_base_credentials,
 )
 from local_operator.team_bridge import availability
 from local_operator.team_bridge import screening_observation as _observation
@@ -166,13 +167,14 @@ def _split_base_credentials(base_url: str) -> tuple[str, bool]:
     they KEEP the bearer (measured in that round: only non-empty credentials
     swap it for Basic), so this is not about the wire; it keeps the rule one
     predicate a reviewer can check — no ``@``, or refused.
+
+    The split itself is :func:`strip_base_credentials`, shared with the refusal
+    sentence's sanitizer so the stored base and the quoted one obey ONE rule:
+    the last ``@`` across the whole value (security round 2, S-4), and a fixed
+    placeholder when no trustworthy scheme precedes the credentials.
     """
 
-    if "@" not in base_url:
-        return base_url, False
-    scheme, separator, rest = base_url.partition("://")
-    _credentials, _at, remainder = (rest if separator else base_url).rpartition("@")
-    return (f"{scheme}://{remainder}" if separator else remainder), True
+    return strip_base_credentials(base_url)
 
 
 def _attach_observation(
@@ -6868,11 +6870,12 @@ class StatusDiscipline:
         self._states.clear()
 
 
-#: Process-wide disciplines, keyed by (config root, hub base URL) — the two
-#: inputs that can change any answer. This is what makes one read serve every
+#: Process-wide disciplines, keyed by (config root, credential-free hub base
+#: URL, whether the configured base carried credentials) — the inputs that can
+#: change any answer. This is what makes one read serve every
 #: session on the machine ("coalesce per account across sessions"); tests reset
 #: it with :func:`reset_status_disciplines`.
-_DISCIPLINES: dict[tuple[str, str], StatusDiscipline] = {}
+_DISCIPLINES: dict[tuple[str, str, bool], StatusDiscipline] = {}
 
 
 def get_status_discipline(
@@ -6883,10 +6886,15 @@ def get_status_discipline(
     resolved_base = (base_url or resolve_radient_api_base_url()).rstrip("/")
     # Keyed on the STRIPPED base (security round 1 on #3588, S-3) so the
     # process-wide map never holds a URL credential as a key; the discipline
-    # itself still gets the raw base, so its client flags and refuses it.
+    # itself still gets the raw base, so its client flags and refuses it. The
+    # credentials FLAG is part of the key (security round 2, S-5): stripping
+    # alone made a credentialed and a clean spelling of one hub share an entry,
+    # so whichever came first decided whether the other was refused.
+    stripped_base, had_credentials = _split_base_credentials(resolved_base)
     key = (
         str(config_dir) if config_dir is not None else "",
-        _split_base_credentials(resolved_base)[0],
+        stripped_base,
+        had_credentials,
     )
     discipline = _DISCIPLINES.get(key)
     if discipline is None:

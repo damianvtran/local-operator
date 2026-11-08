@@ -28,6 +28,7 @@ import pytest
 
 from local_operator.providers.auth_store import OAuthAccess
 from local_operator.providers.radient_credentials import (
+    INVALID_HUB_BASE_PLACEHOLDER,
     org_destination_refused_sentence,
 )
 from local_operator.team_bridge import client as tb_client
@@ -171,7 +172,6 @@ async def test_a_password_with_an_authority_delimiter_is_still_credentials(
     + [
         "https://ops:" + _MARKER + "@hub.example:8443/v1",
         "  HTTPS://ops:" + _MARKER + "@hub.example:8443/v1?q=1",
-        "ops:" + _MARKER + "@hub.example:8443/v1",
     ],
 )
 def test_the_noncanonical_sentence_quotes_only_a_sanitized_origin(base_url: str) -> None:
@@ -223,7 +223,98 @@ def test_the_shared_discipline_is_keyed_on_the_stripped_base() -> None:
     try:
         tb_client.get_status_discipline(None, "https://ops:" + _MARKER + "@hub.example/v1")
         keys = list(tb_client._DISCIPLINES)
-        assert keys == [("", "https://hub.example/v1")]
-        assert all(_MARKER not in part for key in keys for part in key)
+        assert keys == [("", "https://hub.example/v1", True)]
+        assert all(_MARKER not in str(part) for key in keys for part in key)
+    finally:
+        tb_client.reset_status_disciplines()
+
+
+# ---------------------------------------------------------------------------
+# Security round 2 on #3588: S-4 (an ``@`` BEFORE the first ``://``) and S-5
+# (a credentialed and a clean base must never share one discipline).
+# ---------------------------------------------------------------------------
+
+#: An ``@`` in the would-be scheme half. Splitting on the first ``://`` before
+#: looking for ``@`` put the credential in the "scheme" and kept it (S-4): a
+#: missing-slashes typo with a later URL in the query, and a bare
+#: ``<pw>@https://`` prefix.
+_PRE_SCHEME_AT_BASES = [
+    "https:ops:" + _MARKER + "@hub.example/?r=https://x.example",
+    _MARKER + "@https://hub.example/v1",
+    # No scheme at all: nothing trustworthy precedes the credentials.
+    "ops:" + _MARKER + "@hub.example:8443/v1",
+]
+
+
+@pytest.mark.parametrize("base_url", _PRE_SCHEME_AT_BASES)
+@pytest.mark.asyncio
+async def test_an_at_before_the_scheme_separator_is_still_stripped(
+    caplog: pytest.LogCaptureFixture, base_url: str
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"features": {}})
+
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.INFO, logger="httpx")
+    tb_client.reset_status_disciplines()
+    try:
+        client = tb_client.TeamBridgeClient(
+            None, base_url=base_url, store=FakeStore(), transport=httpx.MockTransport(handler)
+        )
+        tb_client.get_status_discipline(None, base_url)
+        with pytest.raises(tb_client.BridgeRefusal) as refused:
+            await client.status()
+        keys = list(tb_client._DISCIPLINES)
+    finally:
+        tb_client.reset_status_disciplines()
+
+    assert refused.value.code == "bridge_destination_refused"
+    assert seen == []
+    sentence = org_destination_refused_sentence(base_url, "https://api.radienthq.com/v1")
+    _assert_clean(
+        [str(refused.value), repr(refused.value), client.base_url, sentence]
+        + [str(part) for key in keys for part in key]
+        + [record.getMessage() for record in caplog.records]
+    )
+
+
+def test_a_scheme_is_kept_only_when_no_at_precedes_it() -> None:
+    """The shown value never includes a byte from before any ``@``."""
+
+    assert tb_client._split_base_credentials("https://ops:" + _MARKER + "@hub.example/v1") == (
+        "https://hub.example/v1",
+        True,
+    )
+    for base_url in _PRE_SCHEME_AT_BASES:
+        stripped, had_credentials = tb_client._split_base_credentials(base_url)
+        assert had_credentials is True
+        assert stripped == INVALID_HUB_BASE_PLACEHOLDER
+        sentence = org_destination_refused_sentence(base_url, "https://api.radienthq.com/v1")
+        assert INVALID_HUB_BASE_PLACEHOLDER in sentence
+
+
+@pytest.mark.parametrize("credentialed_first", [True, False])
+def test_a_credentialed_and_a_clean_base_never_share_a_discipline(
+    credentialed_first: bool,
+) -> None:
+    """S-5: the credentials flag is part of the key, so neither ordering merges."""
+
+    credentialed = "https://ops:" + _MARKER + "@hub.example/v1"
+    clean = "https://hub.example/v1"
+    order = [credentialed, clean] if credentialed_first else [clean, credentialed]
+    tb_client.reset_status_disciplines()
+    try:
+        first, second = (tb_client.get_status_discipline(None, base) for base in order)
+        by_base = dict(zip(order, (first, second)))
+        assert first is not second
+        assert sorted(tb_client._DISCIPLINES) == [
+            ("", clean, False),
+            ("", clean, True),
+        ]
+        assert by_base[credentialed]._client._base_had_credentials is True
+        assert by_base[clean]._client._base_had_credentials is False
     finally:
         tb_client.reset_status_disciplines()

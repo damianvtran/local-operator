@@ -810,6 +810,60 @@ def test_org_calls_refuse_a_non_canonical_hub_by_default(
     assert hub.published_teams[0][1] == "org-a"
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https:ops:" + "zz" + "secret" + "zz" + "@hub.example/?r=https://x.example",
+        "zz" + "secret" + "zz" + "@https://hub.example/v1",
+    ],
+)
+def test_the_refusal_never_echoes_bytes_before_an_at(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    base_url: str,
+) -> None:
+    """Security round 2 on #3588, S-4: an ``@`` before the first ``://``.
+
+    The CLI prints the configured base through the shared refusal sentence; a
+    password placed before the scheme separator must not reach that output.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(config_dir() / "auth.db", config_dir=config_dir())
+    try:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": "jwt-fixture",
+                "refresh": "refresh-fixture",
+                "expires": int(time.time() * 1000) + 3600000,
+            },
+        )
+    finally:
+        store.close()
+
+    monkeypatch.setenv("RADIENT_API_BASE_URL", base_url)
+    monkeypatch.setattr(
+        "local_operator.clients.radient.RadientClient",
+        lambda **kwargs: pytest.fail("a client must not be built for a refused base"),
+    )
+    _make_team()
+    monkeypatch.setattr(
+        "sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew", "--yes"]
+    )
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "not the Radient cloud API" in out
+    assert "zz" + "secret" + "zz" not in out
+    assert "ops" not in out
+
+
 # --- the credential rule --------------------------------------------------------
 
 
