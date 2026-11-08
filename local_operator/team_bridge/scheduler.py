@@ -871,13 +871,30 @@ async def run_screening_cycle(
         resolve_screening_chain,
     )
     from local_operator.team_bridge.screening import ScreenResult, screen_message_async
+    from local_operator.team_bridge.settings import read_screening_model
     from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
     # ONE capture of the whole hop list: hop 0 is the configured default (the
     # published policy's model), the rest are the operator's configured
     # fallbacks, walked by ScreenChainRunner because failover disables its
     # own chain for isolated requests (see resolve_screening_chain).
-    chain = resolve_screening_chain(config_dir, settings)
+    #
+    # The machine's stored "Screening model" choice rides in as ``preferred``:
+    # it RE-ORDERS the evaluated screeners so the chosen pair is tried first and
+    # leaves the receiver's own cascade in place behind it (operator directive
+    # 2026-11-04: a choice must never block a receiver with no Anthropic account
+    # or an exhausted quota). ``None`` -- no choice, or one this build does not
+    # recognise -- is exactly the chain every machine screened with before the
+    # key existed.
+    chain = resolve_screening_chain(
+        config_dir,
+        settings,
+        preferred=(
+            getattr(settings, "screening_model", None)
+            if settings is not None
+            else read_screening_model(config_dir)
+        ),
+    )
     if not chain:
         # FAIL CLOSED: no preferred screener is credentialed AND the owner has
         # no usable configured model, so nothing can screen and the message is

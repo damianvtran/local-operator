@@ -1,13 +1,9 @@
 {
   "locales": [
     "en",
-    "fr",
     "es",
-    "zh-CN",
     "ru",
-    "vi",
-    "ur",
-    "hi"
+    "vi"
   ],
   "schema": 1
 }

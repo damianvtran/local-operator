@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 
+from local_operator.team_bridge.settings import read_screening_model
 from local_operator.team_bridge.store import (
     SCREENING_FAILURE_CLASSES as _STORE_FAILURE_CLASSES,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "SCREENING_EVALUATED_MODELS",
     "SCREENING_MODEL_UNAVAILABLE",
     "is_evaluated_screening_model",
+    "evaluated_screening_pair",
     "resolve_default_selection",
     "resolve_screening_chain",
     "resolve_screening_selection",
@@ -384,6 +386,31 @@ def provider_hold_code(failure: BaseException) -> str:
     return "provider_error"
 
 
+def evaluated_screening_pair(provider: str, model_id: str) -> tuple[str, str] | None:
+    """The TABLE's own spelling of ``provider/model_id``, or ``None`` if unlisted.
+
+    ONE implementation of "is this pair on the table", because three places now
+    ask it and a second copy would drift from the eval table: the chain
+    (:func:`resolve_screening_chain`, which re-orders to this entry), the
+    membership predicate (:func:`is_evaluated_screening_model`), and the desktop
+    plane, which must not show a stored model as SELECTED while the chain
+    silently ignores it — or fold a login flavour into the config file under a
+    provider spelling no entry uses.
+
+    Folding is by credential STORAGE owner (``anthropic-key`` -> ``anthropic``);
+    an id the registry cannot resolve admits nothing, so an unreadable registry
+    fails closed rather than promoting an unknown pair.
+    """
+
+    try:
+        from local_operator.providers.registry import credential_provider_id
+
+        canonical = (credential_provider_id(provider), model_id)
+    except Exception:  # noqa: BLE001 — an unreadable registry admits nothing
+        return None
+    return canonical if canonical in SCREENING_EVALUATED_MODELS else None
+
+
 def is_evaluated_screening_model(provider: str, model_id: str) -> bool:
     """Whether ``provider/model_id`` is on :data:`SCREENING_EVALUATED_MODELS`.
 
@@ -392,13 +419,7 @@ def is_evaluated_screening_model(provider: str, model_id: str) -> bool:
     because a sibling snapshot or a router alias has no eval result.
     """
 
-    try:
-        from local_operator.providers.registry import credential_provider_id
-
-        storage = credential_provider_id(provider)
-    except Exception:  # noqa: BLE001 — an unreadable registry admits nothing
-        return False
-    return (storage, model_id) in SCREENING_EVALUATED_MODELS
+    return evaluated_screening_pair(provider, model_id) is not None
 
 
 def _credentialed_providers(config_dir: Path) -> set[str]:
@@ -578,19 +599,18 @@ def resolve_screening_chain(
     model.
     """
 
-    # Lazy, to avoid the import cycle; one import serves both uses below.
-    from local_operator.providers.registry import (
-        credential_provider_id,
-        credential_source_id,
-    )
+    # Lazy, to avoid the import cycle; ``credential_source_id`` is the only
+    # registry call this walk makes (the table fold lives in
+    # :func:`evaluated_screening_pair`).
+    from local_operator.providers.registry import credential_source_id
 
     credentialed = _credentialed_providers(config_dir)
     order = list(SCREENING_EVALUATED_MODELS)
     if preferred is not None:
         # Folded onto the table's own spelling so a login flavour
         # (``anthropic-key``) re-orders the canonical entry, never adds one.
-        canonical = (credential_provider_id(preferred[0]), preferred[1])
-        if canonical in order:
+        canonical = evaluated_screening_pair(preferred[0], preferred[1])
+        if canonical is not None:
             order = [canonical] + [pair for pair in order if pair != canonical]
     hops: list[DefaultSelection] = []
     for provider, model_id in order:
@@ -633,7 +653,14 @@ def resolve_screening_selection(config_dir: Path) -> DefaultSelection | None:
     configuration only, never a session's chat model.
     """
 
-    chain = resolve_screening_chain(config_dir)
+    chain = resolve_screening_chain(
+        config_dir,
+        # This is a chain built for REAL use (the image gate, the canonical
+        # provider read), so the machine's stored "Screening model" choice is
+        # part of it exactly as it is in the cycle: a preference that re-orders
+        # the evaluated screeners and nothing else.
+        preferred=read_screening_model(config_dir),
+    )
     return chain[0] if chain else None
 
 

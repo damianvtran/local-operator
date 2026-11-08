@@ -704,3 +704,65 @@ def test_unsent_model_allow_without_preference_is_still_retired(
     before = len(wire.sends)
     assert _cycle(tmp_path, owner).disposition == "deliver"
     assert len(wire.sends) == before + 1  # genuine fallback really screens again
+
+
+# -- the STORED choice, through the shipped cycle ---------------------------------
+#
+# Above pins the chain given ``preferred=``; these pin the WIRING — that the
+# machine's stored "Screening model" value is what the production cycle hands the
+# chain (nothing passed it before this change, so the choice was unreachable).
+
+
+def _store_choice(tmp_path: Path, value: str) -> None:
+    """Add ``team_bridge.screening.model`` to the document ``_config`` wrote."""
+
+    with (tmp_path / "config.yml").open("a", encoding="utf-8") as handle:
+        handle.write(f"  team_bridge:\n    screening:\n      model: {value}\n")
+
+
+def test_the_stored_choice_screens_first_and_its_verdict_is_preferred(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire({"claude-opus-5-5": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    # The stored pair leads the walk, ahead of Sonnet, because the operator said
+    # so; its verdict is a PREFERRED one, which is what B4b's release gate reads.
+    assert _sends(wire) == [OPUS]
+    assert result.disposition == "deliver"
+    assert result.screener_preferred is True
+    assert result.receipt.model == "claude-opus-5-5"
+
+
+def test_a_stored_choice_with_no_credential_still_screens_on_the_default(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    """The operator directive of 2026-11-04: a preference must never block.
+
+    The stored choice names Anthropic, this machine holds no Anthropic
+    credential, and the message still screens on the receiver's own configured
+    default. A regression here means a user without that account cannot receive
+    anything at all.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"openai"})
+    wire = _Wire({"gpt-6-astra": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [("openai", "gpt-6-astra")]
+    assert result.disposition == "deliver"
+    # Delivered normally, never reusable: a fallback screener's allow gates
+    # nothing later (B4b D4).
+    assert result.screener_preferred is False
+    assert result.receipt.model == "gpt-6-astra"
