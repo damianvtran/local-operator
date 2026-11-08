@@ -33,7 +33,7 @@ from local_operator.team_bridge.model_boundary import (
     ScreenChainRunner,
 )
 from local_operator.team_bridge.types import ScreeningObservation, ScreeningReceipt
-from tests.unit.team_bridge.test_client import _make_client, _ok
+from tests.unit.team_bridge.test_client import FakeStore, _make_client, _ok
 from tests.unit.team_bridge.test_hold_release import rig  # noqa: F401 - the B4b fixture
 from tests.unit.team_bridge.test_screening import _setup
 from tests.unit.team_bridge.test_screening_chain import (  # noqa: F401 - autouse fixture
@@ -701,6 +701,78 @@ async def test_the_latch_and_the_resend_each_log_one_origin_only_line(caplog) ->
         "team_bridge: hub https://hub.example refused an admit carrying the screening"
         " observation; resending once without it",
     ]
+
+
+# S-1/Q-1: a non-canonical base (``RADIENT_ORG_ALLOW_NONCANONICAL_BASE``) may
+# carry ``user:password@``. The marker is deliberately NOT password-shaped: a
+# log redactor that masked it would make the absence assertions pass without
+# testing anything, so they also assert no ``@`` survives.
+_USERINFO_MARKER = "zzsecretzz"
+
+
+@pytest.mark.parametrize(
+    ("base_url", "origin"),
+    [
+        (f"https://ops:{_USERINFO_MARKER}@hub.example", "https://hub.example"),
+        (
+            f"https://ops:{_USERINFO_MARKER}@Hub.Example:8443/v1/x?token=q#frag",
+            "https://hub.example:8443",
+        ),
+        (f"https://{_USERINFO_MARKER}@hub.example/v1", "https://hub.example"),
+        ("http://[::1]:8080/v1", "http://[::1]:8080"),
+        (f"http://ops:{_USERINFO_MARKER}@[2001:DB8::1]:9000/v1", "http://[2001:db8::1]:9000"),
+        ("https://hub.example:443/v1", "https://hub.example:443"),
+    ],
+)
+def test_hub_origin_is_scheme_host_and_port_only(base_url: str, origin: str) -> None:
+    rendered = obs.hub_origin(base_url)
+    assert rendered == origin
+    assert _USERINFO_MARKER not in rendered
+    assert "@" not in rendered
+
+
+def test_a_userinfo_only_difference_shares_one_latch() -> None:
+    """Stripping userinfo merges spellings of one host: the safe direction."""
+
+    obs.note_hub_status(
+        f"https://ops:{_USERINFO_MARKER}@hub.example/v1",
+        {"features": {obs.OBSERVATION_FEATURE: 1}},
+    )
+    obs.note_hub_refused("https://other:pw2@hub.example")
+    assert obs.hub_accepts("https://hub.example/v1") is False
+    assert obs.hub_accepts(f"https://ops:{_USERINFO_MARKER}@hub.example/v1") is False
+
+
+@pytest.mark.asyncio
+async def test_a_base_with_userinfo_logs_the_bare_origin(caplog) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/status"):
+            return _ok({"features": {obs.OBSERVATION_FEATURE: 1}})
+        if _carried(request):
+            return httpx.Response(400, json=_INVALID)
+        return _ok({"status": "recorded"})
+
+    # The base is the only change from the sibling test above, so the client
+    # is built the way ``_make_client`` builds it, with this base instead.
+    client = tb_client.TeamBridgeClient(
+        None,
+        base_url=f"https://ops:{_USERINFO_MARKER}@hub.example/v1",
+        store=FakeStore(),
+        transport=httpx.MockTransport(handler),
+    )
+    await client.status()
+    caplog.set_level("INFO", logger="local_operator.team_bridge")
+    assert await _admit(client, PREFERRED) == {"status": "recorded"}
+    lines = [r.getMessage() for r in caplog.records if r.name.startswith("local_operator")]
+    assert lines == [
+        "team_bridge: hub https://hub.example refused the screening observation;"
+        " latched off for this origin",
+        "team_bridge: hub https://hub.example refused an admit carrying the screening"
+        " observation; resending once without it",
+    ]
+    logged = caplog.text + "\n".join(lines)
+    assert _USERINFO_MARKER not in logged
+    assert "@" not in logged
 
 
 # -- the pull lane: the block rides the first send of an intent only --------

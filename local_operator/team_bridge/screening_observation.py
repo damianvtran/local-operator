@@ -98,14 +98,33 @@ _monotonic = time.monotonic
 
 
 def hub_origin(base_url: str) -> str:
-    """The ``scheme://netloc`` key the gate is held under (also what logs name)."""
+    """The lower-cased, userinfo-free ``scheme://host[:port]`` the gate is held under.
+
+    It is also the only part of the base the INFO lines name, so it must never
+    carry ``user:password@``: a non-canonical base admitted through
+    ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` (a QA, staging or self-hosted hub
+    behind URL basic auth) would otherwise print its credential to the log.
+
+    This is NOT the comparison ``pull._guard_destination`` makes: that guard
+    compares the raw ``netloc``, userinfo included, which is the stricter key a
+    destination check needs. Do not reuse this value as a trust check.
+    """
 
     # Keyed by ORIGIN, not the full base: the pull lane's default client and
     # the status fetcher's owner-pinned client may spell the same hub with and
-    # without its ``/v1`` path (``pull._guard_destination`` accepts that), and
-    # the origin is the trust boundary those guards already use.
+    # without its ``/v1`` path (``pull._guard_destination`` accepts that).
+    # Dropping userinfo also merges spellings that differ only in credentials
+    # onto one latch entry, which is the safe direction for an off-switch.
     parts = urlsplit(str(base_url or "").strip())
-    return f"{parts.scheme}://{parts.netloc}".lower()
+    host = parts.hostname or ""  # ``hostname`` strips userinfo and lower-cases
+    if ":" in host:  # IPv6: re-bracket, or the port would be ambiguous
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:  # a non-numeric or out-of-range port: keep no port
+        port = None
+    authority = host if port is None else f"{host}:{port}"
+    return f"{parts.scheme}://{authority}".lower()
 
 
 def note_hub_status(base_url: str, payload: Any) -> None:
