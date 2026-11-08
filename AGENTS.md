@@ -1732,8 +1732,18 @@ cd /tmp && ~/.local/bin/lop --version
 #     A docstring can quote a removed line verbatim, so a grep for a code string
 #     is not evidence either way; the symbol is.
 
+# 5b. DIRTY-ROOT VARIANT ONLY (see "When the root checkout is dirty" below):
+#    once BOTH checks above confirm the NEW build, delete the clean clone THIS
+#    RUN created — by its literal path, never a glob and never a variable.
+#    Nothing else tracks that clone, and a leftover one holds 250 MB to several
+#    GiB on the volume whose low headroom is often why it was made this way.
+rm -rf ~/workspace/lop-release-clone-<suffix>
+
 # 6. Reclaim the worktree (also on an aborted release: a stranded one is
-#    what `scripts/worktree_janitor.py` reports).
+#    what `scripts/worktree_janitor.py` reports), and confirm no clean clone
+#    survived 5b: this must print nothing (a read-only glob; the deletion above
+#    still names one literal path).
+ls -d ~/workspace/lop-release-*clone* 2>/dev/null
 git -C ~/local-operator worktree remove ~/local-operator/.worktrees/release-next
 ```
 
@@ -1812,6 +1822,51 @@ in the clone and a re-run put it right in about two minutes. Since the
 downgrade gate that install is refused before it starts (0.64.4 is strictly
 older than the pointer's install), so the mistake is loud — the fix is
 unchanged, advance the clone's own `main` first.
+
+**There is no lighter no-clone route today, and the `-d "$REPO/.git"` gate is
+why.** `lop-update` installs a ref parsed out of the repository it RUNS IN (it
+`cd`s there and hands the ref to `lop update --from-snapshot`, which archives it
+with `git archive`), so archiving needs a real `.git` directory to point at — a
+worktree supplies a file, not a directory. One route exists in the updater's API
+but is NOT equivalent and is not used by this checklist: `--from-snapshot` also
+accepts a directory, so `LOCAL_OPERATOR_REPO=<real repo> lop-update <worktree
+path>` does reach a worktree today — but the directory shape installs the tree
+as it STANDS, uncommitted files included, and records that tree's `HEAD` as the
+commit marker. That is
+the opposite of the "committed ref, nothing from the working tree" guarantee
+this section relies on. A lighter clone form integrated into `lop-update` would
+need a script change, which a docs fix does not make; until then the real clone
+stands and its cleanup is mandatory.
+
+**Reclaim the clone once the install is verified — nothing else does.** The
+clone exists only to be installed from, and this procedure named it and then
+left it behind, so every dirty-root release leaked one. Measured on this host on
+2026-11-08: two were still sitting in `~/workspace`
+(`lop-release-clone-861845`, 287 MB; `lop-release-0.94.22-clone`, 253 MB) while
+the volume showed about 12 GiB free. Size is not the point of the rule — a clone
+that cannot share objects pays for a copy of this repository's object store
+(~5 GiB on 2026-11-08: 3.58 GiB packed plus 1.44 GiB loose, per `git
+count-objects -vH`) plus a fresh working-tree checkout. Name the clone
+`~/workspace/lop-release-clone-<suffix>` when you make it, so this deletion and
+step 6's check both name one path shape instead of a guess. Delete it only AFTER
+step 5's two checks put the new build live
+(`readlink ~/.local/share/lop/current` naming the NEW generation and
+`~/.local/bin/lop --version` reporting the new version), and delete the EXACT
+path this run created:
+
+```sh
+# Literal path, as recorded when the clone was made. Never a glob, never a
+# variable: this runs unattended at the tail of a release, and a wildcard here
+# would take a clone another session is installing from — or something
+# unrelated — with it. Re-run the install rather than guess at a path.
+rm -rf ~/workspace/lop-release-clone-<suffix>
+```
+
+Sooner than the verification and there is nothing left to re-run the install
+from if it turns out wrong; later and an aborted release strands the clone,
+which is exactly why step 6 lists leftovers. Only the clone THIS run created is
+in scope — a leftover it did not make is reported to the operator, never deleted
+by the next release's session.
 
 ### A green run is a function of the tree it was computed against
 
