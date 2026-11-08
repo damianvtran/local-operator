@@ -3547,6 +3547,11 @@ def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
             f"full-suite `{job_id}` builds a label-name test with `contains(` "
             f"({condition!r}); the same `skipped` hole, written the long way"
         )
+        # The ritual's own label, named directly: the context rules above are the
+        # invariant, this is the instance the repository actually uses.
+        assert "ready-to-merge" not in condition, (
+            f"full-suite `{job_id}` names the re-arm label in its `if:` " f"({condition!r})"
+        )
 
 
 def test_no_full_suite_job_is_conditional_on_the_triggering_event() -> None:
