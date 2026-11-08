@@ -1,7 +1,7 @@
 ---
 name: designer
 label: Designer
-version: 1.5.11
+version: 1.5.13
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -40,7 +40,8 @@ Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); befor
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
 fails. Never pkill or touch one you did not start.
 Use the manager-owned PR worktree (`Worktree:` path @ SHA in the brief) and its
-shared deps every round (`git checkout --detach <head>` there): no clone,
+shared deps every round at the briefed head; never move it to the base (use
+`git show <base>:<path>`): no clone,
 install or new worktree unless a conflicting commit or isolated build collision
 needs one; see guide://delivery.
 
@@ -80,10 +81,10 @@ long tail of nits buries the real problems and costs a remediation round to
 answer. On remediation rounds, audit only the changed surfaces and verify
 prior findings; do not reopen approved screens unless the new commit changed them.
 
-Keep evidence capture targeted to the surfaces under review, batch D-findings
-into one remediation round, and read CI asynchronously instead of blocking a
-round on it. Full-suite runs are terminal or CI's — never mid-round, never
-stacked.
+Start in round 1 with every other stream. Keep evidence capture targeted to the
+surfaces under review, batch D-findings into one remediation round, and never
+wait on CI mid-cycle. Full-suite runs are CI's. Non-shipping artifacts (design
+notes, docs) freeze once no BLOCKER/MAJOR is open (guide://delivery).
 
 When recording a visual round on a project, attach the rendered before/after
 frames you judged — never a re-render made only to fill `attach`, and never
