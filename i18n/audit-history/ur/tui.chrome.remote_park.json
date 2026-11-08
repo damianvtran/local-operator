@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "tui.chrome.remote_park",
+  "history_sha256": "49b6a6148e115ba1b18b7b94736ce65b9a34890b597e2810b60d883b1eeaaa0d",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "tui.chrome.remote_park",
+      "source_sha256": "3bfd9ea6e46573cb62ccf2ccdc0f5100ec8e6fcbddd788458de7fb11bcffe0e9",
+      "context_sha256": "4db983f47f52b08da2a7a7743f27e2e731f91f0aaccc5451310fc2677dd75f70",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), first pass",
+        "session": "054a07687c61",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), first independent audit (round 1); independent instance, distinct from every translator",
+        "session": "d5716ce73bb0",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)",
+        "result": "fail",
+        "findings": 11,
+        "unresolved_blocker_major": 1,
+        "finding_detail": "0 blocker, 1 major, 5 minor, 5 nit",
+        "independent_from_translator": true,
+        "translator_session": "054a07687c61",
+        "scope": "full audit of every row of the namespace",
+        "namespace_finding_detail": "1 major in this namespace: operator-authority term 'آپریٹر اتھارٹی' vs the shipped 'آپریٹر کا اختیار'"
+      },
+      "status": "failed",
+      "note": "Round-1 audit failed this namespace on 1 major (operator-authority term 'آپریٹر اتھارٹی' vs the shipped 'آپریٹر کا اختیار'); locale-level counts 0 blocker, 1 major, 5 minor, 5 nit. The text was changed afterwards, so this row is history, not a pass of the final bytes. target_sha256 is deliberately omitted: the bytes this audit saw were not preserved and the namespace was changed afterwards, so no hash is claimed. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.chrome.remote_park",
+      "source_sha256": "3bfd9ea6e46573cb62ccf2ccdc0f5100ec8e6fcbddd788458de7fb11bcffe0e9",
+      "context_sha256": "4db983f47f52b08da2a7a7743f27e2e731f91f0aaccc5451310fc2677dd75f70",
+      "target_sha256": "7fa6d651d6d1dbc764874ad808cc809dfd7604024f17ba8e1a9c90830a85f095",
+      "translator": {
+        "agent": "translator (lopdev task subagent, profile 'translator'), post-audit remediation of the round-1 major (operator-authority term 'آپریٹر اتھارٹی' vs the shipped 'آپریٹر کا اختیار')",
+        "session": "1c49f3597b38",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev task subagent, profile 'translation-auditor'), delta re-audit; independent instance, distinct from every translator",
+        "session": "5797a8038f82",
+        "session_kind": "lopdev task subagent JOB id (not a transcript session id; none was available to the coder)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "model_kind": "served model as self-reported by the subagent",
+        "underlying_model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-07",
+        "fallback": "none: self-reported by the subagent as served by anthropic/claude-sonnet-5-5 with no provider fallback (reported to the coder by the manager; the coder inspected no harness route log)",
+        "result": "clean",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 0 minor, 1 nit",
+        "independent_from_translator": true,
+        "translator_session": "1c49f3597b38",
+        "scope": "delta only: the fixed key(s) of tui.chrome.remote_park after the post-audit remediation"
+      },
+      "status": "passed",
+      "note": "Delta re-audit of the remediated key(s): clean (0 blocker, 0 major, 0 minor, 1 nit), closing the round-1 major. target_sha256 is the namespace file's SHA-256 at recording time. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    }
+  ]
+}
