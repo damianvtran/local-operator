@@ -194,13 +194,13 @@ from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
 from .types import (
     CONVERSATION_ID_PATTERN,
     RECIPIENT_NAME_SHAPE,
-    RECIPIENT_TEACHING,
     SCOPE_ALLOWLIST,
     SCOPE_CONVERSATION,
     SEND_RECIPIENT_DESCRIPTION,
     InvalidSendRecipient,
     NameResolution,
     RecipientNameRefused,
+    decode_recipient_argument,
     is_conversation_message_id,
     validate_recipient_shape,
     validate_send_recipient,
@@ -525,25 +525,19 @@ class BridgeToolParams(BaseModel):
         the op that can resolve it, and this model is shared by every op. The
         op-specific refusal is the executor's, where the op is known.
 
-        A JSON-OBJECT STRING IS DECODED FIRST (Aida, 439818272d84: one DM took four
-        calls). Models routinely serialise a nested argument, so the object form
-        arrives as ``'{"endpoint_id":"bep_…"}'``. Read as a bare string, a spaced
-        one was refused with the shape teaching and a compact one became an
-        ACCOUNT id — the endpoint was looked up as an account and answered "no
-        active member … has that account_id". No id begins with ``{``, so decoding
-        reinterprets nothing a caller could have meant literally; the decoded
-        value then passes through the SAME shape rule as a real object, and an
-        undecodable one refuses with the same teaching. Parsing only: every op's
-        resolver and fence still decides who may be reached.
+        A JSON-OBJECT STRING IS DECODED FIRST, by
+        :func:`~local_operator.team_bridge.types.decode_recipient_argument` — the
+        ONE decoder. The executor already applied it to the raw ``args["to"]``
+        before any op read it (so send/reply/reply-resolution see the same value
+        this model does); calling it here again is idempotent and keeps a direct
+        ``BridgeToolParams(...)`` caller on the same rule. The decoded value then
+        passes through the SAME shape rule as a real object, and an undecodable,
+        over-long or duplicate-key one refuses with the same teaching. Parsing
+        only: every op's resolver and fence still decides who may be reached.
         """
         if value is None:
             return None
-        if isinstance(value, str) and value.strip().startswith("{"):
-            try:
-                value = json.loads(value)
-            except ValueError:
-                raise InvalidSendRecipient(RECIPIENT_TEACHING) from None
-        return validate_recipient_shape(value)
+        return validate_recipient_shape(decode_recipient_argument(value))
 
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
@@ -1040,20 +1034,25 @@ def _dm_recipient(
     ``self_target``, the unknown-endpoint and not-a-member refusals) unchanged,
     whichever spelling arrived.
 
-    WHAT REFUSES HERE. Only what the pair itself cannot settle, in the
-    resolver's own words: a ``to`` that names a DISPLAY NAME (the shared shape
-    validator admits ``{"name": …}`` because a room post and a pair send both
-    resolve one; ``dm`` resolves against neither, so it refuses and points at
-    ``op=directory`` rather than letting the name be silently dropped beside an
-    id), or the same key naming two different ids (refused naming both fields and
-    the form that works). None is guessed at. A fourth branch refuses a ``to`` that
-    is not the canonical one-key dict at all, which ``BridgeToolParams`` cannot
-    produce — its validator returns that dict or raises — so the branch exists to
-    keep the type checker and the runtime on the same value and to refuse rather
-    than guess if that ever changes; it reuses the same sentence. ``target`` is
-    untouched, so ``to={"endpoint_id": …}`` beside ``target="human"`` hits the
-    resolver's existing "endpoint_id addresses an agent" refusal rather than a new
-    one.
+    WHAT REFUSES HERE. Three refusals, each for something the pair itself cannot
+    settle, in the resolver's own words; everything else passes through (no
+    ``to`` at all, or a ``to`` carried forward — alone or as a pair, below):
+
+    1. a ``to`` that is not the canonical one-key dict, which ``BridgeToolParams``
+       cannot produce (its validator returns that dict or raises) — kept so the
+       type checker and the runtime read the same value, and to refuse rather
+       than guess if that ever changes;
+    2. a ``to`` that names a DISPLAY NAME (the shared shape validator admits
+       ``{"name": …}`` because a room post and a pair send both resolve one;
+       ``dm`` resolves against neither, so it refuses and points at
+       ``op=directory`` rather than letting the name be silently dropped beside
+       an id);
+    3. the same key naming two different ids (refused naming both fields and the
+       form that works).
+
+    None is guessed at. ``target`` is untouched, so ``to={"endpoint_id": …}``
+    beside ``target="human"`` hits the resolver's existing "endpoint_id addresses
+    an agent" refusal rather than a new one.
 
     ``to`` BESIDE THE OTHER TOP-LEVEL KEY (shape 3 of the 2026-11 report:
     ``to=<account id>`` with ``endpoint_id=``) may name ONE recipient — a person's
@@ -2256,6 +2255,16 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     args, refused = _normalize_message_field(op, args)
     if refused is not None:
         return refused
+    # ONE READING OF ``to`` (security review S-2, QA Q1): decode a JSON-object
+    # string here, before reply resolution, the send/reply shape check, the
+    # outbox intent and the params model all read it — otherwise send read the
+    # raw text as a bare account id while dm decoded the same text as an object.
+    # Local and network-free, so a refusal makes no read and no write.
+    if args.get("to") is not None:
+        try:
+            args = {**args, "to": decode_recipient_argument(args["to"])}
+        except InvalidSendRecipient as failure:
+            return _error(str(failure), code=failure.code)
     # CREDENTIAL GUARD (secret_guard). Here, once, for every op in
     # MESSAGE_FIELD_BY_OP (dm, channel_post, send, reply) rather than inside each
     # op: this is the last point every message body passes through BEFORE the

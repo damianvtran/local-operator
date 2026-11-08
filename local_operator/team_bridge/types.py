@@ -25,6 +25,7 @@ that produce them. Two hard rules, both from the frozen contract (§13.9's
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -40,6 +41,8 @@ __all__ = [
     "ATTACHMENT_ID_PATTERN",
     "CONVERSATION_ID_PATTERN",
     "InvalidSendRecipient",
+    "RECIPIENT_ARGUMENT_MAX_CHARS",
+    "decode_recipient_argument",
     "RECIPIENT_ACCOUNT_SHAPE",
     "RECIPIENT_ENDPOINT_SHAPE",
     "RECIPIENT_KEYS",
@@ -249,6 +252,70 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
             + RECIPIENT_TEACHING
         )
     return recipient
+
+
+#: Longest ``to`` string accepted, in characters, checked BEFORE any JSON decode
+#: (security review S-3). The longest legitimate value is one object naming one
+#: id or one display name — tens of characters — so 1 KiB is generous headroom,
+#: and it bounds what a malformed argument can cost: a decode, and the nesting a
+#: decoder may recurse into, are both proportional to the input length.
+RECIPIENT_ARGUMENT_MAX_CHARS = 1024
+
+
+def _refuse_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``object_pairs_hook`` that refuses a repeated key at any nesting level.
+
+    ``json.loads`` keeps the LAST duplicate, so ``{"endpoint_id":"a",
+    "endpoint_id":"b"}`` decodes to ONE key and passes the one-recipient rule
+    while the raw argument — what an approval prompt, the transcript and an
+    auditor read — names ``a`` first (security review S-1). The text must settle
+    the recipient on its own, so an ambiguous one is refused, never resolved.
+    """
+    decoded: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in decoded:
+            raise InvalidSendRecipient(RECIPIENT_TEACHING)
+        decoded[key] = item
+    return decoded
+
+
+def decode_recipient_argument(value: Any) -> Any:
+    """Return ``to`` as ONE reading every op shares: a JSON-object string decoded.
+
+    WHY DECODE (Aida, 439818272d84: one DM took four calls). Models routinely
+    serialise a nested argument, so the object form arrives as the string
+    ``'{"endpoint_id":"bep_…"}'``. Read as a bare string, a spaced one was
+    refused with the shape teaching and a compact one became an ACCOUNT id. No
+    id begins with ``{``, so decoding reinterprets nothing a caller could have
+    meant literally.
+
+    ONE HELPER, EVERY READER (security review S-2, QA Q1). ``to`` is read both
+    raw (the send/reply executor, reply resolution) and through
+    ``BridgeToolParams``; when only the model decoded, send POSTed a compact
+    JSON string as the account id ``'{"account_id":…}'`` while dm read the same
+    text as an object. The executor therefore decodes ``args["to"]`` once, up
+    front, and the params validator calls this too (idempotent: a non-string
+    passes through untouched), so dm, send, reply and channel_post agree.
+
+    Parsing only, and it never widens a shape: the result still goes through
+    :func:`validate_recipient_shape` (and each op's resolver and fences). A
+    string longer than :data:`RECIPIENT_ARGUMENT_MAX_CHARS`, undecodable JSON, a
+    repeated key, or a decoder failure (a nesting bomb's ``RecursionError``)
+    refuses with the shape teaching, before any read or write.
+    """
+    if not isinstance(value, str):
+        return value
+    if len(value) > RECIPIENT_ARGUMENT_MAX_CHARS:
+        raise InvalidSendRecipient(
+            f"recipient is longer than {RECIPIENT_ARGUMENT_MAX_CHARS} characters; "
+            + RECIPIENT_TEACHING
+        )
+    if not value.strip().startswith("{"):
+        return value
+    try:
+        return json.loads(value, object_pairs_hook=_refuse_duplicate_keys)
+    except (ValueError, RecursionError):
+        raise InvalidSendRecipient(RECIPIENT_TEACHING) from None
 
 
 def validate_recipient_shape(value: Any) -> dict[str, str]:

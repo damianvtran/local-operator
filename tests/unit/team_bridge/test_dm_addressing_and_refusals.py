@@ -41,6 +41,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.team_bridge import host as host_mod
+from local_operator.team_bridge import types as types_mod
 from local_operator.team_bridge.client import (
     ACCOUNT_MISMATCH_CODE,
     ACCOUNT_MISMATCH_SENTENCE,
@@ -872,3 +873,61 @@ async def test_dm_to_a_name_stays_refused_and_names_the_id_fields(to: Any) -> No
 def test_the_published_to_description_states_the_dm_addressing_rule() -> None:
     assert "dm takes ids only" in SEND_RECIPIENT_DESCRIPTION
     assert "endpoint_id" in SEND_RECIPIENT_DESCRIPTION.split("dm takes ids only")[1]
+
+
+# -- (4) a JSON-string ``to`` must settle ONE recipient on its own text --
+#
+# Security review S-1/S-3: ``json.loads`` keeps the LAST of two repeated keys,
+# so ``'{"endpoint_id":"bep_other","endpoint_id":"bep_peer"}'`` passed the
+# one-recipient rule and the DM went to ``bep_peer`` while the raw argument —
+# what an approval prompt and the transcript show — named ``bep_other`` first.
+# Each case refuses with the shape teaching before any directory read or write.
+
+_NESTING_BOMB = '{"endpoint_id":' * 200_000 + '"x"' + "}" * 200_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "to",
+    [
+        '{"endpoint_id":"bep_other","endpoint_id":"bep_peer"}',
+        '{"endpoint_id": "bep_peer", "endpoint_id": "bep_peer"}',  # even when equal
+        '{"endpoint_id": {"a": 1, "a": 2}}',  # a repeat at any depth
+        '{"endpoint_id": "bep_' + "p" * 1100 + '"}',  # over the length cap
+        _NESTING_BOMB,  # refused by the length cap before any decode
+    ],
+    ids=["duplicate", "duplicate-equal", "duplicate-nested", "too-long", "bomb"],
+)
+async def test_dm_to_json_string_that_cannot_settle_one_recipient_is_refused(to: str) -> None:
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(_runtime(client), _dm(to=to))
+
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    assert "a recipient is exactly one of" in outcome["error"], outcome["error"][:300]
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_dm_to_json_string_nested_under_the_cap_is_refused_before_any_read() -> None:
+    """Decoded, it is a nested object — refused by the params model like one."""
+
+    client = DmClient(_two_members())
+    outcome = await execute_bridge(
+        _runtime(client), _dm(to='{"endpoint_id":' * 50 + '"x"' + "}" * 50)
+    )
+
+    assert outcome["ok"] is False, outcome
+    assert outcome["code"] == "invalid_request"
+    assert client.calls == []
+
+
+def test_a_decoder_recursion_failure_is_the_shape_teaching_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins the decoder's own guard, should the length cap ever be raised."""
+
+    monkeypatch.setattr(types_mod, "RECIPIENT_ARGUMENT_MAX_CHARS", len(_NESTING_BOMB))
+    with pytest.raises(types_mod.InvalidSendRecipient) as refused:
+        types_mod.decode_recipient_argument(_NESTING_BOMB)
+    assert "a recipient is exactly one of" in str(refused.value)
