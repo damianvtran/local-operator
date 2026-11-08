@@ -60,11 +60,13 @@ BUILD OUTPUT: WHY THE FOURTH CATEGORY IS GATED ON PROVENANCE
     only even CONSIDERED as a candidate when its parent — the project root the
     operator named — holds one of that shape's manifests. That gate is what
     makes this safe for a non-technical user: someone who happens to keep a
-    folder called ``build`` or ``dist`` under ``~/Documents`` has no manifest
+    folder called ``build`` or ``dist`` under ``~/projects`` has no manifest
     there, so it is never a candidate at all — whatever it contains and however
     large it is. The manifest is what makes the deletion PROVABLE rather than
     guessed from a name, and it is why adding an ecosystem is one row in that
-    table rather than a new code path, a new module or a new command.
+    table rather than a new code path, a new module or a new command. A manifest
+    is not the only defence for the folders that are not projects at all: see
+    :data:`PROTECTED_DATA_DIRS`.
 
     The operator names project DIRECTORIES (``--build-output PATH``), never
     shape directories, and nothing is discovered or defaulted — the same rule as
@@ -73,17 +75,29 @@ BUILD OUTPUT: WHY THE FOURTH CATEGORY IS GATED ON PROVENANCE
     Every predicate fails toward KEEP, and each refusal is an ``Item`` with
     ``action=keep``, a stable code and a :data:`KEEP_HINTS` entry:
 
-    * a ``.git`` entry (directory OR the FILE a linked worktree carries) inside
-      the candidate, or the candidate BEING a git directory (``git init --bare
-      <shape>``, ``--separate-git-dir``) — ``git-repository``;
+    * a ``.git`` entry (directory OR the FILE a linked worktree carries) at the
+      candidate's own root or anywhere below it — a cloned repository inside
+      build output keeps its history only there — or the candidate BEING a git
+      directory (``git init --bare <shape>``, ``--separate-git-dir``) —
+      ``git-repository``;
     * a candidate that is a symlink, or a path that traverses one — ``symlink``;
-    * a candidate that is a mount point — ``mount-point``;
+    * a candidate that is a mount point, or whose walk crosses onto another
+      filesystem — ``mount-point``, because that other volume's contents are not
+      ours to delete;
+    * a project root that is ``$HOME`` or a standard data directory
+      (:data:`PROTECTED_DATA_DIRS`), and a candidate that CONTAINS one of those
+      directories — ``protected-location``: one stray manifest is not evidence
+      that somebody's own folder is build output;
     * tracked files inside it (``git-tracked``), or a shape git does not ignore
       (``git-not-ignored``); a git that cannot answer is ``git-unknown`` and
       keeps, never "nothing is tracked";
-    * a toolchain process attributable to it or to its project root, or an open
-      handle beneath it — ``toolchain-running`` / ``handles-open``; either probe
-      failing is ``probe-failed`` and keeps;
+    * a toolchain process attributable to it or to its project root, or a
+      process whose cwd is at/under it or which holds files open beneath it —
+      ``toolchain-running`` / ``handles-open``; either probe failing is
+      ``probe-failed`` and keeps. This command's own process is excluded from
+      both tables: it is a generic ``python`` producer sitting in whatever
+      directory the operator ran it from, so counting it kept the very tree the
+      command was asked about;
     * a walk that hit its entry bound — ``idle-unproven``, because a truncated
       walk cannot prove the tree idle.
 
@@ -300,6 +314,17 @@ BUILD_OUTPUT_GENERIC_PRODUCERS: frozenset[str] = frozenset(
     }
 )
 
+#: Directory names directly under ``$HOME`` that hold the user's own data rather
+#: than a project. ``$HOME`` itself and these are never build-output project
+#: roots, and a candidate that CONTAINS one of them is kept: the provenance gate
+#: proves a project owns a shape directory, it says nothing about a folder the
+#: operator happens to keep documents in, and one stray ``~/package.json`` would
+#: otherwise make ``~/dist`` — or ``~/Documents/build`` — provably build output.
+#: The Go-cache category already refuses ``$HOME`` for the same reason.
+PROTECTED_DATA_DIRS: frozenset[str] = frozenset(
+    {"Documents", "Desktop", "Downloads", "Movies", "Music", "Pictures"}
+)
+
 #: What :func:`producer_kind` answers for one process.
 PRODUCER_SPECIFIC = "specific"
 PRODUCER_GENERIC = "generic"
@@ -357,11 +382,18 @@ KEEP_HINTS: dict[str, str] = {
     "policy-off": "enable the setting named in the reason, or pass --force for one run",
     "guarded": "kept by the scratchpad guards (see the reason)",
     "git-repository": (
-        "the directory IS a repository or a linked-worktree root; a branch and any "
-        "uncommitted work would go with it"
+        "the directory IS a repository, contains one below it, or is a linked-worktree "
+        "root; a branch, its history and any uncommitted work would go with it"
     ),
     "symlink": "a symlink (or a path through one) is never followed or removed",
-    "mount-point": "it is the root of its own filesystem; another volume's contents are not ours",
+    "mount-point": (
+        "it is the root of its own filesystem, or the tree crosses onto another one; "
+        "that volume's contents are not ours"
+    ),
+    "protected-location": (
+        "it is (or contains) your home directory or one of your standard data "
+        "directories; a folder there is your data, never build output"
+    ),
     "git-tracked": "git tracks files inside it, so part of it is committed content",
     "git-not-ignored": (
         "git does not ignore it, so it is not provably build output; ignore it in "
@@ -375,7 +407,10 @@ KEEP_HINTS: dict[str, str] = {
         "a build toolchain process is working in it; let it finish and rerun (a removed "
         "build directory corrupts an in-flight build)"
     ),
-    "handles-open": "a process holds files open inside it; stop that process first",
+    "handles-open": (
+        "a process holds files open inside it or is working in it; stop that process "
+        "first"
+    ),
     "probe-failed": (
         "the liveness or provenance probes could not answer (ps/lsof/git unavailable or "
         "unreadable); rerun where they work"
@@ -529,6 +564,13 @@ class Walk:
     #: ``.git`` entries (file or directory) found BELOW the root: a nested
     #: repository or submodule whose history lives only inside this tree.
     nested_git: list[str] = field(default_factory=list)
+    #: ``stop_at_mount`` only: a directory inside the tree that is a mount point.
+    #: The walk STOPPED there, so bytes are a lower bound and nothing past it was
+    #: measured — another filesystem's contents are not this tree's to delete.
+    mount_crossed: str = ""
+    #: ``prune_names`` only: directories the walk refused to descend into. Empty
+    #: is the only answer that leaves the tree fully measured.
+    pruned: list[str] = field(default_factory=list)
 
 
 def walk_allocated(
@@ -537,6 +579,8 @@ def walk_allocated(
     cutoff_ns: int | None = None,
     max_entries: int = WALK_MAX_ENTRIES,
     skip_top_level: frozenset[str] = frozenset(),
+    stop_at_mount: bool = False,
+    prune_names: frozenset[str] = frozenset(),
 ) -> Walk:
     """Iterative, symlink-never-followed walk of ``root`` with a hard entry bound.
 
@@ -550,6 +594,14 @@ def walk_allocated(
     worktree's ``.git`` pointer/admin dir, judged separately). Nested ``.git``
     directories (submodules, vendored repos) are NOT skipped: activity there is
     activity.
+
+    ``stop_at_mount`` and ``prune_names`` are the build-output category's two
+    edges, opt-in so the worktree and Go-cache walks keep their existing meaning.
+    A mount point below ``root`` ENDS the walk: its bytes belong to another
+    filesystem and nothing past it is measured. A directory named in
+    ``prune_names`` is not descended into and is recorded in
+    :attr:`Walk.pruned` — never silently, because a walk that did not cover the
+    tree cannot be used to justify deleting all of it.
     """
     result = Walk()
     try:
@@ -585,6 +637,22 @@ def walk_allocated(
             except OSError as exc:
                 result.error = f"{entry.path}: {exc.strerror or exc}"
                 return result
+            if stop_at_mount and stat.S_ISDIR(st.st_mode):
+                # STOP rather than descend: `_remove_tree` would walk onto the
+                # other volume and delete what is not ours. A probe that cannot
+                # answer is the same keep as an unreadable directory.
+                try:
+                    crossed = os.path.ismount(entry.path)
+                except OSError as exc:
+                    result.error = f"{entry.path}: {exc.strerror or exc}"
+                    return result
+                if crossed:
+                    result.mount_crossed = entry.path
+                    return result
+            if stat.S_ISDIR(st.st_mode) and entry.name in prune_names:
+                if len(result.pruned) < 5:
+                    result.pruned.append(entry.path)
+                continue
             result.allocated_bytes += st.st_blocks * 512
             if st.st_mtime_ns > result.newest_mtime_ns:
                 result.newest_mtime_ns = st.st_mtime_ns
@@ -1487,6 +1555,13 @@ def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
     yields no rows is ``None`` ("cannot tell"), never "nothing is running" —
     every supported platform has at least one process, so an empty table means
     the output was not what we expect.
+
+    THIS COMMAND'S OWN PROCESS IS EXCLUDED. ``lop disk reclaim --build-output
+    <root>`` is a generic ``python`` producer, so its argv is never what
+    attributes it and the cwd rule decides — which made the planner itself the
+    live build it was looking for whenever it was run from inside the named
+    root. The row is dropped here, in the reader, so no attribution path can see
+    it; :func:`read_open_handles` drops the same pid for the same reason.
     """
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
@@ -1501,6 +1576,7 @@ def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
     if done.returncode != 0:
         return None
     rows: list[tuple[int, tuple[str, ...]]] = []
+    own_pid = os.getpid()
     for line in done.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -1510,6 +1586,8 @@ def read_process_table() -> list[tuple[int, tuple[str, ...]]] | None:
             pid = int(pid_text)
         except ValueError:
             return None
+        if pid == own_pid:
+            continue
         rows.append((pid, tuple(rest.split())))
     return rows or None
 
@@ -1539,27 +1617,44 @@ def read_open_handles() -> tuple[str, ...] | None:
     documented blind spot of the same shape the worktree category documents for
     its own lsof use. Resolving tens of thousands of names per plan would cost
     more than the guard is worth on the machine this exists for.
+
+    TWO PIDS ARE EXCLUDED — this process and the ``lsof`` child it just spawned.
+    Both sit in whatever directory the operator ran the command from, ``lsof``
+    reports its OWN cwd (measured: a ``lsof`` row for the sweep itself), and a
+    cwd sentinel inside the candidate was a confident ``handles-open`` on a tree
+    nobody was using. Excluding exactly those pids keeps every OTHER process in
+    that same directory attributable, which is the direction this guard exists
+    for. The child's pid is only knowable from :class:`subprocess.Popen`, which
+    is why this is not a ``subprocess.run``.
     """
     try:
-        done = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             ["lsof", "-n", "-P", "-w"],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=QUICK_TIMEOUT_S,
-            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    try:
+        stdout, _ = proc.communicate(timeout=QUICK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return None
+    own_pids = {os.getpid(), proc.pid}
     paths: list[str] = []
-    for line in done.stdout.splitlines():
+    for line in (stdout or "").splitlines():
         # NAME may contain spaces, so split the fixed leading columns and keep
         # the remainder whole: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
         fields = line.split(None, 8)
         if len(fields) != 9:
             continue
         try:
-            int(fields[1])
+            pid = int(fields[1])
         except ValueError:
+            continue
+        if pid in own_pids:
             continue
         name = fields[8].strip()
         if not name:
@@ -2029,6 +2124,43 @@ def _in_config_dir(path: str, config_root: Path) -> bool:
     return any(_inside(form, base) for form in forms for base in roots)
 
 
+def protected_location_reason(project_root: str) -> str | None:
+    """Why ``project_root`` may not be a build-output root, or ``None`` when it may.
+
+    ``$HOME`` and the standard data directories below it
+    (:data:`PROTECTED_DATA_DIRS`) are not projects, so one stray manifest there
+    must not turn them into one: ``~/package.json`` would otherwise make
+    ``~/dist`` "provably owned build output", and the same manifest dropped in
+    ``~/Documents`` would do it to ``~/Documents/build``. The Go-cache category
+    refuses ``$HOME`` for the same reason. A named project INSIDE one of these
+    directories is still fine — that is the operator naming a project.
+
+    Both spellings are compared, like every path comparison in this module: the
+    root is what the operator typed (``abspath``, never ``realpath`` — see
+    :func:`plan_build_output`) and home is what the environment says either way.
+    """
+    home = os.path.expanduser("~")
+    home_forms = {os.path.abspath(home), os.path.realpath(home)}
+    root_forms = {os.path.abspath(project_root), os.path.realpath(project_root)}
+    for form in root_forms:
+        if form in home_forms:
+            return (
+                f"{project_root} is your home directory; name the project directory "
+                "inside it instead"
+            )
+        for home_form in home_forms:
+            if (
+                os.path.dirname(form) == home_form
+                and os.path.basename(form) in PROTECTED_DATA_DIRS
+            ):
+                return (
+                    f"{project_root} is a standard data directory; the folders in it "
+                    "are your data, never build output — name the project directory "
+                    "inside it"
+                )
+    return None
+
+
 def manifests_present(project_root: str, manifests: Iterable[str]) -> tuple[str, ...]:
     """Which of one shape's manifests exist as files in ``project_root``.
 
@@ -2085,9 +2217,13 @@ def assess_build_output(
     different repository entirely — a confident answer about the wrong repository
     is the dangerous case, and the ``.git``-inside guard is what closes it. Age is
     next, because the bounded walk also stops early the moment a tree is provably
-    too young. git provenance follows, and the live-build probes are last: they
-    are the most expensive, and their "cannot tell" is the one that costs most to
-    get wrong.
+    too young. The three structural findings that same walk can turn up — a mount
+    point it had to stop at, a standard data directory it refused to descend into
+    (:data:`PROTECTED_DATA_DIRS`), a nested ``.git`` — are judged immediately
+    after it: every one means the tree was either not fully measured or holds
+    something no rebuild can recreate. git provenance follows, and the live-build
+    probes are last: they are the most expensive, and their "cannot tell" is the
+    one that costs most to get wrong.
     """
     window = build_output_idle_minutes(min_idle_minutes)
     cutoff_ns = int((now - window * 60) * 1e9)
@@ -2159,7 +2295,12 @@ def assess_build_output(
             **evidence,
         )
 
-    walk = walk_allocated(candidate, cutoff_ns=cutoff_ns)
+    walk = walk_allocated(
+        candidate,
+        cutoff_ns=cutoff_ns,
+        stop_at_mount=True,
+        prune_names=PROTECTED_DATA_DIRS,
+    )
     evidence["newest_mtime"] = (
         _iso(walk.newest_mtime_ns / 1e9) if walk.newest_mtime_ns else None
     )
@@ -2168,6 +2309,33 @@ def assess_build_output(
             candidate,
             "idle-unproven",
             f"the tree could not be read ({walk.error}), so idle cannot be proven",
+            **evidence,
+        )
+    if walk.mount_crossed:
+        return _keep_build_output(
+            candidate,
+            "mount-point",
+            "the walk crosses onto another filesystem at "
+            f"{os.path.relpath(walk.mount_crossed, candidate)}; that volume's "
+            "contents are not ours to delete",
+            **evidence,
+        )
+    if walk.pruned:
+        return _keep_build_output(
+            candidate,
+            "protected-location",
+            "it contains a standard data directory ("
+            + ", ".join(os.path.relpath(path, candidate) for path in walk.pruned[:3])
+            + "), whose contents are the user's own data",
+            **evidence,
+        )
+    if walk.nested_git:
+        return _keep_build_output(
+            candidate,
+            "git-repository",
+            "it contains a nested .git ("
+            + ", ".join(os.path.relpath(path, candidate) for path in walk.nested_git[:3])
+            + "), so a repository's history lives only inside it",
             **evidence,
         )
     if walk.recent:
@@ -2294,6 +2462,11 @@ def plan_build_output(
     claim/lease, retention window, manifests). Refusing here is what lets the
     no-session-deletion guard prove that nothing this module deletes can reach a
     session directory.
+
+    A named root that is ``$HOME`` or one of the standard data directories below
+    it is refused for the reason :func:`protected_location_reason` gives: the
+    provenance gate proves a project owns a shape directory, and it must not be
+    possible to make somebody's own folder into one by leaving a manifest in it.
     """
     resolved = probes if probes is not None else default_build_probes()
     items: list[Item] = []
@@ -2326,6 +2499,12 @@ def plan_build_output(
                         "reclaimed by --scratchpads under its own guards"
                     ),
                 }
+            )
+            continue
+        protected = protected_location_reason(root)
+        if protected:
+            refusals.append(
+                {"category": CATEGORY_BUILD_OUTPUT, "path": given, "reason": protected}
             )
             continue
         if not os.path.isdir(root):
@@ -2404,6 +2583,11 @@ def revalidate_build_output(
     if probes is not None:
         probes.refresh()
     root = item.evidence.get("project_root") or os.path.dirname(item.path)
+    protected = protected_location_reason(root)
+    if protected:
+        return _keep_build_output(
+            item.path, "protected-location", protected, project_root=root
+        )
     manifests = tuple(
         item.evidence.get("manifests")
         or BUILD_OUTPUT_SHAPES.get(os.path.basename(item.path), ())
@@ -2495,7 +2679,8 @@ def remove_build_output(
        named — never removed "because it was approved earlier";
     2. the shape of the entry itself is re-checked against ``lstat``: a symlink
        or a mount point that appeared since the preview is refused, and so is a
-       path that stopped being a directory;
+       path that stopped being a directory — plus a mount point that appeared
+       INSIDE the tree, which the measurement walk stops at;
     3. the tree is measured again immediately before deletion, and that
        measurement is what the receipt carries for this item — the preview's
        figure and the removal's figure are different numbers, and the reader can
@@ -2527,9 +2712,17 @@ def remove_build_output(
     except OSError as exc:
         return f"refusing: the mount probe failed ({exc.strerror or exc})"
 
-    walk = walk_allocated(item.path)
+    walk = walk_allocated(item.path, stop_at_mount=True)
     if walk.error:
         return f"refusing: the tree could not be measured ({walk.error})"
+    if walk.mount_crossed:
+        # The same race as the mount check above, one level down: the walk stops at
+        # the boundary, so nothing past it was measured — and `_remove_tree` would
+        # happily descend onto the other volume.
+        return (
+            "refusing: a mount point appeared inside it at removal time "
+            f"({walk.mount_crossed})"
+        )
     item.allocated_bytes = walk.allocated_bytes
     item.bytes_truncated = walk.truncated
     item.evidence["allocated_bytes_at_removal"] = walk.allocated_bytes

@@ -1188,25 +1188,28 @@ def plan_bo(root: Path, **kw: Any) -> tuple[list[Any], list[Any]]:
 def test_a_folder_named_build_without_a_manifest_is_never_a_candidate(tmp_path: Path) -> None:
     """THE non-technical-user safety test: a name is not evidence.
 
-    A chat-only user's ``~/Documents/build`` (or ``dist``) is their data. There is
+    A chat-only user's ``~/projects/build`` (or ``dist``) is their data. There is
     no manifest beside it, so it is not a candidate at all — it does not appear as
     a reclaim row, and it does not appear as a KEEP row either, because a keep
-    would still mean this planner considered deleting it.
+    would still mean this planner considered deleting it. (``~/Documents`` is
+    refused by NAME, in its own case: see
+    :func:`test_home_and_the_data_directories_are_never_project_roots`. The gate
+    proven here is the manifest one, which holds for every directory.)
     """
-    documents = tmp_path / "home" / "Documents"
+    holder = tmp_path / "home" / "projects"
     for name in ("build", "dist"):
-        folder = documents / name
+        folder = holder / name
         folder.mkdir(parents=True)
         for index in range(5):
             (folder / f"invoice-{index}.pdf").write_bytes(b"x" * 4096)
         _idle(folder, hours=800)
-    _idle(documents, hours=800)
+    _idle(holder, hours=800)
 
-    items, refusals = plan_bo(documents)
+    items, refusals = plan_bo(holder)
 
     assert items == [] and refusals == []
-    assert (documents / "build" / "invoice-0.pdf").exists()
-    assert (documents / "dist" / "invoice-0.pdf").exists()
+    assert (holder / "build" / "invoice-0.pdf").exists()
+    assert (holder / "dist" / "invoice-0.pdf").exists()
 
 
 @pytest.mark.parametrize("shape", sorted(dp.BUILD_OUTPUT_SHAPES))
@@ -1649,3 +1652,214 @@ def test_the_real_parser_accepts_build_output(fx: Fx, tmp_path: Path) -> None:
     assert payload["summary"]["reclaimable"] == 1
     assert payload["items"][0]["category"] == "build-output"
     assert (root / "target").exists()
+
+
+# -- build output: the planner itself, and the edges of a tree -----------------
+#
+# Round-1 review findings, each with the case that produced it. The first is the
+# one that mattered: the command's OWN process was the live build it went looking
+# for, so `--apply --yes` from inside the named root reported `nothing-to-do` and
+# deleted nothing.
+
+
+def _handler_payload(root: Path, *, cwd: Path) -> dict[str, Any]:
+    """The REAL command, in a subprocess started from ``cwd``: its JSON payload."""
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from local_operator.cli import main; sys.exit(main())",
+            "disk",
+            "reclaim",
+            "--build-output",
+            str(root),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=cwd,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_the_planners_own_process_is_never_the_live_build(fx: Fx) -> None:
+    """The measured self-attribution, from every cwd an operator runs it in.
+
+    ``lop disk reclaim --build-output <root>`` is a generic ``python`` producer,
+    so argv attribution is skipped for it and the CWD rule decides. From outside
+    the root the candidate was planned ``reclaim``; from the root itself it was
+    kept as ``toolchain-running``, and from inside the candidate as
+    ``handles-open`` because ``lsof`` reports its OWN cwd — which is why the
+    sweep's child pid is excluded as well as ours. All three say ``reclaim`` now,
+    and a preview still removes nothing.
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    for cwd in (fx.root, root, shape):
+        payload = _handler_payload(root, cwd=cwd)
+        assert payload["summary"]["reclaimable"] == 1, (cwd, payload)
+        assert [item["code"] for item in payload["items"]] == ["reclaim"], (cwd, payload)
+    assert shape.exists()
+
+
+def test_a_different_live_producer_in_the_project_still_keeps_it(fx: Fx) -> None:
+    """Excluding ourselves must not become attribution-blindness.
+
+    A genuinely different ``python`` working in the named root is still a live
+    build: the exclusion is by pid (ours, and the ``lsof`` child's), never by
+    "a generic producer does not count".
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    _shape(root)
+    _idle(root)
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=root)
+    try:
+        payload = _handler_payload(root, cwd=fx.root)
+        assert [item["code"] for item in payload["items"]] == ["toolchain-running"], payload
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+    assert child.poll() is not None
+
+
+def test_the_two_tables_drop_this_process_and_its_lsof_child() -> None:
+    """The exclusion lives in the READERS, so no attribution path can see us."""
+    rows = dp.read_process_table()
+    assert rows, "ps lists at least one process on every supported platform"
+    assert all(pid != os.getpid() for pid, _ in rows)
+
+    handles = dp.read_open_handles()
+    assert handles is not None, "the end-to-end cases already require a working lsof"
+    assert not [
+        entry for entry in handles if entry.startswith(f"pid:{os.getpid()}:cwd=")
+    ]
+    assert os.getpid() not in dp.cwds_by_pid(handles)
+
+
+def test_a_clone_inside_the_candidate_keeps_it(tmp_path: Path) -> None:
+    """Build output that a repository was cloned into: its history lives there.
+
+    ``target/vendor/tool`` is a clone somebody's build wrote (or a submodule
+    checked out under it), and it was previously collected because the ``.git``
+    guard only looked at the candidate's own root.
+    """
+    root = _project(tmp_path)
+    shape = _shape(root)
+    inner = shape / "vendor" / "tool"
+    inner.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(inner)], check=True, capture_output=True)
+    (inner / "README").write_text("history\n")
+    git(inner, "add", "-A")
+    git(inner, "commit", "-qm", "the only copy")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["git-repository"], items
+    assert items[0].action == dp.ACTION_KEEP
+    assert "nested .git" in items[0].reason
+    assert (inner / "README").read_text() == "history\n"
+
+
+def test_a_mount_point_inside_the_tree_stops_the_walk_and_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Something was mounted INSIDE the candidate: that volume is not ours.
+
+    The candidate-level ``ismount`` check cannot see it, so previously the walk
+    descended onto the other filesystem, measured it, and the remover followed it
+    there. The walk now stops at the boundary and the candidate is kept — at plan
+    time AND when the removal re-validates.
+    """
+    root = _project(tmp_path)
+    shape = _shape(root)
+    inner = shape / "debug" / "mounted"
+    inner.mkdir()
+    (inner / "other-volume.txt").write_text("not ours\n")
+    _idle(root)
+
+    real = os.path.ismount
+    monkeypatch.setattr(os.path, "ismount", lambda path: str(path) == str(inner) or real(path))
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["mount-point"], items
+    assert items[0].action == dp.ACTION_KEEP
+
+    # ... and the walk really stopped there: nothing below the boundary is counted.
+    stopped = dp.walk_allocated(str(shape), stop_at_mount=True)
+    everything = dp.walk_allocated(str(shape))
+    assert stopped.mount_crossed == str(inner)
+    assert stopped.allocated_bytes < everything.allocated_bytes
+
+    # ... and the remover refuses it too, one level further from the plan.
+    detail = dp.remove_build_output(items[0], min_idle_minutes=60, probes=_bo_probes())
+    assert detail and detail.startswith("no longer qualifies"), detail
+    assert "mount-point" in detail
+
+    monkeypatch.undo()
+    assert (inner / "other-volume.txt").exists()
+
+
+def test_home_and_the_data_directories_are_never_project_roots(tmp_path: Path) -> None:
+    """The non-developer clause: one stray manifest must not make ``~/dist`` ours.
+
+    ``~/package.json`` — anything that installs a dependency at the top of home
+    leaves one — made ``~/dist`` "provably owned build output", and the same file
+    in ``~/Documents`` did it to ``~/Documents/build``.
+    """
+    home = Path(os.environ["HOME"])
+    (home / "package.json").write_text("{}\n")
+    dist = home / "dist"
+    dist.mkdir()
+    (dist / "app.js").write_text("bundle\n")
+    _idle(home, hours=800)
+
+    items, refusals = plan_bo(home)
+
+    assert items == []
+    assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT]
+    assert "home directory" in refusals[0]["reason"]
+    assert (dist / "app.js").exists()
+
+    for name in sorted(dp.PROTECTED_DATA_DIRS):
+        holder = home / name
+        holder.mkdir(exist_ok=True)
+        (holder / "package.json").write_text("{}\n")
+        (holder / "build").mkdir(exist_ok=True)
+        (holder / "build" / "x.js").write_text("x\n")
+    _idle(home, hours=800)
+
+    for name in sorted(dp.PROTECTED_DATA_DIRS):
+        items, refusals = plan_bo(home / name)
+        assert items == [], (name, items)
+        assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT], name
+        assert "standard data directory" in refusals[0]["reason"], name
+        assert (home / name / "build" / "x.js").exists(), name
+
+
+def test_a_data_directory_inside_a_candidate_keeps_it(tmp_path: Path) -> None:
+    """``target/Documents`` is somebody's documents, even inside build output."""
+    root = _project(tmp_path)
+    shape = _shape(root)
+    documents = shape / "Documents"
+    documents.mkdir()
+    (documents / "invoice.pdf").write_text("data\n")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["protected-location"], items
+    assert items[0].action == dp.ACTION_KEEP
+    assert (documents / "invoice.pdf").exists()
