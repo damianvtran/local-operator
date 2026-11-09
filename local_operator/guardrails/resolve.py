@@ -831,6 +831,8 @@ class Target:
     #: ``--force``/``-f`` on that removal: git deletes uncommitted work, so the
     #: clean-worktree exemption no longer holds and the ordinary ranking applies.
     forced: bool = False
+    #: Double force is narrowly allowed for a verified stale git initialization lock.
+    force_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -2409,6 +2411,10 @@ class _Walker:
                     for target in self.result.targets[before:]:
                         target.worktree_remove = True
                         target.forced = forced
+                        target.force_count = sum(
+                            1 if f == "--force" else f[1:].count("f")
+                            for f in flags if f.startswith("-")
+                        )
                 finally:
                     self.state.cwd = saved
 

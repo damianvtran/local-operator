@@ -50,6 +50,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for sid in (SID, CHILD, OTHER, ASKER):
         (state / "sessions" / sid / "scratchpad").mkdir(parents=True)
     (state / "config.yml").write_text("version: 1\n")
+    # Synthetic trees are never live process cwd; dedicated worktree-removal
+    # controls cover live/unknown inventory without depending on fleet latency.
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
     for key in [k for k in os.environ if k.startswith(("CMUX_", "GIT_"))]:

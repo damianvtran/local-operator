@@ -7,8 +7,12 @@ description: "Guardrail rules: block, warn or review a tool call before it runs,
 
 Two layers run at ONE checkpoint — `guardrails/check.py::check_tool_call`, from
 `harness/loop.py` after the approval gate and before the tool executes. A refusal is
-the call's own result and starts with `BLOCKED by guardrail`; never reword or retry
-a refused call — report it.
+the call's own result and starts with `BLOCKED by guardrail`. It is final for THAT
+action: the same effect on the same targets, by any spelling, tool or path — never
+reword, retry or reroute it; report it. It does not taint later work: a NEW artifact
+from your own fresh work, written to your own worktree's mandated location (a repo's
+`i18n/receipts/`, say), is a different action and needs no approval. Copying or
+importing the blocked material there by another route is still a reroute.
 
 **Order, first refusal wins:** (1) the **built-in dangerous-delete** (bash only):
 CRITICAL is refused with no model call, HIGH goes to a forked judge, LOW runs with

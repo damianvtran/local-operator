@@ -877,16 +877,25 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
-    if target.worktree_remove and not target.forced and target.pattern is None:
+    if target.worktree_remove and target.pattern is None:
         # ``git worktree remove`` without --force: git refuses tracked or
         # untracked changes itself, but deletes IGNORED files and a detached
         # HEAD's unreferenced commits. ``worktree_state`` proves those absent
-        # (only regenerable ignored output, HEAD reachable from a ref). Anything
-        # else (dirty, unknown, not linked) takes the ordinary ranking below.
+        # (only regenerable ignored output, HEAD on a branch or reachable from a
+        # ref; a branch HEAD needs no pushed/merged test because the removal
+        # keeps the branch ref — see ``worktree_state``). Anything else (dirty,
+        # locked, unknown, not linked) takes the ordinary ranking below, which
+        # then names that state: the refusal otherwise says only "a git
+        # repository root" and hides the one fact the agent can act on.
         from local_operator.guardrails.provenance import worktree_state
 
-        if worktree_state(path) == "clean":
+        state = worktree_state(path)
+        if state == "clean" and not target.forced:
             return RankedTarget(target, Risk.LOW, "a clean linked git worktree")
+        if state == "stale-initializing" and target.force_count == 2:
+            return RankedTarget(target, Risk.LOW, "a clean linked git worktree with a stale initializing lock")
+        if state != "not-linked":
+            notes.append(f"linked worktree state: {state}")
     for spelling in _spellings(path):
         reason = _high_reason(spelling, target, prot)
         if reason is not None:

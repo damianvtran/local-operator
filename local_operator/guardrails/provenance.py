@@ -77,6 +77,17 @@ _DB_TIMEOUT_S = 2.0
 #: worktrees, 2026-11-07): median 0.015 s, max 0.86 s. 10 s is far above that and still
 #: short enough that a hung filesystem cannot hold the turn.
 _GIT_TIMEOUT_S = 10.0
+#: Bound on the ONE ``git status --porcelain --ignored`` that ``worktree_state``
+#: runs. The 10 s probe bound above was measured on an idle machine; under the
+#: disk pressure of ~25 concurrent sessions (2026-11-09, ~4 GiB free) the same
+#: status calls on the operator's real linked worktrees measured n=6, median
+#: ~21 s, max 34.3 s (``lo-i18n-es`` 20.4/28.9 s, ``.worktrees/durable-write``
+#: 34.3/23.5 s, local-operator-ui ``i18n-restored-content`` 5.0/3.3 s). Every
+#: one timed out, ``worktree_state`` said ``unknown``, and a clean
+#: ``git worktree remove`` fell through to the repository-root refusal. 60 s
+#: sits above that max; the ``git worktree remove`` it gates walks the same
+#: tree, so the guard costs at most what the delete itself costs.
+_WORKTREE_STATUS_TIMEOUT_S = 60.0
 #: How far back the operator brief reads. A transcript can hold thousands of
 #: rows; the judge needs the recent operator words, not the session's history.
 _SCAN_LIMIT = 400
@@ -632,7 +643,7 @@ def commit_creations(
 # -- git worktrees -------------------------------------------------------------
 
 
-def _git(args: Sequence[str], cwd: str) -> str | None:
+def _git(args: Sequence[str], cwd: str, *, timeout: float = _GIT_TIMEOUT_S) -> str | None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     # Read-only probes: no prompts, no index refresh writes, no credential helper.
     env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
@@ -641,7 +652,7 @@ def _git(args: Sequence[str], cwd: str) -> str | None:
             ["git", "-C", cwd, *args],
             capture_output=True,
             text=True,
-            timeout=_GIT_TIMEOUT_S,
+            timeout=timeout,
             env=env,
             check=False,
         )
@@ -668,19 +679,131 @@ _REGENERABLE = frozenset(
         ".turbo",
         "coverage",
         ".tox",
+        # Added 2026-11-09 from the operator's real clean worktrees, each of
+        # which the old list called dirty: setuptools metadata from an editable
+        # install, generic tool caches (``.cache`` — vite/eslint/parcel), and
+        # Finder's per-directory ``.DS_Store``.
+        ".eggs",
+        ".cache",
+        ".DS_Store",
     }
 )
+#: Basename patterns with the same standing as :data:`_REGENERABLE`:
+#: bytecode, editable-install metadata (``<dist>.egg-info``), macOS AppleDouble
+#: sidecars (``._<name>``, metadata about a sibling), and the throwaway esbuild
+#: bundles local-operator-ui tests write beside themselves and unlink
+#: (``scripts/_*.bundle.mjs``; a killed run leaves them behind — that repo's
+#: ``.gitignore`` documents the convention).
+_REGENERABLE_GLOBS = ("*.pyc", "*.egg-info", "._*", "_*.bundle.mjs", "_*.bundle.cjs")
+
+
+def _regenerable(name: str) -> bool:
+    return name in _REGENERABLE or any(fnmatch.fnmatchcase(name, g) for g in _REGENERABLE_GLOBS)
+
+
+def _live_cwd_inside(real: str) -> bool | None:
+    """Whether a live process uses this tree; unknown never grants an exemption.
+
+    The manager-allocated 5 s inventory budget fails closed under host load.
+    lsof's cwd inventory is read-only and avoids probing process command lines
+    (which may carry secrets). Linux exposes the same data under /proc. A
+    disappearing process no longer owns a cwd; other inspection errors fail
+    closed. This protects ordinary clean removals as well as abandoned adds.
+    """
+    if os.path.isdir("/proc/self"):
+        try:
+            for entry in os.scandir("/proc"):
+                if not entry.name.isdecimal():
+                    continue
+                try:
+                    if entry.stat().st_uid != os.getuid():
+                        continue
+                    cwd = os.readlink(os.path.join(entry.path, "cwd"))
+                except FileNotFoundError:
+                    continue
+                if (os.path.realpath(cwd) == real or os.path.realpath(cwd).startswith(real + os.sep)):
+                    return True
+            return False
+        except OSError:
+            return None
+    try:
+        proc = subprocess.run(
+            ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn", "-w"],
+            capture_output=True, text=True, timeout=5.0, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
+    if not paths:
+        return None
+    return any((os.path.realpath(cwd) == real or os.path.realpath(cwd).startswith(real + os.sep)) for cwd in paths)
+
+
+def _only_regenerable(directory: str) -> bool:
+    """Every entry under ``directory`` is regenerable (bounded; over → False).
+
+    WHY. ``git status --ignored`` collapses a directory whose content is ALL
+    ignored into the directory itself: ``scripts/`` holding only throwaway
+    ``_*.bundle.mjs`` files reports as ``!! scripts/``, and that basename says
+    nothing about its content. A regenerable subdirectory (``.cache``) is
+    accepted whole, as it would be at the top level. Not a directory, a
+    symlink, an unreadable tree or more than :data:`_WALK_ENTRIES` entries all
+    count as NOT regenerable — fail closed.
+    """
+    if not os.path.isdir(directory) or os.path.islink(directory):
+        return False
+    seen = 0
+    stack = [directory]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            return False
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return False
+        for entry in entries:
+            if _regenerable(entry.name):
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                stack.append(entry.path)
+            else:
+                return False
+    return True
 
 
 def worktree_state(path: str) -> str:
-    """``clean`` / ``dirty`` / ``not-linked`` / ``unknown`` for a worktree path.
+    """``clean`` / ``dirty`` / ``locked`` / ``not-linked`` / ``unknown`` for a worktree path.
 
-    Linked = its ``.git`` is a FILE, its git-dir differs from the common dir,
-    and the repository's ``git worktree list`` names it (not as the main
-    checkout). Clean = ALL of: no tracked or untracked change, no ignored entry
-    outside :data:`_REGENERABLE`, and HEAD on a branch or contained in some
-    ref. Anything less is ``dirty`` and takes the ordinary ranking — where an
-    OWN worktree can still pass through the ledger or history evidence.
+    Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
+    and sits in ``<common>/worktrees/<name>``, and that registration's
+    ``gitdir`` file points back at this path — exactly the records
+    ``git worktree list`` reads, read here without spawning git. Clean = ALL
+    of: not locked, no tracked or untracked change, no ignored entry that is
+    not regenerable (:func:`_regenerable`), and HEAD on a branch or contained
+    in some ref. Anything less is ``dirty`` and takes the ordinary ranking —
+    where an OWN worktree can still pass through the ledger or history
+    evidence.
+
+    WHY no "pushed or merged" test for a branch HEAD. ``git worktree remove``
+    deletes the working tree and ``<common>/worktrees/<name>``; it never
+    deletes the branch. The branch ref lives in the common repository, so
+    every commit on it is still reachable after the removal — whether pushed,
+    squash-merged (not an ancestor of any remote ref) or purely local. Asking
+    for remote reachability refused clean worktrees of squash-merged branches
+    and protected nothing. Only a DETACHED HEAD loses commits (no ref names
+    them once the worktree's own HEAD file is gone), so only that case checks
+    ``--contains``. Deleting the branch afterwards is a separate command
+    (``git branch -D``) the guard does not exempt.
+
+    COST. Under heavy disk pressure each git probe here measured up to 34 s
+    (see :data:`_WORKTREE_STATUS_TIMEOUT_S`), so this makes the fewest probes
+    that answer the question: one ``rev-parse``, file reads for registration
+    and lock, ONE ``git status --porcelain --ignored`` for tracked, untracked
+    (``??``) and ignored (``!!``) entries alike, and ``symbolic-ref``. A
+    timeout is still ``unknown`` — never ``clean``.
     """
     try:
         real = os.path.realpath(path)
@@ -696,23 +819,35 @@ def worktree_state(path: str) -> str:
         return "unknown"
     git_dir = os.path.realpath(lines[0])
     common = os.path.realpath(os.path.join(real, lines[1]))
-    if git_dir == common:
+    if git_dir == common or os.path.dirname(git_dir) != os.path.join(common, "worktrees"):
         return "not-linked"
-    listing = _git(["worktree", "list", "--porcelain"], real)
-    if listing is None:
-        return "unknown"
-    trees = [
-        os.path.realpath(ln[len("worktree ") :])
-        for ln in listing.splitlines()
-        if ln.startswith("worktree ")
-    ]
-    if real not in trees[1:]:
+    try:
+        with open(os.path.join(git_dir, "gitdir"), encoding="utf-8") as fh:
+            back = fh.read().strip()
+    except OSError:
         return "not-linked"
-    status = _git(["status", "--porcelain", "--untracked-files=all"], real)
-    if status is None:
+    # Relative when ``worktree.useRelativePaths`` is set (git >= 2.48):
+    # relative to the registration directory itself.
+    back = os.path.join(git_dir, back)
+    if os.path.realpath(os.path.dirname(back)) != real:
+        # Registered for another path (a moved or copied tree): not this one.
+        return "not-linked"
+    stale_initializing = False
+    lock = os.path.join(git_dir, "locked")
+    try:
+        with open(lock, encoding="utf-8") as fh:
+            reason = fh.read().strip()
+        # One hour is the operator's explicit stale-add policy, not a measured
+        # probe timeout. Never unlock or mutate this record from the guard.
+        stale_initializing = reason == "initializing" and time.time() - os.stat(lock).st_mtime > 3600
+        if not stale_initializing:
+            return "locked"
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError):
         return "unknown"
-    if status.strip():
-        return "dirty"
+    if _live_cwd_inside(real) is not False:
+        return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
     # of its history went with it). Only regenerable entries may remain. A
@@ -720,15 +855,21 @@ def worktree_state(path: str) -> str:
     # directory: under a name not on the list it is dirty outright, and under
     # an allowlisted name (``build/keep/.git``) the bounded walk below finds
     # it (review R2-MINOR-1).
-    ignored = _git(["status", "--porcelain", "--ignored"], real)
+    ignored = _git(
+        ["status", "--porcelain", "--ignored"],
+        real,
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
     if ignored is None:
         return "unknown"
+    if any(ln and not ln.startswith("!! ") for ln in ignored.splitlines()):
+        return "dirty"  # a tracked change or an untracked (``??``) entry
     for line in ignored.splitlines():
         if not line.startswith("!! "):
             continue
         entry = line[3:].strip().strip('"').rstrip("/")
         name = os.path.basename(entry)
-        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+        if not _regenerable(name) and not _only_regenerable(os.path.join(real, entry)):
             return "dirty"
         if _holds_git(os.path.join(real, entry)):
             return "dirty"
@@ -748,7 +889,7 @@ def worktree_state(path: str) -> str:
         )
         if not (refs or "").strip():
             return "dirty"
-    return "clean"
+    return "stale-initializing" if stale_initializing else "clean"
 
 
 def _ignored_unregenerable(real: str) -> bool:
@@ -762,7 +903,7 @@ def _ignored_unregenerable(real: str) -> bool:
             continue
         entry = line[3:].strip().strip('"').rstrip("/")
         name = os.path.basename(entry)
-        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+        if not _regenerable(name):
             return True
         if _holds_git(os.path.join(real, entry)):
             return True
