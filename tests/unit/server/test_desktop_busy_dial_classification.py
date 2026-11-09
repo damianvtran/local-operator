@@ -153,6 +153,54 @@ async def test_the_foreground_bind_to_a_closed_port_is_not_owner_alive(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_an_owner_that_exits_between_bind_attempts_is_not_owner_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Newer proof of absence outranks an earlier attempt's busy disposition.
+
+    Agent review round 1, R1-1: attempt 1 hits a live owner that welcomes late
+    (``OwnerWelcomeTimeout``, ``owner_alive``), the owner then exits and its
+    record is removed, and attempt 2's ``locate`` finds no owner at all.
+    ``_bind_under_lock`` used to rethrow the cached attempt-1 error, so a
+    KNOWN-GONE owner reached the ladder as ``runtime_busy`` — the exact
+    mislabel the dead-owner control above exists to forbid, only reached via
+    a retry. The sentence must survive (the TUI matches it); only the
+    disposition is dropped.
+    """
+    monkeypatch.setattr(attach_client, "ACK_TIMEOUT_S", 0.1)
+    await _seed(tmp_path)
+    owner = _FakeOwner(SESSION_ID, tmp_path, mute=True)
+    await owner.start()
+    _publish_live(tmp_path, owner)
+    viewer = await _cold_viewer(tmp_path)
+    original = attach_client.AttachClient.connect
+
+    async def connect_then_owner_exits(client: Any, record: Any, session_id: str) -> Any:
+        try:
+            return await original(client, record, session_id)
+        except attach_client.OwnerWelcomeTimeout:
+            # The owner goes away AFTER proving itself alive: the socket closes
+            # and its record is unpublished, so the next locate() finds nothing.
+            await owner.stop()
+            registry.record_path(OWNER_PID, tmp_path).unlink()
+            raise
+
+    monkeypatch.setattr(attach_client.AttachClient, "connect", connect_then_owner_exits)
+    try:
+        with pytest.raises(ConnectionError) as raised:
+            await viewer.bind_runtime()
+    finally:
+        await viewer.dispose()
+        await owner.stop()
+
+    assert owner.conns >= 1, "the bind never dialled the owner"
+    assert not _owner_busy(raised.value), repr(raised.value)
+    assert str(raised.value) == "owner did not send its state"
+    # The earlier attempt stays reachable for diagnosis.
+    assert isinstance(raised.value.__cause__, attach_client.OwnerWelcomeTimeout)
+
+
+@pytest.mark.asyncio
 async def test_an_ask_answer_to_a_live_owner_that_welcomes_late_is_owner_alive(
     tmp_path: Path,
 ) -> None:

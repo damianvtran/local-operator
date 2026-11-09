@@ -5025,7 +5025,22 @@ class AttachedSession:
                 # attempt 2 then finding no record must not downgrade the
                 # diagnosis to this generic sentence. Same rule as the two
                 # disposal arms above, which is why all three read alike.
+                #
+                # The reason survives; a stale DISPOSITION does not (agent
+                # review round 1, R1-1). An ``owner_alive`` error from an
+                # earlier attempt (``OwnerWelcomeTimeout``: the owner accepted
+                # the socket and welcomed late) was true THEN, but this arm is
+                # newer, definitive evidence — no record and no lease holder —
+                # that the owner has since gone. Rethrowing it unchanged would
+                # report a known-gone owner as ``runtime_busy`` and invite a
+                # resend into nothing. Re-raise the same sentence (the TUI's
+                # resume retry matches it) as a plain ``ConnectionError``,
+                # chained so the earlier attempt stays visible. The disposal
+                # arms above deliberately keep the error as-is: disposal says
+                # nothing about whether the owner lives.
                 if last_error is not None:
+                    if getattr(last_error, "owner_alive", False):
+                        raise ConnectionError(str(last_error)) from last_error
                     raise last_error
                 raise ConnectionError("could not start a runtime for this session")
             try:
