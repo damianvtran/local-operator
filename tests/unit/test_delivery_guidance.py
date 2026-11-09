@@ -51,7 +51,7 @@ def _fields(**overrides):
 # stays: a test asserts it). Trimming here would mean dropping a merge
 # invariant to keep a budget, which is the wrong trade.
 BUDGETS = {
-    "coder": 2800,
+    "coder": 2960,
     "reviewer": 3660,
     "manager": 3750,
     "designer": 5650,
@@ -78,7 +78,7 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     for required in (
         "make test-affected",
         "Targeted test evidence",
-        "ci-main-red",
+        "Post-merge ownership",
         "negative control",
         "source-only",
         "stable session ID",
@@ -116,7 +116,9 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     # rule that actually holds the main branch green is that the suite runs once
     # at a labeled-PR merge gate, a red gate blocks the merge, and a push
     # re-arms it with `make merge-gate PR=<n>`. Trim prose, not that invariant.
-    assert len(policy) < 12600
+    # Raised to 12720 for post-merge ownership (+175 measured with
+    # `len(read_text())`, 12540 -> 12715): the author follows main's red run.
+    assert len(policy) < 12720
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():

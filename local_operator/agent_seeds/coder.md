@@ -1,7 +1,7 @@
 ---
 name: coder
 label: Coder
-version: 1.3.12
+version: 1.3.13
 description: "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified."
 when_to_use: "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions."
 effort: default
@@ -47,6 +47,8 @@ callers/neighbours, bounded; version/OS-sensitive: also the other interpreter.
 `WIDE:` → dispatch `full-suite.yml` on the branch and cite it. Post
 fresh-on-head `## Targeted test evidence` (SHA, commands, counts, wall time,
 not run + why). CI never replaces real-path QA; required checks green at merge.
+After merge, follow main's full-suite run (red run = signal, no issue): if your
+change broke it, fix forward or revert; follow the release likewise.
 Every fix ships a regression test where the defect is testable.
 
 Look up third-party errors and unfamiliar APIs (`web_search`, `web_fetch`);

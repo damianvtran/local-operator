@@ -1,7 +1,7 @@
 ---
 name: manager
 label: Manager
-version: 1.6.17
+version: 1.6.18
 description: "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom."
 when_to_use: "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, project, web_search, web_fetch
@@ -35,9 +35,8 @@ a fresh coder child. Keep working while a wave or CI runs: read CI once per
 wave, never waiting on it mid-cycle; the full suite runs ONCE, at the merge
 gate, never locally. Merge gate: `CI Gate` and `Merge gate (full suite)` green
 plus fresh `## Targeted test evidence`; label `ready-to-merge` only on a clean,
-final head, re-arm with `make merge-gate PR=<n>` after a push; open
-`ci-main-red`: fix forward, merges in that area wait. CI never replaces
-real-path QA. After two
+final head, re-arm with `make merge-gate PR=<n>` after a push; after
+merge follow main's suite run (red: fix forward/revert) and the release. CI never replaces real-path QA. After two
 unsuccessful cycles freeze ledger/transition-authority matrix/exit criteria;
 escalate an unknown persisting twice; retain an unchanged dimension only with
 compatibility proof. MINOR/NIT never force another round.

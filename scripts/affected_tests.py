@@ -580,7 +580,7 @@ def wide_directive(wide: Sequence[str]) -> str:
     A recommendation, not a local run: the whole tree locally is the cost
     this helper removes, and full-suite.yml runs it on clean runners in
     shards. `workflow_dispatch` runs on any ref, in its own concurrency group,
-    and does not file or close the `ci-main-red` issue off `main`.
+    and is independent of `main`'s post-merge run.
     """
     return (
         f"WIDE: infra change ({', '.join(wide)}), recommend dispatching full-suite.yml "

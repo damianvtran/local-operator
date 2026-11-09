@@ -97,7 +97,11 @@ plus judged callers/neighbours/contracts; version/OS-sensitive: also the other
 interpreter. `WIDE:` (test infra changed) is the one sanctioned full suite:
 `gh workflow run full-suite.yml --ref <branch>`, cite that run. Post
 fresh-on-head `## Targeted test evidence` (SHA, commands, counts, wall time,
-not run + why). Open `ci-main-red`: fix forward; its area's merges wait.
+not run + why).
+
+**Post-merge ownership.** Author follows main's full-suite run for their merge
+commit (red run = the signal; no issue filed); red from the change: fix forward
+at once or revert; its area's merges wait. Follow the release likewise.
 
 **CI is concurrent** with review/QA on every push. Read it once per wave,
 folding failures into that wave's remediation. No `--watch`; never sleep-poll it
