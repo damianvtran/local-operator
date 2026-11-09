@@ -252,6 +252,42 @@ HEARTBEAT_S = float(HEARTBEAT_INTERVAL_S)
 #: admitted anywhere in a mesh is visible everywhere inside one watch of a listing.
 MEMBERSHIP_PULL_MIN_INTERVAL_S = 15.0
 
+#: The CEILING a settled link's pull interval backs off TO (#3608's follow-up).
+#:
+#: WHAT IS LEFT TO SAVE IS RATE, NOT SIZE. After #3608 a settled pull is answered
+#: ``unchanged`` in 297 B on the wire (152 B ask + 145 B answer), so the bytes are
+#: already small — the cost is that BOTH ends of every link ask 4 times a minute
+#: for a table that has not moved. Measured on a full loopback mesh (n=5 windows of
+#: 30 s, medians), per DIRECTED link that is 1,185 B/min at the floor: 35,552 B/min
+#: across a 6-member mesh's 30 directed links and 85,376 B/min across a 9-member
+#: one's 72. Backing a settled link off to this ceiling halves both — 593 B/min per
+#: directed link, 17,786 and 42,683 B/min for the same two meshes on the same rig.
+#:
+#: WHY 30 AND NOT 60, WHICH WOULD HALVE IT AGAIN. The interval IS the convergence
+#: bound for everything that travels only by this pull: a rename of the sender's
+#: own row (``member_sync_digest`` hashes ``name`` for the sender's row alone) and a
+#: row this device lacks. On top of it sits one :data:`MEMBERSHIP_PULL_PASS_S` of
+#: scheduling slop, so a rename costs 30 s + one pass on a link that has backed off
+#: where 60 would cost it 60 s + one pass — past the ~60 s this change is allowed to
+#: cost one.
+#:
+#: THAT 35 s HOLDS ONLY WHILE THE OTHER LINKS ANSWER. The pass itself is SERIAL
+#: (:meth:`RelayServer._membership_loop` runs one :meth:`refresh_membership` at a
+#: time) and every due pull AHEAD of a link in the member walk costs up to
+#: :data:`MEMBERSHIP_PULL_TIMEOUT_S` (4 s), so a wedged peer adds its own four
+#: seconds to every link behind it — seven of them put the last link at ~63 s, which
+#: is exactly the state the network guide's "skipped after four seconds" sentence
+#: describes. That term is not new (the pass was already serial and a wedged peer
+#: already delayed the links behind it) and it is bounded by a peer that eventually
+#: answers or is dropped, but a single number that ignored it would overclaim, so
+#: the serial term is stated here rather than implied away.
+#: Measured on the 9-member rig with this ceiling, every link answering, n=5 renames
+#: each reaching all 8 peers: 14.9-26.7 s (median 15.2 s), against 13.8-15.3 s
+#: (median 15.2 s) at the floor. A REMOVAL does not ride this pull at all
+#: (``net_epoch``/``removed_ids`` push it; measured at 1.2-1.3 s), which is why the
+#: rename is the case the ceiling is chosen for.
+MEMBERSHIP_PULL_MAX_INTERVAL_S = 30.0
+
 #: How often the relay walks its live links looking for a table refresh that is due.
 #:
 #: SHORTER THAN THE INTERVAL ABOVE ON PURPOSE: this is the granularity of "due",
@@ -1834,6 +1870,37 @@ def members_digest_of(record: NetworkRecord) -> str:
 SYNC_DIGEST_ADOPTED_FIELDS = frozenset({"device_id", "endpoints", "name", "previous_ids"})
 #: ``rotation_proof`` is read for ONE key only (its ``old_device_id`` claim).
 SYNC_DIGEST_PARTIAL_FIELDS = frozenset({"rotation_proof"})
+#: Every :class:`MemberRecord` field the digest deliberately does NOT hash, i.e. a
+#: field the merge keeps LOCAL on a row this device already holds.
+#:
+#: WHY IT IS SPELLED OUT (review R2-m1): the three sets are meant to PARTITION
+#: ``fields(MemberRecord)``, and a test asserts exactly that
+#: (``test_every_member_field_is_classified_for_the_sync_digest``). Without this set
+#: a field added later would simply not be hashed, fall out of
+#: ``SYNC_DIGEST_ADOPTED_FIELDS | SYNC_DIGEST_PARTIAL_FIELDS``, and every existing
+#: assertion would still pass — silently classing it as local even if
+#: :func:`adopt_members` were later taught to take it, which is the one direction that
+#: withholds a change. Now adding a field FAILS that test until somebody decides.
+SYNC_DIGEST_LOCAL_FIELDS = frozenset(
+    {
+        "public_key",
+        "kind",
+        "lifecycle",
+        "role",
+        "capabilities",
+        "added_at",
+        "added_by",
+        "added_via",
+        "last_seen_at",
+        "observed_endpoint",
+        "last_seen_instance",
+        "duplicate_count",
+        "suspect",
+        "rotated_at",
+        "removed_at",
+        "removed_by",
+    }
+)
 
 
 def member_sync_digest(record: NetworkRecord, *, sender_device_id: str) -> str:
@@ -4612,6 +4679,21 @@ class PeerLink:
         #: pair keeps its link open indefinitely and establishment therefore never
         #: comes round again (QA round 3, Q-R2-1).
         self.member_pulled_at = 0.0
+        #: THIS LINK'S CURRENT pull interval — the schedule the due gate in
+        #: :meth:`RelayServer.refresh_membership` actually applies. It starts at
+        #: :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S` and DOUBLES on every ``unchanged``
+        #: answer up to :data:`MEMBERSHIP_PULL_MAX_INTERVAL_S`; every other outcome
+        #: of a pull (a full table, a refusal, a timeout, an older peer that cannot
+        #: be asked conditionally) puts it back to the floor.
+        #:
+        #: THE ASYMMETRY IS THE SAFETY ARGUMENT. Only an answer that PROVES the two
+        #: tables hash alike may slow a link down — the ``unchanged`` branch in
+        #: ``_learn_members_from`` believes it only when the peer echoes the digest
+        #: this device sent — so no link can ever go quiet about a table it has not
+        #: compared. A link with no ``unchanged`` in its history never backs off, so
+        #: an older peer, a peer with no such capability and a link whose views keep
+        #: disagreeing all keep asking at exactly the rate they do today.
+        self.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
         #: The device ids the last table pull ADDED, so a refresh pass can report
         #: what it learned rather than only that it asked.
         self.member_pull_added: list[str] = []
@@ -6296,6 +6378,9 @@ class RelayServer:
         try:
             return self._learn_members_from(link)
         except Exception:  # noqa: BLE001 — see the docstring: never fails its caller
+            # A PULL THAT THREW IS NOT SETTLEMENT, so it may not inherit the backoff a
+            # settled link earned (see ``PeerLink.member_pull_interval_s``).
+            link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return "error"
 
     def _learn_members_from(self, link: "PeerLink") -> str:
@@ -6325,12 +6410,14 @@ class RelayServer:
         stale table it fixes.
         """
         if not link.alive:
+            link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return "link_down"
         listed = next(
             (item for item in store.list_networks(self.root) if item.network_id == link.network_id),
             None,
         )
         if listed is None:
+            link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return "unknown_network"
         frame: dict[str, Any] = {
             "op": "net_member_list",
@@ -6343,6 +6430,27 @@ class RelayServer:
         # first pull of every link stays full so each (re)connection re-reads the
         # peer's rows whole whatever the digest says; after that a settled mesh
         # trades ~0.8-1.4 KB of identical rows per 15 s for a ~0.2 KB "unchanged".
+        #
+        # THE STATES THAT KEEP A LINK ON FULL PULLS UNTIL THE NEXT RECONNECT (review
+        # R2-m2). Each of these makes the two digests differ although the merge would
+        # take nothing, so the link never earns a backoff (see
+        # ``PeerLink.member_pull_interval_s``) and keeps asking at the floor — the
+        # safe direction, because a wrong "unchanged" would withhold a real change:
+        #
+        # * THE PEER ROTATED MID-LINK, so no row of ours carries ``link.device_id``
+        #   while the peer's own row has a name. The two row SETS differ: the payload
+        #   iterates the rows each side holds (so an id we do not hold contributes no
+        #   entry at all), and the name the peer hashes for itself is hashed by
+        #   neither side in our view.
+        # * EITHER SIDE'S OWN ROW HAS AN EMPTY NAME OR EMPTY ENDPOINTS while the
+        #   other holds values: the merge ignores empty incoming values, the digest
+        #   does not treat empty as absent.
+        # * A NAME THAT FAILS ``validate_member_name``, which the merge also refuses.
+        #
+        # All three end at the next reconnect or at the reverse pull (
+        # ``adopt_members`` fills the field in), so they cost a full table per pass
+        # on ONE link until then, and they are not a regression: this build asks
+        # exactly what it asked before the backoff existed.
         conditional = wire.MEMBER_LIST_DIGEST_V1 in link.capabilities and link.member_pulled_at > 0
         own_view = ""
         if conditional:
@@ -6350,8 +6458,15 @@ class RelayServer:
             frame["if_digest"] = own_view
         reply = link.request(frame, timeout=MEMBERSHIP_PULL_TIMEOUT_S)
         if reply is None:
+            # EVERY UNHAPPY OUTCOME PUTS THE LINK BACK ON THE FLOOR. A timeout, a
+            # refusal and a malformed answer are each a state in which this device
+            # cannot say the two tables agree, and the whole point of the backoff is
+            # that only a CONFIRMED ``unchanged`` may buy one (see
+            # ``PeerLink.member_pull_interval_s``).
+            link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return "no_answer"
         if reply.get("op") != "ack":
+            link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return str(reply.get("code") or reply.get("op") or "refused")
         detail = reply.get("detail")
         if (
@@ -6367,14 +6482,37 @@ class RelayServer:
             # to the full-table checks below, which refuse it as a bad answer.
             link.member_pulled_at = time.time()
             link.member_pull_added = []
+            # THE ONE BRANCH THAT MAY BACK THIS LINK OFF: the peer's answer hashed to
+            # the digest this device asked about, so the next read is worth less than
+            # the full rate. At the shipped constants this is ONE STEP, not a ramp —
+            # ``MEMBERSHIP_PULL_MIN_INTERVAL_S * 2 == MEMBERSHIP_PULL_MAX_INTERVAL_S``,
+            # so a link that settles once is already at the ceiling and a change it
+            # misses pays the whole interval (the bound in
+            # MEMBERSHIP_PULL_MAX_INTERVAL_S covers exactly that). The doubling is
+            # still written as a doubling because a build that sets a ceiling more
+            # than twice the floor (the tests' compressed clocks do) gets a ramp out
+            # of it rather than a jump, and neither shape needs a second constant.
+            link.member_pull_interval_s = min(
+                getattr(link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S) * 2,
+                MEMBERSHIP_PULL_MAX_INTERVAL_S,
+            )
             return ""
         if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
+            link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return "bad_answer"
         rows = detail["members"]
         # STAMPED BEFORE THE MERGE, and stamped on an answer that changed nothing:
         # the stamp is evidence that this peer's TABLE answered, not that its table
         # differed, and the reporting surfaces read it as exactly that.
         link.member_pulled_at = time.time()
+        # A FULL TABLE IS NOT SETTLEMENT, whether or not it changed anything: it means
+        # the peer's table differed from ours (or could not be compared at all), and
+        # that is the state in which the next read is worth the full rate. A full pull
+        # that changes NOTHING is not a reason to slow down either — it usually means
+        # the two views differ in a field this build does not adopt, which stays true
+        # until something else moves (see the full-pull states in the docstring of
+        # ``_learn_members_from``).
+        link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
         # THE MERGE IS A READ-MODIFY-WRITE of the member table, so it reads inside
         # the lock: ``adopt_members`` merges INTO the record it is handed, so a
         # rotation applied between the pull's answer arriving and this write would
@@ -6410,8 +6548,10 @@ class RelayServer:
         THE BLOCKER THIS CLOSES (QA rounds 2 and 3, Q-R2-1). Membership convergence
         may not depend on which links happen to exist, on which link was established
         last, or on an operator touching a surface. So the trigger is a per-link
-        SCHEDULE — every link answers a table pull again once
-        :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S` has passed — and it runs with no
+        SCHEDULE — every link is asked for its table again once ITS OWN interval has
+        passed, which starts at :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S` and grows to
+        :data:`MEMBERSHIP_PULL_MAX_INTERVAL_S` only while the peer keeps proving the
+        tables agree (``PeerLink.member_pull_interval_s``) — and it runs with no
         surface involved (:meth:`_membership_loop`), which is what lets a mesh
         converge with nothing restarted. `show`/`ls`/`peers` also force a refresh
         before they report (:meth:`contact_peers`), so a command answers with the
@@ -6442,7 +6582,15 @@ class RelayServer:
                     report.silent.append({"device_id": member.device_id, "reason": "no_live_link"})
                     continue
                 age = now - link.member_pulled_at
-                if age < MEMBERSHIP_PULL_MIN_INTERVAL_S:
+                # THE GATE IS THIS LINK'S OWN INTERVAL, not the floor. A link whose
+                # table has hashed the same on every read back to
+                # :data:`MEMBERSHIP_PULL_MAX_INTERVAL_S` is asked that much less
+                # often; anything that moved, failed or could not be compared has
+                # already reset it to the floor (see
+                # ``PeerLink.member_pull_interval_s``), so a link is never slow to
+                # re-read a table that is known to differ.
+                interval = getattr(link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S)
+                if age < interval:
                     # AN ANSWER INSIDE THE CADENCE IS STILL EVIDENCE. Skipping the ask
                     # must not turn into "no peer answered": a `show` one second after
                     # a refresh would otherwise claim the table was never checked
@@ -6670,8 +6818,10 @@ class RelayServer:
         (Q-R2-1). This pass exists so the table converges on its own, the way the
         heartbeat already republishes the relay record for the same reason.
 
-        The interval is :data:`MEMBERSHIP_PULL_PASS_S` and the per-link gate is
-        :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S`, so the traffic is bounded per link
+        The interval is :data:`MEMBERSHIP_PULL_PASS_S` and the per-link gate is the
+        link's own ``member_pull_interval_s`` (:data:`MEMBERSHIP_PULL_MIN_INTERVAL_S`
+        for an unsettled link, up to :data:`MEMBERSHIP_PULL_MAX_INTERVAL_S` for one
+        that keeps answering ``unchanged``), so the traffic is bounded per link
         whatever a mesh's diameter is. Every failure is swallowed and retried on the
         next pass: one unreachable peer must never be able to stop a relay's clock.
 
@@ -8640,8 +8790,16 @@ class RelayServer:
             raise MeshRefusal("not_a_member", "this device is not in that network")
         # The conditional half of ``wire.MEMBER_LIST_DIGEST_V1``: answer without the
         # rows only when the asker's table hashes exactly like ours. Any difference
-        # — a member either side lacks, a moved endpoint, a rename, a tombstone —
-        # gets the full table, so this can only ever withhold rows the asker holds.
+        # — a member either side lacks, a moved endpoint, a rename — gets the full
+        # table, so this can only ever withhold rows the asker holds.
+        #
+        # A REMOVAL IS NOT ONE OF THOSE DIFFERENCES (review N1: this comment used to
+        # list "a tombstone" among them, which read as if removals converged here).
+        # Removals travel by ``net_epoch``/``removed_ids`` — a push, measured at
+        # 1.2-1.3 s — never by this pull. What a tombstoned ROW does to the digest is
+        # move it, because the row's id is hashed: that is what lets a peer which
+        # missed the epoch adopt a row it does not hold, and it is the absence of the
+        # row on one side that this answer reports, not the removal.
         #
         # THE REPLY IS BARE ON PURPOSE (QA round 1, Q2): the asker reads only the flag
         # and the echoed digest, and only a peer that negotiated the capability can
