@@ -74,5 +74,8 @@
   "mobile.setup.unexpected_failure": "Phone access could not finish. Check /mobile status for the current blocker; completed steps have not been undone.",
   "mobile.setup.in_progress": "Phone access setup is already in progress; check its status before retrying.",
   "mobile.setup.quote_unread": "Check the fresh account and quote before enabling phone access.",
-  "mobile.setup.corrupt_intent": "The saved phone setup request is invalid. Leave create.json unchanged and ask your agent to recover the original request before retrying. No setup changes were made."
+  "mobile.setup.corrupt_intent": "The saved phone setup request is invalid. Leave create.json unchanged and ask your agent to recover the original request before retrying. No setup changes were made.",
+  "mobile.setup.title_repoint": "Phone access needs reconnecting to this device’s newer sign-in",
+  "mobile.setup.repoint": "A newer sign-in to the same Radient account is already on this device. Reconnect phone access to that sign-in — same account, same phone address.",
+  "mobile.setup.repointed": "Reconnected phone access to this device’s newer sign-in for the same account (credential {id})."
 }

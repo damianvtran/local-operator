@@ -46,7 +46,11 @@ TUNNEL_HUB = DEFAULT_API_URL + "/v1"
 
 
 def same_account_successor(
-    pin: object, *, owner_account: object = None, fresh_id: int | None = None
+    pin: object,
+    *,
+    owner_account: object = None,
+    fresh_id: int | None = None,
+    read_only: bool = False,
 ) -> int | None:
     """The live row that should own this tunnel instead of a dead ``pin``, if PROVABLE.
 
@@ -55,10 +59,17 @@ def same_account_successor(
     shared with the Team Bridge enrollment heal so the two owners cannot drift.
     This wrapper supplies what is the TUNNEL's: the ambient credential store and
     :data:`TUNNEL_HUB`, the only hub a tunnel request ever goes to.
+
+    ``read_only`` exists for the desktop's setup POLL (issue #3520). That poll is
+    metadata-only by contract: it may not create the auth database, its WAL or
+    its schema while merely opening the affordance, which the writable
+    ``AuthStore()`` constructor does. The successor proof is nothing but store
+    reads, so it runs unchanged over a ``mode=ro`` handle; an absent database
+    reads there as an empty store and answers ``None``.
     """
     if not isinstance(pin, int) or isinstance(pin, bool):
         return None  # before the open, as it always was: no pin, no store read
-    with closing(AuthStore()) as store:
+    with closing(AuthStore(read_only=read_only)) as store:
         return _successor(
             pin, store=store, hub=TUNNEL_HUB, owner_account=owner_account, fresh_id=fresh_id
         )

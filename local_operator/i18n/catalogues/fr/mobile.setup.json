@@ -74,5 +74,8 @@
   "mobile.setup.unexpected_failure": "L’accès téléphone n’a pas pu aboutir. Consultez /mobile status pour le blocage actuel ; les étapes terminées n’ont pas été annulées.",
   "mobile.setup.in_progress": "La configuration de l’accès téléphone est déjà en cours ; vérifiez son état avant de réessayer.",
   "mobile.setup.quote_unread": "Vérifiez le compte et le devis à jour avant d’activer l’accès téléphone.",
-  "mobile.setup.corrupt_intent": "La demande de configuration du téléphone enregistrée n’est pas valide. Laissez create.json inchangé et demandez à votre agent de récupérer la demande d’origine avant de réessayer. Aucune modification de configuration n’a été faite."
+  "mobile.setup.corrupt_intent": "La demande de configuration du téléphone enregistrée n’est pas valide. Laissez create.json inchangé et demandez à votre agent de récupérer la demande d’origine avant de réessayer. Aucune modification de configuration n’a été faite.",
+  "mobile.setup.title_repoint": "L’accès téléphone doit être reconnecté à la connexion la plus récente de cet appareil",
+  "mobile.setup.repoint": "Une connexion plus récente au même compte Radient se trouve déjà sur cet appareil. Reconnectez l’accès téléphone à cette connexion — même compte, même adresse de téléphone.",
+  "mobile.setup.repointed": "Accès téléphone reconnecté à la connexion la plus récente de cet appareil pour le même compte (identifiant {id})."
 }
