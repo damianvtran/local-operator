@@ -1680,8 +1680,10 @@ async def test_cold_trace_discriminates_actual_proof_and_delays(
     )
     try:
         assert "_cold_open_trace" not in vars(facade)
-        assert facade.frontend_state.selected_model.display_name == "Synthetic account"
-        assert facade.frontend_state.selected_model.context_window == 765432
+        selected_model = facade.frontend_state.selected_model
+        assert selected_model is not None
+        assert selected_model.display_name == "Synthetic account"
+        assert selected_model.context_window == 765432
     finally:
         await facade.dispose()
     rows = [json.loads(line) for line in path.read_text().splitlines()]
