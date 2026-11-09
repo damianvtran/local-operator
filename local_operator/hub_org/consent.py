@@ -121,7 +121,14 @@ def build_plan(
             continue
         if item.local == "absent" or (item.local == "conflict" and on_conflict == "adopt-link"):
             plan.new.append(
-                {"kind": item.kind, "name": item.name, "local_edits": item.local == "conflict"}
+                {
+                    "kind": item.kind,
+                    "name": item.name,
+                    # The id the grant binds to and the tool pins the pull to
+                    # (:func:`consent_items`): a name can be re-used by another item.
+                    "hub_id": item.hub_id,
+                    "local_edits": item.local == "conflict",
+                }
             )
         elif item.local == "linked":
             linked.append(item)
@@ -154,8 +161,12 @@ def build_plan(
             plan.updates.append(
                 {
                     **row,
+                    "hub_id": c.hub_id,
                     "from": _short(from_rev.get((c.kind, c.hub_id))),
                     "to": _short(c.remote_revision or item.revision),
+                    # The FULL target revision the grant binds to: a yes to "update
+                    # to this content" must not carry a later, unseen revision.
+                    "rev": str(c.remote_revision or item.revision or ""),
                     "local_edits": state in _LOCAL_EDIT_STATES,
                 }
             )
@@ -244,19 +255,45 @@ def apply_linked(
 # -- the host-authored consent ask ---------------------------------------------------
 
 
-def _names(rows: Sequence[dict[str, Any]], *, revisions: bool) -> str:
+def consent_items(plan: dict[str, Any]) -> list[str]:
+    """The exact writes a plan performs, as the keys a consent grant binds to.
+
+    WHY (PR #3693 review R2). A queued ask is answered LATER, and the pull that
+    spends the yes re-plans from the catalogue at that moment. Binding the grant
+    only to tenant and kinds let a yes to "get skill A" carry whatever the hub
+    published in between. A grant now covers a plan only when every key of the
+    new plan was in the plan the person saw; anything else is re-asked.
+
+    New items bind by hub id (the preview names the item, not a revision, and a
+    first install has nothing local to protect); updates bind by hub id AND the
+    full target revision, because the person agreed to a specific update;
+    re-subscriptions bind by hub id. A fewer-items plan is covered (an item
+    pulled meanwhile simply drops out), never a different or larger one.
+    """
+
+    keys: set[str] = set()
+    for row in plan.get("new") or ():
+        keys.add(f"new:{row.get('kind')}:{row.get('hub_id') or row.get('name')}")
+    for row in plan.get("updates") or ():
+        ident = row.get("hub_id") or row.get("name")
+        keys.add(f"update:{row.get('kind')}:{ident}@{row.get('rev') or row.get('to')}")
+    for row in plan.get("resubscribe") or ():
+        keys.add(f"resubscribe:{row.get('kind')}:{row.get('hub_id') or row.get('name')}")
+    return sorted(keys)
+
+
+def _names(rows: Sequence[dict[str, Any]]) -> str:
     from local_operator.i18n.keys import wire_hub_pull as k
     from local_operator.i18n.text import tr
 
     _t = tr("wire.hub_pull")
     shown: list[str] = []
     for row in rows[:PREVIEW_NAMES]:
+        # No revision hashes (design review D4): a non-technical reader cannot
+        # act on them and they doubled every line. The grant still binds to the
+        # full revision (:func:`consent_items`) and the tool's own report names
+        # "updated to revision …".
         label = f"{row['kind']} {row['name']}"
-        if revisions:
-            before, after = row.get("from", "?"), row.get("to", "?")
-            # An opaque token that did not move (a hub that versions content
-            # elsewhere) says nothing; show the arrow only when it carries news.
-            label += f" ({before}\u2192{after})" if before != after else f" ({after})"
         if row.get("local_edits"):
             label += " *"
         shown.append(label)
@@ -279,11 +316,11 @@ def plan_lines(plan: dict[str, Any]) -> list[str]:
     resub = list(plan.get("resubscribe") or ())
     lines = [_t(k.ask_title(org=str(plan.get("org_name") or plan.get("tenant") or "")))]
     if new:
-        lines.append(_t(k.ask_new(count=len(new), names=_names(new, revisions=False))))
+        lines.append(_t(k.ask_new(count=len(new), names=_names(new))))
     if updates:
-        lines.append(_t(k.ask_updates(count=len(updates), names=_names(updates, revisions=True))))
+        lines.append(_t(k.ask_updates(count=len(updates), names=_names(updates))))
     if resub:
-        lines.append(_t(k.ask_resubscribe(count=len(resub), names=_names(resub, revisions=False))))
+        lines.append(_t(k.ask_resubscribe(count=len(resub), names=_names(resub))))
     if any(r.get("local_edits") for r in (*new, *updates)):
         lines.append(_t(k.ask_local_edits()))
     return lines

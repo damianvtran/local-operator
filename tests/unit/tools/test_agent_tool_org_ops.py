@@ -280,6 +280,7 @@ def _scoped_run(root: Path, args: dict[str, Any], decide) -> tuple[Any, list[Any
         agent_registry=_Scoped(AgentRegistry(root)),
         authorize_durable_write=authorize,
     )
+
     async def go() -> Any:
         return await execute_agent("call", args, None, None, context)
 
@@ -343,6 +344,60 @@ def test_granted_safe_pull_applies(_isolated: Path, member_hub) -> None:
     )
     assert not result.is_error and seen[0].operation == "hub_pull"
     assert (_isolated / "skills" / "acme-style" / "SKILL.md").is_file()
+
+
+def _flaky_skill_list(hub: Any, first: str) -> list[str]:
+    """Make the hub's FIRST skill list fail (``"error"``) or return nothing
+    (``"empty"``), and every later one succeed with ``acme-style``: the
+    catalogue changing between the plan's read and any later read."""
+    from tests.unit.hub_org.test_pull import _skill_doc
+
+    calls: list[str] = []
+    real = hub.list_org_skills
+
+    def listing(tenant: str) -> list[dict[str, Any]]:
+        calls.append("skill")
+        if len(calls) == 1:
+            if first == "error":
+                raise RuntimeError("synthetic transient list failure")
+            return []
+        hub.skills.setdefault(SKILL_A, _skill_doc("acme-style", "x\n"))
+        return real(tenant)
+
+    hub.list_org_skills = listing
+    return calls
+
+
+@pytest.mark.parametrize("first", ["error", "empty"])
+def test_empty_or_failed_plan_never_pulls_without_consent(
+    _isolated: Path, member_hub, first
+) -> None:
+    """Review R2: an empty/failed plan used to skip consent and then run a fresh
+    all-catalogue pull that found (and installed) work nobody was asked about."""
+    calls = _flaky_skill_list(member_hub, first)
+    result, seen = _scoped_run(_isolated, {"op": "org_pull", "kinds": "skill"}, lambda _i: None)
+    text = " ".join(block.text for block in result.content)
+    assert seen == [] and calls == ["skill"], (seen, calls)  # no second, unapproved read
+    assert not (_isolated / "skills" / "acme-style").exists()
+    assert ("check failed" in text) is (first == "error"), text
+
+
+def test_granted_pull_is_pinned_to_the_planned_items(_isolated: Path, member_hub) -> None:
+    """Review R2: the run writes exactly the plan the grant covered; an item the
+    hub publishes after planning is not pulled on the old yes."""
+    from tests.unit.hub_org.test_pull import _skill_doc
+
+    member_hub.skills[SKILL_A] = _skill_doc("acme-style", "x\n")
+
+    def decide(intent: Any) -> str:
+        assert [r["hub_id"] for r in intent.plan["new"]] == [SKILL_A]
+        member_hub.skills[SKILL_B] = _skill_doc("late-arrival", "y\n")  # published meanwhile
+        return "ask:a-1"
+
+    result, _ = _scoped_run(_isolated, {"op": "org_pull", "kinds": "skill"}, decide)
+    assert not result.is_error
+    assert (_isolated / "skills" / "acme-style" / "SKILL.md").is_file()
+    assert not (_isolated / "skills" / "late-arrival").exists()
 
 
 def test_hub_wins_adopt_stays_a_sync_intent_not_hub_pull(_isolated: Path, member_hub) -> None:

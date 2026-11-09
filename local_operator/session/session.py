@@ -14872,83 +14872,101 @@ class Session:
            new items, hub-sync auto-update per kind for updates) and nothing
            needs re-subscribing. The daemon performs the identical write
            unattended under that policy, so asking again would add nothing.
-        2. The owner's own typed message in this run asks for a hub pull/update
-           (``_run_owner_texts``: bridge, peer, wake and remote text never land
-           there; a subagent session never qualifies).
-        3. A person answered, IN THIS RUN, a host-filed consent ask for the same
-           tenant whose kinds cover this pull, with its affirmative option; not
-           a bridge/relay ask; not already spent. Spent here (single use). A
-           "Not now" answer is a decline: nothing is written and nothing is
-           re-asked in this run.
-        4. An attached approval card showing the plan.
-        5. Otherwise file ONE host-authored ask carrying the plan (deduplicated
-           per tenant) and return :class:`QueuedHubPull`: the tool tells the
-           model to end the turn and retry when the answer arrives.
+        2. A person answered, IN THIS RUN, a host-filed consent ask for the same
+           tenant whose kinds AND exact items (:func:`consent_items`: hub ids,
+           update target revisions) cover this plan, with its affirmative
+           option; not a bridge/relay ask; not already spent. Spent here
+           (single use). The exact "Not now" option is a decline: nothing is
+           written and nothing is re-asked in this run.
+        3. Otherwise file ONE host-authored ask carrying the plan (an open ask
+           is reused only when its items cover this plan) and return
+           :class:`QueuedHubPull`: the tool tells the model to end the turn and
+           retry when the answer arrives.
 
-        A teammate's or another agent's request is never consent: none of these
-        steps reads message text other than the owner's own.
+        WHAT IS DELIBERATELY NOT HERE (PR #3693 review round 1):
+
+        * No "the owner's message asked for it" rung (R1). Keyword matching on
+          free text cannot tell "update my skills" from "do not update my
+          skills" or "get the agent logs"; guessing authorisation from prose is
+          the failure. The owner who asks gets the same one-tap ask instead,
+          which the operator accepted as the ceiling on friction.
+        * No attached approval card (D2). The shared account-profile gate
+          titled it "Allow account profile save?" with run-this-call options;
+          one queued ask is the single, correctly worded surface whether or not
+          someone is attached, and both paths grant identically.
+        * A typed ("Other") answer is NEITHER a yes nor a no (D3): the ask card
+          always offers free text, and a typed "yes please" must not silently
+          decline, nor may fuzzy prose grant. It is skipped, and a fresh ask with
+          the exact options is filed.
+        * A stale yes is not reused (R2): if the plan now holds an item or
+          revision the person did not see, the answer does not cover it and the
+          host asks again with the current plan.
+
+        A teammate's or another agent's request is never consent: no step reads
+        message text at all.
         """
-        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+        from local_operator.harness.approval import (
+            ACCOUNT_PROFILE_GATE,
+            ApprovalUnavailableError,
+        )
         from local_operator.harness.types import QueuedHubPull
-        from local_operator.hub_org.consent import ask_question, plan_lines
+        from local_operator.hub_org.consent import ask_question, consent_items
 
         plan = dict(intent.plan or {})
         tenant = str(plan.get("tenant") or "")
         kinds = {str(k) for k in (plan.get("kinds") or ())}
-        if not tenant or not kinds:
-            return None  # no host plan, no grant: fail closed
+        items = set(consent_items(plan))
+        if not tenant or not kinds or not items:
+            # No host plan, or a plan that writes nothing: there is nothing a
+            # grant could be bound to, so there is no grant (fail closed). The
+            # tool never asks for an empty plan; it reports a no-op instead.
+            return None
         if self._hub_pull_auto_policy_covers(plan):
             return f"auto-policy:hub_pull:{tenant}"
-        if not self._parent_session_id and self._run_owner_texts:
-            from local_operator.profile_scope import owner_text_requests_hub_pull
-
-            if any(owner_text_requests_hub_pull(text) for text in self._run_owner_texts):
-                run_ms = int(self._run_started_at * 1000)
-                return f"owner-prompt:{self._session_id or 'session'}@{run_ms}"
         queue = self.ask_queue()
-        if queue is not None:
-            for ask_id in sorted(self._run_answered_ask_ids):
-                record = queue.find(ask_id)
-                consent = (record or {}).get("consent")
-                if not isinstance(consent, Mapping) or consent.get("op") != "hub_pull":
-                    continue
-                if str(consent.get("tenant") or "") != tenant:
-                    continue
-                if not kinds <= {str(k) for k in (consent.get("kinds") or ())}:
-                    continue
-                if record.get("relay") or self._is_bridge_ask_record(record):
-                    continue
-                if record.get("status") != "answered" or record.get("consent_used"):
-                    continue
-                picks = [str(v) for v in (record.get("answers") or {}).get("hub_pull") or ()]
-                if picks != [str(consent.get("affirm") or "")]:
-                    # The person answered this exact question with anything but
-                    # the affirmative option: that IS their answer. Decline,
-                    # and do not file the same question again in this run.
-                    return None
-                if not queue.mark_consent_used(ask_id):
-                    return None  # an unrecorded spend could be spent twice
-                return f"ask:{ask_id}"
-        gate = self._request_approval
-        if gate is not None:
-            card = "\n".join(plan_lines(plan))
-            if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
-                return f"approval:hub_pull:{tenant}"
-            return None
         if queue is None:
-            from local_operator.harness.approval import ApprovalUnavailableError
+            raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no ask queue to ask the user")
 
-            raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface or ask queue")
+        def covers(consent: Mapping[str, Any]) -> bool:
+            return kinds <= {str(k) for k in (consent.get("kinds") or ())} and items <= {
+                str(k) for k in (consent.get("items") or ())
+            }
+
+        for ask_id in sorted(self._run_answered_ask_ids):
+            record = queue.find(ask_id)
+            consent = (record or {}).get("consent")
+            if not isinstance(consent, Mapping) or consent.get("op") != "hub_pull":
+                continue
+            if str(consent.get("tenant") or "") != tenant:
+                continue
+            if record.get("relay") or self._is_bridge_ask_record(record):
+                continue
+            if record.get("status") != "answered" or record.get("consent_used"):
+                continue
+            picks = [str(v) for v in (record.get("answers") or {}).get("hub_pull") or ()]
+            decline = str(consent.get("decline") or "")
+            if decline and picks == [decline]:
+                # The person picked "Not now" for this organization: that IS
+                # their answer, whatever the plan now holds. Decline, and do not
+                # file the same question again in this run.
+                return None
+            if picks != [str(consent.get("affirm") or "")] or not covers(consent):
+                # Typed text (D3) or a yes to a different plan (R2): not consent
+                # for THIS plan. Fall through to asking with the exact options.
+                continue
+            if not queue.mark_consent_used(ask_id):
+                return None  # an unrecorded spend could be spent twice
+            return f"ask:{ask_id}"
         for record in queue.open_records():
             consent = record.get("consent")
             if (
                 isinstance(consent, Mapping)
                 and consent.get("op") == "hub_pull"
                 and str(consent.get("tenant") or "") == tenant
-                # Reuse only an open ask whose yes would cover THIS pull's kinds;
-                # a wider pull files its own question rather than spending a
-                # narrower answer.
-                and kinds <= {str(k) for k in (consent.get("kinds") or ())}
+                # Reuse only an open ask whose yes would cover THIS plan; a wider
+                # or changed pull files its own question rather than relying on
+                # an answer to something else.
+                and covers(consent)
             ):
                 return QueuedHubPull(ask_id=str(record["ask_id"]), tenant=tenant, reused=True)
         question, affirm = ask_question(plan)
@@ -14956,7 +14974,16 @@ class Session:
             [question],
             self.HUB_PULL_ASK_TIMEOUT_S,
             tool_call_id=intent.tool_call_id,
-            consent={"op": "hub_pull", "tenant": tenant, "kinds": sorted(kinds), "affirm": affirm},
+            consent={
+                "op": "hub_pull",
+                "tenant": tenant,
+                "kinds": sorted(kinds),
+                "items": sorted(items),
+                "affirm": affirm,
+                # The persisted labels, never re-rendered strings: a language
+                # change between asking and answering cannot flip an answer.
+                "decline": str(question["options"][1]["label"]),
+            },
         )
         if not receipt.get("ok"):
             logger.warning("hub-pull consent ask not filed: %s", receipt.get("error"))

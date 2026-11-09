@@ -407,31 +407,6 @@ def owner_text_requests_profile_edit(
     return False
 
 
-#: The owner's own words asking for an org-hub pull/update: a verb AND a hub
-#: noun in the same message. Deliberately small; a miss falls through to the
-#: consent ask (never a refusal), so this only saves a question the user already
-#: answered by asking. Bridge, peer, wake and remote text never reach the caller's
-#: list, so this can never be satisfied by someone else's message.
-_HUB_PULL_VERB = r"\b(?:pull|update|sync|subscribe|install|get|fetch|refresh|upgrade)\w*"
-_HUB_PULL_NOUN = r"\b(?:skills?|agents?|teams?|hub|org|organi[sz]ation)\b"
-
-
-def owner_text_requests_hub_pull(text: str) -> bool:
-    """Whether the owner's own message asks for an org-hub pull or update.
-
-    Requires a pull/update verb and a hub noun ("update my hub items", "pull
-    the org skills", "sync my team's agents"). Fail-safe: an unmatched phrasing
-    only means the host asks instead.
-    """
-    import re
-
-    body = str(text or "")
-    return bool(
-        re.search(_HUB_PULL_VERB, body, flags=re.IGNORECASE)
-        and re.search(_HUB_PULL_NOUN, body, flags=re.IGNORECASE)
-    )
-
-
 def owner_text_names_profile(text: str, names: Iterable[str]) -> bool:
     """Whether the user's own words name one of ``names`` as a whole word.
 
@@ -576,9 +551,11 @@ def hub_pull_refusal(reason: str, ask_id: str = "") -> str:
             + ", so nothing was changed. Tell the user it failed; do not retry unchanged."
         )
     return (
-        "This run has no way to ask the user, so nothing was changed. Tell them that "
-        "saying 'update my hub items' in their own message lets you do it. Do not give "
-        "them commands to run."
+        # No "say 'update my hub items'" hint any more: the owner's wording is
+        # not consent (PR #3693 review R1); only an answered host ask is.
+        "This run has no way to ask the user, so nothing was changed. Tell them you "
+        "need their confirmation and will ask for it in a conversation they can "
+        "answer. Do not give them commands to run."
     )
 
 

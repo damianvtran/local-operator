@@ -3,8 +3,10 @@
 The operator's request (2026-11-09): agents woken by a teammate could not pull
 from the org hub ("this run cannot ask") and told non-technical users to run
 ``lop agents sync``. ``Session._authorize_hub_pull`` now decides from host-held
-state only: standing auto policy, the owner's own words, an answered HOST-FILED
-consent ask (single use), an attached card, else it files that ask itself.
+state only: standing auto policy or an answered HOST-FILED consent ask (single
+use, bound to the exact items it previewed), else it files that ask itself. The
+owner's wording is never consent (review R1) and no account-profile card is shown
+(design D2); a typed answer neither grants nor declines (design D3).
 
 These drive a REAL ``Session`` and its real ``AskQueue`` (synthetic ids, an
 isolated config dir from ``configured_tiers``); no live session is touched.
@@ -42,9 +44,17 @@ PLAN = {
     "tenant": TENANT,
     "org_name": "Minerva",
     "kinds": ["agent", "skill", "team"],
-    "new": [{"kind": "skill", "name": "acme-style", "local_edits": False}],
+    "new": [{"kind": "skill", "name": "acme-style", "hub_id": "h-acme", "local_edits": False}],
     "updates": [
-        {"kind": "skill", "name": "research", "from": "rev-1", "to": "rev-2", "local_edits": True}
+        {
+            "kind": "skill",
+            "name": "research",
+            "hub_id": "h-research",
+            "from": "rev-1",
+            "to": "rev-2",
+            "rev": "rev-2-full",
+            "local_edits": True,
+        }
     ],
     "resubscribe": [],
 }
@@ -99,36 +109,46 @@ async def test_auto_policy_grants_silently(stores, tmp_path) -> None:
     )
     gate = Gate(answer=False)
     session = _session(stores, gate=gate)
+    _with_queue(session)
     try:
         _new_run(session, CustomMessage(custom_type=TEAM_BRIDGE_MESSAGE_TYPE, attribution="user"))
         origin = await session._authorize_account_profile_write(_intent())
         assert origin == f"auto-policy:hub_pull:{TENANT}" and gate.cards == []
-        # A link the user UNSUBSCRIBED is outside what the runner does unattended.
+        # A link the user UNSUBSCRIBED is outside what the runner does unattended:
+        # the host asks (one queued ask, never the account-profile card).
         resub = {**PLAN, "resubscribe": [{"kind": "skill", "name": "x", "hub_id": "h"}]}
-        assert await session._authorize_account_profile_write(_intent(resub)) is None
-        assert len(gate.cards) == 1
+        assert isinstance(
+            await session._authorize_account_profile_write(_intent(resub)), QueuedHubPull
+        )
+        assert gate.cards == []
     finally:
         await session.dispose()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "text,granted",
+    "text",
     [
-        ("update my hub items", True),
-        ("please pull the org skills", True),
-        ("sync my team's agents from the hub", True),
-        ("what's new today?", False),
+        # Review R1: each of these silently granted under the keyword rung.
+        "Do not update my skills.",
+        "Can you get the agents logs?",
+        "Explain how to subscribe to hub updates; do not make changes.",
+        "Should I update my org skills?",
+        # Even an unambiguous request: the owner's wording is never consent,
+        # they get the one-tap ask instead.
+        "update my hub items",
     ],
 )
-async def test_owner_typed_message_grants(stores, text, granted) -> None:
-    gate = Gate(answer=False)
+async def test_owner_text_never_grants_and_no_card_is_shown(stores, text) -> None:
+    gate = Gate(answer=True)  # a card would say yes: proving none is shown
     session = _session(stores, gate=gate)
+    queue = _with_queue(session)
     try:
         _new_run(session, Message.user(text))
         origin = await session._authorize_account_profile_write(_intent())
-        assert (isinstance(origin, str) and origin.startswith("owner-prompt:")) is granted
-        assert len(gate.cards) == (0 if granted else 1)
+        assert isinstance(origin, QueuedHubPull), origin
+        assert gate.cards == []  # design D2: no "Allow account profile save?" card
+        assert queue.find(origin.ask_id)["consent"]["op"] == "hub_pull"
     finally:
         await session.dispose()
 
@@ -168,7 +188,12 @@ async def test_bridge_woken_turn_queues_and_answered_turn_grants_once(stores) ->
         question = record["questions"][0]
         # The preview shows names, from→to revisions and the local-edits mark.
         assert "acme-style" in question["question"]
-        assert "research (rev-1→rev-2) *" in question["question"]
+        # Design D4: names and the local-edits mark, no revision hashes.
+        assert "research *" in question["question"] and "rev-" not in question["question"]
+        assert record["consent"]["items"] == [
+            "new:skill:h-acme",
+            "update:skill:h-research@rev-2-full",
+        ]
         assert [o["label"] for o in question["options"]] == ["Update now", "Not now"]
 
         reply = _answer(queue, queued.ask_id, "Update now")
@@ -248,7 +273,7 @@ async def test_answered_hub_ask_never_opens_other_operations(stores, operation) 
             )
         )
         # adopt/reconcile ride ``sync``: the card decides (and says no), never the ask.
-        assert not (isinstance(origin, str) and origin.startswith(("ask:", "owner-prompt:")))
+        assert not (isinstance(origin, str) and origin.startswith("ask:"))
         assert queue.find(queued.ask_id)["consent_used"] is False
     finally:
         await session.dispose()
@@ -312,23 +337,67 @@ async def test_model_ask_and_bridge_ask_never_grant(stores) -> None:
 
 
 @pytest.mark.asyncio
-async def test_card_shows_plan_and_no_queue_is_unavailable(stores) -> None:
+async def test_no_queue_is_unavailable_even_with_a_card_attached(stores) -> None:
+    # Design D2: the account-profile card is never the hub_pull surface, so a
+    # session with a gate but no ask queue refuses rather than showing it.
     gate = Gate(answer=True)
-    session = _session(stores, gate=gate)
-    try:
-        origin = await session._authorize_account_profile_write(_intent())
-        assert origin == f"approval:hub_pull:{TENANT}"
-        assert "research (rev-1→rev-2) *" in gate.cards[0][1]
-    finally:
-        await session.dispose()
-    bare = _session(stores, gate=None)
+    bare = _session(stores, gate=gate)
     try:
         with pytest.raises(ApprovalUnavailableError):
             await bare._authorize_account_profile_write(_intent())
         reason = (await durable_write_decision(_Ctx(bare), _intent()))[1]
-        assert reason == "unavailable"
+        assert reason == "unavailable" and gate.cards == []
     finally:
         await bare.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_yes_never_covers_a_changed_plan(stores) -> None:
+    """Review R2: a yes binds to the exact items and update revisions it previewed."""
+    session = _session(stores, gate=None)
+    queue = _with_queue(session)
+    try:
+        queued = await session._authorize_account_profile_write(_intent())
+        _new_run(session, _answer(queue, queued.ask_id, "Update now"))
+        # The hub published a NEW item since the ask: not covered, re-asked.
+        grown = {**PLAN, "new": [*PLAN["new"], {"kind": "skill", "name": "z", "hub_id": "h-z"}]}
+        again = await session._authorize_account_profile_write(_intent(grown))
+        assert isinstance(again, QueuedHubPull) and again.ask_id != queued.ask_id
+        # A NEWER revision of an approved update: not covered either.
+        bumped = {**PLAN, "updates": [{**PLAN["updates"][0], "rev": "rev-3-full"}]}
+        assert isinstance(
+            await session._authorize_account_profile_write(_intent(bumped)), QueuedHubPull
+        )
+        assert queue.find(queued.ask_id)["consent_used"] is False
+        # FEWER items than were approved (one was pulled meanwhile): covered.
+        fewer = {**PLAN, "new": []}
+        assert (
+            await session._authorize_account_profile_write(_intent(fewer)) == f"ask:{queued.ask_id}"
+        )
+        # An empty plan never earns a grant (nothing to bind it to).
+        empty = {**PLAN, "new": [], "updates": [], "resubscribe": []}
+        assert await session._authorize_account_profile_write(_intent(empty)) is None
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed", ["yes", "yes please update", "Update now please"])
+async def test_a_typed_answer_neither_grants_nor_declines(stores, typed) -> None:
+    """Design D3: the card's free-text row must not turn a typed yes into a no."""
+    session = _session(stores, gate=None)
+    queue = _with_queue(session)
+    try:
+        queued = await session._authorize_account_profile_write(_intent())
+        _new_run(session, _answer(queue, queued.ask_id, typed))
+        origin = await session._authorize_account_profile_write(_intent())
+        # Not a grant, not a decline: a fresh ask with the exact options.
+        assert isinstance(origin, QueuedHubPull) and origin.ask_id != queued.ask_id
+        options = queue.find(origin.ask_id)["questions"][0]["options"]
+        assert [o["label"] for o in options] == ["Update now", "Not now"]
+        assert queue.find(queued.ask_id)["consent_used"] is False
+    finally:
+        await session.dispose()
 
 
 @pytest.mark.parametrize("reason", ["ask_queued", "declined", "unavailable", "error", "no_seam"])

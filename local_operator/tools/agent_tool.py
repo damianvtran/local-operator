@@ -2627,7 +2627,27 @@ async def _op_org(
     if state is None:
         return _text(tool_call_id, "agent", failure)
     plan = state["plan"]
-    if safe_pull and plan is not None and scoped_host and not plan.is_empty():
+    # PINNED EXECUTION (PR #3693 review R2). On a scoped host the plan built
+    # above is the ONLY thing the grant covers, so the run below writes exactly
+    # it: new items by the hub ids the plan named (never a fresh all-catalogue
+    # pull), linked updates from the plan's own checks, re-subscriptions from its
+    # rows. An EMPTY plan (nothing to do, or every planning read failed) is a
+    # report, never a pull: a second read that found work would otherwise write
+    # without anyone having been asked.
+    pinned = safe_pull and plan is not None and scoped_host
+    if pinned and plan.is_empty():
+        lines = state["header"] + [f"{r['kind']} {r['name']}: up-to-date" for r in plan.current]
+        lines += [f"{k}: check failed ({c})" for k, c in plan.errors.items()]
+        if plan.errors:
+            lines.append(  # i18n: ignore model-facing tool result
+                "nothing was changed: a check failed, so nothing could be confirmed; " "retry later"
+            )
+        return _text(
+            tool_call_id,
+            "agent",
+            "\n".join(lines) or "nothing to pull: no new items and no updates",
+        )
+    if pinned:
         from local_operator.profile_scope import (
             durable_write_decision,
             hub_pull_refusal,
@@ -2714,20 +2734,30 @@ async def _op_org(
                 )
             lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
             return "\n".join(lines) or "the organization shares nothing of these kinds yet"
-        report = pull_all(
-            manager,
-            tenant,
-            kinds=kinds,
-            names=state["names"],
-            subscribe=True,
-            auto_push=False,
-            on_conflict=conflict,  # type: ignore[arg-type]
-            # The safe class never spends the user's model budget: identical to
-            # what org auto-enrol runs unattended. reconcile keeps its LLM path.
-            allow_llm=not safe_pull,
-            client=client,
-            agent_registry=account,
-        )
+        names = state["names"]
+        if pinned:
+            names = [str(r["hub_id"]) for r in plan.new if r.get("hub_id")]
+        if pinned and not names:
+            # Only updates/re-subscriptions were approved: no catalogue pull at
+            # all (an empty ``names`` would mean "everything").
+            from local_operator.hub_org.pull import OrgPullReport
+
+            report = OrgPullReport(items=(), adopted=(), errors={})
+        else:
+            report = pull_all(
+                manager,
+                tenant,
+                kinds=kinds,
+                names=names,
+                subscribe=True,
+                auto_push=False,
+                on_conflict=conflict,  # type: ignore[arg-type]
+                # The safe class never spends the user's model budget: identical to
+                # what org auto-enrol runs unattended. reconcile keeps its LLM path.
+                allow_llm=not safe_pull,
+                client=client,
+                agent_registry=account,
+            )
         lines = state["header"] + [
             f"{i.kind} {i.name} id={i.hub_id}: {i.outcome}" + (f" ({i.detail})" if i.detail else "")
             for i in report.items
