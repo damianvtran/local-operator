@@ -34,6 +34,17 @@ monitor({op:"create", name:"loom-pr-1710", tool:"bash",
 
 - `tool` + `arguments`: the exact read-only call to re-run — `bash`,
   `web_fetch`/`web_search`, `read`, `grep`, `glob`, or an `mcp__` tool.
+- `cwd` (optional): the directory the CHECK runs in. Ticks run in the arming
+  session's directory by default, which is wrong whenever the call depends on
+  WHERE it runs: a `git`/`gh` command must run inside the repository, and a
+  session whose directory is not one cannot run it at all. Name the repo root
+  (or any existing directory) and the watch runs there, every tick, across
+  session and machine restarts — the path is captured absolute at arm time, and
+  a relative name resolves against the ARMING session's own directory (it is
+  refused where that session has none, rather than guessed from the process). A
+  `cwd` that is not an existing directory is refused at arm with a sentence
+  saying so instead of failing every tick; a watch that fails because of where
+  it runs says so in the notice and in its first line of the arm receipt.
 - `every`: `30s`|`60s`|`5m`|`1h` (floor 30s, default 60s). Compound terms
   work (`1h30m`).
 - `until` (optional ISO datetime): stop after this time. Omit for durable.
@@ -67,7 +78,13 @@ effective approval tier is not `read`, at arm time and again before every
 run. `bash` commands must be provably read-only: a single line, every stage
 from an allow-list (`ls`, `cat`, `grep`, `rg`, `git log/status/diff/…`,
 `gh pr view …`, `jq`, …) with default-deny flags; redirection, chaining and
-command substitution are refused. An MCP tool qualifies only when its server
+command substitution are refused. `gh`'s `-R/--repo OWNER/REPO` (or a repo URL
+such as `https://github.com/OWNER/REPO`, with or without a `.git` suffix — the
+value is checked at arm time) is allowed on the read-only verbs (`pr
+view/list/diff/checks/status`, `issue view/list`,
+`run view/list`): it names WHICH repo to read, never what to write, and the
+verb gate still refuses every mutating subcommand. An MCP tool qualifies only
+when its server
 declares `readOnlyHint: true`. `eval`, `task`, and mutating ops of
 read-tagged tools (`todo add`, `hub send`, …) never qualify. If a call loses
 its read-only status later (a settings change, a tool going away), the tick
@@ -77,7 +94,7 @@ itself with the reason — re-arm it once the call is monitorable again.
 The arguments you pass are checked against the tool's OWN schema at arm time,
 so a call that would fail on its first tick is refused when you arm it (a
 typo'd `glob({path: …})`, an argument the tool never declared) instead of
-quietly burning five checks and disabling itself.
+burning five checks and disabling itself.
 
 `kubectl` is allow-listed for `get`, `describe` and `logs` only, and the
 subcommand must come first. Anything that retargets the cluster or the
@@ -321,12 +338,59 @@ The list surfaces say what a row's counters alone cannot: `idle` (overdue
 because no session is hosting it), `never checked`, `N checks, 0 deliveries —
 nothing has changed` (or the suppression sentence above, when changes were
 suppressed), `BLIND: cannot compare its result — <reason>; changes are not
-being reported`, and `tool unavailable since HH:MM — retrying`. The status band
+being reported`, `WATCH IS FAILING: <error> — nothing is being reported`
+(see the next section), the `returns nothing` line for a call that has never
+produced output, and `tool unavailable since HH:MM — retrying`. The status band
 is a two-row glance surface, so it carries the STATE in the due slot
 (`disabled` / `stalled` / `blind` / `idle`) and the state clause of a hint; the
 `lop monitor status` table prints each row, then its health hint on an indented
 wrapped line beneath it (a narrow terminal wraps the fact rather than clipping
 it), and `--json` carries it inline.
+
+## When the watch itself is broken
+
+A monitor that cannot do its job must not look like a quiet one. All three
+states below arrive as ordinary tool results, which is how they used to hide:
+
+- **The call is failing.** `bash` reports a non-zero exit as a normal result
+  whose text starts `exit code: N`, so the measured incident — `gh pr view`
+  outside a git repository, `fatal: not a git repository`, every tick for 90
+  minutes — read as a good check and said nothing. It is now a `failing`
+  episode: one notice leading `watch is failing: <error>`, latched once per
+  episode, ended by the next success (`restored`), which reports everything
+  missed as one delta unless the watch never had a baseline — then nothing was
+  missed.
+  **How many failures are needed:** a watch that never produced a baseline says
+  so on its FIRST failed check (it has never worked, so it is not blipping); once
+  a check has succeeded, two CONSECUTIVE failures are needed, because one is what
+  a rate limit, a network hiccup or a restarting server looks like.
+  **It charges no strike**: a resource that has not appeared yet is not an error,
+  so `consecutive_failures` stays 0, the retry backs off to at most 15 minutes,
+  and the watch is disabled only after 24 HOURS of continuous failing — a day is
+  not "about to appear".
+- **The check keeps failing.** The other fault class — a timeout, a tool error,
+  where the check cannot complete at all. That one DOES walk the ordinary ladder
+  and really is heading for the disable, so it says so: the second consecutive
+  failure earns one notice — `the check keeps failing: <error> — repeated
+  failures disable it at N` in the row, `keeps failing, stops at N: <error>` in
+  the band — and the fifth disables it. That is the only warning before a silent
+  death, which is why both surfaces carry the deadline. A non-zero exit that
+  prints nothing is NOT a failure: `grep` exits 1 with no match, `diff`/`git
+  diff --quiet` exit 1 because there IS a difference — those are answers, and
+  calling them failures makes every quiet watch noisy. Red CI is not a broken
+  watch either: `gh pr checks` exits 1 with empty stderr.
+- **The call returns nothing.** An empty result is not a failure either (a file
+  still being written, a filter matching nothing yet). It is a FACT, not a
+  verdict: N checks so far produced no output. The watch stays armed and reports
+  the first result it gets, because an empty result IS a valid baseline — the
+  first non-empty one is diffed against it and delivered like any other change.
+  One notice, once; one non-empty result ends it.
+
+Arming also probes the call once: the receipt says `WATCH IS FAILING` (with the
+error) if that probe failed, and a successful probe becomes the baseline — so a
+broken watch is announced AT ARM instead of silently waiting. It WARNS and never
+refuses the arm: a resource that does not exist yet (a PR not opened, a file not
+written) is a legitimate thing to watch the moment it appears.
 
 ## No action needed is a first-class outcome
 

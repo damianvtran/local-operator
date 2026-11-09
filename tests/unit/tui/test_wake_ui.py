@@ -1862,3 +1862,104 @@ class TestSuppressedMonitorState:
         _, out = await _paint([], [(spec, counters)])
 
         assert "blind" not in out
+
+
+def test_a_failing_watch_renders_its_hint_in_the_band() -> None:
+    """Review MINOR-4: the band's failing branch returned before the hint chain.
+
+    ``store.health_hint`` is the ONE sentence every surface shares, and
+    ``store.py`` asserts this band renders the published row — but the chain
+    reached ``elif failing:`` (which hardcoded ``N failed``) before ``elif hint:``,
+    so the surface holding the row was the only one that never said
+    ``WATCH IS FAILING: <why>``. A failing call also charges no strike now, so the
+    branch has to key off the EPISODE flag rather than a failure count.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.tui.widgets.wake_panel import WakePanel
+
+    now = int(time.time() * 1000)
+    spec = SimpleNamespace(
+        id="m1",
+        tool="bash",
+        created_at=now - 600_000,
+        every_ms=60_000,
+        until_at=None,
+        name="pr-ci",
+    )
+    counters = {
+        "failing": True,
+        "failing_ticks": 3,
+        "failing_notice_checks": 2,
+        "last_error": "failed to run git: fatal: not a git repository",
+        "checks": 3,
+        "next_due_at": now + 60_000,
+    }
+    row = WakePanel._monitor_fingerprint(spec, counters)
+    health = row[5]
+    assert health.startswith("WATCH IS FAILING"), row
+    assert "not a git repository" in health, row
+
+    # A single failed check of a watch that has worked stays a count, not an
+    # alarm: the store's below-threshold sentence is what the band shows.
+    blip = dict(counters, failing_ticks=1)
+    blip_row = WakePanel._monitor_fingerprint(spec, blip)
+    assert "below the 2-check threshold" in blip_row[5], blip_row
+    assert blip_row[4] == "muted", blip_row
+
+
+def test_a_striking_watch_renders_its_reason_and_countdown_in_the_band() -> None:
+    """QA round 2, Q-R2-4: the band dropped the only pre-disable warning it has.
+
+    ``store.health_hint`` is the ONE sentence every surface shares, and the strike
+    class is the one that really IS heading for the disable — but the band's
+    failing branch ended at ``N failed``, so the glance surface showed neither the
+    reason nor the countdown while the CLI and the desktop rows showed both. The
+    sentence keeps the countdown in its FIRST clause (a semicolon, not an em-dash)
+    so the band's own clause rule cannot cut it off; the ink is an alarm.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.tui.widgets.wake_panel import WakePanel
+
+    now = int(time.time() * 1000)
+    spec = SimpleNamespace(
+        id="m1",
+        tool="bash",
+        created_at=now - 600_000,
+        every_ms=60_000,
+        until_at=None,
+        name="pr-ci",
+    )
+    counters = {
+        "consecutive_failures": 2,
+        "failure_limit": 5,
+        "last_error": "the tool timed out after 120s",
+        "checks": 4,
+        "next_due_at": now + 60_000,
+    }
+    row = WakePanel._monitor_fingerprint(spec, counters)
+    health = row[5]
+    assert health.startswith("keeps failing"), row
+    assert "stops at 5" in health, row
+    assert "timed out after 120s" in health, row
+    assert "2 failed" not in health, row
+    # ORDER IS THE BUDGET: at 100 columns the row truncates its tail, so the
+    # deadline precedes the error — measured, the shipped full sentence (106
+    # chars) lost the countdown AND the monitor's name.
+    assert health.index("stops at 5") < health.index("timed out"), health
+    assert row[4] == "warning", row
+
+    # A PUBLISHED row (a viewer attached to another process's runtime) keeps the
+    # count: a recovery republishes nothing, so "keeps failing" read from history
+    # would alarm about a watch that may already be well.
+    cold = WakePanel._monitor_fingerprint(spec, counters, live_clocks=False)
+    assert cold[5] == "2 failed", cold
+    assert cold[4] == "muted", cold
+
+    # One strike stays below the reporting threshold and keeps the shipped
+    # count-only row: the alarm sentence is for a run, not a blip.
+    blip = dict(counters, consecutive_failures=1)
+    blip_row = WakePanel._monitor_fingerprint(spec, blip)
+    assert blip_row[5] == "1 failed", blip_row
+    assert "keeps failing" not in blip_row[5], blip_row
