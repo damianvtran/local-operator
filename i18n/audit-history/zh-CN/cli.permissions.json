@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.permissions",
+  "history_sha256": "82e507ac5ad8ac58f2c907a23505a93a7a3d32fdddd01e7612d7467531b8e357",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 coder agent, job ad99821ab9e1)",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "6b7e2046be3d",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 7,
+        "unresolved_blocker_major": 2
+      },
+      "status": "changes_requested",
+      "note": "Independent zh-CN audit zhp1 @eba1e1dd: changes_requested, 2 MAJOR (Z1 CJK/Latin spacing vs style guide, 14 keys; Z2 'row' calqued as 一行, 7 keys), 2 MINOR, 3 NIT. Record: i18n/audits/evidence/zh-CN/cli.permissions/zhp1/record.json"
+    }
+  ]
+}

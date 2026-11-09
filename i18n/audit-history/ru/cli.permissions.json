@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "cli.permissions",
+  "history_sha256": "8794f046d09a692f8bf50ffef2b3ec9c04c960dd1291bdfec9b6a9f3e1d504c3",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "coder agent of PR #3691",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "741233d88cd4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 9,
+        "unresolved_blocker_major": 2
+      },
+      "status": "changes_requested",
+      "note": "Independent ru audit pa1: changes_requested, 0B/2M/5m/2n. R1 runtime must be «рантайм» (13 keys), R2 «сеансы»→«сессии». Record: i18n/audits/evidence/ru/cli.permissions/pa1/record.json"
+    }
+  ]
+}

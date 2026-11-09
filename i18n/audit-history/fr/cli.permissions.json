@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.permissions",
+  "history_sha256": "dc8065e44736dbde97467abf7aeaacf26962cd8544acd87632baa6925ec50289",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "coder (lopdev, PR #3691 implementer)",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev task subagent)",
+        "session": "144ca81a304c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 7,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "changes_requested: 1 MAJOR (fr typography: no ’/U+202F in 27/28 keys), 3 MINOR, 3 NIT. fr bytes 9eae53cdd40d. Record: i18n/audits/evidence/fr/cli.permissions/frpm1/record.json"
+    }
+  ]
+}

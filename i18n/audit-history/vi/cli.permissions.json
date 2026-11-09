@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "cli.permissions",
+  "history_sha256": "835d7c2a4997a9f98766ce2be26dcfd1755cdf3f193834ebe8fa9be83b3ec0de",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 coder agent)",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team, task subagent)",
+        "session": "fe66a4c43d27",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 6
+      },
+      "status": "passed",
+      "note": "Independent audit vp1 (session fe66a4c43d27, anthropic/claude-opus-5-5; translator ad99821ab9e1) of 28/28 keys: 0 blocker/0 major; 2 minor, 4 nit (m1 always_allow, m2 failed). Record: i18n/audits/evidence/vi/cli.permissions/vp1/record.json"
+    }
+  ]
+}

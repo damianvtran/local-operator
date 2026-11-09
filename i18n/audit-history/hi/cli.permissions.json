@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "cli.permissions",
+  "history_sha256": "e80243d4528ffed128b2b26e9d14bfadb1587e253b0076c3af1b4ea8488348e1",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 coder agent, job ad99821ab9e1)",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "d94d672abfb8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 5,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "Independent audit pm1 (session d94d672abfb8, anthropic/claude-opus-5-5, not translator ad99821ab9e1): changes_requested, 0 blocker/1 major/2 minor/2 nit. H1 MAJOR setup.done 'सेशन' violates glossary सत्र. Record: i18n/audits/evidence/hi/cli.permissions/pm1/record.json"
+    }
+  ]
+}

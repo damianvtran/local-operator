@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.permissions",
+  "history_sha256": "e3ef14d8234f8a2c3006ad22ad5bfbaba670185aedc33ec6b8b71598e64395ce",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 coder agent, job ad99821ab9e1)",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "f8ab0a45e07a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Independent audit r1-f8ab, 28/28 keys, check.py 0 problems. 0 blocker/0 major/4 minor (M1 « » vs guide “ ”; M2 app→aplicación de escritorio; M3 build→compilación; M4 Ejecútala referent). Record: i18n/audits/evidence/es/cli.permissions/r1-f8ab/record.json"
+    }
+  ]
+}
