@@ -383,6 +383,7 @@ def test_membership_converges_over_links_that_were_already_up(
     # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
     # inside this test and its own window would expire waiting for a pull.
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PUSH_PULL_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
 
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -493,6 +494,7 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
     # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
     # inside this test and its own window would expire waiting for a pull.
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PUSH_PULL_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
 
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2042,8 +2044,10 @@ def _spy_member_list(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     seen: list[dict[str, Any]] = []
     original = relay.RelayServer._op_member_list  # noqa: SLF001 — the handler under test
 
-    def _spy(self: relay.RelayServer, link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+    def _spy(self: relay.RelayServer, link: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
         reply = original(self, link, frame)
+        if reply is None:
+            return None  # Change notifications are not answered pulls.
         detail = reply.get("detail") or {}
         seen.append(
             {
@@ -2151,6 +2155,7 @@ def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
     # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
     # inside this test and its own window would expire waiting for a pull.
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PUSH_PULL_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2237,6 +2242,7 @@ def test_a_share_to_a_drive_device_still_settles_to_unchanged(
     # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
     # inside this test and its own window would expire waiting for a pull.
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PUSH_PULL_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2301,6 +2307,9 @@ def test_an_unchanged_answer_for_another_digest_is_not_believed(tmp_path: Path) 
             capabilities=frozenset({wire.MEMBER_LIST_DIGEST_V1}),
             member_pulled_at=1.0,
             member_pull_added=["stale"],
+            local_capabilities=frozenset({wire.MEMBER_LIST_DIGEST_V1}),
+            member_push_generation=0,
+            member_table_lock=threading.Lock(),
             request=request,
         )
 
@@ -2327,6 +2336,7 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
     # inside this test and its own window would expire waiting for a pull.
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PUSH_PULL_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2389,6 +2399,9 @@ _BACKOFF_PASS_S = 0.05
 def backoff_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", _BACKOFF_FLOOR_S)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", _BACKOFF_CEILING_S)
+    # Both negotiated ceilings follow this fixture's compressed clock; production
+    # push-only convergence and the real five-minute ceiling have separate tests.
+    monkeypatch.setattr(relay, "MEMBERSHIP_PUSH_PULL_INTERVAL_S", _BACKOFF_CEILING_S)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", _BACKOFF_PASS_S)
 
 
