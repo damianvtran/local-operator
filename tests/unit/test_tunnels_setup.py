@@ -537,7 +537,7 @@ def _real_pin_proof(monkeypatch, seen: list[object] | None = None) -> None:
 @pytest.mark.asyncio
 async def test_dead_pin_with_same_account_successor_offers_the_repoint(rig, monkeypatch):
     """REGRESSION (#3520): the plan said `login`, whose remedy is a re-sign-in."""
-    pin, fresh = _incident(rig)
+    fresh = _incident(rig)[1]
     seen: list[object] = []
     _real_pin_proof(monkeypatch, seen)
 
@@ -546,7 +546,7 @@ async def test_dead_pin_with_same_account_successor_offers_the_repoint(rig, monk
     assert plan["step"] == "repoint", plan
     assert plan["ready"] is True and plan["verified"] is False
     assert plan["credential_id"] == fresh
-    assert plan["previous_credential_id"] == pin
+    assert "previous_credential_id" not in plan, "no consumer reads it; keep no dead state"
     assert plan["identity_label"]
     assert plan["remedy"] == REPOINT_REMEDY
     # The cached owner must reach the proof: it is the only same-account evidence
@@ -558,13 +558,20 @@ async def test_dead_pin_with_same_account_successor_offers_the_repoint(rig, monk
 
 @pytest.mark.asyncio
 async def test_desktop_poll_and_fresh_plan_agree_and_the_poll_writes_nothing(rig, monkeypatch):
-    pin, fresh = _incident(rig)
+    def snapshot() -> dict[str, tuple[int, int]]:
+        files = config.directory().iterdir()
+        return {p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in files}
+
+    _pin, fresh = _incident(rig)
     _real_pin_proof(monkeypatch)
-    before = {
-        p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in config.directory().iterdir()
-    }
+    # The snapshot brackets the POLL alone: `observe()` is free to write, so one
+    # window spanning both could not attribute a change to either of them.
+    before = snapshot()
 
     local = await setup.observe_local()
+
+    after = snapshot()
+    assert after == before, "the poll is metadata-only: no auth DB, WAL, schema or config write"
     fresh_plan = await setup.observe()
 
     # The poll is what the desktop renders while the fresh plan runs: a different
@@ -575,9 +582,6 @@ async def test_desktop_poll_and_fresh_plan_agree_and_the_poll_writes_nothing(rig
         True,
         fresh,
     )
-    assert local["previous_credential_id"] == fresh_plan["previous_credential_id"] == pin
-    after = {p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in config.directory().iterdir()}
-    assert after == before, "the poll is metadata-only: no auth DB, WAL, schema or config write"
 
 
 @pytest.mark.asyncio
@@ -612,6 +616,25 @@ async def test_the_run_posting_the_successor_is_not_an_account_switch(rig, monke
     assert (await setup.observe_local(fresh))["step"] == "repoint"
     # An id that is neither the pin nor its successor is still a refusal.
     assert (await setup.observe(unrelated))["step"] == "owner_choice"
+
+
+@pytest.mark.asyncio
+async def test_naming_the_tunnels_own_pin_is_not_an_account_switch(rig, monkeypatch):
+    """REGRESSION (R1-m1): the plan offered the repair, then refused its own pin.
+
+    Both entry points answered `owner_choice` — "Select the existing tunnel's
+    owning credential" — to the one id that IS that credential, where base carried
+    an explicit pin straight through (and answered `login`). An account switch is a
+    DIFFERENT id, never the pin the plan is about.
+    """
+    pin, _fresh = _incident(rig)
+    _real_pin_proof(monkeypatch)
+
+    for plan in (await setup.observe(pin), await setup.observe_local(pin)):
+        assert plan["step"] == "repoint", plan
+        assert plan["ready"] is True
+        # The caller named the pin, so the plan is about the pin it will move.
+        assert plan["credential_id"] == pin
 
 
 @pytest.mark.asyncio
@@ -674,7 +697,6 @@ async def test_a_different_account_row_is_never_a_successor(rig, monkeypatch):
 
     assert plan["step"] == "login" and plan["ready"] is False
     assert plan["credential_id"] == _dead
-    assert "previous_credential_id" not in plan
 
 
 @pytest.mark.asyncio
@@ -693,7 +715,6 @@ async def test_a_live_pin_is_never_second_guessed(rig, monkeypatch):
     plan = await setup.observe()
 
     assert plan["step"] != "repoint" and plan["credential_id"] == live
-    assert "previous_credential_id" not in plan
 
 
 @pytest.mark.asyncio
@@ -730,6 +751,44 @@ async def test_apply_repoints_the_pin_before_any_stage_reads_it(rig, monkeypatch
         "Local connector installation completed.",
     ]
     assert result["receipt_steps"] == ["configuration", "installation"]
+
+
+@pytest.mark.asyncio
+async def test_a_repoint_into_an_unaccepted_quote_waits_for_acceptance(rig, monkeypatch):
+    """REGRESSION (R1-M1): the price gate skipped the plan the run NOW had.
+
+    A re-point's plan is built before any upstream read (the quote is read only
+    after the pin moves), so it cannot know the activation state. The gate at the
+    top of `_apply` therefore ran against a plan without `activation_required`, and
+    the billing stage dispatched `tunnel activate --accept-monthly-price None` for
+    a price the operator never accepted. The truthful answer is the fresh quote,
+    not ready, with no activate dispatch at all.
+    """
+    from local_operator.tunnels import cli
+
+    _pin, fresh = _incident(rig)
+    _real_pin_proof(monkeypatch)
+    # The successor's account needs activation, and the route is not serving yet,
+    # so the run reaches the stage whose gate is under test.
+    _unserve(rig)
+    rig[0].update(eligible=False, monthly_price_usd="0.07")
+    calls: list[str] = []
+
+    async def dispatch(args):
+        calls.append(args.tunnel_command)
+        return "no provider body"
+
+    monkeypatch.setattr(cli, "dispatch", dispatch)
+
+    result = await setup.apply()
+
+    assert calls == [], "an unaccepted price must never reach the activate dispatch"
+    assert result["step"] == "quote", result
+    assert result["ready"] is False
+    assert result["monthly_price_usd"] == "0.07"
+    # The completed re-point is not rolled back by the question it raised.
+    assert result["receipt_steps"] == ["configuration"]
+    assert config.load()["credential_id"] == fresh
 
 
 @pytest.mark.asyncio
@@ -786,8 +845,11 @@ async def test_repoint_text_names_the_state_and_its_command(rig, monkeypatch):
     cli_text = setup.text(plan, include_receipts=False)
     assert "Phone access needs reconnecting to this device’s newer sign-in" in cli_text
     assert REPOINT_REMEDY in cli_text
-    assert f"lop tunnel setup apply --credential-id {fresh}" in cli_text
+    # D1: the command is a labelled line of its own, not an unlabelled tail of the
+    # remedy paragraph — the same `mobile.setup.apply` copy the apply step uses.
+    assert f"Run lop tunnel setup apply --credential-id {fresh}" in cli_text
+    assert f"\nRun lop tunnel setup apply --credential-id {fresh}" in cli_text
 
     tui_text = setup.text(plan, surface="tui", include_receipts=False)
     assert REPOINT_REMEDY in tui_text, "the TUI token rewrites must not mangle this copy"
-    assert f"/mobile enable --credential-id {fresh}" in tui_text
+    assert f"\nRun /mobile enable --credential-id {fresh}" in tui_text

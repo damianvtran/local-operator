@@ -158,6 +158,32 @@ def _same_price(accepted: object, current: object) -> bool:
     return left is not None and right is not None and Decimal(left) == Decimal(right)
 
 
+def _unaccepted_price(plan: dict[str, Any], accepted: str | None) -> dict[str, Any] | None:
+    """The plan to report while the price on offer is not the accepted one.
+
+    ONE copy for both call sites in :func:`_apply`: the plan it was handed, and
+    the FRESH plan re-observed after a re-point. The second is why this is a
+    function at all — a re-point plan is built before any upstream read (its
+    quote only exists after the pin moves), so it cannot carry
+    ``activation_required``, and a gate that ran once at the top let the billing
+    stage dispatch ``tunnel activate`` with ``accepted=None`` (#3651).
+    """
+    if not plan.get("activation_required") or _same_price(accepted, plan.get("monthly_price_usd")):
+        return None
+    # Nothing accepted yet, or no readable price to compare against: wait for an
+    # explicit acceptance instead of inventing a moved quote for the operator.
+    current = plan.get("monthly_price_usd")
+    if accepted is None or current is None:
+        return {**plan, "ready": False}
+    return {
+        **plan,
+        "step": "quote_changed",
+        "ready": False,
+        "accepted_price_usd": _price(accepted),
+        "remedy": _t(ms.quote_changed(accepted=str(_price(accepted)), current=str(current))),
+    }
+
+
 def _cloudflared_preflight(configured: str | None = None) -> str:
     # Existing connector capability probe protects --token-file. Setup also
     # binds the documented minimum version instead of trusting feature text
@@ -285,8 +311,10 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
     # The guard is about which row would carry the tunnel, so it compares
     # against the RESOLVED id: the desktop's run posts the id this plan named,
     # which for a dead pin is the successor, and rejecting it as an account
-    # switch would refuse the repair the plan just offered.
-    if pin is not None and selected is not None and selected != effective:
+    # switch would refuse the repair the plan just offered. An explicit PIN is
+    # not a switch either — it is the id the repair moves — so it is allowed
+    # through to the state below, which answers `login` or the re-point itself.
+    if pin is not None and selected is not None and selected not in (pin, effective):
         return _plan("owner_choice", _t(ms.owner_mismatch()), **fields)
     requested = selected if selected is not None else effective
     matches = [r for r in choices if requested is None or r["id"] == requested]
@@ -312,7 +340,6 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
             "repoint",
             _t(ms.repoint()),
             ready=True,
-            previous_credential_id=pin,
             **fields,
         )
     if value:
@@ -349,9 +376,11 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
     # itself; it is therefore the credential this plan is ABOUT, and the
     # account-switch guard compares against it. The desktop's run posts the id
     # the plan named, so comparing against the dead pin would answer
-    # `owner_choice` to the repair the plan just offered.
+    # `owner_choice` to the repair the plan just offered. The pin itself is
+    # allowed through too: an explicit pin is the id the repair moves, not a
+    # switch (base carried it past this guard and answered `login`).
     effective = usable if usable is not None else pin
-    if pin is not None and selected is not None and selected != effective:
+    if pin is not None and selected is not None and selected not in (pin, effective):
         return _plan("owner_choice", _t(ms.owner_mismatch()))
     try:
         selected = credential_id(selected if selected is not None else effective)
@@ -389,7 +418,6 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
             "repoint",
             _t(ms.repoint()),
             ready=True,
-            previous_credential_id=pin,
             **fields,
         )
     if value:
@@ -493,20 +521,9 @@ async def _apply(
     plan = initial_plan if initial_plan is not None else await observe(selected)
     if plan["verified"] or not plan["ready"]:
         return plan
-    if plan.get("activation_required") and not _same_price(accepted, plan["monthly_price_usd"]):
-        if accepted is None:
-            return {**plan, "ready": False}
-        return {
-            **plan,
-            "step": "quote_changed",
-            "ready": False,
-            "accepted_price_usd": _price(accepted),
-            "remedy": _t(
-                ms.quote_changed(
-                    accepted=str(_price(accepted)), current=str(plan["monthly_price_usd"])
-                )
-            ),
-        }
+    gated = _unaccepted_price(plan, accepted)
+    if gated is not None:
+        return gated
     selected = plan["credential_id"]
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
@@ -567,6 +584,19 @@ async def _apply(
                 # completed re-point is not rolled back).
                 return {
                     **plan,
+                    "receipts": receipts,
+                    "receipt_steps": receipt_steps,
+                    "billing_outcome": billing,
+                    "reservation_outcome": reservation,
+                }
+            gated = _unaccepted_price(plan, accepted)
+            if gated is not None:
+                # The same gate the entry above applied, for the plan we have NOW:
+                # this account's activation state was unreadable before the pin
+                # moved, so without it the billing stage would activate a price
+                # nobody accepted. The completed re-point still stands.
+                return {
+                    **gated,
                     "receipts": receipts,
                     "receipt_steps": receipt_steps,
                     "billing_outcome": billing,
@@ -795,9 +825,11 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
     lines.append(remedy)
     if plan["step"] == "repoint":
         # The remedy says what the state IS; the command is the one that performs
-        # it. Surface-aware (`/mobile enable` for the TUI) and appended AFTER the
-        # token rewrites above, which do not know this plan's copy.
-        lines.append(_apply_command(plan, surface))
+        # it, on its own labelled line (`mobile.setup.apply`, exactly as the apply
+        # step does) so it does not read as the remedy's last sentence.
+        # Surface-aware (`/mobile enable` for the TUI) and appended AFTER the token
+        # rewrites above, which do not know this plan's copy.
+        lines.append(_t(ms.apply(command=_apply_command(plan, surface))))
     if plan.get("activation_required") and plan["step"] in {"quote", "quote_changed"}:
         lines.append(_apply_command(plan, surface))
     if plan.get("credential_choices"):

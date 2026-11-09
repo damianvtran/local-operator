@@ -518,7 +518,6 @@ def test_a_repoint_plan_renders_the_primary_action(tmp_path, monkeypatch, local)
         "ready": True,
         "verified": False,
         "credential_id": 2,
-        "previous_credential_id": 1,
         "identity_label": "a***",
         "configured": True,
         "remedy": "A newer sign-in to the same Radient account is already on this device.",
