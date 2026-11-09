@@ -170,7 +170,9 @@ later admission. Why this is arithmetic and not a guess:
 * A response that ended before completion never settles: a truncated stream or
   a cancelled request has partial usage, which is a floor rather than the
   charge, so that row is written `incomplete: true` and the ledger latches as it
-  did before S10.
+  did before S10. A `usage.cost` the provider printed beside that partial usage
+  is a floor too: the row keeps it as evidence and the ledger does not settle it
+  (R18 m4 — settling it booked $0.075 for a stream no reader accepted).
 * Nothing reads `stop_reason`: every unbilled, complete response follows the same
   rule, so a refusal, an ordinary stop and a harness-caused 4xx whose body
   happens to carry counts are treated alike.
@@ -178,8 +180,11 @@ later admission. Why this is arithmetic and not a guess:
 A refusal remains a primary outcome, never an infrastructure void: the attempt
 is not rerun, its native reward (0) stands, and its cost and wall time are
 retained (PREREGISTRATION §9.2). A stated `usage.cost` is still used unchanged
-wherever the provider gives one — derivation only fills a gap, it never
-overrides a bill. The Local Operator classifier channel is unchanged:
+wherever a complete response states one — derivation only fills a gap, it never
+overrides a bill. An `incomplete` row is the exception in every reader (the
+OSWorld lane, the coding driver and the publishing rig refuse it identically):
+it is never a number, never zero and never `cost_complete: true`, whatever it
+states. The Local Operator classifier channel is unchanged:
 `lop_edge.py` settles it only from the reviewed top-level billed `cost` of a
 classifier response.
 

@@ -272,6 +272,11 @@ class GuardTests(unittest.TestCase):
                "usage": derivation["tokens"]}
         with self.assertRaises(ValueError):
             driver.row_cost(row)
+        # R18 m4: a stated usage.cost is not a bill on an incomplete row either --
+        # the same row read by the two money() lanes would otherwise publish it.
+        with self.assertRaises(ValueError):
+            driver.row_cost({**row, "settled_from_tokens": False,
+                             "usage": {**derivation["tokens"], "cost": 0.075}})
         path = self.root / "meter.jsonl"
         path.write_text(json.dumps(row) + "\n")
         with self.assertRaises(ValueError):

@@ -560,6 +560,10 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(cost["unknown_billing_attempts"], 0)
         for broken in (
             {**settled, "incomplete": True},
+            # R18 m4: a stated cost beside partial usage is a floor too. Taking
+            # the cost branch first published 0.075 for this exact row.
+            {"path": "v1/messages", "status": 200, "incomplete": True,
+             "usage": {**tokens, "cost": 0.075}},
             {**settled, "usage": {**tokens, "output_tokens": 5000}},
             {**settled, "cost_derivation": {**derivation, "usd": 0.01}},
             {**settled, "cost_derivation": {**derivation,

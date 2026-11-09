@@ -951,6 +951,14 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
             # hard budget stop and is reported beside our list-price computation.
             cost = usage.get("cost")
+            if (extra or {}).get("incomplete"):
+                # R18 m4: the partial usage of a response that ended early is a
+                # floor, so a cost printed beside it is a floor too. Settling it
+                # booked $0.075 for a truncated stream that every reader refused
+                # as unknown -- the one shape where "unknown -> latch" did not
+                # hold. The provider's number stays in the row as evidence; it
+                # does not enter the ledger as a bill.
+                cost = None
             if cost is None and not unpriced and not (extra or {}).get("incomplete"):
                 # An unbilled response is not automatically unknown spend: when
                 # every token it consumed is priceable at the frozen card, the

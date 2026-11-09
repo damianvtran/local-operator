@@ -721,6 +721,44 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cost_derivation", row)
         self.assertEqual((await self.post("other")).status_code, 402)
 
+    async def test_a_truncated_stream_that_states_a_cost_still_latches(self):
+        # R18 m4: the incomplete branch skipped the derivation and then took a
+        # stated usage.cost straight to settle, so the one stream shape that
+        # broke before completion was booked at the provider's partial number
+        # ($0.075) while every reader refused or aborted the same row. The row's
+        # partial usage is a floor whatever is printed beside it, so the latch
+        # must hold here exactly as it does without a cost (ADAPTERS.md: "the
+        # ledger latches as it did before S10").
+        class Reset(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield (b'data: {"type":"message_start","message":{"model":'
+                       b'"anthropic/claude-sonnet-5.5","usage":{"input_tokens":2,'
+                       b'"output_tokens":1,"cache_read_input_tokens":0,'
+                       b'"cache_creation_input_tokens":27164}}}\n\n')
+                yield (b'data: {"type":"message_delta","usage":'
+                       b'{"output_tokens":900,"cost":0.075}}\n\n')
+                raise httpx.ReadError("reset mid-stream")
+
+        self.upstream._transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=Reset()
+            )
+        )
+        with contextlib.suppress(Exception):
+            await self.post(stream=True)
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("unbilled", " ".join(ledger["voids"]["trial"]))
+        self.assertEqual(ledger["usd"], 0.0)
+        self.assertEqual(len(ledger["pending"]), 1)  # kept as exposure, not settled
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["incomplete"])
+        self.assertNotIn("settled_from_tokens", row)
+        self.assertNotIn("cost_derivation", row)
+        # The provider's number is still recorded: it is evidence, not a bill.
+        self.assertEqual(row["usage"]["cost"], 0.075)
+        self.assertEqual((await self.post("other")).status_code, 402)
+
     async def test_a_client_disconnect_mid_stream_latches(self):
         # R17 M1, second trigger: the harness times out or closes mid-generation.
         # Same branch, same guarantee -- the truncation is not a bill.

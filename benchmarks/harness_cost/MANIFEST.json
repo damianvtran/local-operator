@@ -39,8 +39,8 @@
     },
     {
       "path": "experimental/ADAPTERS.md",
-      "bytes": 16231,
-      "sha256": "aa0df44ce6001e03a15da45322f4cd4eb5c773ea66569b519f1f5cd000d7fd44"
+      "bytes": 16679,
+      "sha256": "440c1b69c37dd7446e7846622e8ace318d54fbc5f019dd5d86e28b2a972b8283"
     },
     {
       "path": "experimental/CACHE-QUALIFICATION.md",
@@ -49,8 +49,8 @@
     },
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
-      "bytes": 11886,
-      "sha256": "89913f32545894bd40983ff53559a91f0070983a7b82ae3c58f88bdc19b01b06"
+      "bytes": 12033,
+      "sha256": "4c8d6d28c20a9f82dbd290d7743985eddaa73f893928e4520476223fe88897cb"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -269,8 +269,8 @@
     },
     {
       "path": "experimental/coding/test_guard.py",
-      "bytes": 18239,
-      "sha256": "5bb75aba1c76c720db1020503ed456a5d2cfc5c687062909934530aa7bd4edae"
+      "bytes": 18593,
+      "sha256": "0d56b22b1774830c9ace423ebc3006abd0f890a9dcc4fb6276f65b3c36b6a379"
     },
     {
       "path": "experimental/coding/test_harbor_integration.py",
@@ -349,8 +349,8 @@
     },
     {
       "path": "experimental/meter_proxy.py",
-      "bytes": 50042,
-      "sha256": "de90279ac0bf1b5c4880f362f271c682e54f068229a214755d232137da84d01a"
+      "bytes": 50573,
+      "sha256": "2a8cfc50f4c076c940ee1965a8eddd3c71c37c9c539a636bb755beb0b7fda1ee"
     },
     {
       "path": "experimental/package_egress.py",
@@ -379,8 +379,8 @@
     },
     {
       "path": "experimental/runner_v2.py",
-      "bytes": 99090,
-      "sha256": "f20177b0c8746f703799e089f422c37c68e84b60f66cfcaf138ee0513dfc4126"
+      "bytes": 100097,
+      "sha256": "8045cc4631627a4491c12ddca9604ffef49571a5712347eebcf206ebccdcb5e4"
     },
     {
       "path": "experimental/sse_stream.py",
@@ -389,8 +389,13 @@
     },
     {
       "path": "experimental/test_adapters.py",
-      "bytes": 54693,
-      "sha256": "05eb7f11b7d5c7bed6a3840e9eceded7c6f87f585604b2a57568bff8a72973dd"
+      "bytes": 56845,
+      "sha256": "757656c6a64f88e9ef2d05f55e56621d81942e50a746ed512a7518d4f6534f5e"
+    },
+    {
+      "path": "experimental/test_billing_agreement.py",
+      "bytes": 6732,
+      "sha256": "919f79248efa15c50131d69e5c1f9fd9ce4053ecde531b86b89b5f92153ba762"
     },
     {
       "path": "experimental/test_bridge_sse.py",
@@ -424,8 +429,8 @@
     },
     {
       "path": "experimental/test_runner_v2.py",
-      "bytes": 33612,
-      "sha256": "272777cee09b9cd83b4a9262c5b1f831df1434f5d050b28b6ace6541ad309edc"
+      "bytes": 33885,
+      "sha256": "6b362d26f45c91fed8cdc922570f95c22a6a8fe9963defde1f21c2b8799d0d2c"
     },
     {
       "path": "experimental/translator_config.example.json",

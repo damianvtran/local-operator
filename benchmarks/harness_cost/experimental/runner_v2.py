@@ -20,6 +20,7 @@ import argparse
 import collections
 import hashlib
 import json
+import math
 import os
 import shutil
 import signal
@@ -1679,6 +1680,11 @@ def derived_amount(row: Mapping[str, object]) -> Decimal:
             continue
         if isinstance(rate, bool) or not isinstance(rate, (int, float)):
             raise ValueError("derivation carries an unusable rate")
+        if not math.isfinite(rate) or rate < 0:
+            # R18 n2: stated, not left to the closing comparison. A zero-count
+            # term contributes nothing to the total, so a NaN or negative rate
+            # there cancels out and would otherwise settle.
+            raise ValueError("derivation carries an unusable rate")
         charged = usage.get(field)
         if isinstance(charged, bool) or not isinstance(charged, int) or charged != count:
             raise ValueError("derivation disagrees with the row's own usage")
@@ -1696,6 +1702,30 @@ def derived_amount(row: Mapping[str, object]) -> Decimal:
         raise ValueError("derivation has no finite amount")
     if abs(total / 1_000_000 - amount) > Decimal("1e-12"):
         raise ValueError("derivation does not match its own tokens and rates")
+    return amount
+
+
+def stated_amount(row: Mapping[str, object]) -> Decimal:
+    """A row's charge from whichever form it carries; ``ValueError`` when it is none.
+
+    WHY (R18 m4): one rule, checked before either form -- an ``incomplete`` row is
+    unknown spend, never a number and never zero. Its partial usage is a floor,
+    so a ``usage.cost`` stated beside it is a floor too, and taking the cost
+    branch first let this lane publish $0.075 for a row the driver aborted. A
+    complete row keeps the provider's stated bill unchanged; only a row without
+    one is derived from its tokens (``derived_amount``).
+    """
+    if row.get("incomplete") is True:
+        raise ValueError("incomplete row is unknown spend")
+    usage = row.get("usage")
+    value = usage.get("cost") if isinstance(usage, dict) else None
+    if value is None:
+        return derived_amount(row)
+    if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+        raise ValueError("Invalid billed cost")
+    amount = Decimal(str(value))
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("Invalid billed cost")
     return amount
 
 
@@ -1724,17 +1754,8 @@ def money(
     measured = Decimal(0)
     unknown = 0
     for row in messages:
-        usage = row.get("usage")
-        value = usage.get("cost") if isinstance(usage, dict) else None
         try:
-            if value is None:
-                amount = derived_amount(row)
-            else:
-                if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
-                    raise ValueError("Invalid billed cost")
-                amount = Decimal(str(value))
-                if not amount.is_finite() or amount < 0:
-                    raise ValueError("Invalid billed cost")
+            amount = stated_amount(row)
         except (InvalidOperation, ValueError, TypeError):
             unknown += 1
             continue
