@@ -1,6 +1,6 @@
 ---
 name: permissions
-description: macOS privacy permissions (Screen Recording, Files & Folders, Accessibility) for Local Operator runtimes — which row to enable and how to clean up stale rows.
+description: macOS privacy permissions (Screen Recording, Files & Folders and the other privacy services) for Local Operator runtimes — which row to enable and how to clean up stale rows.
 ---
 
 # macOS privacy permissions (`lop permissions`)
@@ -21,8 +21,8 @@ It is read-only and never prompts. It prints which identity this host's runtimes
 use, whether the desktop app is installed, whether team signing is on, and
 whether a runtime would be allowed to record the screen (a *preflight*: it asks
 macOS for the current answer without ever triggering a permission dialog).
-Screen Recording is the only service it checks; Files & Folders, Accessibility
-and the other services use the same row, so the identity line tells you which
+Screen Recording is the only service it checks; Files & Folders and the other
+services use the same row, so the identity line tells you which
 row to look for there too. Its last line names this guide's file, which you can
 open from a shell; inside a session, ask Local Operator about permissions and it
 reads this guide.

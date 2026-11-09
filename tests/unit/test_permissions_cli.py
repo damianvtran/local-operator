@@ -328,6 +328,10 @@ def test_setup_asks_about_always_allow_only_after_it_signed(monkeypatch, tmp_pat
     out = capsys.readouterr().out
     assert len(rig.prompts) == 1, rig.prompts
     assert "already signed" in out
+    # Round 2 (m1/Q2/U9): with no earlier "Always Allow" there is nothing to
+    # keep, so the line must not claim one before the allow-once cost line.
+    assert "answer is kept" not in out and "answer for this key is kept" not in out
+    assert "will not sign new Python builds" in out
     assert rig.always() is False
 
 
@@ -341,7 +345,9 @@ def test_an_existing_image_keeps_the_earlier_always_allow_for_the_same_key(
     rig.answers = ["y"]
     assert _run("setup") == 0
     assert rig.always() is True
-    assert "will not sign new Python builds" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "will not sign new Python builds" not in out
+    assert 'Your earlier "Always Allow" answer for this key is kept.' in out
 
 
 @darwin_only

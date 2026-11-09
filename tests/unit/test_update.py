@@ -5516,7 +5516,9 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     ):
         assert update_mod._snapshot_command("v1.2.3") == 0
 
-    assert calls == [(None, {"version": "1.2.3", "note": ""})]
+    # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
+    # terminal and may answer the signing dialog (review round 1, R2).
+    assert calls == [(None, {"version": "1.2.3", "note": "", "team_signing_prompt": True})]
     bundle.assert_not_called()
     assert not snapshot.exists(), "the wheel route must still reclaim the ref extract"
     out = capsys.readouterr().out

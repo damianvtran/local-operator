@@ -23,7 +23,7 @@
   "cli.permissions.status.screen.denied": "Screen Recording (runtime preflight): not granted. Turn on \"{row}\" in System Settings > Privacy & Security > Screen & System Audio Recording.",
   "cli.permissions.status.screen.unknown": "Screen Recording (runtime preflight): could not be checked",
   "cli.permissions.status.screen.no_image": "Screen Recording (runtime preflight): not checked (no runtime image yet)",
-  "cli.permissions.status.scope": "Only Screen Recording is checked. Files & Folders, Accessibility and the other privacy services use the same row.",
+  "cli.permissions.status.scope": "Only Screen Recording is checked. Files & Folders and the other privacy services use the same row.",
   "cli.permissions.status.guide": "More help: {path} (or ask a Local Operator session to read guide://permissions)",
   "cli.permissions.setup.refused.tty": "`lop permissions setup` is interactive. Run it in a terminal.",
   "cli.permissions.setup.refused.isolated": "Team signing is not allowed in this process ({reason}). Run it from your own login shell.",
@@ -34,7 +34,8 @@
   "cli.permissions.setup.cancelled": "Cancelled. Nothing was changed.",
   "cli.permissions.setup.failed": "Signing did not finish: {detail}. Runtimes keep the \"Local Operator Runtime\" row, and any earlier setup is unchanged.",
   "cli.permissions.setup.always_allow": "Did you choose \"Always Allow\" (or did macOS show no dialog)? [y/N] ",
-  "cli.permissions.setup.already_signed": "This Python build's runtime was already signed, so nothing was signed now and macOS had nothing to ask. Your earlier \"Always Allow\" answer is kept.",
+  "cli.permissions.setup.already_signed": "This Python build's runtime was already signed, so nothing was signed now and macOS had nothing to ask.",
+  "cli.permissions.setup.always_allow_kept": "Your earlier \"Always Allow\" answer for this key is kept.",
   "cli.permissions.setup.done": "Done. New runtimes use {identifier} and share the desktop app's row. Running sessions keep their current image until they restart.",
   "cli.permissions.setup.done_allow_once": "Updates with no terminal (agent-run, or /update inside a session) will not sign new Python builds; their runtimes use the \"Local Operator Runtime\" row until you run `lop update` or `lop permissions setup` in a terminal."
 }

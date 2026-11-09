@@ -122,7 +122,7 @@
   "cli.permissions.status.scope": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim. Do not name the Accessibility pane here: Apple renamed it on macOS 27 (English \"Device Control and Data Access\"; \"Accessibility\" on macOS 15 and 26), so any single name is wrong on some supported version. Files & Folders is the example because its name is stable."
   },
   "cli.permissions.status.guide": {
     "role": "lop permissions CLI output line",
@@ -177,7 +177,12 @@
   "cli.permissions.setup.already_signed": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim. Printed when setup found the runtime already signed; a separate line (setup.always_allow_kept) follows only when an earlier \"Always Allow\" answer for this key is actually kept, so this line must not mention that answer."
+  },
+  "cli.permissions.setup.always_allow_kept": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim. Printed right after setup.already_signed, and only when an earlier confirmed \"Always Allow\" answer for the same signing key is kept; \"this key\" is the Developer ID signing key just chosen."
   },
   "cli.permissions.setup.done": {
     "role": "lop permissions CLI output line",

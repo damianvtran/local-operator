@@ -301,6 +301,11 @@ def _setup() -> int:
         # access list nobody exercised (review round 1, R4). Keep what is known.
         always = kept
         print(_t(_k.setup_already_signed()))
+        # Only claim the earlier answer survived when it did: with no prior
+        # confirmed "Always Allow" for this key, saying "kept" and then printing
+        # the allow-once cost contradicted itself (review round 2, m1/Q2/U9).
+        if kept:
+            print(_t(_k.setup_always_allow_kept()))
     # Repoint this venv's link now, so the next runtime from it is the team image.
     procname.ensure_branded_interpreter()
     print(_t(_k.setup_done(identifier=procname.APP_BUNDLE_ID)))

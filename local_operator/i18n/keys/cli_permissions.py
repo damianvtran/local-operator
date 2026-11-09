@@ -30,6 +30,10 @@ def setup_always_allow() -> Msg:
     return Msg("cli.permissions.setup.always_allow", {})
 
 
+def setup_always_allow_kept() -> Msg:
+    return Msg("cli.permissions.setup.always_allow_kept", {})
+
+
 def setup_cancelled() -> Msg:
     return Msg("cli.permissions.setup.cancelled", {})
 
