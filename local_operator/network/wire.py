@@ -226,11 +226,13 @@ PAIR_OFFER_V1 = "pair-offer-v1"
 #: enables compression on a link only when BOTH ends advertised this string.
 ZLIB_RECORDS_V1 = "zlib-records-v1"
 #: The conditional member-table read (``relay._op_member_list``). WHY: every live
-#: link re-pulls the WHOLE member table every 15 s in each direction
-#: (``relay.MEMBERSHIP_PULL_MIN_INTERVAL_S``) and on a settled mesh the answer is
-#: the same table every time — measured on the two-relay rig 2026-11-08 at
-#: 1.43 KB per reply with 2 members (below the compression threshold) and ~0.79 KB
-#: compressed with 6, i.e. ~17 MB per link per day for no information. A puller
+#: link re-pulls the WHOLE member table every 15 s in each direction at the floor
+#: (``relay.MEMBERSHIP_PULL_MIN_INTERVAL_S``; a settled link now backs off towards
+#: ``relay.MEMBERSHIP_PULL_MAX_INTERVAL_S``, halving that rate) and on a settled mesh
+#: the answer is the same table every time — measured on the two-relay rig 2026-11-08
+#: at 1.43 KB per reply with 2 members (below the compression threshold) and ~0.79 KB
+#: compressed with 6, i.e. ~17 MB per link per day at that floor rate for no
+#: information. A puller
 #: that negotiated this string sends ``if_digest`` (its own
 #: ``relay.member_sync_digest``) and a server whose table hashes the same answers
 #: ``unchanged`` with no rows. GATED BOTH WAYS: a build without the string never

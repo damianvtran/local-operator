@@ -267,13 +267,25 @@ MEMBERSHIP_PULL_MIN_INTERVAL_S = 15.0
 #: bound for everything that travels only by this pull: a rename of the sender's
 #: own row (``member_sync_digest`` hashes ``name`` for the sender's row alone) and a
 #: row this device lacks. On top of it sits one :data:`MEMBERSHIP_PULL_PASS_S` of
-#: scheduling slop, so this ceiling bounds a rename at 35 s worst case where 60
-#: would bound it at 65 s — past the ~60 s this change is allowed to cost one.
-#: Measured on the 9-member rig with this ceiling, n=5 renames each reaching all 8
-#: peers: 14.9-26.7 s (median 15.2 s), against 13.8-15.3 s (median 15.2 s) at the
-#: floor. A REMOVAL does not ride this pull at all (``net_epoch``/``removed_ids``
-#: push it; measured at 1.2-1.3 s), which is why the rename is the case the ceiling
-#: is chosen for.
+#: scheduling slop, so a rename costs 30 s + one pass on a link that has backed off
+#: where 60 would cost it 60 s + one pass — past the ~60 s this change is allowed to
+#: cost one.
+#:
+#: THAT 35 s HOLDS ONLY WHILE THE OTHER LINKS ANSWER. The pass itself is SERIAL
+#: (:meth:`RelayServer._membership_loop` runs one :meth:`refresh_membership` at a
+#: time) and every due pull AHEAD of a link in the member walk costs up to
+#: :data:`MEMBERSHIP_PULL_TIMEOUT_S` (4 s), so a wedged peer adds its own four
+#: seconds to every link behind it — seven of them put the last link at ~63 s, which
+#: is exactly the state the network guide's "skipped after four seconds" sentence
+#: describes. That term is not new (the pass was already serial and a wedged peer
+#: already delayed the links behind it) and it is bounded by a peer that eventually
+#: answers or is dropped, but a single number that ignored it would overclaim, so
+#: the serial term is stated here rather than implied away.
+#: Measured on the 9-member rig with this ceiling, every link answering, n=5 renames
+#: each reaching all 8 peers: 14.9-26.7 s (median 15.2 s), against 13.8-15.3 s
+#: (median 15.2 s) at the floor. A REMOVAL does not ride this pull at all
+#: (``net_epoch``/``removed_ids`` push it; measured at 1.2-1.3 s), which is why the
+#: rename is the case the ceiling is chosen for.
 MEMBERSHIP_PULL_MAX_INTERVAL_S = 30.0
 
 #: How often the relay walks its live links looking for a table refresh that is due.
@@ -6419,15 +6431,17 @@ class RelayServer:
         # peer's rows whole whatever the digest says; after that a settled mesh
         # trades ~0.8-1.4 KB of identical rows per 15 s for a ~0.2 KB "unchanged".
         #
-        # THE STATES THAT KEEP A LINK ON FULL PULLS FOR GOOD (review R2-m2). Each of
-        # these makes the two digests differ although the merge would take nothing,
-        # so the link never earns a backoff (see ``PeerLink.member_pull_interval_s``)
-        # and keeps asking at the floor — the safe direction, because a wrong
-        # "unchanged" would withhold a real change:
+        # THE STATES THAT KEEP A LINK ON FULL PULLS UNTIL THE NEXT RECONNECT (review
+        # R2-m2). Each of these makes the two digests differ although the merge would
+        # take nothing, so the link never earns a backoff (see
+        # ``PeerLink.member_pull_interval_s``) and keeps asking at the floor — the
+        # safe direction, because a wrong "unchanged" would withhold a real change:
         #
         # * THE PEER ROTATED MID-LINK, so no row of ours carries ``link.device_id``
-        #   while the peer's own row has a name. Ours hashes ``""`` for a row it does
-        #   not hold, the peer hashes its name for itself.
+        #   while the peer's own row has a name. The two row SETS differ: the payload
+        #   iterates the rows each side holds (so an id we do not hold contributes no
+        #   entry at all), and the name the peer hashes for itself is hashed by
+        #   neither side in our view.
         # * EITHER SIDE'S OWN ROW HAS AN EMPTY NAME OR EMPTY ENDPOINTS while the
         #   other holds values: the merge ignores empty incoming values, the digest
         #   does not treat empty as absent.
@@ -6470,10 +6484,14 @@ class RelayServer:
             link.member_pull_added = []
             # THE ONE BRANCH THAT MAY BACK THIS LINK OFF: the peer's answer hashed to
             # the digest this device asked about, so the next read is worth less than
-            # the full rate. DOUBLING rather than a step straight to the ceiling: a
-            # link that settles for one interval and moves again pays one interval of
-            # extra delay, not the maximum (see MEMBERSHIP_PULL_MAX_INTERVAL_S for the
-            # bound the ceiling is chosen from).
+            # the full rate. At the shipped constants this is ONE STEP, not a ramp —
+            # ``MEMBERSHIP_PULL_MIN_INTERVAL_S * 2 == MEMBERSHIP_PULL_MAX_INTERVAL_S``,
+            # so a link that settles once is already at the ceiling and a change it
+            # misses pays the whole interval (the bound in
+            # MEMBERSHIP_PULL_MAX_INTERVAL_S covers exactly that). The doubling is
+            # still written as a doubling because a build that sets a ceiling more
+            # than twice the floor (the tests' compressed clocks do) gets a ramp out
+            # of it rather than a jump, and neither shape needs a second constant.
             link.member_pull_interval_s = min(
                 getattr(link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S) * 2,
                 MEMBERSHIP_PULL_MAX_INTERVAL_S,
@@ -6571,9 +6589,7 @@ class RelayServer:
                 # already reset it to the floor (see
                 # ``PeerLink.member_pull_interval_s``), so a link is never slow to
                 # re-read a table that is known to differ.
-                interval = getattr(
-                    link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S
-                )
+                interval = getattr(link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S)
                 if age < interval:
                     # AN ANSWER INSIDE THE CADENCE IS STILL EVIDENCE. Skipping the ask
                     # must not turn into "no peer answered": a `show` one second after

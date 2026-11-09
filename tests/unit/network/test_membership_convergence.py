@@ -2586,9 +2586,9 @@ def test_a_backed_off_link_is_still_reported_as_answered_with_its_age(
     payload = report.to_json()
     assert payload["not_answered"] == [] and payload["answered"] == [c.device_id], payload
     assert payload["oldest_answer_age_s"] is not None
-    assert payload["sentence"].startswith(
-        "members verified with all 1 peer(s)"
-    ), payload["sentence"]
+    assert payload["sentence"].startswith("members verified with all 1 peer(s)"), payload[
+        "sentence"
+    ]
 
 
 def test_every_member_field_is_classified_for_the_sync_digest() -> None:
