@@ -1,0 +1,142 @@
+{
+  "cli.permissions.help.permissions": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Local Operator and Developer ID are product names; Screen Recording is the macOS setting name (use the localized macOS name)."
+  },
+  "cli.permissions.help.status": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Local Operator and Developer ID are product names; Screen Recording is the macOS setting name (use the localized macOS name)."
+  },
+  "cli.permissions.help.setup": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Local Operator and Developer ID are product names; Screen Recording is the macOS setting name (use the localized macOS name)."
+  },
+  "cli.permissions.status.not_macos": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.identity.team": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.identity.adhoc": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.identity.legacy": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.identity.none": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.image": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.optin.on": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.optin.off": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.optin.blocked": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.app.found": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.app.missing": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.screen.granted": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.screen.denied": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.screen.unknown": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.status.guide": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.refused.tty": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.refused.isolated": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.no_app": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.no_identity": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.explain": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.confirm": {
+    "role": "interactive yes/no prompt in the terminal",
+    "tone": "plain, direct",
+    "note": "[y/N] stays as-is: the answer is parsed as y/yes. Keep the trailing space. \"Always Allow\" is the macOS keychain dialog's button label; use the localized macOS label."
+  },
+  "cli.permissions.setup.cancelled": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.failed": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  },
+  "cli.permissions.setup.always_allow": {
+    "role": "interactive yes/no prompt in the terminal",
+    "tone": "plain, direct",
+    "note": "[y/N] stays as-is: the answer is parsed as y/yes. Keep the trailing space. \"Always Allow\" is the macOS keychain dialog's button label; use the localized macOS label."
+  },
+  "cli.permissions.setup.done": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+  }
+}

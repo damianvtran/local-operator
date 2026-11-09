@@ -1901,6 +1901,10 @@ fi
 # that question before naming it; the interpreter below always starts.
 branded="$gen/tools/local-operator/bin/Local Operator"
 use_branded=""
+# What an intact image's size must be: the interpreter's for the legacy clone,
+# the size recorded in the build key's "image" sidecar for a bundle image
+# (signing rewrites the bytes, so the interpreter is no longer the oracle).
+expected=$(wc -c < "$gen/tools/local-operator/bin/python3" 2>/dev/null | tr -d ' ')
 if [ -x "$branded" ]; then
     use_branded=1
     if [ -L "$branded" ]; then
@@ -1910,23 +1914,33 @@ if [ -x "$branded" ]; then
             *) target="$(dirname -- "$branded")/$target" ;;
         esac
         found=""
-        # The probe is the IMAGE's directory, not the link's: the plant publishes
-        # ``<key>/lib`` beside ``<key>/bin/...``, so ``dirname`` of the target's
-        # parent is where the stdlib link lives. Probing ``<key>/bin/lib`` (one
-        # dirname short) never matched, so every supervised unit silently took
-        # the fallback interpreter and stayed a separate macOS privacy client.
-        for enc in "$(dirname -- "$(dirname -- "$target")")"/lib/python3*/encodings/__init__.py; do
+        # The probe is the build key's directory, not the link's: the plant
+        # publishes ``<key>/lib`` beside ``<key>/bin/...`` (legacy, two levels
+        # up) or beside ``<key>/Local Operator.lopruntime/Contents/MacOS/...``
+        # (bundle, four levels up -- the macOS privacy identity, keyed by
+        # bundle id). Probing one dirname short never matched, so every
+        # supervised unit silently took the fallback interpreter and stayed a
+        # separate macOS privacy client.
+        imgdir=$(dirname -- "$target")
+        case $imgdir in
+            */Contents/MacOS)
+                home=$(dirname -- "$(dirname -- "$(dirname -- "$imgdir")")")
+                expected=$(cut -d ' ' -f 1 < "$home/image" 2>/dev/null) || expected=""
+                ;;
+            *) home=$(dirname -- "$imgdir") ;;
+        esac
+        for enc in "$home"/lib/python3*/encodings/__init__.py; do
             if [ -f "$enc" ]; then found=1; break; fi
         done
         if [ -z "$found" ]; then use_branded=""; fi
     fi
 fi
 # A truncated or replaced image passes both checks above and then dies with
-# "Exec format error". The image is a byte copy of the interpreter beside it,
-# so a size mismatch (both read through their symlinks) means it is not one.
-fallback="$gen/tools/local-operator/bin/python3"
+# "Exec format error", so a size other than the expected one means it is not
+# the image we published.
 if [ -n "$use_branded" ]; then
-    if [ "$(wc -c < "$branded" 2>/dev/null)" != "$(wc -c < "$fallback" 2>/dev/null)" ]; then
+    actual=$(wc -c < "$branded" 2>/dev/null | tr -d ' ')
+    if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
         use_branded=""
     fi
 fi
@@ -3181,6 +3195,35 @@ def _remove_tree_unlocked(path: Path) -> bool:
     return True
 
 
+def _publish_team_runtime(generation: Path) -> None:
+    """Publish the TEAM-signed runtime bundle for ``generation``'s Python, if opted in.
+
+    WHY HERE, BEFORE THE FLIP: the team image (``com.local-operator``, the
+    desktop app's own privacy row) is the one thing on the session path that
+    may NOT be built at spawn time — signing with a Developer ID can raise the
+    keychain dialog, and a session start must never put a dialog on screen.
+    ``lop update`` is the moment the operator asked for a new build, so it is
+    where a new Python build gets its team image; every runtime started from
+    the new generation then selects it over the ad-hoc flavor.
+
+    Guarded and no-raise in :func:`procname.publish_team_runtime` (darwin,
+    passwd HOME, no root/config override, a recorded opt-in from
+    ``lop permissions setup``, an installed app of the same team). A failure
+    only means runtimes keep the ad-hoc "Local Operator Runtime" row; the
+    update itself is never refused for it.
+    """
+    try:
+        from local_operator import procname
+
+        image = procname.publish_team_runtime(
+            _venv_interpreter(_generation_install_root(generation))
+        )
+        if image is not None:
+            logger.info("team-signed runtime image ready: %s", image)
+    except Exception:  # noqa: BLE001 — an identity is never a reason to fail an update
+        logger.debug("team runtime image not published", exc_info=True)
+
+
 @_install_mutation
 def flip_pointer(generation: Path) -> None:
     """Point ``current`` at ``generation``, atomically.
@@ -3927,6 +3970,7 @@ def install_into_generation(
                 # post-rename staged-unlink errors are swallowed), so a successful return
                 # IS the proof. A failure AFTER this point retains for the independent
                 # reason ``_discard_candidate`` checks first: the pointer now names B.
+                _publish_team_runtime(generation)
                 try:
                     flip_pointer(generation)
                 except OSError as exc:
@@ -4050,6 +4094,7 @@ def clone_into_generation(
                 DOWNGRADE_NOTE,
             )
             previous = current_generation()
+            _publish_team_runtime(generation)
             flip_pointer(generation)
             _written, not_written = write_stable_launchers(generation)
             if not_written:
