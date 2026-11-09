@@ -367,3 +367,26 @@ def test_a_full_answer_carries_no_digest(request: pytest.FixtureRequest) -> None
     detail = (reply or {}).get("detail")
     assert isinstance(detail, dict) and isinstance(detail.get("document"), dict), reply
     assert "digest" not in detail, "the full answer still carries an unread digest"
+
+
+def test_a_no_answer_is_not_reported_as_a_bad_status(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A peer that says nothing keeps the treatment it always had.
+
+    ``_ask_owner_directly`` returns ``None`` for a dead link or a timeout. That is not a
+    malformed answer, so it must not be reported under a reason word that says "status":
+    nothing answered, so there is nothing to describe, and the cadence's own offline
+    handling owns it. The boundary of Q1's arm is pinned here.
+    """
+    rig = _mesh(request)
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    def _silent(self: Any, owner: str, frame: dict[str, Any]) -> None:
+        return None
+
+    monkeypatch.setattr(MeshCredentialClient, "_ask_owner_directly", _silent)
+    pulled = _pull(rig)
+    assert pulled.get("owners") == 1, pulled
+    assert pulled.get("skipped") is None, pulled
+    assert pulled.get("refused_by") is None, pulled

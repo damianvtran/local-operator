@@ -2076,8 +2076,8 @@ class MeshCredentialClient:
                     code = detail.get("code")
                 refused_codes[device] = str(code or "")
                 continue
-            if conditional and not isinstance(document, dict):
-                # NAMED, NOT SILENT (QA round 1, Q1). An answer to a CONDITIONAL ask that
+            if conditional and isinstance(reply, dict) and not isinstance(document, dict):
+                # NAMED, NOT SILENT (QA round 1, Q1). An ANSWER to a CONDITIONAL ask that
                 # is neither a document nor a refusal — ``unchanged: "yes"``, a ``detail``
                 # that is not a mapping, an empty one — already failed safe (nothing is
                 # merged, the file is untouched), but it left the operator with
@@ -2085,6 +2085,12 @@ class MeshCredentialClient:
                 # a well-shaped frame IS named. Same treatment: one honest sentence in
                 # ``skipped``. Only conditional asks record it, so a peer that predates
                 # the capability keeps the reporting it always had.
+                #
+                # AN ANSWER, NOT A SILENCE: ``reply is None`` is the no-answer case (a
+                # dead link, a timeout — ``_ask_owner_directly``'s own contract), which
+                # has never been a ``skipped`` row and must not become one under a reason
+                # word that says "status". Nothing answered, so there is nothing to
+                # describe; the cadence's offline handling owns that case.
                 skipped.append({"device": device, "reason": "bad_placement_status"})
                 continue
             if isinstance(document, dict):
