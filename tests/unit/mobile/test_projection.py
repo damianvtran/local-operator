@@ -89,6 +89,82 @@ def hide_cross_session(tmp_path, monkeypatch: pytest.MonkeyPatch):
     settings_reload()
 
 
+def test_session_state_metadata_is_not_a_history_row() -> None:
+    """Typed context metadata must not consume display rows or the tail budget."""
+    metadata = CustomMessage(
+        custom_type="session_state",
+        attribution="system",
+        details={"text": "[session-state] private context"},
+    )
+    quote = Message.user("I saw [session-state] in the transcript")
+    history = [quote, metadata]
+    fold = make_fold()
+    fold.fold_history(history)
+    assert [row.id for row in fold.projection.transcript] == [quote.id]
+    assert history == [quote, metadata]  # Projection must not mutate agent context.
+
+
+def test_session_state_does_not_displace_visible_history() -> None:
+    quote = Message.user("[session-state] is quoted, not injected")
+    history = [quote] + [
+        CustomMessage(custom_type="session_state", details={"text": "private metadata"})
+        for _ in range(PROJECTION_TRANSCRIPT_LIMIT + 1)
+    ]
+    rows = fold_messages_to_entries(history)
+    assert [row.id for row in rows] == [quote.id]
+    fold = make_fold()
+    fold.fold_history(history)
+    assert [row.id for row in fold.projection.transcript] == [quote.id]
+
+
+def test_session_state_filter_preserves_typed_and_text_controls() -> None:
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+
+    peer = CustomMessage(
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        details={"body": "[session-state] peer quote", "sender": {"name": "synthetic peer"}},
+    )
+    unknown = CustomMessage(
+        custom_type="future_notice", details={"text": "[session-state] meaningful notice"}
+    )
+    rows = fold_messages_to_entries([peer, unknown])
+    assert [(row.kind, row.text) for row in rows] == [
+        ("peer_message", "[session-state] peer quote"),
+        ("notice", "[session-state] meaningful notice"),
+    ]
+    assert rows[1].custom_type == "future_notice"
+
+
+def test_live_session_state_delivery_is_invisible_without_hiding_controls() -> None:
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+
+    fold = make_fold()
+    before = fold.projection.to_json()
+    fold.note_nonpeer_delivery(
+        "private metadata", custom_type="session_state", message_id="state-only"
+    )
+    assert fold.projection.to_json() == before
+    fold.fold_event(
+        PeerMessageDeliveredEvent(
+            body="private metadata", custom_type="session_state", message_id="state-event"
+        )
+    )
+    assert not fold.projection.transcript
+    fold.note_user_message("[session-state] user quote")
+    fold.note_peer_message("[session-state] peer quote")
+    fold.note_nonpeer_delivery(
+        "[session-state] real notice", custom_type="future_notice", message_id="real-notice"
+    )
+    fold.fold_event(NoticeEvent(text="[session-state] warning", kind="warning"))
+    assert [(row.kind, row.text) for row in fold.projection.transcript] == [
+        ("user", "[session-state] user quote"),
+        ("peer_message", "[session-state] peer quote"),
+        ("notice", "[session-state] real notice"),
+        ("notice", "[session-state] warning"),
+    ]
+    assert fold.projection.transcript[-1].details == {"severity": "warning"}
+
+
 def test_model_change_repaints_the_composer_chip() -> None:
     """A fallback must rename the chip the phone shows, not just the notice."""
     fold = make_fold()
