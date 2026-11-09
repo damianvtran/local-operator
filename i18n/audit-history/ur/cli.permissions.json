@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "cli.permissions",
-  "history_sha256": "c82a4ee269f37c4b9123844b372a72e716e696e262afc42027e3b155c5bbacd1",
+  "history_sha256": "241f9b05c7bad9614f8d418b995081942f8421f9d2cece6846b66ef4953e7e47",
   "entries": [
     {
       "locale": "ur",
@@ -47,6 +47,28 @@
       },
       "status": "passed",
       "note": "Independent ur re-audit urp2 @d5eed404 (ur d7c43d6f): passed, 0 BLOCKER/MAJOR; urp1 U1-U5 resolved; P1 minor (explain bullet bidi), 3 NIT. Labels verified vs Apple loctables. Record: i18n/audits/evidence/ur/cli.permissions/urp2/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.permissions",
+      "source_sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 round-3 wave, ur)",
+        "session": "unknown",
+        "model": "unknown",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "df1f78befebc",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent ur re-audit urp3 @58e58c3b (ur 83ea8d20): passed, 0 BLOCKER/MAJOR, 0 new findings; urp2 P1-P3 fixed, P4 closed. Labels verified vs Apple loctables (macOS 27.2). Record: i18n/audits/evidence/ur/cli.permissions/urp3/record.json"
     }
   ]
 }
