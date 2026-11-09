@@ -195,20 +195,42 @@ def _why(item: dp.Item, wt: Path, window_s: float = 2 * 3600, cap: int = 20) -> 
 # on hosted CI before this branch existed (#3389), and the branch's ~1000 added
 # tests only lengthen the shard that hosts it.
 #
-# So the retry keys on that SHAPE, never on a suspect: it fires only when EVERY
-# freshly-written path is git metadata of a NESTED repository, it re-ages the
-# tree between attempts, and a second attempt that still reads `recent` fails
-# exactly as before. A regression that makes the PLANNER write into a worktree
-# writes on every plan and therefore survives the retry; only a one-shot external
-# writer is absorbed.
+# So the retry keys on that SHAPE, never on a suspect. It fires only when the
+# plan failed on the TREE WALK (the only branch a late write under the tree can
+# produce, see :data:`_WALK_RECENT_MARKER`), only when at least one path under
+# the tree is actually fresh, and only when EVERY fresh path is git metadata of
+# a NESTED repository. It re-ages the tree between attempts, and a second
+# attempt that still reads `recent` fails exactly as before. A regression that
+# makes the PLANNER write into a worktree writes on every plan and therefore
+# survives the retry; only a one-shot external writer is absorbed.
+
+# The walk branch of the worktree idle guard, as ``disk_pressure.py`` words it.
+# `recent` has two producers and this retry may absorb only ONE of them: the walk,
+# because it is the only branch a late write INSIDE the tree can produce. The
+# other branch (the outer worktree's ``HEAD``/``index``/``logs/HEAD``) is git
+# admin metadata the planner itself touches on every plan, so absorbing it would
+# hide exactly the regression this retry is supposed to let fail. Pinned against
+# the product source by ``test_the_retry_gate_is_keyed_on_the_product_reason``: a
+# reworded reason must redden a test, not silently disable the retry.
+_WALK_RECENT_MARKER = "working tree touched within the idle window"
 
 
-def _nested_git_writes(wt: Path, window_s: float = 300.0) -> list[str] | None:
-    """Fresh paths under ``wt`` if they are ALL nested-repo git metadata, else None.
+def _nested_git_writes(item: dp.Item, wt: Path, window_s: float = 300.0) -> list[str] | None:
+    """Fresh paths under ``wt`` IF they are all nested-repo git metadata, else None.
 
-    ``None`` means "this is not the external-writer race": something wrote
-    outside a nested repository's ``.git``, which a retry must not absorb.
+    ``None`` means "this is not the external-writer race", which a retry must not
+    absorb. Three ways to land there, and each is evidence this gate does NOT
+    have rather than evidence against the race alone:
+
+    * the plan did not fail on the tree walk (``item.reason`` names the admin-file
+      branch), so nothing under ``wt`` explains it;
+    * nothing under ``wt`` is fresh at all: an empty set would satisfy "every
+      fresh path is nested git metadata" VACUOUSLY and absorb a `recent` with no
+      evidence behind it;
+    * something fresh is not a nested repository's ``.git/...`` entry.
     """
+    if _WALK_RECENT_MARKER not in item.reason:
+        return None
     root = Path(os.path.realpath(wt))
     now = time.time_ns()
     fresh: list[str] = []
@@ -225,6 +247,8 @@ def _nested_git_writes(wt: Path, window_s: float = 300.0) -> list[str] | None:
         if len(offset) < 2 or ".git" not in offset:
             return None
         fresh.append(str(path))
+    if not fresh:
+        return None
     return fresh
 
 
@@ -235,12 +259,154 @@ def plan_when_idle(fx: Fx, wt: Path) -> dp.Plan:
     write no fixture can wait out (see the comment above).
     """
     plan = plan_for(fx)
-    if by_path(plan, wt).code != "recent":
+    item = by_path(plan, wt)
+    if item.code != "recent":
         return plan
-    if _nested_git_writes(wt) is None:
+    if _nested_git_writes(item, wt) is None:
         return plan
     fx.idle(wt)
     return plan_for(fx)
+
+
+def _nested_repo_worktree(fx: Fx, name: str) -> tuple[Path, Path]:
+    """A worktree with a gitignored directory holding its own repository.
+
+    The shape the hosted-CI flake walks: the nested repo's ``.git`` sits INSIDE
+    the tree the worktree category scans, so a write into it after ``fx.idle``
+    is a fresh path in the walk and nothing else.
+    """
+    wt = fx.worktree(name)
+    (wt / ".gitignore").write_text("tmp\n")
+    git(wt, "add", ".gitignore")
+    git(wt, "commit", "-qm", "ignore tmp")
+    git(wt, "push", "-q", "origin", name)
+    nested = wt / "tmp" / "scratchrepo"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "important.txt").write_text("irreplaceable")
+    git(nested, "add", "-A")
+    git(nested, "commit", "-qm", "never pushed")
+    return wt, nested
+
+
+def test_a_git_admin_write_on_the_outer_worktree_is_not_absorbed(fx: Fx) -> None:
+    """PROBE2: the retry fires on the evidence it claims, never on none.
+
+    A one-shot ``utime`` on the OUTER worktree's admin index is the shape a
+    planner-side regression takes: the report is `recent` on the admin-file
+    branch and NOTHING under the tree is fresh. The round-4 gate returned ``[]``
+    there, and ``[]`` satisfied "every fresh path is nested git metadata"
+    vacuously, so the retry re-aged the tree and turned that regression into a
+    pass. It must stay `recent`.
+    """
+    wt = fx.worktree("admin")
+    fx.idle(wt)
+    admin = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    stamp = time.time()
+    os.utime(admin / "index", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert "git admin files touched" in first.reason, first.reason
+    assert _nested_git_writes(first, wt) is None, "no evidence under the tree: no retry"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "recent", _why(item, wt)
+    assert "git admin files touched" in item.reason, item.reason
+
+
+def test_a_git_admin_report_is_not_absorbed_even_with_nested_metadata_fresh(fx: Fx) -> None:
+    """PROBE2b: the reason gate rejects on its own, not by falling through.
+
+    PROBE2 above is rejected twice over (admin branch AND no fresh path), so on
+    its own it does not prove the reason check does any work. Here the outer
+    admin index is touched AND the nested repo's ``.git/objects`` is fresh, so
+    every fresh path IS nested-repo git metadata, the nesting filter passes —
+    and the report still says ``git admin files touched``, which is the branch
+    no write inside the tree can produce. Only the reason check rejects it.
+    """
+    wt, nested = _nested_repo_worktree(fx, "admin-nested")
+    fx.idle(wt)
+    admin = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    stamp = time.time()
+    os.utime(admin / "index", (stamp, stamp))
+    os.utime(nested / ".git" / "objects", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert "git admin files touched" in first.reason, first.reason
+    assert _nested_git_writes(first, wt) is None, "the walk branch is not what reported"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "recent", _why(item, wt)
+
+
+def test_a_walk_report_with_no_fresh_path_is_not_absorbed(fx: Fx) -> None:
+    """The vacuity bug: a walk-branch `recent` with NOTHING fresh is no evidence.
+
+    The walk judges against the full idle window (an hour by default) while this
+    gate looks at the last five minutes, so a nested-metadata write older than
+    that leaves `recent` on the walk branch with an EMPTY fresh set — and an
+    empty set satisfies "every fresh path is nested git metadata" vacuously. No
+    fresh path means no evidence, so the tree is not re-aged and the report
+    stands. (``fx.idle`` sets every entry three days old, so the 600 s stamp
+    below is inside the idle window and outside the gate's.)
+    """
+    wt, nested = _nested_repo_worktree(fx, "stale")
+    fx.idle(wt)
+    stamp = time.time() - 600.0
+    os.utime(nested / ".git" / "objects", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert _WALK_RECENT_MARKER in first.reason, first.reason
+    assert _nested_git_writes(first, wt) is None, "no fresh path is no evidence"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "recent", _why(item, wt)
+
+
+def test_a_late_write_in_a_nested_repos_git_metadata_is_still_absorbed(fx: Fx) -> None:
+    """PROBE4: the one flake this retry exists for is still handled.
+
+    Run 42535944532 dumped exactly one fresh path, ``<nested>/.git/objects`` at
+    0.0 s, written after ``fx.idle`` had back-dated the tree by something outside
+    this module. This drives that shape: the plan reads `recent` on the walk
+    branch, the gate finds no evidence against the race, and the re-age lets it
+    pass. Reddening here means the gate got too narrow and the flake is back.
+    """
+    wt, nested = _nested_repo_worktree(fx, "late")
+    fx.idle(wt)
+    stamp = time.time()
+    os.utime(nested / ".git" / "objects", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert _WALK_RECENT_MARKER in first.reason, first.reason
+    assert _nested_git_writes(first, wt), "the nested-metadata shape must pass the gate"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "ignored-content", _why(item, wt)
+
+
+def test_the_retry_gate_is_keyed_on_the_product_reason(fx: Fx) -> None:
+    """The marker above is pinned to ``disk_pressure.py``, and it is exclusive.
+
+    Keying a gate on a human reason string couples it to product wording: a
+    reworded reason would silently disable the retry, so the marker is asserted
+    against the source. And a plan that did not fail at all must fail the gate,
+    so the retry can never ride a bare marker match into a re-plan.
+    """
+    source = (REPO_ROOT / "local_operator" / "disk_pressure.py").read_text()
+    assert _WALK_RECENT_MARKER in source, (
+        "the tree-walk branch of the worktree idle guard was reworded; re-key "
+        "_nested_git_writes (and the comment above it) to the new wording"
+    )
+    wt = fx.worktree("passing")
+    fx.idle(wt)
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "reclaim", item.reason
+    assert _nested_git_writes(item, wt) is None
 
 
 # -- reclaimable cases -------------------------------------------------------
