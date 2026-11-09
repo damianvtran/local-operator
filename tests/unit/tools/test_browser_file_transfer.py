@@ -570,21 +570,20 @@ def test_two_refusals_joined_by_the_host_keep_one_prefix_and_no_mark_in_the_row(
     assert "refused:" not in rows[0]["reason"]
 
 
-def test_a_no_op_with_no_reason_keeps_todays_answer_exactly() -> None:
-    """State (c) with the host saying nothing: the answer must not have moved.
-
-    Pinned byte for byte because it is the only one of the three states the fix
-    was NOT allowed to touch, and "the reason is absent" has to keep meaning "the
-    host told us nothing" rather than becoming a third refusal shape.
-    """
+def test_a_no_op_with_no_reason_advises_arming_before_the_final_click() -> None:
+    """Missing host guidance must not suggest replaying a one-time mutation."""
     host = FakeHost(methods=("download",), result={"files": [], "armed": True, "reason": ""})
     result = _download(host)
     assert result.is_error
-    assert result.text == (
-        "no download started within 120 s. If the page needs a click first, "
-        "call 'click' on its Download control and retry with selector=..., or the "
-        "file may be behind a login — ask the user to sign in, then retry."
-    )
+    assert result.text.startswith("no download started within 120 s.")
+    assert "download(selector=<final confirm button>)" in result.text
+    assert "before clicking" in result.text
+    assert "future download event" in result.text
+    assert "already dispatched or cancelled" in result.text
+    assert "does not prove" in result.text
+    assert "server mutation" in result.text
+    assert "check the provider-side effect before repeating" in result.text
+    assert "call 'click'" not in result.text
     rows = _download_rows()
     assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
 

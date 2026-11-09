@@ -27537,9 +27537,16 @@ async def _browser_download(
         return _error(
             tool_call_id,
             "browser",
-            f"no download started within {wait:g} s. If the page needs a click first, "
-            "call 'click' on its Download control and retry with selector=..., or the "
-            "file may be behind a login — ask the user to sign in, then retry.",
+            # An empty capture is not proof a one-time provider operation failed.
+            # Keep the fallback as safe as the host's hint: arm before the click,
+            # and never encourage replaying a mutation solely to recover its file.
+            f"no download started within {wait:g} s. For a click-triggered download, "
+            "use download(selector=<final confirm button>) to arm capture before clicking. "
+            "Without a selector, capture only waits for a future download event; "
+            "it cannot recover a download already dispatched or cancelled. "
+            "This timeout does not prove the click handler failed or a server mutation "
+            "did not happen; check the provider-side effect before repeating a Generate key, "
+            "create or export operation.",
         )
 
     kept: list[dict[str, Any]] = []
