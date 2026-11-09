@@ -41,20 +41,28 @@ deferred tool and implements it as a sub-request carrying `web_search_20250305`
 (400, nothing forwarded) any `web_search*` tool, so a codex config regression
 fails at $0 instead of being silently stripped.
 
-**Adapter finding: a refusal costs codex-best the trial (S11, docs only).** After
+**Adapter finding: a refusal no longer costs codex-best the trial (S11 finding; fixed in the meter, S12).** After
 the agent refuses, Codex's adapter can re-send the conversation ending on an
 assistant turn, and the provider rejects that outright: HTTP 400
 `invalid_request_error`, "This model does not support assistant message
 prefilling. The conversation must end with a user message.", `usage: {}`, no
 generation. Measured on the DEV pilot (`PILOT-dd0cb631.md`, attempt 2), one
-refusal became a **dead trial** — the agent process exits on the 400 — so the
-headline run must either avoid this path or account for it explicitly, and the
-results must describe it as **harness behaviour, not a model-quality signal**.
-The trial still ends as a graded native failure (Harbor's reward stands), and the
-rejected call costs **$0**: the meter settles a 4xx that states no bill at zero
-as a rejected request (`settled_no_charge`; [ADAPTERS.md](../ADAPTERS.md)), so the
-trial is dead but its cost is not in doubt. The adapter's behaviour is unchanged
-here — this note records the finding, it does not fix it.
+refusal became a **dead trial** — the agent process exits on the 400 — while the
+other arms kept going, so this arm's quality ceiling was truncated by its own
+retry shape and, because refusal rate is task-dependent, the penalty landed
+unevenly across the task set. The rejected call costs **$0** (the meter settles a
+validation rejection at zero as `settled_no_charge`; [ADAPTERS.md](../ADAPTERS.md)),
+but a dead trial is not a cost question.
+
+The **fix is in the shared shaping path, not in any adapter**: `meter_proxy._patch_body`
+appends one minimal user continuation turn (`"Continue."`) whenever the outgoing
+`messages` would end on an assistant turn, and records `prefill_continuation:
+true` on the row. Every arm's `v1/messages` body passes through that function, so
+the rule is identical for all seven harnesses and no arm gets a branch of its
+own; tools, prompts, system blocks, prior turns and cache markers are untouched.
+Agent behaviour is unchanged — a refusal is still a graded native failure with
+Harbor's reward standing, and the results must still describe it as **model
+behaviour, not a harness artefact**.
 
 Read-only **byte-level** audit (R15): every file under each pinned toolchain
 root, `node_modules` and single-file binaries included, no ignore rules, for

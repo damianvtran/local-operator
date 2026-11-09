@@ -188,34 +188,60 @@ states. The Local Operator classifier channel is unchanged:
 `lop_edge.py` settles it only from the reviewed top-level billed `cost` of a
 classifier response.
 
-**A rejected request costs $0, it is not an unknown charge (S11).** A provider
-that refuses to infer on a request answers 4xx and states no bill: the DEV pilot
-measured HTTP 400 `invalid_request_error` ("This model does not support
-assistant message prefilling") with `usage: {}` in 0.20 s — no generation ran, so
-no charge exists. The meter settles such a response at **exactly $0**, records it
-as `settled_no_charge: true` with `upstream_status` and the provider's own
+**A request the provider rejects at validation costs $0, it is not an unknown
+charge (S11, narrowed in S12).** A provider that refuses to infer on a request
+answers 4xx and states no bill: the DEV pilot measured HTTP 400
+`invalid_request_error` ("This model does not support assistant message
+prefilling") with `usage: {}` in 0.20 s — no generation ran, so no charge exists.
+The meter settles such a response at **exactly $0**, records it as
+`settled_no_charge: true` with `upstream_status` and the provider's own
 `upstream_error_type` (and `upstream_error_code` where it sends one) copied
 verbatim, and does **not** latch the ledger: the attempt is metered at $0 and the
-trial continues. Both money readers (`runner_v2.stated_amount`,
-`coding.driver.row_cost`) read that marker as a measured zero and refuse a row
-that claims it while stating a bill basis, naming a non-4xx status or omitting
-the upstream error.
+trial continues. The three money readers (`runner_v2.stated_amount`,
+`coding.driver.row_cost`, and the publishing rig's `coding/billing.stated_amount`)
+read that marker as a measured zero and refuse a row that claims it while stating
+a bill basis, naming a status outside the settled set or omitting the upstream
+error.
+
+**The settled set is 400 and 422, and nothing wider (S12, R19 M1).** S11 accepted
+any 4xx carrying a typed error body, which also settled a 401
+`authentication_error`, a 402 `billing_error` and a 403 `permission_error` at $0
+*without* latching, and a 429 at $0 *and* as a rerun void. Those are the
+campaign's environment failing, not a response to what a harness sent: a key
+revoked or a credit balance exhausted mid-run would have driven every remaining
+trial to a $0 ledger published as `cost_complete: true`, where pre-S11 the first
+one latched it. So 401, 402, 403 and 429 are infrastructure — they latch and
+void for one rerun exactly as a 5xx does, and never settle. Only a 400 or a 422,
+which is a request the provider rejected at validation, earns the marker;
+everything else in the 4xx family keeps the pre-S11 latch.
 
 The rule is shaped by the *response*, never by a message string or a harness, so
 every arm gets it identically. Its bounds, all of which keep the unknown-spend
 latch or the rerun void:
 
 * any 2xx that states no cost and no priceable token counts (S10's rule, above);
-* any 4xx that **does** state a cost or token counts — it is priced, not zeroed
-  (a stated cost settles as stated; counts settle from their derivation);
-* a 4xx whose usage carries an `unpriced_usage` field, or a token count the
+* any 400/422 that **does** state a cost or token counts — it is priced, not
+  zeroed (a stated cost settles as stated; counts settle from their derivation);
+* a 401, 402, 403 or 429: infrastructure, so the attempt is voided for one rerun
+  and latched, and it never settles (S12; pre-S11 behaviour restored);
+* a 400/422 whose usage carries an `unpriced_usage` field, or a token count the
   frozen card cannot price (e.g. a 1-hour cache write): the bill is not whole;
 * a 5xx (including 529): infrastructure, so the attempt is voided for one rerun
   and does not settle;
+* any other 4xx (404, 413, …): neither a validation rejection nor an
+  infrastructure class, so it keeps the latch;
 * a response whose error body the meter cannot read — not JSON, no `error`
   object, or no error `type` to copy — is not evidence of a zero bill;
 * a 4xx delivered as an event stream carries no JSON body for the row to copy,
   so it keeps the latch.
+
+The rule is applied in `write_row`, which this meter reaches only for a
+`POST …/v1/messages` (every other path is refused before any dispatch), so no
+discovery-route row is produced here at all (S12, R19 N2: the 37 typed 404 rows
+for `api/tags`, `models`, `props`, `version`, `api/show` and `api/v1/models` in
+`logs/requests.jsonl` carry `run_id: "probe"` and none of the fields `write_row`
+writes — they were logged by a probe, not by a proxied request, and under this
+rule a 404 latches rather than settling).
 
 Publication-wise this is honest by construction: a rejected request contributes
 **$0** to its trial's settled cost, and the trial's quality outcome is whatever
@@ -223,6 +249,21 @@ native grading says — a model that refuses, or a harness whose adapter re-send
 what the provider will not accept, is a graded failure, not an infrastructure
 void and not free work. The pilot's codex-best cell is that shape (see
 [coding/README.md](coding/README.md)).
+
+**A request is never forwarded with its conversation ending on an assistant turn
+(S12).** After a refusal, Codex's adapter re-sent the transcript ending on the
+assistant turn and the provider rejected the whole request — the 400 above — so
+that trial died while the other arms went on and recovered. That truncated one
+arm's quality ceiling by its retry shape, and because refusal rate is
+task-dependent the penalty landed unevenly across the task set; identical
+treatment across arms cannot absorb an asymmetry that is itself task-dependent.
+`_patch_body` — the shaping path every arm's `v1/messages` body passes through —
+therefore appends one minimal user continuation turn (`PREFILL_CONTINUATION`,
+the same string for every harness: `"Continue."`) whenever the outgoing
+`messages` would end on an assistant turn, and records `prefill_continuation:
+true` on the row. Nothing else is shaped: tools, system blocks, prior turns, the
+model pin and the cache markers are untouched, and no arm has a branch of its
+own. A body already ending on a user turn is forwarded byte-for-byte unchanged.
 
 Every configuration error fails at startup (one guard per meter/edge process),
 never per request. A ledger written before `models`/`voids` existed reads as

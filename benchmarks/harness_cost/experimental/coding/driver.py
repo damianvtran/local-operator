@@ -904,16 +904,21 @@ def row_cost(row):
 def rejected_cost(row):
     """A rejected request's billed USD: exactly 0.0, or ``ValueError``.
 
-    WHY (S11): the meter settles a 4xx that rejected the request before any
-    generation at $0 and marks the row ``settled_no_charge`` with the status and
-    the provider's error type. Such an attempt is a measured $0 (the pilot's
-    codex-best cell), never an unknown charge and never a void. The marker is
-    billing evidence, not a waiver: a row that also states a bill basis, names a
-    non-4xx status or does not name its upstream error is refused.
+    WHY (S11): the meter settles a request the provider rejected at validation,
+    before any generation, at $0 and marks the row ``settled_no_charge`` with the
+    status and the provider's error type. Such an attempt is a measured $0 (the
+    pilot's codex-best cell), never an unknown charge and never a void. The
+    marker is billing evidence, not a waiver: a row that also states a bill
+    basis, names a status outside ``REJECTION_SETTLE_STATUSES`` (S12: 400 and
+    422 only) or does not name its upstream error is refused.
     """
     status = row.get("upstream_status")
-    if isinstance(status, bool) or not isinstance(status, int) or not 400 <= status < 500:
-        raise ValueError("rejected row does not name a 4xx status")
+    if (
+        isinstance(status, bool)
+        or not isinstance(status, int)
+        or status not in REJECTION_SETTLE_STATUSES
+    ):
+        raise ValueError("rejected row does not name a validation-rejection status")
     kind = row.get("upstream_error_type")
     if not isinstance(kind, str) or not kind:
         raise ValueError("rejected row does not name its upstream error")
@@ -979,6 +984,11 @@ BILLING_TOKEN_FIELDS = (
 # Usage keys that each name a bill basis: a rejected row carries none of them
 # (S11), so their presence is a claim this lane must price, not read as zero.
 REJECTION_BILL_FIELDS = BILLING_TOKEN_FIELDS + ("cost", "cost_details", "cache_creation")
+# The only statuses the meter settles at $0 as a bill-free rejection (S12, R19
+# M1): 400 and 422, a request the provider rejected at validation and did not
+# bill. A row claiming the marker with anything wider -- 401/402/403/429
+# infrastructure or any other 4xx -- is not evidence of a zero bill.
+REJECTION_SETTLE_STATUSES = frozenset({400, 422})
 
 
 # One disclosed note per image this lane could not remove (S10).

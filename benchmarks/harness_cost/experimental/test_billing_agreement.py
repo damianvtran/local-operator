@@ -79,6 +79,26 @@ def stated(cost: float = 0.075) -> dict:
     }
 
 
+def rejected(status: int = 400, kind: str = "invalid_request_error") -> dict:
+    """A row the meter settled at $0 as a request the provider rejected (S11).
+
+    The DEV pilot's shape: the provider refused to infer on what the adapter
+    sent, stated no bill in ``usage: {}``, and nothing was generated. The meter
+    writes ``settled_no_charge`` beside the status and the provider's own error
+    type, and every reader must publish that as a measured $0 rather than as an
+    unknown cost -- one rejected attempt must never blank a cost cell.
+    """
+    return {
+        "run_id": "coding__codex__tasktest__r61",
+        "path": "v1/messages",
+        "status": status,
+        "settled_no_charge": True,
+        "upstream_status": status,
+        "upstream_error_type": kind,
+        "usage": {},
+    }
+
+
 # A zero-count term is the shape where a bad rate hides: it contributes nothing
 # to the arithmetic, so only a rule that inspects the rate itself refuses it.
 UNCOUNTED = {**TOKENS, "output_tokens": 0}
@@ -104,6 +124,16 @@ def cases() -> tuple[tuple[str, dict, float | None], ...]:
         ("nan_rate_on_an_uncounted_term",
          settled(usd=UNCOUNTED_USD, rates={**RATES, "output_tokens": math.nan},
                  tokens=UNCOUNTED), None),
+        # S11/S12: a request the provider rejected at validation (400 or 422,
+        # nothing wider) and did not bill is a measured $0 in every lane.
+        ("settled_no_charge", rejected(), 0.0),
+        ("settled_no_charge_unprocessable", rejected(422, "invalid_request_error"), 0.0),
+        # S12 (R19 M1): 401/402/403/429 are infrastructure, never a $0 settle, so
+        # a row claiming the marker with one of those statuses is a lie and stays
+        # unknown in all three lanes rather than zeroing the cell.
+        ("rejected_by_authentication", rejected(401, "authentication_error"), None),
+        ("rejected_by_billing", rejected(402, "billing_error"), None),
+        ("rejected_by_rate_limit", rejected(429, "rate_limit_error"), None),
     )
 
 

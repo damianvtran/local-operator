@@ -392,6 +392,116 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("settled_no_charge",
                                  json.loads(meter.LOG.read_text().splitlines()[-1]))
 
+    async def test_only_a_validation_rejection_settles_at_zero(self):
+        # S12 (R19 M1): the $0 settle belongs to a request the provider REJECTED
+        # AT VALIDATION and did not bill, which is 400 or 422 -- nothing wider.
+        # S11's predicate was "any 4xx with a typed body", and that let a
+        # revoked key (401 authentication_error), an exhausted balance (402
+        # billing_error) or a lost permission (403 permission_error) settle at
+        # $0 without latching: a credential or credit failure mid-run could then
+        # drive every remaining trial to a $0 ledger reported as complete, where
+        # pre-S11 the first one latched the campaign. Those three plus 429 are
+        # the infrastructure classes of PREREGISTRATION §9.2 -- voided for one
+        # rerun and latched exactly as before S11, never published as a
+        # measured zero. A typed error body is not evidence of a zero bill here.
+        def reset():
+            Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
+
+        for status in (400, 422):
+            with self.subTest(settles=status):
+                reset()
+                self.status = status
+                self.response = {"type": "error",
+                                 "error": {"type": "invalid_request_error"},
+                                 "usage": {}}
+                await self.post()
+                ledger = self.ledger()
+                self.assertEqual(ledger["usd"], 0)
+                self.assertEqual(ledger["trials"]["trial"], 0)
+                self.assertFalse(ledger["blocked"])
+                self.assertNotIn("trial", ledger["voids"])
+                row = json.loads(meter.LOG.read_text().splitlines()[-1])
+                self.assertTrue(row["settled_no_charge"])
+                self.assertEqual(row["upstream_status"], status)
+                # A zero is not a latch: the next trial is admitted.
+                self.status = 200
+                self.response = {"model": "anthropic/claude-sonnet-5.5",
+                                 "usage": {"cost": 0.01}}
+                self.assertEqual((await self.post("next")).status_code, 200)
+
+        for status, kind in ((401, "authentication_error"), (402, "billing_error"),
+                             (403, "permission_error"), (429, "rate_limit_error")):
+            with self.subTest(latches=status):
+                reset()
+                self.status = status
+                self.response = {"type": "error", "error": {"type": kind}, "usage": {}}
+                await self.post()
+                ledger = self.ledger()
+                # Infrastructure: not a charge, not a measured zero, and the
+                # campaign stops rather than reporting an unmeasured complete.
+                self.assertEqual(ledger["usd"], 0)
+                self.assertEqual(ledger["trials"].get("trial", 0), 0)
+                self.assertTrue(ledger["blocked"])
+                reasons = " ".join(ledger["voids"]["trial"])
+                self.assertIn("unbilled", reasons)
+                self.assertIn(f"provider status {status}", reasons)
+                row = json.loads(meter.LOG.read_text().splitlines()[-1])
+                self.assertNotIn("settled_no_charge", row)
+                self.assertNotIn("upstream_status", row)
+
+        # A 422 that does state token counts is priced from them, never zeroed.
+        reset()
+        self.status = 422
+        self.response = {"type": "error", "error": {"type": "invalid_request_error"},
+                         "usage": {"input_tokens": 10, "output_tokens": 4}}
+        await self.post()
+        self.assertGreater(self.ledger()["usd"], 0)
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["settled_from_tokens"])
+        self.assertNotIn("settled_no_charge", row)
+
+    async def test_a_conversation_ending_on_an_assistant_turn_gets_one_shared_continuation(self):
+        # S12 (R19 fairness): after a refusal, Codex's adapter re-sends the
+        # conversation ending on an assistant turn and the provider rejects the
+        # whole request -- 400 "This model does not support assistant message
+        # prefilling", usage {} -- which kills that trial while other arms keep
+        # going. The arm's quality ceiling was therefore truncated by its own
+        # retry shape, and because refusal rate is task-dependent the penalty
+        # lands unevenly across the task set, which is the one thing identical
+        # treatment cannot absorb. The shared shaping path (every arm's Messages
+        # call passes through it) appends ONE minimal user continuation whenever
+        # the outgoing messages end on an assistant turn: same turn for every
+        # arm, no harness-specific branch, no change to tools, prompts or agent
+        # behaviour.
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.001}}
+        conversation = [{"role": "user", "content": "do the task"},
+                        {"role": "assistant", "content": "I will not do that."}]
+        for arm, extra in (
+            # An arm that sends a plain string system prompt and no tools.
+            ("plain", {}),
+            # An arm that reaches the meter through a Responses->Messages
+            # translator: list-shaped system blocks plus a tool list.
+            ("translated", {"system": [{"type": "text", "text": "be terse"}],
+                            "tools": [{"name": "shell",
+                                       "input_schema": {"type": "object"}}]}),
+        ):
+            with self.subTest(arm=arm):
+                sent_messages = [dict(m) for m in conversation]
+                self.assertEqual(
+                    (await self.post(**extra, messages=sent_messages)).status_code, 200)
+                sent = json.loads(self.calls[-1].content)
+                self.assertEqual(sent["messages"][:-1], sent_messages)
+                self.assertEqual(sent["messages"][-1],
+                                 {"role": "user", "content": meter.PREFILL_CONTINUATION})
+                self.assertTrue(json.loads(meter.LOG.read_text().splitlines()[-1])
+                                ["prefill_continuation"])
+        # A body that already ends on a user turn is forwarded untouched.
+        self.assertEqual((await self.post()).status_code, 200)
+        sent = json.loads(self.calls[-1].content)
+        self.assertEqual(sent["messages"], self.body["messages"])
+        self.assertNotIn("prefill_continuation",
+                         json.loads(meter.LOG.read_text().splitlines()[-1]))
+
     async def test_provider_429_and_5xx_void_for_rerun(self):
         for status in (429, 500, 503, 529):
             with self.subTest(status=status):

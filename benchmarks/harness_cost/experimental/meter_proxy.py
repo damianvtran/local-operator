@@ -58,6 +58,27 @@ BODIES = Path(os.environ.get("BENCH_BODIES", "bodies"))
 CAPTURE_BODIES = os.environ.get("BENCH_CAPTURE_BODIES") == "1"
 IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 INJECT_IDENTITY = False
+# Statuses that name the campaign's environment rather than this attempt: the
+# provider's overload/rate limit, and the credential/credit rejections (a revoked
+# key, an exhausted balance, a lost permission). PREREGISTRATION §9.2 lists
+# provider 5xx/429 as external infrastructure; a 401/402/403 is the same class
+# -- no harness behaviour can produce it -- so a mid-run key or credit failure
+# must stop the campaign, not settle $0 and admit the next trial (S12/R19 M1).
+INFRASTRUCTURE_STATUSES = frozenset({401, 402, 403, 429})
+# The only statuses that settle at $0 as a bill-free rejection (S12/R19 M1): a
+# request the provider REJECTED AT VALIDATION and did not bill. 400 covers the
+# measured pilot shape (an adapter re-sending a conversation the model cannot
+# infer on) and 422 the semantically-equivalent unprocessable entity. Nothing
+# wider: every other 4xx is either infrastructure (above) or a priced response.
+REJECTION_SETTLE_STATUSES = frozenset({400, 422})
+# The turn appended when a conversation would end on an assistant message (S12,
+# R19 fairness finding). The provider refuses to continue from an assistant
+# prefill ("This model does not support assistant message prefilling"), and an
+# adapter that re-sends one kills its trial while other arms recover -- which
+# truncates that arm's quality ceiling unevenly across the task set. One minimal
+# user turn is the closest stand-in for the prefill the provider will not take;
+# it is the same string for every arm, so no arm is shaped differently.
+PREFILL_CONTINUATION = "Continue."
 _seen_runs: set[str] = set()
 client = httpx.AsyncClient(timeout=httpx.Timeout(600, connect=30))
 
@@ -117,11 +138,15 @@ class CostCapReached(ValueError):
 def _provider_fault(status: int) -> bool:
     """Statuses that are the provider's fault, not the harness's (§9.2).
 
-    Only overload/rate-limit/server errors (429, 5xx incl. Anthropic's 529)
-    are external infrastructure. Any other 4xx (e.g. "prompt is too long") is
-    a response to what the harness sent: its own behaviour, counted as is.
+    Overload/rate-limit/server errors (429, 5xx incl. Anthropic's 529) are
+    external infrastructure, and so are the credential/credit rejections
+    (401 authentication_error, 402 billing_error, 403 permission_error): a
+    revoked key, an exhausted balance or a lost permission is the campaign's
+    environment failing, never a response to what the harness sent. Any other
+    4xx (e.g. "prompt is too long") answers the request itself and is counted
+    as the harness's own behaviour.
     """
-    return status == 429 or status >= 500
+    return status in INFRASTRUCTURE_STATUSES or status >= 500
 
 
 def _per_million(pricing: dict[str, Any], key: str, *, required: bool) -> float:
@@ -618,6 +643,21 @@ def or_model(model: str | None) -> str | None:
     return f"anthropic/{m.group(1)}-{m.group(2)}" if m else f"anthropic/{model}"
 
 
+def assistant_ending_messages(messages: object) -> bool:
+    """Whether an outgoing ``messages`` list ends on an assistant turn.
+
+    WHY (S12, R19 fairness finding): a provider will not continue from an
+    assistant prefill, so this shape is the one that has to be finished with a
+    user turn. Read defensively: anything that is not a list ending in a dict
+    whose ``role`` is ``assistant`` is left alone, so a shape this meter does not
+    recognise is forwarded by its own harness's design, never shaped on a guess.
+    """
+    if not isinstance(messages, list) or not messages:
+        return False
+    last = messages[-1]
+    return isinstance(last, dict) and last.get("role") == "assistant"
+
+
 def _patch_body(body: WireObject) -> dict[str, object]:
     meta: dict[str, object] = {"requested_model": body.get("model")}
     # Model pin is OFF by default: side-calls a harness deliberately routes to
@@ -652,6 +692,20 @@ def _patch_body(body: WireObject) -> dict[str, object]:
     meta["n_messages"] = len(body.get("messages") or [])
     meta["tools_bytes"] = len(json.dumps(body.get("tools") or []))
     meta["system_bytes"] = len(json.dumps(body.get("system") or ""))
+    # A conversation cannot continue from an assistant prefill: the provider
+    # answers 400 "This model does not support assistant message prefilling".
+    # An adapter that re-sends one after a refusal therefore kills its own trial
+    # while the other arms keep going, truncating that arm's quality ceiling and
+    # landing the penalty unevenly across the task set (S12, R19 fairness
+    # finding). Appending one minimal user turn keeps every arm's retry alive and
+    # is the same turn for all of them -- this function shapes EVERY arm's
+    # Messages body, so there is no harness-specific branch here. Nothing else
+    # about the request changes: tools, system and prior turns are untouched.
+    if assistant_ending_messages(body.get("messages")):
+        continuation: WireObject = {"role": "user", "content": PREFILL_CONTINUATION}
+        body["messages"] = [*(body.get("messages") or []), continuation]
+        meta["prefill_continuation"] = True
+        meta["n_messages"] += 1
     return meta
 
 
@@ -808,8 +862,17 @@ def no_charge_rejection(
     Publication-wise the attempt contributes $0 to its trial's cost, and its
     quality outcome is whatever native grading says -- a refusal is a graded
     failure, not an infrastructure void (PREREGISTRATION §9.2, ADAPTERS.md).
+
+    The status set is ``REJECTION_SETTLE_STATUSES`` (400, 422) and nothing
+    wider (S12, R19 M1). S11 accepted any 4xx with a typed body, which settled a
+    401 authentication_error, 402 billing_error or 403 permission_error at $0
+    *without* latching, so a key revoked or a balance exhausted mid-run could
+    have driven every remaining trial to a $0 ledger published as complete. Those
+    three, and 429, are ``INFRASTRUCTURE_STATUSES``: they latch and void as they
+    did before S11 and never settle. A 400/422 that states a cost or token counts
+    is still priced, never zeroed.
     """
-    if not 400 <= status < 500 or unpriced:
+    if status not in REJECTION_SETTLE_STATUSES or unpriced:
         return None
     if not isinstance(usage, dict) or any(field in usage for field in REJECTION_BILL_FIELDS):
         return None
