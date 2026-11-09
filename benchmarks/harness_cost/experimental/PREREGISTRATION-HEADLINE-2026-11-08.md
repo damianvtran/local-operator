@@ -2,15 +2,18 @@
 
 **Version:** `HEADLINE-2026-11-08` — a NEW versioned document. It does not rewrite
 `PREREGISTRATION.md`; the amendment audit trail R20 asked for is preserved in
-[Appendix A](#appendix-a--retained-prior-text-superseded-92-sentence).
+[Appendix A](#appendix-a--retained-prior-text-superseded-92-and-72-text). The four R20
+publication minors were closed after this freeze and before any headline trial, without touching a
+metered byte — [§13](#13-amendment-at-s13-2026-11-08-before-any-headline-trial-the-four-r20-publication-minors).
 
-**Status:** frozen for **planning and admission only**. No headline trial has run at this
-version. Every number below is derived from a retained artifact named beside it; none is
-typed from memory.
+**Status:** frozen for **planning and admission only**, amended at §13 (S13, 2026-11-08). No
+headline trial has run at this version. Every number below is derived from a retained artifact
+named beside it; none is typed from memory.
 
 | Item | Value | Source |
 |---|---|---|
 | Bench source head | `a3f8f1f88e7dad179d09a6ebce65f5d98494df28` on `bench/harness-cost-lop-edge` | `git rev-parse` in the lane worktree |
+| Amended after freeze | S13 (§13), the child of `3f6b257854d` | `publication.py`, `test_kit.py` and docs only; no `CONTAINER_CLOSURE` member touched, so the S4 record and preflight HARDLOCK still bind |
 | Reviews | clean and terminal through R20 | `radient-dev/LOP-EDGE-REVIEW-R20.md` |
 | Frozen 30-task subset | `97aac6092add53b8c65232f69e0d373eb94fb39c072b63eadef752707c020459` | `sha256 subset.json` (`complete: true`, `target_count: 30`) |
 | Oracle sweep record bound | `428dd2c7322455ea2d6e15d0176d9d5f433548d3241c31b2391b15393fc096f7` | `sha256 container-s4/ORACLE-SWEEP.json`, `source_commit 255f6035…` |
@@ -211,9 +214,13 @@ and nothing wider.
 
 **Infrastructure statuses 401, 402, 403 and 429 never settle at $0.** A revoked key, an
 exhausted balance, a lost permission and a provider rate limit are the campaign's environment
-failing, so all four latch **and** void for one rerun exactly as a 5xx: a mid-run credential or
-credit failure must stop the campaign rather than let it finish with an unmeasured `$0` ledger
-reported as complete. The bounds keep the pre-S11 latch: a 2xx without a priceable bill, a
+failing, so with no stated bill all four latch **and** void for one rerun exactly as a 5xx: a
+mid-run credential or credit failure must stop the campaign rather than let it finish with an
+unmeasured `$0` ledger reported as complete. One that **does** state a cost or token counts is
+priced at that amount and voided for one rerun **without** latching (S13 correction of R20
+MINOR 2; the superseded wording is retained in Appendix A): the classification decides the
+void, the amount decides the latch, so a bill the meter can read never blocks the campaign. The
+bounds keep the pre-S11 latch: a 2xx without a priceable bill, a
 400/422 that *does* state a cost or token counts, any unpriceable usage field, a 5xx, any other
 4xx (404, 413, …), an unreadable error body, and a 4xx delivered as a stream.
 
@@ -301,7 +308,10 @@ cell.
 
 R20 recorded four publication minors and left them open. Three involve reviewed source or
 published text that this lease must not change; they are disclosed here so a public reviewer
-sees them rather than discovering them:
+sees them rather than discovering them. **Amendment at S13 (2026-11-08, before any headline
+trial): items 1–3 are fixed in reviewed source and item 4's retention is complete — see §13,
+which supersedes this section as a statement of current state. The text below is retained as
+the freeze-time record.**
 
 1. **Discovery-row attribution is wrong.** `ADAPTERS.md` (and `SLICE-S9.md` §S12 deviation 1)
    say the 37 typed-404 discovery rows "carry `run_id: "probe"`". Measured over
@@ -371,7 +381,7 @@ that differ between the archived `dd0cb631` record and this head are exactly `..
 | No DEVELOPMENT task in the sample | **PASS** | `set(prereg["tasks"]) ∩ {git-leak-recovery, vulnerable-secret} = ∅`; the 28 identify exactly `subset.tasks − reserved_development_tasks` (checked true) |
 | Prices match the frozen card | **PASS** | prereg `input_usd_per_m 2.0`, `output_usd_per_m 10.0` = live card `prompt 2.0`, `completion 10.0`, cache write 2.5, cache read 0.1 |
 | Caps match `/health` | **PASS** | prereg `trial 5.0 / total 100.0` = meter `/health` `{"total_usd":100.0,"trial_usd":5.0}` = the CLI args preflight compared |
-| Publication allowlist covers the results schema | **FAIL — disclosed** | `publication.py` publishes `n_messages` but not `prefill_continuation` (R20 MINOR 3, §9.3). Not fixed here: it is a reviewed-source change |
+| Publication allowlist covers the results schema | **PASS at S13** | `publication.py` publishes `n_messages` beside `prefill_continuation` and the other measurement-provenance fields (§13, R20 MINOR 3). At freeze this row read **FAIL — disclosed** |
 | Per-call context capture is on | **PASS** | every meter row carries `usage.{input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cost}` (sampled from `container-s4/runs-a3f8f1f8/lop/meter.jsonl`) |
 | Survivors and flags recorded | **PASS** | S4 rows `gold sentinel invisible before inference` (5 digests, 2 planted, `matched []`), `token-leak scan` (0 artifacts); every trial record carries `post_agent_flags`; every requalify row carries `survivors` (keep-alive `94c2168f…`, recorded never killed) |
 | Egress rows complete | **PASS** | all 30 sweep rows `egress_rows_complete_with_end: true`; S4 rows `every package-egress connection has exactly one row with an end reason` PASS for LoP/omp/claude-code |
@@ -413,14 +423,47 @@ off this freeze, and passes `--execute`. Env it sets for the meter (the single b
 * **Publish from the rig tree that holds the S12 reader:** `~/workspace/harness-cost-bench/coding/`
   (`billing.py`), or rejections republish as unknown spend (R20, §7.2 above).
 
-## Appendix A — retained prior text (superseded §9.2 sentence)
+## 13. Amendment at S13 (2026-11-08, before any headline trial): the four R20 publication minors
+
+R20 left four MINOR documentation/publication items open. They are fixed in one commit on
+`bench/harness-cost-lop-edge` — `fix(bench): publish what the meter measured, and correct three
+false details`, the child of `3f6b257854d` — which changes **no metered byte**: no member of
+`coding/driver.py`'s `CONTAINER_CLOSURE` is touched (closure diff empty), so the zero-paid
+container S4 record and the preflight HARDLOCK stay valid for this head. The sample (§1), the
+caps (§6), the measurement conditions (§7–§8), the metrics and the statistics are unchanged.
+
+1. **A published row can now show how it was measured** (MINOR 3). `publication.REQUEST_FIELDS`
+   and `REQUEST_SCHEMA` gain `prefill_continuation`, `settled_from_tokens`, `settled_no_charge`,
+   `upstream_status`, `upstream_error_type`, `upstream_error_code`, `cost_derivation` (a closed
+   `tokens` / `rates_usd_per_m` / `usd` map) and `incomplete`, so the published `n_messages` can
+   be read for what it counts and a derived charge can be recomputed from the record. Only
+   booleans, one status, the provider's own error type/code and numeric maps are published — no
+   prompt, message, body or error text — and a field outside the allowlist is still refused
+   (`test_kit.test_measurement_provenance_fields_publish` asserts both directions).
+2. **The discovery-row attribution is corrected** (MINOR 1). 30 of the 37 typed-404 rows do not
+   carry `run_id: "probe"`; the measured attribution is in §9.1. `ADAPTERS.md` now states the
+   field-shape evidence — no `write_row` field on any of the 37, across five run ids — instead of
+   the false attribution, and the same sentence's path list now matches the seven paths measured.
+3. **The latch sentence is corrected** (MINOR 2). An infrastructure status that *states* a cost or
+   token counts is priced as stated, voided for one rerun and **not** latched. §7.2,
+   `ADAPTERS.md` and `PREREGISTRATION.md` §9.2 now say so, and §7.2's superseded wording is
+   retained verbatim in Appendix A.
+4. **Retention is complete** (MINOR 4). Appendix A quotes the superseded §9.2 and §7.2 sentences
+   verbatim with the revision, reason and timestamp of each, and `PREREGISTRATION.md`'s
+   front-matter note carries the same retention in the document whose own rule demands it.
+
+Why amend a frozen document at all: a disclosure that has since become false is a false public
+statement, and §9 read as current state would publish one. Nothing here is a post-outcome change —
+no headline trial has run at any version.
+
+## Appendix A — retained prior text (superseded §9.2 and §7.2 text)
 
 R20 MINOR 4: `PREREGISTRATION.md` §9.2 was rewritten in place, where the document's own rule
 (`PREREGISTRATION.md:36`) requires that any amendment retain the previous version, its reason
-and its timestamp. This appendix carries the audit trail in the frozen document.
+and its timestamp. This appendix carries the audit trail in the frozen document; S13 completed it
+with the S11 and S12 wordings verbatim and with this document's own superseded §7.2 sentence.
 
-**Pre-S11 text** (as at `277d14b9adf`, before the S11 change), first sentence of the S11
-paragraph:
+**Pre-S11 text** (as at `277d14b9adf`, before the S11 change), last sentence of the paragraph:
 
 > "A response that ended before completion never settles this way: its partial usage is a floor,
 > not the charge, and it keeps the unknown-spend latch."
@@ -428,15 +471,37 @@ paragraph:
 — and, at that revision, §9.2 had **no** validation-rejection rule at all; any unbilled request
 kept the latch.
 
-**S11 amendment** (`611ac9825bc`, prospective, 2026-11-08): a request the provider rejects at
-validation — any 4xx stating no cost and no token counts, with a readable typed error body —
-settles at exactly $0 and neither voids nor blocks.
+**S11 amendment** (`611ac9825bc`, 2026-11-08T20:41-05:00, prospective), verbatim:
 
-**S12 amendment** (`a3f8f1f88e7`, prospective, 2026-11-08, before any headline data): the
-settled set is narrowed to **400 and 422 and nothing wider**; 401/402/403/429 become
+> "A request the provider **rejects outright** — a 4xx that states no cost and no token counts,
+> with a readable error body naming its own type — settles at exactly **$0**, is recorded as
+> `settled_no_charge: true` with that status and error type, and neither voids nor blocks: it
+> contributes $0 to the trial's cost and the trial's quality outcome is exactly what native
+> grading says. The bounds are the meter's, unchanged: a 2xx without a priceable bill, a 4xx that
+> does state a cost or token counts, any unpriceable usage field, a 5xx, an unreadable error body
+> and a 4xx delivered as a stream all keep the unknown-spend latch (ADAPTERS.md)."
+
+**S12 amendment** (`a3f8f1f88e7`, 2026-11-08T22:14-05:00, prospective, before any headline data):
+the settled set is narrowed to **400 and 422 and nothing wider**; 401/402/403/429 become
 infrastructure faults that latch and void exactly as a 5xx. Same amendment: one shared prefill
-continuation for an assistant-ended turn (§7.3) and the rig reader that reads the $0 marker.
+continuation for an assistant-ended turn (§7.3) and the rig reader that reads the $0 marker. Its
+superseded wording, verbatim:
 
-Reason for both, as recorded: task-dependent refusal rates would otherwise penalise one arm
-unevenly, and a mid-run credential or credit failure must stop the campaign rather than let it
-finish with an unmeasured `$0` ledger published as complete.
+> "…so all four are external infrastructure — latched and voided for one rerun exactly as a 5xx,
+> never settled at $0, because a mid-run credential or credit failure must stop the campaign
+> rather than let it finish with an unmeasured `$0` ledger reported as complete."
+
+**§7.2 superseded wording** (as frozen at `3f6b257854d`), verbatim:
+
+> "A revoked key, an exhausted balance, a lost permission and a provider rate limit are the
+> campaign's environment failing, so all four latch **and** void for one rerun exactly as a 5xx:
+> a mid-run credential or credit failure must stop the campaign rather than let it finish with an
+> unmeasured `$0` ledger reported as complete."
+
+Corrected at S13 (see §13): an infrastructure status that states a cost or token counts is priced
+at that amount and voided for one rerun **without** latching.
+
+Reason for all of them, as recorded: task-dependent refusal rates would otherwise penalise one arm
+unevenly; a mid-run credential or credit failure must stop the campaign rather than let it finish
+with an unmeasured `$0` ledger published as complete; and (S13) a bill the meter can read is not
+unknown spend, so it must not block later admissions.

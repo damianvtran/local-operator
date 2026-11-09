@@ -222,12 +222,18 @@ latch or the rerun void:
 * any 2xx that states no cost and no priceable token counts (S10's rule, above);
 * any 400/422 that **does** state a cost or token counts — it is priced, not
   zeroed (a stated cost settles as stated; counts settle from their derivation);
-* a 401, 402, 403 or 429: infrastructure, so the attempt is voided for one rerun
-  and latched, and it never settles (S12; pre-S11 behaviour restored);
+* a 401, 402, 403 or 429 **that states no bill**: infrastructure, so the attempt
+  is voided for one rerun and latched, and it never settles at $0 (S12; pre-S11
+  behaviour restored). One that **does** state a cost or token counts is priced
+  as stated and voided for one rerun, but **not** latched: the classification
+  decides the void and the amount decides the latch, because a bill the meter can
+  read is not unknown spend and blocking on it would end the campaign over a
+  charge that was measured (S13, R20 MINOR 2);
 * a 400/422 whose usage carries an `unpriced_usage` field, or a token count the
   frozen card cannot price (e.g. a 1-hour cache write): the bill is not whole;
-* a 5xx (including 529): infrastructure, so the attempt is voided for one rerun
-  and does not settle;
+* a 5xx (including 529): infrastructure, so the attempt is voided for one rerun —
+  latched like the four statuses above when it states no bill, priced at the
+  stated cost without latching when it states one it can read;
 * any other 4xx (404, 413, …): neither a validation rejection nor an
   infrastructure class, so it keeps the latch;
 * a response whose error body the meter cannot read — not JSON, no `error`
@@ -237,11 +243,14 @@ latch or the rerun void:
 
 The rule is applied in `write_row`, which this meter reaches only for a
 `POST …/v1/messages` (every other path is refused before any dispatch), so no
-discovery-route row is produced here at all (S12, R19 N2: the 37 typed 404 rows
-for `api/tags`, `models`, `props`, `version`, `api/show` and `api/v1/models` in
-`logs/requests.jsonl` carry `run_id: "probe"` and none of the fields `write_row`
-writes — they were logged by a probe, not by a proxied request, and under this
-rule a 404 latches rather than settling).
+discovery-route row is produced here at all (S12, R19 N2; figures corrected in
+S13 from R20 MINOR 1: the 37 typed-404 rows for `version`, `props`, `v1/props`,
+`models`, `api/v1/models`, `api/tags` and `api/show` in `logs/requests.jsonl`
+carry **none** of the fields `write_row` always writes — `channel`,
+`priced_model`, `reserve_usd`, `in_flight_at_admission`, `n_messages` — across
+five distinct run ids, only 7 of which are `probe`, so they were logged outside
+the meter rather than by a proxied request, and under this rule a 404 latches
+rather than settling).
 
 Publication-wise this is honest by construction: a rejected request contributes
 **$0** to its trial's settled cost, and the trial's quality outcome is whatever

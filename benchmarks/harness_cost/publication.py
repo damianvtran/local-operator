@@ -57,6 +57,21 @@ REQUEST_FIELDS = {
     "system_bytes",
     "auto_cache",
     "usage",
+    # Measurement provenance (S13, R20 MINOR 3). WHY: ``n_messages`` counts the
+    # prefill-continuation turn the meter injected, and a charge can be a stated
+    # bill, a token derivation or a bill-free rejection. Without these flags a
+    # published snapshot cannot show which rows were shaped or how a row was
+    # priced, which is the reproducibility property the kit is for. Constraints:
+    # booleans, one status, the provider's own error type/code and closed maps of
+    # numbers -- no prompt, message, body or error text is published.
+    "prefill_continuation",
+    "settled_from_tokens",
+    "settled_no_charge",
+    "upstream_status",
+    "upstream_error_type",
+    "upstream_error_code",
+    "cost_derivation",
+    "incomplete",
 }
 USAGE_FIELDS = {
     "input_tokens",
@@ -84,6 +99,39 @@ REQUEST_SCHEMA.update(
 )
 REQUEST_SCHEMA.update(
     ts=(int, float), latency_s=(int, float), stream=bool, auto_cache=bool, usage=USAGE_SCHEMA
+)
+# The arithmetic behind a token-priced row (meter_proxy.settled_charge): the
+# counts, the frozen card rates used and the resulting USD. Closed at every
+# level so the charge can be recomputed from the published record without any
+# request or response text; a new rate key must be added here deliberately.
+TOKEN_COUNT_KEYS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+RATE_KEYS = ("prompt", "completion", "input_cache_read", "input_cache_write")
+COST_DERIVATION_SCHEMA: dict[str, Schema] = {
+    "tokens": {k: int for k in TOKEN_COUNT_KEYS},
+    "rates_usd_per_m": {k: (int, float) for k in RATE_KEYS},
+    "usd": (int, float),
+}
+REQUEST_SCHEMA.update(
+    {
+        k: bool
+        for k in (
+            "prefill_continuation",
+            "settled_from_tokens",
+            "settled_no_charge",
+            "incomplete",
+        )
+    },
+    upstream_status=int,
+    # The provider's own error type and code, copied verbatim into the row by
+    # meter_proxy.no_charge_rejection; a code may be numeric, so both scalars.
+    upstream_error_type=str,
+    upstream_error_code=(str, int),
+    cost_derivation=COST_DERIVATION_SCHEMA,
 )
 
 

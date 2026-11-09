@@ -123,6 +123,99 @@ class KitTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Metering projection"):
                     p.scan(self.root, ["v1-snapshot/requests.jsonl"])
 
+    def test_measurement_provenance_fields_publish(self):
+        """S13 (R20 MINOR 3): a published row must show how it was measured.
+
+        Why: ``n_messages`` counts the injected prefill-continuation turn, and a
+        row's charge can be a stated bill, a token derivation or a bill-free
+        rejection. With none of those flags published, a snapshot reader cannot
+        tell a shaped row from an as-sent one, or a settled claim from a
+        derived one -- for a dataset whose selling point is reproducibility.
+        Constraints: booleans, one status int, the provider's own error type and
+        code, and three closed maps of numbers. No prompt, message, body or
+        error string is published, and an unknown field is still refused.
+        """
+        # Exactly the shapes the meter writes: ``_patch_body``'s shaping flag,
+        # ``write_row``'s two settle branches and its incomplete-stream marker.
+        provenance = {
+            "prefill_continuation": True,
+            "settled_from_tokens": True,
+            "settled_no_charge": True,
+            "upstream_status": 400,
+            "upstream_error_type": "invalid_request_error",
+            "upstream_error_code": "invalid_prompt",
+            "cost_derivation": {
+                "tokens": {"input_tokens": 1200, "output_tokens": 0},
+                "rates_usd_per_m": {"prompt": 2.0},
+                "usd": 0.0024,
+            },
+            "incomplete": True,
+        }
+        expected = {
+            "prefill_continuation": bool,
+            "settled_from_tokens": bool,
+            "settled_no_charge": bool,
+            "upstream_status": int,
+            "upstream_error_type": str,
+            "upstream_error_code": (str, int),
+            "cost_derivation": {
+                "tokens": {
+                    k: int
+                    for k in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                    )
+                },
+                "rates_usd_per_m": {
+                    k: (int, float)
+                    for k in ("prompt", "completion", "input_cache_read", "input_cache_write")
+                },
+                "usd": (int, float),
+            },
+            "incomplete": bool,
+        }
+        original = r.jsonl(self.snapshot / "requests.jsonl")
+
+        def scan_with(fields):
+            rows = copy.deepcopy(original)
+            rows[0].update(copy.deepcopy(fields))
+            (self.snapshot / "requests.jsonl").write_text(
+                "".join(json.dumps(q) + "\n" for q in rows)
+            )
+            p.scan(self.root, ["v1-snapshot/requests.jsonl"])
+
+        # Each field publishes on its own, then all of them on one real row.
+        for field, value in provenance.items():
+            with self.subTest(field=field):
+                scan_with({field: value})
+        scan_with(provenance)
+        self.assertEqual({k: p.REQUEST_SCHEMA[k] for k in expected}, expected)
+        self.assertTrue(set(expected) <= p.REQUEST_FIELDS)
+        # The derivation maps stay closed, and bools are never token counts.
+        for broken in (
+            {"cost_derivation": {"usd": 0.0024, "private_note": "nonpublic"}},
+            {"cost_derivation": {"tokens": {"input_tokens": "1200"}}},
+            {"cost_derivation": {"tokens": {"private_note": 1}}},
+            {"prefill_continuation": 1},
+            {"upstream_status": "400"},
+            {"upstream_error_code": None},
+        ):
+            with self.subTest(broken=sorted(broken)):
+                with self.assertRaisesRegex(ValueError, "Metering projection"):
+                    scan_with(broken)
+        # Publishing provenance did not open the boundary to anything else.
+        for poison in (
+            {"request_body": "private placeholder"},
+            {"prefill_content": "Continue."},
+            {"upstream_error_message": "private placeholder"},
+            {"settled_note": "private placeholder"},
+        ):
+            with self.subTest(poison=sorted(poison)):
+                with self.assertRaisesRegex(ValueError, "unexpected fields"):
+                    scan_with(poison)
+
     def test_cost_table_numeric_cells_and_populations(self):
         rows = r.cost_table_rows(r.derive(self.snapshot)[0])
         self.assertEqual(len(rows), 10)

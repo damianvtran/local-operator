@@ -1,8 +1,8 @@
 {
   "files": {
     "ADAPTERS.md": {
-      "bytes": 21766,
-      "sha256": "09f78da02a61448555d6fafb242827713e725a56b0f08997011d50d3ce776290"
+      "bytes": 22465,
+      "sha256": "1c7b153abc7a07501f7a19d89d5f91eb7c81da726df447317497f1d2cfa27a60"
     },
     "CACHE-QUALIFICATION.md": {
       "bytes": 5927,
@@ -17,12 +17,12 @@
       "sha256": "0440a2cede8e20f3a495505f9744c52a8b053cd5cec041acafc55b80e5a4a8d0"
     },
     "PREREGISTRATION-HEADLINE-2026-11-08.md": {
-      "bytes": 29921,
-      "sha256": "bf021a97ced62c35ee654c677dde3f182ee75de04e8526dba7f2c20e30f42820"
+      "bytes": 35286,
+      "sha256": "d81b6afc8dad5bf3da2ff55e16b48969ca13ddeaef1ea0a2739d8ffc50d06f1c"
     },
     "PREREGISTRATION.md": {
-      "bytes": 47068,
-      "sha256": "017a62bfaa572e5e6e758e917852fb6dbcbac6956cc6f63a2510e9a7faa339ba"
+      "bytes": 49106,
+      "sha256": "3d920e056862c3835d5ee6aa8cd7c5855cde81652c1913b9beb790dba63d1dd9"
     },
     "README.md": {
       "bytes": 10478,
