@@ -2402,7 +2402,10 @@ def test_the_worktree_walk_is_unperturbed_by_the_build_output_edges(fx: Fx) -> N
     # The reclaim path's own sizing walk measures the tree WHOLE: the protected
     # names and the build-output shapes are all still counted.
     assert item.allocated_bytes == legacy.allocated_bytes
-    assert item.allocated_bytes > control.allocated_bytes
+    # ``Item.allocated_bytes`` is ``int | None``; the truthiness guard is the
+    # file's idiom for narrowing it and cannot weaken the comparison, since a
+    # strictly-greater control reading already rules out zero.
+    assert item.allocated_bytes and item.allocated_bytes > control.allocated_bytes
 
 
 def test_only_the_build_output_path_hands_the_walk_its_new_edges() -> None:
