@@ -287,6 +287,11 @@ _PUBLIC_ID_CONTEXT = re.compile(
     r"(?:[\s_-]?ids?)?\W{0,4}\Z",
     re.I,
 )
+# Merge-status notes use the past tense, not the existing noun ``merge`` ID label.
+# Only full Git object IDs get this extra reading: arbitrary opaque values after
+# generic status prose must still fail closed. Keep it separate from ID vocabulary,
+# which intentionally accepts other hex lengths (session IDs, checksums, etc.).
+_MERGED_COMMIT_CONTEXT = re.compile(r"\bmerged(?:\s{1,3}as)?\s{1,3}[`\"']?\Z", re.I)
 _SECRET_NAME_CONTEXT = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(?:secret|token|passw(?:or)?d|pwd|passphrase|api[\s_-]?key|access[\s_-]?key"
@@ -739,6 +744,10 @@ def _opaque_verdict(
     if hex_run:
         before = text[max(0, start - 24) : start]
         if _PUBLIC_ID_CONTEXT.search(before) or (leaf and _PUBLIC_ID_CONTEXT.search(leaf)):
+            return None
+        if end - start in (40, 64) and _MERGED_COMMIT_CONTEXT.search(before):
+            # Secret-name priority above and vendor/JWT/PEM/bearer checks in the
+            # shared shape table still win, even inside this public syntax.
             return None
         if (
             text.startswith(".bin", end)
