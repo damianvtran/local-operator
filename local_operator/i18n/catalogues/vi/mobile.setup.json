@@ -74,5 +74,8 @@
   "mobile.setup.unexpected_failure": "Truy cập điện thoại chưa hoàn tất. Kiểm tra /mobile status để biết điểm nghẽn hiện tại; các bước đã hoàn tất vẫn được giữ nguyên, không bị hoàn tác.",
   "mobile.setup.in_progress": "Thiết lập truy cập điện thoại đang diễn ra; hãy kiểm tra trạng thái trước khi thử lại.",
   "mobile.setup.quote_unread": "Hãy kiểm tra tài khoản và báo giá mới trước khi bật truy cập điện thoại.",
-  "mobile.setup.corrupt_intent": "Yêu cầu thiết lập điện thoại đã lưu không hợp lệ. Giữ nguyên create.json và nhờ tác nhân của bạn khôi phục yêu cầu gốc trước khi thử lại. Thiết lập chưa thay đổi gì."
+  "mobile.setup.corrupt_intent": "Yêu cầu thiết lập điện thoại đã lưu không hợp lệ. Giữ nguyên create.json và nhờ tác nhân của bạn khôi phục yêu cầu gốc trước khi thử lại. Thiết lập chưa thay đổi gì.",
+  "mobile.setup.title_repoint": "Truy cập điện thoại cần kết nối lại với lần đăng nhập mới hơn trên thiết bị này",
+  "mobile.setup.repoint": "Thiết bị này đã có lần đăng nhập mới hơn vào cùng tài khoản Radient. Hãy kết nối lại truy cập điện thoại với lần đăng nhập đó — cùng tài khoản, cùng địa chỉ điện thoại.",
+  "mobile.setup.repointed": "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực {id})."
 }
