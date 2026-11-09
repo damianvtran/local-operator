@@ -183,6 +183,12 @@ test-affected: ## Run the tests this branch's diff affects; print PR evidence
 # had armed none, on every arming. `jq --arg` is the supported way to bind the
 # values, and gh's `--json` output is what it consumes.
 #
+# Before any label write, look for live gates on this head. A status-filtered
+# existence query needs only one result (not a bounded slice of old history).
+# This is an advisory pre-arm guard, not an atomic lock: simultaneous callers
+# or labels added outside this target can still race. Native per-ref concurrency
+# remains the backstop. An intentional duplicate requires the visibly named
+# I_KNOW_A_GATE_RUN_EXISTS=1 override, and still prints the existing run ID.
 # Prints the triggered run and how to follow it.
 merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	@set -e; \
@@ -196,6 +202,20 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	if [ "$$state" != "OPEN" ]; then \
 	  echo "make merge-gate: PR #$(PR) is $$state, not OPEN; only an open PR can be re-armed" >&2; exit 1; \
 	fi; \
+	for active_status in queued in_progress pending waiting requested; do \
+	  active="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" \
+	    --commit "$$head_sha" --status "$$active_status" --limit=1 --json databaseId,url \
+	    --jq '.[0] | select(. != null) | "\(.databaseId) \(.url)"')" \
+	    || { echo "make merge-gate: cannot check existing $$active_status gates; no label changed" >&2; exit 1; }; \
+	  if [ -n "$$active" ]; then \
+	    if [ "$(I_KNOW_A_GATE_RUN_EXISTS)" != "1" ]; then \
+	      echo "make merge-gate: refusing to arm PR #$(PR): $$active_status gate run $$active already exists for $$head_sha" >&2; \
+	      echo "  follow that run; intentional duplicate only: make merge-gate PR=$(PR) I_KNOW_A_GATE_RUN_EXISTS=1" >&2; \
+	      exit 1; \
+	    fi; \
+	    echo "WARNING: I_KNOW_A_GATE_RUN_EXISTS=1: intentionally arming beside $$active_status gate run $$active" >&2; \
+	  fi; \
+	done; \
 	prev="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
 	  --json databaseId,headSha \
 	  | jq -r --arg sha "$$head_sha" '[.[] | select(.headSha == $$sha)] | .[0].databaseId // empty')" || prev=""; \

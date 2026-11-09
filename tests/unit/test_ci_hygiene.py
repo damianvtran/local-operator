@@ -3690,9 +3690,10 @@ _MERGE_GATE_BEFORE = "2000-01-01T00:00:00Z"
 #: the recipe discarded that stderr, so `prev` stayed empty, the poll matched
 #: nothing and the ritual reported failure for every run it armed. The stub
 #: rejects `--arg` the same way, so a regression fails here instead of only on a
-#: real arming. Its `run list` answers raw JSON with no `--jq` applied — the
-#: recipe filters it itself, with the real `jq`.
+#: real arming. Historical `run list` answers raw JSON for the real `jq`;
+#: the active-run existence query emulates gh's simple, variable-free `--jq`.
 _MERGE_GATE_GH_BODY = """
+import json
 import os
 import sys
 from pathlib import Path
@@ -3731,6 +3732,18 @@ if args[:2] == ["pr", "edit"]:
     raise SystemExit(0)
 
 if args[:2] == ["run", "list"]:
+    if "--status" in args:
+        if "--commit" not in args or "--event=pull_request" not in args:
+            answer("active lookup must filter head and eligible event", 3)
+        status = args[args.index("--status") + 1]
+        sha = args[args.index("--commit") + 1]
+        if os.environ.get("STUB_ACTIVE_FAIL") == "1":
+            answer("API unavailable", 1)
+        for run in json.loads(os.environ.get("STUB_ACTIVE_RUNS", "[]")):
+            if run["status"] == status and run["headSha"] == sha:
+                print(run["databaseId"], run["url"])
+                break
+        raise SystemExit(0)
     counter = Path(os.environ["STUB_RUN_LIST_COUNT"])
     calls = int(counter.read_text()) if counter.exists() else 0
     counter.write_text(str(calls + 1))
@@ -3767,6 +3780,9 @@ def _arm_merge_gate(
     pr_missing: str = "0",
     prev_runs: str = "[]",
     poll_runs: str = "[]",
+    active_runs: str = "[]",
+    active_fail: str = "0",
+    know_run_exists: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the REAL `make merge-gate` target with a stubbed `gh` on PATH.
 
@@ -3801,9 +3817,18 @@ def _arm_merge_gate(
         "STUB_PR_MISSING": pr_missing,
         "STUB_PREV_RUNS": prev_runs,
         "STUB_POLL_RUNS": poll_runs,
+        "STUB_ACTIVE_RUNS": active_runs,
+        "STUB_ACTIVE_FAIL": active_fail,
     }
     proc = subprocess.run(
-        ["make", "-f", str(MAKEFILE), "merge-gate", "PR=3631"],
+        [
+            "make",
+            "-f",
+            str(MAKEFILE),
+            "merge-gate",
+            "PR=3631",
+            *(["I_KNOW_A_GATE_RUN_EXISTS=1"] if know_run_exists else []),
+        ],
         cwd=str(tmp_path),
         env=env,
         capture_output=True,
@@ -3907,6 +3932,78 @@ def test_the_merge_gate_ritual_refuses_without_arming(
         assert calls == [
             call for call in calls if call.startswith("pr view")
         ], f"{scenario}: a PR that cannot be re-armed must not be mutated: {calls}"
+
+
+@pytest.mark.parametrize("status", ["queued", "in_progress", "pending", "waiting", "requested"])
+def test_merge_gate_refuses_an_existing_live_gate(tmp_path: Path, status: str) -> None:
+    """Exercise the real target: a duplicate refusal precedes ALL label writes."""
+    active = [
+        {
+            "databaseId": 4242,
+            "url": "https://example.test/runs/4242",
+            "headSha": _MERGE_GATE_SHA,
+            "status": status,
+        }
+    ]
+    proc, calls = _arm_merge_gate(tmp_path, active_runs=json.dumps(active))
+    assert proc.returncode != 0
+    assert "refusing to arm" in proc.stderr and "4242" in proc.stderr
+    assert "I_KNOW_A_GATE_RUN_EXISTS=1" in proc.stderr
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls)
+
+
+@pytest.mark.parametrize("existing_head", [_MERGE_GATE_SHA, "f" * 40])
+def test_merge_gate_explicit_duplicate_override_and_other_head_control(
+    tmp_path: Path, existing_head: str
+) -> None:
+    """The override is visible; a queued gate on another head is not a match."""
+    same_head = existing_head == _MERGE_GATE_SHA
+    active = [
+        {
+            "databaseId": 4242,
+            "url": "https://example.test/runs/4242",
+            "headSha": existing_head,
+            "status": "queued",
+        }
+    ]
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        active_runs=json.dumps(active),
+        know_run_exists=same_head,
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--add-label" in "\n".join(calls)
+    assert ("WARNING: I_KNOW_A_GATE_RUN_EXISTS=1" in proc.stderr) is same_head
+    if same_head:
+        assert "4242" in proc.stderr
+
+
+def test_merge_gate_active_lookup_failure_is_closed(tmp_path: Path) -> None:
+    proc, calls = _arm_merge_gate(tmp_path, active_fail="1")
+    assert proc.returncode != 0
+    assert "cannot check existing queued gates" in proc.stderr
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls)
+
+
+def test_full_suite_run_name_identifies_the_owning_lane_and_trigger() -> None:
+    """Ownership must be visible in gh run list, before any runner starts."""
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())
+    name = full["run-name"]
+    for token in (
+        "owner=",
+        "github.actor",
+        "lane-",
+        "github.event.pull_request.number",
+        "github.ref_name",
+        "arm/re-arm:",
+        "github.event.label.name",
+        "github.event_name",
+        "github.event.pull_request.head.sha",
+        "github.sha",
+        "github.run_attempt",
+    ):
+        assert token in name, f"run-name lost its ownership/trigger field: {token}"
 
 
 def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:

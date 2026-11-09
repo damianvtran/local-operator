@@ -1,4 +1,10 @@
 name: Main Full Suite
+# PR number is the stable owning lane; actor identifies who armed it. Label
+# events cannot distinguish a first arm from a re-arm, so name both honestly.
+run-name: >-
+  Full suite · owner=${{ github.actor }}/lane-${{ github.event.pull_request.number || github.ref_name }}
+  · ${{ github.event_name == 'pull_request' && format('arm/re-arm:{0}', github.event.label.name) || github.event_name }}
+  · head=${{ github.event.pull_request.head.sha || github.sha }} · attempt=${{ github.run_attempt }}
 
 # THE FULL UNIT SUITE, AND THE PULL-REQUEST MERGE GATE.
 #

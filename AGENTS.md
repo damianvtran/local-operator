@@ -2742,7 +2742,10 @@ green. A red gate blocks the merge, and that is the point: no red pipeline
 reaches `main`. A push **after** the gate revokes that green — the check belongs
 to the SHA it ran on, so the new head sits in "Expected" — and
 `make merge-gate PR=<n>` re-arms it (remove + re-add the label, then print the
-triggered run and `gh run watch`/`gh pr checks`). Never test the label's NAME in
+triggered run and `gh run watch`/`gh pr checks`). Before changing labels, the
+ritual refuses an existing live gate on that head; see
+[gate ownership, duplicate-arm override, and stale-failure semantics](docs/ci-merge-gate.md).
+Never test the label's NAME in
 a job `if:`: GitHub counts a `skipped` job as satisfying a required status check,
 so a job conditional on the label reports `skipped` on a run started by any
 *other* label and a red PR would merge. Any label therefore starts one full run:
