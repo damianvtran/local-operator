@@ -932,18 +932,33 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
     hooks.classification_wait_s = 0.05
     observed_timeouts: list[float | None] = []
     real_wait_for = asyncio.wait_for
+    turn_wait_code = session_factory._classification_recommendation.__code__
 
     async def observe_wait(awaitable: Any, timeout: float | None) -> Any:
-        observed_timeouts.append(timeout)
+        # session_factory.asyncio is the shared module, so vendor/background
+        # tasks see this patch too. The selection gathers the classification leg
+        # into its own task; identify that coroutine, not the parent test task.
+        caller = asyncio.current_task()
+        if caller is not None and getattr(caller.get_coro(), "cr_code", None) is turn_wait_code:
+            observed_timeouts.append(timeout)
         return await real_wait_for(awaitable, timeout=timeout)
 
+    async def unrelated_wait() -> None:
+        # Enter the shared observer while the turn is waiting on its classifier.
+        # An already-set event completes without adding a scheduling/timing bound;
+        # this foreign deadline must never become part of the turn's assertion.
+        await vendor_started.wait()
+        await asyncio.wait_for(vendor_started.wait(), timeout=0.2)
+
     monkeypatch.setattr(session_factory.asyncio, "wait_for", observe_wait)
+    unrelated_task = asyncio.create_task(unrelated_wait())
     try:
         # The watchdog diagnoses deadlock, NOT latency. Event ordering and the
         # actual configured deadline distinguish budget enforcement from awaiting
         # the vendor even when a loaded event loop resumes after 200 ms.
         async with asyncio.timeout(5.0):
             first = await session_factory._select_knowledge_block(hooks, "first task", task_id="t1")
+            await unrelated_task
             assert observed_timeouts == [0.05]
             assert vendor_started.is_set()
             assert not vendor_finished.is_set()
@@ -965,10 +980,13 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget(
         # A failed assertion or watchdog must not leak the deliberately blocked
         # classifier into another test or make event-loop teardown hang.
         release_vendor.set()
+        unrelated_task.cancel()
         for call in hooks.classification_outstanding:
             call.task.cancel()
         await asyncio.gather(
-            *(call.task for call in hooks.classification_outstanding), return_exceptions=True
+            unrelated_task,
+            *(call.task for call in hooks.classification_outstanding),
+            return_exceptions=True,
         )
 
 
