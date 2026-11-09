@@ -611,9 +611,7 @@ async def test_the_arm_receipt_names_the_disable_that_applies_to_the_class(
 
     strike._monitors._check_runner = timed_out  # type: ignore[method-assign]
     try:
-        ordinary = await _arm_via_tool(
-            strike, str(root), name="ci2", arguments={"command": "ls"}
-        )
+        ordinary = await _arm_via_tool(strike, str(root), name="ci2", arguments={"command": "ls"})
         limit = MonitorSettings().max_consecutive_failures
         assert "24 hours" not in ordinary.text, ordinary.text
         assert f"disabled after {limit} consecutive failed checks" in ordinary.text, ordinary.text
@@ -1613,5 +1611,8 @@ def test_a_repo_flag_value_must_look_like_a_repo_name() -> None:
     # ...but it still has to name a REPOSITORY: two parts cannot be a URL tail,
     # and anything past the repo is a path gh would refuse.
     assert readonly._bash_verdict("gh pr view 1 -R https://github.com/owner") is not None
-    assert readonly._bash_verdict("gh pr view 1 -R https://github.com/owner/name/tree/main") is not None
+    assert (
+        readonly._bash_verdict("gh pr view 1 -R https://github.com/owner/name/tree/main")
+        is not None
+    )
     assert readonly._bash_verdict("gh pr view 1 -R https://github.com/../name") is not None
