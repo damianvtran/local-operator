@@ -9694,7 +9694,7 @@ class DesktopSessions:
             # A ONE-ROW read, not a ``Transcript(path)``: constructing the
             # transcript JSON-decodes the whole journal (2059.5 ms on the
             # operator's 261 MB conversation — the A/B table in
-            # ``docs/evidence/session-load-central-cache``), and this branch
+            # ``scripts/repro/session-load-central-cache``), and this branch
             # runs on every bridge creation for a session that carries no
             # ``desktop.json`` marker. The reader answers from the tail
             # backward and never creates the directory.
@@ -10000,7 +10000,7 @@ class DesktopSessions:
         and **7909 ms** — the whole 7.9 s open — while the cold open ran, and
         exactly ONE request completed in that window. On this change the open
         takes 2453 ms and **24** requests complete inside it (median 70 ms, worst
-        308 ms). See ``docs/evidence/session-load-central-cache``.
+        308 ms). See ``scripts/repro/session-load-central-cache``.
         """
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
@@ -10342,7 +10342,7 @@ class DesktopSessions:
         WHY A SESSION EVER HAS TO BE FORGOTTEN (desktop QA round 2, PR #390):
         ``session()`` hands out a RESIDENT bridge without re-checking the
         directory — that lookup is the expensive half of every read (see
-        ``docs/evidence/session-load-central-cache``) — so a conversation this
+        ``scripts/repro/session-load-central-cache``) — so a conversation this
         process had already opened kept answering ``sessions.get``, ``/history``
         and ``/mcp`` with 200 after its directory was deleted. Measured: the
         deleting daemon answered 200 where a FRESH one answered 404 for the same
