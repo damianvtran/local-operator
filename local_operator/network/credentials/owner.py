@@ -2302,9 +2302,13 @@ class MeshCredentialBroker:
         asked = frame.get("if_digest")
         if isinstance(asked, str) and asked and asked == mine:
             return {"kind": "placement", "unchanged": True, "digest": mine}
-        # THE DIGEST RIDES THE FULL ANSWER TOO, so a peer that has just pulled (or that
-        # never asks conditionally) still learns the value to quote next time.
-        return {"kind": "placement", "document": document.to_json(), "digest": mine}
+        # THE DIGEST IS *NOT* ON THE FULL ANSWER (review round 1, M2). An asker that
+        # received a document recomputes the digest from its own merged copy, so this
+        # field had no reader — and it would be ~80 B on EVERY full answer, including
+        # every answer to a peer that predates the capability (100 % of a mixed fleet),
+        # in the very message this PR exists to shrink. An unused field a later build
+        # could start trusting is worse than no field.
+        return {"kind": "placement", "document": document.to_json()}
 
     # -- refresh delegation (mesh-refresh-delegation.md §3.2/§3.3) ----------
 

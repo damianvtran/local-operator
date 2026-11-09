@@ -967,6 +967,17 @@ def owner_rows_digest(document: PlacementDocument | None, owner_device: str) -> 
     peer passes the id of the device it pulled over its own copy. A digest that does
     not match is always safe — it costs exactly the full document the pull sends today.
 
+    AND ON ONE PAIR IT CAN BE THE PERMANENT ANSWER (review round 1, M3). ``merge`` only
+    ever ADOPTS: it has no deletion branch, so a row the owner stops publishing — an
+    owner sign-out, ``revoke_device_everywhere`` deleting a row it owned — stays in the
+    asker's file, and the asker's digest then includes a row the owner no longer hashes.
+    That pair never answers ``unchanged`` again: every later pull is a full document,
+    each merge is a no-op, and nothing clears it. Safe (no stale authority, because the
+    owner authorises every grant against its own row and its own document) and not a
+    regression against the pre-digest behaviour, which sent that full document anyway —
+    but it is a durability caveat, not an occasional mismatch. The sweep that would
+    prune a dropped row is deliberately NOT here; the loss is bytes, never access.
+
     NO SECRET IS HASHED. This is the same metadata the unanswered pull puts on the
     wire in full (``_assert_no_material`` guards the document itself), so an answer of
     ``unchanged`` discloses strictly less than the document it replaces.

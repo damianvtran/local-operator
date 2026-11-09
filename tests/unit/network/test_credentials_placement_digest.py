@@ -38,9 +38,7 @@ from tests.unit.network.test_credentials_real_link import (  # noqa: F401 — fi
     _share,
     mesh,
 )
-from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
-    devices,
-)
+from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixtures by import
 
 OWNER = "d_00000000000000000000000000000011"
 PEER = "d_00000000000000000000000000000012"
@@ -294,3 +292,78 @@ def test_a_share_still_reaches_the_borrower_with_the_digest_in_place(
         rig.network_id, rig.b.root, self_device=rig.borrower
     )
     assert any(entry.owner_device == rig.owner for entry in document.entries.values())
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"kind": "placement", "unchanged": "yes"},
+        {"kind": "placement", "unchanged": 1},
+        {"kind": "placement"},
+        {},
+        "unchanged",
+    ],
+)
+def test_a_malformed_status_is_named_and_nothing_is_merged(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, detail: Any
+) -> None:
+    """QA round 1, Q1: failing safe is not enough — the operator gets a reason.
+
+    ``unchanged: "yes"`` (or a ``detail`` that is not a mapping at all) is never believed,
+    and nothing is merged, but before this the pull reported ``owners: 1, changed: []``
+    with no explanation while a WRONG digest in a well-shaped frame was named. Both are
+    now named; this is the malformed-status arm.
+    """
+    rig = _mesh(request)
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    def _malformed(self: Any, owner: str, frame: dict[str, Any]) -> dict[str, Any]:
+        assert frame.get("if_digest"), "the asker must have quoted a digest to reach this arm"
+        return {"op": "ack", "detail": detail}
+
+    monkeypatch.setattr(MeshCredentialClient, "_ask_owner_directly", _malformed)
+    pulled = _pull(rig)
+    assert pulled.get("unchanged") is None, pulled
+    assert pulled.get("changed") == []
+    assert pulled.get("skipped") == [
+        {"device": rig.owner, "reason": "bad_placement_status"}
+    ], pulled
+
+
+def test_a_full_answer_carries_no_digest(request: pytest.FixtureRequest) -> None:
+    """Review round 1, M2: the digest has no reader on the full answer, so it is not sent.
+
+    An asker that receives a document recomputes the digest from its own merged copy, so
+    the field was ~80 B on every full answer — including every answer to a peer that
+    predates the capability, i.e. every answer on a mixed fleet, in the message this PR
+    exists to shrink. This cell reads the actual reply frame off the real link.
+    """
+    rig = _mesh(request)
+    _share(rig)
+    _pull(rig)
+    # A row the borrower has never seen, declared on the owner, is what makes the next
+    # answer a full document rather than a status.
+    _owner_declares_directly(rig, "m2probe")
+
+    seen: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    links = [link for link in (rig.b.links or {}).values()]
+    assert links, "the borrower holds no link to the owner"
+    for link in links:
+        original = link.request
+
+        def capture(frame: Any, *args: Any, _original: Any = original, **kwargs: Any) -> Any:
+            reply = _original(frame, *args, **kwargs)
+            if isinstance(frame, dict) and frame.get("kind") == "placement":
+                seen.append((frame, reply))
+            return reply
+
+        link.request = capture
+
+    pulled = _pull(rig)
+    assert "m2probe" in pulled.get("changed", []), pulled
+    assert seen, "no placement exchange was observed on the link"
+    frame, reply = seen[-1]
+    assert frame.get("if_digest"), "the conditional ask must have crossed for this cell"
+    detail = (reply or {}).get("detail")
+    assert isinstance(detail, dict) and isinstance(detail.get("document"), dict), reply
+    assert "digest" not in detail, "the full answer still carries an unread digest"

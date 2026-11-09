@@ -2076,6 +2076,17 @@ class MeshCredentialClient:
                     code = detail.get("code")
                 refused_codes[device] = str(code or "")
                 continue
+            if conditional and not isinstance(document, dict):
+                # NAMED, NOT SILENT (QA round 1, Q1). An answer to a CONDITIONAL ask that
+                # is neither a document nor a refusal — ``unchanged: "yes"``, a ``detail``
+                # that is not a mapping, an empty one — already failed safe (nothing is
+                # merged, the file is untouched), but it left the operator with
+                # ``owners: 1, changed: []`` and no reason at all, while a wrong digest in
+                # a well-shaped frame IS named. Same treatment: one honest sentence in
+                # ``skipped``. Only conditional asks record it, so a peer that predates
+                # the capability keeps the reporting it always had.
+                skipped.append({"device": device, "reason": "bad_placement_status"})
+                continue
             if isinstance(document, dict):
                 # AN ANSWERED PULL ENDS A PARKED REFUSAL (review round 1, n1), whoever
                 # asked: the explicit listing and onboarding's in-run refresh run this
