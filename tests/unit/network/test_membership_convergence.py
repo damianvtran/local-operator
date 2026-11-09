@@ -2316,6 +2316,23 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
     c = _make(devices, "c", mode=HUB)
+    # THE OLD BUILD IS APPLIED ON C'S OWN PULL PATH, immediately before the frame is
+    # built — not to the link object once the mesh is up. Stripping a LIVE link's
+    # capabilities from the test thread races the pull loop: an ask already built and
+    # sent under the advertised set is ANSWERED after the strip's snapshot, so the test
+    # counts it as a pull the strip should have covered — shard 2 read exactly that on
+    # 2026-11-09 (``if_digest: True`` beside the strip's own ``False`` rows). A link A re-dials
+    # after a drop also carries the handshake's set again. Applied here, every ask C
+    # builds for A is built without the string — which is all an old A's handshake
+    # ever says — so the assertion is a property of the mesh, not of a snapshot.
+    pulls = relay.RelayServer._pull_members  # noqa: SLF001 — the asker's frame builder
+
+    def _pull_as_though_a_is_old(self: relay.RelayServer, link: Any) -> str:
+        if self is c.server and link.device_id == a.device_id:
+            link.capabilities = frozenset(link.capabilities - {wire.MEMBER_LIST_DIGEST_V1})
+        return pulls(self, link)
+
+    monkeypatch.setattr(relay.RelayServer, "_pull_members", _pull_as_though_a_is_old)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
     link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
@@ -2326,9 +2343,6 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
             for item in c.server.links.values()  # noqa: SLF001
         )
     )
-    for item in list(c.server.links.values()):  # noqa: SLF001
-        if item.device_id == a.device_id:
-            item.capabilities = frozenset(item.capabilities - {wire.MEMBER_LIST_DIGEST_V1})
     count = len(seen)
 
     for owner, tag in ((c, "e1"), (a, "e2")):
@@ -2343,9 +2357,10 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
         both,
     )
     # And after convergence A's conditional pulls settle to "unchanged" (the new side
-    # still saves), while every pull C made of the "old" A stayed full.
+    # still saves), while NO pull C ever made of the "old" A carried the string — the
+    # whole run, not just the rows after the divergence.
     assert net_fixtures.wait_for(
         lambda: any(r["unchanged"] and r["asker"] == a.device_id for r in seen[count:])
     ), seen[count:]
-    from_c = [r for r in seen[count:] if r["asker"] == c.device_id]
+    from_c = [r for r in seen if r["asker"] == c.device_id]
     assert from_c and all(not r["if_digest"] and r["rows"] for r in from_c), from_c
