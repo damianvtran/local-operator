@@ -829,6 +829,11 @@ def _compose_index_rows(
                 ),
                 "blind": bool(counters.get("blind")),
                 "blind_reason": str(counters.get("blind_reason") or ""),
+                # The failing/empty health pair, added to BOTH composers in the
+                # same change (see the key-set note above): without it a cold
+                # reader renders a failing watch as "nothing has changed".
+                "failing": bool(counters.get("failing")),
+                "empty_checks": counters.get("empty_checks", 0),
             }
         )
     return rows

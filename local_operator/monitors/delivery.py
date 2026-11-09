@@ -94,7 +94,11 @@ def format_monitor_delivery_text(delivery: MonitorDelivery) -> str:
 #: is NOT one of these: it rides ``MonitorDelivery``. ``blind`` names a check
 #: whose result cannot be compared (the watch is armed but reports nothing);
 #: ``seeing`` is its matching clear, sent only when the blind notice was told.
-NOTICE_KINDS = ("disabled", "stalled", "restored", "blind", "seeing")
+#: ``failing`` names a call that RAN and could not do its job (a non-zero exit
+#: with a complaint — the shape ``bash`` reports as an ordinary success result),
+#: and ``empty`` a call that has never returned anything to compare. Both are
+#: cleared by ``restored`` when a check succeeds again.
+NOTICE_KINDS = ("disabled", "stalled", "restored", "blind", "seeing", "failing", "empty")
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,9 @@ class MonitorNotice:
     at_ms: int
     checks: int = 0
     deliveries: int = 0
+    #: For ``disabled``: the consecutive failed checks that disabled the watch.
+    #: For ``failing``: the consecutive failing checks when it was announced. For
+    #: ``empty``: the consecutive empty results (the count the notice names).
     failures: int = 0
     #: The failure that caused a disable, or the reason a stall is not
     #: self-healing (auth-required names its own fix).
@@ -252,6 +259,55 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
                 "It keeps its last comparable baseline, so the next comparable check reports "
                 "everything it missed as one delta."
             )
+        lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
+        lines.append("Monitors tick only while this session is open.")
+        return _bounded("\n".join(lines))
+
+    if notice.kind == "failing":
+        # SHAPE (D7): the news LEADS and the failing part is named verbatim. The
+        # incident this kind exists for was 90 minutes of silence about a call
+        # that never ran, so the first clause is the fact and the reason follows
+        # on its own line. The source note rides after the clock like every other
+        # kind, because the collapsed card drops notes wherever they sit.
+        lines = [
+            f"(monitor) {who} at {clock}{source_note} — watch is failing: "
+            f"{_clip(notice.detail or 'the call returned an error')}"
+        ]
+        if notice.no_baseline:
+            lines.append(
+                f"It has never produced a result to compare ({notice.failures} failed check"
+                f"{'s' if notice.failures != 1 else ''} in a row), so nothing is being "
+                "watched yet."
+            )
+        else:
+            lines.append(
+                f"{notice.failures} consecutive checks failed. Nothing is reported while it "
+                "continues, and it keeps its last good baseline: the next successful check "
+                "reports everything it missed as one delta."
+            )
+        lines.append(
+            "If it fails because of WHERE it runs (a gh/git command outside its repo), "
+            're-create it with monitor({op:"create",…,cwd:"<dir>"}) to name the directory '
+            "the checks run in."
+        )
+        lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
+        lines.append("Monitors tick only while this session is open.")
+        return _bounded("\n".join(lines))
+
+    if notice.kind == "empty":
+        # Not a failure (D4) and not a delivery: the call works and answers with
+        # nothing. Said once, because a watch on an empty result can never report
+        # a change and the operator would otherwise wait for one forever.
+        count = notice.failures or notice.checks
+        lines = [
+            f"(monitor) {who} at {clock}{source_note} — the call returns nothing: "
+            f"{count} checks in a row produced no output."
+        ]
+        lines.append(
+            "An empty result can never change, so this watch cannot report anything. Check "
+            "that the call observes something (a path that exists, a filter that matches) "
+            "rather than waiting for a change that cannot arrive."
+        )
         lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
         lines.append("Monitors tick only while this session is open.")
         return _bounded("\n".join(lines))

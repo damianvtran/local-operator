@@ -673,6 +673,23 @@ _GH_FLAGS = _flags(
     long="comments log",
     valued_long="json jq template repo",
 )
+#: ``gh``'s SHORT ``--repo`` spelling: ``gh pr view 1 -R owner/name``. gh-only
+#: because it is ``gh``'s own flag name — glab's short-flag space is per verb
+#: (see ``_GLAB_MR_FLAGS``), so glab keeps the long form only.
+#:
+#: WHY it is allowed at all: ``--repo`` was already permitted (it is a
+#: repo-NAMING flag on a read-only verb, not a write surface), so a model that
+#: wrote the short spelling was refused for a spelling it could not work around
+#: — ``gh pr checks`` has no ``-R`` alternative and ``gh api`` is refused as
+#: method-flippable. It names WHERE to read, never what to write: the verb gate
+#: above still refuses every mutating subcommand, and this table is consulted
+#: only for the read-only verbs in ``_GH_SUBCOMMANDS``.
+_GH_FLAGS_SHORT_REPO = _flags(
+    "qt",
+    valued_short="qtR",
+    long="comments log",
+    valued_long="json jq template repo",
+)
 
 #: ``find`` is expression-allow-listed (no flag/operand grammar a deny-list can
 #: bound): read tests and the boolean operators in, everything else out.
@@ -1019,7 +1036,11 @@ def _gh_reason(cmd: str, tokens: list[str]) -> str | None:
             f'"{family} {verb}" is not read-only for {cmd} (that family allows: '
             f"{' '.join(sorted(verbs))})."
         )
-    return _flags_reason(f"{cmd} {family} {verb}", tokens[2:], _GH_FLAGS)
+    return _flags_reason(
+        f"{cmd} {family} {verb}",
+        tokens[2:],
+        _GH_FLAGS_SHORT_REPO if cmd == "gh" else _GH_FLAGS,
+    )
 
 
 # Unlike GitHub's --json field selector, glab's --output is a FORMAT enum,

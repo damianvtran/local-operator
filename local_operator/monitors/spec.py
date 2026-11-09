@@ -302,6 +302,42 @@ def build_monitor_spec(
     if refusal is not None:
         return {"error": refusal, "malformed": False}
 
+    # The cwd the CHECK runs in: a directory the caller NAMED, or the arming
+    # session's own (today's behaviour, and the fallback that keeps every
+    # existing arm working).
+    #
+    # WHY a named cwd and not "run ticks in the arming session's cwd": they
+    # already do — ``MonitorSpec.cwd`` is captured from the session at arm and
+    # every tick runs with it. That is precisely what failed in the incident:
+    # the session's directory was not a git repository, so a watch whose whole
+    # meaning depends on WHERE it runs (``gh pr view`` shells out to git) could
+    # not run at all. The watch needed a directory the session did not have, and
+    # an argument is the only mechanism that lets the model name one; it is
+    # stored ABSOLUTE (see :func:`_captured_cwd`) so it survives a restart of the
+    # session, the app and the machine.
+    named_cwd = request.get("cwd")
+    if named_cwd is not None and not isinstance(named_cwd, str):
+        return {"error": "'cwd' must be a directory path.", "malformed": True}
+    arm_cwd = cwd
+    requested = (named_cwd or "").strip()
+    if requested:
+        captured = _captured_cwd(requested)
+        if not os.path.isdir(captured):
+            # Well-formed but unsupportable, so NOT malformed: the caller can fix
+            # it by naming a real directory or omitting it, and a refusal sentence
+            # now is better than a watch that fails every tick forever (the
+            # incident's failure class, moved to arm time).
+            return {
+                "error": (
+                    f"monitor 'cwd' is not an existing directory: {captured}. "
+                    "Name the directory the watched call must run in (for a gh/git "
+                    "command, the repository root), or omit 'cwd' to use this "
+                    "session's directory."
+                ),
+                "malformed": False,
+            }
+        arm_cwd = captured
+
     spec = MonitorSpec(
         id=monitor_id,
         name=name,
@@ -313,7 +349,7 @@ def build_monitor_spec(
         notify=as_bool("notify"),
         sort_lines=as_bool("sort_lines"),
         ignore=ignore,
-        cwd=_captured_cwd(cwd),
+        cwd=_captured_cwd(arm_cwd),
         created_at=now_ms,
     )
     return {"spec": spec}

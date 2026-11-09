@@ -31803,7 +31803,41 @@ class Session:
         comparable, blind, handle = _monitor_comparable_text(result.text, details)
         if blind is not None:
             return {"error": blind, "kind": "blind"}
-        return {"text": comparable, "error": None, "handle": handle}
+        # A CALL THAT FAILED WITHOUT REPORTING AN ERROR is this tool layer's
+        # hardest shape, and the one that hid the incident: ``bash`` returns a
+        # non-zero exit as an ORDINARY success result (its text is
+        # ``exit code: N`` + the framed streams, ``is_error`` False, and the
+        # model's contract depends on that). So a watch whose command could never
+        # run — ``gh pr view`` outside a git repository, 18 ticks of
+        # ``fatal: not a git repository`` — looked like a successful check whose
+        # result happened to be stable: two identical error texts diff to "no
+        # change", no delivery, no strike, no notice, forever.
+        #
+        # The exit status now rides ``details`` as STRUCTURED data (see
+        # ``execute_bash``), so the classification is a field read, never a parse
+        # of the framed body. THE RULE IS NOT "non-zero means failed": an exit
+        # status is how these tools ANSWER, too — ``grep`` exits 1 with no match,
+        # ``diff`` exits 1 because the files differ, ``git diff --quiet`` exits 1
+        # because there IS a change, and those are the interesting states of a
+        # quiet watch. A non-zero exit that also PRINTED A COMPLAINT on stderr is
+        # the tool saying it could not do the job; a silent non-zero exit is
+        # indistinguishable from a quiet answer and stays on the empty-output
+        # rule below rather than being reported as a failure.
+        exit_code = details.get("exit_code") if isinstance(details, Mapping) else None
+        if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
+            complaint = str(details.get("stderr_head") or "").strip()
+            if complaint:
+                return {"error": complaint, "kind": "failing", "exit_code": exit_code}
+        # NOTHING TO COMPARE is its own fact (D4): a watch whose call has never
+        # produced output cannot ever deliver a change, but a call that is merely
+        # quiet right now must not be called broken — ``grep`` with no match and
+        # a file that is still empty are both legitimate. The scheduler counts
+        # consecutive empties and says so once; this field is only the signal.
+        # ``no_output`` covers bash, whose text is always framed and therefore
+        # never literally empty.
+        no_output = details.get("no_output") if isinstance(details, Mapping) else None
+        empty = (not str(comparable or "").strip()) or no_output is True
+        return {"text": comparable, "error": None, "handle": handle, "empty": empty}
 
     def _mcp_call_lost_its_server(self, name: str) -> bool:
         """Whether an MCP error result happened while the server was not up.

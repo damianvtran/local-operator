@@ -255,6 +255,15 @@ def _clock(ms: int) -> str:
     return time.strftime("%H:%M", time.localtime(ms / 1000))
 
 
+#: How many consecutive empty results a published row must carry before the
+#: listing says so. Deliberately its own number rather than an import of the
+#: scheduler's ``EMPTY_CHECKS_BEFORE_NOTICE``: this module is stdlib-only (see
+#: ``health_hint``) and the reader's threshold is a rendering decision, not the
+#: scheduler's policy — three is the same number because both answer "has it
+#: EVER returned anything", not because one owns the other.
+EMPTY_HINT_CHECKS = 3
+
+
 def health_hint(row: Mapping[str, Any], now_ms: int | None) -> str | None:
     """One line explaining a monitor that is not doing what the reader assumes.
 
@@ -306,6 +315,36 @@ def health_hint(row: Mapping[str, Any], now_ms: int | None) -> str | None:
         return f"tool unavailable since {_clock(since)} — retrying"
     if not isinstance(row, Mapping):
         return None
+    # A FAILING WATCH MUST NOT READ AS A QUIET ONE (D8). Before this, a row whose
+    # call had been erroring every tick fell through to "nothing has changed
+    # (confirm the call observes what you expect)" — the sentence the incident's
+    # reporter was staring at for 90 minutes while the call could not run at all.
+    # The news leads, like the suppression clause below, because the TUI band
+    # renders the first em-dash clause.
+    if row.get("failing") is True:
+        failure_text = " ".join(str(row.get("last_error") or "").split())
+        detail = failure_text or "its check returned an error"
+        failures = row.get("consecutive_failures")
+        repeats = (
+            f"{failures} checks in a row — "
+            if isinstance(failures, int) and not isinstance(failures, bool) and failures > 1
+            else ""
+        )
+        return f"WATCH IS FAILING: {repeats}{detail} — nothing is being reported"
+    # The "returns nothing" episode is the other silent-but-not-quiet state: the
+    # call works and has never produced anything to compare, so no change can
+    # ever be detected. Same reason as above — the neutral sentence claims
+    # something about the watched thing that this row cannot support.
+    empty_checks = row.get("empty_checks")
+    if (
+        isinstance(empty_checks, int)
+        and not isinstance(empty_checks, bool)
+        and empty_checks >= EMPTY_HINT_CHECKS
+    ):
+        return (
+            f"the call has returned nothing for {empty_checks} checks — there is nothing "
+            "to compare"
+        )
     threshold = _stale_threshold_ms(row)
     checks = row.get("checks")
     checks_n = int(checks) if isinstance(checks, int) and not isinstance(checks, bool) else 0

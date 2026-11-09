@@ -176,7 +176,17 @@ def test_an_unknown_kind_raises_rather_than_reading_as_restored() -> None:
     """
     import pytest
 
-    assert set(NOTICE_KINDS) == {"disabled", "stalled", "restored", "blind", "seeing"}
+    assert set(NOTICE_KINDS) == {
+        "disabled",
+        "stalled",
+        "restored",
+        "blind",
+        "seeing",
+        # The bash-result pair: a call that cannot do its job is failing,
+        # and one that has never returned anything is empty (not failing).
+        "failing",
+        "empty",
+    }
     with pytest.raises(ValueError) as caught:
         format_monitor_notice_text(notice(kind="expired"))
     assert "expired" in str(caught.value)

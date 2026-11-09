@@ -3979,6 +3979,15 @@ def _decode_and_redact_streams(
     )
 
 
+#: How much of a FAILING command's stderr rides ``details["stderr_head"]``.
+#: The monitor scheduler needs the complaint verbatim to say "watch is failing:
+#: <why>", and it must not text-parse the framed result body to get it. Bounded
+#: because the field is per-result state: 400 chars covers every diagnostic this
+#: has been in front of (a git/gh refusal is one line; a traceback's first frames
+#: fit) and is far smaller than the stderr the result text already carries.
+BASH_STDERR_HEAD_CHARS = 400
+
+
 def _bash_output_summary(stdout: str, stderr: str) -> str:
     """The shared 'stdout/stderr' body used by updates and the final result."""
     parts = [
@@ -5589,7 +5598,32 @@ async def execute_bash(
     missing = _missing_tool_notice(stderr, context)
     if missing:
         parts.insert(insert_at, missing)
-    return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
+    # STRUCTURED EXIT FACTS, so a consumer that must judge the call's OUTCOME
+    # never text-parses the framed body. The monitor scheduler is the consumer:
+    # it used to treat a command that exited 1 as a successful check whose
+    # "result" was the text `exit code: 1 / --- stderr --- ...`, so 18 identical
+    # failing ticks diffed as "no change" and the operator was never told the
+    # watch was broken (the incident this field exists for).
+    #
+    # ``exit_code`` on EVERY result (one int, and the same key other tools
+    # already publish for a subprocess status). ``stderr_head`` only on a
+    # non-zero exit: a successful command's result stays byte-identical, so this
+    # adds no per-call transcript weight to the 99% case, and a failing one is
+    # where a reader needs the complaint. ``no_output`` is the D4 signal — a
+    # command that printed NOTHING is the quiet-watch shape (see the monitors'
+    # empty-output rule), and for bash it cannot be read off ``text``, which is
+    # always framed with `--- stdout ---/(empty)`.
+    result_details = dict(spill_details) if spill_details else {}
+    result_details["exit_code"] = return_code
+    # Only a SUCCESSFUL command can be "returns nothing": a non-zero exit with an
+    # empty stderr is the undecided shape (see the monitor's failing rule) and
+    # claiming it printed nothing would be a second, different fact.
+    result_details["no_output"] = return_code == 0 and not (
+        stdout_raw.strip() or stderr_raw.strip()
+    )
+    if return_code != 0 and stderr_raw.strip():
+        result_details["stderr_head"] = stderr_raw.strip()[:BASH_STDERR_HEAD_CHARS]
+    return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=result_details)
 
 
 def _bash_partial_summary(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput) -> str:
@@ -14980,6 +15014,15 @@ class MonitorParams(BaseModel):
     arguments: dict[str, Any] | None = Field(
         default=None, description="Exact arguments for that tool call."
     )
+    cwd: str | None = Field(
+        default=None,
+        description=(
+            "Directory the check runs in (an existing directory path; ~ is expanded). "
+            "Use this for any bash watch that depends on WHERE it runs — a gh/git "
+            "command must run inside the repo, and ticks otherwise run in the arming "
+            "session's cwd, which may not be one. Omit for the session's cwd."
+        ),
+    )
     every: str | None = Field(
         default=None,
         description="Check interval: '30s'|'60s'|'5m'|'1h' (floor 30s, default 60s).",
@@ -15034,6 +15077,13 @@ def _describe_monitor_approval(args: dict[str, Any], cwd: str) -> str:
     decision is what is being watched, how often, and until when — not the
     parameter shape (the ``_describe_wake_approval`` rationale, verbatim).
     Keys come from :class:`MonitorParams`, which is ``extra="forbid"``.
+
+    A NAMED ``cwd`` is part of that decision and is stated here: the same
+    command means different things in different directories (the incident's
+    watch was ``gh pr view`` — inside the repo it succeeds, outside it cannot
+    run at all), so an approval that showed only the command would be approving
+    a call whose behaviour it did not describe. Omitted ``cwd`` adds nothing:
+    the session's own directory is the default the approver is already in.
     """
     op = str(args.get("op") or "create").strip()
     if op == "cancel":
@@ -15048,7 +15098,9 @@ def _describe_monitor_approval(args: dict[str, Any], cwd: str) -> str:
     until = str(args.get("until") or "").strip()
     until_part = f" until {until}" if until else ""
     call = _monitor_call_repr(tool, args.get("arguments"))
-    return f"watch: {tool} {call} every {interval}{until_part}"
+    named_cwd = str(args.get("cwd") or "").strip()
+    cwd_part = f" in {named_cwd}" if named_cwd else ""
+    return f"watch: {tool} {call}{cwd_part} every {interval}{until_part}"
 
 
 def _monitor_row_text(row: dict[str, Any], now: int) -> str:
@@ -15128,6 +15180,16 @@ async def _monitor_create(
         "name": params.name,
         "tool": params.tool,
         "arguments": params.arguments,
+        # The directory the CHECK runs in, when the caller named one (D1). It
+        # rides the request rather than a separate parameter so the spec builder
+        # owns the one place a cwd is captured/validated/absolutised, and so the
+        # session cwd stays what ``cwd=`` below means: the DEFAULT, not the rule.
+        "cwd": params.cwd,
+        # Probe the call once at arm (D6). Opted in HERE, at the one arm path a
+        # human or agent actually uses, and only after the approval above the
+        # tool: the probe is a real call, and a programmatic arm keeps its
+        # pre-probe behaviour (one scheduled check, no call at arm).
+        "probe": True,
         "every": params.every,
         "until": params.until,
         "description": params.description,
@@ -15153,6 +15215,9 @@ async def _monitor_create(
         "remaining": len(scheduler.monitors),
         "already_armed": bool(outcome.get("duplicate")),
         "reactivated": bool(outcome.get("reactivated")),
+        "cwd": spec.cwd,
+        "baseline_error": outcome.get("baseline_error"),
+        "baseline_adopted": bool(outcome.get("baseline_adopted")),
     }
     if outcome.get("duplicate"):
         return _text(
@@ -15187,12 +15252,37 @@ async def _monitor_create(
     caveat = "ticks run only while this session is open."
     if spec.tool.startswith("mcp__"):
         caveat += " If its server reconnects the monitor waits (no failed checks)."
+    if outcome.get("baseline_error"):
+        # THE BASELINE ALREADY FAILED (D6): the watch is armed anyway — arming
+        # on a resource that does not exist yet (a PR not opened, a file not
+        # written) is legitimate — but the receipt must say so LOUDLY, in the
+        # first line, because the alternative is what the incident showed: an
+        # arm receipt that read as healthy next to a call that could never work.
+        failure = _clip_monitor_text(str(outcome["baseline_error"]), 200)
+        return _text(
+            tool_call_id,
+            "monitor",
+            f"Armed monitor '{spec.name}' ({spec.id}) — {caveat} WATCH IS FAILING: "
+            f"its baseline check already failed: {failure} "
+            f"{spec.tool} {call} every {format_duration(spec.every_ms)}, {bound}. The watch "
+            "stays armed (a resource that does not exist yet is a legitimate watch); if the "
+            "first scheduled check fails too it says so again, and repeated failures disable it.",
+            details=facts,
+        )
+    first_clause = (
+        # The arm-time probe already adopted the baseline (D6), so promising that
+        # "the first check in ~2s captures it" would describe a call that has
+        # already run — and the next real check is one interval away.
+        "Its baseline was captured just now by the arm-time check; you'll be told only "
+        "what changes."
+        if outcome.get("baseline_adopted")
+        else "First check in ~2s captures the baseline; you'll be told only what changes."
+    )
     return _text(
         tool_call_id,
         "monitor",
         f"Armed monitor '{spec.name}' ({spec.id}) — {caveat} {spec.tool} {call} every "
-        f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
-        "baseline; you'll be told only what changes.\n"
+        f"{format_duration(spec.every_ms)}, {bound}. {first_clause}\n"
         "A closed session's monitors resume, with one consolidated delta, when it "
         "reopens; a watch whose tool stays unreachable for 30 minutes says so.",
         details=facts,
@@ -15243,7 +15333,10 @@ def build_monitor_tool(context: ToolContext) -> AgentTool | None:
         describe_approval=_describe_monitor_approval,
         description=(
             "Watch a read-only call for changes (create/list/cancel): re-runs it every "
-            "interval and wakes you only when the output differs."
+            "interval and wakes you only when the output differs. 'cwd' names the "
+            "directory the check runs in — pass it for any git/gh watch, which must "
+            "run inside its repository. A watch whose call fails is reported as "
+            "failing instead of being retried in silence."
         ),
         parameters=MonitorParams.model_json_schema(),
         # write tier: create persists monitors and arms unattended future
