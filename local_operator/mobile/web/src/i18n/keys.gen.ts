@@ -614,6 +614,7 @@ export type MessageParams = {
   "wire.errors.desktop.session_is_remote_open": { "session_id": string; "label": string };
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
   "wire.errors.desktop.session_not_found": { "session_id": string };
+  "wire.errors.desktop.settings_intent_generation_moved": undefined;
   "wire.errors.desktop.skill_alias_occupied": undefined;
   "wire.errors.desktop.skill_local_changes_unpublished": undefined;
   "wire.errors.desktop.skill_not_editable": undefined;

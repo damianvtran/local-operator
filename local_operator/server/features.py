@@ -593,6 +593,19 @@ def static_feature_flags() -> dict[str, Any]:
         # bump is of THIS FEATURE CONTRACT, never the package version,
         # and `1` remains readable by a renderer that gates on presence.
         "session_move": 2,
+        # Durable background settings intents
+        # (POST/DELETE /v1/desktop/sessions/{id}/settings-intents[/{kind}],
+        # GET /v1/desktop/settings-intents, and the `settings_intent` feed
+        # frame). A model/effort/fast/cwd pick is recorded and answered at
+        # once, then applied in the background with retries, surviving a
+        # conversation switch and a backend restart.
+        #
+        # ITS OWN KEY for the `session_search` rule above: the renderer's
+        # existing picker path (`/commands`, `/working-directory`) must keep
+        # working byte for byte against a backend without these routes, so a
+        # client gates the new path on this key's presence and falls back to
+        # today's path when it is absent.
+        "settings_intents": 1,
         # An explicit desktop-only `frontend.replace` frame on the event
         # stream, plus the additive `frontend_replace=1` subscription
         # flag that negotiates it (review R4).

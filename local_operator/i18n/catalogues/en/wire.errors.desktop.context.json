@@ -22,5 +22,11 @@
     "tone": "plain, calm, tells the user the next step",
     "width": "one sentence, shown inline under a skill editor or in a toast",
     "note": "409; the saved fingerprint no longer matches the folder (edited elsewhere); the editor reloads; no placeholders"
+  },
+  "wire.errors.desktop.settings_intent_generation_moved": {
+    "role": "API refusal text for cancelling or dismissing a queued settings change (model, effort, fast mode or working directory) in the desktop app",
+    "tone": "plain, calm, reassuring: nothing went wrong",
+    "width": "one sentence, shown in a toast or under the settings chip",
+    "note": "409 generation_moved: the user picked again for the same setting after the change they tried to cancel, so the newer pick stands and there is nothing to cancel. 'change' means a requested settings change, not a code change. No placeholders."
   }
 }
