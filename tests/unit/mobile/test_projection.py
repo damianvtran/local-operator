@@ -301,7 +301,10 @@ def test_tool_row_lifecycle_one_line_with_diff_counts() -> None:
             result=ToolResult(
                 tool_call_id="t1",
                 content=[TextContent(text="wrote 10 lines")],
-                details={"added": 8, "removed": 2, "diff": "@@"},
+                # ``diff_truncated_rows`` is the producer's count of rows the
+                # stored diff omits; the phone needs it to say the record is
+                # partial, so it must ride the allowlist with ``diff``.
+                details={"added": 8, "removed": 2, "diff": "@@", "diff_truncated_rows": 7},
                 duration_s=1.25,
             ),
         )
@@ -310,6 +313,7 @@ def test_tool_row_lifecycle_one_line_with_diff_counts() -> None:
     assert (row.diff_added, row.diff_removed) == (8, 2)
     assert row.details["output"] == "wrote 10 lines"
     assert row.details["diff"] == "@@"
+    assert row.details["diff_truncated_rows"] == 7
     assert row.details["args"]["path"] == "/a/b/c.py"
     assert row.elapsed_s == 1.2
 

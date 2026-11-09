@@ -661,9 +661,12 @@ def test_diff_details_carries_a_rendered_diff_and_honours_the_cap() -> None:
     # An unchanged file reports no diff at all (nothing to render).
     unchanged = builtin._diff_details("f.txt", "a\nb\n", "a\nb\n")
     assert "diff" not in unchanged
-    # The cap bounds the stored list even for a pathological write.
+    # The cap bounds the stored list even for a pathological write, and the
+    # omission is reported as a count rather than a trailing marker row.
     big = builtin._diff_details("f.txt", "\n".join(f"line{i}" for i in range(500)), "")
-    assert len(big["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+    assert len(big["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES
+    assert "…" not in big["diff"]
+    assert big[builtin.DIFF_TRUNCATED_ROWS_KEY] == 501 - (len(big["diff"]) - 2)
 
 
 def _pem_block(line: str, *, prefix: str = "") -> str:
@@ -794,8 +797,11 @@ class TestDiffDetailsKeepsPemBlocksWhole:
             self.LINE + "\n" + self.LINE, self.LINE + "\n" + self.LINE * 2, 1
         )
         capped = builtin._diff_details("synthetic.md", huge_before, huge_after)
-        assert len(capped["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
-        assert capped["diff"][-1] == "…"
+        # The only change sits inside a block longer than the cap: the cut moves
+        # before the block, leaving no change row, so NO diff is stored rather
+        # than a split block -- and the omission is still reported.
+        assert "diff" not in capped
+        assert capped[builtin.DIFF_TRUNCATED_ROWS_KEY] > builtin._DIFF_DETAILS_CAP_LINES
 
     def test_more_than_two_hundred_lines_with_a_long_repeated_run_still_publishes(self) -> None:
         """Review round 2, R2-1: a credential-free diff must never be withheld.
@@ -840,9 +846,11 @@ class TestDiffDetailsKeepsPemBlocksWhole:
         )
         before = big + "Middle guidance 111.\n" + big
         after = before.replace("Middle guidance 111.", "Middle guidance 222.", 1)
-        rows = self._details(before, after)
-        assert rows[-1] == "…", "the over-cap payload must advertise truncation"
-        assert len(rows) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+        details = builtin._diff_details("synthetic.md", before, after)
+        # Hiding is now "no rows stored" plus the omitted count; a split block is
+        # never stored either way.
+        assert "diff" not in details, "a block larger than the cap must not be split"
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] > builtin._DIFF_DETAILS_CAP_LINES
 
     def test_new_file_create_header_matches_difflib_byte_for_byte(self) -> None:
         """A zero-length side prints the line BEFORE it, as difflib does (R3-1).
@@ -874,6 +882,126 @@ class TestDiffDetailsKeepsPemBlocksWhole:
         assert self._details(before, after) == list(
             difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
         )
+
+
+def _assert_publishable(rows: list[str]) -> None:
+    """``rows`` survive the REAL publication seam unchanged under a no-op mask.
+
+    The seam (``harness.loop._redact_diff_detail``) withholds any diff whose hunk
+    counts disagree with its observed rows; an identity redactor isolates that
+    shape check from credential masking, so a withheld result here means the
+    producer handed it an invalid diff.
+    """
+    from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD, _redact_diff_detail
+
+    published = _redact_diff_detail(rows, lambda text: text)
+    assert _DIFF_DETAIL_WITHHELD not in published, "valid truncated diff was withheld"
+    assert published == rows
+
+
+def _hunk_counts_match(rows: list[str]) -> bool:
+    """Every ``@@`` header's counts equal the rows that follow it."""
+    import re
+
+    pattern = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+    index = 2
+    while index < len(rows):
+        match = pattern.fullmatch(rows[index])
+        if match is None:
+            return False
+        old_want = int(match[2]) if match[2] is not None else 1
+        new_want = int(match[4]) if match[4] is not None else 1
+        index += 1
+        old_seen = new_seen = 0
+        while index < len(rows) and not rows[index].startswith("@@"):
+            old_seen += rows[index][:1] in (" ", "-")
+            new_seen += rows[index][:1] in (" ", "+")
+            index += 1
+        if (old_seen, new_seen) != (old_want, new_want):
+            return False
+    return True
+
+
+class TestDiffDetailsTruncatesIntoARedactableShape:
+    """Over-cap diffs are cut at hunk boundaries, never into an invalid shape.
+
+    The bug: ``diff[:200] + ["…"]`` cut mid-hunk, the publication seam refused
+    the count mismatch and every write/edit diff over 200 rows reached replay,
+    subagent and transcript views as ``[output withheld: ...]``.
+    """
+
+    def test_large_new_file_keeps_its_first_rows_with_rewritten_header(self) -> None:
+        content = "".join(f"line {i}\n" for i in range(500))
+        details = builtin._diff_details("new.py", "", content)
+        rows = details["diff"]
+        assert len(rows) == builtin._DIFF_DETAILS_CAP_LINES
+        assert rows[2] == f"@@ -0,0 +1,{builtin._DIFF_DETAILS_CAP_LINES - 3} @@"
+        assert rows[3] == "+line 0"
+        assert "…" not in rows
+        assert details["added"] == 500
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == 501 - (len(rows) - 2)
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+
+    def test_many_hunks_keep_whole_hunks_then_a_valid_partial(self) -> None:
+        before_lines = [f"row {i}" for i in range(2000)]
+        after_lines = list(before_lines)
+        for index in range(0, 2000, 10):
+            after_lines[index] = f"changed {index}"
+        details = builtin._diff_details(
+            "many.txt", "\n".join(before_lines) + "\n", "\n".join(after_lines) + "\n"
+        )
+        rows = details["diff"]
+        assert len(rows) <= builtin._DIFF_DETAILS_CAP_LINES
+        assert _hunk_counts_match(rows)
+        assert rows[-1][:1] in (" ", "+", "-")
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] > 0
+        _assert_publishable(rows)
+
+    def test_exact_cap_is_not_truncated(self) -> None:
+        # 2 file headers + 1 hunk header + 197 added rows == the cap exactly.
+        content = "".join(f"x{i}\n" for i in range(builtin._DIFF_DETAILS_CAP_LINES - 3))
+        details = builtin._diff_details("exact.txt", "", content)
+        assert len(details["diff"]) == builtin._DIFF_DETAILS_CAP_LINES
+        assert builtin.DIFF_TRUNCATED_ROWS_KEY not in details
+        one_more = content + "extra\n"
+        over = builtin._diff_details("exact.txt", "", one_more)
+        assert len(over["diff"]) == builtin._DIFF_DETAILS_CAP_LINES
+        assert over[builtin.DIFF_TRUNCATED_ROWS_KEY] == 1
+        _assert_publishable(over["diff"])
+
+    def test_cut_never_splits_a_private_key_block(self) -> None:
+        line = "M7qA9zKd3PxW8sVn" * 4
+        pem = (
+            "-----BEGIN " + "PRIV" "ATE KEY-----\n" + "\n".join([line] * 20) + "\n-----END " + "PRIV"
+            "ATE KEY-----\n"
+        )
+        # The block's 22 rows straddle row ~197 of a new file.
+        content = "".join(f"x{i}\n" for i in range(185)) + pem + "tail\n"
+        rows = builtin._diff_details("pem.txt", "", content)["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in rows), "cut moved before the block"
+        assert rows[-1] == "+x184"
+        assert _hunk_counts_match(rows)
+
+    def test_byte_budget_bounds_long_rows(self) -> None:
+        wide = "y" * 4000
+        content = "".join(f"{i}{wide}\n" for i in range(60))
+        details = builtin._diff_details("wide.json", "", content)
+        rows = details["diff"]
+        assert sum(len(r.encode()) for r in rows) <= builtin._DIFF_DETAILS_CAP_BYTES
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == 61 - (len(rows) - 2)
+        _assert_publishable(rows)
+
+    def test_rewrite_hunk_keeps_counts_valid_across_removed_and_added(self) -> None:
+        before = "".join(f"old {i}\n" for i in range(300))
+        after = "".join(f"new {i}\n" for i in range(300))
+        details = builtin._diff_details("rewrite.txt", before, after)
+        rows = details["diff"]
+        assert _hunk_counts_match(rows)
+        # difflib renders all removals first: the kept prefix is 197 '-' rows,
+        # and the header says the new side is empty at line 0.
+        assert rows[2] == f"@@ -1,{builtin._DIFF_DETAILS_CAP_LINES - 3} +0,0 @@"
+        _assert_publishable(rows)
 
 
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:
