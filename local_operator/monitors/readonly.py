@@ -1023,17 +1023,54 @@ def _git_reason(tokens: list[str]) -> str | None:
 #: mirrored conservatively). Used by ``_repo_value_reason`` below.
 _REPO_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@-")
 
+#: The URL prefixes ``gh`` accepts on ``-R``/``--repo``, stripped before the name
+#: grammar applies (measured against gh, see ``_repo_name_parts``).
+_REPO_URL_SCHEMES = ("https://", "http://")
+
+
+def _repo_name_parts(value: str) -> list[str] | None:
+    """The ``[HOST/]OWNER/REPO`` parts of a repo-naming flag value, or ``None``.
+
+    ``gh`` ITSELF takes a URL where these flags are used — measured: ``gh pr list
+    -R https://github.com/cli/cli``, the same with a ``.git`` suffix and with a
+    trailing slash all answer with real data — so the scan accepts one too (QA
+    round 3, Q-R3-2). The guide always said it did; the validator was the only
+    thing refusing it. The VALUE is not rewritten: gh parses the URL, and
+    re-spelling the operator's command is not this gate's job. A URL has to name
+    its host (three parts, because there is nothing else a two-part URL tail
+    could be), while a bare name may be ``OWNER/REPO``.
+    """
+    url = False
+    for scheme in _REPO_URL_SCHEMES:
+        if value.startswith(scheme):
+            value = value[len(scheme) :]
+            url = True
+            break
+    if url:
+        value = value.rstrip("/")
+        if value.endswith(".git"):
+            value = value[: -len(".git")]
+    parts = value.split("/")
+    if not 2 <= len(parts) <= 3 or (url and len(parts) != 3):
+        return None
+    if any(part in (".", "..") for part in parts):
+        return None
+    if not all(part and all(char in _REPO_NAME_CHARS for char in part) for part in parts):
+        return None
+    return parts
+
 
 def _repo_value_reason(tokens: list[str]) -> str | None:
     """Refuse a repo-naming flag whose VALUE is not a repo name (QA round 1, Q4).
 
     ``-R``/``--repo`` name WHERE to read, and the flag machinery deliberately
     treats a consumed value as data — right for a path or a query, wrong for this
-    one: these values are always ``[HOST/]OWNER/REPO``. A value that is not one
-    (empty, flag-shaped, or carrying punctuation noise) turned into one gh error
-    per tick on a watch nobody could see was mis-armed, so it gets a sentence at
-    arm time instead. No shell ever sees these bytes — the verb gate is the
-    security boundary and is untouched — this is legibility.
+    one: these values are always ``[HOST/]OWNER/REPO``, or a URL gh reduces to
+    one. A value that is neither (empty, flag-shaped, or carrying punctuation
+    noise) turned into one gh error per tick on a watch nobody could see was
+    mis-armed, so it gets a sentence at arm time instead. No shell ever sees these
+    bytes — the verb gate is the security boundary and is untouched — this is
+    legibility.
     """
     for index, token in enumerate(tokens):
         value: str | None = None
@@ -1045,16 +1082,11 @@ def _repo_value_reason(tokens: list[str]) -> str | None:
             value = token[len("--repo=") :]
         if value is None:
             continue
-        parts = value.split("/")
-        named = (
-            2 <= len(parts) <= 3
-            and all(part not in (".", "..") for part in parts)
-            and all(part and all(char in _REPO_NAME_CHARS for char in part) for part in parts)
-        )
-        if not named:
+        if _repo_name_parts(value) is None:
             return (
-                f'"-R/--repo" wants a repo name ([HOST/]OWNER/REPO), not {value!r} — '
-                "the value is passed to gh as data, so gh would refuse it on every check."
+                f'"-R/--repo" wants a repo name ([HOST/]OWNER/REPO) or a repo URL, '
+                f"not {value!r} — the value is passed to gh as data, so gh would "
+                "refuse it on every check."
             )
     return None
 

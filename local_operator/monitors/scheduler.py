@@ -729,6 +729,10 @@ class MonitorScheduler:
             # details (§4.5; round-1 review F4).
             "next_due_at": entry.counters.get("next_due_at"),
             "baseline_adopted": baseline_adopted,
+            # The strike count the ordinary ladder disables at, so the receipt can
+            # name the disable that actually applies instead of hard-coding one
+            # policy's sentence (review round 4).
+            "failure_limit": self._settings.max_consecutive_failures,
         }
         if probe is not None and "error" in probe:
             # The receipt names the failure LOUDLY (``_monitor_create`` leads its
@@ -741,6 +745,12 @@ class MonitorScheduler:
             # policies need a scheduled tick's accounting to stay honest, and a
             # probe is not one.
             probe_kind = str(probe.get("kind") or "")
+            # The RECEIPT's sentence is class-dependent (review round 4): a
+            # ``failing``/``unavailable`` episode has the 24-hour horizon, a
+            # ``fatal`` one dies on its first occurrence, and the ordinary class
+            # in between spends the strike ladder — which disabled a watch 14
+            # minutes after arming while the receipt promised 24 hours.
+            result["baseline_kind"] = probe_kind
             if probe_kind not in ("unavailable", "blind", "fatal"):
                 self._record_arm_probe_failure(
                     entry, str(probe["error"]), now, kind=probe_kind or None
@@ -771,6 +781,14 @@ class MonitorScheduler:
 
         ``next_due_at`` is deliberately NOT touched: the probe is not a scheduled
         check, and the receipt has already promised when the first one runs.
+
+        BOTH classes also record ``restored_no_baseline`` here, at the edge that
+        opens the episode, exactly as the three SCHEDULED enter edges do (QA
+        round 3, Q-R3-3; review round 4, MAJOR-1). Without it this path — the
+        ONLY one a human or an agent reaches, since ``_monitor_create`` arms with
+        ``probe: True`` — opened an episode that ``_restored_notice`` then
+        defaulted to "there was a baseline", and the recovery told the operator
+        the next check diffs against an old baseline that never existed.
         """
         counters = entry.counters
         counters["checks"] = int(counters.get("checks") or 0) + 1
@@ -781,10 +799,13 @@ class MonitorScheduler:
             counters["failing_ticks"] = 1
             counters["failing_notice_checks"] = FAILING_CHECKS_WITHOUT_BASELINE
             counters["last_note"] = "the watch's call already failed at arm"
-            return
-        counters["consecutive_failures"] = int(counters.get("consecutive_failures") or 0) + 1
-        counters["failure_limit"] = self._settings.max_consecutive_failures
-        counters["last_note"] = "a check already failed at arm"
+        else:
+            counters["consecutive_failures"] = int(counters.get("consecutive_failures") or 0) + 1
+            counters["failure_limit"] = self._settings.max_consecutive_failures
+            counters["last_note"] = "a check already failed at arm"
+        # Read BEFORE the first success can adopt a baseline, for the reason the
+        # scheduled edges give: ``_restored_notice`` runs after that adoption.
+        counters["restored_no_baseline"] = not bool(counters.get("content_hash"))
 
     async def _probe_baseline(self, spec: MonitorSpec) -> dict[str, Any]:
         """Run one arm-time check; ``{"error": …}`` or ``{"text": …, "handle": …}``.
@@ -1581,16 +1602,23 @@ class MonitorScheduler:
         # every latch in this file is, and ``_restored_notice`` clears it on the
         # next success so the notice is never the last word.
         if failures == 1:
-            # The ENTER edge is published, exactly like the failing episode's: the
-            # row must be able to say "1 failed check, below the threshold" instead
-            # of "nothing has changed" while the strikes are accruing.
-            counters["failure_limit"] = self._settings.max_consecutive_failures
-            # And it is the edge that remembers whether there was anything to miss
-            # while this run of failures lasts (QA round 2, Q-R2-5).
+            # The ENTER edge remembers whether there was anything to miss while
+            # this run of failures lasts (QA round 2, Q-R2-5).
             counters["restored_no_baseline"] = not bool(counters.get("content_hash"))
-            self._notify_change()
+        # THE COUNT IS PUBLISHED ON EVERY STRIKE, not only at the enter edge (QA
+        # round 3, Q-R3-1; review round 4, MAJOR-1). ``consecutive_failures`` is
+        # what decides which sentence a cold reader gets — "N failed check(s) so
+        # far, below the 2-check threshold" under it, "the check keeps failing —
+        # repeated failures disable it at N" at and above it — and a row
+        # published only at strike 1 told the operator for the whole ~14 minutes
+        # before the disable that the watch was still below a threshold it had
+        # already passed (the CLI's hint and its ``--json`` count both lied about
+        # the present). A strike is never a quiet tick: the count is a claim that
+        # just changed, and the retry ladder (backing off to the 15-minute cap)
+        # bounds the rewrites to a handful per episode.
+        counters["failure_limit"] = self._settings.max_consecutive_failures
+        self._notify_change()
         if failures >= STRIKING_CHECKS_BEFORE_NOTICE and not counters.get("striking_notified"):
-            counters["failure_limit"] = self._settings.max_consecutive_failures
             striking_notice = MonitorNotice(
                 monitor_id=entry.spec.id,
                 name=entry.spec.name,

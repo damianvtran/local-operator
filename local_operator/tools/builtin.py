@@ -15214,6 +15214,11 @@ async def _monitor_create(
         "cwd": spec.cwd,
         "baseline_error": outcome.get("baseline_error"),
         "baseline_adopted": bool(outcome.get("baseline_adopted")),
+        # WHICH disable the receipt's prose names (review round 4): the probe's
+        # failure class and the strike count the ordinary ladder stops at, so a
+        # structured reader gets the same answer as the sentence.
+        "baseline_kind": outcome.get("baseline_kind"),
+        "failure_limit": outcome.get("failure_limit"),
     }
     if outcome.get("duplicate"):
         return _text(
@@ -15258,6 +15263,25 @@ async def _monitor_create(
         # second clause no longer promises a disable after five failures: a
         # failing call charges no strike at all now (review round 1, BLOCKER-1).
         failure = _clip_monitor_text(str(outcome["baseline_error"]), 200)
+        # THE DISABLE IT NAMES IS THE ONE THAT APPLIES (review round 4). This
+        # sentence promised "disabled only if the failure lasts 24 hours" for
+        # EVERY probe error, and an ordinary one (a timeout or a tool error, no
+        # ``kind``) spends the strike ladder instead — measured: disabled 14
+        # minutes after arming, on the fifth consecutive failure, under a receipt
+        # that had promised a day. ``failing``/``unavailable`` really do have the
+        # 24-hour horizon (no strike is charged), ``fatal`` dies on its first
+        # occurrence, and everything else is the strike count.
+        baseline_kind = str(outcome.get("baseline_kind") or "")
+        limit = outcome.get("failure_limit")
+        if baseline_kind in ("failing", "unavailable"):
+            disable = "is disabled only if the failure lasts 24 hours"
+        elif baseline_kind == "fatal":
+            disable = "is disabled on the first failed check, because that failure is fatal"
+        elif isinstance(limit, int) and not isinstance(limit, bool) and limit > 1:
+            disable = f"is disabled after {limit} consecutive failed checks"
+        else:
+            # No number to name: promise only what every class shares.
+            disable = "is disabled once this class of failure keeps happening"
         return _text(
             tool_call_id,
             "monitor",
@@ -15265,8 +15289,8 @@ async def _monitor_create(
             f"check already failed: {failure} {spec.tool} {call} every "
             f"{format_duration(spec.every_ms)}, {bound}. The watch stays armed (a "
             "resource that does not exist yet is a legitimate watch): it keeps checking, "
-            "backing off to every 15 minutes, says this once per failing episode, and is "
-            f"disabled only if the failure lasts 24 hours. {caveat}",
+            "backing off to every 15 minutes, says this once per failing episode, and "
+            f"{disable}. {caveat}",
             details=facts,
         )
     first_clause = (

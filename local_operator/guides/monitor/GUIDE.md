@@ -78,8 +78,9 @@ effective approval tier is not `read`, at arm time and again before every
 run. `bash` commands must be provably read-only: a single line, every stage
 from an allow-list (`ls`, `cat`, `grep`, `rg`, `git log/status/diff/…`,
 `gh pr view …`, `jq`, …) with default-deny flags; redirection, chaining and
-command substitution are refused. `gh`'s `-R/--repo OWNER/REPO` (or a repo URL —
-the value is validated) is allowed on the read-only verbs (`pr
+command substitution are refused. `gh`'s `-R/--repo OWNER/REPO` (or a repo URL
+such as `https://github.com/OWNER/REPO`, with or without a `.git` suffix — the
+value is checked at arm time) is allowed on the read-only verbs (`pr
 view/list/diff/checks/status`, `issue view/list`,
 `run view/list`): it names WHICH repo to read, never what to write, and the
 verb gate still refuses every mutating subcommand. An MCP tool qualifies only

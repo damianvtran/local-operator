@@ -33,6 +33,7 @@ tick produces nothing at all.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from pathlib import Path
@@ -213,6 +214,19 @@ async def _tick(session: Session, clock: list[int], *, advance_ms: int = 5_000) 
 def _row(session: Session) -> dict[str, Any]:
     rows = session._monitors.index_rows()
     assert rows, "the monitor must be published in the index"
+    return rows[0]
+
+
+def _published_row(config_dir: Path) -> dict[str, Any]:
+    """The row a COLD READER renders: the index FILE, not ``index_rows()``.
+
+    `lop monitor status`, the desktop route and the TUI band all read the entry
+    the session last published (``store.read_index``); the live counters are a
+    different thing and were already right in the Q-R3-1 defect.
+    """
+    index = monitor_store.read_index(config_dir)
+    rows = [row for entry in index.values() for row in entry.get("monitors") or ()]
+    assert len(rows) == 1, rows
     return rows[0]
 
 
@@ -559,6 +573,61 @@ async def test_a_succeeding_probe_adopts_the_baseline_with_one_call(
 
 
 @pytest.mark.asyncio
+async def test_the_arm_receipt_names_the_disable_that_applies_to_the_class(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """Review round 4: ONE sentence promised "24 hours" for every probe error.
+
+    A ``failing`` probe really does have the 24-hour horizon (no strike is
+    charged), while an ordinary probe error — a timeout or a tool error, with no
+    ``kind`` — spends the strike ladder: measured disabled 14 minutes after
+    arming, on the fifth consecutive failure, under a receipt that had promised
+    a day.
+    """
+    outside = _not_a_repo(tmp_path)
+    session, _sinks = _session(tmp_path, outside)
+    session._monitors._now = lambda: NOW  # type: ignore[method-assign]
+    try:
+        failing = await _arm_via_tool(
+            session,
+            str(outside),
+            name="ci",
+            arguments={"command": "git rev-parse --show-toplevel"},
+        )
+        assert "disabled only if the failure lasts 24 hours" in failing.text, failing.text
+        assert " is is " not in failing.text, failing.text
+        assert failing.details is not None
+        assert failing.details["baseline_kind"] == "failing", failing.details
+    finally:
+        await session.dispose()
+
+    root = tmp_path / "strike"
+    root.mkdir()
+    strike, _ = _session(root, root)
+    strike._monitors._now = lambda: NOW  # type: ignore[method-assign]
+
+    async def timed_out(spec: MonitorSpec) -> Any:
+        return {"error": "check timed out after 0s"}
+
+    strike._monitors._check_runner = timed_out  # type: ignore[method-assign]
+    try:
+        ordinary = await _arm_via_tool(
+            strike, str(root), name="ci2", arguments={"command": "ls"}
+        )
+        limit = MonitorSettings().max_consecutive_failures
+        assert "24 hours" not in ordinary.text, ordinary.text
+        assert f"disabled after {limit} consecutive failed checks" in ordinary.text, ordinary.text
+        # The clause is spliced into a sentence that already ends in "and";
+        # the first draft of it read "and is is disabled" (round-4 evidence).
+        assert " is is " not in ordinary.text, ordinary.text
+        assert ordinary.details is not None
+        assert ordinary.details["baseline_kind"] == "", ordinary.details
+        assert ordinary.details["failure_limit"] == limit, ordinary.details
+    finally:
+        await strike.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_named_cwd_that_is_not_a_directory_is_refused(
     tmp_path: Path, config_dir: Path
 ) -> None:
@@ -702,7 +771,7 @@ class _Harness:
     arithmetic itself.
     """
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, *, settings: MonitorSettings | None = None) -> None:
         self.now_ms = NOW
         self.results: list[CheckOutcome] = []
         self.notices: list[Any] = []
@@ -711,7 +780,7 @@ class _Harness:
             now=lambda: self.now_ms,
             config_dir=tmp_path / "cfg",
             session_id="sess",
-            settings=MonitorSettings(),
+            settings=settings or MonitorSettings(),
             validate=lambda tool, args: None,
             run_check=self._run_check,
             deliver=self._deliver,
@@ -733,7 +802,16 @@ class _Harness:
 
     async def arm(self, **extra: Any) -> None:
         outcome = await self.scheduler.create(
-            {"name": "watch", "tool": "bash", "arguments": {"command": "ls"}, "every": "60s"},
+            {
+                "name": "watch",
+                "tool": "bash",
+                "arguments": {"command": "ls"},
+                "every": "60s",
+                # ``probe: True`` for the arm path a human or an agent actually
+                # uses (``_monitor_create``) — the one whose episode starts at
+                # ``_record_arm_probe_failure``.
+                **extra,
+            },
             cwd="/tmp",
         )
         assert outcome.get("created"), outcome
@@ -849,6 +927,73 @@ async def test_a_recovery_promises_a_delta_only_when_a_baseline_survived_the_epi
         assert "no gap to report" in format_monitor_notice_text(recovered)
     finally:
         strike.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_armed_failing_probe_still_records_there_was_no_baseline(
+    tmp_path: Path,
+) -> None:
+    """Q-R3-3 (A): the arm path is the ONLY one a human or an agent uses.
+
+    ``_monitor_create`` arms with ``probe: True``, so the episode a real operator
+    opens most often begins at ``_record_arm_probe_failure`` — and that edge,
+    alone among the four, never recorded ``restored_no_baseline``. The recovery
+    then promised a delta against a baseline that never existed.
+    """
+    harness = _Harness(tmp_path)
+    try:
+        harness.results.append({"error": "boom: no such repo", "kind": "failing"})
+        await harness.arm(probe=True)
+        harness.results.append({"error": "boom: still no repo", "kind": "failing"})
+        await harness.tick()
+        assert [notice.kind for notice in harness.notices] == ["failing"], harness.notices
+        harness.results.append({"text": "A", "error": None})
+        await harness.tick()
+        restored = harness.notices[-1]
+        assert restored.kind == "restored", harness.notices
+        assert restored.no_baseline is True, restored
+        assert "no gap to report" in format_monitor_notice_text(restored)
+        assert harness.deliveries == []
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_armed_probe_timeout_still_records_there_was_no_baseline(
+    tmp_path: Path,
+) -> None:
+    """Q-R3-3 (B): the same edge on the strike branch — a probe that TIMED OUT.
+
+    A probe error with no ``kind`` charges one strike, and its recovery is the
+    strike class's, which must not promise a delta over a gap in which nothing was
+    ever compared. The timeout is REAL (a 1 ms budget against a sleeping runner),
+    not a hand-built error dict.
+    """
+    harness = _Harness(tmp_path, settings=MonitorSettings(run_timeout_ms=1))
+    real_runner = harness.scheduler._check_runner
+    hung: list[int] = []
+
+    async def hang_first(spec: MonitorSpec) -> Any:
+        if not hung:
+            hung.append(1)
+            await asyncio.sleep(0.05)  # the probe's own budget fires first
+        return await real_runner(spec)
+
+    harness.scheduler._check_runner = hang_first  # type: ignore[method-assign]
+    try:
+        await harness.arm(probe=True)
+        assert hung, "the probe must have run (and timed out)"
+        harness.results.append({"error": "the tool returned an error"})
+        await harness.tick()
+        assert [notice.kind for notice in harness.notices] == ["striking"], harness.notices
+        harness.results.append({"text": "first answer", "error": None})
+        await harness.tick()
+        restored = harness.notices[-1]
+        assert restored.kind == "restored", harness.notices
+        assert restored.no_baseline is True, restored
+        assert "no gap to report" in format_monitor_notice_text(restored)
+    finally:
+        harness.scheduler.dispose()
 
 
 @pytest.mark.asyncio
@@ -1176,6 +1321,52 @@ async def test_the_row_tells_a_blip_from_a_strike_run(tmp_path: Path) -> None:
         harness.scheduler.dispose()
 
 
+@pytest.mark.asyncio
+async def test_the_published_row_counts_every_strike_of_a_striking_run(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """Q-R3-1: the INDEX ROW — not the live counters — must tell the truth.
+
+    Independent QA and review both found this by execution: the strike class
+    published at its enter edge only, so `lop monitor status` printed "1 failed
+    check so far, below the 2-check threshold" — and `--json` carried 1 — for the
+    whole ~14 minutes the watch was at 2, 3 and 4 strikes, while the live counters
+    and the already-sent "keeps failing" notice said otherwise. The assertion is
+    on what a cold reader renders, ``store.read_index`` (the file the CLI reads),
+    never on ``index_rows()``, which was already right.
+    """
+    watched = tmp_path / "watched.txt"
+    watched.write_text("one\n", encoding="utf-8")
+    session, sinks = _session(tmp_path, tmp_path)
+    clock = [NOW]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    try:
+        await _arm_via_tool(
+            session, str(tmp_path), name="ci", arguments={"command": f"cat {watched}"}
+        )
+
+        async def timed_out(spec: MonitorSpec) -> Any:
+            return {"error": "check timed out after 0s"}
+
+        session._monitors._check_runner = timed_out  # type: ignore[method-assign]
+        for strikes, opening in (
+            (1, "1 failed check so far"),
+            (2, "the check keeps failing:"),
+            (3, "the check keeps failing:"),
+        ):
+            await _tick(session, clock)
+            row = _published_row(config_dir)
+            assert row["consecutive_failures"] == strikes, row
+            hint = monitor_store.health_hint(row, None) or ""
+            assert hint.startswith(opening), (strikes, hint)
+        assert "below the 2-check threshold" not in hint, hint
+        assert "repeated failures disable it at 5" in hint, hint
+        # The ladder still speaks once, at the second strike.
+        assert [notice.kind for notice in sinks.notices] == ["striking"], sinks.notices
+    finally:
+        await session.dispose()
+
+
 def test_the_failing_hint_clips_its_detail() -> None:
     """MINOR-2: a 639-char single row beside a neighbour that clips to 80."""
     row = {
@@ -1373,7 +1564,13 @@ def test_a_relative_cwd_resolves_against_the_arming_session(tmp_path: Path) -> N
 
 
 def test_a_repo_flag_value_must_look_like_a_repo_name() -> None:
-    """QA Q4: the flag's VALUE was accepted as opaque data."""
+    """QA Q4: the flag's VALUE was accepted as opaque data.
+
+    Q-R3-2 adds the other direction: a repo URL is a repo name to ``gh`` — measured
+    ``gh pr list -R https://github.com/cli/cli`` (and the ``.git``/trailing-slash
+    forms) answering with real data — and the guide always promised it, so the
+    validator is what had to move, not the guide.
+    """
     from local_operator.monitors import readonly
 
     assert readonly._bash_verdict("gh pr view 1 -R not-a-repo-name") is not None
@@ -1382,3 +1579,14 @@ def test_a_repo_flag_value_must_look_like_a_repo_name() -> None:
     assert readonly._bash_verdict("gh pr view 1 -R owner/name") is None
     assert readonly._bash_verdict("gh pr view 1 --repo=owner/name") is None
     assert readonly._bash_verdict("gh pr view 1 -Rowner/name") is None
+
+    # A repo URL, in every form gh accepts.
+    assert readonly._bash_verdict("gh pr view 1 -R https://github.com/owner/name") is None
+    assert readonly._bash_verdict("gh pr view 1 -R https://github.com/owner/name.git") is None
+    assert readonly._bash_verdict("gh pr view 1 --repo=https://github.com/owner/name/") is None
+    assert readonly._bash_verdict("gh pr checks 1 -R https://gitlab.example.com/o/n") is None
+    # ...but it still has to name a REPOSITORY: two parts cannot be a URL tail,
+    # and anything past the repo is a path gh would refuse.
+    assert readonly._bash_verdict("gh pr view 1 -R https://github.com/owner") is not None
+    assert readonly._bash_verdict("gh pr view 1 -R https://github.com/owner/name/tree/main") is not None
+    assert readonly._bash_verdict("gh pr view 1 -R https://github.com/../name") is not None
