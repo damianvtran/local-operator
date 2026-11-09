@@ -11,7 +11,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 838
+        "settings_io.py": 840
       }
     },
     "wire.settings.hub_defaults": {
