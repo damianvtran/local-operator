@@ -180,6 +180,69 @@ def _why(item: dp.Item, wt: Path, window_s: float = 2 * 3600, cap: int = 20) -> 
     return "\n".join(lines)
 
 
+# The retry in plan_when_idle exists for ONE observed external writer, and it is
+# not a general "try again". What the fixture leaves running is git's own
+# detached auto-maintenance child: a `git commit` inside a nested repository
+# starts `git maintenance run --auto --quiet --detach` and never waits for it
+# (measured on git 2.55 from the parent's trace2 stream), and that nested repo's
+# `.git` sits INSIDE the tree the worktree category walks. On this host the child
+# wrote nothing within 5 s - a two-commit fixture meets none of its auto
+# thresholds - so the child's IDENTITY is NOT established. What IS established is
+# the shape of the write the failure reported: run 42535944532 dumped exactly ONE
+# fresh path, `<nested>/.git/objects` at 0.0 s, i.e. an entry created inside the
+# nested repository's metadata AFTER `fx.idle` had back-dated the tree by
+# something outside this module. This assertion had already failed this way twice
+# on hosted CI before this branch existed (#3389), and the branch's ~1000 added
+# tests only lengthen the shard that hosts it.
+#
+# So the retry keys on that SHAPE, never on a suspect: it fires only when EVERY
+# freshly-written path is git metadata of a NESTED repository, it re-ages the
+# tree between attempts, and a second attempt that still reads `recent` fails
+# exactly as before. A regression that makes the PLANNER write into a worktree
+# writes on every plan and therefore survives the retry; only a one-shot external
+# writer is absorbed.
+
+
+def _nested_git_writes(wt: Path, window_s: float = 300.0) -> list[str] | None:
+    """Fresh paths under ``wt`` if they are ALL nested-repo git metadata, else None.
+
+    ``None`` means "this is not the external-writer race": something wrote
+    outside a nested repository's ``.git``, which a retry must not absorb.
+    """
+    root = Path(os.path.realpath(wt))
+    now = time.time_ns()
+    fresh: list[str] = []
+    for path in [root, *root.rglob("*")]:
+        try:
+            stamp = os.lstat(path).st_mtime_ns
+        except OSError:
+            continue
+        if (now - stamp) / 1e9 > window_s:
+            continue
+        offset = path.relative_to(root).parts
+        # ``(".git",)`` is this worktree's own pointer file: ``idle`` ages it and
+        # the walk skips it. Nesting means a ``.git`` BELOW the root.
+        if len(offset) < 2 or ".git" not in offset:
+            return None
+        fresh.append(str(path))
+    return fresh
+
+
+def plan_when_idle(fx: Fx, wt: Path) -> dp.Plan:
+    """``plan_for`` for a fixture worktree that must read as idle.
+
+    Re-ages and re-plans at most ONCE, and only for the nested-repo git-metadata
+    write no fixture can wait out (see the comment above).
+    """
+    plan = plan_for(fx)
+    if by_path(plan, wt).code != "recent":
+        return plan
+    if _nested_git_writes(wt) is None:
+        return plan
+    fx.idle(wt)
+    return plan_for(fx)
+
+
 # -- reclaimable cases -------------------------------------------------------
 
 
@@ -661,7 +724,7 @@ def test_ignored_nested_repo_with_unpushed_commit_is_kept(fx: Fx) -> None:
     git(nested, "add", "-A")
     git(nested, "commit", "-qm", "never pushed")
     fx.idle(wt)
-    plan = plan_for(fx)
+    plan = plan_when_idle(fx, wt)
     item = by_path(plan, wt)
     assert item.code == "ignored-content", _why(item, wt)
     dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
@@ -2116,3 +2179,99 @@ def test_the_walk_before_delete_reapplies_the_data_dir_check(
     assert "standard data" in detail, detail
     assert (documents / "invoice.pdf").exists(), "a refusal must not delete"
     assert shape.exists()
+
+
+# -- the fourth category must not reach the first three ----------------------
+
+
+def test_the_worktree_walk_is_unperturbed_by_the_build_output_edges(fx: Fx) -> None:
+    """``stop_at_mount``/``prune_names`` must not reach the worktree category.
+
+    They exist for build output: a mount point ENDS that walk (another volume's
+    bytes are not ours to delete) and a standard data directory is PRUNED from
+    it (:data:`dp.PROTECTED_DATA_DIRS`). The worktree category measured every
+    one of those entries before the fourth category existed and must still: its
+    idle guard reads mtimes out of the SAME walk, so pruning there would move
+    ``newest_mtime_ns`` and turn a reclaim into a ``recent`` keep, or the
+    reverse.
+
+    Driven through the real planner over a tree built out of exactly the shapes
+    the build-output walk prunes, with the pruning walk run as a NEGATIVE
+    CONTROL: if the control stops being smaller than the measurement, the
+    fixture has stopped discriminating and this test no longer proves anything.
+    """
+    wt = fx.worktree("shapes")
+    (wt / "Cargo.toml").write_text("[package]\nname = 'x'\n")
+    (wt / "package.json").write_text("{}\n")
+    # Protected names (`Documents`/`Downloads`/`Music`) AND build-output shapes
+    # (`target` beside a Cargo.toml, `build` beside a package.json).
+    for name in ("Documents", "Downloads", "Music", "target", "build"):
+        (wt / name).mkdir()
+        (wt / name / "payload.bin").write_bytes(b"x" * 16384)
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "shapes")
+    git(wt, "push", "-q", "origin", "shapes")
+    fx.idle(wt)
+
+    legacy = dp.walk_allocated(str(wt), skip_top_level=frozenset({".git"}))
+    explicit = dp.walk_allocated(
+        str(wt),
+        skip_top_level=frozenset({".git"}),
+        stop_at_mount=False,
+        prune_names=frozenset(),
+    )
+    assert legacy == explicit, "the build-output parameters must default to the old walk"
+    assert explicit.pruned == [] and explicit.mount_crossed == ""
+    assert explicit.truncated is False and explicit.error == ""
+
+    control = dp.walk_allocated(
+        str(wt), skip_top_level=frozenset({".git"}), prune_names=dp.PROTECTED_DATA_DIRS
+    )
+    assert control.pruned, "negative control: these names must be prunable"
+    assert control.allocated_bytes < explicit.allocated_bytes
+
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "reclaim", item.reason
+    assert item.bytes_truncated is False
+    # The reclaim path's own sizing walk measures the tree WHOLE: the protected
+    # names and the build-output shapes are all still counted.
+    assert item.allocated_bytes == legacy.allocated_bytes
+    assert item.allocated_bytes > control.allocated_bytes
+
+
+def test_only_the_build_output_path_hands_the_walk_its_new_edges() -> None:
+    """Provenance: ``stop_at_mount``/``prune_names`` are build output's alone.
+
+    A default is not a contract: the next edit to the worktree, Go-cache or
+    scratchpad caller could pass one of them and silently change what that
+    category measures — the worktree's idle guard reads the same walk, so the
+    change would surface as a shifted keep reason rather than as an error.
+    Asserted on the source, and the OWNER SET is asserted too so a new walk call
+    in one of the older categories has to be argued for here.
+    """
+    import ast
+
+    source = (REPO_ROOT / "local_operator" / "disk_pressure.py").read_text()
+    edges = {"stop_at_mount", "prune_names"}
+    legacy = {"_assess", "plan_go_cache"}  # worktree (idle + sizing) and Go cache
+    owners: list[tuple[str, set[str]]] = []
+    for func in (n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef)):
+        for call in ast.walk(func):
+            if not isinstance(call, ast.Call):
+                continue
+            name = (
+                call.func.attr
+                if isinstance(call.func, ast.Attribute)
+                else getattr(call.func, "id", "")
+            )
+            if name == "walk_allocated":
+                owners.append((func.name, {kw.arg for kw in call.keywords if kw.arg}))
+
+    for owner, kwargs in owners:
+        if owner in legacy:
+            assert not (kwargs & edges), f"{owner} must keep the older walk: {sorted(kwargs)}"
+    assert {owner for owner, kwargs in owners if kwargs & edges} == {
+        "assess_build_output",
+        "remove_build_output",
+    }
+    assert {owner for owner, _ in owners} == legacy | {"assess_build_output", "remove_build_output"}
