@@ -15270,13 +15270,21 @@ async def _monitor_create(
         # minutes after arming, on the fifth consecutive failure, under a receipt
         # that had promised a day. ``failing``/``unavailable`` really do have the
         # 24-hour horizon (no strike is charged), ``fatal`` dies on its first
-        # occurrence, and everything else is the strike count.
+        # occurrence, and ordinary failures use the strike count. Blind checks
+        # bypass _apply_failure: _apply_blind resets strikes, preserves the
+        # baseline and retries at the normal interval without disabling. Its
+        # notice latches once delivered; _clear_blind ends the episode on the
+        # first comparable check and announces recovery only if it was notified.
         baseline_kind = str(outcome.get("baseline_kind") or "")
         limit = outcome.get("failure_limit")
+        retry = "backing off to every 15 minutes, says this once per failing episode, and "
         if baseline_kind in ("failing", "unavailable"):
             disable = "is disabled only if the failure lasts 24 hours"
         elif baseline_kind == "fatal":
             disable = "is disabled on the first failed check, because that failure is fatal"
+        elif baseline_kind == "blind":
+            retry = "says this once per blind episode, and "
+            disable = "leaves the baseline unchanged without charging a failed check"
         elif isinstance(limit, int) and not isinstance(limit, bool) and limit > 1:
             disable = f"is disabled after {limit} consecutive failed checks"
         else:
@@ -15289,8 +15297,7 @@ async def _monitor_create(
             f"check already failed: {failure} {spec.tool} {call} every "
             f"{format_duration(spec.every_ms)}, {bound}. The watch stays armed (a "
             "resource that does not exist yet is a legitimate watch): it keeps checking, "
-            "backing off to every 15 minutes, says this once per failing episode, and "
-            f"{disable}. {caveat}",
+            f"{retry}{disable}. {caveat}",
             details=facts,
         )
     first_clause = (

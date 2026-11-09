@@ -626,6 +626,31 @@ async def test_the_arm_receipt_names_the_disable_that_applies_to_the_class(
     finally:
         await strike.dispose()
 
+    root = tmp_path / "blind"
+    root.mkdir()
+    blind_session, _ = _session(root, root)
+    blind_session._monitors._now = lambda: NOW  # type: ignore[method-assign]
+
+    async def uncomparable(spec: MonitorSpec) -> Any:
+        return {"error": "full result spill is gone", "kind": "blind"}
+
+    blind_session._monitors._check_runner = uncomparable  # type: ignore[method-assign]
+    try:
+        blind = await _arm_via_tool(
+            blind_session, str(root), name="ci3", arguments={"command": "ls"}
+        )
+        assert (
+            "it keeps checking, says this once per blind episode, and leaves the baseline "
+            "unchanged without charging a failed check."
+        ) in blind.text, blind.text
+        assert "5 consecutive" not in blind.text, blind.text
+        assert "disabl" not in blind.text.lower(), blind.text
+        assert "backing off" not in blind.text, blind.text
+        assert blind.details is not None
+        assert blind.details["baseline_kind"] == "blind", blind.details
+    finally:
+        await blind_session.dispose()
+
 
 @pytest.mark.asyncio
 async def test_a_named_cwd_that_is_not_a_directory_is_refused(
