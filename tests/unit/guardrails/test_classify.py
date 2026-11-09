@@ -10,11 +10,16 @@ deletion the guard must keep letting through without any model call.
 
 from __future__ import annotations
 
+import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.guardrails.classify import Risk, classify_bash
+from local_operator.tools import search_guard
+from local_operator.tools.search_guard import lex
 
 
 @pytest.fixture
@@ -1004,16 +1009,134 @@ def test_r9_1_substituted_heredoc_as_data_stays_low(home: Path, command: str) ->
     assert _classify(home, command, cwd=home / "repo").risk is Risk.LOW
 
 
-def test_r9_m4_lex_is_linear_in_open_frames() -> None:
-    import time
+# --- perf: ``lex`` must stay linear in the frames it has OPEN ------------------
+#
+# What the m4 review found was an O(n * depth) scan: ``lex`` asked "is a quote
+# frame open?" by walking its context stack, so every operator character cost
+# O(depth), and a command opening 10,000 ``$(`` frames ahead of 10,000 ``;``
+# operators cost seconds (1.4 s by the old comment's reading; 3.40 s of CPU here
+# when that scan is put back). ``_FrameStack``'s running counts are the fix: each
+# of those questions is now O(1).
+#
+# The guard that shipped with it was ``time.perf_counter() - start < 0.5``, which
+# does not measure that property:
+#   * one absolute reading of ONE size cannot show a growth RATE — linearity is a
+#     relationship between two sizes, so the test could not fail the way its own
+#     name describes;
+#   * 0.5 s sat BELOW the 1.4 s its own comment calls normal, so the margin ran
+#     the wrong way for the scan it existed to catch;
+#   * it measured the machine. Main Full Suite run 42553116385 (shard test
+#     (3.13, 3)) failed it at 0.5528 s — ``assert (310.740596109 -
+#     310.187794309) < 0.5`` — as the run's ONLY failure, with 10,463 other cells
+#     green: the runner was the subject and the code was fine.
+#
+# The count below replaces it because ``lex`` can expose one: ``_FrameStack`` is a
+# plain ``list`` subclass, so every way to READ an element of it is a dunder a test
+# can count, and element reads are precisely the work the m4 defect added. An
+# exact count needs no clock at all, so the numbers are the same on an idle laptop
+# and on a loaded runner. (``test_credential_shapes`` measures a CPU-time RATIO
+# for its regex rules because those steps run inside the C engine, where no
+# counter is reachable; here one is.)
 
-    from local_operator.tools.search_guard import lex
 
-    text = "$(" * 10_000 + "; x" * 10_000
-    start = time.perf_counter()
+class _CountingFrameStack(search_guard._FrameStack):
+    """``lex``'s context stack, counting every element READ of it.
+
+    Any scan of the stack has to go through one of these — ``for frame in stack``,
+    ``stack[-1]``, ``frame in stack``, ``stack.count(...)``, ``stack.index(...)`` —
+    so a re-introduced depth scan cannot slip past uncounted. ``len`` is
+    deliberately NOT counted: it is O(1) on a real list, and the ``if stack`` /
+    ``bool(stack)`` tests in ``lex`` must stay free.
+
+    Reaching into a private class is the point: this asserts the invariant
+    ``_FrameStack`` exists to hold, and the test fails loudly (no stack built, no
+    reads counted) if a refactor takes the instrument away rather than passing
+    vacuously.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def __getitem__(self, index: Any) -> Any:
+        found = super().__getitem__(index)
+        self.reads += len(found) if isinstance(index, slice) else 1
+        return found
+
+    def __iter__(self) -> Iterator[str]:
+        for frame in super().__iter__():
+            self.reads += 1
+            yield frame
+
+    def __reversed__(self) -> Iterator[str]:
+        for frame in super().__reversed__():
+            self.reads += 1
+            yield frame
+
+    def __contains__(self, frame: object) -> bool:
+        self.reads += len(self)
+        return super().__contains__(frame)
+
+    def count(self, frame: Any) -> int:
+        self.reads += len(self)
+        return super().count(frame)
+
+    def index(self, frame: Any, *args: Any) -> int:
+        self.reads += len(self)
+        return super().index(frame, *args)
+
+
+def _frame_reads(text: str, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Element reads of ``lex``'s frame stack for exactly one scan of ``text``."""
+    made: list[_CountingFrameStack] = []
+
+    class _Recording(_CountingFrameStack):
+        def __init__(self) -> None:
+            super().__init__()
+            made.append(self)
+
+    monkeypatch.setattr(search_guard, "_FrameStack", _Recording)
     lex(text)
-    # Generous bound: the O(n * depth) scan measured 1.4 s here.
-    assert time.perf_counter() - start < 0.5
+    assert len(made) == 1, "lex built no frame stack through the module attribute"
+    return made[0].reads
+
+
+def test_r9_m4_lex_is_linear_in_open_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Frame-stack reads grow with the TEXT, not with the depth it opens.
+
+    The two legs are the same shape four sizes apart, so a scan whose cost is a
+    constant per character gives 4x the reads, while the quadratic scan this
+    test exists for gives 16x. Measured on the fixed scanner here: 0.80 reads per
+    character (only ``stack[-1]``, and ``$(`` is consumed two characters at a
+    time) and a 4.00x growth; the pre-m4 scan measures 200.8 and 800.8 reads per
+    character on the same two texts, i.e. 16.0x.
+    """
+    small = "$(" * 1_000 + "; x" * 1_000
+    large = "$(" * 4_000 + "; x" * 4_000
+    small_reads = _frame_reads(small, monkeypatch)
+    large_reads = _frame_reads(large, monkeypatch)
+    assert small_reads > 0, "the instrument did not attach: no frame reads were counted"
+    growth = large_reads / small_reads
+    # 6x leaves room for a per-scan overhead that is not exactly proportional,
+    # and still sits well below the 16x the depth scan costs.
+    assert growth <= 6, (
+        f"frame-stack reads grew {growth:.1f}x for 4x the characters: "
+        f"{small_reads} -> {large_reads}"
+    )
+    # The same property per character, which is what "linear in open frames"
+    # means: the depth below grows 4x while the cost of a character must not.
+    # A depth scan reads ~200 per character at ``small`` and ~800 at ``large``.
+    per_char = small_reads / len(small)
+    assert per_char <= 4, f"frame reads per character grow with depth: {per_char:.1f}"
+    # A BLOW-UP guard, not the property: its only job is to fail a pathological
+    # regression instead of letting it hang the suite. It is deliberately seconds
+    # (this scan costs 21 ms of CPU at the median and 46 ms at the worst of 40
+    # readings here) so a loaded runner can be slow without being wrong — the
+    # counts above are what judge the scanner.
+    start = time.process_time()
+    lex("$(" * 10_000 + "; x" * 10_000)
+    spent = time.process_time() - start
+    assert spent < 30.0, f"lex needed {spent:.1f} s of CPU for a 50,000-character command"
 
 
 @pytest.mark.parametrize("separator", ["; ", " && ", "\n"])
