@@ -1086,6 +1086,9 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # receives it (`_job_id` is set before the merge, so the builder refuses).
     # Appended last for the same prefix reason as `sessions`.
     "notify",
+    "generate_music",
+    "modify_music",
+    "music_status",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -6608,6 +6611,8 @@ class Session:
         # outlived its runtime gets its check-wake ensured here, before the
         # first turn — see ``_boot_video_jobs``.
         await self._boot_video_jobs()
+        from local_operator.music.jobs import recover as recover_music_jobs
+        await recover_music_jobs(self._build_tool_context())
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands
             # at (or microseconds before) the grace deadline, and a COLD
@@ -21538,6 +21543,8 @@ class Session:
             # rows themselves, and this method is the ONE append path for
             # ``video_job_v1`` records (see ``journal_video_job``).
             journal_video_job=self.journal_video_job,
+            journal_music_job=self.journal_music_job,
+            session_disposed=lambda: self._disposed,
             # The audio lane's late-settlement pair: a cancelled-but-running
             # job may finish minutes after the tool returned, so the settle
             # poll rides the SESSION's background task set (tracked, and
@@ -23115,6 +23122,10 @@ class Session:
         except OSError:
             logger.warning("could not journal credential binding change", exc_info=True)
 
+    async def journal_music_job(self, record: dict[str, Any]) -> None:
+        """Persist music recovery identity without making bookkeeping fresh work."""
+        await self._transcript.append_custom("music_job_v1", record, preserve_mtime=True)
+
     async def journal_video_job(self, record: dict[str, Any]) -> None:
         """Append one durable ``video_job_v1`` record (media wave-2, video phase).
 
@@ -23223,7 +23234,7 @@ class Session:
         # settled video job delivers its review result exactly like a child,
         # and its cancellations never reach here (the manager's task-cancel
         # arm returns before delivery, as for every type).
-        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video"):
+        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video", "music"):
             return
         if self._leaving_deliveries:
             # A result that arrives AFTER the departure latch must not be
@@ -23736,7 +23747,7 @@ class Session:
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
             details["held"] = True
-        if getattr(job, "type", "") == "video":
+        if getattr(job, "type", "") in ("video", "music"):
             # The video receipt rides the row for the review turn (§5.3 of the
             # video contract): digest/content_type/duration/model/cost are the
             # facts a surface (or the model) needs to find the attachment
@@ -23744,7 +23755,10 @@ class Session:
             # progress channel (``latest_details``), so the delivery path stays
             # generic — task/bash rows keep their exact two-key shape.
             latest = getattr(job, "latest_details", None)
-            receipt = latest.get("video_receipt") if isinstance(latest, dict) else None
+            receipt_key = (
+                "music_receipt" if getattr(job, "type", "") == "music" else "video_receipt"
+            )
+            receipt = latest.get(receipt_key) if isinstance(latest, dict) else None
             if isinstance(receipt, dict):
                 details.update(receipt)
         return CustomMessage(

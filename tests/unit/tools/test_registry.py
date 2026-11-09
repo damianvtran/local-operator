@@ -89,6 +89,10 @@ async def _allow_notify(**_kwargs: Any) -> str:
     return "Notified."
 
 
+async def _music_journal(_record: dict[str, Any]) -> None:
+    """Presence-only durable door for the fully capable registry fixture."""
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
@@ -135,6 +139,7 @@ def _engine_context(**kwargs) -> ToolContext:
         # The inbox door (docs/design/notifications-inbox.md §3.2): presence-
         # only, the ONE fact ``build_notify_tool``'s createIf gate reads.
         notify_inbox=_allow_notify,
+        journal_music_job=_music_journal,
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -188,7 +193,9 @@ def _force_browser_available(monkeypatch):
     monkeypatch.setattr(
         audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
     )
-    from local_operator.tools import artifact_data_tool
+    from local_operator.tools import artifact_data_tool, music_tool
+
+    monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
 
@@ -333,25 +340,30 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     newest BUILDER append and ends ``TOOL_BUILDERS`` only: it is absent from
     ``DEFAULT_TOOL_NAMES`` on purpose (see ``test_skill_is_opt_in_only``), so
     the builder table's tail is the default tail plus ``skill``."""
-    assert list(TOOL_BUILDERS)[-1] == "skill"
-    builders = list(TOOL_BUILDERS)[:-1]
-    assert DEFAULT_TOOL_NAMES[-1] == "notify"
+    music = ["generate_music", "modify_music", "music_status"]
+    assert list(TOOL_BUILDERS)[-3:] == music
+    assert DEFAULT_TOOL_NAMES[-3:] == music
+    previous_builders = list(TOOL_BUILDERS)[:-3]
+    assert previous_builders[-1] == "skill"
+    builders = previous_builders[:-1]
+    previous_defaults = DEFAULT_TOOL_NAMES[:-3]
+    assert previous_defaults[-1] == "notify"
     assert builders[-1] == "notify"
-    assert DEFAULT_TOOL_NAMES[-2] == "artifact_data"
+    assert previous_defaults[-2] == "artifact_data"
     assert builders[-2] == "artifact_data"
-    assert DEFAULT_TOOL_NAMES[-3] == "tags"
+    assert previous_defaults[-3] == "tags"
     assert builders[-3] == "tags"
-    assert DEFAULT_TOOL_NAMES[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert previous_defaults[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
     assert builders[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
-    assert DEFAULT_TOOL_NAMES[-6] == "bridge"
+    assert previous_defaults[-6] == "bridge"
     assert builders[-6] == "bridge"
-    assert DEFAULT_TOOL_NAMES[-7] == "setting"
+    assert previous_defaults[-7] == "setting"
     assert builders[-7] == "setting"
-    assert DEFAULT_TOOL_NAMES[-8] == "video_status"
+    assert previous_defaults[-8] == "video_status"
     assert builders[-8] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-9] == "generate_video"
+    assert previous_defaults[-9] == "generate_video"
     assert builders[-9] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-10] == "no_reply"
+    assert previous_defaults[-10] == "no_reply"
     assert builders[-10] == "no_reply"
 
 

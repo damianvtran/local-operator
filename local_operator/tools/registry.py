@@ -41,6 +41,11 @@ from local_operator.tools.secret_tool import build_secret_tool
 from local_operator.tools.skill_tool import build_skill_tool
 from local_operator.tools.tags_tool import build_tags_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
+from local_operator.tools.music_tool import (
+    build_generate_music_tool,
+    build_modify_music_tool,
+    build_music_status_tool,
+)
 from local_operator.tools.video_tool import (
     build_generate_video_tool,
     build_video_status_tool,
@@ -227,6 +232,10 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # session's tools array -- the prompt-cache prefix -- moves. Appended at END
     # for the same prefix reason as every entry above.
     "skill": lambda context: build_skill_tool(context),
+    # Appended: existing provider schema prefixes remain stable.
+    "generate_music": build_generate_music_tool,
+    "modify_music": build_modify_music_tool,
+    "music_status": build_music_status_tool,
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -290,6 +299,9 @@ DEFAULT_TOOL_NAMES: list[str] = [
     # The newest append (see the table comment above): createIf-gated on the
     # session's inbox door.
     "notify",
+    "generate_music",
+    "modify_music",
+    "music_status",
 ]
 
 

@@ -2428,6 +2428,12 @@ class ToolContext(BaseModel):
     # ``local_operator.video.records.build_record`` returns, and this module
     # must not import that module's way up the graph.
     journal_video_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # Music journals before paid submit so an interrupted HTTP response can be
+    # replayed under the SAME idempotency key, never another purchase.
+    journal_music_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # A lifecycle predicate, not a turn snapshot: teardown stops observation
+    # without authorizing upstream cancellation or discarding purchased audio.
+    session_disposed: Callable[[], bool] | None = Field(default=None, exclude=True)
     # The audio lane's late-settlement writer (``Session.journal_audio_settle``):
     # appends one ``audio_settle_v1`` bookkeeping row after a RUNNING cancel,
     # because a job refused cancellation may finish minutes later and the tool
