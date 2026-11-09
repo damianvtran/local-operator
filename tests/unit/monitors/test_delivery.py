@@ -138,6 +138,23 @@ def test_the_restored_notice_closes_the_episode() -> None:
     assert "old baseline" in text
 
 
+def test_a_restored_notice_promises_no_delta_when_the_episode_had_no_baseline() -> None:
+    """QA round 2, Q-R2-5: the recovery copy described a gap that never existed.
+
+    An episode that began BEFORE the watch had ever produced a result (the
+    failing-at-arm shape) missed nothing — the first good result becomes the
+    baseline — so "changes during the gap arrive as one delta" is a promise the
+    next check cannot keep. The ``blind``/``seeing`` pair already splits on this,
+    and the same ``no_baseline`` field now carries it here.
+    """
+    text = format_monitor_notice_text(notice(kind="restored", no_baseline=True))
+    assert "is running again" in text
+    assert "no gap to report" in text, text
+    assert "one delta" not in text, text
+    # The cancel tail is shared by both halves, so a reader always has the out.
+    assert 'monitor({op:"cancel",id:"m1"})' in text, text
+
+
 def test_every_notice_kind_is_bounded_and_one_block() -> None:
     """A notice is a PUSH into the conversation, so its size is a contract: a
     long failure reason is clipped rather than allowed to turn a disable into a

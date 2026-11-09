@@ -401,6 +401,11 @@ class WakePanel(Container):
         # (which charges no strike, so the count is 0) or ordinary failed checks
         # climbing the strike ladder.
         failing = failing_episode or fail_count > 0
+        # THE ORDINARY LADDER'S OWN COUNT, kept apart from ``fail_count`` above,
+        # which an open failing episode repoints at its ticks: the strike hint's
+        # threshold is about consecutive FAILURES of the check, not ticks of a
+        # call that ran and reported it could not do the job.
+        strikes = failures if isinstance(failures, int) and not isinstance(failures, bool) else 0
         # EXPIRY IS THE ONE DEADLINE EVERY HOST MAY JUDGE: ``until_at`` is a spec
         # instant the owner never moves, and past it the owner never checks the
         # watch again, so "it is not running" is true however old the published
@@ -502,6 +507,23 @@ class WakePanel(Container):
             # flag, and its count is the episode's own.
             if hint and hint.startswith("WATCH IS FAILING"):
                 health = _band_health_clause(hint)
+                ink, rank = "warning", 2
+            elif hint and strikes >= monitor_store.STRIKING_HINT_CHECKS and live_clocks:
+                # STRIKING REACHES THE BAND (QA round 2, Q-R2-4) — the other fault
+                # class, where the check cannot complete at all and the ladder WILL
+                # disable it. This branch used to end at "N failed", so the glance
+                # surface dropped both the reason and the countdown, which made the
+                # strike notice the only warning anything gave before a silent
+                # death. It renders ``store.striking_clause`` rather than the
+                # sentence's first clause: measured at 100 columns the sentence is
+                # too long for a row that must also name the monitor, and the
+                # countdown was what truncation took.
+                # LIVE COUNTS ONLY: a published copy's ``consecutive_failures`` is
+                # the count at the last change event, and a recovery republishes
+                # nothing, so "keeps failing" read from it would be an alarm about
+                # a watch that may already be well (the stale-count rule in the
+                # fallback below).
+                health = monitor_store.striking_clause(row)
                 ink, rank = "warning", 2
             elif failing_episode and hint:
                 # A single failed check, below the reporting threshold: the

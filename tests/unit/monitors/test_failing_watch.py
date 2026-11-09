@@ -774,6 +774,10 @@ async def test_the_failing_threshold_is_one_without_a_baseline_and_two_with_one(
         harness.results.append({"text": "A", "error": None})
         await harness.tick()
         assert [notice.kind for notice in harness.notices] == ["failing", "restored"]
+        # The episode began BEFORE a baseline existed, so the recovery must not
+        # promise a delta over that gap (QA round 2, Q-R2-5).
+        assert harness.notices[-1].no_baseline is True, harness.notices[-1]
+        assert "no gap to report" in format_monitor_notice_text(harness.notices[-1])
 
         # Now one failure is a blip: silent.
         harness.results.append({"error": "boom: rate limited", "kind": "failing"})
@@ -793,6 +797,58 @@ async def test_the_failing_threshold_is_one_without_a_baseline_and_two_with_one(
         assert harness.deliveries == []
     finally:
         harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_promises_a_delta_only_when_a_baseline_survived_the_episode(
+    tmp_path: Path,
+) -> None:
+    """Q-R2-5: the same sentence for both fault classes, on both edges.
+
+    ``_restored_notice`` runs AFTER the successful check adopted its baseline, so
+    it cannot ask "was there one?" at that moment — the answer is always yes. The
+    ENTER edge of each interrupted episode records it instead, and the ``restored``
+    copy splits on it exactly as the ``blind``/``seeing`` pair already does.
+    """
+    harness = _Harness(tmp_path)
+    try:
+        await harness.arm()
+        harness.results.append({"text": "A", "error": None})
+        await harness.tick()  # a baseline exists from here on
+
+        # Class 1 — the failing episode. With a baseline the threshold is two, and
+        # the recovery closes a gap that really was missed.
+        for error in ("boom: rate limited", "boom: still failing"):
+            harness.results.append({"error": error, "kind": "failing"})
+            await harness.tick()
+        assert [notice.kind for notice in harness.notices] == ["failing"], harness.notices
+        harness.results.append({"text": "B", "error": None})
+        await harness.tick()
+        restored = harness.notices[-1]
+        assert restored.kind == "restored", harness.notices
+        assert restored.no_baseline is False, restored
+        assert "one delta" in format_monitor_notice_text(restored)
+    finally:
+        harness.scheduler.dispose()
+
+    # Class 2 — the ordinary strike ladder, whose ENTER edge records the same
+    # fact: a watch whose checks never answered must not promise a delta the
+    # first success cannot produce.
+    strike = _Harness(tmp_path / "strike")
+    try:
+        await strike.arm()
+        for error in ("the tool returned an error", "the tool returned an error"):
+            strike.results.append({"error": error})
+            await strike.tick()
+        assert [notice.kind for notice in strike.notices] == ["striking"], strike.notices
+        strike.results.append({"text": "first answer", "error": None})
+        await strike.tick()
+        recovered = strike.notices[-1]
+        assert recovered.kind == "restored", strike.notices
+        assert recovered.no_baseline is True, recovered
+        assert "no gap to report" in format_monitor_notice_text(recovered)
+    finally:
+        strike.scheduler.dispose()
 
 
 @pytest.mark.asyncio

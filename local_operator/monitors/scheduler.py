@@ -1507,6 +1507,11 @@ class MonitorScheduler:
         if kind == "unavailable":
             if not counters.get("unavailable_since"):
                 counters["unavailable_since"] = now
+                # Recorded at the ENTER edge for the same reason as the blind and
+                # failing episodes record theirs: ``_restored_notice`` runs AFTER
+                # the successful check adopted its baseline, so by then the answer
+                # to "was there one?" is always yes (QA round 2, Q-R2-5).
+                counters["restored_no_baseline"] = not bool(counters.get("content_hash"))
             counters["unavailable_ticks"] = int(counters.get("unavailable_ticks") or 0) + 1
             counters["last_note"] = "tool unavailable — retrying"
             ticks = int(counters["unavailable_ticks"])
@@ -1580,6 +1585,9 @@ class MonitorScheduler:
             # row must be able to say "1 failed check, below the threshold" instead
             # of "nothing has changed" while the strikes are accruing.
             counters["failure_limit"] = self._settings.max_consecutive_failures
+            # And it is the edge that remembers whether there was anything to miss
+            # while this run of failures lasts (QA round 2, Q-R2-5).
+            counters["restored_no_baseline"] = not bool(counters.get("content_hash"))
             self._notify_change()
         if failures >= STRIKING_CHECKS_BEFORE_NOTICE and not counters.get("striking_notified"):
             counters["failure_limit"] = self._settings.max_consecutive_failures
@@ -1652,7 +1660,12 @@ class MonitorScheduler:
             # The ENTER edge is published (not every failing tick): the list row
             # and the TUI band render the published row, and a row in a failing
             # episode must say so instead of "nothing has changed" (D8). Same
-            # rule and same reason as ``_apply_blind``.
+            # rule and same reason as ``_apply_blind``. It also remembers whether
+            # a baseline existed when the episode began, so the ``restored`` notice
+            # does not promise a delta over a gap in which nothing was missed (QA
+            # round 2, Q-R2-5): the successful check that ends the episode adopts
+            # its own baseline before ``_restored_notice`` reads anything.
+            counters["restored_no_baseline"] = not bool(counters.get("content_hash"))
             self._notify_change()
         if now - int(counters["failing_since"]) >= FAILING_GONE_MS:
             # A DAY of continuous failure is not a resource that is about to
@@ -1720,6 +1733,9 @@ class MonitorScheduler:
         counters["failing"] = False
         counters["failing_since"] = 0
         counters["failing_ticks"] = 0
+        # The episode's "was there a baseline" answer dies with it, for the same
+        # reason the episode clock does (QA round 2, Q-R2-5).
+        counters.pop("restored_no_baseline", None)
 
     def _disable_notice(self, entry: _Entry, now: int, *, failures: int) -> MonitorNotice | None:
         """The disable notice, unless this monitor's has already gone out.
@@ -1790,6 +1806,10 @@ class MonitorScheduler:
         # for an hour a day would be disabled on its third day).
         counters["failing_since"] = 0
         counters["failing_ticks"] = 0
+        # CONSUMED ONCE, whether or not a notice goes out: a reactivated or
+        # later-episode watch must not inherit the previous episode's answer to
+        # "was there a baseline to miss?" (QA round 2, Q-R2-5).
+        no_baseline = bool(counters.pop("restored_no_baseline", False))
         if was_failing or was_striking:
             # Same edge-publish rule as ``_clear_blind``: a cold reader renders
             # the published row, and a stale "watch is failing" would outlive
@@ -1805,6 +1825,7 @@ class MonitorScheduler:
             at_ms=now,
             checks=int(counters.get("checks") or 0),
             deliveries=int(counters.get("deliveries") or 0),
+            no_baseline=no_baseline,
         )
 
     def _apply_blind(self, entry: _Entry, reason: str, now: int) -> MonitorNotice | None:

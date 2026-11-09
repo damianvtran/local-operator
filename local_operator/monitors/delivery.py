@@ -252,12 +252,24 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
 
     # restored
     if notice.kind == "restored":
+        # THE GAP SENTENCE IS ONLY TRUE IF A BASELINE SURVIVED IT (QA round 2,
+        # Q-R2-5). An episode that began before the watch had ever produced a
+        # result — the failing-at-arm shape this PR exists for — missed nothing:
+        # the first good result is adopted silently, so promising a delta here
+        # described a diff that cannot arrive. Same split, and same words, as the
+        # ``blind``/``seeing`` pair above.
+        gap = (
+            "No comparable baseline existed, so there is no gap to report: the first "
+            "result after it became the baseline silently (no delta for that one)."
+            if notice.no_baseline
+            else "The next check diffs against the old baseline, so changes during the "
+            "gap arrive as one delta."
+        )
         return _bounded(
             f"(monitor) {who} is running again as of {clock}{source_note} — the earlier "
-            "interruption has ended.\n"
-            "The next check diffs against the old baseline, so changes during the gap arrive "
-            f'as one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once '
-            "its goal is met."
+            f"interruption has ended.\n{gap} "
+            f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once its goal '
+            "is met."
         )
 
     if notice.kind == "blind":

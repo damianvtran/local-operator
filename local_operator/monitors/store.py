@@ -505,6 +505,29 @@ def is_idle(row: Mapping[str, Any], now_ms: int | None) -> bool:
     return now_ms - due > _stale_threshold_ms(row)
 
 
+def striking_clause(row: Mapping[str, Any]) -> str:
+    """The band's compressed form of the strike sentence (QA round 2, Q-R2-4).
+
+    ``health_hint`` writes the sentence every surface with room prints, and the
+    band shows only its FIRST clause — which for the strike class is the error,
+    so the countdown that makes the row an alarm (this watch stops at the fifth
+    failure) fell outside it and the glance surface showed neither reason nor
+    countdown, just "2 failed". Moving the countdown into that clause is not a
+    fix on its own: measured at 100 columns the full sentence runs to 106
+    characters on a row that also has to name the monitor, and truncation then
+    ate the countdown AND the name. So the band gets a shorter spelling — state,
+    then the deadline, then the reason, which is the order width can afford to
+    lose — while the CLI, the desktop rows and the lifecycle notice keep the
+    full sentence. ``disabled_clause`` is the same arrangement for a disabled
+    row: the store owns the words, the band owns the budget.
+    """
+    detail = _clip_detail(str(row.get("last_error") or "")) or "its check returned an error"
+    limit = _count(row.get("failure_limit"))
+    if limit:
+        return f"keeps failing, stops at {limit}: {detail}"
+    return f"keeps failing: {detail}"
+
+
 def disabled_clause(row: Mapping[str, Any]) -> str:
     """The one-line cause a listing row leads with for a disabled monitor.
 
