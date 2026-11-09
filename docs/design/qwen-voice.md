@@ -19,16 +19,10 @@ rig pins:
 - **Gateway tasks run one at a time per owner** (`task-operations.mjs`,
   `laneLimit: 1`). A task tied to a whole session turn would hold every later
   take, including steers, until the turn ended; hence Q4.
-- **The token mechanism.** The rig's provider is a copy of the s2s profile and
-  puts only `⟦lop-say:<uuid>⟧` into the instructions it builds for a spoken
-  reply, a result injection and a permission injection. The relay endpoint
-  resolves the token from an in-process registry and streams exactly that text;
-  an unknown token yields empty output. The only further edits are s2s's own
-  `remove_markdown`/`remove_unspeechable` and lop's `speakable` cap.
-- **Auth placement.** The desktop bearer stays in Electron main, which is the
-  only HTTP caller of these routes and proxies a closed set of verbs. The
-  Gateway process runs third-party code, and a bearer there would reach
-  `/v1/credentials`, so it never receives one.
+- **The Provider contract** (`docs/voice-frontends/custom-provider.md`): a
+  Provider must implement, among others, `buildSpeakResponse()`,
+  `buildResultInjection()` and `buildPermissionInjection()` — the three builders
+  that compose what the rig speaks and injects. That is where Q3 puts the token.
 
 ## What it is
 
@@ -51,22 +45,28 @@ and returns text.
   mode (drops updates outside a prompt, paraphrases results).
 - **Q2 No language model in the rig's loop.** The Qwen3-4B is removed. A
   deterministic relay endpoint answers a user turn with
-  `spawn_thinking({objective: <last user message, byte for byte>})`, a tool
-  result with empty text, and anything unrecognised with empty text. The
-  failure mode is silence. The admitted text is the transcript.
-- **Q3 Verbatim speech goes through a token.** The rig's provider puts only
-  `⟦lop-say:<uuid>⟧` into the instructions; the relay endpoint looks the token
-  up and streams exactly the registered text. An unknown token produces empty
-  output. The only edits to spoken text are s2s's own markdown/unspeakable
-  stripping and lop's `speakable` cap.
+  `spawn_thinking({objective: <last user message>})` — the objective is the
+  admitted text verbatim, up to whitespace normalisation (the Gateway collapses
+  runs of whitespace) — a tool result with empty text, and anything unrecognised
+  with empty text. The failure mode is silence. The admitted text is the
+  transcript.
+- **Q3 Verbatim speech goes through a token.** The rig's provider is a copy of
+  the s2s profile (which the custom-provider contract above permits) and puts
+  only `⟦lop-say:<uuid>⟧` into the instructions it builds for a spoken reply, a
+  result injection and a permission injection. The relay endpoint looks the
+  token up in an in-process registry and streams exactly the registered text;
+  an unknown token produces empty output. The only edits to spoken text are
+  s2s's own `remove_markdown`/`remove_unspeechable` and lop's `speakable` cap.
 - **Q4 Replies are spoken by the bridge, not by the Gateway's task result.** A
   Gateway task covers admission only (it resolves once `/utterance` answers),
   because Gateway tasks run one at a time per owner and a whole turn would hold
   every later take.
 - **Q5 Target, auth and binding.** The target is always the V3 slot session,
   through the text door of `POST /v1/desktop/voice/utterance` (V5). The desktop
-  bearer stays in Electron main and never reaches the Gateway process. Binding a
-  take to its turn stays V14/V15, in the renderer.
+  bearer stays in Electron main, which is the only HTTP caller of these routes
+  and proxies a closed set of verbs, and never reaches the Gateway process: that
+  process runs third-party code and a bearer there would reach
+  `/v1/credentials`. Binding a take to its turn stays V14/V15, in the renderer.
 - **Q6 Approvals.** Gates are announced from `/voice/text {kind: gate}`. A
   spoken "yes" gets 409 `approval_pending` (V13), and the rig says the
   "on screen first" phrase. Voice never answers a gate (V7).
@@ -86,8 +86,9 @@ and returns text.
 - **Q11 Fresh branches.** `feat/qwen-voice` cut from `origin/main`; only the
   carried pieces move across from the earlier `feat/session-voice` work.
 - **Q12 The rig directory supplies the runtime only** (its virtualenv, node
-  modules and model cache), located by the UI setting `voice.qwen_rig_dir`. The
-  integration code lives in local-operator-ui.
+  modules and model cache). It is located by the environment variable
+  `LOP_QWEN_RIG_DIR`, default `~/.local/share/qwen-voice-rig`; there is no
+  setting for it. The integration code lives in local-operator-ui.
 
 ## Frozen contract
 
@@ -125,11 +126,37 @@ renderer) are part of the same contract and do not touch this repository:
   gate | phrase}`, `slot {active}`, `cancel_all`. The utility process speaks
   only texts main sent it, plus the Q7 phrases.
 - Main ↔ renderer: event `voice.qwen.take {taskId, text}`; invokes
-  `voice.qwen.result {taskId, ok | code}` and `voice.qwen.speak {text, kind}`;
-  status `voice.qwen.status {rig: stopped | starting | ready | error,
-  webui_url}`.
-- Main ↔ renderer invoke `voice.qwen.start` (UI-only): starts the rig when the
-  slot is held but the rig is stopped, for example after an app relaunch.
+  `voice.qwen.result {taskId, ok | code}`, `voice.qwen.speak {text, kind}` and
+  `voice.qwen.start` (UI-only); status `voice.qwen.status {rig: stopped |
+  starting | ready | error, webui_url, clients?, cause?}`, where `clients` is
+  the number of voice pages connected to the Gateway right now and `cause` is
+  `unexpected_exit` when a rig process died while the rig was ready, else null.
+  The status phases distinguish "ready, no page connected" (nothing can hear
+  the operator, so a UI must not say "listening") from "listening" (ready with
+  at least one page connected). `voice.qwen.start` starts the rig when the slot
+  is held but the rig is stopped, for example after an app relaunch; on an
+  already-ready rig it reopens the voice page instead. `voice.qwen.speak`
+  returns `no_client` when no page is connected, so a reply is not lost to a
+  closed tab.
+
+Approved deviations the UI makes from this contract (each one narrows it):
+
+- `desktop-media.ts` exposes a text-only `voice.utterance` op: file bytes and
+  the recording fields are refused, so a renderer cannot reach the removed door.
+- Main honours `voice.qwen.speak` only for a text it relayed as a 200
+  `/voice/text` answer within 10 minutes, so a stale or forged speak is dropped.
+- An empty task result is confirmed without being spoken.
+- A take is refused before it is sent while a card is pending, which is V13
+  enforced client-side as well as here.
+
+The echo guard, client-side (Q8's risk): a take that is one of the rig's own
+Q7 phrases, or a reply or gate text this window had spoken in the last 30 s, is
+dropped unsent and silently — the microphone heard the rig — so the rig's own
+speech never steers the session or answers itself. The match is word-based: a
+take of 6 words or more is an echo when one CONTIGUOUS run it shares with the
+spoken text is at least 6 words long and covers at least 80% of the take; a
+shorter take is an echo only when it equals one whole sentence of the spoken
+text, or all of it.
 
 ## Carried forward from session voice
 
