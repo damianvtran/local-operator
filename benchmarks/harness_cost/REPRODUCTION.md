@@ -242,9 +242,15 @@ made; numeric parity, explicit scope and no clipping are the acceptance criteria
 
 The publication scan combines explicit metering/task field allowlists, blocked
 file classes, symlink refusal, credential/private-key/home-path patterns and email
-screening. Only two exact generic upstream schema email examples are allowed;
-full license attributions are public upstream notices. The scan never prints a
-suspected credential. Projection/source hashes are in PROVENANCE.json; SHA256SUMS
+screening. The publish step itself is `publication.publish_request`: it keeps only
+allowlisted fields — a real meter row also carries `cost_details`, `is_byok` and
+other price-neutral usage leaves, which stay in the private log — and maps the two
+upstream error strings to a reviewed vocabulary value or an
+`unclassified:<sha256 prefix>` digest of the raw value, so a provider error that
+carries request text cannot reach a published file (R21-M2). Only two exact generic
+upstream schema email examples are allowed; full license attributions are public
+upstream notices. The scan never prints a suspected credential. Projection/source
+hashes are in PROVENANCE.json; SHA256SUMS
 and MANIFEST.json bind the actual shareable files. No raw bodies, internal MCP
 schemas, auth stores, personal instructions/home paths, tokens, fetched skills,
 virtual environments, .git or source-workspace caches are included.

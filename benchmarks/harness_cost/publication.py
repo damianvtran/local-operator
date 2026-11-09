@@ -100,22 +100,38 @@ REQUEST_SCHEMA.update(
 REQUEST_SCHEMA.update(
     ts=(int, float), latency_s=(int, float), stream=bool, auto_cache=bool, usage=USAGE_SCHEMA
 )
-# The arithmetic behind a token-priced row (meter_proxy.settled_charge): the
-# counts, the frozen card rates used and the resulting USD. Closed at every
-# level so the charge can be recomputed from the published record without any
-# request or response text; a new rate key must be added here deliberately.
-TOKEN_COUNT_KEYS = (
+# The arithmetic behind a token-priced row (`meter_proxy.settled_charge`): the
+# counts it priced, the card rates it used and the resulting USD. R21-M1 caught
+# this keyed by the card's own names (`prompt`, `completion`, ...), which the
+# producer never writes -- it keys `rates_usd_per_m` by the token fields it priced
+# -- so every genuine settled row was refused at publish. Closed at every level
+# and numbers only, so the charge can be recomputed from the record with no
+# request or response text; `validate_field_invariants` additionally refuses a
+# derivation that cannot be recomputed.
+DERIVATION_TERMS = (
     "input_tokens",
     "output_tokens",
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
-RATE_KEYS = ("prompt", "completion", "input_cache_read", "input_cache_write")
 COST_DERIVATION_SCHEMA: dict[str, Schema] = {
-    "tokens": {k: int for k in TOKEN_COUNT_KEYS},
-    "rates_usd_per_m": {k: (int, float) for k in RATE_KEYS},
+    "tokens": {k: int for k in DERIVATION_TERMS},
+    "rates_usd_per_m": {k: (int, float) for k in DERIVATION_TERMS},
     "usd": (int, float),
 }
+# Upstream error strings are copied verbatim into the private row by
+# `meter_proxy.no_charge_rejection`, so they can carry request text: R21-M2 drove
+# a confidential sentence through the producer and this scan. Only two shapes may
+# be published -- a value from a vocabulary reviewed against a real provider
+# value, or `unclassified:<sha256 prefix>` of the raw value, which lets an auditor
+# match the row to the private log without the published file carrying the text.
+# Grow the vocabularies deliberately (codes stay empty until one is observed): a
+# character or length pattern alone is not evidence that content is absent.
+ERROR_VALUE_PATTERN = re.compile(r"\A[a-z][a-z0-9_]{2,31}\Z")
+ERROR_TYPE_VOCABULARY = frozenset({"invalid_request_error"})
+ERROR_CODE_VOCABULARY: frozenset[str] = frozenset()
+UNCLASSIFIED = "unclassified:"
+DIGEST_CHARS = 12
 REQUEST_SCHEMA.update(
     {
         k: bool
@@ -127,10 +143,10 @@ REQUEST_SCHEMA.update(
         )
     },
     upstream_status=int,
-    # The provider's own error type and code, copied verbatim into the row by
-    # meter_proxy.no_charge_rejection; a code may be numeric, so both scalars.
+    # Classified by `publish_request`, never the raw provider string; the
+    # invariants below enforce the vocabulary-or-digest shape.
     upstream_error_type=str,
-    upstream_error_code=(str, int),
+    upstream_error_code=str,
     cost_derivation=COST_DERIVATION_SCHEMA,
 )
 
@@ -155,10 +171,83 @@ def validate_projection(value, schema, path="request"):
             isinstance(value, (int, float)) and (not math.isfinite(value) or value < 0)
         ):
             fail(f"Metering projection contains invalid leaf at {path}")
+    validate_field_invariants(value, path)
 
 
 def fail(message: str) -> NoReturn:
     raise ValueError(message)
+
+
+def validate_field_invariants(value: object, path: str) -> None:
+    """Refusals a type-only schema cannot express, at the published paths only.
+
+    Why: two published fields carry an argument, not just a type. The derivation
+    must be recomputable from the record -- every token count it prices carries
+    the rate it was multiplied by -- and an upstream error value must be a
+    reviewed category or a digest, never free text that could hold request
+    content. Both fail closed through the schema's own error class, so one
+    refusal path stays auditable.
+    """
+    if path == "request.cost_derivation":
+        tokens, rates = value.get("tokens") or {}, value.get("rates_usd_per_m") or {}
+        if not set(rates) <= set(tokens):
+            fail(f"Metering projection prices a term the row does not state at {path}")
+        if [k for k, count in tokens.items() if count and k not in rates]:
+            fail(f"Metering projection leaves a priced token term unpriced at {path}")
+    elif path == "request.upstream_error_type":
+        if not is_public_error_value(value, ERROR_TYPE_VOCABULARY):
+            fail(f"Metering projection contains an unpublished error type at {path}")
+    elif path == "request.upstream_error_code":
+        if not is_public_error_value(value, ERROR_CODE_VOCABULARY):
+            fail(f"Metering projection contains an unpublished error code at {path}")
+
+
+def public_error_value(raw: object, vocabulary: frozenset[str]) -> str:
+    """Map one verbatim upstream error value onto the public classifier.
+
+    A reviewed vocabulary value publishes unchanged; anything else -- free text,
+    an unreviewed provider value, a non-string -- becomes
+    ``unclassified:<sha256 prefix of the raw value>``.
+    """
+    if isinstance(raw, str) and ERROR_VALUE_PATTERN.match(raw) and raw in vocabulary:
+        return raw
+    return UNCLASSIFIED + hashlib.sha256(str(raw).encode("utf-8")).hexdigest()[:DIGEST_CHARS]
+
+
+def is_public_error_value(value: object, vocabulary: frozenset[str]) -> bool:
+    """True for a reviewed category or a well-formed unclassified digest."""
+    if not isinstance(value, str):
+        return False
+    if value.startswith(UNCLASSIFIED):
+        suffix = value[len(UNCLASSIFIED) :]
+        return len(suffix) == DIGEST_CHARS and set(suffix) <= set("0123456789abcdef")
+    return bool(ERROR_VALUE_PATTERN.match(value)) and value in vocabulary
+
+
+def publish_request(row: dict) -> dict:
+    """Project one raw meter row onto the record this kit may publish.
+
+    Why a projection beside the scan: a scan can only refuse what it is told
+    about, so the reviewed boundary has to sit where rows become public (R21-M1/
+    M2). Allowlisted fields are kept as emitted -- the producer's derivation shape
+    IS the published shape -- while ``usage`` keeps the same leaf subset the
+    checked-in snapshot already carries (real rows also hold ``cost_details``,
+    ``is_byok`` and other price-neutral fields that stay in the private log), and
+    the two upstream error strings are replaced by their classifier. Constraints:
+    unknown keys are dropped, never coerced or truncated, and a projection its own
+    schema rejects raises rather than shipping.
+    """
+    out = {k: v for k, v in row.items() if k in REQUEST_FIELDS}
+    if isinstance(out.get("usage"), dict):
+        out["usage"] = {k: v for k, v in out["usage"].items() if k in USAGE_FIELDS}
+    for field, vocabulary in (
+        ("upstream_error_type", ERROR_TYPE_VOCABULARY),
+        ("upstream_error_code", ERROR_CODE_VOCABULARY),
+    ):
+        if field in out:
+            out[field] = public_error_value(out[field], vocabulary)
+    validate_projection(out, REQUEST_SCHEMA)
+    return out
 
 
 def inventory(root):

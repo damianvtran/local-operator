@@ -16,6 +16,7 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,9 @@ class KitTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.snapshot = self.root / "v1-snapshot"
         shutil.copytree(r.ROOT / "v1-snapshot", self.snapshot)
+        # Pristine rows for the projection cases: each case must start from the
+        # shipped snapshot, never from a previous case's mutated file.
+        self.original = r.jsonl(self.snapshot / "requests.jsonl")
 
     def mutate(self, file, fn):
         path = self.snapshot / file
@@ -123,33 +127,96 @@ class KitTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Metering projection"):
                     p.scan(self.root, ["v1-snapshot/requests.jsonl"])
 
+    # Verbatim `cost_derivation` from a real settled row in the rig's private log
+    # (`~/workspace/harness-cost-bench/logs/requests.jsonl:2294`, run
+    # `coding__local-operator__vulnerab__r60`, 200 `v1/messages`, no `usage.cost`):
+    # the shape `meter_proxy.settled_charge` writes, with the rate map keyed by the
+    # token fields it priced. R21-M1 caught a hand-written fixture that agreed with
+    # the schema rather than with the producer, so the producer is also called.
+    REAL_DERIVATION = {
+        "tokens": {
+            "input_tokens": 173,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+        "rates_usd_per_m": {
+            "input_tokens": 2.0,
+            "output_tokens": 10.0,
+            "cache_read_input_tokens": 0.09999999999999999,
+            "cache_creation_input_tokens": 2.5,
+        },
+        "usd": 0.000346,
+    }
+
+    def producer(self):
+        """Import the real meter, so the contract cannot drift from the producer.
+
+        Why: the publication schema is only correct if it matches the function
+        that writes the row; S13's invented derivation shape is what let R21-M1
+        through. Skipped only when a consumer extracted the kit without
+        `experimental/` (it is in the inventory, so normally present).
+        """
+        path = r.ROOT / "experimental" / "meter_proxy.py"
+        if not path.is_file():
+            self.skipTest("experimental producer not present in this tree")
+        sys.path.insert(0, str(path.parent))
+        self.addCleanup(sys.path.remove, str(path.parent))
+        spec = importlib.util.spec_from_file_location("kit_meter_proxy", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def scan_with(self, fields):
+        """Scan a snapshot whose first row carries `fields`, from a clean copy."""
+        rows = copy.deepcopy(self.original)
+        rows[0].update(copy.deepcopy(fields))
+        (self.snapshot / "requests.jsonl").write_text(
+            "".join(json.dumps(q) + "\n" for q in rows)
+        )
+        p.scan(self.root, ["v1-snapshot/requests.jsonl"])
+
     def test_measurement_provenance_fields_publish(self):
-        """S13 (R20 MINOR 3): a published row must show how it was measured.
+        """S13/R21-M1: a published row must show how it was measured.
 
         Why: ``n_messages`` counts the injected prefill-continuation turn, and a
         row's charge can be a stated bill, a token derivation or a bill-free
-        rejection. With none of those flags published, a snapshot reader cannot
-        tell a shaped row from an as-sent one, or a settled claim from a
-        derived one -- for a dataset whose selling point is reproducibility.
-        Constraints: booleans, one status int, the provider's own error type and
-        code, and three closed maps of numbers. No prompt, message, body or
-        error string is published, and an unknown field is still refused.
+        rejection. Constraints: the derivation is the producer's own shape --
+        counts, the rates keyed by those same token fields, and the USD -- so a
+        reader can recompute the charge from the record with no request text.
         """
-        # Exactly the shapes the meter writes: ``_patch_body``'s shaping flag,
-        # ``write_row``'s two settle branches and its incomplete-stream marker.
+        # sha256("invalid_prompt")[:12]: an unreviewed code publishes as a digest.
         provenance = {
             "prefill_continuation": True,
             "settled_from_tokens": True,
             "settled_no_charge": True,
             "upstream_status": 400,
             "upstream_error_type": "invalid_request_error",
-            "upstream_error_code": "invalid_prompt",
-            "cost_derivation": {
-                "tokens": {"input_tokens": 1200, "output_tokens": 0},
-                "rates_usd_per_m": {"prompt": 2.0},
-                "usd": 0.0024,
-            },
+            "upstream_error_code": "unclassified:42a650350f77",
+            "cost_derivation": self.REAL_DERIVATION,
             "incomplete": True,
+        }
+        derivation_schema = {
+            "tokens": {
+                k: int
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+            },
+            "rates_usd_per_m": {
+                k: (int, float)
+                for k in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+            },
+            "usd": (int, float),
         }
         expected = {
             "prefill_continuation": bool,
@@ -157,54 +224,76 @@ class KitTests(unittest.TestCase):
             "settled_no_charge": bool,
             "upstream_status": int,
             "upstream_error_type": str,
-            "upstream_error_code": (str, int),
-            "cost_derivation": {
-                "tokens": {
-                    k: int
-                    for k in (
-                        "input_tokens",
-                        "output_tokens",
-                        "cache_read_input_tokens",
-                        "cache_creation_input_tokens",
-                    )
-                },
-                "rates_usd_per_m": {
-                    k: (int, float)
-                    for k in ("prompt", "completion", "input_cache_read", "input_cache_write")
-                },
-                "usd": (int, float),
-            },
+            "upstream_error_code": str,
+            "cost_derivation": derivation_schema,
             "incomplete": bool,
         }
-        original = r.jsonl(self.snapshot / "requests.jsonl")
-
-        def scan_with(fields):
-            rows = copy.deepcopy(original)
-            rows[0].update(copy.deepcopy(fields))
-            (self.snapshot / "requests.jsonl").write_text(
-                "".join(json.dumps(q) + "\n" for q in rows)
-            )
-            p.scan(self.root, ["v1-snapshot/requests.jsonl"])
-
         # Each field publishes on its own, then all of them on one real row.
         for field, value in provenance.items():
             with self.subTest(field=field):
-                scan_with({field: value})
-        scan_with(provenance)
+                self.scan_with({field: value})
+        self.scan_with(provenance)
         self.assertEqual({k: p.REQUEST_SCHEMA[k] for k in expected}, expected)
         self.assertTrue(set(expected) <= p.REQUEST_FIELDS)
-        # The derivation maps stay closed, and bools are never token counts.
+        # The real producer's output satisfies the same schema. R21-M1's repro,
+        # verbatim: card-keyed rates are the producer's *input*, not its output.
+        meter = self.producer()
+        rates = {
+            "prompt": 2.0,
+            "completion": 10.0,
+            "input_cache_read": 0.1,
+            "input_cache_write": 2.5,
+        }
+        live = meter.settled_charge(rates, {"input_tokens": 1200, "output_tokens": 0})
+        self.assertEqual(
+            live,
+            {
+                "tokens": {"input_tokens": 1200, "output_tokens": 0},
+                "rates_usd_per_m": {"input_tokens": 2.0, "output_tokens": 10.0},
+                "usd": 0.0024,
+            },
+        )
+        p.validate_projection({"cost_derivation": live}, p.REQUEST_SCHEMA)
+        # A real row's every rate is a token term the derivation counted.
+        self.assertEqual(
+            sorted(self.REAL_DERIVATION["rates_usd_per_m"]),
+            sorted(self.REAL_DERIVATION["tokens"]),
+        )
+        # The derivation stays closed and complete: card-keyed rates, a rate for a
+        # token term that was not counted, a nonzero count with no rate, a text or
+        # unknown leaf, and the booleans-that-are-not-counts rule.
         for broken in (
-            {"cost_derivation": {"usd": 0.0024, "private_note": "nonpublic"}},
-            {"cost_derivation": {"tokens": {"input_tokens": "1200"}}},
-            {"cost_derivation": {"tokens": {"private_note": 1}}},
+            {
+                "cost_derivation": dict(
+                    self.REAL_DERIVATION, rates_usd_per_m={"prompt": 2.0}
+                )
+            },
+            {
+                "cost_derivation": dict(
+                    self.REAL_DERIVATION, tokens={"input_tokens": 173}
+                )
+            },
+            {
+                "cost_derivation": {
+                    "tokens": {"input_tokens": 173, "output_tokens": 5},
+                    "rates_usd_per_m": {"input_tokens": 2.0},
+                    "usd": 0.00037,
+                }
+            },
+            {"cost_derivation": {"usd": 0.000346, "private_note": "nonpublic"}},
+            {
+                "cost_derivation": dict(
+                    self.REAL_DERIVATION,
+                    rates_usd_per_m={"input_tokens": "2.0"},
+                )
+            },
             {"prefill_continuation": 1},
             {"upstream_status": "400"},
             {"upstream_error_code": None},
         ):
             with self.subTest(broken=sorted(broken)):
                 with self.assertRaisesRegex(ValueError, "Metering projection"):
-                    scan_with(broken)
+                    self.scan_with(broken)
         # Publishing provenance did not open the boundary to anything else.
         for poison in (
             {"request_body": "private placeholder"},
@@ -214,7 +303,78 @@ class KitTests(unittest.TestCase):
         ):
             with self.subTest(poison=sorted(poison)):
                 with self.assertRaisesRegex(ValueError, "unexpected fields"):
-                    scan_with(poison)
+                    self.scan_with(poison)
+
+    def test_upstream_error_text_cannot_publish(self):
+        """R21-M2: a provider error string publishes as a classifier, not as text.
+
+        Why: `meter_proxy.no_charge_rejection` copies `error.type`/`error.code`
+        verbatim into the private row, and either can carry request content --
+        R21 drove a confidential sentence through the producer and this scan. The
+        published record keeps the status and the $0 marker, so a reader can still
+        tell a rejection happened; a reviewed vocabulary value passes through and
+        everything else becomes `unclassified:<sha256 prefix>`, auditable against
+        the private log out of band.
+        """
+        secret = "Customer balance is 1742 dollars; supplied prompt: confidential internal plan"
+        meter = self.producer()
+        marker = meter.no_charge_rejection(
+            400, {}, frozenset(), {"error": {"type": secret, "code": secret}}
+        )
+        # The producer is unchanged and keeps the raw value in the private log.
+        self.assertEqual(marker["upstream_error_type"], secret)
+        self.assertEqual(marker["upstream_error_code"], secret)
+        raw = {
+            "ts": 1.0,
+            "run_id": "remediation",
+            "path": "v1/messages",
+            "channel": "model",
+            "priced_model": "anthropic/claude-sonnet-5.5",
+            "reserve_usd": 0.25,
+            "in_flight_at_admission": 0,
+            "status": 400,
+            "latency_s": 0.2,
+            "stream": False,
+            "n_messages": 3,
+            # A real row also carries price-neutral leaves the kit does not ship.
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 0,
+                "cost_details": {"upstream_inference_cost": 0.1},
+                "is_byok": False,
+            },
+            **marker,
+        }
+        published = p.publish_request(raw)
+        text = json.dumps(published)
+        for fragment in ("Customer balance", "1742", "confidential", "internal plan",
+                         "supplied prompt", secret):
+            self.assertNotIn(fragment, text)
+        self.assertNotIn("channel", published)  # the projection is still an allowlist
+        self.assertEqual(sorted(published["usage"]), ["input_tokens", "output_tokens"])
+        self.assertEqual(published["upstream_status"], 400)
+        self.assertTrue(published["settled_no_charge"])
+        for field in ("upstream_error_type", "upstream_error_code"):
+            self.assertRegex(published[field], r"\Aunclassified:[0-9a-f]{12}\Z")
+        # The digest is the documented recipe, so an auditor can match the row to
+        # the private log entry without the published file carrying the string.
+        digest = hashlib.sha256(secret.encode()).hexdigest()[:12]
+        self.assertEqual(published["upstream_error_type"], "unclassified:" + digest)
+        self.scan_with(published)
+        # The boundary itself: the raw string, in either field, is refused.
+        for field in ("upstream_error_type", "upstream_error_code"):
+            for value in (secret, "unclassified:not-a-digest", "Invalid_Request_Error"):
+                with self.subTest(field=field, value=value[:12]):
+                    with self.assertRaisesRegex(ValueError, "Metering projection"):
+                        self.scan_with({field: value})
+        # A reviewed value passes; a well-formed but unreviewed one does not.
+        self.assertEqual(
+            p.public_error_value("invalid_request_error", p.ERROR_TYPE_VOCABULARY),
+            "invalid_request_error",
+        )
+        self.scan_with({"upstream_error_type": "invalid_request_error"})
+        with self.assertRaisesRegex(ValueError, "Metering projection"):
+            self.scan_with({"upstream_error_type": "some_new_error"})
 
     def test_cost_table_numeric_cells_and_populations(self):
         rows = r.cost_table_rows(r.derive(self.snapshot)[0])

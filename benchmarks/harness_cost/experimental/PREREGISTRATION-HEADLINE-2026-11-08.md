@@ -4,7 +4,7 @@
 `PREREGISTRATION.md`; the amendment audit trail R20 asked for is preserved in
 [Appendix A](#appendix-a--retained-prior-text-superseded-92-and-72-text). The four R20
 publication minors were closed after this freeze and before any headline trial, without touching a
-metered byte — [§13](#13-amendment-at-s13-2026-11-08-before-any-headline-trial-the-four-r20-publication-minors).
+metered byte — [§13](#13-publication-record-amendments-s13-and-its-r21-remediation-2026-11-08).
 
 **Status:** frozen for **planning and admission only**, amended at §13 (S13, 2026-11-08). No
 headline trial has run at this version. Every number below is derived from a retained artifact
@@ -423,7 +423,7 @@ off this freeze, and passes `--execute`. Env it sets for the meter (the single b
 * **Publish from the rig tree that holds the S12 reader:** `~/workspace/harness-cost-bench/coding/`
   (`billing.py`), or rejections republish as unknown spend (R20, §7.2 above).
 
-## 13. Amendment at S13 (2026-11-08, before any headline trial): the four R20 publication minors
+## 13. Publication-record amendments (S13, and its R21 remediation), 2026-11-08
 
 R20 left four MINOR documentation/publication items open. They are fixed in one commit on
 `bench/harness-cost-lop-edge` — `fix(bench): publish what the meter measured, and correct three
@@ -434,12 +434,17 @@ caps (§6), the measurement conditions (§7–§8), the metrics and the statisti
 
 1. **A published row can now show how it was measured** (MINOR 3). `publication.REQUEST_FIELDS`
    and `REQUEST_SCHEMA` gain `prefill_continuation`, `settled_from_tokens`, `settled_no_charge`,
-   `upstream_status`, `upstream_error_type`, `upstream_error_code`, `cost_derivation` (a closed
-   `tokens` / `rates_usd_per_m` / `usd` map) and `incomplete`, so the published `n_messages` can
-   be read for what it counts and a derived charge can be recomputed from the record. Only
-   booleans, one status, the provider's own error type/code and numeric maps are published — no
-   prompt, message, body or error text — and a field outside the allowlist is still refused
-   (`test_kit.test_measurement_provenance_fields_publish` asserts both directions).
+   `upstream_status`, `upstream_error_type`, `upstream_error_code`, `cost_derivation` and
+   `incomplete`, so the published `n_messages` can be read for what it counts and a derived charge
+   can be recomputed from the record. The derivation is the producer's own shape —
+   `{tokens, rates_usd_per_m, usd}`, with `rates_usd_per_m` keyed by the same token fields it
+   priced — closed and numbers-only, and a derivation that cannot be recomputed (a priced count
+   with no rate, or a rate for a count the row does not state) is refused. The two upstream error
+   strings are **not** published as text: the publish step maps a value from a reviewed vocabulary
+   (`invalid_request_error`; no provider code is reviewed yet) and otherwise publishes
+   `unclassified:<sha256 prefix>` of the raw value, keeping the raw string in the run's private log
+   for out-of-band audit. `test_kit`'s `test_measurement_provenance_fields_publish` and
+   `test_upstream_error_text_cannot_publish` assert both directions against the real producer.
 2. **The discovery-row attribution is corrected** (MINOR 1). 30 of the 37 typed-404 rows do not
    carry `run_id: "probe"`; the measured attribution is in §9.1. `ADAPTERS.md` now states the
    field-shape evidence — no `write_row` field on any of the 37, across five run ids — instead of
@@ -451,6 +456,16 @@ caps (§6), the measurement conditions (§7–§8), the metrics and the statisti
 4. **Retention is complete** (MINOR 4). Appendix A quotes the superseded §9.2 and §7.2 sentences
    verbatim with the revision, reason and timestamp of each, and `PREREGISTRATION.md`'s
    front-matter note carries the same retention in the document whose own rule demands it.
+
+**R21 remediation** (the child of `12aae454867`, 2026-11-08). R21 blocked on two MAJOR findings
+against the paragraph above, and both are fixed at the publication boundary: the derivation schema
+was keyed by the card's own rate names (`prompt`, `completion`, …) that the producer never writes,
+so no genuine settled row could publish; and the two upstream error strings were published
+verbatim, so provider text could carry request content. The schema now matches
+`settled_charge` exactly, and the publish step classifies the error values. Both change no metered
+byte, task, cap, metric or statistic, and the container S4 closure still matches 19/19. R21's two
+minors are closed as well: the S11 amendment now cites the commit that introduced its text, with
+that commit's timestamp, and the retained quotations that are excerpts say so.
 
 Why amend a frozen document at all: a disclosure that has since become false is a false public
 statement, and §9 read as current state would publish one. Nothing here is a post-outcome change —
@@ -471,7 +486,8 @@ with the S11 and S12 wordings verbatim and with this document's own superseded �
 — and, at that revision, §9.2 had **no** validation-rejection rule at all; any unbilled request
 kept the latch.
 
-**S11 amendment** (`611ac9825bc`, 2026-11-08T20:41-05:00, prospective), verbatim:
+**S11 amendment** (`c18c1dc1cf9`, 2026-11-08T20:41:37-05:00, prospective; the text stands
+unchanged at the later revision `611ac9825bc`, 21:21:25), verbatim:
 
 > "A request the provider **rejects outright** — a 4xx that states no cost and no token counts,
 > with a readable error body naming its own type — settles at exactly **$0**, is recorded as

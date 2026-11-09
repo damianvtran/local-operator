@@ -36,8 +36,11 @@
 > (2026-11-08 retention note, S13 — retained superseded text, required by the
 > rule at PREREGISTRATION.md:36 and named by R20 MINOR 4. The in-place rewrites
 > of §9.2 are recorded here with their reasons and timestamps; the frozen
-> headline document carries the same retention verbatim in its Appendix A.
-> **Superseded by S11** (`611ac9825bc`, 2026-11-08T20:41-05:00): the paragraph
+> headline document carries the same retention verbatim in its Appendix A. The
+> quotations below are **excerpts** — ellipses mark elisions — and are not a
+> substitute for that appendix, which holds the complete S11 wording.
+> **Superseded by S11** (`c18c1dc1cf9`, 2026-11-08T20:41:37-05:00; the text stands
+> unchanged at the later revision `611ac9825bc`, 21:21:25): the paragraph
 > previously ended at "…it keeps the unknown-spend latch." and held **no**
 > validation-rejection rule at all. **Superseded by S12** (`a3f8f1f88e7`,
 > 2026-11-08T22:14-05:00): "A request the provider **rejects outright** — a 4xx

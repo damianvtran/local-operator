@@ -145,7 +145,9 @@ the bill is made of — `input_tokens` and `output_tokens` both present as
 nonnegative integers, plus any `cache_read_input_tokens` or
 `cache_creation_input_tokens` it reports — the meter settles the charge at the
 rate card frozen for that run and records `settled_from_tokens: true` with
-`cost_derivation: {tokens, rates_usd_per_m, usd}` in its request row. The card
+`cost_derivation: {tokens, rates_usd_per_m, usd}` in its request row, the rate
+map keyed by the same token fields it priced (`input_tokens`, `output_tokens`,
+…). The card
 carries every rate such a settlement can be made of — `prompt`, `completion`,
 `input_cache_write` and `input_cache_read` — mapped from the same live listing; a
 listing that omits any of them is a startup configuration error, never a silent
@@ -196,7 +198,10 @@ prefilling") with `usage: {}` in 0.20 s — no generation ran, so no charge exis
 The meter settles such a response at **exactly $0**, records it as
 `settled_no_charge: true` with `upstream_status` and the provider's own
 `upstream_error_type` (and `upstream_error_code` where it sends one) copied
-verbatim, and does **not** latch the ledger: the attempt is metered at $0 and the
+verbatim — publication replaces both with a reviewed classifier or an
+`unclassified:<sha256 prefix>` digest, so no provider string is published as
+text and the verbatim value stays in this private row — and does **not** latch
+the ledger: the attempt is metered at $0 and the
 trial continues. The three money readers (`runner_v2.stated_amount`,
 `coding.driver.row_cost`, and the publishing rig's `coding/billing.stated_amount`)
 read that marker as a measured zero and refuse a row that claims it while stating
