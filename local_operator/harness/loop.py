@@ -7605,7 +7605,21 @@ class AgentLoop:
                 out = dict(details)
                 for key in _CONTENT_BEARING_DETAIL_KEYS:
                     if key in details:
-                        out[key] = _redact_diff_detail(details[key], redact)
+                        value = details[key]
+                        if (
+                            tool_name in {"agent", "team", "skill", "profile_proposal"}
+                            and isinstance(value, (list, tuple))
+                            and all(isinstance(row, str) for row in value)
+                        ):
+                            # Profile receipts are semantic field summaries, NOT
+                            # file-tool unified hunks. A new profile's full text
+                            # is its diff. Feed the complete text to credential
+                            # redaction so multiline secrets remain detectable,
+                            # without rejecting valid summaries as malformed hunks.
+                            masked = redact("\n".join(value)).splitlines()
+                            out[key] = tuple(masked) if isinstance(value, tuple) else masked
+                        else:
+                            out[key] = _redact_diff_detail(value, redact)
                 return out
 
         return await asyncio.to_thread(_run)

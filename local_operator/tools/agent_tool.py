@@ -2034,29 +2034,45 @@ class _AccountSave:
     post_revision: str | None = None
 
 
-def _queued_profile_receipt(tool_call_id: str, tool_name: str, queued: Any) -> ToolResult:
+def _proposed_profile_receipt(tool_call_id: str, tool_name: str, proposed: Any) -> ToolResult:
+    """The receipt for a write the host filed as a proposal instead of applying.
+
+    TOKEN-LEAN AND POINTS AT AGENTS, NEVER MESH: the person reviews proposals in
+    the desktop Agents section (Agents → <name>), or says yes in the
+    conversation and the agent applies it with ``profile_proposal``. The text
+    tells the model exactly those two routes so it neither retries the write nor
+    sends the user to the device approvals tray.
+    """
     from local_operator.profile_scope import profile_diff_summary
 
+    fields = ", ".join(proposed.changes) or "no fields"
+    pid = proposed.proposal_id
+    text = (
+        f"Proposed {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) as "
+        f"{pid}; nothing changed yet. Tell the user to review it in Agents → "
+        f"{proposed.profile_name}, or ask them and call profile_proposal op=apply id={pid} "
+        "after they agree."
+    )
+    if proposed.diff:
+        text += "\n" + profile_diff_summary("\n".join(proposed.diff))
     return _text(
         tool_call_id,
         tool_name,
-        f"Queued {queued.profile_kind} {queued.profile_name!r} for durable approval "
-        f"({queued.approval_id}). No profile or backup was changed. "
-        "The signed approval continuation applies it; do not retry this tool call."
-        + ("\n" + profile_diff_summary("\n".join(queued.diff)) if queued.diff else ""),
+        text,
         details={
-            "status": "queued",
-            "fields": list(queued.changes),
-            "diff": list(queued.diff),
-            "approval_id": queued.approval_id,
-            "request_digest": queued.request_digest,
-            "expires_at": queued.expires_at,
-            "receipt_id": queued.receipt_id,
-            "profile_kind": queued.profile_kind,
-            "profile_name": queued.profile_name,
+            "status": "proposed",
+            "proposal_id": pid,
+            "profile_kind": proposed.profile_kind,
+            "profile_name": proposed.profile_name,
             "scope": "global",
+            "fields": list(proposed.changes),
+            "diff": list(proposed.diff),
         },
     )
+
+
+#: Old name, kept so an out-of-tree import keeps resolving for one release.
+_queued_profile_receipt = _proposed_profile_receipt
 
 
 def _agent_proposal(
@@ -2390,8 +2406,8 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
-    if reason == "queued":
-        return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
+    if reason == "proposed":
+        return _proposed_profile_receipt(tool_call_id, "agent", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
 
@@ -2710,8 +2726,8 @@ async def _op_write(
             tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
-        if reason == "queued":
-            return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
+        if reason == "proposed":
+            return _proposed_profile_receipt(tool_call_id, "agent", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
     try:
@@ -3080,6 +3096,9 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
             "Reusable agent profiles: delegation roles (reviewer, coder, "
             "architect, manager, designer, scout) and specialists with their "
             "own instruction sets; launch a role with task(agent='<name>')."
+            " Account edits the user explicitly requested apply directly; otherwise "
+            "review the proposed change in Agents → <name>, or use profile_proposal "
+            "after the user agrees."
         ),
         parameters=parameters,
         # Writes land in the user's own configuration directory, never in the

@@ -276,7 +276,7 @@ async def test_unattached_session_tool_queues_immediately(root):
         )
         assert not result.is_error, result.content
         assert result.details is not None
-        assert result.details["status"] == "queued"
+        assert result.details["status"] == "proposed"
         assert P.snapshot(root, "agent", data.target_id) == data.before
         assert not (directory / "profile-backups").exists()
     finally:
@@ -651,6 +651,36 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         "same-real-call", args, None, None, context
     )
     assert queued.details is not None
+    assert queued.details["status"] == "proposed"
+    from local_operator import profile_proposals as PP
+    from local_operator.harness.types import TextContent, ToolResult
+
+    proposed = PP.get(root, queued.details["proposal_id"])
+    legacy = P.build(
+        root,
+        profile_kind=kind,
+        operation="update",
+        target_id=proposed["target_id"],
+        name=proposed["name"],
+        session_id=original._session_id,
+        tool_call_id=queued.tool_call_id,
+        before=proposed["before"],
+        after=proposed["after"],
+    )
+    legacy_record = P.file_request(root, legacy)
+    queued = ToolResult(
+        tool_call_id=queued.tool_call_id,
+        tool_name=kind,
+        content=[TextContent(text="Queued legacy profile save for signed approval.")],
+        details={
+            "status": "queued",
+            "approval_id": legacy_record["approval_id"],
+            "receipt_id": legacy.receipt_id,
+            "profile_kind": kind,
+            "profile_name": proposed["name"],
+            "scope": "global",
+        },
+    )
     assert queued.details["status"] == "queued"
     # The ordinary harness native persistence boundary, using the ACTUAL call/result.
     call = Message.assistant(

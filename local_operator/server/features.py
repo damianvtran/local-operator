@@ -38,7 +38,9 @@ from local_operator.supplements.contract import (
 #: calls it a SEPARATE additive capability a client may test without also
 #: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
 #: drops ``include_ask_reads`` and answers the same plain first page.
-DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection", "notification_bulk_ask_read"})
+DESKTOP_ONLY_FEATURES = frozenset(
+    {"notification_bulk_selection", "notification_bulk_ask_read", "profile_proposals"}
+)
 
 
 def feature_flags() -> dict[str, Any]:
@@ -955,6 +957,7 @@ def static_feature_flags() -> dict[str, Any]:
         "credential_approvals": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
+        "profile_proposals": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the

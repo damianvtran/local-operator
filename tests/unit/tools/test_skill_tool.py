@@ -60,7 +60,13 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     config_dir.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
-    context = ToolContext(cwd=str(config_dir), memory_config_dir=str(config_dir))
+
+    async def owner_grant(_intent):
+        return "owner-prompt:synthetic-skill-test"
+
+    context = ToolContext(
+        cwd=str(config_dir), memory_config_dir=str(config_dir), authorize_durable_write=owner_grant
+    )
     tools = create_tools(context, ["skill"])
     assert [tool.name for tool in tools] == ["skill"]
     return SimpleNamespace(home=home, config_dir=config_dir, context=context, tool=tools[0])
@@ -625,6 +631,7 @@ async def _drive(env: SimpleNamespace, plan: Any, *, masked: bool = False) -> _S
         )
         redact = session._redact_tool_result_text
         tool_context = session._build_tool_context()
+        tool_context.authorize_durable_write = env.context.authorize_durable_write
         assert tool_context.memory_config_dir == str(env.config_dir)
     context = LoopContext(system_blocks=["sys"], tools=[env.tool], tool_context=tool_context)
     config = LoopConfig(
@@ -906,7 +913,11 @@ async def test_list_and_create_agree_on_a_moved_profile(
     config_dir.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
-    context = ToolContext(cwd=str(config_dir), memory_config_dir=str(config_dir))
+    context = ToolContext(
+        cwd=str(config_dir),
+        memory_config_dir=str(config_dir),
+        authorize_durable_write=env.context.authorize_durable_write,
+    )
     moved = SimpleNamespace(
         home=home, config_dir=config_dir, context=context, tool=create_tools(context, ["skill"])[0]
     )

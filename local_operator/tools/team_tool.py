@@ -609,10 +609,10 @@ async def _op_write(
             tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
-        if reason == "queued":
-            from local_operator.tools.agent_tool import _queued_profile_receipt
+        if reason == "proposed":
+            from local_operator.tools.agent_tool import _proposed_profile_receipt
 
-            return _queued_profile_receipt(tool_call_id, "team", authorized_by)
+            return _proposed_profile_receipt(tool_call_id, "team", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
         if existing is not None:
@@ -924,10 +924,10 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
-    if reason == "queued":
-        from local_operator.tools.agent_tool import _queued_profile_receipt
+    if reason == "proposed":
+        from local_operator.tools.agent_tool import _proposed_profile_receipt
 
-        return _queued_profile_receipt(tool_call_id, "team", authorized_by)
+        return _proposed_profile_receipt(tool_call_id, "team", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
     from pathlib import Path
@@ -1154,6 +1154,9 @@ def build_team_tool(context: ToolContext) -> AgentTool | None:
             "top of each member's own instructions. Find or author one; use "
             "team_delete for irreversible removal. The user launches it with "
             "/team <name> <request>."
+            " Account edits the user explicitly requested apply directly; otherwise "
+            "review the proposed change in Agents → <name>, or use profile_proposal "
+            "after the user agrees."
         ),
         parameters=TeamParams.model_json_schema(),
         approval_tier="read",

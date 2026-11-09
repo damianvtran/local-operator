@@ -301,11 +301,6 @@ async def durable_write_decision(
         # message) is the right one. EVERY other refusal keeps ``error`` with its
         # code named — a refusal that names a real cause must never be silently
         # reclassified as "no surface".
-        if exc.code == "approval_anchor_unavailable":
-            logger.info(
-                "durable-write: no operator anchor, so no request can be filed (%s)", exc.code
-            )
-            return None, WriteReason("unavailable", fault=exc.code)
         logger.warning(
             "durable-write consent seam refused: %s (%s); refusing",
             type(exc).__name__,
@@ -321,10 +316,11 @@ async def durable_write_decision(
             "durable-write consent seam failed: %s; refusing", type(exc).__name__, exc_info=True
         )
         return None, WriteReason("error", fault=type(exc).__name__)
-    from local_operator.harness.types import QueuedProfileWrite
+    from local_operator.harness.types import ProposedProfileWrite
 
-    if isinstance(origin, QueuedProfileWrite):
-        return origin, WriteReason("queued")
+    if isinstance(origin, ProposedProfileWrite):
+        # Filed for review in Agents; not a grant and not a refusal.
+        return origin, WriteReason("proposed")
     return (str(origin), WriteReason("granted")) if origin else (None, WriteReason("declined"))
 
 
@@ -401,6 +397,51 @@ def owner_text_requests_profile_edit(
             if set(fields) <= requested:
                 return True
     return False
+
+
+def owner_text_requests_profile_change(text: str, names: Iterable[str]) -> bool:
+    """An actual edit imperative naming the target, not a mere name mention.
+
+    Unlike the legacy field-specific grammar this accepts natural requests such
+    as “make lopdev's manager more concise”, and covers policy fields. Anchoring
+    at the imperative excludes “tell me how to change reviewer” and negations.
+    """
+    import re
+
+    prefix = (
+        r"^\s*(?:(?:please|can you|could you|would you|I want you to)\s+)?"
+        r"(?:update|change|edit|make|set|add|remove|rewrite|replace|create|revert|restore|"
+        r"shorten|expand|revise)\s+"
+        r"(?:(?:the|that|this|a|an|your)\s+)?"
+        r"(?:(?:agent|team|skill|role|profile)\s+)?"
+    )
+    return any(
+        re.match(prefix + re.escape(str(name)) + r"(?![\w-])", text, re.IGNORECASE)
+        for name in names
+        if name
+    )
+
+
+def owner_text_requests_profile_creation(text: str, kind: str) -> bool:
+    """Explicit creation may let the model choose a new name, never an update.
+
+    This is limited to a creation imperative naming the kind. An unrelated
+    profile name mention, or a request about how to create one, cannot grant.
+    """
+    import re
+
+    noun = {"agent": "(?:agent|role|specialist)", "team": "team", "skill": "skill"}[kind]
+    return bool(
+        re.match(
+            r"^\s*(?:(?:please|can you|could you|would you|I want you to)\s+)?"
+            r"(?:create|make|build|add)\s+(?:(?:me|a|an|new|reusable)\s+)*"
+            + r"(?:[\w-]+\s+){0,3}"
+            + noun
+            + r"\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
 
 
 def owner_text_names_profile(text: str, names: Iterable[str]) -> bool:
@@ -563,35 +604,14 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
             )
     elif reason == "unavailable":
         fault = getattr(reason, "fault", "")
-        if fault == "approval_anchor_unavailable":
-            # AN ANCHOR FAULT IS NOT AN UNASKED REQUEST (round 1, security). Two
-            # different entry points reach ``unavailable``: the owner-prompt path
-            # below, where nobody can be asked and the owner's own message is the
-            # remedy, and a rejected filing, where the owner may well have asked
-            # and only the anchor proving THIS machine's operator authority was
-            # missing (``profile_approval.build`` → ``local_anchor_trio``). Claiming
-            # the first for both sent the model hunting for a request that already
-            # happened, so this path names the prerequisite that actually failed
-            # and returns rather than appending the manual-surface remedy: the
-            # remedy here is ONE concrete act, and it is not a retyped message.
-            return (
-                f"this run could not reach the account's operator authority, so the "
-                f"{intent.kind} change could not be filed as a request and nothing in "
-                "their account was changed. The request itself is not the problem — the "
-                "owner may well have asked for it. Ask Local Operator to set up operator "
-                "authority on this machine first; the same change can be filed once that "
-                "anchor is installed."
-            )
         # The owner-prompt path (``Session._authorize_account_profile_write``)
         # saves without a card when the user's own message names the profile;
         # that is the remedy worth naming, before the manual surfaces.
         opening = (
             f"this {intent.kind} change was not asked for in the user's own message, and "
             "no one is attached to approve it, so nothing in their account was changed. "
-            f"For a wording-only update, the user can ask in their own local message, "
-            f"naming {intent.name!r} and the definition fields to edit. Policy changes and "
-            "other operations need an attached "
-            "approval surface. No durable queued approval was filed."
+            f"The user can request the edit in their own local message, naming {intent.name!r}, "
+            f"or review the proposed change in Agents → {intent.name}."
         )
     elif intent.operation == "promote":
         opening = (
