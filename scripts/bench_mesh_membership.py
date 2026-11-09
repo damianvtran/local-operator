@@ -57,19 +57,19 @@ def remember(cipher, frame):
         requests[(id(cipher), req)] = op
 
 
-def opened(cipher, payload):
-    frame = open_record(cipher, payload)
+def opened(self, payload):
+    frame = open_record(self, payload)
     with lock:
-        remember(cipher, frame)
+        remember(self, frame)
     return frame
 
 
-def sealed(cipher, frame):
-    payload = seal(cipher, frame)
+def sealed(self, frame):
+    payload = seal(self, frame)
     with lock:
         op = frame.get("op", "")
         answer = op in ("ack", "refuse", "error")
-        attributed = requests.get((id(cipher), frame.get("req")), op) if answer else op
+        attributed = requests.get((id(self), frame.get("req")), op) if answer else op
         rows.append((time.monotonic(), attributed, "answer" if answer else "ask", len(payload)))
     return payload
 
@@ -107,17 +107,17 @@ try:
     def rename_trials(label, count=5, wedge=False):
         samples = []
         wedge_seen = threading.Event()
+        wedged = built[1]
+        dispatch = wedged.server.dispatch
+        request = relay.PeerLink.request
+        timeout_samples = []
         if wedge:
-            wedged = built[1]
-            dispatch = wedged.server.dispatch
-            request = relay.PeerLink.request
-            timeout_samples = []
 
-            def timed_request(link, frame, *, timeout=None):
+            def timed_request(self, frame, *, timeout=None):
                 started = time.monotonic()
-                reply = request(link, frame, timeout=timeout)
+                reply = request(self, frame, timeout=timeout)
                 if (
-                    link.device_id == wedged.device_id
+                    self.device_id == wedged.device_id
                     and frame.get("op") == "net_member_list"
                     and reply is None
                 ):
@@ -155,12 +155,16 @@ try:
             name = f"{label}-{trial}"
             started = time.monotonic()
             with store.mutate(record.network_id, built[0].root) as copy:
-                copy.member(built[0].device_id).name = name
+                own = copy.member(built[0].device_id)
+                assert own is not None
+                own.name = name
                 store.save(copy, built[0].root)
             deadline = started + 40
             while time.monotonic() < deadline:
                 if all(
-                    store.load(record.network_id, d.root).member(built[0].device_id).name == name
+                    (member := store.load(record.network_id, d.root).member(built[0].device_id))
+                    is not None
+                    and member.name == name
                     for d in built[1:]
                 ):
                     break
@@ -248,7 +252,8 @@ try:
         deadline = started + 30
         while time.monotonic() < deadline:
             if all(
-                not store.load(record.network_id, device.root).member(removed).active
+                (member := store.load(record.network_id, device.root).member(removed)) is not None
+                and not member.active
                 for device in built[:-1]
             ):
                 break

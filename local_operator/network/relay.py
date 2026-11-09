@@ -4708,7 +4708,10 @@ class PeerLink:
         #: the old answer appear fresh until the five-minute repair clock expires.
         self.member_push_unverified = False
         self.member_push_digest = ""
-        self.member_push_generation = 0
+        #: Sender-local persisted record sequences order BOTH pushes and answers.
+        #: Compared only on this authenticated peer/network link, never across
+        #: peers: store.save serializes and increments each local network record.
+        self.member_snapshot_sequence = -1
         self.member_table_lock = threading.Lock()
         #: The device ids the last table pull ADDED, so a refresh pass can report
         #: what it learned rather than only that it asked.
@@ -6475,15 +6478,11 @@ class RelayServer:
         if conditional:
             own_view = member_sync_digest(listed, sender_device_id=link.device_id)
             frame["if_digest"] = own_view
-        generation = getattr(link, "member_push_generation", 0)
         reply = link.request(frame, timeout=MEMBERSHIP_PULL_TIMEOUT_S)
-        # Never hold this lock while waiting: a change push uses the SAME reader
-        # that delivers our reply. Discard an in-flight answer overtaken by a push
-        # rather than reverting the new rows or falsely certifying the old digest.
+        # Never hold this lock while waiting: a push uses the SAME reader that
+        # delivers our reply. One persisted snapshot sequence orders both paths,
+        # including a delayed push delivered AFTER a newer completed pull.
         with link.member_table_lock:
-            if generation != link.member_push_generation:
-                link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
-                return "table_changed"
             return self._apply_member_answer(link, reply, conditional, own_view)
 
     def _apply_member_answer(
@@ -6502,6 +6501,15 @@ class RelayServer:
             link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return str(reply.get("code") or reply.get("op") or "refused")
         detail = reply.get("detail")
+        sequence = None
+        if self._member_push_enabled(link):
+            sequence = detail.get("sequence") if isinstance(detail, dict) else None
+            if type(sequence) is not int or sequence < 0:
+                link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+                return "bad_answer"
+            if sequence < link.member_snapshot_sequence:
+                link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+                return "stale_answer"
         if (
             conditional
             and isinstance(detail, dict)
@@ -6513,6 +6521,8 @@ class RelayServer:
             # The echoed digest must be the one we sent (review R1-m2): an
             # "unchanged" for some other table is not believed, and falls through
             # to the full-table checks below, which refuse it as a bad answer.
+            if sequence is not None:
+                link.member_snapshot_sequence = sequence
             link.member_pulled_at = time.time()
             link.member_push_unverified = False
             link.member_pull_added = []
@@ -6553,7 +6563,10 @@ class RelayServer:
         # until something else moves (see the full-pull states in the docstring of
         # ``_learn_members_from``).
         link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
-        return self._adopt_member_rows(link, rows)
+        result = self._adopt_member_rows(link, rows)
+        if sequence is not None:
+            link.member_snapshot_sequence = sequence
+        return result
 
     def _adopt_member_rows(self, link: PeerLink, rows: list[Any]) -> str:
         """Use the SAME authority-preserving merge for answers and change pushes."""
@@ -6870,7 +6883,7 @@ class RelayServer:
         for record in store.list_networks(self.root):
             digest = member_sync_digest(record, sender_device_id=record.self_device_id)
             for member in record.active_members():
-                link = self._link_for(member.device_id)
+                link = self._link_for(member.device_id, network_id=record.network_id)
                 if link is None or not link.alive or not self._member_push_enabled(link):
                     continue
                 if link.member_push_digest == digest:
@@ -6878,6 +6891,8 @@ class RelayServer:
                 if link.send(
                     {
                         "op": "net_member_list",
+                        "network_id": record.network_id,
+                        "sequence": record.sequence,
                         "changed_members": [row.to_json() for row in record.members],
                     }
                 ):
@@ -8884,12 +8899,24 @@ class RelayServer:
             rows = frame["changed_members"]
             if not self._member_push_enabled(link) or not isinstance(rows, list):
                 raise MeshRefusal("bad_frame", "member-table push was not negotiated or is invalid")
+            # The authenticated link, not an embedded member row, owns the target
+            # network. Keep this check even though publication is network-scoped:
+            # an incorrectly constructed frame must never cross that boundary.
+            if frame.get("network_id") != link.network_id:
+                raise MeshRefusal(
+                    "bad_frame", "member-table push does not match the link's network"
+                )
+            sequence = frame.get("sequence")
+            if type(sequence) is not int or sequence < 0:
+                raise MeshRefusal("bad_frame", "member-table push has no valid snapshot sequence")
             # This is a TABLE, not an invalidation: adoption happens on the healthy
             # link's reader immediately, independent of other peers' pull timeouts.
             # No req / ack: unsolicited delivery is not a freshly answered pull.
             with link.member_table_lock:
-                link.member_push_generation += 1
+                if sequence <= link.member_snapshot_sequence:
+                    return None  # Already applied, or overtaken by a newer pull/push.
                 self._adopt_member_rows(link, rows)
+                link.member_snapshot_sequence = sequence
                 link.member_push_unverified = True
                 link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             self._membership_wake.set()
@@ -8910,6 +8937,9 @@ class RelayServer:
         # THE REPLY IS BARE ON PURPOSE (QA round 1, Q2): the asker reads only the flag
         # and the echoed digest, and only a peer that negotiated the capability can
         # ever receive this shape — an older asker never sends ``if_digest``.
+        # The same persisted record sequence accompanies full and conditional
+        # answers on push-capable links. Old peers retain their EXACT wire shape.
+        snapshot = {"sequence": record.sequence} if self._member_push_enabled(link) else {}
         asked = frame.get("if_digest")
         if isinstance(asked, str) and asked:
             mine = member_sync_digest(record, sender_device_id=record.self_device_id)
@@ -8917,7 +8947,7 @@ class RelayServer:
                 return {
                     "op": "ack",
                     "req": frame.get("req"),
-                    "detail": {"unchanged": True, "digest": mine},
+                    "detail": {"unchanged": True, "digest": mine, **snapshot},
                 }
         return {
             "op": "ack",
@@ -8927,6 +8957,7 @@ class RelayServer:
                 "epoch": record.epoch,
                 "members": [member.to_json() for member in record.members],
                 "members_digest": members_digest_of(record),
+                **snapshot,
             },
         }
 
@@ -12702,8 +12733,11 @@ class RelayServer:
                     if link.send(frame):
                         store.drop_frame(path)
 
-    def _link_for(self, device_id: str) -> PeerLink | None:
+    def _link_for(self, device_id: str, *, network_id: str | None = None) -> PeerLink | None:
         """A link anything NEW may go over — never one that has begun closing.
+
+        Membership publication must specify ``network_id``: the same device can
+        share several networks, but each authenticated link belongs to only one.
 
         ``alive`` IS NOT THE QUESTION ASKED HERE, and asking it was the defect this
         method's callers paid for: a link inside ``PeerLink.close``'s flush window is
@@ -12716,7 +12750,12 @@ class RelayServer:
         dialled fresh and finished in 70 ms.
         """
         for link in self.links.values():
-            if link.device_id == device_id and link.alive and not link.closing:
+            if (
+                link.device_id == device_id
+                and (network_id is None or link.network_id == network_id)
+                and link.alive
+                and not link.closing
+            ):
                 return link
         return None
 

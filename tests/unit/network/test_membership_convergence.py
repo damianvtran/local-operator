@@ -2308,7 +2308,7 @@ def test_an_unchanged_answer_for_another_digest_is_not_believed(tmp_path: Path) 
             member_pulled_at=1.0,
             member_pull_added=["stale"],
             local_capabilities=frozenset({wire.MEMBER_LIST_DIGEST_V1}),
-            member_push_generation=0,
+            member_snapshot_sequence=-1,
             member_table_lock=threading.Lock(),
             request=request,
         )
