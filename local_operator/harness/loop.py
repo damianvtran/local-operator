@@ -131,6 +131,7 @@ from local_operator.incidents import (
     REASONING_ECHO_MARKERS,
 )
 from local_operator.model.effort import real_rungs
+from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
 #: the byte counter visibly moves (so the row reads as progress rather than as a
@@ -346,11 +347,120 @@ _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 # still walks N slots to preserve container/nonstring identity (not O(cap)).
 _DIFF_DETAIL_ROWS = 256
 _DIFF_DETAIL_BYTES = 128 * 1024
-_DIFF_DETAIL_WITHHELD = "[output withheld: credential redaction requires a complete bounded diff]"
+_DIFF_DETAIL_WITHHELD = DIFF_WITHHELD_TEXT
 _DIFF_HUNK = re.compile(
     r"@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@[^\r\n]*"
 )
 _DIFF_ROW_BREAKS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
+    """Keys of ``rows`` whose text ``result`` (the redaction of their
+    ``"\n"``-join) did not return unchanged.
+
+    Occurrence-anchored, never LCS: a row is kept only when it appears exactly
+    once on each side, in order; every unanchored changed gap is affected
+    whole, so the error direction is over-masking. Raises ``ValueError`` when
+    no safe projection exists (callers withhold).
+    """
+    if any(char in _DIFF_ROW_BREAKS - {"\n"} for char in result):
+        raise ValueError
+    original = [text for _, text in rows]
+    returned = result.split("\n")
+    if original == returned:
+        return set()
+    # Occurrence grouping, not SequenceMatcher/LCS: duplicate body rows may
+    # never anchor. Across all calls there are <=2R original context rows
+    # and <=3R output rows (combined <=5R); byte populations are <=5B.
+    occurrences = sorted(
+        [(text, 0, index) for index, text in enumerate(original)]
+        + [(text, 1, index) for index, text in enumerate(returned)]
+    )
+    anchors: list[tuple[int, int]] = []
+    at = 0
+    while at < len(occurrences):
+        end = at + 1
+        while end < len(occurrences) and occurrences[end][0] == occurrences[at][0]:
+            end += 1
+        group = occurrences[at:end]
+        if len(group) == 2 and group[0][1] == 0 and group[1][1] == 1:
+            anchors.append((group[0][2], group[1][2]))
+        at = end
+    anchors.sort()
+    if any(a[1] >= b[1] for a, b in zip(anchors, anchors[1:])):
+        raise ValueError
+    affected: set[int] = set()
+    left_old = left_new = 0
+    for old, new in anchors + [(len(original), len(returned))]:
+        old_gap = original[left_old:old]
+        new_gap = returned[left_new:new]
+        if old_gap != new_gap:
+            if not old_gap:
+                raise ValueError  # insertion-only output has no safe source projection
+            affected.update(index for index, _ in rows[left_old:old])
+        # Equal gaps consume each row once; no arbitrary duplicate elsewhere
+        # can justify retaining an original masked body row.
+        left_old, left_new = old + 1, new + 1
+    return affected
+
+
+def _source_affected_lines(text: str, redact: Callable[[str], str]) -> set[int]:
+    """0-based line indices of ``text`` that ``redact`` changes, judged WHOLE.
+
+    One redaction call over the complete file side, so a registered value of
+    any height is seen in full; the occurrence-anchored projection maps the
+    output back to source lines and over-masks on ambiguity. Lines come from
+    ``splitlines`` exactly as the rendered diff's do, so indices match the
+    hunk headers' line numbers.
+    """
+    lines = text.splitlines()
+    if not lines:
+        return set()
+    result = redact("\n".join(lines))
+    if not isinstance(result, str):
+        raise ValueError
+    return _changed_rows(list(enumerate(lines)), result)
+
+
+def _mask_by_source_evidence(
+    rows: Sequence[str], affected_old: set[int], affected_new: set[int]
+) -> list[str]:
+    """Mask every diff row whose source line the whole-side redaction touched.
+
+    Line numbers come from the hunk headers (1-based starts; a zero count names
+    the line before), advanced row by row: `` `` rows are on both sides, ``-``
+    old only, ``+`` new only. A masked row keeps its sign and becomes
+    ``sign + REDACTION_MARKER``, the seam's own masked-row form, so counts and
+    geometry are unchanged. Anything that is not a well-formed diff raises
+    ``ValueError`` (the caller withholds).
+    """
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    if len(rows) < 2 or not rows[0].startswith("--- ") or not rows[1].startswith("+++ "):
+        raise ValueError
+    out = list(rows[:2])
+    old_line = new_line = -1
+    for row in rows[2:]:
+        frame = _DIFF_HUNK.fullmatch(row)
+        if frame is not None:
+            old_count = int(frame[2]) if frame[2] is not None else 1
+            new_count = int(frame[4]) if frame[4] is not None else 1
+            old_line = int(frame[1]) - (1 if old_count else 0)
+            new_line = int(frame[3]) - (1 if new_count else 0)
+            out.append(row)
+            continue
+        tag = row[:1]
+        if old_line < 0 or new_line < 0 or tag not in (" ", "-", "+"):
+            raise ValueError
+        hit = (tag in " -" and old_line in affected_old) or (
+            tag in " +" and new_line in affected_new
+        )
+        out.append(tag + REDACTION_MARKER if hit else row)
+        if tag in " -":
+            old_line += 1
+        if tag in " +":
+            new_line += 1
+    return out
 
 
 def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
@@ -418,46 +528,7 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
             raise ValueError
         return result
 
-    def changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
-        if any(char in _DIFF_ROW_BREAKS - {"\n"} for char in result):
-            raise ValueError
-        original = [text for _, text in rows]
-        returned = result.split("\n")
-        if original == returned:
-            return set()
-        # Occurrence grouping, not SequenceMatcher/LCS: duplicate body rows may
-        # never anchor. Across all calls there are <=2R original context rows
-        # and <=3R output rows (combined <=5R); byte populations are <=5B.
-        occurrences = sorted(
-            [(text, 0, index) for index, text in enumerate(original)]
-            + [(text, 1, index) for index, text in enumerate(returned)]
-        )
-        anchors: list[tuple[int, int]] = []
-        at = 0
-        while at < len(occurrences):
-            end = at + 1
-            while end < len(occurrences) and occurrences[end][0] == occurrences[at][0]:
-                end += 1
-            group = occurrences[at:end]
-            if len(group) == 2 and group[0][1] == 0 and group[1][1] == 1:
-                anchors.append((group[0][2], group[1][2]))
-            at = end
-        anchors.sort()
-        if any(a[1] >= b[1] for a, b in zip(anchors, anchors[1:])):
-            raise ValueError
-        affected: set[int] = set()
-        left_old = left_new = 0
-        for old, new in anchors + [(len(original), len(returned))]:
-            old_gap = original[left_old:old]
-            new_gap = returned[left_new:new]
-            if old_gap != new_gap:
-                if not old_gap:
-                    raise ValueError  # insertion-only output has no safe source projection
-                affected.update(index for index, _ in rows[left_old:old])
-            # Equal gaps consume each row once; no arbitrary duplicate elsewhere
-            # can justify retaining an original masked body row.
-            left_old, left_new = old + 1, new + 1
-        return affected
+    changed_rows = _changed_rows
 
     try:
         if scalar:
@@ -6203,6 +6274,10 @@ class AgentLoop:
                         nested_verdict = context.exempt_source_verdicts.pop(nested.id, None)
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
+                    # A write/edit diff is settled from its complete sources (and
+                    # the raw carrier consumed) before this result crosses back
+                    # into arbitrary Python.
+                    await self._settle_write_diff(result, context, config.redact_tool_result)
                     if config.redact_tool_result is not None:
                         # The same off-loop seam the history path uses: this
                         # result crosses back into arbitrary Python, and the
@@ -6656,6 +6731,10 @@ class AgentLoop:
                     duration_s=time.monotonic() - started_at,
                 )
                 raise
+            # Before ``park``: the live end event, the one-turn public copy and
+            # the persisted row all read ``result.details``, so the safe diff
+            # settled here reaches every surface at once.
+            await self._settle_write_diff(result, context, config.redact_tool_result)
             park(
                 slot,
                 item,
@@ -6700,6 +6779,7 @@ class AgentLoop:
                         text,
                         details={FAULT_KEY: FAULT_ABORTED if aborted else FAULT_SKIPPED},
                     )
+                await self._settle_write_diff(result, context, config.redact_tool_result)
                 park(
                     slot,
                     item,
@@ -7355,6 +7435,9 @@ class AgentLoop:
         redact: Callable[[str], str] | None = None,
     ) -> None:
         for result in results:
+            # Idempotent backstop for a path that skipped the runner's step:
+            # consumes any source evidence still attached BEFORE the row persists.
+            await self._settle_write_diff(result, context, redact)
             content: list[Content] = list(result.content)
             details = result.details
             # Redact BEFORE the empty-result backfill: a redacted secret is
@@ -7532,6 +7615,77 @@ class AgentLoop:
             else:
                 out.append(item)
         return out
+
+    async def _settle_write_diff(
+        self,
+        result: ToolResult,
+        context: LoopContext,
+        redact: Callable[[str], str] | None,
+    ) -> None:
+        """Publish a write/edit diff only after its COMPLETE sources were judged.
+
+        The producer (``tools/builtin._diff_text_result``) leaves the withheld
+        receipt in ``details['diff']`` and the raw ``(before, after, preview)``
+        on the private ``ToolResult._diff_source``. This is the one seam that
+        consumes it (single take, so the raw text stops existing on the result):
+
+        1. Each complete file side is redacted ONCE and projected back to the
+           source lines it touched (:func:`_source_affected_lines`). A hunk
+           holds two context lines, so a multi-line registered value longer
+           than that window, or cut by the 200-row preview, is only provable
+           from the whole side (see ``tools/diff_limits``).
+        2. Every preview row on a touched line is masked, sign kept
+           (:func:`_mask_by_source_evidence`); no re-diff, so counts and signs
+           stay the executor's.
+        3. The ordinary per-hunk seam (:func:`_redact_diff_detail`) then runs
+           on that copy as well, so nothing it masked before is lost.
+
+        Runs before the live end event is queued (both runners), as the nested
+        eval bridge's step, and as an idempotent backstop in
+        ``_append_results``; the live card, the one-turn public copy, the
+        persisted row and an eval result therefore read the same safe diff.
+        Fail-closed: any refusal or error keeps the receipt. With no redactor
+        configured nothing is redacted anywhere, so the raw preview is restored
+        exactly as before.
+        """
+        carried = result.take_diff_source()
+        if carried is None:
+            return
+        before, after, preview = carried
+        details = dict(result.details or {})
+        if redact is None:
+            details["diff"] = list(preview)
+            result.details = details
+            return
+        call_id = result.tool_call_id
+        tool_name = result.tool_name
+        # ``.get``, not the consuming helpers: the history redaction after this
+        # still consumes the same records.
+        arguments = context.original_call_args.get(call_id, {})
+        verdict = context.exempt_source_verdicts.get(call_id)
+        cwd = _session_cwd(context)
+
+        def _run() -> list[str]:
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, cwd, verdict),
+            ):
+                masked = _mask_by_source_evidence(
+                    preview,
+                    _source_affected_lines(before, redact),
+                    _source_affected_lines(after, redact),
+                )
+                out = _redact_diff_detail(masked, redact)
+            if not isinstance(out, list):
+                raise ValueError
+            return out
+
+        try:
+            details["diff"] = await asyncio.to_thread(_run)
+        except Exception:  # noqa: BLE001 - no proof, no publication
+            logger.warning("write/edit diff source redaction failed for %s", tool_name)
+            details["diff"] = [_DIFF_DETAIL_WITHHELD]
+        result.details = details
 
     @staticmethod
     async def _redact_details(

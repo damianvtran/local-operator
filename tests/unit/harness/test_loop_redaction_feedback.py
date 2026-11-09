@@ -869,17 +869,19 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         assert DETAILS_KEY not in json.dumps(row.provider_payload)
         # ...and the ENFORCER of the rule, both ways: the disk holds the caller's
         # bytes exactly (which is also the proof the executor received the original
-        # argument — the receipt reports the ORIGINAL length), while the executor's
-        # own result, the one the live event carries, still describes those bytes.
+        # argument — the receipt reports the ORIGINAL length). The live end
+        # event no longer quotes the raw bytes: its diff is settled from the
+        # complete file sides before it is queued
+        # (``AgentLoop._settle_write_diff``), so it is masked like the row.
         assert target.read_bytes() == content.encode()
         assert f"({len(content)} chars)" in _result_text(row)
         executor = [event for event in events if isinstance(event, ToolExecutionEndEvent)][-1]
         # ``or {}``/``or []`` so the Optional ``details`` is never subscripted
         # directly (pyright reportOptionalSubscript; CI type-check).
         executor_diff = (executor.result.details or {}).get("diff") or []
-        assert DETAILS_KEY in "\n".join(
+        assert executor_diff and DETAILS_KEY not in "\n".join(
             executor_diff
-        ), "the executor's own record must describe the bytes it wrote"
+        ), "the live event must not quote the written key"
 
         transcript = Transcript(tmp_path / "session")
         for message in end.messages:
@@ -1553,9 +1555,11 @@ async def test_q3_actual_write_durable_provider_and_fork_no_longer_publish_body_
     await session.prompt("Run the synthetic write and read")
     assert len(requests) == 3 and len(raw_results) == 1
     assert target.read_bytes() == body.encode()
-    # The executor/live-event object remains ground truth. Only publication
-    # copies, provider history, durable rows and actual in-process fork change.
-    assert prefix in "\n".join(raw_results[0].details["diff"])
+    # The disk is ground truth. The executor's result object is the live
+    # event's too, and its diff is settled from the complete file sides before
+    # the event is queued (``AgentLoop._settle_write_diff``), so it no longer
+    # quotes the body either.
+    assert prefix not in "\n".join(raw_results[0].details["diff"])
     history = list(session.transcript.build_llm_history())
     tools = [m for m in history if m.role == "tool"]
     assert len(tools) == 2
