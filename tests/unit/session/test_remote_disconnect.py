@@ -748,11 +748,24 @@ def _silent_owner_facade(tmp_path, monkeypatch) -> tuple[AttachedSession, list[f
 
 
 async def _await_verdict(remote: AttachedSession) -> None:
-    """Wait on the STATE, never on the clock."""
+    """Wait on the STATE, never on the clock.
+
+    Recovery clearing ``_recovering`` is the event; the tick ceiling is only a
+    deadlock guard, and it RAISES rather than falling out of the loop. It used
+    to return None on timeout, so a recovery that never reached its verdict
+    surfaced as whichever assertion came next - which is precisely the symptom
+    this file's regression case is about, so the report pointed at the wrong
+    thing.
+    """
     for _ in range(600):
         if not remote._recovering:
             return
         await asyncio.sleep(0.01)
+    raise AssertionError(
+        "recovery never left the _recovering state within 600 ticks (6.0 s); "
+        "this is a TIMEOUT waiting for the recovery verdict, not the verdict "
+        "being wrong"
+    )
 
 
 @pytest.mark.asyncio
