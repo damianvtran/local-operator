@@ -1635,8 +1635,14 @@ def adopt_members(
             if not own_assertion:
                 logger.warning("Refused member row: third-device assertion requires admin standing")
                 continue
+        # A peer does not learn a receiver-local capability revoke. On an
+        # existing owned row its stale capability declaration is ignored below,
+        # not a reason to discard the endpoint/name that keeps it reachable.
+        # New identities (including signed successors) still need bounded claims;
+        # a role promotion is refused in either case. Standing stays pre-merge.
         if own_assertion and (
-            incoming.role != sender_role or not set(incoming.capabilities) <= sender_caps
+            incoming.role != sender_role
+            or (existing is None and not set(incoming.capabilities) <= sender_caps)
         ):
             logger.warning("Refused member row: self assertion exceeds admitted standing")
             continue

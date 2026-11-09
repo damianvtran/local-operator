@@ -97,6 +97,30 @@ def test_self_capability_increase_cannot_bootstrap_a_later_third_party_row() -> 
     assert record.member(forged_other["device_id"]) is None
 
 
+def test_local_capability_revoke_does_not_block_owned_metadata_updates() -> None:
+    """A receiver-local revoke must not make a legitimate peer unreachable."""
+    record, _state = _record()
+    peer = _admit_peer(record, role="drive")
+    own = peer.to_json()
+    assert "prompt" in own["capabilities"]
+    relay.set_member_capabilities(record, device_id=PEER, revoke=["prompt"])
+    local_capabilities = list(peer.capabilities)
+    local_key = peer.public_key
+    own["name"] = "renamed-peer"
+    own["endpoints"] = ["127.0.0.1:43210"]
+    # The peer still declares its originally admitted capabilities. Accept its
+    # owned metadata, not its stale capability claim or a subsequent new identity.
+    forged = dict(own, device_id="d_" + "c" * 32)
+    assert relay.adopt_members(record, [own, forged], sender_device_id=PEER) == (True, [])
+    assert peer.name == "renamed-peer"
+    assert peer.endpoints == own["endpoints"]
+    assert peer.role == "drive"
+    assert peer.public_key == local_key
+    assert peer.capabilities == local_capabilities
+    assert "prompt" not in peer.capabilities
+    assert record.member(forged["device_id"]) is None
+
+
 def test_joined_member_can_assert_its_own_admitted_row() -> None:
     record, _state = _record()
     peer = _admit_peer(record, role="read")
