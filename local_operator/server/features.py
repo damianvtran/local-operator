@@ -468,6 +468,18 @@ def static_feature_flags() -> dict[str, Any]:
         # alone, because the UI's reaction hold was lifted on exactly that
         # condition. A renderer that does not see it shows no reaction controls.
         "team_bridge_reactions": 1,
+        # TYPING INDICATORS (typing-indicators design §5): `GET|PUT|DELETE
+        # .../conversations/{id}/typing` for the signed-in HUMAN only (no actor
+        # endpoint on this plane). Both writes REQUIRE the captured-owner
+        # receipt (PUT in the body, DELETE in the query) under the same atomic
+        # compare and coded refusal as reactions, and the PUT honours the local
+        # `team_bridge.share_typing` opt-out without contacting the hub. Same
+        # promise as reactions: this key means "the routes exist AND they are
+        # owner-guarded", never "the hub serves typing" — a hub that predates
+        # the routes answers `outdated_hub` and the renderer stops polling. A
+        # renderer that does not see it mounts no emitter and no reader, so it
+        # sends zero typing requests.
+        "team_bridge_typing": 1,
         # SEND MENTIONS: `mentions: [{kind, account_id, endpoint_id?}]` on the
         # conversation send body (the @-mention autocomplete). Agents carry
         # their `bep_` endpoint id, humans none; at most 50 distinct rows. The
