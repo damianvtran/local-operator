@@ -1560,14 +1560,17 @@ def adopt_members(
     rows: Sequence[Any],
     *,
     sender_device_id: str = "",
+    allow_new: bool = True,
 ) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
-    THE SAME TRUST DECISION THE JOIN ALREADY MAKES, made again where it is needed.
-    A joiner adopts the inviter's full member list verbatim when it pairs
-    (``network/cli.py:_persist_join``); this is that list, read again from a member
-    that holds it — not a second source of truth. The wire has exactly one
-    membership read (``net_member_list``, §6.4) and this is its merge.
+    The authenticated supplier, not a row's ``added_by`` or claimed role,
+    determines who may assert it. Resolve standing ONCE from the receiver's
+    pre-merge record: otherwise an early row could authorise a later forgery.
+    A joined member may assert its own bounded standing; only an active admin
+    may introduce another device. Unknown rows arrive only in receiver-initiated
+    pulls (``allow_new``), never in unsolicited change notifications. No new
+    wire field is needed: the link already authenticates the answering peer.
 
     THE RULES, and each one is a refusal to guess:
 
@@ -1585,10 +1588,9 @@ def adopt_members(
       table may therefore rename anybody — including the rotating device, whose
       statement signs ids and the new key only. Empty and identical names are
       ignored, so this rule never erases a name and never marks a no-op changed.
-    * A row this device does NOT hold is adopted as the frame carries it, exactly
-      as an admission frame's rows are, because without it the member is invisible
-      to every surface here — listings, dialling, and the authoriser that has to
-      recognise its frames.
+    * An unknown row is adopted only from an authorised supplier in a pull.
+      Existing receiver-local authority is never overwritten by a table answer;
+      explicit grants remain receiver-local (``set_member_capabilities``).
     * A row that names one of OUR OWN rows as its past self is a ROTATION CLAIM, and
       it is the one case where this merge moves a row rather than adding one:
       the superseded row is retired, and the claim is believed only where the row
@@ -1602,6 +1604,12 @@ def adopt_members(
     """
     changed = False
     added: list[str] = []
+    sender = record.member(sender_device_id)
+    if sender is None or not sender.active:
+        return False, []
+    sender_caps = frozenset(sender.capabilities)
+    sender_role = sender.role
+    sender_is_admin = "admin" in sender_caps
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1613,7 +1621,28 @@ def adopt_members(
         if not device_id or device_id in record.removed_ids:
             continue
         existing = record.member(device_id)
+        # A table is not admission evidence. In particular, copied ``added_by``
+        # metadata cannot let a reader mint a third identity or promote itself.
+        # Keep the refusal free of supplier identity: no caller attribution leaks.
+        own_assertion = device_id == sender_device_id
+        if not own_assertion and not sender_is_admin:
+            # A signed key rotation is still the supplier speaking for itself,
+            # not a third-device grant. The predecessor's key must cover the hop.
+            proven, predecessors = _rotation_retirements(
+                record, incoming, survivor=existing or incoming
+            )
+            own_assertion = proven and any(row is sender for row in predecessors)
+            if not own_assertion:
+                logger.warning("Refused member row: third-device assertion requires admin standing")
+                continue
+        if own_assertion and (
+            incoming.role != sender_role or not set(incoming.capabilities) <= sender_caps
+        ):
+            logger.warning("Refused member row: self assertion exceeds admitted standing")
+            continue
         if existing is None:
+            if not allow_new:
+                continue
             adopt, retired = _rotation_retirements(record, incoming, survivor=incoming)
             if not adopt:
                 continue
@@ -6568,7 +6597,9 @@ class RelayServer:
             link.member_snapshot_sequence = sequence
         return ""
 
-    def _adopt_member_rows(self, link: PeerLink, rows: list[Any]) -> bool:
+    def _adopt_member_rows(
+        self, link: PeerLink, rows: list[Any], *, allow_new: bool = True
+    ) -> bool:
         """Use the SAME authority-preserving merge for answers and change pushes."""
         # THE MERGE IS A READ-MODIFY-WRITE of the member table, so it reads inside
         # the lock: ``adopt_members`` merges INTO the record it is handed, so a
@@ -6576,7 +6607,9 @@ class RelayServer:
         # be merged away — reverted on disk, with the higher sequence ``save``
         # stamps hiding it.
         with store.mutate(link.network_id, self.root) as record:
-            changed, added = adopt_members(record, rows, sender_device_id=link.device_id)
+            changed, added = adopt_members(
+                record, rows, sender_device_id=link.device_id, allow_new=allow_new
+            )
             link.member_pull_added = list(added)
             if not changed:
                 return False
@@ -8915,7 +8948,19 @@ class RelayServer:
             with link.member_table_lock:
                 if sequence <= link.member_snapshot_sequence:
                     return None  # Already applied, or overtaken by a newer pull/push.
-                changed = self._adopt_member_rows(link, rows)
+                # A push can refresh known rows, but only a solicited answer may
+                # introduce identities. Leave its sequence unsettled so the next
+                # pull actually obtains those rows instead of accepting a digest.
+                has_unknown = any(
+                    isinstance(row, dict) and record.member(str(row.get("device_id", ""))) is None
+                    for row in rows
+                )
+                changed = self._adopt_member_rows(link, rows, allow_new=False)
+                if has_unknown:
+                    link.member_push_unverified = True
+                    link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+                    self._membership_wake.set()
+                    return None
                 link.member_snapshot_sequence = sequence
                 # Record revisions also advance for liveness/metadata. A late
                 # snapshot that changes no mergeable row must not undo an equal

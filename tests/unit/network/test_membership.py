@@ -54,6 +54,87 @@ def _admit_peer(record: types.NetworkRecord, *, role: str = "drive") -> types.Me
     )
 
 
+def test_read_peer_cannot_mint_an_unknown_admin() -> None:
+    """The authenticated reader must not turn a table answer into an admission."""
+    record, _state = _record()
+    _admit_peer(record, role="read")
+    forged = types.MemberRecord(
+        device_id="d_" + "c" * 32,
+        public_key=wire.b64u(b"c" * 32),
+        role="admin",
+        capabilities=sorted(types.capabilities_for_role("admin")),
+        added_by=SELF,
+    ).to_json()
+    # Exact net_member_list answer rows: even a forged added_by is not evidence
+    # that the authenticated link's reader may speak for an unknown identity.
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (False, [])
+    assert record.member(forged["device_id"]) is None
+
+
+@pytest.mark.parametrize("role", ["read", "drive"])
+def test_member_cannot_promote_its_own_row(role: str) -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role=role)
+    forged = peer.to_json()
+    forged.update(role="admin", capabilities=sorted(types.capabilities_for_role("admin")))
+    forged["endpoints"] = ["127.0.0.1:43210"]
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (False, [])
+    assert peer.role == role
+    assert peer.endpoints == []
+
+
+def test_self_capability_increase_cannot_bootstrap_a_later_third_party_row() -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role="read")
+    forged_self = peer.to_json()
+    forged_self["capabilities"] = sorted(types.capabilities_for_role("admin"))
+    forged_other = dict(forged_self, device_id="d_" + "c" * 32)
+    assert relay.adopt_members(record, [forged_self, forged_other], sender_device_id=PEER) == (
+        False,
+        [],
+    )
+    assert peer.capabilities == sorted(types.capabilities_for_role("read"))
+    assert record.member(forged_other["device_id"]) is None
+
+
+def test_joined_member_can_assert_its_own_admitted_row() -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role="read")
+    own = peer.to_json()
+    own["endpoints"] = ["127.0.0.1:43210"]
+    assert relay.adopt_members(record, [own], sender_device_id=PEER) == (True, [])
+    assert peer.endpoints == own["endpoints"]
+
+
+def test_admin_can_introduce_a_genuine_third_device_grant() -> None:
+    record, _state = _record()
+    _admit_peer(record, role="admin")
+    newcomer = types.MemberRecord(
+        device_id="d_" + "c" * 32,
+        public_key=wire.b64u(b"c" * 32),
+        role="drive",
+        capabilities=sorted(types.capabilities_for_role("drive")),
+    ).to_json()
+    # An unsolicited notification is not an answered membership pull, even from
+    # an admin. The subsequent pull may introduce this exact authorised row.
+    assert relay.adopt_members(record, [newcomer], sender_device_id=PEER, allow_new=False) == (
+        False,
+        [],
+    )
+    assert relay.adopt_members(record, [newcomer], sender_device_id=PEER) == (
+        True,
+        [newcomer["device_id"]],
+    )
+    assert record.member(newcomer["device_id"]).role == "drive"
+
+
+def test_member_rows_without_authenticated_supplier_are_not_admissions() -> None:
+    record, _state = _record()
+    row = types.MemberRecord(device_id=PEER, role="admin").to_json()
+    assert relay.adopt_members(record, [row]) == (False, [])
+    assert record.member(PEER) is None
+
+
 # ---------------------------------------------------------------------------
 # Admission
 # ---------------------------------------------------------------------------
@@ -500,7 +581,10 @@ def test_a_rotation_statement_that_arrives_after_the_pull_is_a_no_op(root: Path)
         rotated_at=time.time(),
         added_via="invite",
     )
-    assert relay.adopt_members(record, [published.to_json()]) == (True, [new.device_id])
+    assert relay.adopt_members(record, [published.to_json()], sender_device_id=SELF) == (
+        True,
+        [new.device_id],
+    )
     assert record.member(old.device_id) is record.member(new.device_id)
 
     # NOW THE FRAME ARRIVES, exactly as it was queued, and finds its work already done.
@@ -618,7 +702,10 @@ def test_another_network_is_refused_even_when_this_one_already_applied_it(root: 
         rotated_at=time.time(),
         added_via="invite",
     )
-    assert relay.adopt_members(record, [published.to_json()]) == (True, [new.device_id])
+    assert relay.adopt_members(record, [published.to_json()], sender_device_id=SELF) == (
+        True,
+        [new.device_id],
+    )
     survivor = record.member(new.device_id)
     assert survivor is not None and survivor.rotation_proof == statement
     foreign = identity.rotation_statement(old, new, "n_ffffffffffffffffffffffff")
@@ -1014,7 +1101,7 @@ def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
         role="read",
         capabilities=sorted(types.capabilities_for_role("read")),
     ).to_json()
-    changed, added = relay.adopt_members(record, [newcomer], sender_device_id=PEER)
+    changed, added = relay.adopt_members(record, [newcomer], sender_device_id=SELF)
     assert added == [newcomer_id]
     newcomer_row = record.member(newcomer_id)
     assert newcomer_row is not None

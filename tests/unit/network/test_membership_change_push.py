@@ -7,9 +7,11 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import identity, relay, store, wire
+from local_operator.network import identity, relay, store, types, wire
 from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_membership_convergence import (
+    _join,
+    _make,
     _rename_own_row,
     _row,
     _settled_pair,
@@ -318,3 +320,85 @@ def test_an_inflight_answer_cannot_revert_a_newer_push(
     assert link.member_pulled_at == stamp
     assert link.member_push_unverified
     assert link.member_pull_interval_s == relay.MEMBERSHIP_PULL_MIN_INTERVAL_S
+
+
+@pytest.mark.parametrize("supplier_role", ["read", "admin"])
+def test_new_rows_require_a_solicited_answer_and_supplier_standing(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, supplier_role: str
+) -> None:
+    """Real encrypted pushes cannot admit; their subsequent pull is peer-bound."""
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    reverse = _negotiated_pair(a, c, network_id, link)
+    pull = a.server._pull_members
+    # Disable the background rescue path before publishing: the push assertion
+    # must not accidentally observe an admission made by a concurrent pull.
+    monkeypatch.setattr(a.server, "_pull_members", lambda link: "no_answer")
+    with store.mutate(network_id, a.root) as record:
+        supplier = record.member(c.device_id)
+        assert supplier is not None
+        supplier.role = supplier_role
+        supplier.capabilities = sorted(types.capabilities_for_role(supplier_role))
+        store.save(record, a.root)
+    newcomer = identity.mint(c.root / "asserted-device", name="asserted")
+    with store.mutate(network_id, c.root) as record:
+        row = types.MemberRecord(
+            device_id=newcomer.device_id,
+            public_key=newcomer.public_key,
+            role="admin",
+            capabilities=sorted(types.capabilities_for_role("admin")),
+            added_by=a.device_id,  # Claimed provenance cannot replace link standing.
+        )
+        record.members.append(row)
+        store.save(record, c.root)
+    assert reverse.send(_change_frame(record))
+    _wire_barrier(c.server, reverse)
+    assert store.load(network_id, a.root).member(newcomer.device_id) is None
+    assert pull(link) == ""
+    adopted = store.load(network_id, a.root).member(newcomer.device_id)
+    print("BOUND_TABLE_ANSWER", supplier_role, "adopted", adopted is not None)
+    if supplier_role == "admin":
+        assert adopted is not None and adopted.role == "admin"
+    else:
+        assert adopted is None
+
+
+def test_removal_and_epoch_still_reach_every_peer(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    removed = _make(devices, "removed")
+    assert _join(removed, inviter=c, monkeypatch=monkeypatch)["device_id"] == removed.device_id
+    # Pairing uses a short-lived CLI connection. Establish the relay's own link
+    # before removal, so the removed device can receive its epoch notification.
+    removed_link, reason = removed.server.dial(network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert removed_link is not None, reason
+    assert net_fixtures.wait_for(
+        lambda: (live := c.server._link_for(removed.device_id)) is not None and live.alive
+    )
+    assert a.server._pull_members(link) == ""
+    assert store.load(network_id, a.root).member(removed.device_id) is not None
+    old_secret = store.load_secrets(network_id, removed.root).secret
+    result = c.server._ctl_member_rm({"network": network_id, "device_id": removed.device_id})
+    assert result["epoch"] == 2
+
+    def all_removed() -> bool:
+        records = [store.load(network_id, peer.root) for peer in (a, c, removed)]
+        return all(
+            record.epoch == 2
+            and removed.device_id in record.removed_ids
+            and (row := record.member(removed.device_id)) is not None
+            and not row.active
+            for record in records
+        )
+
+    assert net_fixtures.wait_for(all_removed)
+    assert (
+        store.load_secrets(network_id, a.root).secret
+        == store.load_secrets(network_id, c.root).secret
+    )
+    assert store.load_secrets(network_id, removed.root).secret == old_secret
+    print(
+        "REMOVAL_ALL_PEERS",
+        "epochs",
+        [store.load(network_id, p.root).epoch for p in (a, c, removed)],
+    )
