@@ -386,6 +386,17 @@ def test_membership_converges_over_links_that_were_already_up(
     monkeypatch.setattr(relay, "MEMBERSHIP_PUSH_PULL_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
 
+    # This case proves CORE membership convergence over a fixed graph. Redial
+    # and sibling slices may legitimately replace links and repair a stale table
+    # through a fresh handshake, which would make this causal proof meaningless.
+    # Gate those unrelated producers BEFORE any relay starts; the real membership
+    # pull/push loops, authenticated sockets, store and audit remain unchanged.
+    def no_redial(self: relay.RelayServer) -> None:
+        self._stop.wait()
+
+    monkeypatch.setattr(relay.RelayServer, "_redial_loop", no_redial)
+    monkeypatch.setattr(relay.RelayServer, "_install_slices", lambda self: None)
+
     a = _make(devices, "a", mode=DIAL_ONLY)
     b = _make(devices, "b", mode=SILENT)
     c = _make(devices, "c", mode=HUB)
@@ -411,42 +422,61 @@ def test_membership_converges_over_links_that_were_already_up(
     after = [item.link_id for item in a.server.links.values() if item.alive]  # noqa: SLF001
     assert after == live_links
 
-    assert _members(a) == {a.device_id, b.device_id, c.device_id}
+    initial = {a.device_id, b.device_id, c.device_id}
+
+    def initial_settled() -> bool:
+        if not all(_members(device) == initial for device in (a, b, c)):
+            return False
+        # Link admission precedes its first table read. Finish those reads before
+        # admitting D so an in-flight registration pull cannot prove convergence.
+        return all(
+            (peer_link := owner.server._link_for(peer_id)) is not None
+            and peer_link.member_pulled_at > 0
+            for owner, peer_id in (
+                (a, c.device_id),
+                (b, c.device_id),
+                (c, a.device_id),
+                (c, b.device_id),
+            )
+        )
+
+    assert net_fixtures.wait_for(initial_settled), {
+        device.name: _members(device) for device in (a, b, c)
+    }
+    assert _members(a) == initial
     assert _link_peers(a) == {c.device_id}
     assert _link_peers(b) == {c.device_id}
 
-    # D IS ADMITTED LATE, by B, and holds no link to anybody afterwards: the pairing
-    # socket is the CLI's, and it closes when the ceremony ends. B's record knows D;
-    # nobody else's does yet.
-    assert _join(d, inviter=b, monkeypatch=monkeypatch)["device_id"] == d.device_id
-    assert _members(b) == {a.device_id, b.device_id, c.device_id, d.device_id}
-    assert _members(a) == {a.device_id, b.device_id, c.device_id}
-    assert _members(c) == {a.device_id, b.device_id, c.device_id}
-
     # FROM HERE NOTHING IS TOUCHED, NOBODY IS RESTARTED, AND A IS WATCHED FOR DIALS.
     dials: list[str] = []
-    original = a.server._ensure_link_with_reason  # noqa: SLF001 — the dialling path
+    original = a.server.dial
 
-    def _spy(device_id: str, **fields: Any) -> Any:
-        dials.append(device_id)
-        return original(device_id, **fields)
+    def _spy(network_id: str, **fields: Any) -> Any:
+        dials.append(str(fields.get("host") or ""))
+        return original(network_id, **fields)
 
-    a.server._ensure_link_with_reason = _spy  # type: ignore[method-assign]  # noqa: SLF001
+    # Cached-link lookups and no-endpoint checks are NOT socket dials. Observe
+    # actual connection attempts, including ones made during the late admission.
+    monkeypatch.setattr(a.server, "dial", _spy)
 
-    deadline = time.time() + 30.0
-    while time.time() < deadline and d.device_id not in _members(a):
-        time.sleep(0.1)
-
-    assert _members(a) == {
-        a.device_id,
-        b.device_id,
-        c.device_id,
-        d.device_id,
-    }, "the late member never became visible over a link that was already up"
-    assert _members(c) == {a.device_id, b.device_id, c.device_id, d.device_id}
+    # B admits D after the existing topology is settled and the dial spy is
+    # installed. A/C may learn D BEFORE join() returns: early convergence is not
+    # a failure and must not be asserted away as an old three-member snapshot.
+    assert _join(d, inviter=b, monkeypatch=monkeypatch)["device_id"] == d.device_id
+    expected = initial | {d.device_id}
+    agreement = net_fixtures.wait_for(lambda: _members(a) == _members(c) == _members(b) == expected)
+    actual_a, actual_c = _members(a), _members(c)
+    assert actual_a == actual_c == expected and agreement, {
+        "agreement_wait": agreement,
+        "a": actual_a,
+        "c": actual_c,
+        "expected": expected,
+    }
     # NOTHING WAS DIALED TO MAKE THIS HAPPEN — the refresh runs on the links that
     # exist, which is the property that makes it independent of a mesh's shape.
     assert dials == [], dials
+    current_link = a.server._link_for(c.device_id)
+    assert current_link is not None and current_link.link_id in live_links
     assert _link_peers(a) == {c.device_id}
     assert d.device_id not in _link_peers(c)
 

@@ -1,6 +1,7 @@
 """Change pushes must replace the old convergence clock, not merely slow it."""
 
 import copy
+import threading
 import time
 from typing import Any
 
@@ -32,6 +33,30 @@ def _wire_barrier(server: Any, link: Any) -> None:
     # The ping is queued after a notification on the SAME TCP link. Its ack
     # proves the reader finished the prior dispatch, without timing-based sleeps.
     assert link.request({"op": "ping", "req": server._next_relay_req()})["op"] == "ack"
+
+
+def _negotiated_pair(a: Any, c: Any, network_id: str, link: Any) -> Any:
+    """Wait for the real relay link and both initial table reads, not the CLI link."""
+
+    def ready() -> bool:
+        reverse = c.server._link_for(a.device_id, network_id=network_id)
+        if reverse is None or not link.alive or not reverse.alive:
+            return False
+        if link.instance_id != c.server.instance_id or reverse.instance_id != a.server.instance_id:
+            return False
+        if not (a.server._member_push_enabled(link) and c.server._member_push_enabled(reverse)):
+            return False
+        if not (link.member_pulled_at and reverse.member_pulled_at):
+            return False
+        left, right = store.load(network_id, a.root), store.load(network_id, c.root)
+        return all(
+            relay.member_sync_digest(left, sender_device_id=sender)
+            == relay.member_sync_digest(right, sender_device_id=sender)
+            for sender in (a.device_id, c.device_id)
+        )
+
+    assert net_fixtures.wait_for(ready), "bilateral negotiated relay/table state did not settle"
+    return c.server._link_for(a.device_id, network_id=network_id)
 
 
 def test_two_network_pushes_stay_bound_to_the_authenticated_network(
@@ -151,20 +176,23 @@ def test_only_negotiated_change_push_links_get_the_long_ceiling(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a, c, network_id, link = _settled_pair(devices, monkeypatch)
-    # Keep verification under this test's control: an automatic pull must not
-    # conceal a late no-op push resetting a confirmed settlement to the floor.
-    monkeypatch.setattr(a.server, "refresh_membership", lambda **kwargs: {})
-    assert a.server._pull_members(link) == ""
-    assert a.server._pull_members(link) == ""
+    reverse = _negotiated_pair(a, c, network_id, link)
+    # Observe autonomous settlement after both initial reads. Two manual pulls
+    # race with the other endpoint's initial snapshot on a starved runner.
+    assert net_fixtures.wait_for(
+        lambda: link.member_pull_interval_s == relay.MEMBERSHIP_PUSH_PULL_INTERVAL_S
+        and not link.member_push_unverified
+    ), {"interval": link.member_pull_interval_s, "unverified": link.member_push_unverified}
     assert link.member_pull_interval_s == relay.MEMBERSHIP_PUSH_PULL_INTERVAL_S
-    reverse = c.server._link_for(a.device_id)
-    assert reverse is not None
+    # Freeze ONLY subsequent verification: it must not conceal a no-op push
+    # incorrectly undoing the confirmed settlement we just observed.
+    monkeypatch.setattr(a.server, "refresh_membership", lambda **kwargs: {})
     stamp = link.member_pulled_at
     # The record sequence can move for liveness/metadata without changing a
     # single mergeable row. Force that snapshot to arrive AFTER the equal pull.
     with store.mutate(network_id, c.root) as record:
         store.save(record, c.root)
-    c.server._publish_member_changes()
+    assert reverse.send(_change_frame(record))
     _wire_barrier(c.server, reverse)
     assert link.member_pulled_at == stamp
     print("POST_SETTLEMENT_NOOP_PUSH", link.member_pull_interval_s, link.member_push_unverified)
@@ -187,19 +215,59 @@ def test_only_negotiated_change_push_links_get_the_long_ceiling(
 
 def test_unchanged_table_does_not_push_again(devices: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     a, c, network_id, link = _settled_pair(devices, monkeypatch)
-    reverse = c.server._link_for(a.device_id)
-    assert reverse is not None
-    frames = []
-    monkeypatch.setattr(reverse, "send", lambda frame, **kwargs: frames.append(frame) or True)
-    c.server._publish_member_changes()
-    count = len(frames)
-    c.server._publish_member_changes()
-    assert len(frames) == count
+    reverse = _negotiated_pair(a, c, network_id, link)
+    lock = threading.Lock()
+    frames: list[dict[str, Any]] = []
+    cycles = 0
+    send = relay.PeerLink.send
+    publish = c.server._publish_member_changes
+
+    def record_send(self: relay.PeerLink, frame: dict[str, Any], **kwargs: Any) -> bool:
+        accepted = send(self, frame, **kwargs)
+        if accepted and self is reverse and "changed_members" in frame:
+            with lock:
+                frames.append(frame)
+        return accepted
+
+    def completed_cycle() -> None:
+        nonlocal cycles
+        publish()
+        with lock:
+            cycles += 1
+
+    def snapshot() -> tuple[int, int]:
+        with lock:
+            return cycles, len(frames)
+
+    def settled_after(previous: int) -> bool:
+        completed, _ = snapshot()
+        record = store.load(network_id, c.root)
+        return completed > previous and reverse.member_push_digest == relay.member_sync_digest(
+            record, sender_device_id=c.device_id
+        )
+
+    monkeypatch.setattr(relay.PeerLink, "send", record_send)
+    monkeypatch.setattr(c.server, "_publish_member_changes", completed_cycle)
+    # Let the ONE real publisher finish initial synchronization. Invoking it
+    # manually beside its background loop creates a second, artificial producer.
+    assert net_fixtures.wait_for(lambda: settled_after(0)), snapshot()
+    cycle, count = snapshot()
+    assert net_fixtures.wait_for(lambda: settled_after(cycle)), snapshot()
+    assert snapshot()[1] == count, "an unchanged complete cycle emitted an additional push"
+
+    cycle, count = snapshot()
     _rename_own_row(c, network_id, "new-name")
-    c.server._publish_member_changes()
-    assert len(frames) == count + 1
+    assert net_fixtures.wait_for(
+        lambda: settled_after(cycle)
+        and (row := _row(a, c.device_id)) is not None
+        and row.name == "new-name"
+    ), snapshot()
+    changed_cycle, _ = snapshot()
+    # A second completed cycle proves quiescence, not merely that the first
+    # expected frame arrived before a duplicate still queued on another thread.
+    assert net_fixtures.wait_for(lambda: settled_after(changed_cycle)), snapshot()
+    assert snapshot()[1] == count + 1
     assert frames[-1]["op"] == "net_member_list"
-    assert "changed_members" in frames[-1]
     assert "req" not in frames[-1]
 
 
