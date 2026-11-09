@@ -6563,12 +6563,12 @@ class RelayServer:
         # until something else moves (see the full-pull states in the docstring of
         # ``_learn_members_from``).
         link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
-        result = self._adopt_member_rows(link, rows)
+        self._adopt_member_rows(link, rows)
         if sequence is not None:
             link.member_snapshot_sequence = sequence
-        return result
+        return ""
 
-    def _adopt_member_rows(self, link: PeerLink, rows: list[Any]) -> str:
+    def _adopt_member_rows(self, link: PeerLink, rows: list[Any]) -> bool:
         """Use the SAME authority-preserving merge for answers and change pushes."""
         # THE MERGE IS A READ-MODIFY-WRITE of the member table, so it reads inside
         # the lock: ``adopt_members`` merges INTO the record it is handed, so a
@@ -6579,7 +6579,7 @@ class RelayServer:
             changed, added = adopt_members(record, rows, sender_device_id=link.device_id)
             link.member_pull_added = list(added)
             if not changed:
-                return ""
+                return False
             store.save(record, self.root)
         self.audit.record(
             AuditEvent(
@@ -6597,7 +6597,7 @@ class RelayServer:
                 },
             )
         )
-        return ""
+        return True
 
     def refresh_membership(self, *, budget_s: float | None = None) -> dict[str, MembershipReport]:
         """Re-pull the member table from every LIVE link whose pull is DUE.
@@ -8915,11 +8915,16 @@ class RelayServer:
             with link.member_table_lock:
                 if sequence <= link.member_snapshot_sequence:
                     return None  # Already applied, or overtaken by a newer pull/push.
-                self._adopt_member_rows(link, rows)
+                changed = self._adopt_member_rows(link, rows)
                 link.member_snapshot_sequence = sequence
-                link.member_push_unverified = True
-                link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
-            self._membership_wake.set()
+                # Record revisions also advance for liveness/metadata. A late
+                # snapshot that changes no mergeable row must not undo an equal
+                # pull's settlement or manufacture a new verification need.
+                if changed:
+                    link.member_push_unverified = True
+                    link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+            if changed:
+                self._membership_wake.set()
             return None
         # The conditional half of ``wire.MEMBER_LIST_DIGEST_V1``: answer without the
         # rows only when the asker's table hashes exactly like ours. Any difference

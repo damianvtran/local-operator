@@ -2328,9 +2328,11 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     """One end of a link predates ``member-list-digest-v1``; the mesh still converges.
 
     Modelled at the negotiation, which is the only place the build difference is
-    visible: C's link to A is told A did not advertise the string, so C must keep
-    asking full tables (an old A would not know ``if_digest``), while A — which sees
-    C advertise it — pulls conditionally. A row added on EITHER side reaches the other.
+    visible: A's handshake omits digest and change-push support, so C must keep
+    asking full tables (an old A would not know ``if_digest``), while this test's
+    client implementation can still ask the capable C conditionally. Capabilities
+    are fixed BEFORE the handshake, not reassigned while an already-prepared
+    conditional request may still be in flight. A row added on EITHER side arrives.
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
     # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
@@ -2341,19 +2343,35 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
     c = _make(devices, "c", mode=HUB)
+    new_handshake = Handshake.new
+    old_features = {wire.MEMBER_LIST_DIGEST_V1, wire.MEMBER_LIST_PUSH_V1}
+
+    def handshake_for_build(**kwargs: Any) -> Handshake:
+        if kwargs["identity"].device_id == a.device_id:
+            kwargs["capabilities"] = [
+                cap for cap in kwargs["capabilities"] if cap not in old_features
+            ]
+        return new_handshake(**kwargs)
+
+    monkeypatch.setattr(Handshake, "new", staticmethod(handshake_for_build))
+    pushes: list[dict[str, Any]] = []
+    send = relay.PeerLink.send
+
+    def record_send(self: relay.PeerLink, frame: dict[str, Any], **kwargs: Any) -> bool:
+        if "changed_members" in frame:
+            pushes.append(frame)
+        return send(self, frame, **kwargs)
+
+    monkeypatch.setattr(relay.PeerLink, "send", record_send)
     record = _init_network(c.server)
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
     link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
     assert link is not None, reason
-    assert net_fixtures.wait_for(
-        lambda: any(
-            item.device_id == a.device_id and item.alive
-            for item in c.server.links.values()  # noqa: SLF001
-        )
-    )
-    for item in list(c.server.links.values()):  # noqa: SLF001
-        if item.device_id == a.device_id:
-            item.capabilities = frozenset(item.capabilities - {wire.MEMBER_LIST_DIGEST_V1})
+    assert net_fixtures.wait_for(lambda: c.server._link_for(a.device_id) is not None)
+    reverse = c.server._link_for(a.device_id)
+    assert reverse is not None
+    assert not old_features.intersection(reverse.capabilities)
+    assert not old_features.intersection(link.local_capabilities)
     count = len(seen)
 
     for owner, tag in ((c, "e1"), (a, "e2")):
@@ -2372,8 +2390,12 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     assert net_fixtures.wait_for(
         lambda: any(r["unchanged"] and r["asker"] == a.device_id for r in seen[count:])
     ), seen[count:]
-    from_c = [r for r in seen[count:] if r["asker"] == c.device_id]
+    # Check EVERY C request, including first contact: an old negotiated receiver
+    # must never see a digest or a push, not merely after a mutable test cutoff.
+    from_c = [r for r in seen if r["asker"] == c.device_id]
     assert from_c and all(not r["if_digest"] and r["rows"] for r in from_c), from_c
+    assert not pushes
+    assert reverse.member_pull_interval_s <= relay.MEMBERSHIP_PULL_MAX_INTERVAL_S
 
 
 # ---------------------------------------------------------------------------

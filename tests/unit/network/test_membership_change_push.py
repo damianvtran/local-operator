@@ -151,9 +151,25 @@ def test_only_negotiated_change_push_links_get_the_long_ceiling(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    # Keep verification under this test's control: an automatic pull must not
+    # conceal a late no-op push resetting a confirmed settlement to the floor.
+    monkeypatch.setattr(a.server, "refresh_membership", lambda **kwargs: {})
     assert a.server._pull_members(link) == ""
     assert a.server._pull_members(link) == ""
     assert link.member_pull_interval_s == relay.MEMBERSHIP_PUSH_PULL_INTERVAL_S
+    reverse = c.server._link_for(a.device_id)
+    assert reverse is not None
+    stamp = link.member_pulled_at
+    # The record sequence can move for liveness/metadata without changing a
+    # single mergeable row. Force that snapshot to arrive AFTER the equal pull.
+    with store.mutate(network_id, c.root) as record:
+        store.save(record, c.root)
+    c.server._publish_member_changes()
+    _wire_barrier(c.server, reverse)
+    assert link.member_pulled_at == stamp
+    print("POST_SETTLEMENT_NOOP_PUSH", link.member_pull_interval_s, link.member_push_unverified)
+    assert link.member_pull_interval_s == relay.MEMBERSHIP_PUSH_PULL_INTERVAL_S
+    assert not link.member_push_unverified
     link.capabilities = frozenset(link.capabilities - {wire.MEMBER_LIST_PUSH_V1})
     link.member_pull_interval_s = relay.MEMBERSHIP_PULL_MIN_INTERVAL_S
     assert a.server._pull_members(link) == ""
