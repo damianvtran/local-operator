@@ -365,8 +365,18 @@ def _changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
     """
     if any(char in _DIFF_ROW_BREAKS - {"\n"} for char in result):
         raise ValueError
+    return _anchored_affected(rows, result.split("\n"))
+
+
+def _anchored_affected(rows: list[tuple[int, str]], returned: list[str]) -> set[int]:
+    """The occurrence-anchored projection behind :func:`_changed_rows`.
+
+    ``returned`` is the redacted text already split into rows the SAME way
+    ``rows`` were; split here so the exact-source pass of
+    :func:`_source_affected_lines` can split on every ``splitlines``
+    separator (ends kept) while the seam keeps its ``"\n"`` contract.
+    """
     original = [text for _, text in rows]
-    returned = result.split("\n")
     if original == returned:
         return set()
     # Occurrence grouping, not SequenceMatcher/LCS: duplicate body rows may
@@ -407,8 +417,8 @@ def _changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
 def _source_affected_lines(text: str, redact: Callable[[str], str]) -> set[int]:
     """0-based line indices of ``text`` that ``redact`` changes, judged WHOLE.
 
-    One redaction call over the complete file side, so a registered value of
-    any height is seen in full; the occurrence-anchored projection maps the
+    Redaction calls over the complete file side (normalized and exact), so a
+    registered value of any height is seen in full; the occurrence-anchored projection maps the
     output back to source lines and over-masks on ambiguity. Lines come from
     ``splitlines`` exactly as the rendered diff's do, so indices match the
     hunk headers' line numbers.
@@ -419,7 +429,24 @@ def _source_affected_lines(text: str, redact: Callable[[str], str]) -> set[int]:
     result = redact("\n".join(lines))
     if not isinstance(result, str):
         raise ValueError
-    return _changed_rows(list(enumerate(lines)), result)
+    affected = _changed_rows(list(enumerate(lines)), result)
+    # R1-2 (PR #3702): the pass above judges the side with every line break
+    # normalized to ``"\n"``, so a value registered with the file's OWN
+    # separators (``"\r\n"``, ``"\f"``, ``"\x85"``, ...) no longer matches there
+    # and its lines were published. Redact the EXACT original text too, split
+    # both it and its redaction with ``splitlines(keepends=True)`` -- the same
+    # boundaries and indices the rendered diff uses, terminators included so
+    # a separator the redactor consumed still registers as a change -- and
+    # UNION the two projections. Each pass only ever adds masked lines, so the
+    # union is at least as conservative as either; no masked side is re-diffed.
+    exact = redact(text)
+    if not isinstance(exact, str):
+        raise ValueError
+    if exact != text:
+        affected |= _anchored_affected(
+            list(enumerate(text.splitlines(keepends=True))), exact.splitlines(keepends=True)
+        )
+    return affected
 
 
 def _mask_by_source_evidence(
@@ -6277,7 +6304,16 @@ class AgentLoop:
                     # A write/edit diff is settled from its complete sources (and
                     # the raw carrier consumed) before this result crosses back
                     # into arbitrary Python.
-                    await self._settle_write_diff(result, context, config.redact_tool_result)
+                    # ``_runner_result`` already settled it; this is the
+                    # idempotent backstop, given the popped records explicitly
+                    # (R1-3) so it never judges with emptied ones.
+                    await self._settle_write_diff(
+                        result,
+                        context,
+                        config.redact_tool_result,
+                        arguments=planned.args,
+                        verdict=nested_verdict,
+                    )
                     if config.redact_tool_result is not None:
                         # The same off-loop seam the history path uses: this
                         # result crosses back into arbitrary Python, and the
@@ -6356,6 +6392,17 @@ class AgentLoop:
                 )
             pending_creations = _plan_guard_creations(tool.name, item.args, execution_context)
             result = await tool.execute(call.id, item.args, signal, on_update, execution_context)
+            # R1-1 (PR #3702): settle a write/edit diff on the ORIGINAL result,
+            # right here, before anything copies it. The guard annotation, the
+            # one-turn public copy and a PostToolUse hook note all
+            # ``model_copy`` the result, and every copy deliberately drops the
+            # private raw-source carrier (``ToolResult.__copy__``); settling
+            # after them found no carrier and left the withheld receipt on an
+            # ordinary diff. Settling first keeps that stripping invariant
+            # intact AND means no guard, hook or copy ever sees raw rows. The
+            # arguments/verdict records are still present here (the eval
+            # bridge pops them only after this returns).
+            await self._settle_write_diff(result, context, config.redact_tool_result)
             if pending_creations is not None:
                 # Recorded whatever the exit status: ``mkdir -p a b`` can create
                 # ``a`` and then fail on ``b``. Only directories that exist NOW
@@ -6731,9 +6778,10 @@ class AgentLoop:
                     duration_s=time.monotonic() - started_at,
                 )
                 raise
-            # Before ``park``: the live end event, the one-turn public copy and
-            # the persisted row all read ``result.details``, so the safe diff
-            # settled here reaches every surface at once.
+            # Idempotent backstop: ``_runner_result`` settles a write/edit diff
+            # right after ``execute`` (before any copy), so this only consumes a
+            # carrier some other path left attached -- still before ``park``,
+            # which feeds the live end event and the persisted row.
             await self._settle_write_diff(result, context, config.redact_tool_result)
             park(
                 slot,
@@ -7621,6 +7669,9 @@ class AgentLoop:
         result: ToolResult,
         context: LoopContext,
         redact: Callable[[str], str] | None,
+        *,
+        arguments: Mapping[str, Any] | None = None,
+        verdict: bool | None = None,
     ) -> None:
         """Publish a write/edit diff only after its COMPLETE sources were judged.
 
@@ -7640,10 +7691,12 @@ class AgentLoop:
         3. The ordinary per-hunk seam (:func:`_redact_diff_detail`) then runs
            on that copy as well, so nothing it masked before is lost.
 
-        Runs before the live end event is queued (both runners), as the nested
-        eval bridge's step, and as an idempotent backstop in
-        ``_append_results``; the live card, the one-turn public copy, the
-        persisted row and an eval result therefore read the same safe diff.
+        Runs in ``_runner_result`` right after ``execute`` -- before the guard
+        annotation, the one-turn public copy and post-tool hooks, each of which
+        copies the result and so drops the carrier -- with idempotent backstops
+        before ``park``, in the nested eval bridge and in ``_append_results``;
+        the live card, the one-turn public copy, the persisted row and an eval
+        result therefore read the same safe diff.
         Fail-closed: any refusal or error keeps the receipt. With no redactor
         configured nothing is redacted anywhere, so the raw preview is restored
         exactly as before.
@@ -7661,8 +7714,12 @@ class AgentLoop:
         tool_name = result.tool_name
         # ``.get``, not the consuming helpers: the history redaction after this
         # still consumes the same records.
-        arguments = context.original_call_args.get(call_id, {})
-        verdict = context.exempt_source_verdicts.get(call_id)
+        # Explicit values win: the eval bridge pops both records before its
+        # backstop call (R1-3).
+        if arguments is None:
+            arguments = context.original_call_args.get(call_id, {})
+        if verdict is None:
+            verdict = context.exempt_source_verdicts.get(call_id)
         cwd = _session_cwd(context)
 
         def _run() -> list[str]:

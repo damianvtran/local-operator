@@ -256,6 +256,141 @@ async def test_result_that_never_reaches_the_seam_publishes_the_receipt(tmp_path
     assert result.take_diff_source() is not None and result._diff_source is None
 
 
-def test_private_carrier_default_is_empty():
+# R1-4 (PR #3702): a coroutine, so the module-wide asyncio mark applies to it
+# instead of warning that a sync test carries it.
+async def test_private_carrier_default_is_empty():
     result = ToolResult(tool_call_id="c", tool_name="write", content=[], details={})
     assert result._diff_source is None and result.take_diff_source() is None
+
+
+def _live_and_persisted(session: Session, events: list[Any]) -> tuple[Any, Any]:
+    (end,) = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+    (details,) = _tool_details(session)
+    return end, details
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+@pytest.mark.parametrize("copier", ["guard_warn", "hook_note"])
+async def test_copying_paths_keep_the_settled_credential_free_diff(
+    tmp_path, monkeypatch, tool, copier
+):
+    """R1-1 / Q2: a WARN guardrail and a PostToolUse note both ``model_copy``
+    the result; settlement must already have happened on the original, so the
+    ordinary diff is published (not the withheld receipt) live and persisted.
+    """
+    token = "QAWARNTOKEN"
+    if copier == "guard_warn":
+        rules = tmp_path / "config" / "rules"
+        rules.mkdir(parents=True)
+        (rules / "synthetic-warn.md").write_text(
+            "---\nname: synthetic-warn\nscope: tool:"
+            + tool
+            + "\naction: warn\ncondition: ["
+            + token
+            + "]\n---\nSynthetic warning.\n"
+        )
+    else:
+
+        async def note(self, *_args, **_kwargs):
+            return ["formatter ran"]
+
+        monkeypatch.setattr(Session, "_run_post_tool_hooks", note)
+    target = tmp_path / "plain.py"
+    before = "".join(f"v{index} = {index}\n" for index in range(30))
+    if tool == "edit":
+        target.write_text(before)
+        after = before.replace("v15 = 15", f"v15 = 15  # {token}")
+        args = {"path": str(target), "old_text": "v15 = 15", "new_text": f"v15 = 15  # {token}"}
+    else:
+        before, after = "", f"hello\n{token} world\n"
+        args = {"path": str(target), "content": after}
+    session, events = await _run(tmp_path, [("w-1", tool, args)])
+    assert target.read_bytes() == after.encode()
+    end, details = _live_and_persisted(session, events)
+    assert not end.is_error
+    marker = "Synthetic warning" if copier == "guard_warn" else "formatter ran"
+    assert marker in end.result.text, "the copying path did not run"
+    expected = builtin._diff_details(str(target), before, after)["diff"]
+    assert details["diff"] == expected
+    assert (end.result.details or {})["diff"] == expected
+
+
+_SEPARATORS = ["\r\n", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+
+
+@pytest.mark.parametrize("sep", _SEPARATORS, ids=[repr(s) for s in _SEPARATORS])
+@pytest.mark.parametrize("edited", [0, 5, 9])
+async def test_literal_registered_with_the_files_own_separator(tmp_path, sep, edited):
+    """R1-2 / Q1: the source pass normalized every break to ``"\n"`` before
+    redaction, so a literal registered with the file's own separator never
+    matched and its fragments published. Every ``splitlines`` separator."""
+    parts = _literal(10, "S")
+    pad = [f"filler line {index}" for index in range(40)]
+    target = tmp_path / "sep.txt"
+    original = sep.join(pad + parts + pad) + sep
+    target.write_bytes(original.encode())
+    session, events = await _run(
+        tmp_path,
+        [("s-1", "edit", {"path": str(target), "old_text": parts[edited], "new_text": "EDITED"})],
+        secrets=(sep.join(parts),),
+    )
+    assert target.read_bytes() == original.replace(parts[edited], "EDITED").encode()
+    end, details = _live_and_persisted(session, events)
+    assert not end.is_error
+    _assert_no_fragment(_published(session, events), parts)
+    assert details["diff"][0] != WITHHELD, "masked, not withheld"
+    assert (end.result.details or {})["diff"] == details["diff"]
+    assert details["added"] == 1 and details["removed"] == 1
+
+
+async def test_crlf_literal_among_duplicate_fillers_over_masks(tmp_path):
+    """R1-2: the exact-source pass inherits the occurrence anchoring, so a
+    duplicate filler row can never anchor a masked CRLF literal row back out."""
+    parts = _literal(6, "E")
+    pad = ["}", "", "}", ""] * 5
+    target = tmp_path / "dupcrlf.txt"
+    original = "\r\n".join(pad + parts + pad) + "\r\n"
+    target.write_bytes(original.encode())
+    session, events = await _run(
+        tmp_path,
+        [("e-1", "edit", {"path": str(target), "old_text": parts[3], "new_text": "X"})],
+        secrets=("\r\n".join(parts),),
+    )
+    assert target.read_bytes() == original.replace(parts[3], "X").encode()
+    _assert_no_fragment(_published(session, events), parts)
+
+
+async def test_settle_uses_explicit_call_records_after_they_were_popped(tmp_path):
+    """R1-3: the eval bridge pops ``original_call_args`` and the exemption
+    verdict before its settle call; explicit values must reach the redactor's
+    call identity and exemption scope instead of the emptied records."""
+    from local_operator.harness.guard_area import source_is_exempt
+    from local_operator.harness.loop import AgentLoop, LoopContext
+    from local_operator.harness.redaction import current_tool_source
+
+    target = tmp_path / "meta.txt"
+    result = await build_write_tool().execute(
+        "m-1",
+        {"path": str(target), "content": "META-ROW\n"},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path)),
+    )
+    seen: list[tuple[tuple[str, str], bool]] = []
+
+    def redact(text: str) -> str:
+        seen.append((current_tool_source(), source_is_exempt()))
+        return text
+
+    await AgentLoop._settle_write_diff(
+        cast(Any, None),
+        result,
+        LoopContext(),
+        redact,
+        arguments={"path": str(target)},
+        verdict=True,
+    )
+    assert seen, "redactor never ran"
+    assert all(name == "write" and "meta.txt" in summary for (name, summary), _ in seen)
+    assert all(exempt for _, exempt in seen)
+    assert (result.details or {})["diff"] != [WITHHELD]
