@@ -157,7 +157,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "Radient Team only: your organization's shared agents, teams and "
                     "skills, each marked linked / conflict (same-named unlinked local "
-                    "copy) / absent."
+                    "copy) / absent; linked rows add current / update-available."
                 ),
                 fields=("org", "kinds", "query"),
                 gated=True,
@@ -169,7 +169,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "prefix) and subscribe; re-runs never duplicate. on_conflict for a "
                     "same-named unlinked local copy: adopt-link (default: back up, link, "
                     "content unchanged, never merges) | skip | adopt (hub wins, backed up) "
-                    "| reconcile (model merge); adopt/reconcile need confirm_replace=true."
+                    "| reconcile (model merge); adopt/reconcile need confirm_replace=true. "
+                    "Also updates linked items (local edits kept; conflicts reported) and "
+                    "re-subscribes them. Without consent it asks the user itself: end the "
+                    "turn, retry on their answer. Never hand users CLI commands."
                 ),
                 fields=("org", "kinds", "name", "on_conflict"),
                 gated=True,

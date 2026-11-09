@@ -321,10 +321,14 @@ async def durable_write_decision(
             "durable-write consent seam failed: %s; refusing", type(exc).__name__, exc_info=True
         )
         return None, WriteReason("error", fault=type(exc).__name__)
-    from local_operator.harness.types import QueuedProfileWrite
+    from local_operator.harness.types import QueuedHubPull, QueuedProfileWrite
 
     if isinstance(origin, QueuedProfileWrite):
         return origin, WriteReason("queued")
+    if isinstance(origin, QueuedHubPull):
+        # Not a grant: the host filed ONE consent ask. The caller reports it and
+        # the model retries the same call once the person's answer arrives.
+        return origin, WriteReason("ask_queued")
     return (str(origin), WriteReason("granted")) if origin else (None, WriteReason("declined"))
 
 
@@ -401,6 +405,31 @@ def owner_text_requests_profile_edit(
             if set(fields) <= requested:
                 return True
     return False
+
+
+#: The owner's own words asking for an org-hub pull/update: a verb AND a hub
+#: noun in the same message. Deliberately small; a miss falls through to the
+#: consent ask (never a refusal), so this only saves a question the user already
+#: answered by asking. Bridge, peer, wake and remote text never reach the caller's
+#: list, so this can never be satisfied by someone else's message.
+_HUB_PULL_VERB = r"\b(?:pull|update|sync|subscribe|install|get|fetch|refresh|upgrade)\w*"
+_HUB_PULL_NOUN = r"\b(?:skills?|agents?|teams?|hub|org|organi[sz]ation)\b"
+
+
+def owner_text_requests_hub_pull(text: str) -> bool:
+    """Whether the owner's own message asks for an org-hub pull or update.
+
+    Requires a pull/update verb and a hub noun ("update my hub items", "pull
+    the org skills", "sync my team's agents"). Fail-safe: an unmatched phrasing
+    only means the host asks instead.
+    """
+    import re
+
+    body = str(text or "")
+    return bool(
+        re.search(_HUB_PULL_VERB, body, flags=re.IGNORECASE)
+        and re.search(_HUB_PULL_NOUN, body, flags=re.IGNORECASE)
+    )
 
 
 def owner_text_names_profile(text: str, names: Iterable[str]) -> bool:
@@ -520,6 +549,39 @@ async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> st
     return origin
 
 
+def hub_pull_refusal(reason: str, ask_id: str = "") -> str:
+    """Model-facing outcome of an unconsented org-hub pull (English by design).
+
+    NEVER a CLI command addressed to the user: the people this reaches are often
+    non-technical, and the old text sent them to ``lop agents sync``, which does
+    not even touch skills. The remedy is always an ask or the user's own words.
+    """
+    if reason == "ask_queued":
+        return (
+            f"Asked the user to confirm this hub update (ask {ask_id}); nothing was "
+            "changed yet. End your turn now. When their answer arrives, retry the same "
+            "org_pull call: a yes lets it through, a 'Not now' means stop. Do not give "
+            "them commands to run."
+        )
+    if reason == "declined":
+        return (
+            "The user chose not to update from the hub now, so nothing was changed. "
+            "Do not retry unless they ask again."
+        )
+    if reason == "error":
+        fault = getattr(reason, "fault", "")
+        return (
+            "The confirmation step failed before the user could answer"
+            + (f" ({fault})" if fault else "")
+            + ", so nothing was changed. Tell the user it failed; do not retry unchanged."
+        )
+    return (
+        "This run has no way to ask the user, so nothing was changed. Tell them that "
+        "saying 'update my hub items' in their own message lets you do it. Do not give "
+        "them commands to run."
+    )
+
+
 def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam") -> str:
     """Why a tool-issued account write was refused, and the ONE next action.
 
@@ -541,6 +603,8 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
+    if intent.operation == "hub_pull":
+        return hub_pull_refusal(reason)
     if reason == "declined":
         return (
             f"the user declined to save this {intent.kind} for every conversation, so "
