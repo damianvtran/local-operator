@@ -773,6 +773,67 @@ def settled_charge(rates: dict[str, float], usage: object) -> dict[str, object] 
     return {"tokens": counts, "rates_usd_per_m": priced, "usd": float(total / 1_000_000)}
 
 
+# Every usage field that names something a provider could have charged for. A
+# response carrying any of them is not a bill-free rejection: it states a basis
+# the meter must price -- or fail to price, and latch.
+REJECTION_BILL_FIELDS = frozenset(TOKEN_RATE_KEYS) | frozenset(
+    {"cost", "cost_details", "cache_creation"}
+)
+
+
+def no_charge_rejection(
+    status: int, usage: object, unpriced: frozenset, body: object
+) -> dict[str, object] | None:
+    """Row fields marking a 4xx that rejected the request bill-free, or ``None``.
+
+    WHY (S11): a provider that refuses to infer on a request answers 4xx and
+    states no bill. Measured on the DEV pilot: Codex's adapter resent a
+    conversation ending on an assistant turn, and the API replied 400
+    ``invalid_request_error`` ("This model does not support assistant message
+    prefilling") with ``usage: {}`` in 0.20 s. No generation ran, so no charge
+    exists -- yet pricing that as unknown spend voided the attempt AND latched
+    the shared ledger, blocking every later admission on a request the provider
+    billed at nothing.
+
+    This is the meter's own arithmetic, never a discount, so the gate is narrow
+    and reads only the response: 4xx (a 5xx is infrastructure, which voids for a
+    rerun), a usage stating no bill basis at all, no ``unpriced_usage`` field
+    (F23), and an error body that names the provider's own error ``type`` --
+    copied into the row verbatim beside the status. A 4xx that states a cost or
+    token counts is priced as before (it was charged); a body the meter cannot
+    read is not evidence of a zero bill and keeps the unknown-spend latch.
+    Nothing here reads a model name, a stop reason, an error string or a harness,
+    so every arm gets the same rule.
+
+    Publication-wise the attempt contributes $0 to its trial's cost, and its
+    quality outcome is whatever native grading says -- a refusal is a graded
+    failure, not an infrastructure void (PREREGISTRATION §9.2, ADAPTERS.md).
+    """
+    if not 400 <= status < 500 or unpriced:
+        return None
+    if not isinstance(usage, dict) or any(field in usage for field in REJECTION_BILL_FIELDS):
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    kind = error.get("type")
+    if not isinstance(kind, str) or not kind:
+        return None
+    code = error.get("code")
+    if code is not None and (isinstance(code, bool) or not isinstance(code, (str, int))):
+        return None
+    marker: dict[str, object] = {
+        "settled_no_charge": True,
+        "upstream_status": status,
+        "upstream_error_type": kind,
+    }
+    if code is not None:
+        marker["upstream_error_code"] = code
+    return marker
+
+
 def _merge_usage(acc: WireObject, usage: WireObject | None) -> None:
     if not usage:
         return
@@ -947,6 +1008,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
             usage: WireObject,
             extra: dict[str, object] | None = None,
             unpriced: frozenset = frozenset(),
+            body: object = None,
         ) -> None:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
             # hard budget stop and is reported beside our list-price computation.
@@ -972,6 +1034,16 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
                     cost = derivation["usd"]
                     row["settled_from_tokens"] = True
                     row["cost_derivation"] = derivation
+                else:
+                    # A 4xx that states no bill at all is a rejection, not unknown
+                    # spend: nothing was generated, so it settles at exactly $0
+                    # with the upstream status and error type on the row (S11).
+                    # Every other shape here -- a stated bill, an unpriceable
+                    # field, an unreadable body, a 5xx -- keeps the latch.
+                    rejection = no_charge_rejection(status, usage, unpriced, body)
+                    if rejection is not None:
+                        cost = 0.0
+                        row.update(rejection)
             guard.settle(reservation, cost, qualified=not unpriced)
             if unpriced:
                 row["unpriced_usage"] = sorted(unpriced)
@@ -1048,8 +1120,10 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         usage: WireObject = {}
         unpriced: frozenset = frozenset()
         extra: dict[str, object] = {"stream": False}
+        body: object = None
         try:
             d = json.loads(content)
+            body = d
             if is_messages:
                 usage = d.get("usage") or {}
                 unpriced = frozenset(unpriced_usage(d.get("usage")))
@@ -1060,7 +1134,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         except Exception:
             pass
         owned = False
-        write_row(usage, extra, unpriced)
+        write_row(usage, extra, unpriced, body)
         return Response(content, status_code=status, headers=passthrough_headers)
     finally:
         if owned:

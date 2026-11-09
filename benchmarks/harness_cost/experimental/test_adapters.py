@@ -304,13 +304,93 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.01}}
         self.assertEqual((await self.post()).status_code, 200)
 
-    async def test_harness_caused_4xx_without_a_bill_latches_but_is_not_a_rerun(self):
+    async def test_rejected_request_with_no_bill_settles_at_zero_and_does_not_latch(self):
+        # S11, the DEV pilot's shape: Codex's adapter resent a conversation ending
+        # on an assistant turn and the provider refused to infer on it -- HTTPS 400,
+        # "This model does not support assistant message prefilling", usage {}, in
+        # 0.20 s. Nothing was generated and nothing was billed, so the attempt
+        # costs $0 and the campaign continues; the row records which upstream
+        # rejection produced that zero, verbatim.
         self.status = 400
-        self.response = {"type": "error", "error": {"type": "invalid_request_error"}}
-        await self.post()
+        self.response = {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "code": "prefill_unsupported",
+                      "message": "This model does not support assistant message prefilling. "
+                                 "The conversation must end with a user message."},
+            "request_id": "req_011CgrQv31EU",
+            "usage": {},
+        }
+        self.assertEqual((await self.post()).status_code, 400)
         ledger = self.ledger()
-        self.assertTrue(ledger["blocked"])  # unknown bill: latch as before
-        self.assertNotIn("upstream status 400", " ".join(ledger["voids"].get("trial", [])))
+        self.assertEqual(ledger["usd"], 0)
+        self.assertEqual(ledger["trials"]["trial"], 0)
+        self.assertFalse(ledger["blocked"])
+        self.assertNotIn("trial", ledger["voids"])
+        self.assertEqual(ledger["pending"], {})
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["settled_no_charge"])
+        self.assertEqual(row["upstream_status"], 400)
+        self.assertEqual(row["upstream_error_type"], "invalid_request_error")
+        self.assertEqual(row["upstream_error_code"], "prefill_unsupported")
+        self.assertNotIn("cost_derivation", row)
+        self.assertNotIn("settled_from_tokens", row)
+        # A zero is not a latch: the next trial on the shared ledger is admitted.
+        self.status = 200
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.01}}
+        self.assertEqual((await self.post("next")).status_code, 200)
+
+    async def test_only_a_4xx_stating_no_bill_at_all_earns_the_zero(self):
+        # The rule is status- and body-shaped, never keyed on an error string or a
+        # harness, and it is not a discount: a response that states a bill is
+        # charged, and everything the meter cannot reconcile is unknown spend.
+        def reset():
+            Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
+
+        # A 4xx that states a cost is charged, never zeroed.
+        self.status = 400
+        self.response = {"type": "error", "error": {"type": "invalid_request_error"},
+                         "usage": {"cost": 0.02}}
+        await self.post()
+        self.assertEqual(self.ledger()["usd"], 0.02)
+        self.assertFalse(self.ledger()["blocked"])
+        self.assertNotIn("settled_no_charge", json.loads(meter.LOG.read_text().splitlines()[-1]))
+
+        # A 4xx that states token counts is priced from them, never zeroed.
+        reset()
+        self.response = {"type": "error", "error": {"type": "invalid_request_error"},
+                         "usage": {"input_tokens": 10, "output_tokens": 4}}
+        await self.post()
+        self.assertGreater(self.ledger()["usd"], 0)
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertTrue(row["settled_from_tokens"])
+        self.assertNotIn("settled_no_charge", row)
+
+        # Unknown spend is unchanged: a 2xx with no bill, a 5xx, a body that never
+        # names the provider's error type, an unpriceable usage field, and a token
+        # count the frozen card cannot price.
+        for status, response, reason in (
+            (200, {"model": "anthropic/claude-sonnet-5.5", "usage": {}}, "unbilled"),
+            (500, {"type": "error", "error": {"type": "api_error"}, "usage": {}},
+             "provider status 500"),
+            (400, {"usage": {}}, "unbilled"),
+            (400, {"type": "error", "error": "invalid request", "usage": {}}, "unbilled"),
+            (400, {"type": "error", "error": {"message": "no type"}, "usage": {}}, "unbilled"),
+            (400, {"type": "error", "error": {"type": "invalid_request_error"},
+                   "usage": {"service_tier": "priority"}}, "unbilled"),
+            (400, {"type": "error", "error": {"type": "invalid_request_error"},
+                   "usage": {"input_tokens": 10, "output_tokens": 4,
+                             "cache_creation": {"ephemeral_1h_input_tokens": 10}}}, "unbilled"),
+        ):
+            with self.subTest(status=status, response=response):
+                reset()
+                self.status = status
+                self.response = response
+                await self.post()
+                ledger = self.ledger()
+                self.assertTrue(ledger["blocked"])
+                self.assertIn(reason, " ".join(ledger["voids"]["trial"]))
+                self.assertNotIn("settled_no_charge",
+                                 json.loads(meter.LOG.read_text().splitlines()[-1]))
 
     async def test_provider_429_and_5xx_void_for_rerun(self):
         for status in (429, 500, 503, 529):

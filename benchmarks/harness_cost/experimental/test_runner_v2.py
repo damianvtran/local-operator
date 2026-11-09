@@ -576,6 +576,39 @@ class V2Tests(unittest.TestCase):
                 self.assertEqual(cost["measured_model_cost_usd"], 0.0)
                 self.assertIsNone(cost["total_cost_usd"])
 
+    def test_money_rejected_request_row_is_measured_at_zero(self):
+        # S11: a 4xx that rejected the request before any generation billed
+        # nothing, so its attempt is a measured $0 -- not unknown spend, and not
+        # a void. The marker is the only thing that makes it one: a row that also
+        # states a bill, or that does not name its upstream rejection, stays
+        # unknown exactly as before.
+        rejected = {"path": "v1/messages", "status": 400, "usage": {},
+                    "settled_no_charge": True, "upstream_status": 400,
+                    "upstream_error_type": "invalid_request_error"}
+        cost = r.money([rejected], None, False)
+        self.assertTrue(cost["cost_complete"])
+        self.assertEqual(cost["total_cost_usd"], 0.0)
+        self.assertEqual(cost["unknown_billing_attempts"], 0)
+        for broken in (
+            {**rejected, "upstream_status": 500},
+            {**rejected, "upstream_status": 200},
+            {**rejected, "upstream_status": True},
+            {**rejected, "upstream_error_type": ""},
+            {**rejected, "upstream_error_type": None},
+            {**rejected, "usage": {"input_tokens": 5}},
+            {**rejected, "usage": {"cache_creation": {"ephemeral_5m_input_tokens": 0}}},
+            {**rejected, "settled_no_charge": "yes"},
+        ):
+            with self.subTest(broken=sorted(broken)):
+                cost = r.money([broken], None, False)
+                self.assertFalse(cost["cost_complete"])
+                self.assertEqual(cost["unknown_billing_attempts"], 1)
+                self.assertIsNone(cost["total_cost_usd"])
+        # A marker never zeroes a bill the row does state: the stated cost wins.
+        cost = r.money([{**rejected, "usage": {"cost": 0.02}}], None, False)
+        self.assertTrue(cost["cost_complete"])
+        self.assertAlmostEqual(cost["total_cost_usd"], 0.02, delta=1e-12)
+
     def test_deferred_summary_without_raw_exchanges_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Deferred capture lacks correlated"):
             r.validate_deferred_exchanges(

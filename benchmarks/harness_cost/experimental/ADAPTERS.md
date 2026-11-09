@@ -188,6 +188,42 @@ states. The Local Operator classifier channel is unchanged:
 `lop_edge.py` settles it only from the reviewed top-level billed `cost` of a
 classifier response.
 
+**A rejected request costs $0, it is not an unknown charge (S11).** A provider
+that refuses to infer on a request answers 4xx and states no bill: the DEV pilot
+measured HTTP 400 `invalid_request_error` ("This model does not support
+assistant message prefilling") with `usage: {}` in 0.20 s — no generation ran, so
+no charge exists. The meter settles such a response at **exactly $0**, records it
+as `settled_no_charge: true` with `upstream_status` and the provider's own
+`upstream_error_type` (and `upstream_error_code` where it sends one) copied
+verbatim, and does **not** latch the ledger: the attempt is metered at $0 and the
+trial continues. Both money readers (`runner_v2.stated_amount`,
+`coding.driver.row_cost`) read that marker as a measured zero and refuse a row
+that claims it while stating a bill basis, naming a non-4xx status or omitting
+the upstream error.
+
+The rule is shaped by the *response*, never by a message string or a harness, so
+every arm gets it identically. Its bounds, all of which keep the unknown-spend
+latch or the rerun void:
+
+* any 2xx that states no cost and no priceable token counts (S10's rule, above);
+* any 4xx that **does** state a cost or token counts — it is priced, not zeroed
+  (a stated cost settles as stated; counts settle from their derivation);
+* a 4xx whose usage carries an `unpriced_usage` field, or a token count the
+  frozen card cannot price (e.g. a 1-hour cache write): the bill is not whole;
+* a 5xx (including 529): infrastructure, so the attempt is voided for one rerun
+  and does not settle;
+* a response whose error body the meter cannot read — not JSON, no `error`
+  object, or no error `type` to copy — is not evidence of a zero bill;
+* a 4xx delivered as an event stream carries no JSON body for the row to copy,
+  so it keeps the latch.
+
+Publication-wise this is honest by construction: a rejected request contributes
+**$0** to its trial's settled cost, and the trial's quality outcome is whatever
+native grading says — a model that refuses, or a harness whose adapter re-sends
+what the provider will not accept, is a graded failure, not an infrastructure
+void and not free work. The pilot's codex-best cell is that shape (see
+[coding/README.md](coding/README.md)).
+
 Every configuration error fails at startup (one guard per meter/edge process),
 never per request. A ledger written before `models`/`voids` existed reads as
 invalid (fail closed); start a fresh ledger file for this schema. Do not

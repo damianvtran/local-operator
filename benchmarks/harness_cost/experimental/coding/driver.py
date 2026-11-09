@@ -894,9 +894,35 @@ def row_cost(row):
         if not math.isfinite(float(cost)) or float(cost) < 0:
             raise ValueError("invalid exact-run billing evidence")
         return float(cost)
+    if row.get("settled_no_charge") is True:
+        return rejected_cost(row)
     if row.get("settled_from_tokens") is not True:
         raise ValueError("missing/invalid exact-run billing evidence")
     return derived_cost(row.get("cost_derivation"), usage)
+
+
+def rejected_cost(row):
+    """A rejected request's billed USD: exactly 0.0, or ``ValueError``.
+
+    WHY (S11): the meter settles a 4xx that rejected the request before any
+    generation at $0 and marks the row ``settled_no_charge`` with the status and
+    the provider's error type. Such an attempt is a measured $0 (the pilot's
+    codex-best cell), never an unknown charge and never a void. The marker is
+    billing evidence, not a waiver: a row that also states a bill basis, names a
+    non-4xx status or does not name its upstream error is refused.
+    """
+    status = row.get("upstream_status")
+    if isinstance(status, bool) or not isinstance(status, int) or not 400 <= status < 500:
+        raise ValueError("rejected row does not name a 4xx status")
+    kind = row.get("upstream_error_type")
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("rejected row does not name its upstream error")
+    usage = row.get("usage")
+    if not isinstance(usage, dict):
+        raise ValueError("rejected row has no usage to agree with")
+    if any(field in usage for field in REJECTION_BILL_FIELDS):
+        raise ValueError("rejected row states a bill basis")
+    return 0.0
 
 
 def derived_cost(derivation, usage):
@@ -950,6 +976,9 @@ BILLING_TOKEN_FIELDS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+# Usage keys that each name a bill basis: a rejected row carries none of them
+# (S11), so their presence is a claim this lane must price, not read as zero.
+REJECTION_BILL_FIELDS = BILLING_TOKEN_FIELDS + ("cost", "cost_details", "cache_creation")
 
 
 # One disclosed note per image this lane could not remove (S10).

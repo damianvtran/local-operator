@@ -1644,6 +1644,34 @@ BILLING_TOKEN_FIELDS = (
 )
 
 
+REJECTION_BILL_FIELDS = tuple(BILLING_TOKEN_FIELDS) + ("cost", "cost_details", "cache_creation")
+
+
+def rejected_amount(row: Mapping[str, object]) -> Decimal:
+    """A rejected request's charge: exactly zero, or ``ValueError``.
+
+    WHY (S11): a 4xx the provider answered without generating anything bills
+    nothing, and the meter settles such a row at $0 with ``settled_no_charge``,
+    the status and the provider's error type on it. That is a measured zero --
+    the pilot's codex-best attempt, whose rejected call contributes $0 to the
+    trial -- so it must not be published as an unknown cost. The marker is
+    billing evidence, not a waiver: a row that also states a bill basis, names a
+    non-4xx status or fails to name its upstream error is refused.
+    """
+    status = row.get("upstream_status")
+    if isinstance(status, bool) or not isinstance(status, int) or not 400 <= status < 500:
+        raise ValueError("rejected row does not name a 4xx status")
+    kind = row.get("upstream_error_type")
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("rejected row does not name its upstream error")
+    usage = row.get("usage")
+    if not isinstance(usage, dict):
+        raise ValueError("rejected row has no usage to agree with")
+    if any(field in usage for field in REJECTION_BILL_FIELDS):
+        raise ValueError("rejected row states a bill basis")
+    return Decimal(0)
+
+
 def derived_amount(row: Mapping[str, object]) -> Decimal:
     """A settled row's charge, recomputed; ``ValueError`` when it is not one.
 
@@ -1720,6 +1748,8 @@ def stated_amount(row: Mapping[str, object]) -> Decimal:
     usage = row.get("usage")
     value = usage.get("cost") if isinstance(usage, dict) else None
     if value is None:
+        if row.get("settled_no_charge") is True:
+            return rejected_amount(row)
         return derived_amount(row)
     if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
         raise ValueError("Invalid billed cost")

@@ -41,6 +41,21 @@ deferred tool and implements it as a sub-request carrying `web_search_20250305`
 (400, nothing forwarded) any `web_search*` tool, so a codex config regression
 fails at $0 instead of being silently stripped.
 
+**Adapter finding: a refusal costs codex-best the trial (S11, docs only).** After
+the agent refuses, Codex's adapter can re-send the conversation ending on an
+assistant turn, and the provider rejects that outright: HTTP 400
+`invalid_request_error`, "This model does not support assistant message
+prefilling. The conversation must end with a user message.", `usage: {}`, no
+generation. Measured on the DEV pilot (`PILOT-dd0cb631.md`, attempt 2), one
+refusal became a **dead trial** — the agent process exits on the 400 — so the
+headline run must either avoid this path or account for it explicitly, and the
+results must describe it as **harness behaviour, not a model-quality signal**.
+The trial still ends as a graded native failure (Harbor's reward stands), and the
+rejected call costs **$0**: the meter settles a 4xx that states no bill at zero
+as a rejected request (`settled_no_charge`; [ADAPTERS.md](../ADAPTERS.md)), so the
+trial is dead but its cost is not in doubt. The adapter's behaviour is unchanged
+here — this note records the finding, it does not fix it.
+
 Read-only **byte-level** audit (R15): every file under each pinned toolchain
 root, `node_modules` and single-file binaries included, no ignore rules, for
 the server tool type families `web_search_*`, `web_fetch_*`, `code_execution_*`,

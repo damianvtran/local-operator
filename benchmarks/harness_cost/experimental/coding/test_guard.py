@@ -316,6 +316,34 @@ class GuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             driver.wire_rows(path, self.run_id)
 
+    def test_a_rejected_request_row_is_a_measured_zero(self):
+        # S11: the meter settles a 4xx that billed nothing at exactly $0 and marks
+        # the row. This lane reads that marker as a measured zero -- the pilot's
+        # codex-best cell is $0.00 for the rejected call, not an unknown charge --
+        # and refuses a row that claims the marker while stating a bill, naming a
+        # non-4xx status, or failing to name the upstream rejection.
+        row = {"run_id": self.run_id, "status": 400, "usage": {},
+               "settled_no_charge": True, "upstream_status": 400,
+               "upstream_error_type": "invalid_request_error",
+               "upstream_error_code": "prefill_unsupported"}
+        self.assertEqual(driver.row_cost(row), 0.0)
+        path = self.root / "meter.jsonl"
+        path.write_text(json.dumps(row) + "\n")
+        self.assertEqual(driver.wire_rows(path, self.run_id)[0]["upstream_status"], 400)
+        for broken in (
+            {**row, "upstream_status": 500},
+            {**row, "upstream_status": 200},
+            {**row, "upstream_error_type": ""},
+            {**row, "usage": {"input_tokens": 5}},
+            {**row, "usage": {"cache_creation": {"ephemeral_5m_input_tokens": 0}}},
+        ):
+            with self.subTest(broken=sorted(broken)):
+                with self.assertRaises(ValueError):
+                    driver.row_cost(broken)
+        # A marker is not a licence to zero a bill the row does state: the stated
+        # cost is charged, exactly as for any other complete row.
+        self.assertEqual(driver.row_cost({**row, "usage": {"cost": 0.02}}), 0.02)
+
     def test_a_token_settled_refusal_is_billing_evidence_not_a_void(self):
         # S10: the meter settles an unbilled response from its own tokens, so the
         # refusal row has no usage.cost but is still a complete, summable bill.

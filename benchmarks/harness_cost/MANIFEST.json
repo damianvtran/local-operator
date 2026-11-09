@@ -39,8 +39,8 @@
     },
     {
       "path": "experimental/ADAPTERS.md",
-      "bytes": 16679,
-      "sha256": "440c1b69c37dd7446e7846622e8ace318d54fbc5f019dd5d86e28b2a972b8283"
+      "bytes": 18920,
+      "sha256": "ffb73f7b282df645db1630ac901d00e5b454c3a0b811f46d2203ed131560cc51"
     },
     {
       "path": "experimental/CACHE-QUALIFICATION.md",
@@ -50,7 +50,7 @@
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
       "bytes": 12033,
-      "sha256": "4c8d6d28c20a9f82dbd290d7743985eddaa73f893928e4520476223fe88897cb"
+      "sha256": "664d6f1e5a792c86d8ac6286651d28720dc1dc0091656621e75ca1f14b616d74"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -59,8 +59,8 @@
     },
     {
       "path": "experimental/PREREGISTRATION.md",
-      "bytes": 44412,
-      "sha256": "e2fc2430fa93e29346331e1e7b821f4a50a74a47aee58432e84da12c7d7bfb97"
+      "bytes": 45054,
+      "sha256": "881843f0453158e6fa0ea0798c79262763aec3adcafc2f8d41b4bbb8ab578597"
     },
     {
       "path": "experimental/README.md",
@@ -144,8 +144,8 @@
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 19370,
-      "sha256": "48f165c5bf9317397fe30ea52f3cb54987677b419ca6d93f0a5b89d1891faa0d"
+      "bytes": 20446,
+      "sha256": "ef7cd58971c5ec41698a0350da5a56779bfede3f5f3395450c2e5a4b7e182f83"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
@@ -184,8 +184,8 @@
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 61553,
-      "sha256": "dc7f0b90cdac2bc852acf263be9a46088400cc8a5692dd765cc072692c3b0f2b"
+      "bytes": 63078,
+      "sha256": "265546f5f5787fe4ce9a7ac8988e1471f008ef00c47284e27f0864deda7aafec"
     },
     {
       "path": "experimental/coding/egress.py",
@@ -269,8 +269,8 @@
     },
     {
       "path": "experimental/coding/test_guard.py",
-      "bytes": 18593,
-      "sha256": "0d56b22b1774830c9ace423ebc3006abd0f890a9dcc4fb6276f65b3c36b6a379"
+      "bytes": 20228,
+      "sha256": "65b318afc36b02fbc3d4718c48e76ee751d98ee72010d06b716169c92b0e48d3"
     },
     {
       "path": "experimental/coding/test_harbor_integration.py",
@@ -349,8 +349,8 @@
     },
     {
       "path": "experimental/meter_proxy.py",
-      "bytes": 50573,
-      "sha256": "2a8cfc50f4c076c940ee1965a8eddd3c71c37c9c539a636bb755beb0b7fda1ee"
+      "bytes": 54081,
+      "sha256": "c867a789df311c877aa24438a25f45be383774f4d46262ae379a33e86206772c"
     },
     {
       "path": "experimental/package_egress.py",
@@ -379,8 +379,8 @@
     },
     {
       "path": "experimental/runner_v2.py",
-      "bytes": 100097,
-      "sha256": "8045cc4631627a4491c12ddca9604ffef49571a5712347eebcf206ebccdcb5e4"
+      "bytes": 101601,
+      "sha256": "f9301f91a0e2e11807c54dfd77fa4d0cec78c76a492aef6440e59606d81748eb"
     },
     {
       "path": "experimental/sse_stream.py",
@@ -389,8 +389,8 @@
     },
     {
       "path": "experimental/test_adapters.py",
-      "bytes": 56845,
-      "sha256": "757656c6a64f88e9ef2d05f55e56621d81942e50a746ed512a7518d4f6534f5e"
+      "bytes": 61392,
+      "sha256": "be3e6b1261fc05ea9770c569ab079986f0c1f44644288a70feb0953cdc5ba5de"
     },
     {
       "path": "experimental/test_billing_agreement.py",
@@ -429,8 +429,8 @@
     },
     {
       "path": "experimental/test_runner_v2.py",
-      "bytes": 33885,
-      "sha256": "6b362d26f45c91fed8cdc922570f95c22a6a8fe9963defde1f21c2b8799d0d2c"
+      "bytes": 35791,
+      "sha256": "9a3f444105d3388476c064d2e1c7db75dc19c06087ee0fe882bbc2ccf589ccf4"
     },
     {
       "path": "experimental/translator_config.example.json",
