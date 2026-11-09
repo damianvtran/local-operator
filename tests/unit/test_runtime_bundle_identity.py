@@ -287,6 +287,7 @@ class TestFallbackAndMigration:
         root = tmp_path / "runtime"
         image = procname._plant_runtime(real, root)
 
+        assert image is not None
         assert image == procname._legacy_image(root, procname._build_key(real))
         assert procname._healthy_image(image, real)
         assert not procname._flavor_dir(root, procname._build_key(real), "adhoc").exists()

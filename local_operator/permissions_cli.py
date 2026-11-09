@@ -35,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+from typing import Any
 
 from local_operator import procname
 from local_operator.i18n.keys import cli_permissions as _k
@@ -208,9 +209,7 @@ def permissions_command(args: argparse.Namespace) -> int:
     return _status()
 
 
-def register(
-    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]", help_locale: str | None
-) -> None:
+def register(subparsers: "argparse._SubParsersAction[Any]", help_locale: str | None) -> None:
     """Add the ``permissions`` command group to the top-level parser."""
     parser = subparsers.add_parser(
         "permissions", help=_k.help_permissions().envelope(locale=help_locale)["text"]
