@@ -1,5 +1,5 @@
 {
-  "wire.hub_pull.ask.local_edits": "* — есть ваши собственные правки: они сохраняются или проходят через merge, но никогда не перезаписываются.",
+  "wire.hub_pull.ask.local_edits": "* — содержит ваши собственные правки: они сохраняются или проходят через merge, но никогда не перезаписываются.",
   "wire.hub_pull.ask.more": "{names} и ещё {count}",
   "wire.hub_pull.ask.new": "{count, plural, one {# новый элемент} few {# новых элемента} many {# новых элементов} other {# нового элемента}}: {names}",
   "wire.hub_pull.ask.option.not_now": "Не сейчас",

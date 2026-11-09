@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.hub_pull",
+  "history_sha256": "3defbb3434ab8ed4c9845c7cca1b82d6eb43e946f133376c19a855dc7ff9b404",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.hub_pull",
+      "source_sha256": "a37e0313d698c3191a327a2a84f51d1003612f2ba15662941e77182146aab84a",
+      "context_sha256": "687f73821d1005a8dd2a731eeded0af5018580c24d902643a130e280919e5a03",
+      "target_sha256": "7b0ee459f7b857adcfd6dea4815bd0c2ee33f093021f49a7d4b1de6ae68e9a9c",
+      "translator": {
+        "agent": "coder/i18n-translator (lopdev task subagent)",
+        "session": "5c382e4e9e09",
+        "model": "anthropic/claude-opus-5-5 (initial translations) + openai/gpt-6.1-sol (quota fallback: glossary/typography corrections and validation)",
+        "date": "2026-11-09",
+        "fallback": "openai/gpt-6.1-sol temporary quota fallback, as disclosed in the translator handoff i18n-handoff.md"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (lopdev team member, independent translation auditor; never a translator of this namespace)",
+        "session": "9ad76a20d5e8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "fallback": "none",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "finding_detail": "0 blocker, 0 major, 1 minor, 0 nit; C2 minor: ask.resubscribe \"#项条目恢复保持更新\" is an awkward verb stack; corrected to \"#项条目将恢复接收更新\" (will resume receiving updates), matching the context note.",
+        "independent_from_translator": true,
+        "translator_session": "5c382e4e9e09",
+        "scope": "full audit of all 10 keys at en source a37e0313; real-path render of plan_lines/ask_question at counts 1/2/5/21 with local edits and capped lists"
+      },
+      "status": "passed",
+      "note": "PR #3693 round-1 translation audit, scope f1d5c307bf7..a965c7b2d8b. Target bytes sha256 7b0ee459f7b8 (auditor-corrected from c8f4cf1a151e). Checked: intent (pull new / update existing org Hub items; own edits kept or merged, never overwritten; decline changes nothing), glossary (hub rendering consistent with shipped cli.agents_help; merge kept English per glossary §2; formality per style guide), placeholder parity ({org},{names},{count},#), CLDR plural arms per glossary §3, option labels within maxCells 24 (rich cell_len), leading * preserved, fr U+202F before : and ?, no Cf/bidi controls (ur). Second independent audit for high-visibility/safety copy NOT performed in this lane; no second_audit field. Auditor shares model family with initial translator (claude-opus-5-5): disclosed."
+    }
+  ]
+}
