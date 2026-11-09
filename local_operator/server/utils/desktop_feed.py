@@ -49,7 +49,8 @@ read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
 COST, CONTINUED — the SIX 1 s invalidation probes are NOT in that eight-stat figure:
-the voice slot's (one ``os.stat`` of ``voice/active.json``, a read only when it moved), the approvals one (two directory stats; record reads only on movement/expiry,
+the voice slot's (one ``os.stat`` of ``voice/active.json``, a read only when it
+moved), the approvals one (two directory stats; record reads only on movement/expiry,
 with failures backing off on the same clock), the catalogue's, the authoring one
 (O(profiles)), the code-request one (one ``readdir`` of the derived code-request
 index plus one ``os.stat`` per session WITH rows — usually

@@ -140,6 +140,7 @@ _CHILD_SETTINGS_NAMESPACES = (
     # locale (#3945 review round 1, D1/Q1); `test_no_registry_string_is_its_own_code`
     # now fails for any child namespace left out of this tuple.
     "wire.phone_access",
+    "wire.voice",
 )
 
 
@@ -182,13 +183,6 @@ class _LocalizedText(str):
         return value
 
     message: _Msg
-
-# Voice mode's section reads its copy from ``wire.voice`` for the same reason:
-# a new section beside translated ones must not move their audited sources.
-try:
-    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.voice"))
-except Exception:  # pragma: no cover - missing optional copy degrades to its code
-    pass
 
 
 def _t(message: _Msg) -> str:
