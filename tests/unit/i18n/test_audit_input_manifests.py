@@ -17,6 +17,7 @@ unnormalised — the same string the runtime renders.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from pathlib import Path
@@ -42,6 +43,31 @@ def _body_sha(manifest: dict[str, Any]) -> str:
     body = {k: v for k, v in manifest.items() if k != "manifest_sha256"}
     text = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@functools.lru_cache(maxsize=None)
+def _audit_history(root: Path) -> list[dict[str, Any]]:
+    """The EFFECTIVE audit history for a checkout, in append order.
+
+    WHY this is not a plain read of ``i18n/ledger/<locale>.json``. That file is a
+    frozen PRE-MIGRATION snapshot: ``i18n/audit-history.json`` pins its bytes as
+    the append-only baseline and docs/I18N.md forbids rewriting it, so it stops
+    growing the moment the ordered-suffix migration lands. Every later audit is
+    appended to ``i18n/audit-history/<locale>/<namespace>.json`` instead. Reading
+    only the snapshot is invisible while the namespace has no post-migration
+    append — and silently wrong the first time one arrives (this PR's
+    ``mobile.setup`` repoint rows), because the snapshot's last row keeps the old
+    English hash forever. Reading the same view the generator and checker use
+    (``ledger.load_entries``, which layers the verified shards over that pinned
+    baseline) keeps this test's notion of "the last row ships" identical to the
+    pipeline's.
+
+    Cached per root: the digest-verified load is not cheap and every namespace of
+    every manifest asks for it. Nothing mutates the history during a run.
+    """
+    from scripts.i18n.ledger import load_entries
+
+    return load_entries(root)
 
 
 def _superseding_records(evidence: Path) -> list[Path]:
@@ -95,6 +121,13 @@ def _superseded(locale: str, namespace: str) -> bool:
     MOVES to those records — it is never dropped (review R1) — so a value edited
     after the audit still fails here. Anything less returns False and the cg1
     manifest comparison decides.
+
+    "The ledger's last row" is read through ``_audit_history`` — the effective,
+    migration-aware history the generator selects from — not the frozen
+    pre-migration snapshot. The row must match BOTH the locale and the namespace:
+    the history is repo-wide, so a namespace-only filter would let another
+    locale's row decide this locale's bytes. Selection is last-row-wins in append
+    order, matching ``generate._shipped_locales``.
     """
     from local_operator.i18n import catalogues
 
@@ -107,9 +140,11 @@ def _superseded(locale: str, namespace: str) -> bool:
         # cg1 still owns the shipped values; the manifest comparison is the check.
         return False
     current = catalogues.catalogue_sha256("en", namespace)
-    ledger = json.loads((ROOT / "i18n" / "ledger" / f"{locale}.json").read_text(encoding="utf-8"))
-    rows = ledger.get("entries", ledger.get("rows", []))
-    last = [row for row in rows if row.get("namespace") == namespace][-1:]
+    last = [
+        row
+        for row in _audit_history(ROOT)
+        if row.get("locale") == locale and row.get("namespace") == namespace
+    ][-1:]
     if not last:
         return False
     row = last[0]
@@ -173,3 +208,26 @@ def test_every_bundle_binds_the_committed_manifest(path: Path) -> None:
         for name, sha in receipt["hashes"].items():
             actual = hashlib.sha256((record_path.parent / name).read_bytes()).hexdigest()
             assert actual == sha, f"{record_path.parent}: receipt stale for {name}"
+
+
+def test_effective_history_includes_post_migration_appends() -> None:
+    """The supersession test must read the SAME history the generator reads.
+
+    WHY this guard exists (R2-B1). ``i18n/ledger/<locale>.json`` is a frozen
+    pre-migration baseline, pinned by ``i18n/audit-history.json`` and forbidden to
+    rewrite, so a helper reading it stops seeing audits the moment the ordered
+    suffix storage starts accepting appends. That failure is invisible until the
+    first post-migration append: the snapshot's last row keeps a stale English
+    hash, the namespace looks un-superseded, and the cg1 manifest comparison then
+    fails on keys a later passed audit already covers. Every append committed
+    under ``i18n/audit-history/<locale>/<namespace>.json`` must be visible to
+    ``_audit_history`` or the byte pin silently reverts to the snapshot.
+    """
+    shards = sorted((ROOT / "i18n/audit-history").glob("*/*.json"))
+    assert shards, "audit-history storage moved; update this guard"
+    # Last-wins per key, the same selection ``generate._shipped_locales`` makes.
+    effective = {(row["locale"], row["namespace"]): row for row in _audit_history(ROOT)}
+    for shard in shards:
+        payload = json.loads(shard.read_text(encoding="utf-8"))
+        key = (payload["locale"], payload["namespace"])
+        assert effective.get(key) == payload["entries"][-1], f"{shard}: last append is invisible"
