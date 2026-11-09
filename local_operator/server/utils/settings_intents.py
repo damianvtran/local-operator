@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -244,6 +245,7 @@ class Current:
     effort: str | None = None
     fast: bool | None = None
     cwd: str | None = None
+    settings_result: Mapping[str, Any] | None = None
 
     def of(self, kind: str) -> Any:
         return getattr(self, kind, None)
@@ -273,7 +275,7 @@ class SettingsDriver(Protocol):
     async def current(self, session_id: str) -> Current: ...
 
     async def apply(
-        self, session_id: str, kind: str, value: Any, effort: str | None
+        self, session_id: str, kind: str, value: Any, effort: str | None, *, request_id: str
     ) -> Outcome: ...
 
 
@@ -419,6 +421,15 @@ class SettingsApplier:
                 now=now,
                 budget=self.budget,
             )
+            if existing and existing.get("state") in ACTIVE_STATES:
+                # Our own earlier generation may still land after this POST.
+                # Retain that target as an owned predecessor across restart so
+                # the supersede rule cannot mistake it for an external change.
+                slot["_predecessors"] = [
+                    *existing.get("_predecessors", []),
+                    existing["value"],
+                    existing.get("base"),
+                ]
             slots[kind] = slot
             await self._save(session_id, document)
         self._emit(session_id, kind, slot)
@@ -581,9 +592,10 @@ class SettingsApplier:
         kind, slot = active[0]
         due = _epoch(slot.get("next_attempt_at")) or now
         if due > now:
-            return min(
-                due - now for due in ((_epoch(s.get("next_attempt_at")) or now) for _, s in active)
-            )
+            # A later kind cannot overtake the first (model resets fast and
+            # cwd retires the runtime). Waiting on its already-due timestamp
+            # instead would spin at zero delay for the entire model backoff.
+            return due - now
         if slot.get("state") == "queued_next_step":
             await self._confirm(session_id, kind, slot)
         else:
@@ -612,10 +624,11 @@ class SettingsApplier:
         # means nothing to compare against: never guess a supersede.
         if reading is None or slot.get("base") is None:
             return False
+        allowed = [slot.get("base"), slot["value"], *slot.get("_predecessors", [])]
         if kind == "model":
-            reading = str(reading).lower()
-            return reading not in {str(slot.get("base") or "").lower(), str(slot["value"]).lower()}
-        return reading not in {slot.get("base"), slot["value"]}
+            # Model IDs are case-sensitive; do not lowercase a user's selector.
+            return reading not in allowed
+        return reading not in allowed
 
     def _confirmed(self, kind: str, slot: Mapping[str, Any], current: Current) -> bool:
         reading = current.of(kind)
@@ -645,6 +658,7 @@ class SettingsApplier:
         # Paired effort: an effort slot pending beside a model slot rides the
         # model's attempt (model always sorts first, so reaching an effort slot
         # here means no model slot is active).
+        pending_effort: tuple[int, str] | None = None
         effort = slot.get("effort") if kind == "model" else None
         if kind == "model" and effort is None:
             pending_effort = await self._paired_effort(session_id)
@@ -656,7 +670,9 @@ class SettingsApplier:
             self.in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
             try:
-                outcome = await self.driver.apply(session_id, kind, slot["value"], effort)
+                outcome = await self.driver.apply(
+                    session_id, kind, slot["value"], effort, request_id=slot["request_id"]
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 — the driver classifies; this is the net
@@ -664,8 +680,31 @@ class SettingsApplier:
                 outcome = Outcome("retry", "runtime_unreachable", str(error))
             finally:
                 self.in_flight -= 1
+        if outcome.status == "applied":
+            # A transport ACK is not proof: old runtimes can acknowledge before
+            # their journal projection catches up. Confirm only from durable
+            # selection (or the request-correlated result field below).
+            try:
+                after = await self.driver.current(session_id)
+            except Exception:  # noqa: BLE001 — poll again, never strand applying
+                after = Current()
+            target = {**slot, "effort": effort} if kind == "model" else slot
+            result = after.settings_result
+            confirmed_result = (
+                result
+                and result.get("request_id") == slot["request_id"]
+                and result.get("ok") is True
+            )
+            if not self._confirmed(kind, target, after) and not confirmed_result:
+                outcome = Outcome("queued")
         await self._settle(
-            session_id, kind, generation, outcome, effort=effort, value=slot["value"]
+            session_id,
+            kind,
+            generation,
+            outcome,
+            effort=effort,
+            value=slot["value"],
+            paired_generation=pending_effort[0] if pending_effort else None,
         )
 
     async def _paired_effort(self, session_id: str) -> tuple[int, str] | None:
@@ -684,6 +723,7 @@ class SettingsApplier:
         *,
         effort: str | None = None,
         value: Any = None,
+        paired_generation: int | None = None,
     ) -> None:
         now = self.clock()
         state = self._state(session_id)
@@ -694,6 +734,8 @@ class SettingsApplier:
                 slot.update(state="applied", error=None, next_attempt_at=None)
                 return
             if outcome.status == "queued":
+                if kind == "model" and effort is not None:
+                    slot["effort"] = effort
                 state.queued_since[(kind, generation)] = self.clock()
                 slot.update(state="queued_next_step", error=None, next_attempt_at=_iso(now))
                 return
@@ -771,7 +813,7 @@ class SettingsApplier:
         if kind == "model" and effort is not None:
             # The paired effort landed (or failed) with the model.
             paired = await self._paired_effort(session_id)
-            if paired is not None and paired[1] == effort:
+            if paired is not None and paired[1] == effort and paired[0] == paired_generation:
                 await self._update(
                     session_id,
                     "effort",
@@ -828,7 +870,23 @@ class SettingsApplier:
             current = await self.driver.current(session_id)
         except Exception:  # noqa: BLE001
             current = Current()
-        if self._confirmed(kind, slot, current):
+        result = current.settings_result
+        if result and result.get("request_id") == slot["request_id"]:
+            if result.get("ok") is False:
+                await self._settle(
+                    session_id,
+                    kind,
+                    generation,
+                    Outcome(
+                        "terminal",
+                        str(result.get("code") or "refused"),
+                        str(result.get("message") or ""),
+                    ),
+                )
+                return
+        if (
+            result and result.get("request_id") == slot["request_id"] and result.get("ok") is True
+        ) or self._confirmed(kind, slot, current):
             await self._update(
                 session_id, kind, generation, lambda s: s.update(state="applied", error=None)
             )
@@ -929,44 +987,88 @@ def classify_exception(error: BaseException) -> Outcome:
 class BridgeDriver:
     """Applies a slot through the session pool's bridge — the desktop's own path.
 
-    model/effort/fast go through ``route_shared_slash`` (the same seam the
-    ``/commands`` route uses, so the owner-record admission for a model pick is
-    paid here too); cwd through ``move_session``, the ONE implementation behind
-    the TUI ``/move`` and the working-directory route. ``refresh_watch`` is never
-    called (see the module docstring).
-
-    The model+effort pair is sent as ``/model`` then ``/effort`` on the same
-    acquired bridge, in order: the slash seam carries no effort for ``/model``,
-    and sending both on one bridge in sequence reaches the same end state as the
-    paired ``set_model`` op without a second, private path into the client.
+    Model and effort use the public attach client's setters after the bridge
+    binds, with the same owner-provider admission as routed ``/model``. The
+    model's effort rides ONE frame, so no provider call can see half the pair.
+    Fast uses the client's typed slash result (the old routed seam when that
+    client predates deferred kwargs). cwd uses ``move_session``, the existing
+    transaction behind the TUI and desktop move. No watch refresh is involved.
     """
 
     def __init__(self, pool_of: Callable[[], Any]) -> None:
         self._pool_of = pool_of
 
     async def current(self, session_id: str) -> Current:
-        from local_operator.server.utils.desktop_sessions import read_desktop_marker
+        from local_operator.server.utils.desktop_sessions import (
+            read_desktop_marker,
+            stored_draft_model,
+        )
+        from local_operator.session.cold_model import configured_model_pair
         from local_operator.session.model_selection import read_model_selection
 
         pool = self._pool_of()
         directory = Path(pool.root) / "sessions" / session_id
 
         def read() -> Current:
-            selection = read_model_selection(directory, read_only=True)
             marker = read_desktop_marker(directory) or {}
-            cwd = marker.get("cwd")
-            if selection is None:
-                return Current(cwd=str(cwd) if cwd else None)
+            selection = read_model_selection(directory, read_only=True)
+            if selection is not None:
+                # Reuse the journal's own selection; no bridge or transcript
+                # hydration is needed, and this read has a stat-keyed memo.
+                return Current(
+                    model=selection.selector,
+                    effort=selection.effort,
+                    fast=selection.fast,
+                    cwd=marker.get("cwd"),
+                )
+            birth = stored_draft_model(marker)
+            # No selection yet: cold_model supplies the configured pair. Do not
+            # hydrate model metadata here: unlike the actual cold-open painter,
+            # the intent POST only needs identity and must never discover over
+            # HTTP. A draft's explicit birth selection outranks machine config.
+            provider, model_id = configured_model_pair(Path(pool.root))
             return Current(
-                model=selection.selector,
-                effort=selection.effort,
-                fast=selection.fast,
-                cwd=str(cwd) if cwd else None,
+                model=(
+                    f"{birth['provider']}/{birth['model_id']}"
+                    if birth
+                    else f"{provider}/{model_id}"
+                ),
+                effort=birth.get("reasoning_effort") if birth else None,
+                fast=birth.get("fast_mode", False) if birth else None,
+                cwd=marker.get("cwd"),
             )
 
-        return await asyncio.to_thread(read)
+        current = await asyncio.to_thread(read)
+        bridge = pool.bridges.get(session_id)
+        if bridge is not None and bridge.remote is not None:
+            # Only read an ALREADY ATTACHED bridge, never acquire one for a GET
+            # or confirmation poll. PR1's canonical result is request-correlated.
+            try:
+                result = getattr(bridge.remote.frontend_state, "settings_result", None)
+                if result is not None:
+                    current = Current(
+                        **{
+                            **current.__dict__,
+                            "settings_result": (
+                                result.model_dump() if hasattr(result, "model_dump") else result
+                            ),
+                        }
+                    )
+            except RuntimeError:
+                pass  # cold / not yet synchronized; the journal is sufficient
+        return current
 
-    async def apply(self, session_id: str, kind: str, value: Any, effort: str | None) -> Outcome:
+    @staticmethod
+    def _deferred(method: Any, request_id: str) -> dict[str, Any]:
+        # PR1 is additive. Old Python clients don't accept these kwargs even
+        # though old RUNTIMES ignore unknown wire fields, so probe the client
+        # signature rather than catching TypeError after a mutation may run.
+        parameters = inspect.signature(method).parameters
+        return {"defer_ok": True, "request_id": request_id} if "defer_ok" in parameters else {}
+
+    async def apply(
+        self, session_id: str, kind: str, value: Any, effort: str | None, *, request_id: str
+    ) -> Outcome:
         try:
             async with self._pool_of().session(session_id) as bridge:
                 if kind == "cwd":
@@ -975,40 +1077,57 @@ class BridgeDriver:
                 if remote is None:
                     return Outcome("retry", "runtime_unreachable", "")
                 await remote.bind_runtime()
+                client = remote._client
+                if client is None:
+                    return Outcome("retry", "runtime_unreachable", "")
                 if kind == "model":
-                    outcome = _slash_outcome(
-                        "model", await remote.route_shared_slash("model", str(value))
-                    )
-                    if outcome.status != "applied" or not effort:
-                        return outcome
-                    return _slash_outcome(
-                        "effort", await remote.route_shared_slash("effort", effort)
-                    )
+                    # Retain the routed model admission check (older owners may
+                    # lack it), but send ONE set_model frame so effort lands
+                    # atomically with the chosen identity, never as a later op.
+                    remote._require_routed_model_admission(str(value))
+                    provider, _, model_id = str(value).partition("/")
+                    kwargs = self._deferred(client.set_model, request_id)
+                    if effort is not None:
+                        kwargs["effort"] = effort
+                    detail = await client.set_model(provider, model_id, **kwargs)
+                    return Outcome("queued" if detail == "queued" else "applied")
                 if kind == "effort":
-                    return _slash_outcome(
-                        "effort", await remote.route_shared_slash("effort", str(value))
+                    detail = await client.set_effort(
+                        str(value), **self._deferred(client.set_effort, request_id)
                     )
+                    return Outcome("queued" if detail == "queued" else "applied")
                 if kind == "fast":
-                    return _slash_outcome(
-                        "fast", await remote.route_shared_slash("fast", "on" if value else "off")
-                    )
+                    kwargs = self._deferred(client.slash_result, request_id)
+                    if kwargs:
+                        payload = await client.slash_result(
+                            "fast", "on" if value else "off", **kwargs
+                        )
+                    else:
+                        payload = await remote.route_shared_slash("fast", "on" if value else "off")
+                    return _slash_outcome("fast", payload)
                 return Outcome("terminal", "unknown_kind", kind)
         except asyncio.CancelledError:
             raise
-        except Exception as error:  # noqa: BLE001 — classified, never swallowed silently
+        except Exception as error:  # noqa: BLE001 — every result is persisted
+            if kind == "effort" and isinstance(error, ValueError):
+                return Outcome("terminal", "effort_unsupported", str(error))
             return classify_exception(error)
 
     async def _move(self, bridge: Any, target: str) -> Outcome:
+        # SHIELDED: a cancelled move (server shutdown) must not release
+        # ``move_lock`` while its marker write and retire are in flight — the
+        # working-directory route's ``_join_owned`` states the same hazard.
+        from local_operator.owned_tasks import join_owned
         from local_operator.server.utils.desktop_sessions import move_session
         from local_operator.session.errors import MoveIndeterminate
         from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
 
-        # SHIELDED: a cancelled move (server shutdown) must not release
-        # ``move_lock`` while its marker write and retire are in flight — the
-        # working-directory route's ``_join_owned`` states the same hazard.
-        task = asyncio.ensure_future(move_session(bridge, target))
+        async def transaction() -> dict[str, Any]:
+            return (await move_session(bridge, target)).model_dump(mode="json")
+
+        task = asyncio.create_task(transaction())
         try:
-            await asyncio.shield(task)
+            await join_owned(task)
         except MoveIndeterminate as error:
             # The owner may have accepted: the next attempt either finds the
             # session already there (``unchanged`` → applied) or retries.

@@ -95,19 +95,62 @@ async def _validate_model(provider_model: str, effort: str | None) -> None:
     not refuse — "we have not looked" is not "it does not exist". Off the event
     loop because it reads catalogue caches.
     """
-    from local_operator.server.routes.desktop_sessions import (
-        DraftModel,
-        _draft_model_spec,
+    from local_operator.model.configure import (
+        build_model_spec,
+        model_unknown_refusal,
+        resolve_model_info_paint,
+    )
+    from local_operator.model.discovery import (
+        cached_available_models,
+        offered_model_ids,
+    )
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        is_decision_only,
+        is_media_only,
+        is_speech_only,
     )
 
-    provider, sep, model_id = provider_model.partition("/")
-    if not sep or not provider or not model_id:
-        raise HTTPException(
-            422,
-            _wd.desktop_refusal(error=provider_model).envelope(code="model_unknown"),
-        )
-    draft = DraftModel(provider=provider, model_id=model_id, reasoning_effort=effort)
-    await asyncio.to_thread(_draft_model_spec, draft)
+    def validate() -> None:
+        provider, sep, model_id = provider_model.partition("/")
+        if (
+            not sep
+            or not provider
+            or not model_id
+            or get_provider_definition(provider) is None
+            or is_decision_only(provider)
+            or is_media_only(provider)
+            or is_speech_only(provider)
+        ):
+            raise HTTPException(
+                422, _wd.desktop_refusal(error=provider_model).envelope(code="model_unknown")
+            )
+        offered = offered_model_ids(provider)
+        if offered is not None and model_id not in offered:
+            refused = model_unknown_refusal(provider, model_id)
+            raise HTTPException(
+                422, _wd.desktop_refusal(error=refused.message).envelope(code="model_unknown")
+            )
+        # Do NOT call validate_model_selection here: its build_model_spec path
+        # enriches unlisted metadata over HTTP (up to 13 s). This admission is
+        # cache-only; a missing row is not evidence of an invalid pick. The
+        # cached listing's stated ladder wins over static metadata, just as it
+        # does for the picker that offered this effort level.
+        rows, _ = cached_available_models(provider)
+        row = next((r for r in rows if r.id == model_id), None)
+        ladder = row.reasoning_efforts if row is not None else None
+        if ladder is None:
+            info, _ = resolve_model_info_paint(provider, model_id)
+            ladder = build_model_spec(provider, model_id, info=info).reasoning_efforts
+        if effort and effort not in ladder:
+            message = (
+                _wd.effort_not_in_levels(model=model_id, levels=", ".join(ladder), effort=effort)
+                if ladder
+                else _wd.effort_levels_missing(model=model_id)
+            )
+            raise HTTPException(422, message.envelope(code="effort_unsupported"))
+
+    await asyncio.to_thread(validate)
 
 
 async def _validate_cwd(target: str, base: str | None) -> str:
@@ -142,6 +185,23 @@ async def submit_settings_intent(session_id: str, body: SettingsIntentRequest, r
     applier = ensure_applier(request.app)
     if not applier.store.exists(session_id):
         raise _unknown_session()
+    existing = (await applier.snapshot(session_id)).get(session_id, {})
+    replay = existing.get(body.kind)
+    if replay and replay["request_id"] == body.request_id:
+        # Replay precedes catalogue/target validation: a cached row can disappear
+        # after the original durable admission without invalidating its receipt.
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder(
+                CRUDResponse(
+                    status=200,
+                    message="Desktop session result.",
+                    result=SettingsIntentReceipt.model_validate(
+                        {"intent": replay, "intents": existing}
+                    ),
+                )
+            ),
+        )
     try:
         current = await applier.driver.current(session_id)
     except Exception:  # noqa: BLE001 — no reading: validate what we can, no base
@@ -175,7 +235,7 @@ async def submit_settings_intent(session_id: str, body: SettingsIntentRequest, r
     )
     payload = CRUDResponse(
         status=202 if created else 200,
-        message="Settings intent recorded." if created else "Settings intent replayed.",
+        message="Desktop session result.",
         result=SettingsIntentReceipt.model_validate({"intent": slot, "intents": slots}),
     )
     return JSONResponse(status_code=202 if created else 200, content=jsonable_encoder(payload))
@@ -193,7 +253,7 @@ async def list_settings_intents(request: Request, session_id: str | None = Query
     intents = await applier.snapshot(session_id)
     return CRUDResponse(
         status=200,
-        message="Settings intents.",
+        message="Desktop session result.",
         result=SettingsIntentIndex.model_validate({"intents": intents}),
     )
 

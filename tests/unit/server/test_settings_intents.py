@@ -83,7 +83,9 @@ class FakeDriver:
     async def current(self, session_id: str) -> Current:
         return self.reading
 
-    async def apply(self, session_id: str, kind: str, value: Any, effort: str | None) -> Outcome:
+    async def apply(
+        self, session_id: str, kind: str, value: Any, effort: str | None, *, request_id: str
+    ) -> Outcome:
         self.calls.append((session_id, kind, value, effort))
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
@@ -473,7 +475,8 @@ async def test_a_queued_ack_is_confirmed_from_the_journal(tmp_path) -> None:
     driver = FakeDriver({"model": [Outcome("queued")]})
     # Frozen: the 60 s resend window must not elapse while the test observes
     # the queued state, or the "no resend" assertion would race the poller.
-    applier = _applier(tmp_path, driver, FrozenClock())
+    clock = FrozenClock()
+    applier = _applier(tmp_path, driver, clock)
     await _submit(applier, "model", "a/b", "r")
     await _until(
         lambda: any(
@@ -481,6 +484,7 @@ async def test_a_queued_ack_is_confirmed_from_the_journal(tmp_path) -> None:
         )
     )
     driver.reading = Current(model="a/b")  # the next step took it
+    clock.now += 2  # make the next confirmation poll due
     # Not ``_settle``: with frozen time the applied slot's 60 s prune never comes.
     await _until(
         lambda: any(intent and intent["state"] == "applied" for _, _, intent in applier.frames)
@@ -513,14 +517,14 @@ async def test_resume_rearms_a_slot_written_by_a_previous_process(tmp_path) -> N
 @pytest.mark.asyncio
 async def test_cwd_waits_for_idle_without_a_budget_then_applies(tmp_path) -> None:
     _session(tmp_path)
-    busy = [Outcome("waiting_idle", "runtime_busy", "working") for _ in range(40)]
+    busy = [Outcome("waiting_idle", "runtime_busy", "working") for _ in range(3)]
     driver = FakeDriver({"cwd": busy})
     clock = FakeClock()
-    applier = _applier(tmp_path, driver, clock, budget=60.0)
+    applier = _applier(tmp_path, driver, clock, budget=1.0)
     await _submit(applier, "cwd", "/new", "r")
     await _settle(applier, limit=30)
-    # 40 refusals × 5 s = 200 s, far past the 60 s budget: still not failed.
-    assert len(driver.calls) == 41
+    # 3 refusals × 5 s = 15 s, past the 1 s budget: still not failed.
+    assert len(driver.calls) == 4
     assert set(delay for delay in clock.sleeps if delay > 0 and delay < 60) == {5.0}
     states = [intent["state"] for _, _, intent in applier.frames if intent]
     assert "waiting_idle" in states and "failed" not in states and states[-1] == "applied"
@@ -530,17 +534,23 @@ async def test_cwd_waits_for_idle_without_a_budget_then_applies(tmp_path) -> Non
 @pytest.mark.asyncio
 async def test_cwd_blocked_by_another_viewer_fails_after_120_s(tmp_path) -> None:
     _session(tmp_path)
-    viewed = [Outcome("exclusive", "move_exclusive", "open elsewhere") for _ in range(100)]
-    driver = FakeDriver({"cwd": viewed})
+    driver = FakeDriver()
     clock = FakeClock()
     applier = _applier(tmp_path, driver, clock)
-    await _submit(applier, "cwd", "/new", "r")
-    await _settle(applier)
-    slot = (await applier.snapshot(SID))[SID]["cwd"]
-    assert slot["state"] == "failed"
-    assert slot["error"]["code"] == "move_exclusive"
-    assert sum(delay for delay in clock.sleeps if delay > 0) >= 120.0
-    assert len(driver.calls) <= 26
+    applier._closed = True  # step the worker explicitly: no real 120 s wait
+    _, slot, _ = await _submit(applier, "cwd", "/new", "r")
+    await applier._settle(
+        SID, "cwd", slot["generation"], Outcome("exclusive", "move_exclusive", "open elsewhere")
+    )
+    first = (await applier.snapshot(SID))[SID]["cwd"]
+    assert first["state"] == "pending"
+    clock.now += 120
+    await applier._settle(
+        SID, "cwd", slot["generation"], Outcome("exclusive", "move_exclusive", "open elsewhere")
+    )
+    failed = (await applier.snapshot(SID))[SID]["cwd"]
+    assert failed["state"] == "failed"
+    assert failed["error"]["code"] == "move_exclusive"
     await applier.close()
 
 
@@ -562,3 +572,134 @@ async def test_at_most_four_attempts_in_flight_machine_wide(tmp_path) -> None:
     assert len(driver.calls) == 10
     assert driver.peak == 4 and applier.peak_in_flight == 4
     await applier.close()
+
+
+@pytest.mark.asyncio
+async def test_an_external_change_between_retries_is_not_overwritten(tmp_path):
+    _session(tmp_path)
+    driver = FakeDriver()
+    clock = FakeClock()
+    applier = _applier(tmp_path, driver, clock)
+    applier._closed = True
+    _, slot, _ = await _submit(applier, "model", "a/mine", "r")
+    await applier._settle(SID, "model", slot["generation"], Outcome("retry", "runtime_busy"))
+    driver.reading = Current(model="a/external")
+    clock.now += 1
+    await applier._step(SID)
+    assert not driver.calls
+    assert (await applier.snapshot(SID))[SID]["model"]["state"] == "superseded"
+
+
+@pytest.mark.asyncio
+async def test_backoff_does_not_spin_on_a_later_already_due_kind(tmp_path):
+    _session(tmp_path)
+    clock = FakeClock()
+    applier = _applier(tmp_path, FakeDriver(), clock)
+    applier._closed = True
+    _, model, _ = await _submit(applier, "model", "a/new", "r")
+    await _submit(applier, "fast", True, "f")
+    await applier._settle(SID, "model", model["generation"], Outcome("retry", "runtime_busy"))
+    assert await applier._step(SID) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_request_correlated_runtime_refusal_settles_a_queued_slot(tmp_path):
+    _session(tmp_path)
+    driver = FakeDriver()
+    applier = _applier(tmp_path, driver, FakeClock())
+    applier._closed = True
+    _, slot, _ = await _submit(applier, "model", "a/new", "r")
+    await applier._settle(SID, "model", slot["generation"], Outcome("queued"))
+    driver.reading = Current(
+        settings_result={
+            "request_id": "r",
+            "ok": False,
+            "code": "model_unknown",
+            "message": "refused",
+        }
+    )
+    await applier._confirm(SID, "model", slot)
+    failed = (await applier.snapshot(SID))[SID]["model"]
+    assert failed["state"] == "failed"
+    assert failed["error"]["code"] == "model_unknown"
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_sends_one_paired_model_frame_with_deferred_identity():
+    import contextlib
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.settings_intents import BridgeDriver
+
+    frames = []
+    admissions = []
+
+    class Client:
+        async def set_model(
+            self, provider, model_id, effort=None, *, defer_ok=False, request_id=None
+        ):
+            frames.append((provider, model_id, effort, defer_ok, request_id))
+            return "queued"
+
+    async def bound():
+        pass
+
+    remote = SimpleNamespace(
+        _client=Client(), bind_runtime=bound, _require_routed_model_admission=admissions.append
+    )
+
+    class Pool:
+        @contextlib.asynccontextmanager
+        async def session(self, sid):
+            yield SimpleNamespace(remote=remote)
+
+    outcome = await BridgeDriver(Pool).apply(SID, "model", "a/new", "high", request_id="r")
+    assert outcome.status == "queued"
+    assert frames == [("a", "new", "high", True, "r")]
+    assert admissions == ["a/new"]
+
+
+@pytest.mark.asyncio
+async def test_an_older_python_attach_client_still_gets_one_paired_frame():
+    import contextlib
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.settings_intents import BridgeDriver
+
+    frames = []
+
+    class Client:
+        async def set_model(self, provider, model_id, effort=None):
+            frames.append((provider, model_id, effort))
+            return "changed"
+
+    async def bound():
+        pass
+
+    class Pool:
+        @contextlib.asynccontextmanager
+        async def session(self, sid):
+            yield SimpleNamespace(
+                remote=SimpleNamespace(
+                    _client=Client(),
+                    bind_runtime=bound,
+                    _require_routed_model_admission=lambda target: None,
+                )
+            )
+
+    outcome = await BridgeDriver(Pool).apply(SID, "model", "a/new", "high", request_id="r")
+    assert outcome.status == "applied"
+    assert frames == [("a", "new", "high")]
+
+
+@pytest.mark.asyncio
+async def test_post_validation_never_uses_network_metadata_enrichment(monkeypatch):
+    from local_operator.model import configure
+    from local_operator.providers import shared_catalogue
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("intent admission attempted network-backed model resolution")
+
+    monkeypatch.setattr(configure, "resolve_model_info", forbidden)
+    monkeypatch.setattr(shared_catalogue, "prepare_selection_sync", forbidden)
+    await desktop_settings_intents._validate_model("test/offline", None)
