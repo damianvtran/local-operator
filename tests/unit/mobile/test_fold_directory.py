@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.harness.types import Message
+from local_operator.harness.types import AgentMessage, Message
 from local_operator.mobile.durable import _fold
 
 
@@ -16,7 +16,7 @@ def test_fold_uses_directory_for_discovery_and_strong_proof(
     import local_operator.session.transcript as transcript
 
     directory = tmp_path / "sessions" / "synthetic-session"
-    history = [Message.user("hello", id="root")]
+    history: list[AgentMessage] = [Message.user("hello", id="root")]
     records = {"records": [], "remaining": [], "unavailable": [], "bytes": 0}
     observed = {}
 
@@ -82,6 +82,9 @@ def _fixture(config, *, marker_first=False, certificate="valid"):
             assert await persist_record(transcript, record)
         closing = cycle[-1]
         if certificate == "invalid":
+            # The cycle's closing entry is a tool result (a Message); narrow so
+            # the mutation is typed against the class that owns ``content``.
+            assert isinstance(closing, Message)
             closing.content = [TextContent(text="changed result invalidates certificate")]
         await transcript.append_message(closing)
         await transcript.append_message(
@@ -229,7 +232,11 @@ def test_authenticated_archive_route_matches_control_without_full_replay(
     from starlette.testclient import TestClient
 
     import local_operator.mobile.durable as durable
-    from local_operator.mobile.daemon import MobileDaemon, _durable_projection, build_app
+    from local_operator.mobile.daemon import (
+        MobileDaemon,
+        _durable_projection,
+        build_app,
+    )
 
     config = tmp_path / "config"
     directory, _, _ = _fixture(config, marker_first=marker_first, certificate=certificate)
@@ -282,7 +289,5 @@ def test_authenticated_archive_route_matches_control_without_full_replay(
     with capsys.disabled():
         print(
             "ARCHIVE_ROUTE_MEASUREMENT "
-            + json.dumps(
-                {"marker_first": marker_first, "certificate": certificate, **measurements}
-            )
+            + json.dumps({"marker_first": marker_first, "certificate": certificate, **measurements})
         )
