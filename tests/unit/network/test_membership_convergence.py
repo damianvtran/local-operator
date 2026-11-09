@@ -875,7 +875,8 @@ def test_a_frame_queued_immediately_before_a_close_reaches_the_peer(
     assert net_fixtures.wait_for(
         # Other membership pulls can already be in flight on this link. Only
         # this request proves the frame queued immediately before close arrived.
-        lambda: ("net_member_list", 424242) in seen, timeout_s=3.0
+        lambda: ("net_member_list", 424242) in seen,
+        timeout_s=3.0,
     ), "the frame queued immediately before the close never arrived: close beat the writer"
 
     assert (
@@ -2649,8 +2650,7 @@ def test_a_peer_without_the_digest_capability_never_backs_off(
     assert link is not None, reason
     assert wire.MEMBER_LIST_DIGEST_V1 not in link.capabilities
     assert net_fixtures.wait_for(
-        lambda: link.member_pulled_at > 0.0
-        and link.member_pull_interval_s == _BACKOFF_FLOOR_S
+        lambda: link.member_pulled_at > 0.0 and link.member_pull_interval_s == _BACKOFF_FLOOR_S
     ), "the old peer's establishment pull never completed at the floor interval"
     mark = 0  # All requests, not merely answers recorded after a live capability edit.
 
