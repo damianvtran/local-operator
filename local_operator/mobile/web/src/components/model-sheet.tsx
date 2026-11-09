@@ -1,7 +1,10 @@
 /**
  * Model sheet: the server's ranked /api/models, filtered, current model marked.
  * Choosing POSTs set_model; the next projection repaint shows the truth, so
- * there is no local optimistic state.
+ * there is no local optimistic state. The ONE exception is a `queued` answer
+ * (the session is mid-step and applies the change at the next one): the sheet
+ * stays open and says so, because the repaint will not show the new model until
+ * it lands and a silent close read as "nothing happened".
  *
  * ONE FLAT LIST, IN THE SERVER'S ORDER. This used to group by provider, which
  * silently re-sorted the payload: the daemon ranks direct-connected providers
@@ -12,6 +15,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { getModels, sendCommand } from "../api";
+import { QUEUED_DETAIL, deferredSettingsFields } from "../lib/settings-defer";
 import { cn } from "../lib/cn";
 import { filterModels } from "../lib/model-filter";
 import { messageRuntime } from "../store";
@@ -52,6 +56,7 @@ export function ModelSheet({
 	const filter = query ?? ownFilter;
 	const setFilter = onQuery ?? setOwnFilter;
 	const [error, setError] = useState("");
+	const [queued, setQueued] = useState(false);
 
 	useEffect(() => {
 		if (!open) return;
@@ -64,6 +69,7 @@ export function ModelSheet({
 		   that has never been opened does not inherit a stale query. */
 		if (!onQuery) setFilter("");
 		setError("");
+		setQueued(false);
 		/* Back to unresolved on every open, because this sheet REFETCHES per open:
 		   keeping the previous list would paint a stale catalogue as though it were
 		   the answer to the request now in flight. */
@@ -94,11 +100,16 @@ export function ModelSheet({
 
 	const choose = async (m: ModelEntry) => {
 		try {
-			await sendCommand(pid, {
+			const receipt = await sendCommand(pid, {
 				op: "set_model",
 				provider: m.provider,
 				model_id: m.model_id,
+				...deferredSettingsFields(),
 			});
+			if (receipt.detail === QUEUED_DETAIL) {
+				setQueued(true);
+				return;
+			}
 			onClose();
 		} catch (e) {
 			setError(String((e as Error).message ?? e));
@@ -141,6 +152,11 @@ export function ModelSheet({
 				    Reversing any of this re-creates a lie, which is why the order is
 				    stated here rather than left to the reader of three sibling
 				    conditionals. */}
+				{queued && !error ? (
+					<p role="status" className="px-3 py-1 text-body-sm text-ink-dim">
+						{messageRuntime.t("relay.session.model.queued")}
+					</p>
+				) : null}
 				{error ? (
 					<p className="px-3 py-1 text-body-sm text-danger">
 						{error}

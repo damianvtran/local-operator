@@ -15,5 +15,6 @@
   "relay.session.directory.path_placeholder": "or type another path…",
   "relay.session.model.sheet_title": "model",
   "relay.session.model.filter_placeholder": "filter models",
-  "relay.session.model.loading": "loading…"
+  "relay.session.model.loading": "loading…",
+  "relay.session.model.queued": "selected — applies at the next step"
 }

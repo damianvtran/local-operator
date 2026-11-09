@@ -148,5 +148,15 @@
     "role": "TUI notice text",
     "tone": "terse, operator-facing status",
     "note": "EN-only context sidecar; the provider refused fast mode and the dial was reset. {selector} names the route that refused, {reason} is its own wording with any trailing full stop stripped — the sentence supplies the punctuation"
+  },
+  "tui.notices.model_switch_queued": {
+    "role": "TUI notice text",
+    "tone": "terse, operator-facing status, reassuring (not an error)",
+    "note": "EN-only context sidecar; shown when a model/effort change was accepted by a busy session and will take effect before its next model request. {model} is a provider/model label such as 'openai/gpt-5'. 'step' means the agent's next model call, not the next user message."
+  },
+  "tui.notices.model_switch_refused": {
+    "role": "TUI notice text (error)",
+    "tone": "terse, operator-facing error",
+    "note": "EN-only context sidecar; the session owner refused a model/effort change. {model} is a provider/model label; {reason} is the owner's own sentence, which may stay English."
   }
 }

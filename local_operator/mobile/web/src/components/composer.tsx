@@ -13,6 +13,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
 import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
+import { QUEUED_DETAIL, deferredSettingsFields } from "../lib/settings-defer";
 import {
 	getPendingContinuation,
 	submitContinuation,
@@ -346,9 +347,25 @@ function EffortSheet({
 	pid: string;
 	projection: SessionProjection;
 }) {
+	/* Reset per open so a stale "queued" line never greets a fresh visit. */
+	const [queued, setQueued] = useState(false);
+	useEffect(() => {
+		if (open) setQueued(false);
+	}, [open]);
 	const set = async (effort: string) => {
 		try {
-			await sendCommand(pid, { op: "set_effort", effort });
+			const receipt = await sendCommand(pid, {
+				op: "set_effort",
+				effort,
+				...deferredSettingsFields(),
+			});
+			/* Queued: the session is mid-step and applies the level at the next
+			   one. The repaint will not show it until then, so the sheet stays
+			   and says so rather than closing on what looks like a no-op. */
+			if (receipt.detail === QUEUED_DETAIL) {
+				setQueued(true);
+				return;
+			}
 		} catch {
 			/* The next repaint shows the truth; a failed set leaves it. */
 		}
@@ -365,6 +382,11 @@ function EffortSheet({
 				>
 					<span aria-hidden>‹</span>
 				</button>
+				{queued ? (
+					<p role="status" className="px-2 py-1 text-body-sm text-ink-dim">
+						{messageRuntime.t("relay.session.model.queued")}
+					</p>
+				) : null}
 				{projection.effort_ladder.map((rung) => (
 					<button
 						key={rung}

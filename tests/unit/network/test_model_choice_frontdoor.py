@@ -611,3 +611,36 @@ def test_effort_rides_the_model_choice_so_a_team_only_create_keeps_it(
     rc = net_cli.main(_parse(["--model", "test/claude-opus-5"]))
     assert rc == 0, capsys.readouterr()
     assert recorder.calls[1]["model"] == {"provider": "test", "model_id": "claude-opus-5"}
+
+
+def test_the_set_model_hop_asks_for_a_deferred_ack_and_counts_queued_as_applied(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A busy owner answers ``queued`` instead of holding the hop for a whole step.
+
+    The relay opts in with ``defer_ok`` + a ``request_id``; a ``queued`` ack is
+    an accepted switch (it applies before the next provider call), so the
+    create reports it applied rather than failing or waiting out the turn.
+    """
+    identity.mint(root, name="cloud-node-1")
+    server = _warmed_server(root)
+    frames: list[dict[str, Any]] = []
+
+    class _Dial:
+        def exchange(self, frame: dict[str, Any], *, timeout_s: float) -> dict[str, Any]:
+            frames.append(frame)
+            return {"op": "ack", "detail": "queued", "queued": True}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(server, "_dial_owned", lambda *args, **kwargs: _Dial())
+
+    result = server._set_model_on(  # noqa: SLF001
+        SESSION, {"provider": "deepseek", "model_id": "deepseek-flash"}
+    )
+
+    assert result == {"applied": True, "detail": "", "queued": True}
+    assert frames[0]["defer_ok"] is True
+    assert isinstance(frames[0]["request_id"], str) and frames[0]["request_id"]
+    assert frames[0]["offered_only"] is True

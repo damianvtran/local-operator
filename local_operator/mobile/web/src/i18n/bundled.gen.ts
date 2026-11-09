@@ -367,6 +367,7 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.session.list.start_idle": "new session",
       "relay.session.model.filter_placeholder": "filter models",
       "relay.session.model.loading": "loading\u2026",
+      "relay.session.model.queued": "selected \u2014 applies at the next step",
       "relay.session.model.sheet_title": "model",
       "relay.session.past.back": "back",
       "relay.session.past.heading": "past sessions",
@@ -535,11 +536,4 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
  * rather than mixing two languages under one page tag. */
 export const BUNDLED_CHUNKS: Readonly<Record<string, () => Promise<
  { readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>> = {
-  "es": () => import("./bundled.es.gen"),
-  "fr": () => import("./bundled.fr.gen"),
-  "hi": () => import("./bundled.hi.gen"),
-  "ru": () => import("./bundled.ru.gen"),
-  "ur": () => import("./bundled.ur.gen"),
-  "vi": () => import("./bundled.vi.gen"),
-  "zh-CN": () => import("./bundled.zh-CN.gen"),
 };

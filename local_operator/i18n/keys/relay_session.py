@@ -46,6 +46,10 @@ def model_loading() -> Msg:
     return Msg("relay.session.model.loading", {})
 
 
+def model_queued() -> Msg:
+    return Msg("relay.session.model.queued", {})
+
+
 def model_sheet_title() -> Msg:
     return Msg("relay.session.model.sheet_title", {})
 

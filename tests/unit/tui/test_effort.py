@@ -13,6 +13,7 @@ would send, not the app's remembered choice.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -1411,3 +1412,129 @@ async def test_the_effort_picker_prepends_auto_when_the_ladder_lacks_it() -> Non
         assert editor.picker.is_open()
         rows = [name for name, _ in editor.picker.suggestions()]
     assert rows == ["auto", "low", "medium", "high"], rows
+
+
+# ---------------------------------------------------------------------------
+# An attached viewer's switch no longer waits on the owner's turn work.
+#
+# ``AttachedSession.set_model`` sends ``defer_ok``: a busy owner acks
+# ``queued`` at once (``server.SETTINGS_INLINE_ACK_S``) and the viewer says the
+# change "applies at the next step"; a refusal, which the old fire-and-forget
+# task swallowed, becomes an error notice.
+# ---------------------------------------------------------------------------
+
+
+def _attached_viewer(answer: Any) -> tuple[Any, list[dict[str, Any]], list[Any]]:
+    from local_operator.harness.types import ModelSpec
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.session.attached import AttachedSession
+
+    sent: list[dict[str, Any]] = []
+    notices: list[Any] = []
+    current = ModelSpec(provider="openai", model_id="old", reasoning_efforts=["low", "high"])
+
+    class Client(AttachClient):
+        def __init__(self) -> None:
+            pass  # records the request; never opens a socket
+
+        async def set_model(  # type: ignore[override]
+            self,
+            provider: str,
+            model_id: str,
+            effort: str | None = None,
+            *,
+            defer_ok: bool = False,
+            request_id: str | None = None,
+        ) -> str:
+            sent.append(
+                {
+                    "provider": provider,
+                    "model_id": model_id,
+                    "effort": effort,
+                    "defer_ok": defer_ok,
+                    "request_id": request_id,
+                }
+            )
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+    class Viewer(AttachedSession):
+        @property
+        def model(self) -> Any:
+            return current.model_copy()
+
+        def _require_owner_can_serve(self, provider: str) -> None:
+            return None
+
+    viewer = object.__new__(Viewer)
+    viewer._client = Client()
+    viewer._handlers = [notices.append]
+    return viewer, sent, notices
+
+
+async def _settle() -> None:
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_attached_switch_says_it_applies_at_the_next_step() -> None:
+    from local_operator.harness.types import ModelSpec
+
+    viewer, sent, notices = _attached_viewer("queued")
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert sent and sent[0]["defer_ok"] is True
+    assert isinstance(sent[0]["request_id"], str) and sent[0]["request_id"]
+    assert [n.code for n in notices] == ["tui.notices.model_switch_queued"]
+    assert notices[0].kind == "info"
+    assert "openai/new" in notices[0].text and "next step" in notices[0].text
+
+
+@pytest.mark.asyncio
+async def test_an_applied_attached_switch_adds_no_notice() -> None:
+    from local_operator.harness.types import ModelSpec
+
+    viewer, sent, notices = _attached_viewer("model: openai/new")
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert len(sent) == 1
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_an_owner_refusal_of_an_attached_switch_is_shown_not_swallowed() -> None:
+    from local_operator.harness.types import ModelSpec
+
+    viewer, _sent, notices = _attached_viewer(RuntimeError("no such model here"))
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert [n.code for n in notices] == ["tui.notices.model_switch_refused"]
+    assert notices[0].kind == "error"
+    assert "no such model here" in notices[0].text
+
+
+@pytest.mark.asyncio
+async def test_a_lost_owner_during_an_attached_switch_stays_quiet() -> None:
+    from local_operator.harness.types import ModelSpec
+
+    viewer, _sent, notices = _attached_viewer(ConnectionError("owner gone"))
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_a_carried_level_that_queues_is_not_announced_as_the_users_change() -> None:
+    """No decision was made (an adoption/failover carry): no "queued" line."""
+    from local_operator.harness.types import ModelSpec
+
+    viewer, sent, notices = _attached_viewer("queued")
+    carried = ModelSpec(
+        provider="openai", model_id="old", reasoning_efforts=["low", "high"], reasoning_effort="low"
+    )
+    viewer.set_model(carried)
+    await _settle()
+    assert sent and sent[0]["effort"] is None and sent[0]["defer_ok"] is True
+    assert notices == []

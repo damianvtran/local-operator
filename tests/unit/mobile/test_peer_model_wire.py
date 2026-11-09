@@ -460,3 +460,86 @@ def test_the_json_payload_is_one_field_wider() -> None:
     assert repeat["default"] is False
     assert "confirmed same-turn" in repeat["description"]
     assert "only on explicit user request" in repeat["description"]
+
+
+# ---------------------------------------------------------------------------
+# ``AttachClient.set_model``/``set_effort`` carry ``defer_ok`` + ``request_id``.
+#
+# The client half of the runtime's deferred settings ack: the keys reach the
+# owner only when asked for (an un-opted caller's frame is byte-identical), and
+# a busy owner's ``queued`` answer comes back as ``QUEUED_DETAIL``.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_attach_client_sends_defer_keys_only_when_asked(monkeypatch) -> None:
+    from local_operator.mobile.attach_client import AttachClient
+
+    frames: list[tuple[str, dict]] = []
+
+    async def capture(self, op, **fields):  # noqa: ANN001, ANN202
+        frames.append((op, fields))
+        return "ok"
+
+    monkeypatch.setattr(AttachClient, "_request", capture)
+    client = AttachClient(lambda p: None, lambda reason: None)
+    await client.set_model("openai", "m")
+    await client.set_effort("high")
+    await client.set_model("openai", "m", "low", defer_ok=True, request_id="r1")
+    await client.set_effort("high", defer_ok=True, request_id="r2")
+    assert frames == [
+        ("set_model", {"provider": "openai", "model_id": "m"}),
+        ("set_effort", {"effort": "high"}),
+        (
+            "set_model",
+            {
+                "provider": "openai",
+                "model_id": "m",
+                "effort": "low",
+                "defer_ok": True,
+                "request_id": "r1",
+            },
+        ),
+        ("set_effort", {"effort": "high", "defer_ok": True, "request_id": "r2"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_owner_answers_the_attach_client_queued(monkeypatch) -> None:
+    """Over a real runtime: the held switch is acked ``queued`` and lands later."""
+    import asyncio
+    import threading
+
+    from local_operator.mobile.attach_client import QUEUED_DETAIL, AttachClient
+    from local_operator.session.runtime import server as server_mod
+
+    monkeypatch.setattr(server_mod, "SETTINGS_INLINE_ACK_S", 0.3)
+    release = threading.Event()
+    landed: list[tuple[str, str | None]] = []
+
+    class Held(FakeHandle):
+        async def set_effort(self, effort, *, request_id=None):  # noqa: ANN001, ANN202
+            assert await asyncio.to_thread(release.wait, 10)
+            landed.append((effort, request_id))
+            return f"effort: {effort}"
+
+    runtime = RuntimeServer(Held(), kind="tui")
+    runtime.start()
+    client = AttachClient(lambda p: None, lambda reason: None)
+    try:
+        record = await _wait_record()
+        await client.connect(record, "s1")
+        detail = await asyncio.wait_for(
+            client.set_effort("high", defer_ok=True, request_id="rid-9"), timeout=5
+        )
+        assert detail == QUEUED_DETAIL
+        assert landed == []
+        release.set()
+        deadline = asyncio.get_running_loop().time() + 5
+        while not landed and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+        assert landed == [("high", "rid-9")]
+        await client.detach()
+    finally:
+        release.set()
+        runtime.close()

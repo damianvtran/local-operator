@@ -83,5 +83,10 @@
     "role": "model catalogue in-flight placeholder",
     "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
     "note": "Owned relay SPA session copy. Shown while the catalogue response has not landed; the error and empty states are separate keys or daemon copy."
+  },
+  "relay.session.model.queued": {
+    "role": "phone model/effort sheet status line",
+    "tone": "Preserve current lowercase style of the sheet copy; reassuring, not an error.",
+    "note": "Owned relay SPA session copy. Shown after picking a model or effort while the session is busy: the change was accepted and takes effect before the agent's next model call ('step'), not the next user message."
   }
 }

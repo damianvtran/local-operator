@@ -24,6 +24,7 @@ import inspect
 import logging
 import math
 import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -74,9 +75,12 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.i18n.keys import tui_notices as _nt
+from local_operator.i18n.messages import Msg
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     MOVED_REASON,
+    QUEUED_DETAIL,
     RETIRING_REASON,
     STOPPED_REASON,
     AttachClient,
@@ -171,6 +175,20 @@ from local_operator.session.usage_seed import (
 from local_operator.session_lease import SessionLeaseHeldError
 
 logger = logging.getLogger(__name__)
+
+
+def _settings_notice(message: Msg, *, kind: Literal["info", "error"]) -> NoticeEvent:
+    """A viewer-local notice about this viewer's own settings switch.
+
+    Rendered in the ACTIVE locale, unlike the owner's transcript notices
+    (``session._notice`` pins ``en``): this event is delivered only to this
+    viewer's handlers (``_deliver``), is never written to the transcript and is
+    never model-facing, so it is plain UI copy for the person who clicked.
+    ``code``/``params`` still ride along for a re-rendering viewer.
+    """
+    body = message.envelope()
+    return NoticeEvent(text=body["text"], code=body["code"], params=body["params"], kind=kind)
+
 
 #: User-facing refusal for a routed slash submitted while the owner is being
 #: recovered. One string, formatted with the command, so every seam that can
@@ -1605,6 +1623,9 @@ class AttachedSession:
         # later phase for the same id must always pass.
         self._live_message_phase: dict[str, int] = {}
         self._handlers: list[EventHandler] = []
+        #: In-flight owner switch requests (``_switch_on_owner``), held so the
+        #: tasks are not collected before their notice is delivered.
+        self._switch_tasks: set[asyncio.Task[None]] = set()
         # Events arriving before OperatorApp adopts/subscribes are retained;
         # otherwise a fast owner can stream between factory return and app
         # adoption and the first visible delta vanishes.
@@ -9980,7 +10001,7 @@ class AttachedSession:
                 # cannot express a WITHDRAWAL; ``auto`` is the owner's word for
                 # "no level chosen" and ``set_model_effort`` accepts it.
                 chosen = "auto" if effort_choice is None else str(effort_choice)
-                asyncio.create_task(client.set_model(model.provider, model.model_id, effort=chosen))
+                self._switch_on_owner(client, model, effort=chosen, announce=True)
             elif model.reasoning_effort != old.reasoning_effort:
                 # A LEVEL moved but this caller stated no DECISION (a carried
                 # spec, an adoption). `set_effort` is an explicit choice on the
@@ -9991,9 +10012,67 @@ class AttachedSession:
                 # its own choice, which is the local Session's semantics for a
                 # level change with no decision; a spec whose level did not move
                 # (`/fast`) sends nothing at all.
-                asyncio.create_task(client.set_model(model.provider, model.model_id))
+                self._switch_on_owner(client, model, announce=explicit)
         else:
-            asyncio.create_task(client.set_model(model.provider, model.model_id))
+            self._switch_on_owner(client, model, announce=True)
+
+    def _switch_on_owner(
+        self, client: AttachClient, model: ModelSpec, *, effort: str | None = None, announce: bool
+    ) -> None:
+        """Send one model switch to the owner WITHOUT waiting on its turn work.
+
+        WHY ``defer_ok``. ``set_model`` here is synchronous for the TUI (the
+        picker repaints at once), so the owner request was always fire-and-
+        forget — but the owner's answer still waited for its session loop, so
+        a switch made mid-tool or mid-eval sat unanswered for the whole step,
+        and a refusal was swallowed with the task. The runtime now acks
+        ``queued`` within ``SETTINGS_INLINE_ACK_S`` instead, and this tells the
+        user what happened: "applies at the next step" when queued (the owner
+        re-reads the model before every provider call), the owner's sentence
+        when refused. ``request_id`` correlates the owner's later
+        ``settings_result``.
+
+        ``announce`` is False for a level carried with no user decision (an
+        adoption, a failover carry): those are not the user's change, so a
+        "queued" line would describe something they never asked for. A refusal
+        is reported either way.
+
+        A lost connection stays silent, as before: the attach layer already
+        reports the owner going away, and a second line here would duplicate it.
+        """
+        request_id = uuid.uuid4().hex
+        label = f"{model.provider}/{model.model_id}"
+
+        async def run() -> None:
+            try:
+                detail = await client.set_model(
+                    model.provider,
+                    model.model_id,
+                    effort,
+                    defer_ok=True,
+                    request_id=request_id,
+                )
+            except (ConnectionError, TimeoutError):
+                logger.debug("attach: model switch to %s not answered", label, exc_info=True)
+                return
+            except Exception as exc:  # noqa: BLE001 — the refusal IS the notice
+                self._deliver(
+                    _settings_notice(
+                        _nt.model_switch_refused(model=label, reason=str(exc)), kind="error"
+                    )
+                )
+                return
+            if announce and detail == QUEUED_DETAIL:
+                self._deliver(_settings_notice(_nt.model_switch_queued(model=label), kind="info"))
+
+        task = asyncio.create_task(run())
+        # Strong reference until it settles: a bare create_task can be
+        # collected mid-await, dropping the notice with it.
+        # ``setdefault`` because several tests build this facade with
+        # ``__new__`` and only the attributes they exercise.
+        tasks: set[asyncio.Task[None]] = self.__dict__.setdefault("_switch_tasks", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     @property
     def goal(self) -> str:
