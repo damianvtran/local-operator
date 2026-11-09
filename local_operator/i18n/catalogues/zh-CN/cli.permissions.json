@@ -1,6 +1,6 @@
 {
   "cli.permissions.help.permissions": "查看或设置Local Operator运行时使用的macOS隐私身份",
-  "cli.permissions.help.status": "显示运行时使用的身份，以及是否已允许屏幕录制（只读）",
+  "cli.permissions.help.status": "显示运行时使用的身份，以及是否已允许录屏（只读）",
   "cli.permissions.help.setup": "用你的Developer ID为运行时签名，使其共享桌面应用的权限（交互式）",
   "cli.permissions.status.not_macos": "此平台不适用macOS隐私权限。",
   "cli.permissions.status.identity.team": "运行时身份：{identifier}，与桌面应用共用“Local Operator”条目",
@@ -19,11 +19,11 @@
   "cli.permissions.status.reason.not_darwin": "非macOS",
   "cli.permissions.status.app.found": "桌面应用：{path}（团队{team}）",
   "cli.permissions.status.app.missing": "桌面应用：未安装",
-  "cli.permissions.status.screen.granted": "屏幕录制（运行时预检）：已允许",
-  "cli.permissions.status.screen.denied": "屏幕录制（运行时预检）：未允许。在“系统设置”>“隐私与安全性”>“录屏与系统录音”中打开“{row}”。",
-  "cli.permissions.status.screen.unknown": "屏幕录制（运行时预检）：无法检查",
-  "cli.permissions.status.screen.no_image": "屏幕录制（运行时预检）：未检查（尚无运行时映像）",
-  "cli.permissions.status.scope": "仅检查屏幕录制。“文件与文件夹”“辅助功能”及其他隐私服务使用同一条目。",
+  "cli.permissions.status.screen.granted": "录屏（运行时预检）：已允许",
+  "cli.permissions.status.screen.denied": "录屏（运行时预检）：未允许。在“系统设置”>“隐私与安全”>“录屏与系统录音”中打开“{row}”。",
+  "cli.permissions.status.screen.unknown": "录屏（运行时预检）：无法检查",
+  "cli.permissions.status.screen.no_image": "录屏（运行时预检）：未检查（尚无运行时映像）",
+  "cli.permissions.status.scope": "仅检查录屏。“文件与文件夹”及其他隐私服务使用同一条目。",
   "cli.permissions.status.guide": "更多帮助：{path}（或让Local Operator会话读取guide://permissions）",
   "cli.permissions.setup.refused.tty": "`lop permissions setup`为交互式命令，需在终端中运行。",
   "cli.permissions.setup.refused.isolated": "此进程不允许团队签名（{reason}）。改为在自己的登录shell中运行。",
@@ -34,7 +34,8 @@
   "cli.permissions.setup.cancelled": "已取消，未做任何更改。",
   "cli.permissions.setup.failed": "签名未完成：{detail}。运行时继续使用“Local Operator Runtime”条目，之前的任何设置均未更改。",
   "cli.permissions.setup.always_allow": "是否已选择“始终允许”（或macOS未显示对话框）？[y/N] ",
-  "cli.permissions.setup.already_signed": "此Python构建的运行时之前已签名，因此本次未进行签名，macOS也无需询问。之前选择的“始终允许”仍然保留。",
+  "cli.permissions.setup.already_signed": "此Python构建的运行时之前已签名，因此本次未进行签名，macOS也无需询问。",
+  "cli.permissions.setup.always_allow_kept": "之前为此密钥选择的“始终允许”仍然保留。",
   "cli.permissions.setup.done": "完成。新的运行时将使用{identifier}，并与桌面应用共用同一条目。正在运行的会话在重新启动前继续使用当前映像。",
-  "cli.permissions.setup.done_allow_once": "没有终端的更新（由智能体运行，或在会话中使用/update）不会为新的Python构建签名；在你于终端中运行`lop update`或`lop permissions setup`之前，这些构建的运行时使用“Local Operator Runtime”条目。"
+  "cli.permissions.setup.done_allow_once": "没有终端的更新（由智能体运行，或在会话中使用/update）不会为新的Python构建签名；在终端中运行`lop update`或`lop permissions setup`之前，这些构建的运行时将使用“Local Operator Runtime”条目。"
 }
