@@ -383,12 +383,22 @@ def test_removal_and_epoch_still_reach_every_peer(
 
     def all_removed() -> bool:
         records = [store.load(network_id, peer.root) for peer in (a, c, removed)]
-        return all(
-            record.epoch == 2
-            and removed.device_id in record.removed_ids
-            and (row := record.member(removed.device_id)) is not None
-            and not row.active
-            for record in records
+        # WAIT ON THE ASSERTED STATE, NOT A PROXY. ``apply_epoch`` (relay.py
+        # ~2864-2871) and ``rotate_epoch`` (~2750-2762) save the record BEFORE the
+        # secrets file, so a lock-free ``store.load`` can see ``epoch == 2`` while the
+        # remaining peer's secret file still holds epoch 1 (seen in CI run
+        # 42667056271 and on main's code with this test). That write order is a
+        # product decision left untouched here; the wait must cover the secret too.
+        rotated = store.load_secrets(network_id, c.root).secret
+        return (
+            all(
+                record.epoch == 2
+                and removed.device_id in record.removed_ids
+                and (row := record.member(removed.device_id)) is not None
+                and not row.active
+                for record in records
+            )
+            and store.load_secrets(network_id, a.root).secret == rotated
         )
 
     assert net_fixtures.wait_for(all_removed)
