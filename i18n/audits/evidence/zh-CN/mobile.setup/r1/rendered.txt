@@ -1,0 +1,323 @@
+# Rendered evidence — zh-CN / mobile.setup repoint keys
+
+- Worktree: `/Users/damian/local-operator/.worktrees/fix-setup-repoint`
+- Branch: `fix/tunnel-setup-repoint-successor`
+- Revision under audit: `0df4ddea133` (the three-key append to this locale); head at run time `2d8373cc2be`
+- Interpreter: `.venv/bin/python` (CPython 3.12.13); rich 15.0.0
+- Written by `emit_render.py`, which calls the product's own loader, ICU engine, resolver and TUI wrap helper. **No value below is formatted by the audit script.**
+- English source sha256 (re-derived here): `f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4`
+- English context sidecar sha256: `2cf80ced83e19efddf0414fac6daed2c424fdcb13ca70f303d74471caf03c22a`
+- This locale's catalogue sha256: `da9d130ede023c303b20549dedebe9da8dbd60dead8e2016dcd8da8974150222` (79 keys)
+- Generated `data/shipped.json` currently lists: ['en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi']
+- `resolve.shipped_locales()` as the tree stands: ['en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi']
+- `resolve.is_shipped('zh-CN')`: True
+
+## Layer 1 — product resolver exactly as the tree stands
+
+`messages.render(code, params, locale='zh-CN')` — the public resolver. Because
+`resolve.is_shipped('zh-CN')` is False in this tree (the generated shipped set still
+lists only `en`), the resolved source is **English**. This is the layer that answers
+English today; it is shown rather than hidden so the claim is visible:
+
+    mobile.setup.title_repoint => '手机访问需要重新连接到此设备较新的登录'
+        render_record source_locale = 'zh-CN'
+        messages.render == render_record.text: True
+    mobile.setup.repoint => '此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。'
+        render_record source_locale = 'zh-CN'
+        messages.render == render_record.text: True
+    mobile.setup.repointed => '已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。'
+        render_record source_locale = 'zh-CN'
+        messages.render == render_record.text: True
+
+Regeneration of `data/shipped.json` is this auditor's own gate and runs AFTER the
+ledger rows are recorded (docs/I18N.md step 6: append, then generate, then check).
+
+## Layer 2 — product ICU engine over the product-loaded catalogue value
+
+`runtime.render_message(catalogues.load_catalogue('zh-CN', 'mobile.setup')[code], params, 'zh-CN')` — the same formatter Layer 1 uses, applied to this locale's own bytes
+(verified identical to `messages._lookup`: the resolver reads the same file).
+
+    mobile.setup.title_repoint
+        source value    = '手机访问需要重新连接到此设备较新的登录'
+        rendered        = '手机访问需要重新连接到此设备较新的登录'
+        source == messages._lookup('zh-CN'): True
+        cells: value 38, rendered 38
+    mobile.setup.repoint
+        source value    = '此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。'
+        rendered        = '此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。'
+        source == messages._lookup('zh-CN'): True
+        cells: value 91, rendered 91
+    mobile.setup.repointed
+        source value    = '已为同一账户将手机访问重新连接到此设备较新的登录（凭据{id}）。'
+        rendered        = '已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。'
+        source == messages._lookup('zh-CN'): True
+        cells: value 62, rendered 60
+
+## Layer 3 — full resolver chain with the shipped gate widened in process
+
+`messages.render_record(...)` after patching `resolve.shipped_locales` /
+`resolve.is_shipped` **for this measurement only**. This exercises
+`render_record -> _lookup -> runtime.render_message` end to end and shows this
+catalogue as the provenance of the rendered bytes. No file is modified:
+`data/shipped.json` keeps its checked-in content, and the patch is restored before
+the negative controls run.
+
+    mobile.setup.title_repoint => '手机访问需要重新连接到此设备较新的登录'
+        source_locale = 'zh-CN'
+    mobile.setup.repoint => '此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。'
+        source_locale = 'zh-CN'
+    mobile.setup.repointed => '已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。'
+        source_locale = 'zh-CN'
+
+`{id}` supplied as the product's own type (`receipt(_t(ms.repointed(id=str(moved[1]))))`
+at `local_operator/tunnels/setup.py:559` — a credential ROW id, so a string):
+
+    mobile.setup.repointed => '已为同一账户将手机访问重新连接到此设备较新的登录（凭据1042）。'
+        source_locale = 'zh-CN', cells 62
+
+- After restore, `resolve.shipped_locales()` is back to ['en', 'fr', 'es', 'zh-CN', 'ru', 'vi', 'ur', 'hi']
+
+## Negative controls (product engine, not this script)
+
+Control 1 — omitting `id` must raise; proves the placeholder is live ICU, not escaped
+braces. `MessageFormatError` is the product's own exception:
+
+```
+zh-CN: runtime.MessageFormatError: message argument 'id' was not supplied (have: none)
+```
+
+Control 2 — the public resolver degrades instead of raising (the additive runtime
+contract), so a missing param cannot crash a client read path:
+
+```
+zh-CN: render_record with no params -> 'mobile.setup.repointed' (source_locale=None)
+```
+
+Control 3 — `title_repoint` and `repoint` carry no brace at all, so an unused `id`
+must be inert:
+
+```
+zh-CN: repoint identical with and without an unused 'id' param: True
+```
+
+## Placeholder and ICU-argument introspection
+
+```
+mobile.setup.title_repoint: message_arguments=() braces=(0,0) '{id}' occurrences=0
+mobile.setup.repoint: message_arguments=() braces=(0,0) '{id}' occurrences=0
+mobile.setup.repointed: message_arguments=(('id', 'simple'),) braces=(1,1) '{id}' occurrences=1
+```
+
+## Bidi, punctuation and half-width checks
+
+```
+mobile.setup.title_repoint
+    manual bidi controls      : none
+    NFC-stable                : True
+    bidi class census         : {'L': 19}
+    full-width punctuation    : none
+    ascii '.' / ',' present   : False / False
+mobile.setup.repoint
+    manual bidi controls      : none
+    NFC-stable                : True
+    bidi class census         : {'L': 45, 'ON': 5}
+    full-width punctuation    : none
+    ascii '.' / ',' present   : False / False
+mobile.setup.repointed
+    manual bidi controls      : none
+    NFC-stable                : True
+    bidi class census         : {'L': 28, 'ON': 5}
+    full-width punctuation    : ['U+FF08', 'U+FF09']
+    ascii '.' / ',' present   : False / False
+```
+
+Rendered `{id}` island with the product's own string type (`id='1042'`), showing the
+digit run and its surrounding direction classes:
+
+```
+'已为同一账户将手机访问重新连接到此设备较新的登录（凭据1042）。'
+    bidi class census = {'L': 26, 'ON': 3, 'EN': 4}
+```
+
+## Product bidi paint projection (`tui.i18n_status.localized_display`)
+
+The TUI's production paint resolver, called with this locale's ACTUAL source
+provenance. This is the projection the copy has to survive, executed rather than
+asserted:
+
+```
+mobile.setup.title_repoint
+    raw     = '手机访问需要重新连接到此设备较新的登录'
+    painted = '手机访问需要重新连接到此设备较新的登录'
+    RLI=0 PDI=0 balanced=True edges_isolated=False bytes_inside_identical_to_raw=True
+mobile.setup.repoint
+    raw     = '此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。'
+    painted = '此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。'
+    RLI=0 PDI=0 balanced=True edges_isolated=False bytes_inside_identical_to_raw=True
+mobile.setup.repointed
+    raw     = '已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。'
+    painted = '已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。'
+    RLI=0 PDI=0 balanced=True edges_isolated=False bytes_inside_identical_to_raw=True
+```
+
+## Wrapped rows at the notice's REAL body width
+
+`NoticeBlock.body_budget(width)` is the text column a notice wraps at; at an
+80-column terminal that is **74 cells** (`max(width-2,12) - GLYPH_COLS`, GLYPH_COLS=4).
+Rows below come from the product's own `wrap_cells`, per locale, so this is what the
+TUI paints rather than an arithmetic guess:
+
+```
+### terminal 80 cols -> notice body 74 cells
+-- mobile.setup.title_repoint
+   en     1 row(s), 62 cells
+          |Phone access needs reconnecting to this device’s newer sign-in
+   zh-CN  1 row(s), 38 cells
+          |手机访问需要重新连接到此设备较新的登录
+   ur     1 row(s), 67 cells
+          |فون رسائی کو اس ڈیوائس کے نئے سائن اِن سے دوبارہ منسلک کرنا ضروری ہے
+   hi     1 row(s), 43 cells
+          |फ़ोन एक्सेस को इस डिवाइस के नए साइन-इन से फिर से जोड़ना होगा
+-- mobile.setup.repoint
+   en     2 row(s), 145 cells
+          |A newer sign-in to the same Radient account is already on this device.
+          |Reconnect phone access to that sign-in — same account, same phone address.
+   zh-CN  2 row(s), 91 cells
+          |此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账
+          |户、同一手机地址。
+   ur     2 row(s), 144 cells
+          |اسی Radient اکاؤنٹ کا ایک نیا سائن اِن پہلے سے اس ڈیوائس پر موجود ہے۔ فون
+          |رسائی کو اسی سائن اِن سے دوبارہ منسلک کریں — وہی اکاؤنٹ، وہی فون ایڈریس۔
+   hi     2 row(s), 101 cells
+          |इसी Radient खाते का एक नया साइन-इन पहले से इस डिवाइस पर मौजूद है। फ़ोन एक्सेस को उसी साइन-इन से
+          |फिर से जोड़ें — वही खाता, वही फ़ोन पता।
+-- mobile.setup.repointed
+   en     2 row(s), 93 cells
+          |Reconnected phone access to this device’s newer sign-in for the same
+          |account (credential 42).
+   zh-CN  1 row(s), 60 cells
+          |已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。
+   ur     2 row(s), 97 cells
+          |فون رسائی کو اسی اکاؤنٹ کے لیے اس ڈیوائس کے نئے سائن اِن سے دوبارہ منسلک کر
+          |دیا گیا (کریڈینشل 42)۔
+   hi     1 row(s), 69 cells
+          |फ़ोन एक्सेस को उसी खाते के लिए इस डिवाइस के नए साइन-इन से फिर से जोड़ दिया गया (क्रेडेंशियल 42)।
+
+### terminal 100 cols -> notice body 94 cells
+-- mobile.setup.title_repoint
+   en     1 row(s), 62 cells
+          |Phone access needs reconnecting to this device’s newer sign-in
+   zh-CN  1 row(s), 38 cells
+          |手机访问需要重新连接到此设备较新的登录
+   ur     1 row(s), 67 cells
+          |فون رسائی کو اس ڈیوائس کے نئے سائن اِن سے دوبارہ منسلک کرنا ضروری ہے
+   hi     1 row(s), 43 cells
+          |फ़ोन एक्सेस को इस डिवाइस के नए साइन-इन से फिर से जोड़ना होगा
+-- mobile.setup.repoint
+   en     2 row(s), 145 cells
+          |A newer sign-in to the same Radient account is already on this device. Reconnect phone access
+          |to that sign-in — same account, same phone address.
+   zh-CN  1 row(s), 91 cells
+          |此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。
+   ur     2 row(s), 144 cells
+          |اسی Radient اکاؤنٹ کا ایک نیا سائن اِن پہلے سے اس ڈیوائس پر موجود ہے۔ فون رسائی کو اسی سائن اِن
+          |سے دوبارہ منسلک کریں — وہی اکاؤنٹ، وہی فون ایڈریس۔
+   hi     2 row(s), 101 cells
+          |इसी Radient खाते का एक नया साइन-इन पहले से इस डिवाइस पर मौजूद है। फ़ोन एक्सेस को उसी साइन-इन से फिर से जोड़ें — वही खाता, वही
+          |फ़ोन पता।
+-- mobile.setup.repointed
+   en     1 row(s), 93 cells
+          |Reconnected phone access to this device’s newer sign-in for the same account (credential 42).
+   zh-CN  1 row(s), 60 cells
+          |已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。
+   ur     2 row(s), 97 cells
+          |فون رسائی کو اسی اکاؤنٹ کے لیے اس ڈیوائس کے نئے سائن اِن سے دوبارہ منسلک کر دیا گیا (کریڈینشل
+          |42)۔
+   hi     1 row(s), 69 cells
+          |फ़ोन एक्सेस को उसी खाते के लिए इस डिवाइस के नए साइन-इन से फिर से जोड़ दिया गया (क्रेडेंशियल 42)।
+
+### terminal 120 cols -> notice body 114 cells
+-- mobile.setup.title_repoint
+   en     1 row(s), 62 cells
+          |Phone access needs reconnecting to this device’s newer sign-in
+   zh-CN  1 row(s), 38 cells
+          |手机访问需要重新连接到此设备较新的登录
+   ur     1 row(s), 67 cells
+          |فون رسائی کو اس ڈیوائس کے نئے سائن اِن سے دوبارہ منسلک کرنا ضروری ہے
+   hi     1 row(s), 43 cells
+          |फ़ोन एक्सेस को इस डिवाइस के नए साइन-इन से फिर से जोड़ना होगा
+-- mobile.setup.repoint
+   en     2 row(s), 145 cells
+          |A newer sign-in to the same Radient account is already on this device. Reconnect phone access to that sign-in —
+          |same account, same phone address.
+   zh-CN  1 row(s), 91 cells
+          |此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。
+   ur     2 row(s), 144 cells
+          |اسی Radient اکاؤنٹ کا ایک نیا سائن اِن پہلے سے اس ڈیوائس پر موجود ہے۔ فون رسائی کو اسی سائن اِن سے دوبارہ منسلک کریں
+          |— وہی اکاؤنٹ، وہی فون ایڈریس۔
+   hi     1 row(s), 101 cells
+          |इसी Radient खाते का एक नया साइन-इन पहले से इस डिवाइस पर मौजूद है। फ़ोन एक्सेस को उसी साइन-इन से फिर से जोड़ें — वही खाता, वही फ़ोन पता।
+-- mobile.setup.repointed
+   en     1 row(s), 93 cells
+          |Reconnected phone access to this device’s newer sign-in for the same account (credential 42).
+   zh-CN  1 row(s), 60 cells
+          |已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。
+   ur     1 row(s), 97 cells
+          |فون رسائی کو اسی اکاؤنٹ کے لیے اس ڈیوائس کے نئے سائن اِن سے دوبارہ منسلک کر دیا گیا (کریڈینشل 42)۔
+   hi     1 row(s), 69 cells
+          |फ़ोन एक्सेस को उसी खाते के लिए इस डिवाइस के नए साइन-इन से फिर से जोड़ दिया गया (क्रेडेंशियल 42)।
+
+```
+
+## Punctuation codepoint inventory (explicit half-/full-width check)
+
+Every non-letter, non-digit, non-space codepoint in each value, with its Unicode name and block — so 'full-width for prose, half-width only inside Latin/code' is checked by codepoint, not by eye:
+
+```
+-- mobile.setup.title_repoint
+   (none)
+   digit codepoints: none
+-- mobile.setup.repoint
+   U+2014 EM DASH [Pd]
+   U+3001 IDEOGRAPHIC COMMA [Po]
+   U+3002 IDEOGRAPHIC FULL STOP [Po]
+   digit codepoints: none
+-- mobile.setup.repointed
+   U+007B LEFT CURLY BRACKET [Ps]
+   U+007D RIGHT CURLY BRACKET [Pe]
+   U+3002 IDEOGRAPHIC FULL STOP [Po]
+   U+FF08 FULLWIDTH LEFT PARENTHESIS [Ps]
+   U+FF09 FULLWIDTH RIGHT PARENTHESIS [Pe]
+   digit codepoints: none
+```
+
+## Cell widths (`rich.cells.cell_len`)
+
+```
+key                                   en  zh-CN    ur   hi   (value cells; en is the source)
+mobile.setup.title_repoint            62     38     67     43 
+mobile.setup.repoint                 145     91    144    101 
+mobile.setup.repointed                95     62     99     71 
+
+rendered with {id}=42 (the digits the product actually passes):
+mobile.setup.title_repoint         en=62  zh-CN=38  ur=67  hi=43
+mobile.setup.repoint               en=145  zh-CN=91  ur=144  hi=101
+mobile.setup.repointed             en=93  zh-CN=60  ur=97  hi=69
+```
+
+## Rendered surface reachability (code, not string, evidence)
+
+- `local_operator/tunnels/setup.py:707` maps plan step `repoint` to
+  `mobile.setup.title_repoint`; `setup.text()` emits the title, then the remedy
+  (`mobile.setup.repoint`), then `_apply_command(...)` on the next line.
+- `local_operator/tunnels/setup.py:559` emits `mobile.setup.repointed` as the receipt
+  with `id=str(moved[1])`.
+- `local_operator/server/routes/desktop_tunnel_setup.py:155-158` ships
+  `plan['remedy']` (the rendered `mobile.setup.repoint`) as `remedy.text` with
+  `kind: 'run'` — the desktop's primary-action button. The payload has no title
+  field, so `title_repoint` is CLI/TUI only.
+- The desktop renders it as `<p className="break-words text-body-sm text-ink">
+  {result.remedy.text}</p>` (`local-operator-ui`, `phone-access-block.tsx:361`) — it
+  WRAPS; there is no truncation and no server-side cut.
+- `mobile.setup` is **not** a `wire.*` namespace (`catalogues.wire_namespaces`), so
+  these strings never reach the phone web client's bundled chunks.

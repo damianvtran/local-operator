@@ -103,6 +103,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Cleans only this call's mkstemp .json FILE; unlink rejects directories.",
     ),
+    # Build output is the one `lop disk reclaim` category the module deletes
+    # itself: no tool owns the removal of a `target`/`.next`/`build`/`dist`
+    # tree, and the module docstring documents the single guarded remover that
+    # does it. What keeps it away from sessions is ENFORCED, not assumed: a
+    # candidate exists only inside an operator-named project root, only when that
+    # root holds the shape's manifest, and a named root INSIDE the config dir is
+    # refused at plan time and again at removal time
+    # (`disk_pressure._in_config_dir`) — so no `sessions/` path can reach this
+    # unlink/rmdir. The walk is symlink-aware and never descends a link.
+    (
+        "local_operator/disk_pressure.py::_remove_tree",
+        "os.unlink",
+        "Unlinks one file entry of an operator-named project's build-output tree; "
+        "config-dir roots are refused at plan and removal time.",
+        2,
+    ),
+    (
+        "local_operator/disk_pressure.py::_remove_tree",
+        "os.rmdir",
+        "Removes one already-emptied directory of that same tree; config-dir roots "
+        "are refused at plan and removal time.",
+        2,
+    ),
     # Browser network telemetry keeps its one sensitive artefact in the SESSION
     # SCRATCHPAD, as a mkstemp REGULAR FILE whose name it generated one line
     # earlier (`network-request-*.body`). Unlinking it removes that file and

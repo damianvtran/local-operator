@@ -55,7 +55,10 @@ requirement exists to prevent. So a report may, at most:
   report with a huge retry time locked the owner out of its own login for an hour);
 * provoke AT MOST ONE coalesced owner-side refresh per credential per
   ``REPORT_REFRESH_MIN_INTERVAL_S``, through ``_ensure_oauth_fresh``, so a stale
-  borrower can ask the owner to try — and the owner decides;
+  borrower can ask the owner to try — and the owner decides. The window is per
+  SIGN-IN of that credential, not per row (#3616 QA follow-up): a row keeps its id
+  across a re-sign-in, so a window keyed on the id alone swallowed the first report
+  about material the operator had just replaced (see :meth:`_login_material`);
 * and nothing else. ``rotate_sibling``, ``disable_credential`` and
   ``delete_credential`` are never reachable from this module, and
   ``tests/unit/network/test_credentials_owner.py`` proves it with a fixture in which
@@ -124,10 +127,11 @@ JOIN_WINDOW_S = 0.25
 HANDLER_WAIT_MARGIN_S = 20.0
 
 #: The floor between two owner-side refreshes provoked by a PEER's report, per
-#: credential. The design's number (§2.3: "at most one coalesced owner-side refresh
-#: per credential per 5 min"). A report is the cheapest way for a borrower to make
-#: the owner spend a POST, so it is the one path that needs its own rate limit
-#: rather than relying on the token's freshness.
+#: SIGN-IN of a credential (``_login_material``; #3616 QA follow-up). The design's
+#: number (§2.3: "at most one coalesced owner-side refresh per credential per 5
+#: min"). A report is the cheapest way for a borrower to make the owner spend a
+#: POST, so it is the one path that needs its own rate limit rather than relying on
+#: the token's freshness.
 REPORT_REFRESH_MIN_INTERVAL_S = 300.0
 
 #: The longest block a PEER'S quota report may write on the owner's row, whatever
@@ -408,7 +412,12 @@ class MeshCredentialBroker:
         self._github_lender: github_app.GithubLender | None = None
         self._loop = _BrokerLoop(self_device[-8:] or "owner")
         self._inflight: dict[tuple[Any, ...], asyncio.Future[Any]] = {}
-        self._report_refreshed: dict[int, float] = {}
+        #: ``{(credential_id, login_incarnation): monotonic}`` — ONE WINDOW PER
+        #: SIGN-IN (#3616 QA follow-up). Keyed on the row alone, a re-sign-in on the
+        #: owner reused the previous login's window and the first report about the new
+        #: material was answered ``coalesced`` with nothing probed, so the borrower fell
+        #: back to the provider's bare 401 plus its own re-login hint — the wrong device.
+        self._report_refreshed: dict[tuple[int, str], float] = {}
         self._report_blocked: dict[tuple[str, int], float] = {}
         #: ONE lock around each report arm's read-then-stamp (review round 4, R4-n2):
         #: two reports racing the same window both read "not stamped", both answered
@@ -1953,6 +1962,7 @@ class MeshCredentialBroker:
         credential_id = self._credential_id_for(key, reported_id)
         if credential_id is None:
             return {"kind": "ack", "key": key, "action": "noted"}
+        material = self._login_material(credential_id)
         now = time.monotonic()
         # ``None`` MEANS "NEVER REFRESHED", and it is checked as such (review round 3,
         # F1). A ``0.0`` default read as "refreshed at clock zero", and ``monotonic``
@@ -1960,10 +1970,17 @@ class MeshCredentialBroker:
         # runner, a laptop just after a reboot — the FIRST report was coalesced and
         # nothing was refreshed. The same ``is not None`` guard the block arm uses.
         with self._report_lock:
-            last = self._report_refreshed.get(credential_id)
+            slot = self._report_slot(credential_id, material)
+            last = self._report_refreshed.get(slot)
             if last is not None and now - last < REPORT_REFRESH_MIN_INTERVAL_S:
                 return {"kind": "ack", "key": key, "action": "coalesced"}
-            self._report_refreshed[credential_id] = now
+            # ONE ENTRY PER ROW: the previous sign-in's window can never be read
+            # again (that material is gone), so keeping it would grow this map by an
+            # entry per re-login for the life of the process.
+            stale = [k for k in self._report_refreshed if k[0] == credential_id and k != slot]
+            for gone in stale:
+                del self._report_refreshed[gone]
+            self._report_refreshed[slot] = now
         # THE REPLY IS WHAT THE REFRESH DID, judged by the stored bearer (mesh perf
         # matrix, 15/15). The old arm answered ``refreshed`` whatever happened, and on
         # a token the owner's clock still called live the probe never POSTed — so the
@@ -2063,6 +2080,72 @@ class MeshCredentialBroker:
         # every ``refresh_failed``) into a held refusal naming this device and its
         # login command, and stops reporting until ``retry_after_ms`` passes.
         return {**common, "action": "unchanged"}
+
+    def _login_material(self, credential_id: int) -> str:
+        """Which SIGN-IN of a row this is — the report window's key (#3616 QA follow-up).
+
+        A row keeps its id when the operator signs in again on this device, so the
+        id alone cannot tell new material from the same material. ``login_incarnation``
+        can: the store mints it on an INTERACTIVE write that replaces the payload
+        wholesale, and never on a refresh — which is exactly the distinction the
+        window needs, because a report itself provokes a refresh and must not thereby
+        open a new window. The alternatives are dishonest in both directions: the
+        bearer and ``updated_at`` both move on a rotation, so keying on either would
+        turn every report into a fresh window and drop the bound §2.3 exists for.
+
+        ``""`` means "the sign-in could not be read THIS time" — a store that raised
+        (the accessor answers ``None`` on any ``sqlite3.Error``), a row written before
+        the column existed, or an MCP row (whose refresh also writes through
+        ``upsert``, so its incarnation can never attest). It is NOT a third sign-in:
+        the row has one at a time, and :meth:`_report_slot` folds an unreadable read
+        back into the window the row already has, so one flapped read cannot earn a
+        second probe inside one window (#3616 review M1). Nothing secret is read: the
+        accessor answers from the bookkeeping column, not from the credential material.
+        """
+        try:
+            store = self._auth_store_instance()
+            read = getattr(store, "native_login_incarnation", None)
+            if not callable(read):
+                return ""
+            return str(read(credential_id) or "")
+        except Exception:  # noqa: BLE001 — an unknown sign-in is not a new one
+            return ""
+
+    def _report_slot(self, credential_id: int, material: str) -> tuple[int, str]:
+        """The ONE window entry a report for this row belongs to (#3616 review M1).
+
+        ``material == ""`` is a failed READ of the row's sign-in, not a sign-in of
+        its own — nothing about the credential changed between two reads of the same
+        row. Treated as a third key it becomes a bug: an unreadable read takes a slot
+        the next readable read then sweeps, and the following report is inside a
+        window that was opened twice, so it probes the IdP again inside
+        ``REPORT_REFRESH_MIN_INTERVAL_S``. Both directions are handled here, because a
+        flap can land on either side of the first report of a window:
+
+        * a read that FAILED joins the newest entry the row already has, and never
+          evicts a named sign-in;
+        * a read that SUCCEEDS and finds only the placeholder entry RELABELS that
+          entry (keeping its timestamp) instead of starting a second window — the
+          placeholder was this same sign-in, read before the store could name it.
+
+        So a flap costs at most one window, which is what the per-row key this
+        replaced always gave. Caller holds ``_report_lock``: this both reads and
+        rewrites the map.
+        """
+        mine = {k: v for k, v in self._report_refreshed.items() if k[0] == credential_id}
+        placeholder = (credential_id, "")
+        if not material:
+            if not mine:
+                return placeholder
+            return max(mine, key=lambda k: mine[k])
+        if list(mine) == [placeholder]:
+            # RELABEL IN PLACE. Dropping the placeholder and stamping the named entry
+            # fresh would give this window a second life; carrying the stamp over is
+            # what makes the two reads one window.
+            stamp = mine[placeholder]
+            del self._report_refreshed[placeholder]
+            self._report_refreshed[(credential_id, material)] = stamp
+        return (credential_id, material)
 
     def _stored_bearer(self, credential_id: int) -> str:
         """The bearer the owner's row holds right now, ``""`` when unreadable.

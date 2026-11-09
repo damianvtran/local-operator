@@ -1,8 +1,8 @@
 """Which verdict a viewer gives when its owner's display window is not usable.
 
-A display page comes back non-``ok`` for two unrelated reasons, and this module
-pins BOTH, because reading one as the other sends the operator to a remedy that
-cannot exist:
+A display page comes back non-``ok`` for three unrelated reasons, and this module
+pins all THREE, because reading one as another sends the operator to a remedy
+that cannot exist:
 
 * ``window is None`` — the owner's runtime predates the field. It served no
   window at all, and updating the peer really is the fix.
@@ -13,13 +13,17 @@ cannot exist:
   attach push frame or the ``frontend_sync`` reply exceeds
   ``server._MAX_LINE_BYTES``. The peer needs no update; the reader has to reach
   the device that holds the conversation.
-
-``reset`` is neither — a cursor that stopped resolving — and must not be told
-its history is too large (review round 1, MINOR-1).
+* ``window.status == "reset"`` — a cursor that stopped resolving, or a
+  generation that moved, between the owner's snapshot and its capture. The peer
+  is on THIS build (the DTO that carried the reset is this release's), so the
+  remedy is the re-sync its own capture paths expect, and for a viewer the
+  re-sync is reopening the conversation. #3624 established that ``reset`` must
+  not be told its history is too large; #3644 gave it this verdict of its own,
+  and this module is its home.
 
 Before the split, every non-ok page raised the "runtime is too old" refusal, so
-an oversized session on the same build reported itself as a version problem —
-the one symptom that cannot be acted on. These cells drive the real
+an oversized or reset session on the same build reported itself as a version
+problem — the one symptom that cannot be acted on. These cells drive the real
 ``_load_frontend_history`` on a remote placement (and prove the local
 placement's honest full replay still runs unchanged).
 """
@@ -171,15 +175,23 @@ async def test_a_missing_window_still_names_the_build(tmp_path: Path) -> None:
     message = str(raised.value)
     assert "too old" in message and "update it" in message, message
     assert "too large" not in message, message
+    # The other two claims belong to their own arms; a reword that smuggled one
+    # into the old-peer sentence would read as advice the peer cannot take.
+    assert "reopen" not in message, message
 
 
 @pytest.mark.asyncio
-async def test_a_reset_page_does_not_get_the_size_sentence(tmp_path: Path) -> None:
-    """``reset`` is a cursor verdict, not a size one (review round 1, MINOR-1).
+async def test_a_reset_page_names_the_resync_and_no_other_verdict(
+    tmp_path: Path,
+) -> None:
+    """``reset`` is a cursor verdict: re-sync it, do not update the peer.
 
-    A page whose cursor stopped resolving is answered by a re-sync, so telling
-    the reader its history is too large would be false twice: the rows are not
-    oversized, and travelling to the other device would not help.
+    #3624 pinned that a reset page must not get the SIZE sentence (review round
+    1, MINOR-1). #3644 is the verdict that decision was waiting for: the page
+    fell through to the same-build "too old … update it" refusal, and the
+    remedy a reset actually has — reopen, which re-captures — had no words.
+    Both halves are asserted, because a future reword could reintroduce either
+    misdiagnosis while still differing from the old text.
     """
     viewer = _remote_viewer(tmp_path)
 
@@ -187,17 +199,35 @@ async def test_a_reset_page_does_not_get_the_size_sentence(tmp_path: Path) -> No
         await viewer._load_frontend_history(_frontend(_page(status="reset")))  # noqa: SLF001
 
     message = str(raised.value)
+    assert message == (
+        "this conversation's history changed on the device that holds it; "
+        "reopen the conversation to reload it"
+    ), message
+    assert "too old" not in message, message
+    assert "update" not in message, message
     assert "too large" not in message, message
-    assert "too old" in message and "update it" in message, message
+    # THE LANE BUDGET (design review round 1, D1): 110 cells is the transcript
+    # lane at 120 columns, and a sentence over it orphans its closing clause.
+    assert len(message) <= 110, f"{len(message)} chars: {message}"
 
 
 @pytest.mark.asyncio
-async def test_a_local_placement_keeps_the_honest_full_replay(tmp_path: Path) -> None:
-    """Unchanged behaviour: a local placement escalates, it never refuses."""
+@pytest.mark.parametrize("status", ["reset", "full_required"])
+async def test_a_local_placement_keeps_the_honest_full_replay(
+    tmp_path: Path, status: Literal["ok", "reset", "full_required"]
+) -> None:
+    """Unchanged behaviour: a local placement escalates, it never refuses.
+
+    Parametrised over BOTH non-ok verdicts that reach this branch, and with the
+    window flag forced on so the page really arrives: an as-shipped local viewer
+    never requests a window, which would make every status here
+    indistinguishable from ``window is None`` — a control that cannot fail.
+    """
     viewer = _local_viewer(tmp_path)
 
-    await viewer._load_frontend_history(_frontend(_page()))  # noqa: SLF001
+    await viewer._load_frontend_history(_frontend(_page(status=status)))  # noqa: SLF001
 
+    assert viewer._display_window_supported is True  # noqa: SLF001
     assert viewer._display_history is None  # noqa: SLF001
     assert viewer._history_hydrated is True  # noqa: SLF001
     assert viewer._history == []  # noqa: SLF001 — an absent journal replays empty

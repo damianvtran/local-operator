@@ -190,12 +190,16 @@ and `lop tunnel setup --json`, not mesh admission.
    MEMBERSHIP CONVERGES ON A SCHEDULE, NOT ON A LINK BEING ESTABLISHED. A member
    admitted after this device joined becomes visible without anything being
    restarted and without anyone running a command: a live link is asked for its
-   member table again every fifteen seconds or so, and because a table transfers
-   transitively, a device two hops from the newcomer learns it too — including on a
-   dial-only machine whose only neighbour never holds a link to the newcomer. A
-   peer that accepts the connection and then does not answer its table read is
-   skipped after four seconds and asked again on the next pass, so one unresponsive
-   member delays nobody else's convergence. A
+   member table again every fifteen to thirty seconds — fifteen while anything is
+   moving, thirty once the peer's answers keep matching the table this device
+   already holds, and straight back to fifteen the moment one differs — and because
+   a table transfers transitively, a device two hops from the newcomer learns it
+   within two of those intervals — including on a dial-only machine whose only
+   neighbour never holds a link to the newcomer. A peer that accepts the connection
+   and then does not answer its table read is skipped after four seconds and asked
+   again on the next pass; the walk is serial, so every link after that peer in the
+   same pass waits those four seconds too, and a wedged member costs the pass
+   seconds rather than nothing. A
    device that has been switched off still shows the table it had when it went down
    until its next contact, and a member that IS reachable is never hidden by that:
    run any of `ls`, `show`, `peers` rather than restarting the relay.

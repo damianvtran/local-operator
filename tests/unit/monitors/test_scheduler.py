@@ -1456,15 +1456,25 @@ async def test_the_stall_episode_publishes_its_two_edges_and_no_ticks(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_an_ordinary_failing_tick_publishes_nothing(tmp_path: Any) -> None:
-    """The auto-disable ladder writes the counters file alone (§10.2).
+async def test_an_ordinary_failing_tick_publishes_its_edges_not_its_ticks(tmp_path: Any) -> None:
+    """The auto-disable ladder publishes the COUNT its row turns on (§10.2).
 
-    Asserted rather than left to a comment because a VIEWER's band now derives
-    its warning ink from exactly this fact: a strike count the reader cannot
-    see move is published history, never a live alarm, so the band must not
-    paint one in warning ink (agent review round 1, MAJOR-1). If this ever
-    starts publishing per tick, the band's rule and this test disagree — which
-    is the point of pinning it here, next to the surface that depends on it.
+    ROUND-2 DECISION CHANGE (manager, this PR), kept for the record: this test used
+    to assert that an ordinary failing tick published NOTHING AT ALL — the strike
+    count was invisible to every cold reader, which is how `lop monitor status`
+    kept saying "nothing has changed (confirm the call observes what you expect)"
+    about a watch that had failed four times in a row (QA round 1, Q3).
+
+    ROUND-4 DECISION CHANGE (Q-R3-1; review round 4, MAJOR-1), by execution: the
+    round-2 rule published the episode's opening edge and NOTHING inside it, and
+    `consecutive_failures` is not telemetry — it is the row's sentence. Below 2 the
+    hint reads "N failed check(s) so far, below the 2-check threshold"; at 2 and
+    above it reads "the check keeps failing … repeated failures disable it at 5".
+    A reader told once, at strike 1, therefore kept a claim the live counters had
+    already falsified for the whole ~14 minutes before the disable, `--json` count
+    included. Every strike tick now publishes its count: a failed check is never a
+    quiet tick, and the retry ladder (backing off to the 15-minute cap) bounds the
+    rewrites to a handful per episode.
     """
     harness = Harness(tmp_path)
     try:
@@ -1475,9 +1485,17 @@ async def test_an_ordinary_failing_tick_publishes_nothing(tmp_path: Any) -> None
 
         harness.results.append({"error": "boom"})
         await rill(harness, 60_000)
-        assert harness.changes == before
-        # The live memory knows; the published row is the last change event's.
+        assert harness.changes == before + 1, "the episode's opening edge"
+        # The live memory knows, and now the published row does too.
         assert harness.scheduler.index_rows()[0]["consecutive_failures"] == 1
+
+        # Ticks INSIDE the episode publish their count (Q-R3-1): the sentence the
+        # row owes the reader changes at strike 2, and the count keeps accruing.
+        for _ in range(2):
+            harness.results.append({"error": "boom"})
+            await rill(harness, 120_000)
+        assert harness.changes == before + 3
+        assert harness.scheduler.index_rows()[0]["consecutive_failures"] == 3
     finally:
         harness.scheduler.dispose()
 

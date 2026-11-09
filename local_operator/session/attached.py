@@ -5871,21 +5871,20 @@ class AttachedSession:
             # degrading, because the honest alternative is a session the viewer
             # cannot open until the peer is updated.
             #
-            # TWO DIFFERENT VERDICTS ARRIVE IN THIS ONE BRANCH, and telling them
-            # apart is the point of the split below. ``None`` is the genuine OLD
-            # PEER: a runtime that predates the field serves no window at all.
-            # ``full_required`` is a SIZE verdict from a runtime that is already
-            # current — what the owner returns when one message group exceeds
-            # the page budget (``history_window.DISPLAY_HISTORY_BYTES`` /
+            # THREE DIFFERENT VERDICTS ARRIVE IN THIS ONE BRANCH, and telling
+            # them apart is the point of the split below. ``None`` is the genuine
+            # OLD PEER: a runtime that predates the field serves no window at
+            # all. ``full_required`` is a SIZE verdict from a runtime that is
+            # already current — what the owner returns when one message group
+            # exceeds the page budget (``history_window.DISPLAY_HISTORY_BYTES`` /
             # ``DISPLAY_HISTORY_MESSAGES``), and what both wire fallbacks
             # substitute when the attach push frame or the ``frontend_sync``
             # reply exceeds ``server._MAX_LINE_BYTES``. Reading that as "update
             # the peer" sent the operator to a remedy that cannot exist: the
             # peer is on the same build, and the only fix is arriving on the
-            # device that holds the conversation. ``reset`` is NEITHER: a cursor
-            # that stopped resolving is answered by a re-sync, so it must not be
-            # told its history is too large — it keeps the legacy sentence until
-            # a re-sync verdict of its own is designed.
+            # device that holds the conversation. ``reset`` is neither — a
+            # cursor that stopped resolving — so it is answered by the re-sync
+            # verdict in its own arm below, never by size and never by version.
             #
             # Nothing on the wire records WHY a page came back non-ok, so the
             # status is logged here: after the fact this line is the only way to
@@ -5910,10 +5909,38 @@ class AttachedSession:
                     window.has_more,
                 )
             if not self._owner.placement.is_local:
+                # THREE ENVELOPES, THREE VERDICTS. A non-ok status is NOT a
+                # synonym for "old peer": the owner answered, and it answered
+                # this build (the DTO it just sent carries a field list only
+                # this release emits). Each arm names the remedy its own cause
+                # actually has, because a viewer on another device cannot paper
+                # over either of them with a local replay.
                 if window is not None and window.status == "full_required":
                     raise ConnectionError(
                         "this session's newest history is too large to send here; "
                         "open the conversation on the device that holds it"
+                    )
+                if window is not None and window.status == "reset":
+                    # A CURSOR THAT STOPPED RESOLVING, not an old peer. The
+                    # capture raced a compaction or a prune (``history_window``
+                    # answers a dead ``through_id``, a moved generation, or an
+                    # unresolvable anchor with this status), and the remedy its
+                    # own callers use is a re-sync, not an update and not a
+                    # smaller page. Nothing shrinks on retry, and nothing here is
+                    # stale code — telling the user to update a peer on this
+                    # build sends them after a version that does not exist.
+                    #
+                    # THE BINDS HAVE ALREADY RETRIED by the time anyone reads
+                    # this: ``_ensure_bound`` runs ``_bind_to`` up to
+                    # ``_BIND_RETRY_ATTEMPTS``, the ``frontend_sync`` RPC
+                    # re-mints a fresh window on a bound facade, and the
+                    # degraded resync re-arms with backoff. What ends HERE is the
+                    # facade (``connect`` discards the rejected client), so the
+                    # viewer's next attempt is the reopen — and a reopen
+                    # re-captures from the generation that is live now.
+                    raise ConnectionError(
+                        "this conversation's history changed on the device that holds it; "
+                        "reopen the conversation to reload it"
                     )
                 raise ConnectionError(
                     "this peer's runtime is too old to serve history over the mesh; update it"

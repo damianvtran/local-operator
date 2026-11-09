@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "mobile.setup",
+  "history_sha256": "7c5068e961d825c47ea2d7d4b9fec29ad700f35d0cd8114f35f0c2ce6702e9f5",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "mobile.setup",
+      "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+      "translator": {
+        "agent": "i18n translator lane, `task` teammate of the lopdev team, session 86c6d01615c6",
+        "model": "deepseek/deepseek-flash (quota-driven cross-vendor fallback from the lane's pinned anthropic/claude-opus-5-5, descending via openai/gpt-6.1-sol; the fallback actually wrote the text)",
+        "date": "2026-11-08"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent `task` subagent, session e7b6613db529; did not translate or edit any value it judged",
+        "model": "deepseek/deepseek-flash (quota-driven cross-vendor fallback from the session's pinned anthropic/claude-opus-5-5, descending via openai/gpt-6.1-sol; the fallback performed the audit)",
+        "date": "2026-11-08",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Repoint family (3 keys) appended to a complete 79-key namespace; round 1 independent audit PASSED, 0 blocker / 0 major / 1 minor / 2 nit. Evidence: i18n/audits/evidence/fr/mobile.setup/r1/record.json (+ report.md, rendered.txt, receipt.json), round r1. FR-01 minor: «reconnecté à la connexion» doubles the connect- root in title and receipt and «connexion» also carries the network sense in this namespace — meaning survives because the remedy body names the account; optional wording pass in a later fr wave. FR-02 nit: superlative «la plus récente» vs the English comparative (referent unique). FR-03 nit: «(identifiant {id})» is the glossary's fr credentials term and matches mobile.setup.account. Adjudications fr-a (connexion polysemy) and fr-b (superlative) both pass. Not verified: native-speaker review, no terminal/desktop frame.",
+      "evidence": "i18n/audits/evidence/fr/mobile.setup/r1/record.json",
+      "round": "r1",
+      "keys_audited": 3
+    }
+  ]
+}

@@ -706,9 +706,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "The PAIR-INBOX lane only: an outbound note/question/request "
                     "through the durable outbox (intent and client_ref recorded "
                     "before dispatch, so a retry replays the same idempotent "
-                    "send). It is NOT a direct message: nothing is posted in any "
-                    "Team Bridge conversation and the recipient does not see it "
-                    "there. Use `dm` for a person or their agent, `channel_post` "
+                    # The "NOT a direct message" sentence moved out: "invisible in
+                    # the UI" (WHICH LANE, below) already states it once, and this
+                    # reference is inside the 8 KiB doc soft cap — the one-channel
+                    # clause had to be paid for here rather than left over the cap.
+                    "send). Use `dm` for a person or their agent, `channel_post` "
                     "for a room, and `send` only to answer a delivery that "
                     "arrived on this lane."
                 ),
@@ -760,9 +762,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="channels",
                 blurb=(
-                    "One page of YOUR OWNER's conversations (the human list). It "
-                    "belongs to the chief-of-staff session: a task session gets "
-                    "`not_designated` here. Tenant-visible channels your owner has "
+                    "One page of YOUR OWNER's conversations (the human list). "
+                    # The `not_designated` sentence moved to WHICH SESSION (below),
+                    # which states the same rule with the non-retryable detail; the
+                    # duplicate was what paid for the one-channel wire clause.
+                    "Tenant-visible channels your owner has "
                     "not joined come back discoverable with a member count."
                 ),
             ),

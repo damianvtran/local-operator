@@ -1,0 +1,317 @@
+{
+ "schema": 1,
+ "audit_id": "r1",
+ "audit_kind": "independent_translation_audit_delta",
+ "audit_position": "second independent auditor (the first audited es, fr, ru, vi only)",
+ "locale": "zh-CN",
+ "namespace": "mobile.setup",
+ "round": 1,
+ "audit_date": "2026-11-08",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "the three repoint keys appended by 0df4ddea133 to a complete 79-key namespace; the other 76 values are re-pointed to as unchanged and were verified byte-identical to their parent revision",
+ "key_count": 79,
+ "keys_audited": 3,
+ "source_audit_revision": "0df4ddea13324dc8dd5feb1967caa29a178017c6",
+ "worktree": "/Users/damian/local-operator/.worktrees/fix-setup-repoint",
+ "branch": "fix/tunnel-setup-repoint-successor",
+ "translator": {
+  "agent": "i18n translator lane, `task` teammate of the lopdev team, session 86c6d01615c6; wrote all three values and did not audit them",
+  "model": "deepseek/deepseek-flash — quota-driven cross-vendor fallback. The lane was pinned to anthropic/claude-opus-5-5 and descended twice (anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash); the text was drafted and written while running the fallback, as its own receipt in this directory states. Recorded as the fallback, not the pinned id, per docs/I18N.md step 3.",
+  "date": "2026-11-08"
+ },
+ "auditor": {
+  "agent": "second independent translation auditor (lopdev team, `task` subagent), session 84b112fab6ca; did not translate or edit any value it judged, and audited none of the four locales the first auditor covered (es, fr, ru, vi)",
+  "model": "deepseek/deepseek-flash — harness-disclosed cross-vendor fallback, the same descent as the translator lane (pinned anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash) before any string was read or judged. Recorded as the fallback, never the pinned id; no native-speaker pass is claimed for zh-CN, ur or hi.",
+  "date": "2026-11-08",
+  "independent_from_translator": true
+ },
+ "input_hashes": {
+  "en": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+  "context": "2cf80ced83e19efddf0414fac6daed2c424fdcb13ca70f303d74471caf03c22a",
+  "target": "da9d130ede023c303b20549dedebe9da8dbd60dead8e2016dcd8da8974150222",
+  "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+  "style_guide": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+  "translator_receipt": "39aae3c994f6c5340a0f64d447c494a3ddbe83287029eed499c17fb9762412af"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.setup.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+  "target": "local_operator/i18n/catalogues/zh-CN/mobile.setup.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/zh-CN.md",
+  "translator_receipt": "i18n/audits/evidence/zh-CN/mobile.setup/zhca2/translator-receipt.md"
+ },
+ "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+ "target_sha256": "da9d130ede023c303b20549dedebe9da8dbd60dead8e2016dcd8da8974150222",
+ "mechanical_checks": [
+  "key set: 79 keys, identical and order-identical to the English catalogue (tests/unit/i18n/test_catalogues.py asserts order-sensitive parity); the three new keys are the trailing group, exactly where the English source puts them after mobile.setup.corrupt_intent",
+  "append-only: all 76 pre-existing values are byte-identical to `git show 0df4ddea133^:<path>` (compared as parsed JSON maps over the whole namespace, not by eye); the only other diff line is the trailing comma the append needs (4 insertions / 1 deletion per file)",
+  "placeholder integrity: `{id}` appears exactly once, in `mobile.setup.repointed` only, in single-brace ICU-subset form; `runtime.message_arguments()` reports exactly one argument (`('id', 'simple')`); brace counts are (0,0) in the title and the remedy body",
+  "render gate: the product engine raises `MessageFormatError` when `id` is omitted, so the placeholder is live ICU, not escaped braces",
+  "no manual bidi/format control characters (U+200E/F, U+202A-E, U+2066-9) in any of the three values; every value is NFC-stable",
+  "typography: no ASCII apostrophe, no double space, no space before punctuation, no leading/trailing space, no ASCII '...' in any of the three values",
+  "cell widths measured with `rich.cells.cell_len` — the same measure the TUI wraps and the desktop lays out with; no `maxCells` is declared for these keys in the context sidecar (read, not assumed: the sidecar carries only role/tone/note), so nothing was judged against a hard budget"
+ ],
+ "meaning_checks": [
+  "does not imply a NEW sign-in: none of the three strings contains the locale's verb for 'sign in' in an imperative or prospective frame. zh-CN writes 重新连接 (reconnect) and never 重新登录; ur writes دوبارہ منسلک (reconnect again) and never دوبارہ سائن اِن; hi writes फिर से जोड़ें (join again) and never फिर से साइन इन करें. The sign-in appears only as the OBJECT the existing access is re-pointed at",
+  "does not imply a NEW tunnel or a service mutation: the action verb in all three locales is the locale's word for 'reconnect/re-join', with no create/start/enable verb",
+  "does not imply an account change: every locale names the same account explicitly (zh-CN 同一账户 / ur وہی اکاؤنٹ · اسی Radient اکاؤنٹ / hi वही खाता · इसी Radient खाते) and the receipt repeats it",
+  "does not imply the phone address changes: every locale says the address is the same one (zh-CN 同一手机地址 / ur وہی فون ایڈریس / hi वही फ़ोन पता), matching the shipped `reservation_saved` form of that object in each locale",
+  "the {id} parenthetical is presented as a local credential ROW reference, not an account id, email or phone address — and it reuses the exact shipped parenthetical form of `mobile.setup.account` in all three locales",
+  "the comparative 'newer' is decidable in every state this plan can be in: `local_operator/providers/account_successor.py:35` refuses to return a successor unless EXACTLY ONE enabled, non-dead same-account row exists on the same hub, so 'newer' and 'the newer one' name one row — verified by reading that function, not by trusting a translator's note"
+ ],
+ "glossary_compliance": [
+  "phone access → 手机访问 ✓ — the namespace-wide term (title_login, and the shipped 手机访问已连接); not 手机接入, not 移动访问",
+  "device → 设备 / 此设备 ✓ (glossary §2 设备); the title says 此设备, matching the shipped `reserved` (已保存在此设备上)",
+  "account → 账户 ✓. The glossary carries no zh-CN row, so the catalogue is the authority: across all zh-CN catalogues this tree carries 账户 75 times against 账号 3 times (recounted here — which corrects the translator receipt's '64 against 3' figure while agreeing with its direction; the discrepancy is in the receipt's arithmetic, not in the copy)",
+  "credentials → 凭据 ✓. The glossary's zh-CN cell is still `—` (unendorsed, and the glossary forbids inventing one there), so the shipped catalogue is the authority: 凭据 appears in 选择现有隧道所属的凭据, 凭据ID：{ids} and （凭据{id}）; the new receipt reuses that last form",
+  "sign-in → 登录 ✓ (title_login, login, login_tui)",
+  "'newer' → 较新 ✓, the comparative, distinct from the namespace's 最新 for the fresh quote (quote_unread: 最新的账户信息和报价) — a real and correctly used split",
+  "phone address → 手机地址 ✓ (shipped reservation_saved, consent)"
+ ],
+ "style_compliance": [
+  "Address: the strings carry no pronoun at all (verb-forward 需要 / 将 … 重新连接到), the zh-CN guide's preferred shape; no 您 anywhere",
+  "Full-width prose punctuation, verified by codepoint census rather than by eye: U+3002 IDEOGRAPHIC FULL STOP and U+3001 IDEOGRAPHIC COMMA in the remedy, U+FF08/U+FF09 FULLWIDTH PARENTHESES around the receipt's credential id. No ，(U+FF0C) is needed and none was substituted for the ideographic comma",
+  "The em dash is the doubled —— (two U+2014), the convention this namespace already ships (正在准备手机访问——更改前先检查…)",
+  "No space between Chinese and Latin runs — 同一Radient账户 and 凭据{id}. That is the zh-CN guide's explicit width rule ('No space inserted between Chinese text and Latin/digit runs'), the opposite of the more common pangu convention, so it is right as written and would be wrong if 'corrected'",
+  "No sentence-final 。 on the blocked-state title (guide: no 。 on short labels and statuses); the two full sentences keep theirs",
+  "Digits Latin; {id} renders as bare Latin digits with no grouping (the product passes str(row_id)), and Chinese has only the `other` plural category, which these strings do not invoke",
+  "No quotes needed or invented (mainland “ ” convention; 「」 not used)"
+ ],
+ "naturalness": [
+  "Reads written, not translated. 此设备上已有同一Radient账户的较新登录 is how a Chinese product states 'there is already a newer one of this on the device', and 将手机访问重新连接到该登录 is the standard 将 disposal imperative.",
+  "The one thing a native editor might raise is register, not meaning: 已为同一账户将… is a slightly formal fronting of 'for the same account', chosen (per the translator's receipt) because a trailing 同一账户 would read as a second, separate assertion. I agree with that reasoning and did not ask for a change.",
+  "该登录 is the correct anaphor for the sign-in just named (as opposed to 此设备 for 'this device'); the two demonstratives do not collide."
+ ],
+ "adjudications": [
+  {
+   "topic": "(c) 登录 for a sign-in *instance/row* — right, or does it need 登录凭据 to bind to the receipt's 凭据{id}?",
+   "verdict": "PASS — 登录 is right; no change",
+   "reasoning": "English itself separates the two objects: 'sign-in' in the prose and 'credential {id}' only in the parenthetical. The translation keeps exactly that split — 登录 in all three sentences, 凭据 only inside （凭据{id}）, which is the shipped parenthetical of mobile.setup.account. Widening to 登录凭据 would diverge from English by naming the row a credential in prose, and would then collide with the receipt's own 凭据{id}, reading as 'sign-in credential (credential {id})'. 登录 is also the namespace's established word for this object (title_login) and is understood as the instance in 较新的登录 / 较新登录 because 较新 needs a comparable noun, not a verb. Nothing in the copy is wrong."
+  }
+ ],
+ "observations_outside_this_delta": [
+  "At the TUI notice's real body width (74 cells at 80 columns) the remedy wraps to 2 rows and the break falls inside the compound 同一账户 (…同一账 | 户、同一手机地址。). That is ordinary CJK per-character line breaking, not a defect: Chinese wraps between characters, and no punctuation rule is violated at that break.",
+  "The receipt (60 rendered cells) fits one row where the English source (93) takes two, and the title (38) fits where English (62) fits — so this locale never paints more rows than the source.",
+  "`mobile.setup` is not a `wire.*` namespace, so these strings never reach the phone client's bundled chunks; the surfaces are the CLI/TUI notice and the desktop remedy paragraph."
+ ],
+ "translator_receipt_claims_verified": [
+  "Source hash f38364c1… — re-derived, matches. Context 2cf80ced…, glossary 0eb34437…, zh-CN guide 8f95d89d…, target da9d130e… — all re-derived, all match the receipt.",
+  "Cell figures 38 / 91 / 62 — re-measured with rich.cells.cell_len: 38 / 91 / 62. Confirmed exactly.",
+  "'the shortest of the seven' — consistent with the measurements (91 against en 145 for the remedy).",
+  "'账户 64 against 账号 3' — direction confirmed, figure corrected here to 75 against 3 (my count spans every zh-CN catalogue and counts occurrences, not strings). No copy consequence.",
+  "Key-order and append-only claims — re-verified against `git show 0df4ddea133^:…`: 76 values byte-identical, 79 keys in English order. Confirmed."
+ ],
+ "findings": [
+  {
+   "id": "ZH-CN-01",
+   "severity": "nit",
+   "status": "accepted — no change",
+   "keys": [
+    "mobile.setup.title_repoint",
+    "mobile.setup.repoint",
+    "mobile.setup.repointed"
+   ],
+   "string": "…此设备较新的登录 / …（凭据{id}）。",
+   "issue": "登录 names the sign-in *instance* in all three sentences while the receipt's parenthetical names the row 凭据. A reader who pairs （凭据{id}） with 登录 in the sentence above it may wonder whether the sentence means the row or the act; 登录凭据 would bind the two explicitly.",
+   "assessment": "No change, and this is the correct split rather than an oversight. English makes the same distinction the translation does: 'sign-in' in the prose, 'credential {id}' only inside the parenthetical. Rendering it as 登录凭据 would (a) name in prose something English names only parenthetically, and (b) then read as 'sign-in credential (credential {id})' beside the receipt's own 凭据{id}. 登录 is also this namespace's established word for the object (mobile.setup.title_login 手机访问需要登录Radient, login, login_tui), and （凭据{id}） is byte-for-byte the shipped parenthetical of mobile.setup.account. Recorded as the adjudication the brief asked for; no edit requested. If a future wave wants to bind the two it must move all three keys together, as the translator noted."
+  }
+ ],
+ "finding_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 1
+ },
+ "unresolved_blocker_major": 0,
+ "strings_audited": [
+  {
+   "key": "mobile.setup.title_repoint",
+   "en": "Phone access needs reconnecting to this device’s newer sign-in",
+   "en_cells": 62,
+   "target": "手机访问需要重新连接到此设备较新的登录",
+   "target_cells": 38,
+   "icu_arguments": [],
+   "rendered": "手机访问需要重新连接到此设备较新的登录",
+   "rendered_cells": 38
+  },
+  {
+   "key": "mobile.setup.repoint",
+   "en": "A newer sign-in to the same Radient account is already on this device. Reconnect phone access to that sign-in — same account, same phone address.",
+   "en_cells": 145,
+   "target": "此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。",
+   "target_cells": 91,
+   "icu_arguments": [],
+   "rendered": "此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。",
+   "rendered_cells": 91
+  },
+  {
+   "key": "mobile.setup.repointed",
+   "en": "Reconnected phone access to this device’s newer sign-in for the same account (credential {id}).",
+   "en_cells": 95,
+   "target": "已为同一账户将手机访问重新连接到此设备较新的登录（凭据{id}）。",
+   "target_cells": 62,
+   "icu_arguments": [
+    "id"
+   ],
+   "rendered": "已为同一账户将手机访问重新连接到此设备较新的登录（凭据42）。",
+   "rendered_cells": 60
+  }
+ ],
+ "rendered_evidence": {
+  "path": "i18n/audits/evidence/zh-CN/mobile.setup/r1/rendered.txt",
+  "layer_1_product_resolver_asis": "returns the ENGLISH source for this locale in this tree, because the generated shipped set still listed only ['en'] when the evidence was emitted (the regeneration is this auditor's own shared gate and runs after the ledger rows). Shown verbatim rather than hidden: rendered.txt Layer 1.",
+  "layer_2_locale_rules": "`runtime.render_message(catalogues.load_catalogue(locale, 'mobile.setup')[code], params, locale)` — the same ICU engine Layer 1 uses, over this locale's own loaded bytes; with {id} substituted as 42 and again as the product's own str(row_id) '1042'.",
+  "layer_3_shipped_gate": "`messages.render_record(...)` with `resolve.shipped_locales` / `resolve.is_shipped` widened IN PROCESS for the measurement only, then restored; it exercises render_record -> _lookup -> runtime.render_message end to end and reports this catalogue as `source_locale`. No file is modified: data/shipped.json kept its checked-in content at emission time.",
+  "negative_control": "omitting `id` raises `runtime.MessageFormatError: message argument 'id' was not supplied (have: none)` — the placeholder is live ICU, not escaped braces. The public resolver instead degrades to the code with `source_locale=None`, the documented additive contract.",
+  "bidi_and_half_width": [
+   "mobile.setup.title_repoint: manual bidi controls none; NFC-stable True; bidi class census {'L': 19}; punctuation codepoints []",
+   "mobile.setup.repoint: manual bidi controls none; NFC-stable True; bidi class census {'L': 45, 'ON': 5}; punctuation codepoints ['U+2014 EM DASH', 'U+3001 IDEOGRAPHIC COMMA', 'U+3002 IDEOGRAPHIC FULL STOP']",
+   "mobile.setup.repointed: manual bidi controls none; NFC-stable True; bidi class census {'L': 28, 'ON': 5}; punctuation codepoints ['U+007B LEFT CURLY BRACKET', 'U+007D RIGHT CURLY BRACKET', 'U+3002 IDEOGRAPHIC FULL STOP', 'U+FF08 FULLWIDTH LEFT PARENTHESIS', 'U+FF09 FULLWIDTH RIGHT PARENTHESIS']"
+  ],
+  "wrap": {
+   "80": {
+    "body_cells": 74,
+    "rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 1
+    },
+    "en_rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 2
+    }
+   },
+   "100": {
+    "body_cells": 94,
+    "rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 1,
+     "mobile.setup.repointed": 1
+    },
+    "en_rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 1
+    }
+   },
+   "120": {
+    "body_cells": 114,
+    "rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 1,
+     "mobile.setup.repointed": 1
+    },
+    "en_rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 1
+    }
+   }
+  },
+  "product_paint": [
+   "mobile.setup.title_repoint: RLI=0 PDI=0 bytes_inside_identical_to_raw=True",
+   "mobile.setup.repoint: RLI=0 PDI=0 bytes_inside_identical_to_raw=True",
+   "mobile.setup.repointed: RLI=0 PDI=0 bytes_inside_identical_to_raw=True"
+  ]
+ },
+ "gate_results": [
+  {
+   "command": "scripts/i18n/ledger.py append --receipt <row> --expected-history-sha <history-sha> --apply  (x3: zh-CN, ur, hi)",
+   "rc": 0,
+   "output": "i18n/audit-history/zh-CN/mobile.setup.json\ni18n/audit-history/ur/mobile.setup.json\ni18n/audit-history/hi/mobile.setup.json"
+  },
+  {
+   "command": "scripts/i18n/ledger.py validate --base HEAD",
+   "rc": 0,
+   "output": "audit history: valid and append-only"
+  },
+  {
+   "command": "scripts/i18n/generate.py",
+   "rc": 0,
+   "output": "wrote local_operator/i18n/keys/__init__.py\nwrote local_operator/mobile/web/src/i18n/keys.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.es.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.fr.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.hi.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.ru.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.ur.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.vi.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts   (tail; every generated artifact was written)"
+  },
+  {
+   "command": "scripts/i18n/generate.py --check",
+   "rc": 0,
+   "output": "generate.py --check: 157 artifact(s) byte-identical"
+  },
+  {
+   "command": "scripts/i18n/check.py --catalogues-only",
+   "rc": 0,
+   "output": "check.py: catalogue checks: 0 problem(s)"
+  },
+  {
+   "command": "scripts/i18n/check.py",
+   "rc": 0,
+   "output": "check.py: ok — 215 file(s) scanned, 2528 literal(s) at or below the baseline, catalogues consistent; 81 advisory finding(s) (report-only until activated)"
+  },
+  {
+   "command": ".venv/bin/python -m pytest tests/unit/i18n/test_language_manifest.py tests/unit/i18n/test_catalogue_sizes.py tests/unit/i18n/test_ledger_shards.py -q",
+   "rc": 0,
+   "output": ".........................................................                [100%]\n57 passed in 19.42s"
+  }
+ ],
+ "gate_summary": "all seven gate commands exited 0: ledger append-only validation, generation, generation --check (157 artifacts byte-identical), catalogue-only check (0 problems), the full check (catalogues consistent, 81 pre-existing advisory findings only), and the three i18n unit suites (57 passed). shipped.json moved from ['en'] to the full eight-locale set.",
+ "shipped_after_gate": [
+  "en",
+  "fr",
+  "es",
+  "zh-CN",
+  "ru",
+  "vi",
+  "ur",
+  "hi"
+ ],
+ "limitations": [
+  "Independent LLM review on a provider-fallback model (deepseek/deepseek-flash after two quota descents), not native-speaker certification; the judgments are reasoned, not native intuition.",
+  "Scalar text evidence only: no terminal frame, desktop frame or device screenshot was captured. Widths are rich.cells.cell_len measurements plus the product's own wrap_cells rows, not pixels, and the desktop panel's pixel width lives in local-operator-ui and was not driven.",
+  "The shipped-gate render required widening resolve.shipped_locales in process; that patch is disclosed, measurement-only and restored. The real eligibility proof is the post-append generation, whose output is recorded in gate_results and shipped_after_gate.",
+  "No native RTL shaping was verified (the `ur` TUI stance is documented best-effort: layout stays LTR, per-string isolation only). Glyph shaping in a specific terminal is not something this evidence can settle."
+ ],
+ "refused_to_pass": [
+  "Nothing was refused. All three keys pass; the single nit is adjudicated and asks for no change."
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "rendered.txt",
+  "receipt.json"
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "ZH-CN-01"
+  ],
+  "findings_total": 1,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 1
+ },
+ "rounds": [
+  {
+   "round": 1,
+   "auditor_session": "84b112fab6ca",
+   "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+   }
+  }
+ ],
+ "ledger_status": "passed",
+ "audit_notes_not_execution_log": "record.json is the primary artifact; rendered.txt carries the executed product-path render output; report.md is the reading aid. Nothing in the rendered evidence is formatted by the audit script.",
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/zh-CN/mobile.setup/r1/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ },
+ "audit_ledger_row": {
+  "storage": "i18n/audit-history/<locale>/mobile.setup.json (ordered suffix, appended with scripts/i18n/ledger.py append)",
+  "why_not_i18n_ledger_json": "i18n/ledger.json and i18n/ledger/<locale>.json are pinned historical snapshots (i18n/audit-history.json marker); docs/I18N.md forbids rewriting them, so the row is appended to the suffix, never to the baseline."
+ }
+}

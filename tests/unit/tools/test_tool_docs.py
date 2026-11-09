@@ -404,7 +404,16 @@ MEASURED_TOKENS: dict[str, int] = {
     # description now says dm reads `to` OR the top-level endpoint_id/account_id.
     # The doc sat 7 chars under the 8192 soft cap, so the name/scope clauses were
     # tightened to pay for it (net +7 chars). Measured by this test's printed value.
-    "bridge": 1990,
+    # 1990 -> 1986 (-4, Team Bridge discoverability): the wire description gains
+    # the one-channel prohibition and the untrusted-inbound rule (+197 chars).
+    # The instance this test builds sat 8 chars under the soft cap, so two
+    # restatements were removed to pay for it — the `send` blurb's "NOT a direct
+    # message" sentence (WHICH LANE already says "invisible in the UI") and the
+    # `channels` blurb's `not_designated` sentence (WHICH SESSION states it with
+    # the non-retryable detail). Net -7 chars, so the doc is now 8177. The
+    # untrusted rule is deliberately NOT duplicated into the opt-in notes: the
+    # wire carries it every turn, and that duplication is what would not fit.
+    "bridge": 1986,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -627,7 +636,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``edit new_text={"move":"scope"}``, which makes the verb discoverable
     # without a guide lookup. Re-measured deliberately via this test's print.
     "memory": 109,
-    "monitor": 353,
+    "monitor": 367,
     "network": 894,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
     # doc — the argumentless call's description plus the "when NOT to call

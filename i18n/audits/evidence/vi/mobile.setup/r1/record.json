@@ -1,0 +1,218 @@
+{
+ "schema": 1,
+ "audit_id": "r1",
+ "audit_kind": "independent_translation_audit_delta",
+ "locale": "vi",
+ "namespace": "mobile.setup",
+ "round": 1,
+ "audit_date": "2026-11-08",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "the three repoint keys appended by 0df4ddea133 to a complete 79-key namespace (the other 76 values are re-pointed to as unchanged, and were verified byte-identical to their parent revision)",
+ "key_count": 79,
+ "keys_audited": 3,
+ "source_audit_revision": "0df4ddea13324dc8dd5feb1967caa29a178017c6",
+ "worktree": "/Users/damian/local-operator/.worktrees/fix-setup-repoint",
+ "branch": "fix/tunnel-setup-repoint-successor",
+ "translator": {
+  "agent": "i18n translator lane, `task` teammate of the lopdev team, session 86c6d01615c6",
+  "model": "deepseek/deepseek-flash — quota-driven cross-vendor fallback; the lane was pinned to anthropic/claude-opus-5-5 and descended on provider quota (anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash). Stated by the translator's own receipt in this directory, which says the text was drafted and written while running the fallback; recorded as such per docs/I18N.md step 3.",
+  "date": "2026-11-08"
+ },
+ "auditor": {
+  "agent": "independent translation auditor (lopdev team, `task` subagent), session e7b6613db529; did not translate or edit any value it judged",
+  "model": "deepseek/deepseek-flash — harness-disclosed cross-vendor fallback. The session was pinned to anthropic/claude-opus-5-5 and descended on provider quota (anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash) before any string was read or judged. Recorded as the fallback, not the pinned id; no native-speaker pass is claimed.",
+  "date": "2026-11-08",
+  "independent_from_translator": true
+ },
+ "input_hashes": {
+  "en": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+  "context": "2cf80ced83e19efddf0414fac6daed2c424fdcb13ca70f303d74471caf03c22a",
+  "target": "6fd0509a69ba62a6127b9525aedd6e55555b58a7015cfff741c8b822e4dfe9af",
+  "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+  "style_guide": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888",
+  "translator_receipt": "2cc5d5dfc843b7ceac509587e3057cb8f6d9463f9d863262573284e4a70c2ed2"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.setup.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+  "target": "local_operator/i18n/catalogues/vi/mobile.setup.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/vi.md",
+  "translator_receipt": "i18n/audits/evidence/vi/mobile.setup/r1/translator-receipt.md"
+ },
+ "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+ "target_sha256": "6fd0509a69ba62a6127b9525aedd6e55555b58a7015cfff741c8b822e4dfe9af",
+ "mechanical_checks": [
+  "key set: 79 keys, identical and order-identical to the English catalogue (tests/unit/i18n/test_catalogues.py asserts order-sensitive parity); the three new keys are the trailing group, exactly where the English source puts them after mobile.setup.corrupt_intent",
+  "append-only: every one of the 76 pre-existing values is byte-identical to `git show 0df4ddea133^:<path>`; the only other diff line is the trailing comma the append needs",
+  "placeholder integrity: `{id}` appears exactly once, in `mobile.setup.repointed` only, in single-brace ICU-subset form; runtime.message_arguments() reports exactly one argument ('id', 'simple'); no brace anywhere in the title or the remedy body",
+  "render gate: the product engine raises MessageFormatError when `id` is omitted, so the placeholder is live ICU, not escaped braces",
+  "no bidi/format control characters (U+200E/F, U+202A-E, U+2066-9) in any of the three values; every value is NFC-stable; no decomposed sequences (vi checked explicitly)",
+  "typography: no ASCII apostrophe, no double space, no space before punctuation, no leading/trailing space, em dash spaced ' — ', no ASCII '...'",
+  "cell widths measured with rich.cells.cell_len against the English source; no `maxCells` is declared for these keys in the context sidecar, so nothing was judged against a hard budget"
+ ],
+ "meaning_checks": [
+  "does not imply a NEW sign-in (no 'sign in again' reading in any of the three strings; the title obliges a re-point of the existing access)",
+  "does not imply a NEW tunnel, a NEW account or an address change — the remedy names the same account and the same phone address explicitly and the receipt repeats 'same account'",
+  "does not imply a subscription/activation or any service mutation",
+  "the {id} parenthetical is presented as a local credential row reference, not as an account id, email or phone address"
+ ],
+ "glossary_compliance": [
+  "credentials → «thông tin xác thực» ✓ (glossary §2 + the vi guide's wave-2 call); identical to the shipped `mobile.setup.account` parenthetical",
+  "device → «thiết bị» ✓ (glossary §2); account → «tài khoản»; phone access → «truy cập điện thoại» ✓, the shipped namespace term",
+  "setup/sign-in are kept distinct: «đăng nhập» is the sign-in, «kết nối» the connection (`mobile.setup.verification` «Kết nối chưa được xác nhận»), so vi does not inherit fr's polysemy"
+ ],
+ "style_compliance": [
+  "Address: bạn-register with pronoun dropped — no «bạn» in these strings ✓, matching the vi guide's rule that plain verbs carry the sentence",
+  "«Hãy» as the imperative marker on a full-sentence remedy, matching shipped prose (102 values in the catalogue use «Hãy», e.g. `mobile.setup.owner_mismatch`, `wire.radient_saver.notice.*`)",
+  "NFC throughout, no decomposed combining sequences ✓; em dash spaced ✓; no space before punctuation; no exclamation; sentence case ✓"
+ ],
+ "naturalness": [
+  "Reads written, not translated. «lần đăng nhập» is the ordinary noun for a sign-in instance, and the receipt's «Đã … cho cùng tài khoản» is a normal completed-action frame.",
+  "VI-02: the receipt carries three prepositional phrases in a row («với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản»); readable, slightly heavy, not translated-sounding."
+ ],
+ "meaning": [
+  "Title: «Truy cập điện thoại cần kết nối lại với lần đăng nhập mới hơn trên thiết bị này» — 'needs reconnecting', not 'needs a sign-in'; the newer sign-in is located on this device.",
+  "Remedy: «Thiết bị này đã có lần đăng nhập mới hơn vào cùng tài khoản Radient» carries 'already on this device / same account'; «Hãy kết nối lại truy cập điện thoại với lần đăng nhập đó» names the re-point; «cùng tài khoản, cùng địa chỉ điện thoại» keeps the no-change reassurance.",
+  "Receipt: «Đã kết nối lại … cho cùng tài khoản (thông tin xác thực {id})» is the completed local re-point, not a sign-in or an activation."
+ ],
+ "adjudications": [
+  {
+   "id": "vi-c",
+   "question": "vi added a classifier («lần») that the sibling `title_login` does not use. Is the departure right?",
+   "verdict": "pass",
+   "rationale": "Right, and the sibling is not a counter-example. `title_login` is «Truy cập điện thoại cần đăng nhập Radient», where «đăng nhập» is the VERB ('needs to sign in to Radient') and correctly takes no classifier; these three strings need the NOUN ('a sign-in'), and Vietnamese requires a classifier for a counted/identified instance. The nominal form already ships elsewhere in the same style: «lần đăng nhập» in `wire.remote_compute.unknown_run` («cho lần đăng nhập đã chọn»), `cli.team_bridge.outcome.not_addressable` («vào lần đăng nhập tiếp theo») and `tui.welcome.tip.setup` («một lần đăng nhập, không cần dán khóa»). The translator's proposed fallback («với đăng nhập đó») is the clipped form and would have been the defect. Consistency here means matching the noun convention, which the shipped catalogue already sets."
+  }
+ ],
+ "findings": [
+  {
+   "id": "VI-01",
+   "severity": "nit",
+   "status": "accepted — no change (adjudication vi-c)",
+   "keys": [
+    "mobile.setup.title_repoint",
+    "mobile.setup.repoint",
+    "mobile.setup.repointed"
+   ],
+   "string": "… với lần đăng nhập mới hơn …",
+   "issue": "Classifier «lần» is absent from `title_login`, so the namespace now names the same concept in a verb form in one key and a classified noun form in three.",
+   "assessment": "Not a drift: the two are different grammatical roles and the noun form is the shipped convention in three other namespaces. Keeping the verb form in `title_login` is also correct. No change."
+  },
+  {
+   "id": "VI-02",
+   "severity": "nit",
+   "status": "accepted — optional smooth, no change requested",
+   "keys": [
+    "mobile.setup.repointed"
+   ],
+   "string": "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực {id}).",
+   "issue": "Three prepositional phrases stack at the end («với … trên … cho …»); the English has the same shape, so this is faithful, just heavier than the rest of the string.",
+   "assessment": "Understandable on one read and not the kind of heaviness a vi editor would reject. If a later wave touches it, «… trên thiết bị này, cho cùng tài khoản …» only adds a comma. No remediation round warranted."
+  }
+ ],
+ "finding_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 2
+ },
+ "unresolved_blocker_major": 0,
+ "strings_audited": [
+  {
+   "key": "mobile.setup.title_repoint",
+   "en": "Phone access needs reconnecting to this device’s newer sign-in",
+   "en_cells": 62,
+   "target": "Truy cập điện thoại cần kết nối lại với lần đăng nhập mới hơn trên thiết bị này",
+   "target_cells": 79,
+   "icu_arguments": [],
+   "rendered": "Truy cập điện thoại cần kết nối lại với lần đăng nhập mới hơn trên thiết bị này"
+  },
+  {
+   "key": "mobile.setup.repoint",
+   "en": "A newer sign-in to the same Radient account is already on this device. Reconnect phone access to that sign-in — same account, same phone address.",
+   "en_cells": 145,
+   "target": "Thiết bị này đã có lần đăng nhập mới hơn vào cùng tài khoản Radient. Hãy kết nối lại truy cập điện thoại với lần đăng nhập đó — cùng tài khoản, cùng địa chỉ điện thoại.",
+   "target_cells": 168,
+   "icu_arguments": [],
+   "rendered": "Thiết bị này đã có lần đăng nhập mới hơn vào cùng tài khoản Radient. Hãy kết nối lại truy cập điện thoại với lần đăng nhập đó — cùng tài khoản, cùng địa chỉ điện thoại."
+  },
+  {
+   "key": "mobile.setup.repointed",
+   "en": "Reconnected phone access to this device’s newer sign-in for the same account (credential {id}).",
+   "en_cells": 95,
+   "target": "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực {id}).",
+   "target_cells": 124,
+   "icu_arguments": [
+    [
+     "id",
+     "simple"
+    ]
+   ],
+   "rendered": "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực 42)."
+  }
+ ],
+ "rendered_evidence": {
+  "path": "i18n/audits/evidence/vi/mobile.setup/r1/rendered.txt",
+  "layer_1_product_resolver_asis": "returns the English source for this locale in this tree because the generated shipped set still lists only 'en' (the generator belongs to the second auditor's shared gate; this lane must not run it)",
+  "layer_2_icu_engine_on_catalogue_value": "localized, {id} substituted",
+  "layer_3_full_resolver_chain": "localized with source_locale set to this locale, measured with the shipped gate widened in process only (disclosed; no file modified)",
+  "negative_controls": [
+   "omitting id raises MessageFormatError (the placeholder is live ICU)",
+   "no bidi controls, NFC-stable, no decomposed vi sequences"
+  ],
+  "verbatim": [
+   "Truy cập điện thoại cần kết nối lại với lần đăng nhập mới hơn trên thiết bị này",
+   "Thiết bị này đã có lần đăng nhập mới hơn vào cùng tài khoản Radient. Hãy kết nối lại truy cập điện thoại với lần đăng nhập đó — cùng tài khoản, cùng địa chỉ điện thoại.",
+   "Đã kết nối lại truy cập điện thoại với lần đăng nhập mới hơn trên thiết bị này cho cùng tài khoản (thông tin xác thực 42)."
+  ]
+ },
+ "limitations": [
+  "Independent LLM review on a provider-fallback model (deepseek/deepseek-flash after two quota descents), not native-speaker certification; the judgments are reasoned, not native intuition.",
+  "Scalar text evidence only: no terminal frame, desktop frame or device screenshot was rendered. Widths are rich.cells.cell_len measurements against the English source; no maxCells is declared for these keys.",
+  "This lane did not run scripts/i18n/generate.py or scripts/i18n/check.py: the shipped-set snapshot is only correct after every auditor's rows exist, so the shared gates run last under the second auditor.",
+  "Desktop reachability is asserted from the route contract (desktop_tunnel_setup.py ships plan['remedy'] as remedy.text with kind 'run') and from tunnels/setup.py; no desktop build was exercised."
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "rendered.txt",
+  "receipt.json"
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "VI-01",
+   "VI-02"
+  ],
+  "findings_total": 2,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 2
+ },
+ "rounds": [
+  {
+   "round": 1,
+   "auditor_session": "e7b6613db529",
+   "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 2
+   }
+  }
+ ],
+ "ledger_status": "passed",
+ "audit_notes_not_execution_log": "record.json is the primary artifact; rendered.txt carries the executed product-path render output; report.md is the reading aid. Nothing in the rendered evidence is formatted by the audit script.",
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/vi/mobile.setup/r1/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ },
+ "audit_ledger_row": {
+  "storage": "i18n/audit-history/<locale>/mobile.setup.json (ordered suffix, appended with scripts/i18n/ledger.py append)",
+  "history_sha256_after_append": "83dcbad3fd53e560443aaba7c34cb89cf9666a43bd717ba3efc8ebf6ba5250c2",
+  "why_not_i18n_ledger_json": "i18n/ledger.json and i18n/ledger/<locale>.json are baseline snapshots pinned by i18n/audit-history.json; docs/I18N.md forbids editing them after migration. A new pass is an appended row, and the LAST row per (locale, namespace) wins."
+ }
+}

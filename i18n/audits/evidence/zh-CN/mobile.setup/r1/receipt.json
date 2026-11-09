@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "audit_id": "r1",
+  "locale": "zh-CN",
+  "namespace": "mobile.setup",
+  "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+  "target_sha256": "da9d130ede023c303b20549dedebe9da8dbd60dead8e2016dcd8da8974150222",
+  "verdict": "passed",
+  "auditor": {
+    "agent": "second independent translation auditor (lopdev team, `task` subagent), session 84b112fab6ca; did not translate or edit any value it judged, and audited none of the four locales the first auditor covered (es, fr, ru, vi)",
+    "model": "deepseek/deepseek-flash — harness-disclosed cross-vendor fallback, the same descent as the translator lane (pinned anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash) before any string was read or judged. Recorded as the fallback, never the pinned id; no native-speaker pass is claimed for zh-CN, ur or hi."
+  },
+  "hashes": {
+    "record.json": "c9b8172d60613be5effc95a24f159fb90dbd16d12e885386d432704649e9bc03",
+    "rendered.txt": "40efc3ebe5b64b055dd6e4377e1ba3ded4a56558a91c164cac42dd22c9637f0b",
+    "report.md": "c3e018af9e4d3e53ca95dd566946f8c84e1b8054fe0af06ad79449024db58e8c"
+  }
+}

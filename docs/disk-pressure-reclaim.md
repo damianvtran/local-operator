@@ -6,6 +6,7 @@ nobody needs an ad-hoc `rm -rf` / `shutil.rmtree` sweep under pressure (issue
 
 ```
 lop disk reclaim [--repo PATH]... [--go-build-cache] [--scratchpads]
+                 [--build-output PATH]...
                  [--min-idle-minutes N] [--apply [--yes]] [--force] [--json]
 ```
 
@@ -108,6 +109,84 @@ other arbitrary data directories are deliberately **not** in it. This change add
 governs scratchpad *writes*, an agent can no longer write files under a directory
 of those names (case-insensitive, and `gocache.<x>` via the dot boundary), exactly
 like `node_modules` or `target` today.
+
+### Project build output — `--build-output PATH` (repeatable)
+
+You name each **project** directory; its build output is then considered, one
+level deep, for the shape names below. Nothing is discovered and nothing is
+defaulted: a folder called `build` that you did not point at is never examined.
+
+A shape is only even a *candidate* when the named directory holds a manifest that
+proves a project of that kind owns it. That gate is why this is safe on a machine
+with non-technical users: `~/projects/build` with no manifest beside it is
+somebody's data, not build output, so it is not a candidate at all — whatever it
+contains and however large it is. Two locations are refused before the gate even
+runs, because a manifest is not evidence about them: `$HOME` itself and the
+standard data directories inside it (`Documents`, `Desktop`, `Downloads`,
+`Movies`, `Music`, `Pictures`). Anything that drops a `package.json` at the top of
+home would otherwise make `~/dist` reclaimable.
+
+| Shape | Proven by a manifest in the project root | Producer processes |
+|---|---|---|
+| `target` | `Cargo.toml` | cargo, rustc, rustdoc, clippy-driver, sccache |
+| `.next` | `package.json` | next, vite, tsc, webpack, esbuild |
+| `build` | `CMakeLists.txt`, `build.gradle[.kts]`, `settings.gradle[.kts]`, `meson.build`, `Makefile`, `package.json`, `pyproject.toml`, `setup.py` | cmake, make, ninja, gradle, mvn, maven, xcodebuild |
+| `dist` | `pyproject.toml`, `setup.py`, `package.json`, `Cargo.toml`, `tsconfig.json` | python, pip, uv, setuptools |
+
+Adding an ecosystem is one row in `BUILD_OUTPUT_SHAPES`, not a new code path or a
+second command. `node_modules`, `.venv` and any name outside that table are never
+candidates. `node`, `npm`, `pnpm` and `yarn` are deliberately *not* producer
+processes: they are far too common to be evidence, and the producers a build runs
+(`next build` is `node .../.bin/next`) are attributable by themselves.
+
+A candidate is reclaimable only when **all** hold; the first that fails is the
+reported reason:
+
+| Predicate | Kept as |
+|---|---|
+| it is not a symlink, and no path component down from the named root is one | `symlink` |
+| it is not a mount point, and the walk does not cross onto another filesystem inside it | `mount-point` |
+| it contains no `.git` entry (dir **or** the file a linked worktree carries) at its own root **or anywhere below it**, and is not itself a git directory (`--bare`, `--separate-git-dir`) | `git-repository` |
+| its project root is not `$HOME` or a standard data directory (`Documents`, `Desktop`, `Downloads`, `Movies`, `Music`, `Pictures`), and it does not contain one of those directories | `protected-location` |
+| idle: newest entry older than the window — `max(--min-idle-minutes, 360)`; lower is rejected, exit 2 | `recent`; unreadable or walk bound hit → `idle-unproven` |
+| git tracks nothing inside it | `git-tracked`; git cannot answer → `git-unknown` |
+| git ignores it | `git-not-ignored`; git cannot answer → `git-unknown` |
+| no open handle beneath it (`lsof`), and no process working in it | `handles-open`; probe failed → `probe-failed` |
+| no attributable build process (`ps` argv + `lsof` cwd) | `toolchain-running`; probe failed → `probe-failed` |
+
+*Idle* is the newest entry in the tree, from the same bounded walk the other
+categories use, so an all-ancient tree is judged on its newest file rather than on
+the shape directory's own mtime. The window is six hours rather than the
+worktree's one, because a build tree is written in bursts by a toolchain a wrapper
+may be driving from elsewhere. *Attribution* is per candidate: a producer process
+whose argv names the candidate or the project root, or whose cwd is at/under the
+project root. A sibling checkout whose name merely extends this one is not
+attributed, so a neighbour's compile does not freeze this project. The generic
+names (`python`, `pip`, `uv`, `setuptools`) are attributed by **cwd only**:
+`lop disk reclaim --build-output <root>` is itself a `python` process whose command
+line contains the root, so argv attribution on those names would block every
+reclaim the command makes — and the command's OWN process is excluded from both
+tables by pid (as is the `lsof` sweep it spawns, which reports its own cwd), so
+running it from inside the named root cannot attribute it to the tree either.
+
+**This category is the one place the command deletes a tree itself.** No tool owns
+the removal of build output (`cargo clean` knows only the `target` it created, and
+nothing collects `.next`/`build`/`dist`), so `disk_pressure.remove_build_output`
+exists, and it re-runs every predicate in this table at removal time, refuses a
+symlink or mount point that appeared in between, never follows a symlink out of
+the tree, and measures the tree immediately before deleting it. It is reachable
+only from `apply`, for items the preview approved. A named root inside the config
+dir is refused, at plan time and again at removal time: the sessions store and
+every session scratchpad live there, and `--scratchpads` reclaims what belongs
+below that path under its own guards. A named root that is `$HOME` or a standard
+data directory is refused for the same class of reason: the manifest gate proves a
+project owns a shape directory, and it must not be possible to make somebody's own
+folder into one by leaving a `package.json` in it.
+
+There are deliberately no settings for this category: the threshold *is* the
+window above, dry-run *is* the command's default, and "enabled" *is* naming
+`--build-output`. The output is English-only operator CLI text, like the rest of
+this command.
 
 ## Never touched
 

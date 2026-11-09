@@ -829,6 +829,17 @@ def _compose_index_rows(
                 ),
                 "blind": bool(counters.get("blind")),
                 "blind_reason": str(counters.get("blind_reason") or ""),
+                # The failing/empty health pair, added to BOTH composers in the
+                # same change (see the key-set note above): without it a cold
+                # reader renders a failing watch as "nothing has changed".
+                # ``failing_checks``/``failing_notice_checks`` ride along so the
+                # reader can tell a single failed check from an announced
+                # episode without importing the scheduler's policy.
+                "failing": bool(counters.get("failing")),
+                "failing_checks": counters.get("failing_ticks", 0),
+                "failing_notice_checks": counters.get("failing_notice_checks", 0),
+                "failure_limit": counters.get("failure_limit", 0),
+                "empty_checks": counters.get("empty_checks", 0),
             }
         )
     return rows

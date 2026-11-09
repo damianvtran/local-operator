@@ -2675,7 +2675,11 @@ class MonitorDeltaBlock(WakeBlock):
     #: The notice kinds painted on the warning tier. ``restored`` is good news
     #: and keeps the neutral ink; a stalled or disabled watch is the state the
     #: operator has to act on, and the band already paints both in amber.
-    WARNING_NOTICE_KINDS = ("disabled", "stalled")
+    #: ``failing`` joins them: the watch is armed and reporting NOTHING, which is
+    #: the state the incident's 90 minutes of silence was (the call could not
+    #: run at all). ``empty`` stays neutral — a call that answers with nothing is
+    #: a fact to read, not a fault to fix.
+    WARNING_NOTICE_KINDS = ("disabled", "stalled", "failing")
 
     def _notice_kind(self) -> str:
         from local_operator.harness.rows import monitor_notice_kind

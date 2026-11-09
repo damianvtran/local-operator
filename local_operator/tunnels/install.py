@@ -645,12 +645,15 @@ def _park_heal_prerequisite(detail: str, credential_id: int) -> None:
 
 HEAL_TRIGGER_LOGIN = "login"
 HEAL_TRIGGER_CONNECTOR_START = "connector_start"
+HEAL_TRIGGER_SETUP_REPOINT = "setup_repoint"
 """The receipt's ``trigger``: which path re-pointed the pin.
 
-Two paths write the same receipt — a verified sign-in, and the connector's own
-start-time reconcile — and an operator (or a later incident read) asking "why
-did my tunnel move to credential N?" needs to tell "I signed in" from "the
-connector found the pin dead when it started" without correlating logs.
+Three paths write the same receipt — a verified sign-in, the connector's own
+start-time reconcile, and the setup plan's own apply (issue #3520: the desktop
+plan offered the re-point and the operator pressed Run) — and an operator (or a
+later incident read) asking "why did my tunnel move to credential N?" needs to
+tell "I signed in" from "the connector found the pin dead when it started" from
+"setup repaired the pin the plan had already named" without correlating logs.
 """
 
 
@@ -659,12 +662,14 @@ def _repoint_pin(*, fresh_id: int | None, trigger: str) -> tuple[int, int] | Non
 
     THE FILE-SIDE HALF OF EVERY PIN HEAL, shared rather than copied: the login
     hook (:func:`heal_pin_after_login`, ``fresh_id`` = the row the sign-in just
-    wrote — a membership check) and the connector's start-time reconcile
+    wrote — a membership check), the connector's start-time reconcile
     (:func:`heal_pin_at_start`, ``fresh_id=None`` — the single current
     same-account row, so any number of replacements while no heal ran still
-    resolves). Two copies of a re-point that moves which row carries the
-    tunnel's bearer would drift, and a drift here is a tunnel connected as the
-    wrong account.
+    resolves), and the setup plan's own apply (``HEAL_TRIGGER_SETUP_REPOINT``,
+    also ``fresh_id=None``: the plan named the successor and the operator pressed
+    Run). Three copies of a re-point that moves which row carries the tunnel's
+    bearer would drift, and a drift here is a tunnel connected as the wrong
+    account.
 
     The guards are the proof's (:func:`api.same_account_successor`: dead or
     gone pin, same account, same hub, exactly one candidate) plus a configured,

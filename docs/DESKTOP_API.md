@@ -470,8 +470,15 @@ Responses use the normal `{status,message,result}` envelope. `result` contains:
   not raw provider responses or another persisted setup journal.
 
 `blocked_on` vocabulary: `none`, `login`, `choose_account`, `owner_missing`,
-`quote`, `quote_unread`, `account`, `cloudflared`, `mobile_bundle`, `supervisor`,
-`balance`, `stopped`, `verification`, `failed`, `in_progress`. Prerequisite
+`repoint`, `quote`, `quote_unread`, `account`, `cloudflared`, `mobile_bundle`,
+`supervisor`, `balance`, `stopped`, `verification`, `failed`, `in_progress`.
+`repoint` is a ready, non-terminal blocker: the pinned credential is dead or
+gone and a provable same-account successor sits on this device, so the remedy is
+`kind: run` — the client renders its primary control when `ready` is true and
+posts the plan's own `credential_id` back as `run`, which moves the pin. It is
+not an account choice (`credential_choices` stays empty here) and answers the
+same on the local poll and the fresh plan, so a client may not substitute a
+credential of its own for it. Prerequisite
 remedies direct an approved normal installation/preparation step; the route
 never installs cloudflared or builds the interface silently. Only fresh active
 cloud route + actual connected producer + gateway + healthy/protected mobile

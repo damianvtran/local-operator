@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "mobile.setup",
+  "history_sha256": "4025381b33f4c552c7c8feae515cffeb91bff9ac227240a4d5f8a21c8e71669c",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "mobile.setup",
+      "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+      "translator": {
+        "agent": "i18n translator lane, `task` teammate of the lopdev team, session 86c6d01615c6",
+        "model": "deepseek/deepseek-flash (quota-driven cross-vendor fallback from the lane's pinned anthropic/claude-opus-5-5, descending via openai/gpt-6.1-sol; the fallback actually wrote the text)",
+        "date": "2026-11-08"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent `task` subagent, session e7b6613db529; did not translate or edit any value it judged",
+        "model": "deepseek/deepseek-flash (quota-driven cross-vendor fallback from the session's pinned anthropic/claude-opus-5-5, descending via openai/gpt-6.1-sol; the fallback performed the audit)",
+        "date": "2026-11-08",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Repoint family (3 keys) appended to a complete 79-key namespace; round 1 independent audit PASSED, 0 blocker / 0 major / 0 minor / 2 nit. Evidence: i18n/audits/evidence/ru/mobile.setup/r1/record.json (+ report.md, rendered.txt, receipt.json), round r1. RU-01 nit: analytic «более новый вход» kept deliberately — «новый вход» would invite the 'sign in again' reading this plan refuses. RU-02 nit: plural-only «учётные данные {id}» for one credential row, matching mobile.setup.account. Glossaries/terms checked: вход = sign-in vs подключение = network connection (no fr-style polysemy), устройство, учётная запись, адрес телефона. Not verified: native-speaker review, no terminal/desktop frame.",
+      "evidence": "i18n/audits/evidence/ru/mobile.setup/r1/record.json",
+      "round": "r1",
+      "keys_audited": 3
+    }
+  ]
+}

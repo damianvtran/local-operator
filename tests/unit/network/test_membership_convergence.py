@@ -380,6 +380,9 @@ def test_membership_converges_over_links_that_were_already_up(
     # every relay silent for >4 s at a time, which is the host, not the code) — and a
     # test whose verdict depends on the host's load decides nothing.
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
+    # inside this test and its own window would expire waiting for a pull.
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
 
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -487,6 +490,9 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
     authoritative is worse than an error, because an operator acts on it.
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
+    # inside this test and its own window would expire waiting for a pull.
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
 
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2142,6 +2148,9 @@ def test_a_settled_link_pulls_no_rows_and_every_change_still_lands(
     and on one keyed on the authority digest (the rename never lands).
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
+    # inside this test and its own window would expire waiting for a pull.
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2225,6 +2234,9 @@ def test_a_share_to_a_drive_device_still_settles_to_unchanged(
     ``unchanged`` each way). Fails on a digest that covers ``capabilities``.
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
+    # inside this test and its own window would expire waiting for a pull.
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2312,6 +2324,9 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     C advertise it — pulls conditionally. A row added on EITHER side reaches the other.
     """
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", 1.0)
+    # ...and the CEILING too: the backoff would otherwise climb to the real 30 s
+    # inside this test and its own window would expire waiting for a pull.
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", 2.0)
     monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", 0.25)
     seen = _spy_member_list(monkeypatch)
     a = _make(devices, "a", mode=DIAL_ONLY)
@@ -2349,3 +2364,254 @@ def test_a_mixed_build_mesh_converges_and_the_old_side_never_sees_the_digest(
     ), seen[count:]
     from_c = [r for r in seen[count:] if r["asker"] == c.device_id]
     assert from_c and all(not r["if_digest"] and r["rows"] for r in from_c), from_c
+
+
+# ---------------------------------------------------------------------------
+# Pull FREQUENCY: a settled link backs off, and nothing goes stale
+# ---------------------------------------------------------------------------
+#
+# #3608 made every pull small (297 B on the wire). What was left was the RATE:
+# both ends of every link asked four times a minute for a table that had not
+# moved. These cells pin the backoff that answers it, and — the part that
+# matters — that convergence and the freshness sentence survive it.
+
+#: THE COMPRESSED CLOCK THE BACKOFF RUNS ON, and why it takes THREE numbers the
+#: way production takes three: the floor and the ceiling define the doubling
+#: (0.2 -> 0.4 -> 0.8 s) and the cadence is the granularity of "due". Small
+#: enough to run, large enough that "backed off" and "due" are separated by an
+#: assertion instead of a race.
+_BACKOFF_FLOOR_S = 0.2
+_BACKOFF_CEILING_S = 0.8
+_BACKOFF_PASS_S = 0.05
+
+
+@pytest.fixture()
+def backoff_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MIN_INTERVAL_S", _BACKOFF_FLOOR_S)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_MAX_INTERVAL_S", _BACKOFF_CEILING_S)
+    monkeypatch.setattr(relay, "MEMBERSHIP_PULL_PASS_S", _BACKOFF_PASS_S)
+
+
+def _settled_pair(devices: Any, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, Any, str, Any]:
+    """A dial-only leaf joined to a hub and linked to it: the two-relay baseline."""
+    a = _make(devices, "a", mode=DIAL_ONLY)
+    c = _make(devices, "c", mode=HUB)
+    record = _init_network(c.server)
+    assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
+    link, reason = a.server.dial(record.network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert link is not None, reason
+    return a, c, record.network_id, link
+
+
+def _backed_off(a: Any, c: Any) -> bool:
+    """Both ends of the pair have settled: each of their OWN pull intervals is at the ceiling.
+
+    BOTH, because each end schedules its own asks — a bound proved for one
+    direction says nothing about the other, and every change that crosses this
+    pull crosses it in the direction of the device that asks.
+    """
+    mine = a.server._link_for(c.device_id)  # noqa: SLF001
+    theirs = c.server._link_for(a.device_id)  # noqa: SLF001
+    return (
+        mine is not None
+        and theirs is not None
+        and mine.member_pull_interval_s >= _BACKOFF_CEILING_S
+        and theirs.member_pull_interval_s >= _BACKOFF_CEILING_S
+    )
+
+
+def _rename_own_row(device: Any, network_id: str, name: str) -> None:
+    """Rename ``device``'s own row, the change that travels ONLY by this pull."""
+    with store.mutate(network_id, device.root) as copy:
+        own = copy.member(device.device_id)
+        assert own is not None
+        own.name = name
+        store.save(copy, device.root)
+
+
+def test_a_settled_link_backs_off_and_a_rename_still_lands_within_the_bound(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, backoff_clock: None
+) -> None:
+    """The frequency half: a quiet link asks less, and a rename still crosses.
+
+    THE BOUND THIS PINS IS THE WHOLE OF THE CONCESSION. A rename of the sender's
+    own row travels by this pull alone (``member_sync_digest`` hashes ``name`` for
+    the sender's row only), so on a backed-off link its worst case is the ceiling
+    plus one cadence of scheduling slop. Measured here rather than recomputed from
+    the constants, because the constants are the only thing the test supplies.
+    """
+    seen = _spy_member_list(monkeypatch)
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    assert net_fixtures.wait_for(lambda: _backed_off(a, c)), (
+        link.member_pull_interval_s,
+        getattr(c.server._link_for(a.device_id), "member_pull_interval_s", None),  # noqa: SLF001
+        seen,
+    )
+
+    # A LINK AT THE CEILING IS NOT ASKED AT THE FLOOR RATE. An age past the floor
+    # and short of the ceiling costs a walk and no traffic at all.
+    link.member_pulled_at = time.time() - (_BACKOFF_FLOOR_S + 0.1)
+    before = len(seen)
+    report = a.server.refresh_membership()[network_id]
+    assert not [row for row in seen[before:] if row["asker"] == a.device_id], seen[before:]
+    assert [row["device_id"] for row in report.not_due] == [c.device_id], report.not_due
+
+    _rename_own_row(c, network_id, "hub-renamed")
+    started = time.monotonic()
+    # Slop is the cadence plus this host's own scheduling, not a second ceiling.
+    bound = _BACKOFF_CEILING_S + _BACKOFF_PASS_S + 1.0
+    assert net_fixtures.wait_for(
+        lambda: (row := _row(a, c.device_id)) is not None and row.name == "hub-renamed",
+        timeout_s=bound,
+    ), _row(a, c.device_id)
+    elapsed = time.monotonic() - started
+    assert elapsed <= bound, (elapsed, bound)
+
+
+def test_a_change_resets_the_interval_to_the_floor_immediately(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, backoff_clock: None
+) -> None:
+    """A change does not wait out the backoff it just invalidated.
+
+    Two halves, and the second is the one that would rot: the interval goes back to
+    the floor on the pull that brought the change, AND the schedule then honours
+    it — a backdated stamp past the floor is asked at once, which is exactly what
+    the backed-off link above does NOT do at that age.
+    """
+    seen = _spy_member_list(monkeypatch)
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    assert net_fixtures.wait_for(lambda: _backed_off(a, c)), link.member_pull_interval_s
+
+    _rename_own_row(c, network_id, "hub-renamed")
+    link.member_pulled_at = time.time() - (_BACKOFF_CEILING_S + 0.05)
+    a.server.refresh_membership()
+    row = _row(a, c.device_id)
+    assert row is not None and row.name == "hub-renamed", row
+    assert link.member_pull_interval_s == _BACKOFF_FLOOR_S, link.member_pull_interval_s
+
+    # THE RESET IS THE SCHEDULE, NOT A FIELD: at an age past the floor the peer is
+    # asked again, where a link still on the ceiling would not be.
+    link.member_pulled_at = time.time() - (_BACKOFF_FLOOR_S + 0.05)
+    before = len(seen)
+    a.server.refresh_membership()
+    assert [
+        row for row in seen[before:] if row["asker"] == a.device_id and row["server"] == c.device_id
+    ], seen[before:]
+
+
+def test_a_removal_lands_while_the_link_is_backed_off(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, backoff_clock: None
+) -> None:
+    """A removal is pushed, so the backoff costs it nothing.
+
+    The half of the bound that a removal does NOT pay: it travels by ``net_epoch``
+    / ``removed_ids``, not by this pull, so it lands faster than even one
+    backed-off interval — the reason the ceiling may be chosen for the rename.
+    """
+    a, c, network_id, _link = _settled_pair(devices, monkeypatch)
+    b = _make(devices, "b", mode=HUB)
+    assert _join(b, inviter=c, monkeypatch=monkeypatch)["device_id"] == b.device_id
+    assert net_fixtures.wait_for(lambda: _backed_off(a, c))
+
+    started = time.monotonic()
+    outcome = c.server._ctl_member_rm(  # noqa: SLF001 — the CLI's own control op
+        {"network": network_id, "device_id": b.device_id}
+    )
+    assert outcome.get("ok") is not False, outcome
+    assert net_fixtures.wait_for(
+        lambda: (row := _row(a, b.device_id)) is not None and row.active is False,
+        timeout_s=_BACKOFF_CEILING_S + _BACKOFF_PASS_S + 1.0,
+    ), _row(a, b.device_id)
+    elapsed = time.monotonic() - started
+    assert elapsed < _BACKOFF_CEILING_S, (elapsed, "a removal must not wait out a pull")
+
+
+def test_a_peer_without_the_digest_capability_never_backs_off(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, backoff_clock: None
+) -> None:
+    """Mixed versions: a link whose peer cannot answer ``unchanged`` keeps today's rate.
+
+    The capability is a HANDSHAKE property, and stripping it from the live link is
+    that property's observable (the same way ``test_a_mixed_build_mesh...`` models
+    an older peer). Every ask from then on is unconditional, every answer is a full
+    table, and nothing the peer says proves the two tables agree — so the interval
+    may not leave the floor. This is "an older peer is unaffected" in one place:
+    the backoff is unreachable without a digest-verified ``unchanged``.
+    """
+    seen = _spy_member_list(monkeypatch)
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    assert net_fixtures.wait_for(lambda: link.member_pulled_at > 0.0)
+    link.capabilities = frozenset(link.capabilities - {wire.MEMBER_LIST_DIGEST_V1})
+    mark = len(seen)
+
+    for _ in range(3):
+        # Past every interval, so "due" is never the question this loop is asking.
+        link.member_pulled_at = time.time() - (_BACKOFF_CEILING_S + 0.05)
+        a.server.refresh_membership()
+        assert link.member_pull_interval_s == _BACKOFF_FLOOR_S, link.member_pull_interval_s
+
+    asked = [
+        row for row in seen[mark:] if row["asker"] == a.device_id and row["server"] == c.device_id
+    ]
+    assert asked, seen[mark:]
+    assert all(
+        not row["if_digest"] and row["rows"] and not row["unchanged"] for row in asked
+    ), asked
+
+
+def test_a_backed_off_link_is_still_reported_as_answered_with_its_age(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, backoff_clock: None
+) -> None:
+    """`lop network status` stays truthful while a link is backed off.
+
+    NOT ASKED IS NOT UNANSWERED. The digest answer already stamped "this peer's
+    table answered"; a pass that skips the ask must keep reporting the peer as
+    answered, with the TRUE age of that answer, so the sentence it renders says
+    "members verified with all 1 peer(s) (N ago)" rather than "no table came back".
+    The age is the assertion that matters: a report that quietly presented a
+    backed-off answer as fresh would be the same bug from the other side.
+    """
+    seen = _spy_member_list(monkeypatch)
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    assert net_fixtures.wait_for(lambda: _backed_off(a, c)), link.member_pull_interval_s
+
+    link.member_pulled_at = time.time() - (_BACKOFF_FLOOR_S + 0.1)
+    before = len(seen)
+    report = a.server.refresh_membership()[network_id]
+    assert not [row for row in seen[before:] if row["asker"] == a.device_id], seen[before:]
+    assert report.answered == [c.device_id], report
+    assert report.silent == [] and report.complete is True, report
+    age = report.oldest_answer_age_s
+    assert age is not None and age >= _BACKOFF_FLOOR_S, age
+    payload = report.to_json()
+    assert payload["not_answered"] == [] and payload["answered"] == [c.device_id], payload
+    assert payload["oldest_answer_age_s"] is not None
+    assert payload["sentence"].startswith("members verified with all 1 peer(s)"), payload[
+        "sentence"
+    ]
+
+
+def test_every_member_field_is_classified_for_the_sync_digest() -> None:
+    """Review R2-m1: the three digest sets PARTITION ``fields(MemberRecord)``.
+
+    WHY THE PARTITION AND NOT JUST THE BEHAVIOUR: the per-field cell above proves
+    every field this build has behaves as the rule says, and passes just as happily
+    for a NEW field nobody hashed — it simply falls outside both hashed sets, so
+    ``expect=False`` holds and a field the merge might be taught to adopt is
+    silently classed local. That is the one direction that withholds a change.
+    Spelling the local set out turns "a field was added" into a failure until
+    somebody classifies it.
+    """
+    import dataclasses
+
+    every = {field.name for field in dataclasses.fields(types.MemberRecord)}
+    adopted = relay.SYNC_DIGEST_ADOPTED_FIELDS
+    partial = relay.SYNC_DIGEST_PARTIAL_FIELDS
+    local = relay.SYNC_DIGEST_LOCAL_FIELDS
+    assert not (adopted & partial), adopted & partial
+    assert not (adopted & local), adopted & local
+    assert not (partial & local), partial & local
+    assert adopted | partial | local == every, {
+        "unclassified": every - (adopted | partial | local),
+        "invented": (adopted | partial | local) - every,
+    }

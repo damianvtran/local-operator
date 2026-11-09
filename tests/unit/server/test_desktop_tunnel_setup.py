@@ -16,6 +16,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from local_operator.config_writer import nonblocking_file_claim
+from local_operator.providers.auth_store import AuthStore
 from local_operator.server.routes import desktop_tunnel_setup as routes
 from local_operator.tunnels import api, cli, config, install, report, setup
 
@@ -71,15 +72,22 @@ def upstream(tmp_path, monkeypatch):
             pass
 
         def list_credentials(self, provider):
+            # The row shape the REAL store hands out: the setup poll asks it
+            # whether a pinned row was superseded (#3520), which reads
+            # `disabled_cause` and the grant verdict below.
             return [
                 SimpleNamespace(
                     id=i,
                     provider="radient",
                     credential_type="oauth",
+                    disabled_cause=None,
                     data={"email": f"account{i}@example.test"},
                 )
                 for i in (17, 23)
             ]
+
+        def grant_is_dead(self, credential_id):
+            return False
 
         def get_credential(self, selected):
             return next((r for r in self.list_credentials("radient") if r.id == selected), None)
@@ -494,3 +502,101 @@ async def test_deadline_drains_before_504_and_retry(desktop, upstream, monkeypat
     # CI run 38664322352) without any production defect.
     monkeypatch.setattr(routes, "RUN_DEADLINE_S", 30)
     assert (await client.post(PATH, json={"action": "run", "credential_id": 17})).status_code == 200
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_a_repoint_plan_renders_the_primary_action(tmp_path, monkeypatch, local):
+    """#3520: `run` is the only remedy kind the desktop turns into a button.
+
+    The poll (`local=True`) and the fresh plan after Run share this table, so a
+    missing entry would render the generic `check_status` and leave the operator
+    with the sentence and no control — the dead end the issue is about.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    plan = {
+        "step": "repoint",
+        "ready": True,
+        "verified": False,
+        "credential_id": 2,
+        "identity_label": "a***",
+        "configured": True,
+        "remedy": "A newer sign-in to the same Radient account is already on this device.",
+    }
+
+    result = routes._contract(plan, local=local)
+
+    assert result["blocked_on"] == "repoint"
+    assert result["remedy"]["kind"] == "run"
+    assert result["ready"] is True and result["credential_id"] == 2
+    assert result["verified"] is False and result["url"] is None
+
+
+@pytest.mark.asyncio
+async def test_the_desktop_poll_and_run_repoint_a_dead_pin(desktop, upstream, monkeypatch):
+    """#3520 end to end: the poll offers the action, and the run performs it.
+
+    A desktop operator cannot run the terminal command the old plan named, so the
+    whole fix is only real if THIS surface both offers a control and honours it.
+    """
+    from tests.unit.test_tunnels_setup import (
+        ACCOUNT,
+        REAL_LOGIN_VERDICT,
+        _dead_legacy_pin,
+        _live_row,
+    )
+
+    client, _app, _root = desktop
+    # The real store and the real verdict: what the production proof does with a
+    # dead row beside a live same-account one is the subject here.
+    monkeypatch.setattr(api, "AuthStore", AuthStore)
+    monkeypatch.setattr(setup, "AuthStore", AuthStore)
+    monkeypatch.setattr(report, "login_verdict", REAL_LOGIN_VERDICT)
+    # /v1/me is the live account id the cross-account guard compares with; the
+    # fixture's fake derives it from its own token spelling, which this test
+    # replaced with the real store's, so state it directly.
+    monkeypatch.setattr(setup.RadientTunnels, "account_id", AsyncMock(return_value=ACCOUNT))
+    pin = _dead_legacy_pin(ACCOUNT)
+    fresh = _live_row(ACCOUNT)
+    upstream.record.update(
+        id="fixture-tunnel",
+        status="active",
+        gateway_port=config.DEFAULT_GATEWAY_PORT,
+        owner_account_id=ACCOUNT,
+        harnesses=[
+            {
+                "id": "local-operator",
+                "enabled": True,
+                "port": 4098,
+                "hostname": "exact.fixture.example.test",
+            }
+        ],
+    )
+    config.save(
+        {
+            "tunnel_id": "fixture-tunnel",
+            "credential_id": pin,
+            "gateway_port": config.DEFAULT_GATEWAY_PORT,
+            "record": {**upstream.record},
+            "cloudflared_path": "/synthetic/cloudflared",
+            "mobile_password": "kept-test-only",
+        }
+    )
+
+    poll = (await client.get(PATH)).json()["result"]
+
+    assert poll["blocked_on"] == "repoint"
+    assert poll["remedy"]["kind"] == "run"
+    assert poll["ready"] is True and poll["source"] == "local"
+    assert poll["credential_id"] == fresh
+
+    run = (await client.post(PATH, json={"action": "run", "credential_id": fresh})).json()["result"]
+
+    saved = config.load()
+    assert saved["credential_id"] == fresh
+    assert saved["cloudflared_path"] == "/synthetic/cloudflared"
+    assert saved["mobile_password"] == "kept-test-only"
+    assert run["verified"] is True and run["blocked_on"] == "none", json.dumps(run)
+    assert run["receipts"][0]["text"] == (
+        f"Reconnected phone access to this device’s newer sign-in for the same "
+        f"account (credential {fresh})."
+    )
