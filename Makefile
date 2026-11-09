@@ -185,10 +185,12 @@ test-affected: ## Run the tests this branch's diff affects; print PR evidence
 #
 # Before any label write, look for live gates on this head. A status-filtered
 # existence query needs only one result (not a bounded slice of old history).
-# This is an advisory pre-arm guard, not an atomic lock: simultaneous callers
-# or labels added outside this target can still race. Native per-ref concurrency
-# remains the backstop. An intentional duplicate requires the visibly named
-# I_KNOW_A_GATE_RUN_EXISTS=1 override, and still prints the existing run ID.
+# This advisory check refuses positively identified duplicates, not availability:
+# transient lookup outages warn and proceed; auth or malformed responses refuse.
+# It is not an atomic lock: simultaneous direct label writes can still produce
+# two runs. Native per-ref concurrency remains the backstop. The explicit
+# I_KNOW_A_GATE_RUN_EXISTS=1 override skips the lookup with a visible warning,
+# so even an unreachable API cannot prevent an intentional arm.
 # Prints the triggered run and how to follow it.
 merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	@set -e; \
@@ -202,20 +204,32 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	if [ "$$state" != "OPEN" ]; then \
 	  echo "make merge-gate: PR #$(PR) is $$state, not OPEN; only an open PR can be re-armed" >&2; exit 1; \
 	fi; \
+	if [ "$(I_KNOW_A_GATE_RUN_EXISTS)" = "1" ]; then \
+	  echo "WARNING: I_KNOW_A_GATE_RUN_EXISTS=1: existing-gate lookup did not run (skipped); intentionally arming without duplicate detection" >&2; \
+	else \
 	for active_status in queued in_progress pending waiting requested; do \
-	  active="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" \
-	    --commit "$$head_sha" --status "$$active_status" --limit=1 --json databaseId,url \
-	    --jq '.[0] | select(. != null) | "\(.databaseId) \(.url)"')" \
-	    || { echo "make merge-gate: cannot check existing $$active_status gates; no label changed" >&2; exit 1; }; \
+	  if active="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" \
+	    --commit "$$head_sha" --status "$$active_status" --limit=1 --json databaseId,url 2>&1)"; then :; \
+	  else \
+	    if printf '%s\n' "$$active" | grep -Eiq 'HTTP 401|bad credentials|unauthori[sz]ed|authentication failed' \
+	      || { printf '%s\n' "$$active" | grep -Eiq 'HTTP 403' && ! printf '%s\n' "$$active" | grep -Eiq 'rate.?limit'; }; then \
+	      echo "make merge-gate: existing-gate lookup auth/permission failure: $$active; no label changed" >&2; exit 1; \
+	    fi; \
+	    if printf '%s\n' "$$active" | grep -Eiq 'rate.?limit|HTTP 429|HTTP 5[0-9][0-9]|timed? out|timeout|network|connection|no response|API unavailable|error connecting|no such host|TLS handshake|EOF' || [ -z "$$active" ]; then \
+	      echo "WARNING: existing-gate lookup unavailable ($$active_status): $${active:-no response}; proceeding to arm without duplicate detection" >&2; \
+	      break; \
+	    fi; \
+	    echo "make merge-gate: cannot check existing $$active_status gates (auth/permission or unrecognised response): $$active; no label changed" >&2; exit 1; \
+	  fi; \
+	  active="$$(printf '%s\n' "$$active" | jq -er 'if type == "array" and all(.[]; type == "object" and (.databaseId | type == "number") and (.url | type == "string" and length > 0)) then (.[0] // empty | "\(.databaseId) \(.url)"), "" else error("malformed run response") end')" \
+	    || { echo "make merge-gate: malformed existing-gate response; no label changed" >&2; exit 1; }; \
 	  if [ -n "$$active" ]; then \
-	    if [ "$(I_KNOW_A_GATE_RUN_EXISTS)" != "1" ]; then \
 	      echo "make merge-gate: refusing to arm PR #$(PR): $$active_status gate run $$active already exists for $$head_sha" >&2; \
 	      echo "  follow that run; intentional duplicate only: make merge-gate PR=$(PR) I_KNOW_A_GATE_RUN_EXISTS=1" >&2; \
 	      exit 1; \
-	    fi; \
-	    echo "WARNING: I_KNOW_A_GATE_RUN_EXISTS=1: intentionally arming beside $$active_status gate run $$active" >&2; \
 	  fi; \
 	done; \
+	fi; \
 	prev="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
 	  --json databaseId,headSha \
 	  | jq -r --arg sha "$$head_sha" '[.[] | select(.headSha == $$sha)] | .[0].databaseId // empty')" || prev=""; \

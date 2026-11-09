@@ -69,9 +69,13 @@ cross-suite tie-breaking guarantee.
 full-suite PR run on the same branch/head is `queued`, `in_progress`, `pending`,
 `waiting` or `requested`. It prints the existing run ID/URL. Each lookup filters
 by workflow, PR event, branch, head and status; fetching one matching result is
-an existence check, not a potentially incomplete slice of historical runs. API
-lookup failure also refuses without changing labels. Completed historical
-failures do not trigger this active-run guard.
+an existence check, not a potentially incomplete slice of historical runs. This
+is an **advisory check that refuses positively identified duplicates**, not an
+availability gate: transient failures (network, timeout, 5xx or rate limit) warn
+with the reason and proceed to arm; auth/permission failures (401/403, except an
+explicit rate-limit response) and malformed/unauthorised responses refuse without
+changing labels. Completed historical successes or failures do not trigger this
+active-run guard.
 
 An intentional duplicate requires an explicit, visible override:
 
@@ -79,11 +83,14 @@ An intentional duplicate requires an explicit, visible override:
 make merge-gate PR=<n> I_KNOW_A_GATE_RUN_EXISTS=1
 ```
 
-The override prints a warning naming each existing run it finds. It does not
-cancel anything or waive any required check. This is a **pre-arm guard, not an
-atomic lock**: concurrent callers can both pass before either label is added,
-and labels added outside the target bypass the guard. Native concurrency remains
-the backstop. Nothing new is manually enforced at merge time.
+The override is evaluated before any existing-gate lookup and prints a warning
+that the lookup did not run (was skipped), rather than implying it passed. It
+therefore works even when that API is unreachable. It does not cancel anything
+or waive any required check. This is **not an atomic lock**: concurrent callers
+can both pass before either label is added, and simultaneous direct label writes
+can still produce two runs. Labels added outside the target bypass the guard.
+Native concurrency remains the backstop. Nothing new is manually enforced at
+merge time.
 
 The existing concurrency block is unchanged, including the fixed main group
 `full-suite-main`, per-ref PR/dispatch groups and `cancel-in-progress: false`.
@@ -139,8 +146,11 @@ it is never a silent skipped required check.
 
 Local tests execute the real Makefile target with a stubbed GitHub boundary:
 active statuses refuse before any label mutation, no active run arms normally,
-another head does not match, the explicit override warns and arms, and API
-failure fails closed. Topology tests retain the original concurrency contract
+another head does not match, completed-success-only history arms, and the explicit
+override skips an unreachable advisory lookup with a warning. Transient API
+failures warn and arm; auth/permission or malformed responses refuse with no label
+write. Persisted before/after label state and exit codes distinguish both paths.
+Topology tests retain the original concurrency contract
 and pin ownership fields.
 Workflow syntax/expression lint cannot simulate GitHub's scheduler. A real
 `pull_request:labeled` run is still needed to prove the generated run title and

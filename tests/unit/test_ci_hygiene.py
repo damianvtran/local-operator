@@ -3691,7 +3691,7 @@ _MERGE_GATE_BEFORE = "2000-01-01T00:00:00Z"
 #: nothing and the ritual reported failure for every run it armed. The stub
 #: rejects `--arg` the same way, so a regression fails here instead of only on a
 #: real arming. Historical `run list` answers raw JSON for the real `jq`;
-#: the active-run existence query emulates gh's simple, variable-free `--jq`.
+#: the active-run existence query also returns raw JSON for response validation.
 _MERGE_GATE_GH_BODY = """
 import json
 import os
@@ -3718,7 +3718,7 @@ if args[:2] == ["pr", "view"]:
         print(os.environ["STUB_STATE"], os.environ["STUB_SHA"], os.environ["STUB_HEAD"])
         raise SystemExit(0)
     if "labels" in args:
-        for label in os.environ.get("STUB_LABELS", "").split():
+        for label in json.loads(Path(os.environ["STUB_LABEL_STATE"]).read_text()):
             print(label)
         raise SystemExit(0)
     answer("unexpected pr view: " + " ".join(args), 3)
@@ -3729,6 +3729,17 @@ if args[:2] == ["label", "create"]:
 if args[:2] == ["pr", "edit"]:
     if "--remove-label" in args and os.environ.get("STUB_REMOVE_FAIL") == "1":
         answer("could not update label", 1)
+    label_state = Path(os.environ["STUB_LABEL_STATE"])
+    labels = json.loads(label_state.read_text())
+    if "--remove-label" in args:
+        labels.remove(args[args.index("--remove-label") + 1])
+    if "--add-label" in args:
+        label = args[args.index("--add-label") + 1]
+        if label not in labels:
+            labels.append(label)
+    label_state.write_text(json.dumps(labels))
+    with Path(os.environ["STUB_LABEL_TRANSITIONS"]).open("a") as handle:
+        handle.write(json.dumps(labels) + "\\n")
     raise SystemExit(0)
 
 if args[:2] == ["run", "list"]:
@@ -3737,12 +3748,16 @@ if args[:2] == ["run", "list"]:
             answer("active lookup must filter head and eligible event", 3)
         status = args[args.index("--status") + 1]
         sha = args[args.index("--commit") + 1]
-        if os.environ.get("STUB_ACTIVE_FAIL") == "1":
-            answer("API unavailable", 1)
-        for run in json.loads(os.environ.get("STUB_ACTIVE_RUNS", "[]")):
-            if run["status"] == status and run["headSha"] == sha:
-                print(run["databaseId"], run["url"])
-                break
+        failure = os.environ.get("STUB_ACTIVE_FAIL", "0")
+        if failure != "0":
+            answer(failure, 1)
+        if os.environ.get("STUB_ACTIVE_RESPONSE"):
+            answer(os.environ["STUB_ACTIVE_RESPONSE"], 0)
+        print(json.dumps([
+            {"databaseId": run["databaseId"], "url": run["url"]}
+            for run in json.loads(os.environ.get("STUB_ACTIVE_RUNS", "[]"))
+            if run["headSha"] == sha and run["status"] == status
+        ][:1]))
         raise SystemExit(0)
     counter = Path(os.environ["STUB_RUN_LIST_COUNT"])
     calls = int(counter.read_text()) if counter.exists() else 0
@@ -3782,6 +3797,7 @@ def _arm_merge_gate(
     poll_runs: str = "[]",
     active_runs: str = "[]",
     active_fail: str = "0",
+    active_response: str = "",
     know_run_exists: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     """Run the REAL `make merge-gate` target with a stubbed `gh` on PATH.
@@ -3803,6 +3819,9 @@ def _arm_merge_gate(
     (shim / "sleep").chmod(0o755)
     (tmp_path / "home").mkdir(exist_ok=True)
     log = tmp_path / "gh.log"
+    # Persist boundary state: a re-arm must really remove/add the existing label,
+    # not merely record an add intention that would emit no labeled event.
+    (tmp_path / "labels.json").write_text(json.dumps(labels.split()))
     env = {
         **{k: v for k, v in os.environ.items() if not k.startswith("CMUX_")},
         "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -3812,13 +3831,15 @@ def _arm_merge_gate(
         "STUB_SHA": _MERGE_GATE_SHA,
         "STUB_HEAD": "ci/merge-gate-merge-gate",
         "STUB_STATE": state,
-        "STUB_LABELS": labels,
+        "STUB_LABEL_STATE": str(tmp_path / "labels.json"),
+        "STUB_LABEL_TRANSITIONS": str(tmp_path / "label-transitions.jsonl"),
         "STUB_REMOVE_FAIL": remove_fail,
         "STUB_PR_MISSING": pr_missing,
         "STUB_PREV_RUNS": prev_runs,
         "STUB_POLL_RUNS": poll_runs,
         "STUB_ACTIVE_RUNS": active_runs,
         "STUB_ACTIVE_FAIL": active_fail,
+        "STUB_ACTIVE_RESPONSE": active_response,
     }
     proc = subprocess.run(
         [
@@ -3945,8 +3966,11 @@ def test_merge_gate_refuses_an_existing_live_gate(tmp_path: Path, status: str) -
             "status": status,
         }
     ]
-    proc, calls = _arm_merge_gate(tmp_path, active_runs=json.dumps(active))
-    assert proc.returncode != 0
+    proc, calls = _arm_merge_gate(
+        tmp_path, labels="ready-to-merge synthetic", active_runs=json.dumps(active)
+    )
+    assert proc.returncode == 2
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge", "synthetic"]
     assert "refusing to arm" in proc.stderr and "4242" in proc.stderr
     assert "I_KNOW_A_GATE_RUN_EXISTS=1" in proc.stderr
     assert not any(call.startswith(("pr edit", "label create")) for call in calls)
@@ -3976,14 +4000,103 @@ def test_merge_gate_explicit_duplicate_override_and_other_head_control(
     assert "--add-label" in "\n".join(calls)
     assert ("WARNING: I_KNOW_A_GATE_RUN_EXISTS=1" in proc.stderr) is same_head
     if same_head:
-        assert "4242" in proc.stderr
+        assert "lookup did not run (skipped)" in proc.stderr
+        assert not any("--status" in call for call in calls)
 
 
-def test_merge_gate_active_lookup_failure_is_closed(tmp_path: Path) -> None:
-    proc, calls = _arm_merge_gate(tmp_path, active_fail="1")
-    assert proc.returncode != 0
-    assert "cannot check existing queued gates" in proc.stderr
+@pytest.mark.parametrize(
+    ("failure", "arms"),
+    [
+        ("HTTP 500: Internal Server Error", True),
+        ("HTTP 503: Service Unavailable", True),
+        ("request timed out", True),
+        ("HTTP 429: rate limit exceeded", True),
+        ("HTTP 403: API rate limit exceeded", True),
+        ("error connecting to api.github.com", True),
+        ("", True),
+        ("HTTP 401: Bad credentials", False),
+        ("HTTP 401: Bad credentials (after connection timeout)", False),
+        ("HTTP 403: Resource not accessible by integration", False),
+        ("unexpected unauthorised response", False),
+    ],
+)
+def test_merge_gate_lookup_availability_is_advisory(
+    tmp_path: Path, failure: str, arms: bool
+) -> None:
+    """Outages must not become a fleet-wide gate; configuration errors stay loud."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge synthetic",
+        active_fail=failure,
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+    )
+    assert proc.returncode == (0 if arms else 2), proc.stderr
+    labels = json.loads((tmp_path / "labels.json").read_text())
+    if arms:
+        assert "WARNING: existing-gate lookup unavailable" in proc.stderr
+        assert (failure or "no response") in proc.stderr
+        assert "proceeding to arm" in proc.stderr
+        assert labels == ["synthetic", "ready-to-merge"]
+        assert (tmp_path / "label-transitions.jsonl").read_text().splitlines() == [
+            '["synthetic"]',
+            '["synthetic", "ready-to-merge"]',
+        ]
+    else:
+        assert "no label changed" in proc.stderr
+        assert labels == ["ready-to-merge", "synthetic"]
+        assert not any(call.startswith(("pr edit", "label create")) for call in calls)
+        assert not (tmp_path / "label-transitions.jsonl").exists()
+
+
+@pytest.mark.parametrize("response", ["not json", '{"message":"Unauthorized"}', "null", '[{}]'])
+def test_merge_gate_malformed_lookup_refuses(tmp_path: Path, response: str) -> None:
+    proc, calls = _arm_merge_gate(
+        tmp_path, labels="ready-to-merge synthetic", active_response=response
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "malformed existing-gate response" in proc.stderr
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge", "synthetic"]
     assert not any(call.startswith(("pr edit", "label create")) for call in calls)
+
+
+def test_merge_gate_completed_success_history_arms(tmp_path: Path) -> None:
+    """A historical green is not an active duplicate or a reason to skip arming."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge synthetic",
+        active_runs=json.dumps(
+            [
+                {
+                    "databaseId": 4242,
+                    "url": "https://example.test/runs/4242",
+                    "headSha": _MERGE_GATE_SHA,
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+            ]
+        ),
+        prev_runs=_merge_gate_runs((4242, _MERGE_GATE_BEFORE)),
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "WARNING" not in proc.stderr
+    assert sum("--status" in call for call in calls) == 5
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
+
+
+def test_merge_gate_override_skips_unreachable_advisory_lookup(tmp_path: Path) -> None:
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge synthetic",
+        active_fail="request timed out",
+        know_run_exists=True,
+        poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "WARNING: I_KNOW_A_GATE_RUN_EXISTS=1" in proc.stderr
+    assert "existing-gate lookup did not run (skipped)" in proc.stderr
+    assert not any("--status" in call for call in calls)
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
 
 
 def test_full_suite_run_name_identifies_the_owning_lane_and_trigger() -> None:
