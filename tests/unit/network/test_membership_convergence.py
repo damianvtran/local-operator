@@ -635,12 +635,9 @@ def test_the_removal_frame_is_applied_by_the_device_it_removes(
         {"network": record.network_id, "device_id": b.device_id}
     )
     assert outcome["epoch"] == 2
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        removed = store.load(record.network_id, b.root)
-        if removed.epoch == 2:
-            break
-        time.sleep(0.05)
+    assert net_fixtures.wait_for(
+        lambda: store.load(record.network_id, b.root).epoch == 2, timeout_s=5.0
+    ), "the removed device never applied the rotation that removed it"
 
     removed = store.load(record.network_id, b.root)
     assert removed.epoch == 2, "the removed device never applied the rotation that removed it"
@@ -865,19 +862,21 @@ def test_a_frame_queued_immediately_before_a_close_reaches_the_peer(
     a_link = next(  # noqa: SLF001
         item for item in a.server.links.values() if item.link_id == link.link_id
     )
-    seen: list[str] = []
+    seen: list[tuple[str, Any]] = []
     original = a_link._handle  # noqa: SLF001
 
     def _spy(frame: dict[str, Any]) -> None:
-        seen.append(str(frame.get("op")))
+        seen.append((str(frame.get("op")), frame.get("req")))
         return original(frame)
 
     a_link._handle = _spy  # type: ignore[method-assign]  # noqa: SLF001
     link.send({"op": "net_member_list", "req": 424242, "locality": "remote"})
     link.close("we-closed")
-    deadline = time.time() + 3.0
-    while time.time() < deadline and not seen:
-        time.sleep(0.05)
+    assert net_fixtures.wait_for(
+        # Other membership pulls can already be in flight on this link. Only
+        # this request proves the frame queued immediately before close arrived.
+        lambda: ("net_member_list", 424242) in seen, timeout_s=3.0
+    ), "the frame queued immediately before the close never arrived: close beat the writer"
 
     assert (
         seen
@@ -1366,8 +1365,9 @@ def test_a_status_read_asks_for_the_pass_it_reports(
     # a pass this fixture or the read itself runs — the cadence is parked for
     # the whole test lifetime.
     assert net_fixtures.wait_for(
-        lambda: a_link.member_pulled_at > 0.0
-    ), "a's establishment pull never stamped the link"
+        lambda: (current := a.server._link_for(b.device_id)) is not None  # noqa: SLF001
+        and current.member_pulled_at > 0.0
+    ), "a's establishment pull never stamped the current link"
     assert net_fixtures.wait_for(
         lambda: a.server._membership_seq > admit_seq  # noqa: SLF001
     ), "a's admit-time contact_peers pass never completed"
@@ -1378,6 +1378,10 @@ def test_a_status_read_asks_for_the_pass_it_reports(
     assert net_fixtures.wait_for(
         _all_inbound_done
     ), "an inbound handshake can still restamp the link"
+    # Resolve AFTER quiescence: an admit-time dial can replace the link captured
+    # above. Re-arming that retired object would not make the live pull due.
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001
+    assert a_link is not None, "a holds no live link after its handshakes settled"
 
     # THE BASELINE, made deterministic instead of assumed: one completed pass
     # that really answers the link. The due window is re-opened first so this
@@ -1444,8 +1448,9 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     # is the event: it is written exactly once per establishment pull, so waiting for
     # it leaves no other writer racing the arm.
     assert net_fixtures.wait_for(
-        lambda: a_link.member_pulled_at > 0.0
-    ), "a's establishment pull never stamped the link"
+        lambda: (current := a.server._link_for(b.device_id)) is not None  # noqa: SLF001
+        and current.member_pulled_at > 0.0
+    ), "a's establishment pull never stamped the current link"
 
     # AND LET THE ADMIT-TIME PASS COMPLETE TOO, or one writer the test does not
     # control can still restamp the link behind the arm below (agent review round 1,
@@ -1480,6 +1485,10 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     assert net_fixtures.wait_for(
         _all_inbound_done
     ), "an inbound handshake can still restamp the link"
+    # Resolve AFTER quiescence: an admit-time dial can replace the link captured
+    # above. Re-arming that retired object would not make the live pull due.
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001
+    assert a_link is not None, "a holds no live link after its handshakes settled"
 
     # A completed pass first: the fallback must BE this one, so make it answer with
     # b's table (a real pull — the link is up, and the zero makes it due).
@@ -1547,8 +1556,9 @@ def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
     # Quiesce unprompted writers (same derivation as the hung-pass sibling):
     # establishment stamp, admit-time pass, and every inbound handshake.
     assert net_fixtures.wait_for(
-        lambda: a_link.member_pulled_at > 0.0
-    ), "a's establishment pull never stamped the link"
+        lambda: (current := a.server._link_for(b.device_id)) is not None  # noqa: SLF001
+        and current.member_pulled_at > 0.0
+    ), "a's establishment pull never stamped the current link"
     assert net_fixtures.wait_for(
         lambda: a.server._membership_seq > admit_seq  # noqa: SLF001
     ), "a's admit-time contact_peers pass never completed"
@@ -1559,6 +1569,10 @@ def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
     assert net_fixtures.wait_for(
         _all_inbound_done
     ), "an inbound handshake can still restamp the link"
+    # Resolve AFTER quiescence: an admit-time dial can replace the link captured
+    # above. Re-arming that retired object would not make the live pull due.
+    a_link = a.server._link_for(b.device_id)  # noqa: SLF001
+    assert a_link is not None, "a holds no live link after its handshakes settled"
 
     def _row(payload: dict[str, Any]) -> dict[str, Any]:
         return next(row for row in payload["networks"] if row["network_id"] == record.network_id)
@@ -2063,6 +2077,28 @@ def test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pa
 # compressed with 6). The conditional pull answers "unchanged" instead — and the
 # cells below pin the two ways that could go wrong: a table change hidden behind an
 # "unchanged" answer, and an older build being sent a key it does not know.
+
+
+def _without_digest_advertisement(monkeypatch: pytest.MonkeyPatch, device: Device) -> None:
+    """Model an old build before its handshake can start any membership pulls.
+
+    Capabilities decide the request at frame construction, not when the answer
+    spy appends its receipt. Editing a live link therefore leaves already-built
+    conditional requests in flight. Filter the advertisement instead: every link
+    learns the old build's immutable capability set before it can send a frame.
+    """
+    original = Handshake.new
+
+    def _new(**fields: Any) -> Handshake:
+        if fields["identity"].device_id == device.device_id:
+            fields["capabilities"] = [
+                cap
+                for cap in fields.get("capabilities", wire.LINK_CAPABILITIES)
+                if cap != wire.MEMBER_LIST_DIGEST_V1
+            ]
+        return original(**fields)
+
+    monkeypatch.setattr(Handshake, "new", _new)
 
 
 def _spy_member_list(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -2596,18 +2632,27 @@ def test_a_peer_without_the_digest_capability_never_backs_off(
 ) -> None:
     """Mixed versions: a link whose peer cannot answer ``unchanged`` keeps today's rate.
 
-    The capability is a HANDSHAKE property, and stripping it from the live link is
-    that property's observable (the same way ``test_a_mixed_build_mesh...`` models
-    an older peer). Every ask from then on is unconditional, every answer is a full
+    The capability is a HANDSHAKE property: C never advertises it, including on
+    the establishment pull. Every ask is unconditional, every answer is a full
     table, and nothing the peer says proves the two tables agree — so the interval
     may not leave the floor. This is "an older peer is unaffected" in one place:
     the backoff is unreachable without a digest-verified ``unchanged``.
     """
     seen = _spy_member_list(monkeypatch)
-    a, c, network_id, link = _settled_pair(devices, monkeypatch)
-    assert net_fixtures.wait_for(lambda: link.member_pulled_at > 0.0)
-    link.capabilities = frozenset(link.capabilities - {wire.MEMBER_LIST_DIGEST_V1})
-    mark = len(seen)
+    a = _make(devices, "a", mode=DIAL_ONLY)
+    c = _make(devices, "c", mode=HUB)
+    _without_digest_advertisement(monkeypatch, c)
+    record = _init_network(c.server)
+    network_id = record.network_id
+    assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
+    link, reason = a.server.dial(network_id, host=f"{c.host}:{c.port}", epoch=1)
+    assert link is not None, reason
+    assert wire.MEMBER_LIST_DIGEST_V1 not in link.capabilities
+    assert net_fixtures.wait_for(
+        lambda: link.member_pulled_at > 0.0
+        and link.member_pull_interval_s == _BACKOFF_FLOOR_S
+    ), "the old peer's establishment pull never completed at the floor interval"
+    mark = 0  # All requests, not merely answers recorded after a live capability edit.
 
     for _ in range(3):
         # Past every interval, so "due" is never the question this loop is asking.
