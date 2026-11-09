@@ -634,6 +634,28 @@ class RuntimeUnresponsiveError(ConnectionError):
     runtime_alive = True
 
 
+class OwnerReconnectingError(ConnectionError):
+    """This viewer is between connections to an owner the registry still lists live.
+
+    WHY IT EXISTS (the Aida incident, 2026-11-09): a model pick and two ask
+    answers arrived while the desktop viewer was re-dialling a live, busy owner
+    after its stream dropped, and were refused with a plain ``ConnectionError``
+    — which the desktop control ladder (``routes/desktop_sessions.py::errors``)
+    answers ``runtime_unreachable``, "Reconnect and reconcile before
+    retrying". The runtime was there the whole time and a hand retry worked.
+
+    Raised ONLY by :meth:`AttachedSession._refusal_while_reconnecting`, after
+    the owner seam reported a live, non-leaving record for this session, and
+    only at sites where nothing has reached the owner yet — so a resend is
+    safe. ``owner_alive`` is the duck-checked mark the ladder already reads for
+    ``OwnerAckTimeout``; it is deliberately NOT ``runtime_alive``, which the TUI
+    reads to switch its notice register. The sentence is unchanged, so the
+    TUI's copy is too.
+    """
+
+    owner_alive = True
+
+
 _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
     cls.model_fields["type"].default: cls
     for cls in (
@@ -4158,7 +4180,10 @@ class AttachedSession:
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
-            raise ConnectionError(self._unavailable_reason())
+            # ``_ensure_bound`` returns quietly while a recovery owns the dial,
+            # so this is the ask answer that lands mid-reconnect. Nothing was
+            # sent; the owner's liveness decides busy vs gone.
+            raise await self._refusal_while_reconnecting(self._unavailable_reason())
         method = getattr(client, name)
         if tail:
             return await method(ask_id, *tail)
@@ -5165,7 +5190,10 @@ class AttachedSession:
             if retain_unsynced:
                 store = self._frontend_store
                 assert store is not None, "_install_frontend just installed the store"
-                store.replace_and_notify(frontend.snapshot)
+                # The CURRENT state, never ``frontend.snapshot`` again: see
+                # ``_publish_read_rollover`` for the rewind that killed live
+                # connections to busy owners (Aida, 2026-11-09).
+                self._publish_read_rollover(store)
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
             # not leak the half-open socket or inherit its queued epoch suffix.
@@ -5286,11 +5314,36 @@ class AttachedSession:
             # rollover to a live state that does not exist yet.
             store = self._frontend_store
             assert store is not None, "_install_frontend just installed the store"
-            store.replace_and_notify(frontend.snapshot)
+            self._publish_read_rollover(store)
         except BaseException:  # noqa: BLE001 — a refused late sync is a cold read
             logger.debug("late frontend sync for %s was refused", self._session_id, exc_info=True)
             if not self._disposed and self._frontend_future is pending_sync:
                 self._discard_rejected_client()
+
+    @staticmethod
+    def _publish_read_rollover(store: FrontendStateStore) -> None:
+        """Publish a read's rollover from the store's CURRENT state.
+
+        WHY NOT THE SYNC'S SNAPSHOT (the Aida incident, 2026-11-09): both read
+        installs (``_bind_to`` with ``retain_unsynced`` and the late-landing
+        task) used to re-install ``frontend.snapshot`` here, AFTER
+        ``_install_frontend`` had replayed the deltas buffered behind the sync
+        and AFTER the ``_load_frontend_history`` await had let further live
+        deltas apply. On a busy owner those deltas are always there, so the
+        store REWOUND to the snapshot's older sequence while the transport's
+        own counter (``AttachClient._frontend_sequence``) stayed current. The
+        very next delta was then ``transport+1`` but not ``store+1``;
+        ``FrontendStateStore.apply_update`` refused it ("frontend update is not
+        the next state sequence"), the pump tore down a healthy socket, and
+        every control call in the recovery window answered 503.
+
+        The current state already contains the snapshot plus exactly the
+        in-order deltas applied on top of it, so publishing it carries the same
+        rollover to subscribers without moving the sequence backwards. Nothing
+        out of order can be applied: the install itself, the buffer replay and
+        ``apply_update``'s exact ``+1`` check are unchanged.
+        """
+        store.replace_and_notify(store.state)
 
     async def _settle_landed_sync(
         self, pending_sync: asyncio.Future[FrontendSync]
@@ -10461,7 +10514,10 @@ class AttachedSession:
             await self._ensure_bound()
         client = self._client
         if client is None or self._recovering or not client.connected:
-            raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command))
+            # Nothing was sent: the owner's liveness decides busy vs gone.
+            raise await self._refusal_while_reconnecting(
+                _RECONNECTING_SLASH_NOTICE.format(command=command)
+            )
         if command == "model":
             # A forwarded model switch pays the SAME owner-record admission as
             # the facade's own (``_require_routed_model_admission``): the owner
@@ -10482,6 +10538,33 @@ class AttachedSession:
             if getattr(error, "owner_alive", False):
                 raise
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
+
+    async def _refusal_while_reconnecting(self, sentence: str) -> ConnectionError:
+        """The refusal for a call that found no usable connection: busy or gone.
+
+        Busy (:class:`OwnerReconnectingError`) ONLY when the owner seam — the
+        same ``locate`` every bind reads, which for a local runtime is
+        ``find_runtime_record`` (a record whose pid is alive and whose
+        heartbeat is fresh) and for a peer's is the peer's own answer — returns
+        a record that is not ``leaving``. A dead pid, a stale heartbeat, no
+        record, a draining owner, a deliberate stop or a disposed viewer all
+        keep the plain ``ConnectionError`` and therefore ``runtime_unreachable``.
+        A wedged owner (lease held, no live record) also stays plain: this
+        side has not established that it is serving anything.
+
+        Read only on this failure path, so the registry read costs nothing on
+        a healthy call; a failed read is not evidence of life.
+        """
+        if self._disposed or self._deliberate_stop:
+            return ConnectionError(sentence)
+        try:
+            record, _owner = await asyncio.to_thread(self._owner.locate)
+        except Exception:  # noqa: BLE001 — an unreadable registry proves nothing
+            logger.debug("liveness read for %s failed", self._session_id, exc_info=True)
+            return ConnectionError(sentence)
+        if record is not None and not str(getattr(record, "leaving", "") or ""):
+            return OwnerReconnectingError(sentence)
+        return ConnectionError(sentence)
 
     def _require_routed_model_admission(self, args: str) -> None:
         """The ``model`` arm's admission for a slash FORWARDED to the owner.

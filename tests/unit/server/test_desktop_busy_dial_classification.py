@@ -26,18 +26,22 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.mobile import attach_client
 from local_operator.server.routes.desktop_sessions import _owner_busy
+from local_operator.session.runtime import registry
 from tests.unit.server.test_desktop_read_without_owner import TOKEN, _Harness
 from tests.unit.session.test_ownerless_read import (
+    OWNER_PID,
     SESSION_ID,
     _cold_viewer,
     _FakeOwner,
     _publish_live,
     _seed,
+    _until,
 )
 
 #: Well under ``DESKTOP_CONTROL_ATTACH_S`` (3.0 s): see the module docstring.
@@ -172,3 +176,70 @@ async def test_an_ask_answer_to_a_live_owner_that_welcomes_late_is_owner_alive(
 
     assert owner.conns >= 1, "the answer never dialled the owner"
     assert _owner_busy(raised.value), repr(raised.value)
+
+
+async def _recovering_viewer(tmp_path: Path) -> tuple[Any, _FakeOwner]:
+    """A viewer whose stream to a LIVE owner dropped and is re-dialling it.
+
+    The owner answers the first dial, then sheds this viewer (the busy-owner
+    shapes: an event-queue overflow, or the sequence rewind fixed alongside
+    this) and stops welcoming new dials in time, so the recovery is still in
+    flight when the next control call lands. Its record and pid stay live.
+    """
+    await _seed(tmp_path)
+    owner = _FakeOwner(SESSION_ID, tmp_path, sync_on_connect=True, answer_watch=True)
+    await owner.start()
+    _publish_live(tmp_path, owner)
+    viewer = await _cold_viewer(tmp_path)
+    assert await viewer.attach_existing(control_budget=5.0) is True
+    owner.mute = True
+    for writer in list(owner._writers):
+        writer.close()
+    owner._writers.clear()
+    await _until(lambda: viewer._recovering, why="the drop never started a recovery")
+    return viewer, owner
+
+
+def _bury(tmp_path: Path) -> None:
+    """The owner is GONE: no record names it any more."""
+    registry.record_path(OWNER_PID, tmp_path).unlink()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gone", [False, True], ids=["live-owner", "gone-owner"])
+async def test_a_slash_during_recovery_is_busy_only_while_the_owner_lives(
+    tmp_path: Path, gone: bool
+) -> None:
+    """``route_shared_slash``'s reconnecting arm: the ``/commands`` model pick."""
+    viewer, owner = await _recovering_viewer(tmp_path)
+    try:
+        if gone:
+            _bury(tmp_path)
+        with pytest.raises(ConnectionError) as raised:
+            await viewer.route_shared_slash("model", "openai/gpt-5")
+    finally:
+        await viewer.dispose()
+        await owner.stop()
+
+    assert _owner_busy(raised.value) is (not gone), repr(raised.value)
+    # The TUI's sentence is unchanged on both arms.
+    assert "try /model again" in str(raised.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gone", [False, True], ids=["live-owner", "gone-owner"])
+async def test_an_ask_answer_during_recovery_is_busy_only_while_the_owner_lives(
+    tmp_path: Path, gone: bool
+) -> None:
+    """``_ask_client_method``'s no-connection arm: ``POST /answers`` mid-reconnect."""
+    viewer, owner = await _recovering_viewer(tmp_path)
+    try:
+        if gone:
+            _bury(tmp_path)
+        with pytest.raises(ConnectionError) as raised:
+            await viewer.ask_respond("ask-synthetic", {"q1": ["yes"]})
+    finally:
+        await viewer.dispose()
+        await owner.stop()
+
+    assert _owner_busy(raised.value) is (not gone), repr(raised.value)
