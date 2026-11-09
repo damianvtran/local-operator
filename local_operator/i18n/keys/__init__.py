@@ -166,6 +166,7 @@ from . import (
     wire_tool_rows_bridge,
     wire_tool_rows_bridge_skipped,
     wire_tunnel_setup,
+    wire_voice,
     wire_voice_availability,
     wire_wakes_supervisor,
 )
@@ -330,6 +331,7 @@ __all__ = [
     "wire_tool_rows_bridge",
     "wire_tool_rows_bridge_skipped",
     "wire_tunnel_setup",
+    "wire_voice",
     "wire_voice_availability",
     "wire_wakes_supervisor",
 ]

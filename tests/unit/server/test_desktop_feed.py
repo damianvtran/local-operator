@@ -2098,6 +2098,7 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     feed._authoring_probed_at = time.monotonic()
     feed._asks_probed_at = time.monotonic()
     feed._approvals_probed_at = time.monotonic()
+    feed._voice_probed_at = time.monotonic()
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
@@ -2392,6 +2393,7 @@ def test_the_status_probe_reads_only_the_records_and_never_walks_the_store(tmp_p
 
     feed._catalogue_probed_at = time.monotonic()  # see the note above
     feed._authoring_probed_at = time.monotonic()
+    feed._voice_probed_at = time.monotonic()
     feed._status_probed_at = 0.0
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
