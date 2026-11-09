@@ -708,9 +708,9 @@ if child == 0:
     null = os.open(os.devnull, os.O_RDWR)
     for fd in (0, 1, 2):
         os.dup2(null, fd)
-    # Publish the pid BEFORE touching memory. RSS crosses the 120 MiB grant
-    # about halfway through the touch loop, and the wrapper's census (50 ms
-    # poll) may SIGKILL us at any sample after that — so a pid written after
+    # Publish the pid BEFORE allocating memory. Allocation/touching can cross
+    # the 120 MiB grant before the loop completes, and the wrapper's census
+    # (50 ms poll) may SIGKILL us then — so a pid written after
     # the loop is lost whenever a sample lands in between (seen on loaded CI
     # runners as FileNotFoundError on escaped.pid after rc 137). Writing first
     # makes "pid observable" causally precede "over budget", so the stop can
