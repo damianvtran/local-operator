@@ -74,5 +74,8 @@
   "mobile.setup.unexpected_failure": "手机访问未能完成设置。检查/mobile status，了解当前阻碍；已完成的步骤未被撤销。",
   "mobile.setup.in_progress": "手机访问设置已在进行；重试前先检查状态。",
   "mobile.setup.quote_unread": "启用手机访问前，先检查最新的账户信息和报价。",
-  "mobile.setup.corrupt_intent": "已保存的手机设置请求无效。保持create.json不变，让智能体恢复原始请求后再重试。未作任何设置更改。"
+  "mobile.setup.corrupt_intent": "已保存的手机设置请求无效。保持create.json不变，让智能体恢复原始请求后再重试。未作任何设置更改。",
+  "mobile.setup.title_repoint": "手机访问需要重新连接到此设备较新的登录",
+  "mobile.setup.repoint": "此设备上已有同一Radient账户的较新登录。将手机访问重新连接到该登录——同一账户、同一手机地址。",
+  "mobile.setup.repointed": "已为同一账户将手机访问重新连接到此设备较新的登录（凭据{id}）。"
 }

@@ -178,6 +178,14 @@ def quote_unread() -> Msg:
     return Msg("mobile.setup.quote_unread", {})
 
 
+def repoint() -> Msg:
+    return Msg("mobile.setup.repoint", {})
+
+
+def repointed(*, id: str) -> Msg:
+    return Msg("mobile.setup.repointed", {"id": id})
+
+
 def reservation_existing() -> Msg:
     return Msg("mobile.setup.reservation_existing", {})
 
@@ -276,6 +284,10 @@ def title_quote() -> Msg:
 
 def title_quote_changed() -> Msg:
     return Msg("mobile.setup.title_quote_changed", {})
+
+
+def title_repoint() -> Msg:
+    return Msg("mobile.setup.title_repoint", {})
 
 
 def title_stopped() -> Msg:

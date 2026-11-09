@@ -378,5 +378,20 @@
     "role": "Corrupt saved setup request refusal",
     "tone": "Actionable, cautious",
     "note": "Keep original journal untouched; no account fallback/repair or raw private JSON/error detail. Validation precedes reads/writes upstream."
+  },
+  "mobile.setup.title_repoint": {
+    "role": "Phone setup title, progress, consent or recovery",
+    "tone": "Plain, precise, non-alarmist",
+    "note": "Account identity already masked; IDs/prices/commands stay verbatim. Subscription activation only at exact fresh monthly quote. No automatic credit purchase; completed billing/reservation is not rolled back. Provider sign-in/terms remain human. Status is read-only. This title names a BLOCKED state whose repair is local: the tunnel pins a sign-in row that is dead or gone while a provable newer row for the same account is on this device."
+  },
+  "mobile.setup.repoint": {
+    "role": "Mobile setup progress or blocker",
+    "tone": "Plain, actionable and cautious",
+    "note": "No OAuth, purchase or service mutation implied by observation. Commands/IDs/URL stay verbatim; quote is fresh USD monthly activation price. The action re-points an EXISTING tunnel at an EXISTING local sign-in for the same account: no new sign-in, no new subscription, no account change, and no change to the phone address (only the pinned credential row id moves)."
+  },
+  "mobile.setup.repointed": {
+    "role": "Completed setup receipt",
+    "tone": "Plain, factual",
+    "note": "A completed local re-point, not a new sign-in or activation. {id} is the credential ROW id the tunnel now pins (a local store row id, never an account id, email or phone address); it stays verbatim."
   }
 }

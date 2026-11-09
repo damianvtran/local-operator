@@ -83,6 +83,7 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
         "apply": "none",
         "owner_choice": "choose_account",
         "owner_missing": "owner_missing",
+        "repoint": "repoint",
         "login": "login",
         "quote": "quote",
         "quote_changed": "quote",
@@ -101,6 +102,10 @@ def _contract(plan: dict[str, Any], *, local: bool) -> dict[str, Any]:
         "login": "sign_in",
         "choose_account": "choose_account",
         "owner_missing": "restore_owner",
+        # `run` is the ONE kind that makes the desktop render its primary action
+        # button (posting the plan's own credential_id), which is what turns the
+        # re-point from a sentence into something the operator can do.
+        "repoint": "run",
         "quote": "accept_quote",
         "quote_unread": "check_quote",
         "account": "check_account",

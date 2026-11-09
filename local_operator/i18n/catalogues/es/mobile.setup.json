@@ -74,5 +74,8 @@
   "mobile.setup.unexpected_failure": "El acceso telefónico no pudo terminar. Comprueba /mobile status para ver el bloqueo actual; los pasos completados no se han deshecho.",
   "mobile.setup.in_progress": "La configuración del acceso telefónico ya está en curso; comprueba su estado antes de reintentar.",
   "mobile.setup.quote_unread": "Comprueba la cuenta actual y el precio vigente antes de activar el acceso telefónico.",
-  "mobile.setup.corrupt_intent": "La solicitud guardada de configuración del acceso telefónico no es válida. Deja create.json sin cambios y pide a tu agente que recupere la solicitud original antes de reintentar. No se hizo ningún cambio de configuración."
+  "mobile.setup.corrupt_intent": "La solicitud guardada de configuración del acceso telefónico no es válida. Deja create.json sin cambios y pide a tu agente que recupere la solicitud original antes de reintentar. No se hizo ningún cambio de configuración.",
+  "mobile.setup.title_repoint": "El acceso telefónico debe reconectarse al inicio de sesión más reciente de este dispositivo",
+  "mobile.setup.repoint": "Este dispositivo ya tiene un inicio de sesión más reciente de la misma cuenta de Radient. Reconecta el acceso telefónico a ese inicio de sesión — misma cuenta, misma dirección de teléfono.",
+  "mobile.setup.repointed": "Acceso telefónico reconectado al inicio de sesión más reciente de este dispositivo para la misma cuenta (credencial {id})."
 }
