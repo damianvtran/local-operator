@@ -5493,6 +5493,20 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def check_owner(self, expected_account_id: str | None) -> None:
+        """Refuse ``account_mismatch`` (409) without sending anything upstream.
+
+        For a route that answers locally yet must keep the owner contract of
+        the call it stands in for: the typing PUT's ``share_typing``-off
+        short-circuit still refuses a body captured for another account, so
+        the renderer's account-switch handling never depends on a display
+        preference. Same comparison as every guarded write
+        (:meth:`_guarded_access`); a signed-out machine is
+        ``BridgeSignInRequired``, exactly as the forwarded call would be.
+        """
+
+        await self._guarded_access(expected_account_id)
+
     async def _typing_request(
         self,
         method: str,

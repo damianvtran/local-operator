@@ -330,7 +330,7 @@ class TeamBridgeSettingsPut(_Strict):
         return self
 
 
-def _share_typing(config_dir: Any) -> bool:
+def _read_share_typing(config_dir: Any) -> bool:
     """The person's ``team_bridge.share_typing``, read from the watcher snapshot.
 
     The watcher, not a ``ConfigManager``: the typing PUT runs every ~3 s while
@@ -1000,7 +1000,7 @@ async def get_settings(
             ),
             # ADDITIVE and LOCAL: the typing-indicator sharing choice lives in
             # this machine's config, not on the hub (typing design §7).
-            "share_typing": _share_typing(config_manager.config_dir),
+            "share_typing": _read_share_typing(config_manager.config_dir),
         }
     return reply(payload)
 
@@ -1028,7 +1028,7 @@ async def put_settings(
         # but there is no bearer to compare it with: the key is per machine.
         assert body.share_typing is not None
         _record_share_typing(config_manager.config_dir, body.share_typing)
-        return reply({"share_typing": _share_typing(config_manager.config_dir)})
+        return reply({"share_typing": _read_share_typing(config_manager.config_dir)})
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -1071,9 +1071,21 @@ async def put_settings(
     # The local preference lands only AFTER the hub accepted the state write,
     # so a refused write changes nothing on either side.
     if body.share_typing is not None:
-        _record_share_typing(config_manager.config_dir, body.share_typing)
+        try:
+            _record_share_typing(config_manager.config_dir, body.share_typing)
+        except HTTPException:
+            # The hub has ALREADY committed the state change (review round 1,
+            # R1): answering 500 here would tell the renderer the whole write
+            # failed and invite a retry that re-asserts consent. So the hub's
+            # payload is returned as a success, and ``share_typing`` below is
+            # READ BACK from disk rather than echoed from the body — the
+            # renderer sees the value that actually holds and can re-send the
+            # preference alone (the stateless PUT) if it still differs.
+            logging.getLogger(__name__).warning(
+                "team bridge: state saved upstream but share_typing was not saved locally"
+            )
     if isinstance(payload, dict):
-        payload = {**payload, "share_typing": _share_typing(config_manager.config_dir)}
+        payload = {**payload, "share_typing": _read_share_typing(config_manager.config_dir)}
     return reply(payload)
 
 
@@ -3747,9 +3759,15 @@ async def _typing_reply(awaitable: Any) -> Any:
         _raise_sign_in(exc)
     except BridgeRefusal as exc:
         if exc.retry_after_seconds is not None and exc.http_status is not None:
+            # ``retry_after_ms`` as well (QA round 1, Q1): the desktop
+            # transport reads ``detail.retry_after_ms`` because the renderer's
+            # whole cadence is in ms (``poll_after_ms``/``resend_after_ms``);
+            # the seconds field and the header stay for every other reader.
+            detail = _refusal_detail(exc)
+            detail["retry_after_ms"] = int(max(0, exc.retry_after_seconds) * 1000)
             raise HTTPException(
                 exc.http_status,
-                _refusal_detail(exc),
+                detail,
                 headers={"Retry-After": str(max(0, exc.retry_after_seconds))},
             ) from None
         _raise_bridge(exc)
@@ -3808,14 +3826,21 @@ async def conversation_typing_set(
     ``team_bridge.share_typing`` off → ``{shared: false}`` with NO upstream
     call. The renderer already skips the heartbeat then; this check is the
     defence in depth that keeps an older or misbehaving renderer from
-    disclosing a draft-in-progress the person opted out of sharing.
+    disclosing a draft-in-progress the person opted out of sharing. The
+    owner receipt is still compared first, so a mismatch is ``409`` either way.
     """
     _require_conversation_id(conversation_id)
     _refuse_write_scope(request)
-    if not _share_typing(config_manager.config_dir):
+    client = _conversation_client(config_manager)
+    if not _read_share_typing(config_manager.config_dir):
+        # The owner receipt is checked BEFORE the opt-out short-circuit
+        # (review round 1, R3): a body captured for another account is a 409
+        # ``account_mismatch`` whatever this machine's preference says, so the
+        # renderer's account-switch handling never depends on a display
+        # setting. Local only — still no upstream byte on this path.
+        await _typing_reply(client.check_owner(body.expected_account_id))
         return reply({"shared": False})
 
-    client = _conversation_client(config_manager)
     return reply(
         await _typing_reply(
             client.conversation_typing_set(

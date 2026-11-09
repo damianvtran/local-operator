@@ -307,3 +307,100 @@ async def test_capability_is_advertised_with_its_guard():
     assert routes.ConversationTypingIn.model_fields["expected_account_id"].is_required()
     assert routes.ConversationTypingIn.model_fields["tenant_id"].is_required()
     assert "expected_account_id" in routes._TYPING_DELETE_QUERY
+
+
+# -- round-1 remediation regressions ----------------------------------------------
+
+
+async def test_a_429_also_carries_retry_after_ms_for_the_desktop_transport(rig):
+    """Q1: the UI transport reads ``detail.retry_after_ms``; seconds + header stay."""
+
+    rig.answer(
+        lambda r: httpx.Response(
+            429, json={"code": "rate_limited", "error": "slow"}, headers={"Retry-After": "7"}
+        )
+    )
+    response = await rig.http.put(PATH, json=RECEIPT)
+    assert response.status_code == 429
+    detail = response.json()["detail"]
+    assert detail["retry_after_ms"] == 7000
+    assert isinstance(detail["retry_after_ms"], int)
+    assert detail["retry_after_seconds"] == 7
+    assert response.headers["retry-after"] == "7"
+
+
+async def test_share_typing_off_still_refuses_an_owner_mismatch(rig):
+    """R3: the opt-out short-circuit must not hide ``account_mismatch``."""
+
+    record_share_typing(rig.config_dir, False)
+    rig.login("acc_b")  # captured as A, signed in as B
+    response = await rig.http.put(PATH, json=RECEIPT)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "account_mismatch"
+    assert rig.calls == []
+    rig.login("acc_a")
+    ok = await rig.http.put(PATH, json=RECEIPT)
+    assert ok.json()["result"] == {"shared": False}
+    assert rig.calls == []
+
+
+SETTINGS = "/v1/desktop/team-bridge/settings"
+STATE_BODY = {"expected_account_id": "acc_a", "state": "paused", "share_typing": False}
+
+
+def _local_share_typing(config_dir: Any) -> bool:
+    from local_operator.config import ConfigManager
+
+    return TeamBridgeSettings.from_config(ConfigManager(config_dir)).share_typing
+
+
+async def test_combined_settings_put_saves_and_echoes_share_typing(rig, monkeypatch):
+    """R2: a state write carrying ``share_typing`` saves it after the hub accepts."""
+
+    sent: dict[str, Any] = {}
+
+    async def hub_put(self: Any, **kwargs: Any) -> dict[str, Any]:
+        sent.update(kwargs)
+        return {"state": "paused"}
+
+    monkeypatch.setattr(TeamBridgeClient, "put_settings", hub_put)
+    response = await rig.http.put(SETTINGS, json=STATE_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"state": "paused", "share_typing": False}
+    assert "share_typing" not in sent  # machine-local, never sent upstream
+    assert _local_share_typing(rig.config_dir) is False
+
+
+async def test_combined_settings_put_refused_by_hub_leaves_the_local_key(rig, monkeypatch):
+    """R2: a hub refusal changes nothing locally."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    async def hub_refuses(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise BridgeRefusal("bridge_disabled", "off", http_status=403)
+
+    monkeypatch.setattr(TeamBridgeClient, "put_settings", hub_refuses)
+    record_share_typing(rig.config_dir, True)
+    response = await rig.http.put(SETTINGS, json=STATE_BODY)
+    assert response.status_code == 403, response.text
+    assert _local_share_typing(rig.config_dir) is True
+
+
+async def test_combined_settings_put_local_save_failure_returns_hub_payload(rig, monkeypatch):
+    """R1: hub accepted, local save failed -> 200 with share_typing read back."""
+
+    import local_operator.team_bridge.settings as tb_settings
+
+    async def hub_put(self: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"state": "paused"}
+
+    def disk_full(config_dir: Any, value: bool) -> None:
+        raise OSError("disk full")
+
+    record_share_typing(rig.config_dir, True)
+    monkeypatch.setattr(TeamBridgeClient, "put_settings", hub_put)
+    monkeypatch.setattr(tb_settings, "record_share_typing", disk_full)
+    response = await rig.http.put(SETTINGS, json=STATE_BODY)
+    assert response.status_code == 200, response.text
+    # Read back, not echoed: the save failed, so the value that holds is True.
+    assert response.json()["result"] == {"state": "paused", "share_typing": True}
