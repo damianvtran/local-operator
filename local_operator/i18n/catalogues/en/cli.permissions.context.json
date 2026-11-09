@@ -2,141 +2,191 @@
   "cli.permissions.help.permissions": {
     "role": "lop CLI help text",
     "tone": "terse, operator-facing, describes a command",
-    "note": "Local Operator and Developer ID are product names; Screen Recording is the macOS setting name (use the localized macOS name)."
+    "note": "Local Operator and Developer ID are product names. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.help.status": {
     "role": "lop CLI help text",
     "tone": "terse, operator-facing, describes a command",
-    "note": "Local Operator and Developer ID are product names; Screen Recording is the macOS setting name (use the localized macOS name)."
+    "note": "Local Operator and Developer ID are product names. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.help.setup": {
     "role": "lop CLI help text",
     "tone": "terse, operator-facing, describes a command",
-    "note": "Local Operator and Developer ID are product names; Screen Recording is the macOS setting name (use the localized macOS name)."
+    "note": "Local Operator and Developer ID are product names. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.not_macos": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.identity.team": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.identity.adhoc": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.identity.legacy": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.identity.none": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.image": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.optin.on": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.optin.off": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.optin.no_app": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.optin.unavailable": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.optin.blocked": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "{reason} is an already-translated reason phrase (from the cli.permissions.status.reason.* keys); insert it as is. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.reason.isolated_home": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "A short reason phrase shown inside parentheses after \"unavailable in this process\". HOME is an environment variable; keep it verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.reason.runtime_root_override": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "A short reason phrase shown inside parentheses after \"unavailable in this process\". Environment variable names and ~/.local-operator stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.reason.config_dir_override": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "A short reason phrase shown inside parentheses after \"unavailable in this process\". Environment variable names and ~/.local-operator stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.reason.not_darwin": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "A short reason phrase shown inside parentheses after \"unavailable in this process\". Environment variable names and ~/.local-operator stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.app.found": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.app.missing": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.screen.granted": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.screen.denied": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.screen.unknown": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.screen.no_image": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.status.scope": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.status.guide": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "{path} is a file path; keep it verbatim. guide://permissions stays verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.refused.tty": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.refused.isolated": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "{reason} is an already-translated reason phrase (from the cli.permissions.status.reason.* keys); insert it as is. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.no_app": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.no_identity": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.explain": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim. Keep the two \"- \" bullet lines and the line breaks. \"/update\" is a command typed inside a session; keep it verbatim."
   },
   "cli.permissions.setup.confirm": {
     "role": "interactive yes/no prompt in the terminal",
     "tone": "plain, direct",
-    "note": "[y/N] stays as-is: the answer is parsed as y/yes. Keep the trailing space. \"Always Allow\" is the macOS keychain dialog's button label; use the localized macOS label."
+    "note": "[y/N] stays as-is: the answer is parsed as y/yes. Keep the trailing space. \"Always Allow\" is the macOS keychain dialog's button label; use the localized macOS label. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.cancelled": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.failed": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "{detail} is codesign's own English error line or a machine reason code; never translate it. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.always_allow": {
     "role": "interactive yes/no prompt in the terminal",
     "tone": "plain, direct",
-    "note": "[y/N] stays as-is: the answer is parsed as y/yes. Keep the trailing space. \"Always Allow\" is the macOS keychain dialog's button label; use the localized macOS label."
+    "note": "[y/N] stays as-is: the answer is parsed as y/yes. Keep the trailing space. \"Always Allow\" is the macOS keychain dialog's button label; use the localized macOS label. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.setup.already_signed": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
   },
   "cli.permissions.setup.done": {
     "role": "lop permissions CLI output line",
     "tone": "plain, operator-facing, one line",
-    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. System Settings > Privacy & Security > Screen Recording: use the localized macOS menu names."
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim."
+  },
+  "cli.permissions.setup.done_allow_once": {
+    "role": "lop permissions CLI output line",
+    "tone": "plain, operator-facing, one line",
+    "note": "Placeholders are identifiers, paths, team ids or machine reason codes; never translate them. `lop ...` commands, guide://permissions, codesign, \"Local Operator\" and \"Local Operator Runtime\" (System Settings row names) stay verbatim. macOS UI labels (System Settings, Privacy & Security, Screen & System Audio Recording, Files & Folders, Accessibility, Keychain Access, Access Control, \"Allow\", \"Always Allow\"): use the label exactly as localized macOS shows it; if macOS is not available in the target language (e.g. Urdu), keep the English macOS label verbatim. \"/update\" is a command typed inside a session; keep it verbatim."
   }
 }

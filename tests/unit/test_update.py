@@ -3522,6 +3522,30 @@ def test_a_failed_services_tail_fails_the_run_and_names_serve(
     assert report["failure"]["error"] == "the serve daemon did not move"
 
 
+def test_the_cli_update_passes_team_signing_prompt_consent(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (PR #3691): only the ``lop update`` CLI entry may let codesign prompt.
+
+    The TUI's ``/update`` reaches ``perform_upgrade`` too, with a TTY, in the
+    middle of a session; it leaves ``team_signing_prompt`` at its False default.
+    """
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(update_mod, "check_latest", _check_latest_double("0.27.0", "0.28.0", True))
+    monkeypatch.setattr(update_mod, "install_kind", lambda: update_mod.InstallKind.UV_TOOL)
+    monkeypatch.setattr(update_mod, "is_git_snapshot", lambda: False)
+
+    def record(**kwargs: object) -> str:
+        seen.append(kwargs)
+        raise update_mod.UpdateError("stop after the call under test")
+
+    monkeypatch.setattr(update_mod, "perform_upgrade", record)
+
+    update_command(check=False)
+    capsys.readouterr()
+    assert [call.get("team_signing_prompt") for call in seen] == [True]
+
+
 def test_a_failed_wheel_route_reports_step_publish_and_kind_publication(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

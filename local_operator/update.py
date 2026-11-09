@@ -3195,7 +3195,21 @@ def _remove_tree_unlocked(path: Path) -> bool:
     return True
 
 
-def _publish_team_runtime(generation: Path) -> None:
+#: Operator-facing phrasing for :func:`procname.publish_team_runtime_result`
+#: reason codes in the ``lop update`` warning (log text, not catalogue copy).
+_TEAM_SKIP_REASONS = {
+    "needs-always-allow": '"Always Allow" was not confirmed in `lop permissions setup`',
+    "no-terminal": "no terminal to answer a keychain prompt",
+    "unsupported-interpreter": "this Python build cannot be bundled",
+    "app-missing": "the desktop app is not installed",
+    "team-mismatch": "the desktop app's team differs from the recorded signing team",
+    "no-requirement": "the desktop app's designated requirement is unreadable",
+    "signing-failed": "codesign failed",
+    "error": "unexpected error",
+}
+
+
+def _publish_team_runtime(generation: Path, *, allow_prompt: bool = False) -> None:
     """Publish the TEAM-signed runtime bundle for ``generation``'s Python, if opted in.
 
     WHY HERE, BEFORE THE FLIP: the team image (``com.local-operator``, the
@@ -3211,15 +3225,38 @@ def _publish_team_runtime(generation: Path) -> None:
     ``lop permissions setup``, an installed app of the same team). A failure
     only means runtimes keep the ad-hoc "Local Operator Runtime" row; the
     update itself is never refused for it.
+
+    ``allow_prompt`` is True only from the ``lop update`` CLI entry: there the
+    operator is at a terminal they started the update from, so a keychain
+    dialog is theirs to answer. Every other caller (the TUI's ``/update``, mesh
+    updates, the bootstrap) leaves it False and signs only after a recorded
+    "Always Allow" (review round 1, R2).
+
+    An opted-in host whose team image did NOT come back is told so at warning
+    level with the reason, because the next Python build's runtimes then land
+    on the "Local Operator Runtime" row, which may never have been granted —
+    a silent debug line left Screen Recording failing with no explanation
+    (UX round 1, U5). Hosts that never opted in (and isolated rigs, which are
+    refused before the opt-in is even read) stay at debug.
     """
     try:
         from local_operator import procname
 
-        image = procname.publish_team_runtime(
-            _venv_interpreter(_generation_install_root(generation))
+        result = procname.publish_team_runtime_result(
+            _venv_interpreter(_generation_install_root(generation)), allow_prompt=allow_prompt
         )
-        if image is not None:
-            logger.info("team-signed runtime image ready: %s", image)
+        if result.image is not None:
+            logger.info("team-signed runtime image ready: %s", result.image)
+        elif result.reason == "not-opted-in" or str(result.reason).startswith("refused:"):
+            logger.debug("team runtime image not published: %s", result.reason)
+        else:
+            logger.warning(
+                "team signing skipped (%s%s): runtimes of this Python build use the "
+                '"Local Operator Runtime" privacy row; run `lop permissions setup` '
+                "from a terminal to sign it",
+                _TEAM_SKIP_REASONS.get(str(result.reason), str(result.reason)),
+                f": {result.detail}" if result.detail else "",
+            )
     except Exception:  # noqa: BLE001 — an identity is never a reason to fail an update
         logger.debug("team runtime image not published", exc_info=True)
 
@@ -3803,6 +3840,7 @@ def install_into_generation(
     origin: str = PYPI_SOURCE_TOKEN,
     note: str = "",
     target_mode: Literal["latest", "exact", "source"] = "exact",
+    team_signing_prompt: bool = False,
 ) -> Path:
     """Install ONE build into its own generation and point ``current`` at it.
 
@@ -3970,7 +4008,7 @@ def install_into_generation(
                 # post-rename staged-unlink errors are swallowed), so a successful return
                 # IS the proof. A failure AFTER this point retains for the independent
                 # reason ``_discard_candidate`` checks first: the pointer now names B.
-                _publish_team_runtime(generation)
+                _publish_team_runtime(generation, allow_prompt=team_signing_prompt)
                 try:
                     flip_pointer(generation)
                 except OSError as exc:
@@ -6813,6 +6851,7 @@ def perform_upgrade(
     ref: str = "",
     on_prune: Callable[["PrunePlan"], None] | None = None,
     on_promoted: Callable[[Path], None] | None = None,
+    team_signing_prompt: bool = False,
 ) -> str:
     """Run the detected installer. Returns ``target`` (this process cannot re-read it).
 
@@ -6875,7 +6914,12 @@ def perform_upgrade(
         # ``commit``/``ref`` describe that case, and leaving them empty is what
         # makes the marker say ``pypi <version>``.
         promoted = install_into_generation(
-            source, version=target, commit=commit, ref=ref, target_mode="latest"
+            source,
+            version=target,
+            commit=commit,
+            ref=ref,
+            target_mode="latest",
+            team_signing_prompt=team_signing_prompt,
         )
         if on_promoted is not None:
             on_promoted(promoted)
@@ -9069,7 +9113,11 @@ def _snapshot_command(
             # ``pypi <version>`` — this build genuinely has no git ref.
             try:
                 promoted_generation = install_into_generation(
-                    None, version=route.version, note=note
+                    None,
+                    version=route.version,
+                    note=note,
+                    # ``lop update`` CLI entry: see ``_publish_team_runtime``.
+                    team_signing_prompt=True,
                 )
             except UpdateError as exc:
                 # The sibling of the source-tree branch below: this route used
@@ -9186,6 +9234,7 @@ def _snapshot_command(
                     ref=snapshot.ref,
                     origin=SNAPSHOT_SOURCE_TOKEN,
                     note=note,
+                    team_signing_prompt=True,
                 )
             except UpdateError as exc:
                 step = _progress().step
@@ -9371,6 +9420,9 @@ def _update_command_body(
             kind=kind,
             on_prune=lambda plan: pruned.extend(prune_notice_lines(plan)),
             on_promoted=promoted.append,
+            # The CLI entry is the one caller whose operator is at the
+            # terminal that started it; see ``_publish_team_runtime``.
+            team_signing_prompt=True,
         )
     except UpdateError as exc:
         step = _progress().step

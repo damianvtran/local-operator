@@ -22,6 +22,10 @@ def help_status() -> Msg:
     return Msg("cli.permissions.help.status", {})
 
 
+def setup_already_signed() -> Msg:
+    return Msg("cli.permissions.setup.already_signed", {})
+
+
 def setup_always_allow() -> Msg:
     return Msg("cli.permissions.setup.always_allow", {})
 
@@ -38,12 +42,16 @@ def setup_done(*, identifier: str) -> Msg:
     return Msg("cli.permissions.setup.done", {"identifier": identifier})
 
 
+def setup_done_allow_once() -> Msg:
+    return Msg("cli.permissions.setup.done_allow_once", {})
+
+
 def setup_explain(*, name: str) -> Msg:
     return Msg("cli.permissions.setup.explain", {"name": name})
 
 
-def setup_failed() -> Msg:
-    return Msg("cli.permissions.setup.failed", {})
+def setup_failed(*, detail: str) -> Msg:
+    return Msg("cli.permissions.setup.failed", {"detail": detail})
 
 
 def setup_no_app() -> Msg:
@@ -70,8 +78,8 @@ def status_app_missing() -> Msg:
     return Msg("cli.permissions.status.app.missing", {})
 
 
-def status_guide() -> Msg:
-    return Msg("cli.permissions.status.guide", {})
+def status_guide(*, path: str) -> Msg:
+    return Msg("cli.permissions.status.guide", {"path": path})
 
 
 def status_identity_adhoc(*, identifier: str) -> Msg:
@@ -102,6 +110,10 @@ def status_optin_blocked(*, reason: str) -> Msg:
     return Msg("cli.permissions.status.optin.blocked", {"reason": reason})
 
 
+def status_optin_no_app() -> Msg:
+    return Msg("cli.permissions.status.optin.no_app", {})
+
+
 def status_optin_off() -> Msg:
     return Msg("cli.permissions.status.optin.off", {})
 
@@ -110,12 +122,40 @@ def status_optin_on(*, identity: str, team: str) -> Msg:
     return Msg("cli.permissions.status.optin.on", {"identity": identity, "team": team})
 
 
+def status_optin_unavailable(*, team: str) -> Msg:
+    return Msg("cli.permissions.status.optin.unavailable", {"team": team})
+
+
+def status_reason_config_dir_override() -> Msg:
+    return Msg("cli.permissions.status.reason.config_dir_override", {})
+
+
+def status_reason_isolated_home() -> Msg:
+    return Msg("cli.permissions.status.reason.isolated_home", {})
+
+
+def status_reason_not_darwin() -> Msg:
+    return Msg("cli.permissions.status.reason.not_darwin", {})
+
+
+def status_reason_runtime_root_override() -> Msg:
+    return Msg("cli.permissions.status.reason.runtime_root_override", {})
+
+
+def status_scope() -> Msg:
+    return Msg("cli.permissions.status.scope", {})
+
+
 def status_screen_denied(*, row: str) -> Msg:
     return Msg("cli.permissions.status.screen.denied", {"row": row})
 
 
 def status_screen_granted() -> Msg:
     return Msg("cli.permissions.status.screen.granted", {})
+
+
+def status_screen_no_image() -> Msg:
+    return Msg("cli.permissions.status.screen.no_image", {})
 
 
 def status_screen_unknown() -> Msg:

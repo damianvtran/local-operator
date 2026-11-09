@@ -21,6 +21,11 @@ It is read-only and never prompts. It prints which identity this host's runtimes
 use, whether the desktop app is installed, whether team signing is on, and
 whether a runtime would be allowed to record the screen (a *preflight*: it asks
 macOS for the current answer without ever triggering a permission dialog).
+Screen Recording is the only service it checks; Files & Folders, Accessibility
+and the other services use the same row, so the identity line tells you which
+row to look for there too. Its last line names this guide's file, which you can
+open from a shell; inside a session, ask Local Operator about permissions and it
+reads this guide.
 
 ## The rows you will see
 
@@ -37,6 +42,12 @@ its bundle id, so macOS treats them as the app: enabling **Local Operator** once
 covers the app *and* every runtime. Without team signing, runtimes share one
 **Local Operator Runtime** row instead — still one row for all of them, no
 matter how many sessions, worktrees or updates you run.
+
+Team signing needs the desktop app publisher's own signing key, so on most
+machines it is not available and you will have **two** rows: the desktop app's
+**Local Operator** and **Local Operator Runtime**. `lop permissions status`
+says which applies; it suggests `lop permissions setup` only when a usable key
+is in your keychain.
 
 ## Which surface is governed by which row
 
@@ -72,7 +83,9 @@ updates and worktrees.
   with no responsible app, `subject=com.local-operator`, `authValue=2`
   (allowed) — the app's own grant, with no new row.
 - **Ad hoc** (every host, the default): bundle id `com.local-operator.runtime`,
-  signed on this machine without any key, shown as **Local Operator Runtime**.
+  signed on this machine without any key, named **Local Operator Runtime**
+  (the bundle's display name; how System Settings draws that row — icon
+  included — has not been measured yet, so go by the name).
   It never uses the app's id, so it can never disturb the app's own grant.
 
 The runtime bundle is never registered as an application: it does not appear in
@@ -83,7 +96,8 @@ selects it.
 
 1. Run `lop permissions status` and note the identity line.
 2. Open **System Settings › Privacy & Security** and the service you need
-   (for example **Screen Recording**).
+   (for example **Screen & System Audio Recording**, called **Screen
+   Recording** before macOS 15).
 3. Turn on **Local Operator** if the status says the runtimes share the
    desktop app's row; otherwise turn on **Local Operator Runtime**. If that row
    is not listed yet, it appears the first time a runtime asks.
@@ -97,12 +111,29 @@ lop permissions setup
 ```
 
 Interactive and terminal-only. It needs the desktop app installed and a
-"Developer ID Application" certificate for the app's team in your keychain.
-macOS may show one dialog asking whether `codesign` may use that key: **Allow**
-works for this run; **Always Allow** lets later `lop update` runs sign new
-Python builds without asking. Setup records your choice; an update running
-without a terminal signs only if you chose Always Allow, otherwise runtimes keep
-using the Local Operator Runtime row until you run setup again.
+"Developer ID Application" certificate for the app's team in your keychain —
+in practice, the app publisher's own key.
+
+macOS may show one dialog asking whether `codesign` may use that key. The two
+answers are a real choice:
+
+- **Allow** signs this time only. A later `lop update` run in a terminal asks
+  again. Updates with no terminal — run by an agent, or `/update` inside a
+  session — skip team signing (and `lop update` logs a warning saying so), so a
+  new Python build's runtimes use the **Local Operator Runtime** row until you
+  sign again from a terminal.
+- **Always Allow** stops the questions, but adds `codesign` to that private
+  key's access list: from then on **any program running as your macOS user**
+  can use `codesign` to sign with your Developer ID key without asking.
+
+Setup asks which one you chose only when it actually signed in that run; if
+this Python build was already signed, it keeps your earlier answer. To undo
+Always Allow, open **Keychain Access**, select the key's private key, open
+**Get Info › Access Control**, and remove `codesign`. To turn team signing off
+entirely, delete `~/.local-operator/runtime-signing.json` (the opt-in record);
+already-signed images stay until the next Python build, which then uses the
+Local Operator Runtime row. A failed setup prints codesign's error and leaves
+any earlier opt-in as it was.
 
 Setup refuses to run in a sandboxed or redirected home directory, and it never
 runs as part of starting a session.
@@ -125,14 +156,22 @@ The ad hoc signature is tied to the exact bytes of the Python build. When
 switch off — toggle it on again. Team-signed hosts are not affected: the app's
 grant follows the team signature, not the bytes.
 
+The same applies when **two** Python builds are in use at once on an ad hoc
+host (say, an installed `lop` and a worktree on another Python version): each
+build has its own bundle with the same id, and the one row remembers one
+build's signature, so the grant can flip between them. This is inferred from
+how ad hoc requirements work, not measured. Team signing removes it.
+
 ## Removing stale rows
 
 Older versions left one "Local Operator" row per path. To clean up, by hand:
 
-1. Open the service in **System Settings › Privacy & Security**.
-2. Select a stale "Local Operator" row (generic icon, or an `exec` icon), click
-   **−**, and confirm.
-3. Keep the desktop app's **Local Operator** row (app icon) and, on hosts without
+1. Run `lop permissions status` first, and note which row your runtimes use.
+2. Open the service in **System Settings › Privacy & Security**.
+3. Select a stale "Local Operator" row (generic icon, or an `exec` icon), click
+   **−**, and confirm. If you cannot tell a row apart from the one in use, leave
+   it: a stale row costs nothing, and removing the live one means granting again.
+4. Keep the desktop app's **Local Operator** row (app icon) and, on hosts without
    team signing, **Local Operator Runtime**.
 
 Agents must never run `tccutil reset` for you: it wipes grants (including ones
@@ -149,7 +188,16 @@ you want to keep) and cannot target the old path-keyed rows anyway.
   (for example, no `codesign`); runtimes still work, with the older per-build
   rows. It is retried after a day.
 - **"Team signing: unavailable in this process".** You are in a sandboxed or
-  redirected environment (the reason code says which); run the command from
-  your own login shell.
+  redirected environment (the reason in parentheses says which: HOME is
+  redirected, `LOCAL_OPERATOR_RUNTIME_ROOT` is set, or
+  `LOCAL_OPERATOR_CONFIG_DIR` points elsewhere); run the command from your own
+  login shell.
+- **"Team signing: not available".** No "Developer ID Application" key for the
+  desktop app's team is in your keychain. That is the normal case: use the
+  Local Operator Runtime row.
+- **`lop update` warned "team signing skipped".** An opted-in host did not sign
+  the new Python build (the warning gives the reason, for example Always Allow
+  was not confirmed and there was no terminal). Run `lop permissions setup`
+  from a terminal, or grant Local Operator Runtime.
 - **The TUI itself is denied.** The TUI process is your terminal's client:
   grant your terminal app, not Local Operator.

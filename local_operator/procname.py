@@ -1542,6 +1542,12 @@ def _mark_bundle_unavailable(root: Path, key: str) -> None:
 
 def _populate_legacy(staging: Path, real: Path, base: Path) -> None:
     """The pre-bundle tree: ``bin/<BRAND>`` clone plus ``lib``/``include`` links."""
+    # Darwin-only by construction (every caller is behind a darwin check), but
+    # restated here so the static cross-platform scan sees the guard at the
+    # ``os.symlink`` calls below: raising lands in ``_publish_tree``'s failure
+    # path, which never publishes a partial tree.
+    if sys.platform != "darwin":
+        raise OSError("runtime trees are built on macOS only")
     (staging / "bin").mkdir(parents=True)
     _clone_or_copy(real, staging / "bin" / BRAND)
     _write_source_marker(staging, real)
@@ -1712,8 +1718,13 @@ def _write_info_plist(contents: Path, flavor: str) -> None:
         plistlib.dump(info, handle)
 
 
-def _codesign(*args: str) -> bool:
-    """Run ``codesign`` with ``args``; True on exit 0. Bounded, stdin closed."""
+def _codesign_run(*args: str) -> tuple[bool, str]:
+    """Run ``codesign`` with ``args``: ``(ok, last stderr line)``. Bounded, stdin closed.
+
+    The stderr line is kept because ``lop permissions setup`` shows it when a
+    Developer ID signature fails: without it the operator only learned that
+    signing "did not finish" and the cause lived in a debug log (UX round 1, U5).
+    """
     import subprocess
 
     try:
@@ -1724,12 +1735,23 @@ def _codesign(*args: str) -> bool:
             timeout=120,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("codesign could not run", exc_info=True)
-        return False
+        return False, str(exc)
     if result.returncode != 0:
         logger.debug("codesign %s failed: %s", args[:-1], result.stderr[-400:])
-    return result.returncode == 0
+        lines = [
+            line.strip()
+            for line in (result.stderr or b"").decode("utf-8", "replace").splitlines()
+            if line.strip()
+        ]
+        return False, (lines[-1] if lines else f"codesign exited {result.returncode}")
+    return True, ""
+
+
+def _codesign(*args: str) -> bool:
+    """Run ``codesign`` with ``args``; True on exit 0. Bounded, stdin closed."""
+    return _codesign_run(*args)[0]
 
 
 def _sign_adhoc(bundle: Path) -> bool:
@@ -1747,6 +1769,12 @@ def _populate_bundle(staging: Path, real: Path, base: Path, flavor: str, sign) -
     and the sidecar is written last from the signed image's own stat, so a
     tree is healthy only once it is complete.
     """
+    # Darwin-only by construction (every caller is behind a darwin check), but
+    # restated here so the static cross-platform scan sees the guard at the
+    # ``os.symlink`` calls below: raising lands in ``_publish_tree``'s failure
+    # path, which never publishes a partial tree.
+    if sys.platform != "darwin":
+        raise OSError("runtime trees are built on macOS only")
     _write_source_marker(staging, real)
     # ``lib`` beside the bundle, never inside it (``--strict``, see
     # ``_RPATH_NEW``); ``include`` as the legacy shape has it.
@@ -1923,8 +1951,43 @@ def app_requirement(app: Path) -> str | None:
     return None
 
 
+class TeamPublish:
+    """What :func:`publish_team_runtime_result` did, for callers that report it.
+
+    ``image`` is the team image (or ``None``). ``signed`` is True only when
+    THIS call ran a Developer ID signature — setup asks the "Always Allow"
+    question only then, because an image that already existed exercised no
+    keychain ACL (review round 1, R4). ``reason`` is a machine code for why no
+    image came back (``None`` on success); ``detail`` carries codesign's own
+    error line for ``signing-failed``.
+    """
+
+    # A plain class, not ``typing.NamedTuple``: this module sits on the
+    # interpreter's startup path and imports nothing beyond the stdlib core.
+    __slots__ = ("image", "signed", "reason", "detail")
+
+    def __init__(
+        self,
+        image: Path | None,
+        *,
+        signed: bool = False,
+        reason: str | None = None,
+        detail: str = "",
+    ) -> None:
+        self.image = image
+        self.signed = signed
+        self.reason = reason
+        self.detail = detail
+
+    def __repr__(self) -> str:
+        return (
+            f"TeamPublish(image={self.image!r}, signed={self.signed!r}, "
+            f"reason={self.reason!r}, detail={self.detail!r})"
+        )
+
+
 def publish_team_runtime(
-    interpreter: str | os.PathLike[str], *, interactive: bool = False
+    interpreter: str | os.PathLike[str], *, interactive: bool = False, allow_prompt: bool = False
 ) -> Path | None:
     """Publish the TEAM-signed bundle (``com.local-operator``) for ``interpreter``'s build.
 
@@ -1940,57 +2003,102 @@ def publish_team_runtime(
 
     NEVER on the session path. Only ``lop update`` (before the flip) and
     ``lop permissions setup`` call this, because a Developer ID signature may
-    raise the keychain dialog. ``interactive`` is True only from setup; from
-    ``lop update`` with no TTY it signs only when the operator recorded that
-    they chose "Always Allow", so an agent-run update cannot put a dialog on
-    screen. The signed bundle is verified with ``codesign --verify --strict
+    raise the keychain dialog. ``interactive`` is True only from setup.
+    Otherwise it signs only when the operator recorded that they chose
+    "Always Allow", or when ``allow_prompt`` is True AND stdin is a terminal:
+    ``allow_prompt`` is passed ONLY by the ``lop update`` CLI entry, because a
+    TTY alone is not consent — the TUI's ``/update`` runs with a TTY in the
+    middle of a live session (review round 1, R2), and a keychain dialog over
+    it, with codesign blocking up to 120 s, is exactly what this gate exists
+    to prevent. The signed bundle is verified with ``codesign --verify --strict
     -R=<app DR>`` BEFORE it is published, so an image that would not share the
     app's grant is never selected. Never raises; ``None`` means runtimes keep
     the ad-hoc "Local Operator Runtime" flavor.
     """
+    return publish_team_runtime_result(
+        interpreter, interactive=interactive, allow_prompt=allow_prompt
+    ).image
+
+
+def publish_team_runtime_result(
+    interpreter: str | os.PathLike[str], *, interactive: bool = False, allow_prompt: bool = False
+) -> TeamPublish:
+    """:func:`publish_team_runtime`, reporting whether it signed and why not.
+
+    Reason codes: ``refused:<team_signing_refusal code>``, ``not-opted-in``,
+    ``needs-always-allow`` (no recorded "Always Allow" and this caller may not
+    prompt), ``no-terminal``, ``unsupported-interpreter``, ``app-missing``,
+    ``team-mismatch``, ``no-requirement``, ``signing-failed``, ``error``.
+    Never raises.
+    """
     try:
-        if team_signing_refusal() is not None:
-            return None
+        refusal = team_signing_refusal()
+        if refusal is not None:
+            return TeamPublish(None, reason=f"refused:{refusal}")
         record = read_signing_optin()
         if record is None:
-            return None
+            return TeamPublish(None, reason="not-opted-in")
         if not interactive and not record.get("always_allow_confirmed"):
+            if not allow_prompt:
+                return TeamPublish(None, reason="needs-always-allow")
             try:
                 if not sys.stdin.isatty():
-                    return None
+                    return TeamPublish(None, reason="no-terminal")
             except (AttributeError, ValueError):
-                return None
+                return TeamPublish(None, reason="no-terminal")
         real = _real_interpreter_for(interpreter)
         root = runtime_root()
         if real is None or root is None or _is_framework_build(real):
-            return None
+            return TeamPublish(None, reason="unsupported-interpreter")
         key = _build_key(real)
         image = _bundle_image(root, key, FLAVOR_TEAM)
         if os.path.lexists(_flavor_dir(root, key, FLAVOR_TEAM)) and _healthy_image(image, real):
-            return image
+            return TeamPublish(image)
         app = installed_app()
-        if app is None or code_identity(app).get("TeamIdentifier") != record["team"]:
-            return None
+        if app is None:
+            return TeamPublish(None, reason="app-missing")
+        if code_identity(app).get("TeamIdentifier") != record["team"]:
+            return TeamPublish(None, reason="team-mismatch")
         requirement = app_requirement(app)
         if requirement is None:
-            return None
+            return TeamPublish(None, reason="no-requirement")
         identity = str(record["identity"])
+        attempts: list[str] = []
 
         def sign(bundle: Path) -> bool:
-            return _codesign(
+            ok, error = _codesign_run(
                 "--force", "--sign", identity, "--identifier", APP_BUNDLE_ID, str(bundle)
-            ) and _codesign("--verify", "--strict", f"-R={requirement}", str(bundle))
+            )
+            attempts.append(error)
+            if not ok:
+                return False
+            ok, error = _codesign_run("--verify", "--strict", f"-R={requirement}", str(bundle))
+            if not ok:
+                attempts.append(error)
+            return ok
 
-        return _publish_tree(
+        published = _publish_tree(
             real,
             root,
             _flavor_dir(root, key, FLAVOR_TEAM).name,
             image,
             lambda staging, base: _populate_bundle(staging, real, base, FLAVOR_TEAM, sign),
         )
+        # ``attempts`` non-empty means this call reached the Developer ID
+        # signature (a concurrent publisher that won the rename still means
+        # our codesign ran and any keychain dialog was answered).
+        if published is None:
+            failures = [error for error in attempts if error]
+            return TeamPublish(
+                None,
+                signed=bool(attempts),
+                reason="signing-failed",
+                detail=failures[-1] if failures else "",
+            )
+        return TeamPublish(published, signed=bool(attempts))
     except Exception:  # noqa: BLE001 — an identity never fails an update
         logger.debug("team runtime image not published", exc_info=True)
-        return None
+        return TeamPublish(None, reason="error")
 
 
 def runtime_identity(interpreter: str | os.PathLike[str] | None = None) -> dict[str, object]:

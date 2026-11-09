@@ -98,6 +98,13 @@ def fake_codesign(tmp_path, monkeypatch):
     return calls
 
 
+class _TtyStdin:
+    """A stdin that answers ``isatty()`` like a terminal (the TUI has one)."""
+
+    def isatty(self) -> bool:
+        return True
+
+
 def _signed_with(calls: list[list[str]]) -> list[str]:
     """Every value passed to ``--sign`` across the recorded calls."""
     return [argv[i + 1] for argv in calls for i, arg in enumerate(argv[:-1]) if arg == "--sign"]
@@ -407,6 +414,71 @@ class TestTeamFlavor:
         assert procname.publish_team_runtime(real) is None
         assert fake_codesign() == []
 
+    def test_a_tty_alone_is_not_consent_to_sign(
+        self, tmp_path, fake_codesign, opted_in_host, monkeypatch
+    ):
+        """R2: the TUI's ``/update`` has a TTY mid-session; only ``lop update`` may prompt."""
+        procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False)
+        monkeypatch.setattr(sys, "stdin", _TtyStdin())
+        real = _copied_interpreter(tmp_path)
+
+        result = procname.publish_team_runtime_result(real)
+
+        assert result.image is None
+        assert result.reason == "needs-always-allow"
+        assert fake_codesign() == [], "no Developer ID signature without explicit consent"
+
+    def test_the_cli_update_may_prompt_from_a_terminal(
+        self, tmp_path, fake_codesign, opted_in_host, monkeypatch
+    ):
+        procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False)
+        monkeypatch.setattr(sys, "stdin", _TtyStdin())
+        real = _copied_interpreter(tmp_path)
+
+        result = procname.publish_team_runtime_result(real, allow_prompt=True)
+
+        assert result.image is not None and result.signed
+        assert _FAKE_SHA1 in _signed_with(fake_codesign())
+
+    def test_a_cli_update_with_no_terminal_still_does_not_sign(
+        self, tmp_path, fake_codesign, opted_in_host, monkeypatch
+    ):
+        procname.write_signing_optin(_FAKE_SHA1, _FAKE_TEAM, always_allow_confirmed=False)
+        monkeypatch.setattr(sys, "stdin", open(os.devnull))
+        real = _copied_interpreter(tmp_path)
+
+        result = procname.publish_team_runtime_result(real, allow_prompt=True)
+
+        assert (result.image, result.reason) == (None, "no-terminal")
+        assert fake_codesign() == []
+
+    def test_signed_is_reported_only_when_this_call_signed(
+        self, tmp_path, fake_codesign, opted_in_host
+    ):
+        """R4: an image that already existed exercised no keychain access list."""
+        real = _copied_interpreter(tmp_path)
+
+        first = procname.publish_team_runtime_result(real)
+        calls_after_first = len(fake_codesign())
+        again = procname.publish_team_runtime_result(real)
+
+        assert first.image is not None and first.signed
+        assert again.image == first.image and not again.signed
+        assert len(fake_codesign()) == calls_after_first, "the second call ran no codesign"
+
+    def test_a_failed_signature_reports_codesigns_error(
+        self, tmp_path, fake_codesign, opted_in_host
+    ):
+        """U5: setup shows why signing failed instead of pointing at a debug log."""
+        (fake_codesign.dir / "fail-all").touch()
+        real = _copied_interpreter(tmp_path)
+
+        result = procname.publish_team_runtime_result(real)
+
+        assert result.image is None and result.signed
+        assert result.reason == "signing-failed"
+        assert result.detail, "codesign's error (or its exit status) is carried to the caller"
+
     def test_a_malformed_optin_is_ignored(self, tmp_path, monkeypatch):
         optin = tmp_path / "optin.json"
         monkeypatch.setattr(procname, "_optin_path", lambda: optin)
@@ -444,3 +516,76 @@ def test_the_default_config_dir_spelled_out_is_not_an_isolated_run(monkeypatch):
     monkeypatch.delenv("LOCAL_OPERATOR_RUNTIME_ROOT", raising=False)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(home / ".local-operator"))
     assert procname.team_signing_refusal() is None
+
+
+class TestPopulateGuards:
+    """R1: the tree builders refuse off macOS, where ``os.symlink`` may not exist."""
+
+    @pytest.mark.parametrize("builder", ["legacy", "bundle"])
+    def test_populate_refuses_off_darwin(self, tmp_path, monkeypatch, builder):
+        real = Path(os.path.realpath(sys.executable))
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        monkeypatch.setattr(sys, "platform", "linux")
+        with pytest.raises(OSError, match="macOS only"):
+            if builder == "legacy":
+                procname._populate_legacy(staging, real, real.parent.parent)
+            else:
+                procname._populate_bundle(
+                    staging, real, real.parent.parent, procname.FLAVOR_ADHOC, lambda b: True
+                )
+        assert list(staging.iterdir()) == [], "nothing is built before the guard"
+
+
+class TestUpdateHook:
+    """R2/U5: ``lop update``'s team publish — who may prompt, and what is said."""
+
+    @pytest.fixture()
+    def captured(self, monkeypatch, tmp_path):
+        from local_operator import update
+
+        calls: list[dict[str, object]] = []
+        outcome: dict[str, object] = {"result": procname.TeamPublish(None, reason="not-opted-in")}
+
+        def fake(interpreter, **kwargs):
+            calls.append(kwargs)
+            return outcome["result"]
+
+        monkeypatch.setattr(procname, "publish_team_runtime_result", fake)
+        monkeypatch.setattr(update, "_venv_interpreter", lambda root: tmp_path / "python")
+        monkeypatch.setattr(update, "_generation_install_root", lambda gen: gen)
+        return update, calls, outcome
+
+    def test_only_an_explicit_caller_may_prompt(self, captured, tmp_path):
+        update, calls, _ = captured
+        update._publish_team_runtime(tmp_path)
+        update._publish_team_runtime(tmp_path, allow_prompt=True)
+        assert [call["allow_prompt"] for call in calls] == [False, True]
+
+    def test_the_cli_entry_is_the_one_that_passes_prompt_consent(self):
+        """The TUI calls ``perform_upgrade`` without it; the default must stay False."""
+        import inspect
+
+        from local_operator import update
+
+        for function in (update.perform_upgrade, update.install_into_generation):
+            parameter = inspect.signature(function).parameters["team_signing_prompt"]
+            assert parameter.default is False, function.__name__
+
+    def test_an_opted_in_host_that_falls_back_is_told(self, captured, tmp_path, caplog):
+        update, _, outcome = captured
+        outcome["result"] = procname.TeamPublish(None, reason="needs-always-allow")
+        with caplog.at_level("DEBUG", logger=update.logger.name):
+            update._publish_team_runtime(tmp_path)
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "Always Allow" in warnings[0].getMessage()
+        assert "Local Operator Runtime" in warnings[0].getMessage()
+
+    @pytest.mark.parametrize("reason", ["not-opted-in", "refused:isolated-home"])
+    def test_hosts_that_never_opted_in_stay_quiet(self, captured, tmp_path, caplog, reason):
+        update, _, outcome = captured
+        outcome["result"] = procname.TeamPublish(None, reason=reason)
+        with caplog.at_level("DEBUG", logger=update.logger.name):
+            update._publish_team_runtime(tmp_path)
+        assert not [r for r in caplog.records if r.levelno >= 30]
