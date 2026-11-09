@@ -156,7 +156,8 @@ try:
             started = time.monotonic()
             with store.mutate(record.network_id, built[0].root) as copy:
                 own = copy.member(built[0].device_id)
-                assert own is not None
+                if own is None:
+                    raise RuntimeError("expected local member row; found none")
                 own.name = name
                 store.save(copy, built[0].root)
             deadline = started + 40
