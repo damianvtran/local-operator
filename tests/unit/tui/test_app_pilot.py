@@ -943,11 +943,28 @@ async def _await_session(app: Any, pilot: Any) -> None:
 
     Polling for the state the test depends on removes the timing from the
     assertion while still failing, on timeout, if the session never arrives.
+
+    The FAILURE is raised here, naming the predicate and the ceiling, rather
+    than left to whatever the caller asserts next. This helper used to fall out
+    of its loop and return None, so a boot that never built a session surfaced
+    as the caller's downstream assertion - a refusal's after-state, or an empty
+    transcript - which reads as a product fault at a line that is not the
+    cause (the same shape as the `waitFor` that reddened CI shard 0: a starved
+    runner reported as a behavioural assertion). For a test that sends a slash
+    command after this wait, nothing downstream checks at all, so the silent
+    return could also let the case PASS. The ceiling stays a deadlock guard:
+    on a healthy runner this returns in a handful of pauses.
     """
     for _ in range(200):
         await pilot.pause()
         if getattr(app, "_session", None) is not None:
             return
+    raise AssertionError(
+        "the boot worker never built a session within 200 pilot pauses "
+        "(app._session is still None); a command sent now would be refused "
+        "with 'session is still starting', so this is a TIMEOUT waiting for "
+        "boot, not the refusal test failing"
+    )
 
 
 async def _await_setup_state(app: Any, pilot: Any) -> None:
@@ -961,13 +978,23 @@ async def _await_setup_state(app: Any, pilot: Any) -> None:
     not introduced by it. Polling for the state the test is about removes the
     timing from the assertion while still failing (on timeout) if the state is
     never reached.
+
+    That failure is raised HERE, naming the predicate and the ceiling; it used
+    to fall out of the loop after a last `pilot.pause()` and return None, so an
+    unreached setup state surfaced as the caller's own assertion several lines
+    later (misleading report, and a silent pass wherever nothing downstream
+    checked). See `_await_session` above for the same contract.
     """
     for _ in range(100):
         await pilot.pause()
         if app._setup_state:
             return
         await asyncio.sleep(0.05)
-    await pilot.pause()
+    raise AssertionError(
+        "the boot task never reached the setup state within 100 pauses + 5.0 s "
+        "(app._setup_state is still falsy); this is a TIMEOUT waiting for boot, "
+        "not the guided-setup assertion failing"
+    )
 
 
 @pytest.mark.asyncio

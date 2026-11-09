@@ -197,11 +197,25 @@ async def _until(predicate, message: str, tries: int = 200) -> None:
 
 
 async def settle_background(session: Session, tries: int = 200) -> None:
-    """Let the detached pass finish, the way a real turn's next steps do."""
+    """Let the detached pass finish, the way a real turn's next steps do.
+
+    Mirrors the ``raise AssertionError(message)`` contract of the bounded
+    helper this file already used above, instead of falling out of the loop.
+    A silent return made a pass that never finished arrive as whatever the
+    caller measured next (a summary that was not there yet, a boundary count
+    that had not settled) - which reads as the product under test being wrong
+    rather than the wait being starved - and a caller checking nothing
+    downstream would pass after the timeout.
+    """
     for _ in range(tries):
         await asyncio.sleep(0.01)
         if not session._compaction_pass_in_flight:
             return
+    raise AssertionError(
+        f"the detached compaction pass was still in flight after {tries} ticks "
+        f"({tries * 0.01:.1f} s): TIMEOUT waiting for _compaction_pass_in_flight "
+        "to clear, not a compaction result that came out wrong"
+    )
 
 
 # --- THE GAP THIS CLOSES --------------------------------------------------
