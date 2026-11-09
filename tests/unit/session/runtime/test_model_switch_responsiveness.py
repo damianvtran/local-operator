@@ -260,3 +260,108 @@ async def test_cold_loopback_listing_cannot_commit_after_resolution_cancellation
             server.shutdown()
             server.server_close()
             thread.join()
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_blocked() -> None:
+    """The operator's acceptance item: settings answer instantly even mid-step.
+
+    A REAL ``ServingSessionHandle`` whose session loop is held by a synchronous
+    ``time.sleep`` (a tool step or an eval holding the loop). Without
+    ``defer_ok`` the reply could only come after the sleep, because the switch
+    body hops onto that loop. With it the runtime answers ``queued`` within
+    ``SETTINGS_INLINE_ACK_S``; the body then lands FIFO behind the blocking
+    step and BEFORE the next thing the loop runs \u2014 which is where the agent
+    loop's next ``_current_model`` read would be \u2014 and the outcome is
+    published as ``settings_result`` for the ``request_id`` sent.
+    """
+    import time
+
+    from local_operator.session.runtime.server import SETTINGS_INLINE_ACK_S
+    from tests.unit.session.runtime.test_serving import _AccessSession
+
+    session_loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=session_loop.run_forever, daemon=True)
+    loop_thread.start()
+    session = _AccessSession("test/model")
+    session.model = ModelSpec(provider="test", model_id="model", reasoning_efforts=["low", "high"])
+    handle = serving.ServingSessionHandle(session, session_loop, cwd="/tmp")
+
+    class Host(FakeHandle):
+        """The wire host: switch ops go to the real serving handle."""
+
+        async def set_effort(self, effort, *, request_id=None):  # noqa: ANN001, ANN202
+            return await handle.set_effort(effort, request_id=request_id)
+
+    runtime = RuntimeServer(Host(), kind="tui")
+    runtime.start()
+    writer = None
+    block_s = SETTINGS_INLINE_ACK_S + 1.5
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        blocking = threading.Event()
+
+        def hold() -> None:
+            blocking.set()
+            time.sleep(block_s)
+
+        session_loop.call_soon_threadsafe(hold)
+        assert await asyncio.to_thread(blocking.wait, 2)
+        sent = time.monotonic()
+        writer.write(
+            json.dumps(
+                {
+                    "op": "set_effort",
+                    "req": 1,
+                    "effort": "high",
+                    "defer_ok": True,
+                    "request_id": "rid-1",
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        ack = await asyncio.wait_for(_until(reader, "ack", 1), timeout=block_s + 5)
+        acked_after = time.monotonic() - sent
+        assert ack["detail"] == "queued", ack
+        assert acked_after <= SETTINGS_INLINE_ACK_S + 0.5, acked_after
+        assert session.model.reasoning_effort != "high", "acked before it could land"
+
+        # The "next step": session-loop work scheduled AFTER the switch was
+        # sent, the way the turn's next ``_current_model`` read is. Hops land
+        # FIFO, so the queued switch has applied by the time it runs.
+        async def next_step() -> str | None:
+            return session.model.reasoning_effort
+
+        seen = asyncio.run_coroutine_threadsafe(next_step(), session_loop)
+        assert await asyncio.wrap_future(seen) == "high"
+        result = session._frontend_state_store.state.settings_result
+        assert result is not None
+        assert (result.request_id, result.ok, result.code) == ("rid-1", True, "applied")
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+        session_loop.call_soon_threadsafe(session_loop.stop)
+        loop_thread.join(5)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_identified_switch_publishes_its_refusal() -> None:
+    """A queued switch's refusal has no reply left to ride: it goes on state."""
+    from tests.unit.session.runtime.test_serving import _AccessSession
+
+    session = _AccessSession("test/model")
+    handle = serving.ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    with pytest.raises(ValueError):
+        await handle.set_effort("turbo", request_id="rid-2")
+    result = session._frontend_state_store.state.settings_result
+    assert result is not None
+    assert (result.request_id, result.ok, result.code) == ("rid-2", False, "invalid")
+    assert result.message == "model has no reasoning-effort levels; drop --effort"
+    # Unidentified switches publish nothing (the pre-``defer_ok`` contract).
+    session._frontend_state_store.mutate(settings_result=None)
+    with pytest.raises(ValueError):
+        await handle.set_effort("turbo")
+    assert session._frontend_state_store.state.settings_result is None

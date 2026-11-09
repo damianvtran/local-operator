@@ -7116,3 +7116,291 @@ async def test_unengaged_designated_cos_accepts_a_bridge_card_only_under_v2(
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+# ---------------------------------------------------------------------------
+# ``defer_ok`` switches: an instant ``queued`` ack while the session is busy.
+#
+# The operator's requirement: a settings change from any UI must be answered
+# at once, even mid-turn/mid-tool/mid-eval, and say "queued, applies at the next
+# step" instead of an error when it cannot land yet. The handle below stands in
+# for a session loop held by a synchronous turn step: its switch bodies park on
+# a threading.Event until the test releases them.
+# ---------------------------------------------------------------------------
+
+
+class _HeldSwitchHandle(FakeHandle):
+    """Switch bodies that park until ``release`` is set (a busy session loop)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+        self.entered: list[str] = []
+        self.landed: list[tuple[str, str | None]] = []
+
+    async def set_model(self, provider, model_id, *, request_id=None):  # noqa: ANN001, ANN202
+        self.entered.append(model_id)
+        assert await asyncio.to_thread(self.release.wait, 10), "the test never released"
+        self.landed.append((model_id, request_id))
+        return await self._record("set_model", provider, model_id)
+
+
+async def _send(writer: asyncio.StreamWriter, frame: dict[str, Any]) -> None:
+    writer.write(json.dumps(frame).encode() + b"\n")
+    await writer.drain()
+
+
+async def _replies_for(
+    reader: asyncio.StreamReader, req: object, window: float
+) -> list[dict[str, Any]]:
+    """Every reply frame for ``req`` that arrives within ``window`` seconds."""
+    seen: list[dict[str, Any]] = []
+    deadline = asyncio.get_running_loop().time() + window
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return seen
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return seen
+        if not raw:
+            return seen
+        frame = json.loads(raw)
+        if frame.get("req") == req and frame.get("op") in ("ack", "result", "error"):
+            seen.append(frame)
+
+
+@pytest.fixture
+def _short_inline_window(monkeypatch: pytest.MonkeyPatch) -> float:
+    """A 0.3 s window so a test proves the shape without spending 1.5 s per ack."""
+    from local_operator.session.runtime import server as server_mod
+
+    monkeypatch.setattr(server_mod, "SETTINGS_INLINE_ACK_S", 0.3)
+    return 0.3
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_switch_is_acked_queued_and_never_answered_twice(
+    _short_inline_window: float,
+) -> None:
+    handle = _HeldSwitchHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        started = time.monotonic()
+        await _send(
+            writer,
+            {
+                "op": "set_model",
+                "req": 7,
+                "provider": "test",
+                "model_id": "A",
+                "defer_ok": True,
+                "request_id": "rid-A",
+            },
+        )
+        ack = await asyncio.wait_for(_until(reader, "ack", 7), timeout=5)
+        elapsed = time.monotonic() - started
+        assert ack["detail"] == "queued" and ack["queued"] is True
+        assert ack["request_id"] == "rid-A"
+        assert elapsed < _short_inline_window + 1.0, elapsed
+        assert handle.landed == [], "the ack must not wait for the switch to land"
+
+        handle.release.set()
+        await _until_landed(handle, 1)
+        assert handle.landed == [("A", "rid-A")], "request_id reaches the owner"
+        assert await _replies_for(reader, 7, 0.5) == [], "the body's own reply was resent"
+    finally:
+        handle.release.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+async def _until_landed(handle: _HeldSwitchHandle, n: int, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while len(handle.landed) < n:
+        assert time.monotonic() < deadline, f"only {handle.landed} landed"
+        await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_switch_that_lands_inside_the_window_answers_normally(
+    _short_inline_window: float,
+) -> None:
+    """An idle owner answers with the real outcome, never ``queued``."""
+    handle = _HeldSwitchHandle()
+    handle.release.set()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        await _send(
+            writer,
+            {
+                "op": "set_model",
+                "req": 1,
+                "provider": "test",
+                "model_id": "A",
+                "defer_ok": True,
+                "request_id": "r1",
+            },
+        )
+        replies = await _replies_for(reader, 1, _short_inline_window + 0.7)
+        assert len(replies) == 1, replies
+        assert replies[0]["op"] == "ack" and replies[0]["detail"] != "queued"
+        assert "queued" not in replies[0]
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_switch_without_defer_ok_still_waits_for_its_outcome(
+    _short_inline_window: float,
+) -> None:
+    """The historic contract is untouched: no ``defer_ok``, no ``queued`` ack."""
+    handle = _HeldSwitchHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        await _send(writer, {"op": "set_model", "req": 3, "provider": "test", "model_id": "A"})
+        assert await _replies_for(reader, 3, _short_inline_window + 0.5) == []
+        handle.release.set()
+        ack = await asyncio.wait_for(_until(reader, "ack", 3), timeout=5)
+        assert ack["detail"] != "queued" and "queued" not in ack
+        assert handle.landed == [("A", None)], "no request_id is invented"
+        assert await _replies_for(reader, 3, 0.3) == []
+    finally:
+        handle.release.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_queued_switches_keep_send_order_and_each_acks_promptly(
+    _short_inline_window: float,
+) -> None:
+    """A then B: both acked within the window while A is held; A lands first."""
+    handle = _HeldSwitchHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        started = time.monotonic()
+        for req, model in ((1, "A"), (2, "B")):
+            await _send(
+                writer,
+                {
+                    "op": "set_model",
+                    "req": req,
+                    "provider": "test",
+                    "model_id": model,
+                    "defer_ok": True,
+                    "request_id": f"r{model}",
+                },
+            )
+        first = await asyncio.wait_for(_until(reader, "ack", 1), timeout=5)
+        second = await asyncio.wait_for(_until(reader, "ack", 2), timeout=5)
+        elapsed = time.monotonic() - started
+        assert first["detail"] == second["detail"] == "queued"
+        # B's clock starts at ITS admission, not when A lands: A is still held.
+        assert elapsed < _short_inline_window + 1.0, elapsed
+        assert handle.entered == ["A"], "B must not start before A has landed"
+        handle.release.set()
+        await _until_landed(handle, 2)
+        assert [model for model, _ in handle.landed] == ["A", "B"]
+        assert await _replies_for(reader, 1, 0.3) == []
+        assert await _replies_for(reader, 2, 0.1) == []
+    finally:
+        handle.release.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_switch_survives_its_connection_dropping(
+    _short_inline_window: float,
+) -> None:
+    """The desktop redials freely; a queued switch is a promise, not a socket's."""
+    handle = _HeldSwitchHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        await _send(
+            writer,
+            {
+                "op": "set_model",
+                "req": 9,
+                "provider": "test",
+                "model_id": "A",
+                "defer_ok": True,
+                "request_id": "rA",
+            },
+        )
+        assert (await asyncio.wait_for(_until(reader, "ack", 9), timeout=5))["queued"] is True
+        writer.close()
+        await writer.wait_closed()
+        writer = None
+        await asyncio.sleep(0.2)  # the reader loop observes the close and drops it
+        assert len(runtime._deferred_switches) == 1
+        handle.release.set()
+        await _until_landed(handle, 1)
+        assert handle.landed == [("A", "rA")]
+    finally:
+        handle.release.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_a_switch_still_queued(_short_inline_window: float) -> None:
+    """Shutdown cannot wait out a turn step: the queued body is cancelled, not leaked."""
+    handle = _HeldSwitchHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        await _send(
+            writer,
+            {
+                "op": "set_model",
+                "req": 4,
+                "provider": "test",
+                "model_id": "A",
+                "defer_ok": True,
+                "request_id": "rA",
+            },
+        )
+        assert (await asyncio.wait_for(_until(reader, "ack", 4), timeout=5))["queued"] is True
+        started = time.monotonic()
+        await asyncio.to_thread(runtime.close)
+        # The fence released at the ack: close must not wait for the held body.
+        assert time.monotonic() - started < 5.0
+        assert not runtime._deferred_switches
+        assert handle.landed == []
+    finally:
+        handle.release.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()

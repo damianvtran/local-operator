@@ -114,7 +114,11 @@ from local_operator.session.approval_policy import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import AckDetail, SessionHandle
+from local_operator.session.runtime.server import (
+    _SWITCH_SLASH_COMMANDS,
+    AckDetail,
+    SessionHandle,
+)
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
@@ -810,6 +814,80 @@ def _on_session_loop(method: _F) -> _F:
         )
 
     return cast(_F, marshalled)
+
+
+#: The routed slash commands whose outcome is a SETTINGS result: exactly the
+#: switch lane's slash set, imported rather than restated so the commands that
+#: can be acked ``queued`` and the ones that publish an outcome cannot drift.
+_SETTINGS_SLASH_COMMANDS = _SWITCH_SLASH_COMMANDS
+
+
+def _settings_refusal_code(error: BaseException) -> str:
+    """The stable token a ``settings_result`` refusal carries in ``code``.
+
+    ``ModelSelectionRefused`` already owns a wire-contract code (the desktop's
+    422 body returns it verbatim), so it is reused rather than re-classified;
+    any other ``ValueError`` is a validation refusal (an effort the model has no
+    rung for), and anything else is a failure of the owner, not of the request.
+    """
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code:
+        return code
+    return "invalid" if isinstance(error, ValueError) else "failed"
+
+
+def _records_settings_result(method: _F) -> _F:
+    """Publish the switch's outcome as ``settings_result`` when it was identified.
+
+    WHY A WRAPPER. A switch sent with ``defer_ok`` can be acked ``queued`` by
+    the runtime's control lane before this body has even started (see
+    ``server.py``'s ``SETTINGS_INLINE_ACK_S``), and that ack suppresses the
+    body's own reply \u2014 so the outcome needs a channel that is not the reply.
+    It goes on the session's state (``FrontendSessionState.settings_result``),
+    which every attached viewer already receives. Written by a decorator so the
+    three switch bodies (``set_model``, ``set_model_effort``, ``set_effort``)
+    keep their bodies and their refusal sentences byte-for-byte.
+
+    The ``request_id`` keyword is consumed HERE and never reaches the body, and
+    nothing is written without one: an unidentified switch keeps exactly the
+    behaviour it had. Applied INSIDE ``_on_session_loop`` so the write happens
+    on the session's loop, the only thread that may mutate its state store.
+
+    The wrapper advertises ``request_id`` in ``__signature__`` because the wire
+    dispatch decides whether to pass it with ``_accepts_kw`` (a signature
+    probe): a handle without this wrapper \u2014 the TUI host, test doubles, an
+    older owner \u2014 keeps the narrow call.
+    """
+
+    @functools.wraps(method)
+    async def recorded(
+        self: "ServingSessionHandle", *args: Any, request_id: str | None = None, **kwargs: Any
+    ) -> Any:
+        if not request_id:
+            return await method(self, *args, **kwargs)
+        try:
+            receipt = await method(self, *args, **kwargs)
+        except Exception as exc:
+            self._publish_settings_result(
+                request_id, ok=False, code=_settings_refusal_code(exc), message=str(exc)
+            )
+            raise
+        self._publish_settings_result(request_id, ok=True, code="applied", message=str(receipt))
+        return receipt
+
+    signature = inspect.signature(method)
+    params = list(signature.parameters.values())
+    if "request_id" not in signature.parameters:
+        keyword = inspect.Parameter(
+            "request_id", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=str | None
+        )
+        # A keyword-only parameter must precede ``**kwargs`` to be a valid
+        # signature; none of the wrapped bodies has one today, but stay correct.
+        tail = [p for p in params if p.kind is inspect.Parameter.VAR_KEYWORD]
+        head = [p for p in params if p.kind is not inspect.Parameter.VAR_KEYWORD]
+        params = [*head, keyword, *tail]
+    recorded.__signature__ = signature.replace(parameters=params)  # type: ignore[attr-defined]
+    return cast(_F, recorded)
 
 
 def _fork_entry_target(args: str) -> str | None:
@@ -6021,6 +6099,7 @@ class ServingSessionHandle(SessionHandle):
         return "cancelling at the next tool boundary"
 
     @_on_session_loop
+    @_records_settings_result
     async def set_model(self, provider: str, model_id: str) -> str:
         """Switch the owner onto ``provider``/``model_id`` at the model's own level.
 
@@ -6031,6 +6110,7 @@ class ServingSessionHandle(SessionHandle):
         return await self.set_model_effort(provider, model_id, None)
 
     @_on_session_loop
+    @_records_settings_result
     async def set_model_effort(
         self,
         provider: str,
@@ -6846,6 +6926,7 @@ class ServingSessionHandle(SessionHandle):
             logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
 
     @_on_session_loop
+    @_records_settings_result
     async def set_effort(self, effort: str) -> str:
         self._check_loop_thread()
         spec = self._session.model
@@ -8179,6 +8260,31 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
 
+    def _publish_settings_result(
+        self, request_id: str, *, ok: bool, code: str, message: str
+    ) -> None:
+        """Write one switch outcome onto the session state (see ``_records_settings_result``).
+
+        Never raises: the switch has already landed or been refused by the time
+        this runs, and a projection hiccup must not turn an applied switch into
+        a reported failure. ``store.mutate`` is the same publication path
+        ``pending_gate`` uses, so the field rides the next state push.
+        """
+        try:
+            store = getattr(self._session, "_frontend_state_store", None)
+            if store is None:
+                return
+            store.mutate(
+                settings_result={
+                    "request_id": request_id,
+                    "ok": ok,
+                    "code": code,
+                    "message": message,
+                }
+            )
+        except Exception:  # noqa: BLE001 — the outcome is advisory; the switch stands
+            logger.debug("could not publish the settings result", exc_info=True)
+
     def _refresh_ask_projection(self) -> None:
         """Install the session's ask fold into the phone projection (§4, N2).
 
@@ -8566,6 +8672,7 @@ class ServingSessionHandle(SessionHandle):
         #: connection can answer it, and the verbs that need it are chosen
         #: several frames below.
         capabilities: frozenset[str] | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -8597,12 +8704,45 @@ class ServingSessionHandle(SessionHandle):
         renders itself (``SLASH_ACTION_RECEIPTS``); ``None`` means it declared
         nothing, which is what every client built before the field looks like
         on the wire. See :meth:`_complete_unconsumed_action`.
+
+        ``request_id`` identifies a SETTINGS switch (``/model``, ``/effort``,
+        ``/fast`` — the switch lane's slash commands) sent with ``defer_ok``:
+        its outcome is published as ``settings_result`` exactly as the
+        ``set_model``/``set_effort`` ops publish theirs (see
+        ``_records_settings_result``), because a queued ack suppressed the
+        reply that would otherwise have carried it. Ignored for any other
+        command, which never rides the deferred lane.
         """
         from local_operator.session.frontend_state import SlashResult
 
-        result = await self._slash_result(
-            command, args, SlashResult, locality, may_loosen, capabilities
-        )
+        settings_request: str | None = None
+        if request_id:
+            from local_operator.slash_commands import primary_slash_name
+
+            if primary_slash_name(command.strip().lower()) in _SETTINGS_SLASH_COMMANDS:
+                settings_request = request_id
+        try:
+            result = await self._slash_result(
+                command, args, SlashResult, locality, may_loosen, capabilities
+            )
+        except Exception as exc:
+            if settings_request is not None:
+                self._publish_settings_result(
+                    settings_request,
+                    ok=False,
+                    code=_settings_refusal_code(exc),
+                    message=str(exc),
+                )
+            raise
+        if settings_request is not None:
+            ok = result.kind != "error"
+            data_code = result.data.get("code") if isinstance(result.data, dict) else None
+            self._publish_settings_result(
+                settings_request,
+                ok=ok,
+                code=("applied" if ok else (str(data_code) if data_code else "failed")),
+                message=str(result.text or ""),
+            )
         result = await self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 

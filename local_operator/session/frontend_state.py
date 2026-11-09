@@ -1719,6 +1719,36 @@ class McpServerState(BaseModel):
     tool_count: int | None = None
 
 
+class SettingsResultState(BaseModel):
+    """The landed outcome of ONE identified settings switch (model/effort/fast).
+
+    WHY IT EXISTS. A switch frame sent with ``defer_ok`` may be answered
+    ``queued`` before it lands: the runtime's control lane acks within
+    ``SETTINGS_INLINE_ACK_S`` even while the session loop is busy with a turn
+    step, so the reply can no longer carry the outcome. This field is where the
+    outcome goes instead, on the ordinary state push, so every viewer (desktop,
+    TUI, phone) learns the same result whether or not the socket that asked is
+    still open.
+
+    Written ONLY for a switch that carried a ``request_id``: an unidentified
+    switch is answered by its own reply as it always was, and a field naming no
+    request would give a client nothing to correlate. Last writer wins — a
+    client matches ``request_id`` against the one it sent and ignores the rest.
+
+    ``code`` is a stable machine token (``applied``, or the refusal's class such
+    as ``model_unknown``/``invalid``) for a client to localise; ``message`` is
+    the owner's English sentence, kept for logs and for clients without a
+    translation of ``code``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str
+    ok: bool
+    code: str = ""
+    message: str = ""
+
+
 class PendingGateState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -3904,6 +3934,10 @@ class FrontendSessionState(BaseModel):
     mcp_startup: dict[str, Any] | None = None
     loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
+    #: The outcome of the last identified settings switch — see
+    #: :class:`SettingsResultState`. ``None`` until a switch with a
+    #: ``request_id`` lands; a viewer that predates it ignores the field.
+    settings_result: SettingsResultState | None = None
     #: The session's queued asks, newest first with the OPEN ones in front, and
     #: how many of them are still OUTSTANDING — ``open`` asks, the ones still
     #: waiting on the user (the rule lives in ``asks.store.OUTSTANDING_STATUSES``).

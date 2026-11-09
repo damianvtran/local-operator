@@ -532,6 +532,11 @@ ControlOp = Literal[
     # ``mode: "immediate"`` is the explicit opt-in to ``abort`` semantics, so a
     # caller only cuts a tool in half by asking for it in those words.
     "cancel",  # {mode?: graceful|immediate}
+    # Both switches also take {defer_ok?: true, request_id?: str}: with
+    # ``defer_ok`` the runtime acks ``queued`` instead of waiting on a busy
+    # session loop, and the outcome arrives as state ``settings_result`` keyed by
+    # ``request_id`` (see ``server.SETTINGS_INLINE_ACK_S``). Additive: an older
+    # runtime ignores both and answers when the switch lands.
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
     # A sign-in moving a session off a model whose provider has no credential:
