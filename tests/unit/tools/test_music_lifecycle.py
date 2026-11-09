@@ -84,11 +84,16 @@ async def test_real_registry_detaches_and_explicit_cancel_retains_one_observer(m
     result = await music_tool.execute_generate_music(
         "call-id",
         {"prompt": "Piano", "duration_ms": 3000},
-        context=context,
+        None,
+        None,
+        context,
     )
     assert not result.is_error
+    assert result.details is not None
     job_id = result.details["job_id"]
-    assert manager.get(job_id).type == "music"
+    job = manager.get(job_id)
+    assert job is not None
+    assert job.type == "music"
     await asyncio.wait_for(entered.wait(), timeout=2)
     assert await manager.cancel(job_id)
     await asyncio.wait_for(observed_again.wait(), timeout=2)

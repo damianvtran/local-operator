@@ -10,11 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from local_operator.harness.types import ToolContext
+from local_operator.clients._http import APIError
 from local_operator.harness.jobs import AsyncJobManager
+from local_operator.harness.types import ToolContext
 from local_operator.music.client import MusicClient
 from local_operator.music.jobs import runner
 from local_operator.music.models import GenerateMusicParams
@@ -32,6 +34,18 @@ def test_music_controls_reject_unrepresentable_and_preserve_exact_values():
             GenerateMusicParams.model_validate(values)
     result = GenerateMusicParams(prompt="piano", duration_ms=3000, instrumental=False)
     assert result.body()["instrumental"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [None, 42, {}, "", "https://other.invalid/tools/audio/artifacts/a"])
+async def test_download_refuses_invalid_url_before_transport(url):
+    def refuse_request(request):
+        pytest.fail("invalid artifact URL must never reach the transport")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse_request)) as transport:
+        client = MusicClient(base_url="https://music.invalid", client=transport)
+        with pytest.raises(APIError, match="invalid_music_artifact_origin"):
+            await client.download({"url": url})
 
 
 @pytest.mark.asyncio
@@ -60,9 +74,10 @@ async def test_disabled_server_refuses_before_background_registration(monkeypatc
 
     context = ToolContext(jobs=AsyncJobManager(), journal_music_job=writer)
     result = await music_tool.execute_generate_music(
-        "call", {"prompt": "piano", "duration_ms": 3000}, context=context
+        "call", {"prompt": "piano", "duration_ms": 3000}, None, None, context
     )
     assert result.is_error
+    assert result.details is not None
     assert result.details["capabilities"]["models"][0]["enabled"] is False
 
 
@@ -86,7 +101,7 @@ async def test_real_http_partial_music_keeps_charge_identity_audio_and_restart(
     }
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
         def do_POST(self):

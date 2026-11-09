@@ -98,6 +98,10 @@ async def _allow_notify(**_kwargs: Any) -> str:
     return "Notified."
 
 
+async def _journal_music_job(record: dict[str, Any]) -> None:
+    """Match the durable host callback contract without persisting benchmark data."""
+
+
 def build_real_tool_context(cwd: str) -> ToolContext:
     """A ToolContext whose capabilities are all present.
 
@@ -118,7 +122,7 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         subagent_launcher=_stub_for(_types.SubagentLauncher),
         jobs=_stub_for(_types.JobManagerProtocol),
         # Music submission requires durable identity before any paid request.
-        journal_music_job=lambda record: None,
+        journal_music_job=_journal_music_job,
         browser=_stub_for(_types.BrowserSurfaceProtocol, surface_id="stub"),
         subagent_comms=_UntypedStub(),
         agent_registry=_UntypedStub(),

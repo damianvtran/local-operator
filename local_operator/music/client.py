@@ -71,8 +71,12 @@ class MusicClient:
 
     async def download(self, artifact: dict[str, Any]) -> Any:
         url = artifact.get("url")
+        # Validate the actual URL before parsing so downstream downloads receive
+        # a string, not an unchecked optional value from the provider payload.
+        if not isinstance(url, str):
+            raise APIError("invalid_music_artifact_origin", status_code=None)
         origin = urlparse(self.base_url)
-        parsed = urlparse(url) if isinstance(url, str) else None
+        parsed = urlparse(url)
         # A signed playback grant is not permission to fetch arbitrary origins.
         # Bearer credentials are never sent to the artifact URL, even on-origin.
         if (

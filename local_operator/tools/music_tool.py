@@ -21,7 +21,13 @@ from local_operator.harness.types import (
 from local_operator.i18n.keys import wire_music as mk
 from local_operator.i18n.messages import render_resolved
 from local_operator.music.client import MusicClient
-from local_operator.music.jobs import TERMINAL, journal, read_records, register_observer, runner
+from local_operator.music.jobs import (
+    TERMINAL,
+    journal,
+    read_records,
+    register_observer,
+    runner,
+)
 from local_operator.music.models import GenerateMusicParams, MusicStatusParams
 from local_operator.tools.builtin import _error, _guard, _text
 
@@ -43,7 +49,8 @@ def build_generate_music_tool(context: ToolContext) -> AgentTool | None:
         name="generate_music",
         label=render_resolved(mk.label()),
         description=(
-            "Compose instrumental/exact-lyrics music asynchronously. Guide: guide://music-generation."
+            "Compose instrumental/exact-lyrics music asynchronously. "
+            "Guide: guide://music-generation."
         ),
         parameters=GenerateMusicParams.model_json_schema(),
         approval_tier="write",

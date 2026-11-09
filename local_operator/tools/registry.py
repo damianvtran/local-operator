@@ -32,6 +32,11 @@ from local_operator.tools.image_tool import build_generate_image_tool
 from local_operator.tools.library_tool import build_library_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.memory_tools import build_memory_tool
+from local_operator.tools.music_tool import (
+    build_generate_music_tool,
+    build_modify_music_tool,
+    build_music_status_tool,
+)
 from local_operator.tools.project_tool import (
     build_project_delete_tool,
     build_project_tool,
@@ -41,11 +46,6 @@ from local_operator.tools.secret_tool import build_secret_tool
 from local_operator.tools.skill_tool import build_skill_tool
 from local_operator.tools.tags_tool import build_tags_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
-from local_operator.tools.music_tool import (
-    build_generate_music_tool,
-    build_modify_music_tool,
-    build_music_status_tool,
-)
 from local_operator.tools.video_tool import (
     build_generate_video_tool,
     build_video_status_tool,

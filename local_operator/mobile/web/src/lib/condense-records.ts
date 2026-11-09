@@ -232,6 +232,10 @@ export function toCondenseRecord(entry: TranscriptEntry): CondenseRecord | null 
 			if (!entry.text.trim()) return null;
 			const severity = String(entry.details?.severity ?? "info");
 			const customType = entry.custom_type || (typeof entry.details?.custom_kind === "string" ? entry.details.custom_kind : "");
+			// Durable music snapshots are observer bookkeeping, not result receipts.
+			// Match the desktop's silent-custom predicate even if a producer adds
+			// text; explicit job_result notices must remain visible and foldable.
+			if (customType === "music_job_v1") return null;
 			if (customType === "wake_prompt" || entry.details?.notice_kind === "wake")
 				return { kind: "wake", id, ts, text: entry.text };
 			if (customType === "session_incident")

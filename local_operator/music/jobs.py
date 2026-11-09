@@ -14,7 +14,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from local_operator.clients.radient_cost import channel_record_from_cost, cost_from_payload
+from local_operator.clients.radient_cost import (
+    channel_record_from_cost,
+    cost_from_payload,
+)
 from local_operator.i18n.keys import wire_music as mk
 from local_operator.i18n.messages import render_resolved
 from local_operator.music.client import MusicClient
@@ -203,7 +206,7 @@ def runner(context: Any, initial: dict[str, Any], *, client_factory: Any = Music
                         settled += 1
                 await journal(context, record)
                 progress = render_resolved(
-                    mk.progress(completed=settled, total=len(record["tracks"]))
+                    mk.progress(completed=str(settled), total=str(len(record["tracks"])))
                 )
                 report(
                     {
