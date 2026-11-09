@@ -1,4 +1,4 @@
-"""The relay's five lifecycle loops: joined at stop, and startable only once.
+"""The relay's lifecycle loops: joined at stop, and startable only once.
 
 WHY THIS FILE EXISTS. ``RelayServer.stop()`` set ``_stop``, closed its listening
 sockets and teardown of links, then returned — while every one of the five daemon
@@ -16,7 +16,7 @@ five more loops beside the first five and re-ran the once-only start work.
 
 THE CELLS ARE THE CONTRACT, in four readings:
 
-* a real relay's five threads are all dead by the time ``stop()`` returns, with
+* a real relay's complete thread set is dead by the time ``stop()`` returns, with
   the whole stop inside its bound;
 * one loop that ignores its stop produces exactly ONE warning, keeps its handle,
   and does not stop the other four from being joined;
@@ -86,10 +86,10 @@ def _relay_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]
     ]
 
 
-def test_stop_joins_all_five_loops_and_clears_their_entries(
+def test_stop_joins_all_lifecycle_loops_and_clears_their_entries(
     root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A real relay: five loops running, five dead when ``stop()`` returns.
+    """A real relay: every named loop is dead when ``stop()`` returns.
 
     THE CLOCK IS THE DISCRIMINATOR against the old behaviour, not a sleep-and-hope:
     the heartbeat loop is replaced with one that answers ``_stop`` but takes 0.3 s
@@ -99,39 +99,46 @@ def test_stop_joins_all_five_loops_and_clears_their_entries(
     """
     server = serve_shaped_relay(root, monkeypatch)
 
-    def heartbeat_that_takes_the_bound_to_finish() -> None:
+    def loop_that_takes_the_bound_to_finish() -> None:
         server._stop.wait(5.0)  # noqa: SLF001 — the lifecycle flag under test
         time.sleep(0.3)
 
-    monkeypatch.setattr(server, "_heartbeat_loop", heartbeat_that_takes_the_bound_to_finish)
+    monkeypatch.setattr(server, "_heartbeat_loop", loop_that_takes_the_bound_to_finish)
+    monkeypatch.setattr(server, "_membership_changes_loop", loop_that_takes_the_bound_to_finish)
     server.start()
     threads = list(server._threads)  # noqa: SLF001 — the handles under test
-    assert [thread.name for thread in threads] == [
-        "mesh-accept",
-        "mesh-control",
-        "mesh-heartbeat",
-        "mesh-membership",
-        "mesh-redial",
-    ], "the five lifecycle loops were not the five that started"
+    try:
+        assert {thread.name for thread in threads} == {
+            "mesh-accept",
+            "mesh-control",
+            "mesh-heartbeat",
+            "mesh-membership",
+            "mesh-member-changes",
+            "mesh-redial",
+        }, "the complete named lifecycle-loop inventory changed"
 
-    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
-        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+            started = time.monotonic()
+            server.stop()
+            elapsed = time.monotonic() - started
+
+        alive = [thread.name for thread in threads if thread.is_alive()]
+        assert not alive, f"stop() returned with lifecycle loops still running: {alive}"
+        assert (
+            server._threads == []
+        ), "a stopped loop must clear its entry, not stay in the append-only list"  # noqa: SLF001
+        assert elapsed >= 0.3, (
+            f"a clean stop took {elapsed:.2f}s; it returned before the delayed loop finished, "
+            "so the join did not wait for it"
+        )
+        assert (
+            elapsed < relay.RELAY_LOOP_STOP_TOTAL_S
+        ), f"a clean stop took {elapsed:.2f}s, past the {relay.RELAY_LOOP_STOP_TOTAL_S:.1f}s bound"
+        assert _relay_warnings(caplog) == [], "a clean stop must not warn about survivors"
+    finally:
+        # Inventory assertions MUST NOT leak the very fleet they inspect. The old
+        # assertion fired before stop(), leaving core and slice loops in the suite.
         server.stop()
-        elapsed = time.monotonic() - started
-
-    alive = [thread.name for thread in threads if thread.is_alive()]
-    assert not alive, f"stop() returned with lifecycle loops still running: {alive}"
-    assert (
-        server._threads == []
-    ), "a stopped loop must clear its entry, not stay in the append-only list"  # noqa: SLF001
-    assert elapsed >= 0.3, (
-        f"a clean stop took {elapsed:.2f}s; it returned before the delayed loop finished, "
-        "so the join did not wait for it"
-    )
-    assert elapsed < relay.RELAY_LOOP_STOP_TOTAL_S, (
-        f"a clean stop took {elapsed:.2f}s, past the {relay.RELAY_LOOP_STOP_TOTAL_S:.1f}s " "bound"
-    )
-    assert _relay_warnings(caplog) == [], "a clean stop must not warn about survivors"
 
 
 def test_a_loop_that_ignores_its_stop_is_named_once_and_does_not_block_the_rest(
