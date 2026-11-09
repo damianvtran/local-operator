@@ -2157,7 +2157,7 @@ Warnings that still hold, each of which has already cost a release:
 
   ```sh
   git log --oneline <last-tag>..<target-sha>            # enumerate the range
-  git merge-base --is-ancestor <merge-sha> <target-sha>  # exit 0 = inside, non-zero = not
+  git merge-base --is-ancestor <merge-sha> <target-sha>  # 0 = inside, 1 = not, 128 = the test itself failed
   ```
 
   `<target-sha>` is the literal SHA you will pass to `--target` — not
@@ -2177,14 +2177,18 @@ Warnings that still hold, each of which has already cost a release:
   **A `1` from the ancestry test is a lead, not a verdict.** The recorded merge
   SHA is held by the server, and a rewrite of `main` — which this repository
   has done — leaves it orphaned while the pull's content is still in the range.
-  On #731, this section's own precedent, `gh pr view 731 --json` returns a SHA
-  that is *not* an ancestor of `v0.51.4`; the merge commit actually on the
-  branch is. Ten pulls from that era read the same way, and every recent one
-  reads clean, so a `1` is evidence about history, never proof of absence.
-  Settle those by number inside the enumerated range before excluding them:
+  On #731, this section's own precedent, `gh pr view 731 --json mergeCommit,state`
+  returns a SHA that is *not* an ancestor of `v0.51.4`; the merge commit actually
+  on the branch is. The condition tracks rewrites of `main` rather than age —
+  probes at #1000 and #2925 read this way while #3000 and #3650 read clean — so
+  a `1` is evidence about a pull's recorded history, never proof of absence.
+  Settle those by number inside the enumerated range before excluding them,
+  anchoring on the two landing shapes so a commit that merely *mentions* the
+  pull does not count as the pull landing:
 
   ```sh
-  git log --oneline <last-tag>..<target-sha> | grep -E '#<n>\b'
+  git log --oneline <last-tag>..<target-sha> \
+    | grep -E '\(#<n>\)$|^[0-9a-f]+ Merge pull request #<n> '
   ```
 
   The other half of this is the merger's duty, and it is stated where a merger
