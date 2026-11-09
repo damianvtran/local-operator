@@ -736,6 +736,7 @@ class SettingsApplier:
             if outcome.status == "queued":
                 if kind == "model" and effort is not None:
                     slot["effort"] = effort
+                    slot["_paired_generation"] = paired_generation
                 state.queued_since[(kind, generation)] = self.clock()
                 slot.update(state="queued_next_step", error=None, next_attempt_at=_iso(now))
                 return
@@ -825,7 +826,7 @@ class SettingsApplier:
                         attempts=updated.get("attempts", 0),
                     ),
                 )
-        if kind == "model" and updated["state"] in {"applied", "queued_next_step"}:
+        if kind == "model" and updated["state"] == "applied":
             await self._rebase_after_model(session_id)
 
     async def _rebase(self, session_id: str, kind: str, base: Any) -> None:
@@ -892,10 +893,18 @@ class SettingsApplier:
             )
             if kind == "model":
                 paired = await self._paired_effort(session_id)
-                if paired is not None and paired[1] == slot.get("effort"):
+                if (
+                    paired is not None
+                    and paired[1] == slot.get("effort")
+                    and paired[0] == slot.get("_paired_generation")
+                ):
                     await self._update(
                         session_id, "effort", paired[0], lambda s: s.update(state="applied")
                     )
+                await self._rebase_after_model(session_id)
+            return
+        if self._superseded(kind, slot, current):
+            await self._update(session_id, kind, generation, lambda s: s.update(state="superseded"))
             return
         now = self.clock()
         deadline = _epoch(slot.get("deadline_at")) or now
@@ -1109,6 +1118,17 @@ class BridgeDriver:
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 — every result is persisted
+            from local_operator.session.errors import RuntimeRetiring
+
+            # Older attach clients decode an explicit owner error frame as
+            # RuntimeError. That is a refusal, not a lost connection. Preserve
+            # typed retirement as retryable; never resend an unknown-model or
+            # invalid-effort refusal until the user makes a new request.
+            if isinstance(error, RuntimeError) and not isinstance(error, RuntimeRetiring):
+                code = {"model": "model_unknown", "effort": "effort_unsupported"}.get(
+                    kind, "refused"
+                )
+                return Outcome("terminal", code, str(error))
             if kind == "effort" and isinstance(error, ValueError):
                 return Outcome("terminal", "effort_unsupported", str(error))
             return classify_exception(error)
