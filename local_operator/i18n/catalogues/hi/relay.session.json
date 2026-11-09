@@ -15,5 +15,6 @@
   "relay.session.directory.path_placeholder": "या कोई दूसरा पाथ लिखें…",
   "relay.session.model.sheet_title": "मॉडल",
   "relay.session.model.filter_placeholder": "मॉडल फ़िल्टर करें",
-  "relay.session.model.loading": "लोड हो रहा है…"
+  "relay.session.model.loading": "लोड हो रहा है…",
+  "relay.session.model.queued": "चुना गया — अगले चरण में लागू होगा"
 }

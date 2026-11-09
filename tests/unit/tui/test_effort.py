@@ -1431,7 +1431,7 @@ def _attached_viewer(answer: Any) -> tuple[Any, list[dict[str, Any]], list[Any]]
 
     sent: list[dict[str, Any]] = []
     notices: list[Any] = []
-    current = ModelSpec(provider="openai", model_id="old", reasoning_efforts=["low", "high"])
+    current = ModelSpec(provider="openai", model_id="old", reasoning_efforts=("low", "high"))
 
     class Client(AttachClient):
         def __init__(self) -> None:
@@ -1532,9 +1532,33 @@ async def test_a_carried_level_that_queues_is_not_announced_as_the_users_change(
 
     viewer, sent, notices = _attached_viewer("queued")
     carried = ModelSpec(
-        provider="openai", model_id="old", reasoning_efforts=["low", "high"], reasoning_effort="low"
+        provider="openai", model_id="old", reasoning_efforts=("low", "high"), reasoning_effort="low"
     )
     viewer.set_model(carried)
     await _settle()
     assert sent and sent[0]["effort"] is None and sent[0]["defer_ok"] is True
     assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_our_later_settings_outcome_is_consumed_once_and_other_viewers_ignored() -> None:
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        SettingsResultState,
+    )
+
+    viewer, sent, notices = _attached_viewer("queued")
+    viewer.set_model(ModelSpec(provider="openai", model_id="new"), explicit=True)
+    await _settle()
+    state = FrontendSessionState(session_id="synthetic", epoch="e")
+    state.settings_result = SettingsResultState(request_id="other", ok=False, message="other error")
+    viewer._consume_settings_result(state)
+    assert len(notices) == 1
+    state.settings_result = SettingsResultState(
+        request_id=sent[0]["request_id"], ok=False, code="invalid", message="refused later"
+    )
+    viewer._consume_settings_result(state)
+    viewer._consume_settings_result(state)
+    assert len(notices) == 2
+    assert notices[-1].kind == "error" and "refused later" in notices[-1].text

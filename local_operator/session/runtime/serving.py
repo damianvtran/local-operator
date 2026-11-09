@@ -875,18 +875,6 @@ def _records_settings_result(method: _F) -> _F:
         self._publish_settings_result(request_id, ok=True, code="applied", message=str(receipt))
         return receipt
 
-    signature = inspect.signature(method)
-    params = list(signature.parameters.values())
-    if "request_id" not in signature.parameters:
-        keyword = inspect.Parameter(
-            "request_id", inspect.Parameter.KEYWORD_ONLY, default=None, annotation=str | None
-        )
-        # A keyword-only parameter must precede ``**kwargs`` to be a valid
-        # signature; none of the wrapped bodies has one today, but stay correct.
-        tail = [p for p in params if p.kind is inspect.Parameter.VAR_KEYWORD]
-        head = [p for p in params if p.kind is not inspect.Parameter.VAR_KEYWORD]
-        params = [*head, keyword, *tail]
-    recorded.__signature__ = signature.replace(parameters=params)  # type: ignore[attr-defined]
     return cast(_F, recorded)
 
 
@@ -6100,7 +6088,9 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     @_records_settings_result
-    async def set_model(self, provider: str, model_id: str) -> str:
+    async def set_model(
+        self, provider: str, model_id: str, *, request_id: str | None = None
+    ) -> str:
         """Switch the owner onto ``provider``/``model_id`` at the model's own level.
 
         The two-argument call every host and test double already makes; the
@@ -6118,6 +6108,7 @@ class ServingSessionHandle(SessionHandle):
         effort: str | None,
         *,
         offered_only: bool = False,
+        request_id: str | None = None,
     ) -> str:
         """Switch the owner onto ``provider``/``model_id`` AT ``effort``.
 
@@ -6927,7 +6918,7 @@ class ServingSessionHandle(SessionHandle):
 
     @_on_session_loop
     @_records_settings_result
-    async def set_effort(self, effort: str) -> str:
+    async def set_effort(self, effort: str, *, request_id: str | None = None) -> str:
         self._check_loop_thread()
         spec = self._session.model
         if effort not in spec.reasoning_efforts:

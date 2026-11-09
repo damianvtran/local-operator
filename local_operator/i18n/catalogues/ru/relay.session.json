@@ -15,5 +15,6 @@
   "relay.session.directory.path_placeholder": "или введите другой путь…",
   "relay.session.model.sheet_title": "модель",
   "relay.session.model.filter_placeholder": "фильтр моделей",
-  "relay.session.model.loading": "загрузка…"
+  "relay.session.model.loading": "загрузка…",
+  "relay.session.model.queued": "выбрано — вступит в силу на следующем шаге"
 }

@@ -475,7 +475,7 @@ def test_the_json_payload_is_one_field_wider() -> None:
 async def test_the_attach_client_sends_defer_keys_only_when_asked(monkeypatch) -> None:
     from local_operator.mobile.attach_client import AttachClient
 
-    frames: list[tuple[str, dict]] = []
+    frames: list[tuple[str, dict[str, object]]] = []
 
     async def capture(self, op, **fields):  # noqa: ANN001, ANN202
         frames.append((op, fields))
@@ -543,3 +543,31 @@ async def test_a_busy_owner_answers_the_attach_client_queued(monkeypatch) -> Non
     finally:
         release.set()
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_slash_result_deferred_acceptance_is_explicit_and_legacy_unchanged(
+    monkeypatch,
+) -> None:
+    from local_operator.mobile.attach_client import AttachClient
+
+    seen = []
+
+    async def frame(self, op, **fields):
+        seen.append((op, fields))
+        return {"op": "ack", "detail": "queued", "queued": True}
+
+    async def payload(self, op, **fields):
+        seen.append((op, fields))
+        return {"kind": "notice", "text": "applied"}
+
+    monkeypatch.setattr(AttachClient, "_request_frame", frame)
+    monkeypatch.setattr(AttachClient, "_request_payload", payload)
+    client = AttachClient(lambda p: None, lambda reason: None)
+    result = await client.slash_result("model", "test/new", defer_ok=True, request_id="slash-1")
+    assert result["data"] == {"queued": True, "request_id": "slash-1"}
+    assert seen[-1][1]["defer_ok"] is True
+    assert seen[-1][1]["request_id"] == "slash-1"
+    result = await client.slash_result("model", "test/legacy")
+    assert result["text"] == "applied"
+    assert "defer_ok" not in seen[-1][1] and "request_id" not in seen[-1][1]

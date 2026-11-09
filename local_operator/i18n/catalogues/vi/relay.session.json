@@ -15,5 +15,6 @@
   "relay.session.directory.path_placeholder": "hoặc nhập đường dẫn khác…",
   "relay.session.model.sheet_title": "mô hình",
   "relay.session.model.filter_placeholder": "lọc mô hình",
-  "relay.session.model.loading": "đang tải…"
+  "relay.session.model.loading": "đang tải…",
+  "relay.session.model.queued": "đã chọn — có hiệu lực ở bước tiếp theo"
 }

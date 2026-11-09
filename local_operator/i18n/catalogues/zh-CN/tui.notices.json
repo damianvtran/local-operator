@@ -28,5 +28,7 @@
   "tui.notices.model_default_changed": "保留{model}；默认设置已更改，仅适用于新会话。运行/model saved可在此会话中采用新设置",
   "tui.notices.model_default_changed_headline": "模型不变",
   "tui.notices.effort_default_changed": "新会话的默认推理强度已更改（{effort}）；运行/model saved可在此会话中采用新设置",
-  "tui.notices.effort_default_changed_headline": "默认推理强度已更改"
+  "tui.notices.effort_default_changed_headline": "默认推理强度已更改",
+  "tui.notices.model_switch_queued": "已选择 {model} — 会话正忙，将在下一步生效",
+  "tui.notices.model_switch_refused": "未能应用 {model}：{reason}"
 }

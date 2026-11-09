@@ -15,5 +15,6 @@
   "relay.session.directory.path_placeholder": "或输入其他路径……",
   "relay.session.model.sheet_title": "模型",
   "relay.session.model.filter_placeholder": "筛选模型",
-  "relay.session.model.loading": "正在加载……"
+  "relay.session.model.loading": "正在加载……",
+  "relay.session.model.queued": "已选择 — 将在下一步生效"
 }

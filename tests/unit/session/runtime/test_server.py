@@ -7229,10 +7229,10 @@ async def _until_landed(handle: _HeldSwitchHandle, n: int, timeout: float = 5.0)
 
 
 @pytest.mark.asyncio
-async def test_a_deferred_switch_that_lands_inside_the_window_answers_normally(
+async def test_a_deferred_switch_is_accepted_before_even_an_idle_owner_runs(
     _short_inline_window: float,
 ) -> None:
-    """An idle owner answers with the real outcome, never ``queued``."""
+    """Even an idle owner gets acceptance before application, with one reply."""
     handle = _HeldSwitchHandle()
     handle.release.set()
     runtime = RuntimeServer(handle, kind="tui")
@@ -7254,8 +7254,8 @@ async def test_a_deferred_switch_that_lands_inside_the_window_answers_normally(
         )
         replies = await _replies_for(reader, 1, _short_inline_window + 0.7)
         assert len(replies) == 1, replies
-        assert replies[0]["op"] == "ack" and replies[0]["detail"] != "queued"
-        assert "queued" not in replies[0]
+        assert replies[0]["op"] == "ack" and replies[0]["detail"] == "queued"
+        assert replies[0]["queued"] is True
     finally:
         if writer is not None:
             writer.close()

@@ -1341,39 +1341,21 @@ _SWITCH_OPS = frozenset({"set_model", "set_effort"})
 #: among themselves, which is the lane's first guarantee.
 _SWITCH_SLASH_COMMANDS = frozenset({"model", "effort", "fast"})
 
-#: How long a ``defer_ok`` switch waits to answer with its REAL outcome before
-#: it answers ``queued`` instead (seconds).
-#:
-#: WHY A DEFERRED ACK AT ALL. The switch lane stops a switch waiting behind a
-#: parked prompt, but the switch BODY still hops onto the session's loop
-#: (``serving._on_session_loop``), so its reply waited for whatever synchronous
-#: turn step held that loop — a settings click could hang for the length of a
-#: tool call or an eval. The operator's requirement is that the runtime answer a
-#: settings request at once, even mid-turn, and report "applies at the next
-#: step" rather than an error when it cannot land yet. Nothing about WHERE it
-#: lands changes: ``Session._model`` is re-read before every provider call
-#: (``LoopConfig.get_model``), so the queued body applies at the next step.
-#:
-#: WHY 1.5 s. The worst queueing a switch's build was measured to suffer before
-#: it even started is 750 ms (``bench_model_switch.py --condition busy``, cited
-#: at ``serving._SWITCH_EXECUTOR_WORKERS``); the window is that worst observed
-#: queueing doubled, so an idle or briefly busy
-#: session still answers with the applied outcome inline, and a client only
-#: sees ``queued`` when the session loop is genuinely occupied. It stays well
-#: under the 3 s control attach budget a desktop caller spends before this.
+#: Legacy inline-window constant retained for import compatibility only.
+#: Deferred settings are now accepted immediately, before a session-loop hop:
+#: measured busy medians of 528–796 ms with a 1.5 s inline window failed the
+#: operator's instant-acceptance requirement. Application and outcome delivery
+#: stay ordered; no timer or application wait sits on the receipt path.
 SETTINGS_INLINE_ACK_S = 1.5
 
 
 @dataclass
 class _DeferredReply:
-    """Who answers one ``defer_ok`` switch: its body, or the ``queued`` ack.
+    """Suppress the body reply after the immediate queued receipt.
 
-    Exactly one reply per request is the contract (a client resolves its
-    pending future on the first and would mis-route a second). The two writers
-    race only across an ``await``: the body may be mid-``_send_to`` of its own
-    reply when the window expires. So the body's reply marks ``sent`` as it
-    goes out, and the ``queued`` ack is written only if it has not; once
-    ``queued`` is set, the body's own reply is swallowed in ``_send_to``.
+    The receipt task sends acceptance first. Its child body inherits this gate
+    so deep dispatch/error arms cannot emit a second reply for the same req.
+    State/event frames are not replies and remain unaffected.
     """
 
     conn: Any
@@ -5434,39 +5416,30 @@ class RuntimeServer:
         frame: dict[str, Any],
         previous: asyncio.Task[None] | None,
     ) -> None:
-        """Answer a ``defer_ok`` switch within :data:`SETTINGS_INLINE_ACK_S`.
+        """Accept immediately on the runtime loop, then apply in switch order.
 
-        THE SHAPE. The switch body (chain wait + ``_on_request``) runs as its own
-        task. If it settles inside the window its own reply is the answer \u2014
-        applied or refused, identical to a switch without ``defer_ok``. If not,
-        this answers ``ack`` with ``detail: "queued"``, ``queued: true`` and the
-        frame's ``request_id``, and the body's later reply is swallowed (see
-        :class:`_DeferredReply`); its outcome reaches every viewer as the
-        session state's ``settings_result`` instead.
-
-        THE WINDOW STARTS AT ADMISSION, chain wait included: a second switch B
-        sent while A is still queued must be acked as promptly as A was, so it
-        cannot wait for A to LAND before its own clock starts.
-
-        ORDER IS UNCHANGED. This task \u2014 the one the switch and main chains
-        hold \u2014 settles only when the body has, so B's body still starts after
-        A's body, and a prompt admitted after the switch still waits for it to
-        land (the chain join in ``_dispatch_frame``). Only the REPLY moved.
-
-        DETACHED FROM THE CONNECTION. The body is held in
-        ``self._deferred_switches``; neither ``_drop_client`` nor the reader's
-        exit cancels it (nothing on the connection path cancels op tasks), so a
-        desktop socket that drops after its ``queued`` ack does not unpick the
-        switch. ``_send_to`` to the gone connection then fails quietly, which is
-        why the outcome travels on state rather than on the reply.
-
-        ADMISSION covers this task's own span up to the ``queued`` ack, so
-        ``_shutdown_impl``'s fence still writes the ack before the socket closes;
-        it is released as soon as the ack is out, because a queued body may sit
-        behind a turn step for minutes and shutdown must not wait it out (it is
-        cancelled by ``_cancel_deferred_switches`` instead).
+        The chain retains this task until application completes: A→B and later
+        prompts cannot overtake the mutation. Only acceptance is detached from
+        the body. The server owns queued bodies across socket closure and cancels
+        them at shutdown; outcomes arrive through ``settings_result``.
         """
-        gate = _DeferredReply(conn=conn, req=frame.get("req"))
+        # Receipt first, body second: even scheduling the session-loop hop can
+        # contend with turn work. Never let application latency hold acceptance.
+        gate = _DeferredReply(conn=conn, req=frame.get("req"), queued=True)
+        self._admit_request()
+        try:
+            ack: dict[str, Any] = {
+                "op": "ack",
+                "req": gate.req,
+                "detail": "queued",
+                "duplicate": False,
+                "queued": True,
+            }
+            if frame.get("request_id"):
+                ack["request_id"] = frame["request_id"]
+            await self._send_to(conn, ack)
+        finally:
+            self._release_request()
 
         async def body() -> None:
             _DEFERRED_REPLY.set(gate)
@@ -5474,41 +5447,10 @@ class RuntimeServer:
                 await asyncio.wait({previous})
             await self._on_request(frame, conn)
 
-        self._admit_request()
-        admitted = True
-        try:
-            inner = asyncio.create_task(body())
-            self._deferred_switches.add(inner)
-            inner.add_done_callback(self._deferred_switches.discard)
-            done, _pending = await asyncio.wait({inner}, timeout=SETTINGS_INLINE_ACK_S)
-            if not done and not gate.sent:
-                gate.queued = True
-                request_id = frame.get("request_id")
-                ack: dict[str, Any] = {
-                    "op": "ack",
-                    "req": gate.req,
-                    "detail": "queued",
-                    "duplicate": False,
-                    "queued": True,
-                }
-                if isinstance(request_id, str) and request_id:
-                    ack["request_id"] = request_id
-                logger.info(
-                    "session runtime: %s acked queued after %.1fs (request_id=%s)",
-                    frame.get("op"),
-                    SETTINGS_INLINE_ACK_S,
-                    request_id,
-                )
-                await self._send_to(conn, ack)
-            self._release_request()
-            admitted = False
-            if not inner.done():
-                await asyncio.wait({inner})
-        finally:
-            if admitted:
-                self._release_request()
-        # Consumed here rather than by ``_op_settled``: the body is not an op
-        # task, and an escape from ``_on_request`` must still be logged.
+        inner = asyncio.create_task(body())
+        self._deferred_switches.add(inner)
+        inner.add_done_callback(self._deferred_switches.discard)
+        await asyncio.wait({inner})
         if not inner.cancelled() and inner.exception() is not None:
             raise cast(BaseException, inner.exception())
 

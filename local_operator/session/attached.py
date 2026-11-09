@@ -7597,6 +7597,8 @@ class AttachedSession:
         """
         self._streaming = state.streaming
         self._generation = state.generation
+        if changed_fields is None or "settings_result" in changed_fields:
+            self._consume_settings_result(state)
         self._model = state.selected_model
         # Keep the concrete primary seen at birth OR on an attached owner. A
         # speculatively warmed owner can retire before its first durable row;
@@ -10016,6 +10018,23 @@ class AttachedSession:
         else:
             self._switch_on_owner(client, model, announce=True)
 
+    def _consume_settings_result(self, state: FrontendSessionState) -> None:
+        """Render our outcomes once; ignore other viewers and snapshot replays."""
+        result = state.settings_result
+        pending = self.__dict__.get("_settings_pending", {})
+        if result is None or result.request_id not in pending:
+            return
+        label = pending.pop(result.request_id)
+        if not result.ok:
+            self._deliver(
+                _settings_notice(
+                    _nt.model_switch_refused(model=label, reason=result.message), kind="error"
+                )
+            )
+        elif result.message:
+            # Owner-originated receipt, not newly authored UI copy.
+            self._deliver(NoticeEvent(text=result.message, kind="info"))
+
     def _switch_on_owner(
         self, client: AttachClient, model: ModelSpec, *, effort: str | None = None, announce: bool
     ) -> None:
@@ -10026,7 +10045,7 @@ class AttachedSession:
         forget — but the owner's answer still waited for its session loop, so
         a switch made mid-tool or mid-eval sat unanswered for the whole step,
         and a refusal was swallowed with the task. The runtime now acks
-        ``queued`` within ``SETTINGS_INLINE_ACK_S`` instead, and this tells the
+        ``queued`` immediately instead, and this tells the
         user what happened: "applies at the next step" when queued (the owner
         re-reads the model before every provider call), the owner's sentence
         when refused. ``request_id`` correlates the owner's later
@@ -10042,6 +10061,9 @@ class AttachedSession:
         """
         request_id = uuid.uuid4().hex
         label = f"{model.provider}/{model.model_id}"
+        # Track before sending: outcome pushes can race ahead of the receipt.
+        if announce:
+            self.__dict__.setdefault("_settings_pending", {})[request_id] = label
 
         async def run() -> None:
             try:
@@ -10053,15 +10075,19 @@ class AttachedSession:
                     request_id=request_id,
                 )
             except (ConnectionError, TimeoutError):
+                self.__dict__.get("_settings_pending", {}).pop(request_id, None)
                 logger.debug("attach: model switch to %s not answered", label, exc_info=True)
                 return
             except Exception as exc:  # noqa: BLE001 — the refusal IS the notice
+                self.__dict__.get("_settings_pending", {}).pop(request_id, None)
                 self._deliver(
                     _settings_notice(
                         _nt.model_switch_refused(model=label, reason=str(exc)), kind="error"
                     )
                 )
                 return
+            if detail != QUEUED_DETAIL:
+                self.__dict__.get("_settings_pending", {}).pop(request_id, None)
             if announce and detail == QUEUED_DETAIL:
                 self._deliver(_settings_notice(_nt.model_switch_queued(model=label), kind="info"))
 
@@ -10507,6 +10533,9 @@ class AttachedSession:
         command: str,
         args: str,
         images: Sequence[ImageContent] | None = None,
+        *,
+        defer_ok: bool = False,
+        request_id: str | None = None,
     ) -> Any:
         """Run a conversation-mutating slash command on the authoritative host.
 
@@ -10547,11 +10576,21 @@ class AttachedSession:
             # cannot be relied on to refuse, because a pre-Muse build's
             # ``_model_slash`` predates the gate entirely (review round 1, R1-1).
             self._require_routed_model_admission(args)
+        # An opted-in switch's result may race the receipt; identify it first
+        # so the ordinary state hook can show its later applied/refused outcome.
+        if defer_ok and request_id:
+            self.__dict__.setdefault("_settings_pending", {})[request_id] = args or command
+        settings_kwargs: dict[str, Any] = {}
+        if defer_ok:
+            settings_kwargs["defer_ok"] = True
+        if request_id:
+            settings_kwargs["request_id"] = request_id
         try:
             return await client.slash_result(
                 command,
                 args,
                 [_image_to_wire(image) for image in (images or [])],
+                **settings_kwargs,
             )
         except ConnectionError as error:
             # An ACK expiry is not a disconnect: the authenticated socket is

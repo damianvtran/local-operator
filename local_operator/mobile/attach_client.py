@@ -2389,17 +2389,32 @@ class AttachClient:
         command: str,
         args: str,
         images: list[dict[str, str]] | None = None,
+        *,
+        defer_ok: bool = False,
+        request_id: str | None = None,
     ) -> Any:
-        """Run one shared slash command on the owner; return its typed outcome.
+        """Run a shared slash, optionally accepting a deferred settings receipt.
 
-        The ``result`` frame carries a :class:`SlashResult` payload the invoker
-        renders locally, replacing the synthetic ``ran /…`` receipt that left
-        the follower's terminal with a transport message while the real answer
-        painted in the owner's.
+        ``queued`` is an explicit typed notice, never ``None``: callers must
+        distinguish acceptance from the later applied/refused outcome on state.
+        Legacy calls omit both new keys and keep their original result shape.
         """
-        return await self._request_payload(
-            "slash_result", command=command, args=args, images=images or []
+        fields = _settings_defer_fields(defer_ok, request_id)
+        if not defer_ok:
+            return await self._request_payload(
+                "slash_result", command=command, args=args, images=images or [], **fields
+            )
+        reply = await self._request_frame(
+            "slash_result", command=command, args=args, images=images or [], **fields
         )
+        self._raise_for_reply_error(reply)
+        if reply.get("queued") is True:
+            return {
+                "kind": "notice",
+                "text": QUEUED_DETAIL,
+                "data": {"queued": True, "request_id": request_id},
+            }
+        return reply.get("data")
 
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
         """Copy the authenticated owner's committed history, without interrupting it."""
@@ -2576,9 +2591,8 @@ class AttachClient:
         the rest, and there is no protocol bump for an optional field).
 
         ``defer_ok``/``request_id`` follow the same omit-when-unset rule. With
-        ``defer_ok`` a runtime that cannot land the switch within its inline
-        window (the session loop is mid-step) answers :data:`QUEUED_DETAIL`
-        instead of holding the reply; the switch then applies at the next step
+        ``defer_ok`` a runtime answers :data:`QUEUED_DETAIL` immediately,
+        before hopping to the session loop; the switch applies at the next step
         and its outcome arrives as state ``settings_result`` keyed by
         ``request_id``. An older runtime ignores both and answers on landing.
         """

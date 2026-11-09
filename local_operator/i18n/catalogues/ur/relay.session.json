@@ -15,5 +15,6 @@
   "relay.session.directory.path_placeholder": "یا کوئی اور پاتھ لکھیں…",
   "relay.session.model.sheet_title": "ماڈل",
   "relay.session.model.filter_placeholder": "ماڈلز فلٹر کریں",
-  "relay.session.model.loading": "لوڈ ہو رہا ہے…"
+  "relay.session.model.loading": "لوڈ ہو رہا ہے…",
+  "relay.session.model.queued": "منتخب — اگلے مرحلے میں لاگو ہوگا"
 }

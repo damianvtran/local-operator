@@ -28,5 +28,7 @@
   "tui.notices.model_default_changed": "{model} conservé ; la valeur par défaut a changé pour les nouvelles sessions. /model saved l’adopte ici",
   "tui.notices.model_default_changed_headline": "Modèle inchangé",
   "tui.notices.effort_default_changed": "La valeur par défaut de l’effort de raisonnement a changé pour les nouvelles sessions ({effort}) ; /model saved l’adopte ici",
-  "tui.notices.effort_default_changed_headline": "Effort par défaut modifié"
+  "tui.notices.effort_default_changed_headline": "Effort par défaut modifié",
+  "tui.notices.model_switch_queued": "{model} sélectionné — la session est occupée, le changement prendra effet à la prochaine étape",
+  "tui.notices.model_switch_refused": "{model} n’a pas été appliqué : {reason}"
 }

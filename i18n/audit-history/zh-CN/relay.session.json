@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.session",
+  "history_sha256": "7a4fe3f2ec8e3f5f0d31258195cc7e9fad18c87e2bc92a20fc5e90d00c1d7691",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.session",
+      "source_sha256": "a118c820060685e6b4f83601b9f6d7d2195bb8f7c40b6a9187c8c10195f5af54",
+      "translator": {
+        "agent": "coder-settings-lane",
+        "session": "769ec448c35a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translator)",
+        "session": "1b1866b4f2ed",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 1 added key(s) read, 0 findings; 17 unchanged keys byte-identical to the passed row at base. Target 60b1392b8cc28b0979305684137448ad6c9fa61b83bba072e09f46c93683e174. Evidence: i18n/audits/evidence/zh-CN/relay.session/settings-1b1866b4f2ed/record.json Translator provenance: all 21 added translations authored in the resumed run on anthropic/claude-opus-5-5, no fallback during translation; initial implementation had an openai/gpt-6.1-sol handoff fallback only."
+    }
+  ]
+}

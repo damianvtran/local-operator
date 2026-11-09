@@ -284,7 +284,7 @@ async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_bl
     loop_thread = threading.Thread(target=session_loop.run_forever, daemon=True)
     loop_thread.start()
     session = _AccessSession("test/model")
-    session.model = ModelSpec(provider="test", model_id="model", reasoning_efforts=["low", "high"])
+    session.model = ModelSpec(provider="test", model_id="model", reasoning_efforts=("low", "high"))
     handle = serving.ServingSessionHandle(session, session_loop, cwd="/tmp")
 
     class Host(FakeHandle):
@@ -325,13 +325,14 @@ async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_bl
         ack = await asyncio.wait_for(_until(reader, "ack", 1), timeout=block_s + 5)
         acked_after = time.monotonic() - sent
         assert ack["detail"] == "queued", ack
-        assert acked_after <= SETTINGS_INLINE_ACK_S + 0.5, acked_after
+        assert acked_after < 0.5, acked_after
         assert session.model.reasoning_effort != "high", "acked before it could land"
 
         # The "next step": session-loop work scheduled AFTER the switch was
         # sent, the way the turn's next ``_current_model`` read is. Hops land
         # FIFO, so the queued switch has applied by the time it runs.
         async def next_step() -> str | None:
+            assert session.model is not None
             return session.model.reasoning_effort
 
         seen = asyncio.run_coroutine_threadsafe(next_step(), session_loop)
