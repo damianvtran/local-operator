@@ -1,0 +1,12 @@
+{
+  "wire.hub_pull.ask.local_edits": "* tiene cambios tuyos: se conservan o se integran mediante merge, nunca se sobrescriben.",
+  "wire.hub_pull.ask.more": "{names} y {count} más",
+  "wire.hub_pull.ask.new": "{count, plural, one {# elemento nuevo} many {# de elementos nuevos} other {# elementos nuevos}}: {names}",
+  "wire.hub_pull.ask.option.not_now": "Ahora no",
+  "wire.hub_pull.ask.option.not_now.description": "No cambiar nada por ahora.",
+  "wire.hub_pull.ask.option.update": "Actualizar ahora",
+  "wire.hub_pull.ask.option.update.description": "Añadir los elementos nuevos y actualizar los que ya tienes. Tus cambios se conservan.",
+  "wire.hub_pull.ask.resubscribe": "{count, plural, one {# elemento vuelve a mantenerse al día} many {# de elementos vuelven a mantenerse al día} other {# elementos vuelven a mantenerse al día}}: {names}",
+  "wire.hub_pull.ask.title": "¿Actualizar tus elementos de {org} desde el hub de tu organización?",
+  "wire.hub_pull.ask.updates": "{count, plural, one {# actualización} many {# de actualizaciones} other {# actualizaciones}}: {names}"
+}
