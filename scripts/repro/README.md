@@ -25,6 +25,14 @@ original invocation notes before running them; retain normal HOME/config
 isolation and process cleanup. Generated output belongs in the session
 scratchpad and the PR/project evidence channel, not in this directory.
 
+The type-check discovery boundary remains the one these historical tools had
+under `docs/`: `scripts/repro` is excluded in `[tool.pyright]`. Relocation does
+not certify compatibility with today's APIs or turn opt-in live-provider/native
+rigs into CI fixtures. Maintained scripts outside this directory, tests and
+shipping source remain type-checked; `tests/unit/test_pyright_scope.py` exercises
+that boundary with the real analyzer. New maintained tooling belongs outside
+this historical directory.
+
 The Team Bridge replay JSON is an executable rig input and stays adjacent to
 its consumer. The [hub evaluation runbook](../../evals/team_bridge_moderation/HUB_ARM.md)
 lives with the evaluation kit. Shared product contract fixtures live in
