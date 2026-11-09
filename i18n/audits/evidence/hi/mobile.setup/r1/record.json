@@ -1,0 +1,326 @@
+{
+ "schema": 1,
+ "audit_id": "r1",
+ "audit_kind": "independent_translation_audit_delta",
+ "audit_position": "second independent auditor (the first audited es, fr, ru, vi only)",
+ "locale": "hi",
+ "namespace": "mobile.setup",
+ "round": 1,
+ "audit_date": "2026-11-08",
+ "verdict": "passed",
+ "status": "passed",
+ "scope": "the three repoint keys appended by 0df4ddea133 to a complete 79-key namespace; the other 76 values are re-pointed to as unchanged and were verified byte-identical to their parent revision",
+ "key_count": 79,
+ "keys_audited": 3,
+ "source_audit_revision": "0df4ddea13324dc8dd5feb1967caa29a178017c6",
+ "worktree": "/Users/damian/local-operator/.worktrees/fix-setup-repoint",
+ "branch": "fix/tunnel-setup-repoint-successor",
+ "translator": {
+  "agent": "i18n translator lane, `task` teammate of the lopdev team, session 86c6d01615c6; wrote all three values and did not audit them",
+  "model": "deepseek/deepseek-flash — quota-driven cross-vendor fallback. The lane was pinned to anthropic/claude-opus-5-5 and descended twice (anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash); the text was drafted and written while running the fallback, as its own receipt in this directory states. Recorded as the fallback, not the pinned id, per docs/I18N.md step 3.",
+  "date": "2026-11-08"
+ },
+ "auditor": {
+  "agent": "second independent translation auditor (lopdev team, `task` subagent), session 84b112fab6ca; did not translate or edit any value it judged, and audited none of the four locales the first auditor covered (es, fr, ru, vi)",
+  "model": "deepseek/deepseek-flash — harness-disclosed cross-vendor fallback, the same descent as the translator lane (pinned anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash) before any string was read or judged. Recorded as the fallback, never the pinned id; no native-speaker pass is claimed for zh-CN, ur or hi.",
+  "date": "2026-11-08",
+  "independent_from_translator": true
+ },
+ "input_hashes": {
+  "en": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+  "context": "2cf80ced83e19efddf0414fac6daed2c424fdcb13ca70f303d74471caf03c22a",
+  "target": "633a90641eaf428d35716b2aa2af0803574d4588b2e39cc3f3cfb087968ed797",
+  "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+  "style_guide": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
+  "translator_receipt": "394fb3d56c559363ddff289215beddca3ce5f9e171d902ba964f87d4bc3b7fcc"
+ },
+ "input_paths": {
+  "en": "local_operator/i18n/catalogues/en/mobile.setup.json",
+  "context": "local_operator/i18n/catalogues/en/mobile.setup.context.json",
+  "target": "local_operator/i18n/catalogues/hi/mobile.setup.json",
+  "glossary": "i18n/glossary.md",
+  "style_guide": "i18n/style-guides/hi.md",
+  "translator_receipt": "i18n/audits/evidence/hi/mobile.setup/r1/translator-receipt.md"
+ },
+ "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+ "target_sha256": "633a90641eaf428d35716b2aa2af0803574d4588b2e39cc3f3cfb087968ed797",
+ "mechanical_checks": [
+  "key set: 79 keys, identical and order-identical to the English catalogue (tests/unit/i18n/test_catalogues.py asserts order-sensitive parity); the three new keys are the trailing group, exactly where the English source puts them after mobile.setup.corrupt_intent",
+  "append-only: all 76 pre-existing values are byte-identical to `git show 0df4ddea133^:<path>` (compared as parsed JSON maps over the whole namespace, not by eye); the only other diff line is the trailing comma the append needs (4 insertions / 1 deletion per file)",
+  "placeholder integrity: `{id}` appears exactly once, in `mobile.setup.repointed` only, in single-brace ICU-subset form; `runtime.message_arguments()` reports exactly one argument (`('id', 'simple')`); brace counts are (0,0) in the title and the remedy body",
+  "render gate: the product engine raises `MessageFormatError` when `id` is omitted, so the placeholder is live ICU, not escaped braces",
+  "no manual bidi/format control characters (U+200E/F, U+202A-E, U+2066-9) in any of the three values; every value is NFC-stable",
+  "typography: no ASCII apostrophe, no double space, no space before punctuation, no leading/trailing space, no ASCII '...' in any of the three values",
+  "cell widths measured with `rich.cells.cell_len` — the same measure the TUI wraps and the desktop lays out with; no `maxCells` is declared for these keys in the context sidecar (read, not assumed: the sidecar carries only role/tone/note), so nothing was judged against a hard budget"
+ ],
+ "meaning_checks": [
+  "does not imply a NEW sign-in: none of the three strings contains the locale's verb for 'sign in' in an imperative or prospective frame. zh-CN writes 重新连接 (reconnect) and never 重新登录; ur writes دوبارہ منسلک (reconnect again) and never دوبارہ سائن اِن; hi writes फिर से जोड़ें (join again) and never फिर से साइन इन करें. The sign-in appears only as the OBJECT the existing access is re-pointed at",
+  "does not imply a NEW tunnel or a service mutation: the action verb in all three locales is the locale's word for 'reconnect/re-join', with no create/start/enable verb",
+  "does not imply an account change: every locale names the same account explicitly (zh-CN 同一账户 / ur وہی اکاؤنٹ · اسی Radient اکاؤنٹ / hi वही खाता · इसी Radient खाते) and the receipt repeats it",
+  "does not imply the phone address changes: every locale says the address is the same one (zh-CN 同一手机地址 / ur وہی فون ایڈریس / hi वही फ़ोन पता), matching the shipped `reservation_saved` form of that object in each locale",
+  "the {id} parenthetical is presented as a local credential ROW reference, not an account id, email or phone address — and it reuses the exact shipped parenthetical form of `mobile.setup.account` in all three locales",
+  "the comparative 'newer' is decidable in every state this plan can be in: `local_operator/providers/account_successor.py:35` refuses to return a successor unless EXACTLY ONE enabled, non-dead same-account row exists on the same hub, so 'newer' and 'the newer one' name one row — verified by reading that function, not by trusting a translator's note"
+ ],
+ "glossary_compliance": [
+  "credentials → क्रेडेंशियल ✓ singular for one row (glossary §2 and note 6; plural क्रेडेंशियल्स), matching the shipped (क्रेडेंशियल {id}) in mobile.setup.account",
+  "device → डिवाइस ✓ (settled loan per the hi guide's list); account → खाता ✓; phone access → फ़ोन एक्सेस ✓ (title_login)",
+  "phone address → फ़ोन पता ✓ (shipped reservation_saved)",
+  "sign-in → साइन-इन ✓ with the hyphen, matching title_login and identity_unavailable — see HI-02"
+ ],
+ "style_compliance": [
+  "आप register; respectful imperative जोड़ें; no तुम / तू; no padding honorifics",
+  "Danda । closes both full stops in the remedy and the receipt (guide: danda for full stops in prose); the blocked-state title carries none, like the shipped title_login",
+  "Nukta kept where the spelling has one (फ़ोन) and NOT added where it does not (पता stays पता) — checked character by character, which is the guide's 'keep nukta consistently' rule applied in both directions",
+  "ASCII comma in वही खाता, वही फ़ोन पता। is the guide's sanctioned 'comma ,', and the spaced em dash matches the namespace's identity_unavailable",
+  "No ZWJ/ZWNJ anywhere (asserted); standard conjunct spellings (जोड़, फ़ोन, क्रेडेंशियल)",
+  "Digits Latin; {id} renders as bare Latin digits with no grouping and no Devanagari numerals (the guide defers ०१२… in v1)",
+  "ASCII parentheses ( ) around क्रेडेंशियल {id}, as mobile.setup.account ships them"
+ ],
+ "naturalness": [
+  "Reads written: इसी Radient खाते का एक नया साइन-इन पहले से इस डिवाइस पर मौजूद है is idiomatic (पहले से … मौजूद है for 'already on this device'), and जोड़ दिया गया is the right completed passive for a receipt — the same aspect choice the namespace's other receipts make.",
+  "Oblique forms are all correct: इसी … खाते का (genitive), इस डिवाइस के नए साइन-इन से (oblique + postposition), उसी खाते के लिए (oblique after के लिए).",
+  "फ़ोन एक्सेस is kept as the namespace's term even though it is a loan: the guide prefers the living loan over an invented native form, and the alternative (मोबाइल पहुँच) would fork the concept."
+ ],
+ "adjudications": [
+  {
+   "topic": "(d) «नया» carries both 'new' and 'newer' — acceptable without a comparative?",
+   "verdict": "PASS — acceptable; no comparative is available and none is needed here",
+   "reasoning": "Four reasons, in order of weight. (1) Hindi has no usable comparative of this adjective: नएतर is not a word, and इससे नया ('newer than it') requires an antecedent that these strings deliberately do not have. (2) The catalogue already uses नया for the fresh re-read (account_failed नया सत्यापन, quote_unread नया खाता और कोट), so one carrier is this locale's established register rather than a compression. (3) The wrong reading is blocked structurally, not lexically: 'this device's new sign-in' is the possessive इस डिवाइस के, which makes the sign-in an artifact the device already holds (a sign-in the user would perform reads इस डिवाइस पर नया साइन-इन), and the verb throughout is जोड़ें ('join/reconnect'), never साइन इन करें. (4) The referent is provably unique: local_operator/providers/account_successor.py requires exactly one enabled, non-dead same-account row on the same hub before it re-points, so 'the new one' and 'the newer one' are the same row in every state where this plan is offered. The residual risk is that the title read alone loses 'newer'; that is a nuance, not a wrong instruction, and the remedy restores it immediately with पहले से … मौजूद है."
+  }
+ ],
+ "observations_outside_this_delta": [
+  "At the TUI notice's real body width (74 cells at 80 columns) the remedy wraps to 2 rows and the receipt fits one; Devanagari is measured with the product's own `cell_len`, the same measure Textual lays out with, so these are the rows that paint. Glyph shaping (conjunct rendering in the user's terminal) is the terminal's job and is not claimed here.",
+  "`mobile.setup` is not a `wire.*` namespace, so these strings never reach the phone client's bundled chunks; the surfaces are the CLI/TUI notice and the desktop remedy paragraph."
+ ],
+ "translator_receipt_claims_verified": [
+  "Source hash f38364c1… — re-derived, matches. Context 2cf80ced…, glossary 0eb34437…, hi guide 82292dc8…, target 633a9064… — all re-derived, all match.",
+  "Cell figures 43 / 101 / 71 — re-measured with rich.cells.cell_len: 43 / 101 / 71. Confirmed exactly.",
+  "'नएतर is not a word' — agreed, and no catalogue in this tree uses a comparative of नया.",
+  "Key-order and append-only claims — re-verified against `git show 0df4ddea133^:…`: 76 values byte-identical, 79 keys in English order. Confirmed."
+ ],
+ "findings": [
+  {
+   "id": "HI-01",
+   "severity": "nit",
+   "status": "accepted — no change",
+   "keys": [
+    "mobile.setup.title_repoint",
+    "mobile.setup.repoint",
+    "mobile.setup.repointed"
+   ],
+   "string": "…इस डिवाइस के नए साइन-इन से… / एक नया साइन-इन…",
+   "issue": "«नया» carries 'new', 'newer' and 'fresh' in this catalogue, so the English comparative 'newer' loses its comparative form. Read alone, the title could be taken as 'this device's new sign-in' rather than 'the newer of the two local sign-ins'.",
+   "assessment": "Acceptable, and no better form exists. Hindi has no usable comparative of this adjective (नएतर is not a word; इससे नया needs an antecedent the strings do not have), the catalogue already uses नया for the fresh re-read, the possessive इस डिवाइस के plus पहले से … मौजूद है fix the referent, the verb is जोड़ें ('join/reconnect') and never साइन इन करें, and account_successor.py guarantees exactly one candidate row, so 'the new one' and 'the newer one' are the same row. The residual loss is a nuance in the title, not a wrong instruction. See adjudication (d)."
+  },
+  {
+   "id": "HI-02",
+   "severity": "nit",
+   "status": "accepted — no change; note for a future wave",
+   "keys": [
+    "mobile.setup.title_repoint",
+    "mobile.setup.repoint",
+    "mobile.setup.repointed"
+   ],
+   "string": "साइन-इन (hyphenated) vs साइन इन (spaced) elsewhere in the namespace",
+   "issue": "The namespace ships «साइन-इन» in title_login, identity_unavailable and these three keys, and «साइन इन» in login, complete, complete_tui and login_tui. Two spellings in one namespace can read as drift.",
+   "assessment": "The split is grammatical, not accidental: the hyphenated form is the compound NOUN (Radient साइन-इन चाहिए, साइन-इन किए गए खाते), and the spaced form is the verb phrase (साइन इन करें / साइन इन करने). These three keys use the noun, so they belong on the hyphenated side — the same side as the title ledger they extend. No change. A future hi wave should record the noun/verb split in the style guide so the next translator does not read it as drift and 'unify' it."
+  }
+ ],
+ "finding_counts": {
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 2
+ },
+ "unresolved_blocker_major": 0,
+ "strings_audited": [
+  {
+   "key": "mobile.setup.title_repoint",
+   "en": "Phone access needs reconnecting to this device’s newer sign-in",
+   "en_cells": 62,
+   "target": "फ़ोन एक्सेस को इस डिवाइस के नए साइन-इन से फिर से जोड़ना होगा",
+   "target_cells": 43,
+   "icu_arguments": [],
+   "rendered": "फ़ोन एक्सेस को इस डिवाइस के नए साइन-इन से फिर से जोड़ना होगा",
+   "rendered_cells": 43
+  },
+  {
+   "key": "mobile.setup.repoint",
+   "en": "A newer sign-in to the same Radient account is already on this device. Reconnect phone access to that sign-in — same account, same phone address.",
+   "en_cells": 145,
+   "target": "इसी Radient खाते का एक नया साइन-इन पहले से इस डिवाइस पर मौजूद है। फ़ोन एक्सेस को उसी साइन-इन से फिर से जोड़ें — वही खाता, वही फ़ोन पता।",
+   "target_cells": 101,
+   "icu_arguments": [],
+   "rendered": "इसी Radient खाते का एक नया साइन-इन पहले से इस डिवाइस पर मौजूद है। फ़ोन एक्सेस को उसी साइन-इन से फिर से जोड़ें — वही खाता, वही फ़ोन पता।",
+   "rendered_cells": 101
+  },
+  {
+   "key": "mobile.setup.repointed",
+   "en": "Reconnected phone access to this device’s newer sign-in for the same account (credential {id}).",
+   "en_cells": 95,
+   "target": "फ़ोन एक्सेस को उसी खाते के लिए इस डिवाइस के नए साइन-इन से फिर से जोड़ दिया गया (क्रेडेंशियल {id})।",
+   "target_cells": 71,
+   "icu_arguments": [
+    "id"
+   ],
+   "rendered": "फ़ोन एक्सेस को उसी खाते के लिए इस डिवाइस के नए साइन-इन से फिर से जोड़ दिया गया (क्रेडेंशियल 42)।",
+   "rendered_cells": 69
+  }
+ ],
+ "rendered_evidence": {
+  "path": "i18n/audits/evidence/hi/mobile.setup/r1/rendered.txt",
+  "layer_1_product_resolver_asis": "returns the ENGLISH source for this locale in this tree, because the generated shipped set still listed only ['en'] when the evidence was emitted (the regeneration is this auditor's own shared gate and runs after the ledger rows). Shown verbatim rather than hidden: rendered.txt Layer 1.",
+  "layer_2_locale_rules": "`runtime.render_message(catalogues.load_catalogue(locale, 'mobile.setup')[code], params, locale)` — the same ICU engine Layer 1 uses, over this locale's own loaded bytes; with {id} substituted as 42 and again as the product's own str(row_id) '1042'.",
+  "layer_3_shipped_gate": "`messages.render_record(...)` with `resolve.shipped_locales` / `resolve.is_shipped` widened IN PROCESS for the measurement only, then restored; it exercises render_record -> _lookup -> runtime.render_message end to end and reports this catalogue as `source_locale`. No file is modified: data/shipped.json kept its checked-in content at emission time.",
+  "negative_control": "omitting `id` raises `runtime.MessageFormatError: message argument 'id' was not supplied (have: none)` — the placeholder is live ICU, not escaped braces. The public resolver instead degrades to the code with `source_locale=None`, the documented additive contract.",
+  "bidi_and_half_width": [
+   "mobile.setup.title_repoint: manual bidi controls none; NFC-stable True; bidi class census {'L': 40, 'NSM': 7, 'WS': 12, 'ES': 1}; punctuation codepoints ['U+002D HYPHEN-MINUS', 'U+093C DEVANAGARI SIGN NUKTA', 'U+093E DEVANAGARI VOWEL SIGN AA', 'U+093F DEVANAGARI VOWEL SIGN I', 'U+0947 DEVANAGARI VOWEL SIGN E', 'U+094B DEVANAGARI VOWEL SIGN O', 'U+094D DEVANAGARI SIGN VIRAMA']",
+   "mobile.setup.repoint: manual bidi controls none; NFC-stable True; bidi class census {'L': 89, 'WS': 28, 'NSM': 14, 'ES': 2, 'ON': 1, 'CS': 1}; punctuation codepoints ['U+002C COMMA', 'U+002D HYPHEN-MINUS', 'U+0902 DEVANAGARI SIGN ANUSVARA', 'U+093C DEVANAGARI SIGN NUKTA', 'U+093E DEVANAGARI VOWEL SIGN AA', 'U+093F DEVANAGARI VOWEL SIGN I', 'U+0940 DEVANAGARI VOWEL SIGN II', 'U+0942 DEVANAGARI VOWEL SIGN UU', 'U+0947 DEVANAGARI VOWEL SIGN E', 'U+0948 DEVANAGARI VOWEL SIGN AI', 'U+094B DEVANAGARI VOWEL SIGN O', 'U+094C DEVANAGARI VOWEL SIGN AU', 'U+094D DEVANAGARI SIGN VIRAMA', 'U+0964 DEVANAGARI DANDA', 'U+2014 EM DASH']",
+   "mobile.setup.repointed: manual bidi controls none; NFC-stable True; bidi class census {'L': 61, 'NSM': 13, 'WS': 19, 'ES': 1, 'ON': 4}; punctuation codepoints ['U+0028 LEFT PARENTHESIS', 'U+0029 RIGHT PARENTHESIS', 'U+002D HYPHEN-MINUS', 'U+007B LEFT CURLY BRACKET', 'U+007D RIGHT CURLY BRACKET', 'U+0902 DEVANAGARI SIGN ANUSVARA', 'U+093C DEVANAGARI SIGN NUKTA', 'U+093E DEVANAGARI VOWEL SIGN AA', 'U+093F DEVANAGARI VOWEL SIGN I', 'U+0940 DEVANAGARI VOWEL SIGN II', 'U+0947 DEVANAGARI VOWEL SIGN E', 'U+094B DEVANAGARI VOWEL SIGN O', 'U+094D DEVANAGARI SIGN VIRAMA', 'U+0964 DEVANAGARI DANDA']"
+  ],
+  "wrap": {
+   "80": {
+    "body_cells": 74,
+    "rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 1
+    },
+    "en_rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 2
+    }
+   },
+   "100": {
+    "body_cells": 94,
+    "rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 1
+    },
+    "en_rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 1
+    }
+   },
+   "120": {
+    "body_cells": 114,
+    "rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 1,
+     "mobile.setup.repointed": 1
+    },
+    "en_rows": {
+     "mobile.setup.title_repoint": 1,
+     "mobile.setup.repoint": 2,
+     "mobile.setup.repointed": 1
+    }
+   }
+  },
+  "product_paint": [
+   "mobile.setup.title_repoint: RLI=0 PDI=0 bytes_inside_identical_to_raw=True",
+   "mobile.setup.repoint: RLI=0 PDI=0 bytes_inside_identical_to_raw=True",
+   "mobile.setup.repointed: RLI=0 PDI=0 bytes_inside_identical_to_raw=True"
+  ]
+ },
+ "gate_results": [
+  {
+   "command": "scripts/i18n/ledger.py append --receipt <row> --expected-history-sha <history-sha> --apply  (x3: zh-CN, ur, hi)",
+   "rc": 0,
+   "output": "i18n/audit-history/zh-CN/mobile.setup.json\ni18n/audit-history/ur/mobile.setup.json\ni18n/audit-history/hi/mobile.setup.json"
+  },
+  {
+   "command": "scripts/i18n/ledger.py validate --base HEAD",
+   "rc": 0,
+   "output": "audit history: valid and append-only"
+  },
+  {
+   "command": "scripts/i18n/generate.py",
+   "rc": 0,
+   "output": "wrote local_operator/i18n/keys/__init__.py\nwrote local_operator/mobile/web/src/i18n/keys.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.es.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.fr.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.hi.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.ru.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.ur.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.vi.gen.ts\nwrote local_operator/mobile/web/src/i18n/bundled.zh-CN.gen.ts   (tail; every generated artifact was written)"
+  },
+  {
+   "command": "scripts/i18n/generate.py --check",
+   "rc": 0,
+   "output": "generate.py --check: 157 artifact(s) byte-identical"
+  },
+  {
+   "command": "scripts/i18n/check.py --catalogues-only",
+   "rc": 0,
+   "output": "check.py: catalogue checks: 0 problem(s)"
+  },
+  {
+   "command": "scripts/i18n/check.py",
+   "rc": 0,
+   "output": "check.py: ok — 215 file(s) scanned, 2528 literal(s) at or below the baseline, catalogues consistent; 81 advisory finding(s) (report-only until activated)"
+  },
+  {
+   "command": ".venv/bin/python -m pytest tests/unit/i18n/test_language_manifest.py tests/unit/i18n/test_catalogue_sizes.py tests/unit/i18n/test_ledger_shards.py -q",
+   "rc": 0,
+   "output": ".........................................................                [100%]\n57 passed in 19.42s"
+  }
+ ],
+ "gate_summary": "all seven gate commands exited 0: ledger append-only validation, generation, generation --check (157 artifacts byte-identical), catalogue-only check (0 problems), the full check (catalogues consistent, 81 pre-existing advisory findings only), and the three i18n unit suites (57 passed). shipped.json moved from ['en'] to the full eight-locale set.",
+ "shipped_after_gate": [
+  "en",
+  "fr",
+  "es",
+  "zh-CN",
+  "ru",
+  "vi",
+  "ur",
+  "hi"
+ ],
+ "limitations": [
+  "Independent LLM review on a provider-fallback model (deepseek/deepseek-flash after two quota descents), not native-speaker certification; the judgments are reasoned, not native intuition.",
+  "Scalar text evidence only: no terminal frame, desktop frame or device screenshot was captured. Widths are rich.cells.cell_len measurements plus the product's own wrap_cells rows, not pixels, and the desktop panel's pixel width lives in local-operator-ui and was not driven.",
+  "The shipped-gate render required widening resolve.shipped_locales in process; that patch is disclosed, measurement-only and restored. The real eligibility proof is the post-append generation, whose output is recorded in gate_results and shipped_after_gate.",
+  "No native RTL shaping was verified (the `ur` TUI stance is documented best-effort: layout stays LTR, per-string isolation only). Glyph shaping in a specific terminal is not something this evidence can settle."
+ ],
+ "refused_to_pass": [
+  "Nothing was refused. All three keys pass; both nits are adjudicated and neither asks for a change."
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "rendered.txt",
+  "receipt.json"
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "finding_ids": [
+   "HI-01",
+   "HI-02"
+  ],
+  "findings_total": 2,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 2
+ },
+ "rounds": [
+  {
+   "round": 1,
+   "auditor_session": "84b112fab6ca",
+   "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 2
+   }
+  }
+ ],
+ "ledger_status": "passed",
+ "audit_notes_not_execution_log": "record.json is the primary artifact; rendered.txt carries the executed product-path render output; report.md is the reading aid. Nothing in the rendered evidence is formatted by the audit script.",
+ "evidence_receipt": {
+  "path": "i18n/audits/evidence/hi/mobile.setup/r1/receipt.json",
+  "self_hash_rule": "receipt.json hashes every other artifact in this directory and not itself"
+ },
+ "audit_ledger_row": {
+  "storage": "i18n/audit-history/<locale>/mobile.setup.json (ordered suffix, appended with scripts/i18n/ledger.py append)",
+  "why_not_i18n_ledger_json": "i18n/ledger.json and i18n/ledger/<locale>.json are pinned historical snapshots (i18n/audit-history.json marker); docs/I18N.md forbids rewriting them, so the row is appended to the suffix, never to the baseline."
+ }
+}
