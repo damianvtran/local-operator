@@ -5738,8 +5738,13 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
     ):
         assert update_mod._snapshot_command("v0.9.8", allow_downgrade=True) == 0
 
+    # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
+    # terminal and may answer the signing dialog (review round 1, R2).
     assert calls == [
-        (None, {"version": "0.9.8", "note": "downgrade-allowed"})
+        (
+            None,
+            {"version": "0.9.8", "note": "downgrade-allowed", "team_signing_prompt": True},
+        )
     ], "the override installs the older wheel and the marker note records it"
     tail.assert_called_once_with(
         0,
@@ -5870,7 +5875,8 @@ def test_from_snapshot_newer_version_installs_untouched(
     ):
         assert update_mod._snapshot_command("v0.9.10") == 0
 
-    assert calls == [(None, {"version": "0.9.10", "note": ""})]
+    # CLI entry: the signing dialog may be answered (review round 1, R2).
+    assert calls == [(None, {"version": "0.9.10", "note": "", "team_signing_prompt": True})]
     captured = capsys.readouterr()
     assert "refusing" not in captured.err
     assert "downgrading on purpose" not in captured.err
@@ -6120,8 +6126,19 @@ def test_perform_upgrade_never_collects_previous_generations(
         )
         == "0.70.19"
     )
+    # perform_upgrade defaults to no signing dialog: it also runs unattended
+    # (auto-update), where nobody can answer one (review round 1, R2).
     assert installs == [
-        (None, {"version": "0.70.19", "commit": "", "ref": "", "target_mode": "latest"})
+        (
+            None,
+            {
+                "version": "0.70.19",
+                "commit": "",
+                "ref": "",
+                "target_mode": "latest",
+                "team_signing_prompt": False,
+            },
+        )
     ]
     assert collections == [] and notices == []
 
