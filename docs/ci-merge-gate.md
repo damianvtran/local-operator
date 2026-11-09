@@ -2,12 +2,10 @@
 
 ## When to arm (and when not to)
 
-**Do not re-arm merely because an older failed check coexists with a newer
-successful gate on the same current head.** An unnecessary label event creates
-another full suite and can put a newer gate back into a pending state. Re-arm
-when the final head has no eligible gate, or deliberately retry a current failed
-gate after diagnosing it. If a current gate is queued or running, follow that
-run; do not arm another one to repair the queue.
+- **Re-arm only when BOTH:** the required success is **absent**, AND **no viable queued or running run can supply it** (none exists, or it is definitively dead/invalid rather than merely slow).
+- **OR** a specifically diagnosed **stuck or invalid** run needs **owner-controlled replacement** — and in that case the override is that path, named as such.
+- **An older failure alongside a newer success is never a reason to re-arm.** Neither is API list order, and neither is `filter=latest` — **the check-run list is not gate authority**; the merge state is.
+- A pending run's correct response is to **wait**, and to inspect only if it looks stuck.
 
 GitHub's [required-check documentation](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks)
 requires success (or neutral/skipped) on the latest relevant commit, not success
@@ -70,14 +68,32 @@ full-suite PR run on the same branch/head is `queued`, `in_progress`, `pending`,
 `waiting` or `requested`. It prints the existing run ID/URL. Each lookup filters
 by workflow, PR event, branch, head and status; fetching one matching result is
 an existence check, not a potentially incomplete slice of historical runs. This
-is an **advisory check that refuses positively identified duplicates**, not an
-availability gate: transient failures (network, timeout, 5xx or rate limit) warn
-with the reason and proceed to arm; auth/permission failures (401/403, except an
-explicit rate-limit response) and malformed/unauthorised responses refuse without
-changing labels. Completed historical successes or failures do not trigger this
-active-run guard.
+is **advisory and non-atomic**: it reduces redundant queued runs but does not
+guarantee their absence, and it is not a lock. Completed historical successes or failures
+do not trigger this active-run guard.
 
-An intentional duplicate requires an explicit, visible override:
+Recovery is ordered: **retry (bounded) → proceed with warning on transient →
+override if the lookup is unusable or a diagnosed stuck run needs replacement →
+refuse only on positive authentication/permission failure**. Each status lookup
+gets at most **3 attempts**, with **1 second** between transient failures, each
+request capped at **5 seconds**, within a **17-second total advisory budget**
+(shared across all statuses). These are a small operator-wait policy budget,
+not a measured GitHub latency percentile: 3 × 5 + 2 × 1 = 17 seconds allows two
+short recovery opportunities without making an advisory a prolonged outage gate.
+The remaining budget caps each request and wait; exhausted budget follows the
+transient warning-and-proceed path. Network errors, timeouts, 5xx and rate limits
+are transient. Positive authentication/permission failures (401/403, except an
+explicit rate-limit response) stop immediately without label changes.
+
+Unusable/malformed or unrecognised responses stop automatic arming without label
+changes, but are not a permanent inability to gate: the lane owner inspects the
+failure and uses the explicit manual override below. That override is the **only**
+path through an unusable advisory response; there is no silent fallback. The
+warning on exhausted transient retries also names this manual recovery path.
+
+The lane owner uses this explicit, visible manual override when the advisory
+cannot answer, or for owner-controlled replacement of a specifically diagnosed
+stuck or invalid run (not one that is merely pending or slow):
 
 ```sh
 make merge-gate PR=<n> I_KNOW_A_GATE_RUN_EXISTS=1
@@ -147,9 +163,12 @@ it is never a silent skipped required check.
 Local tests execute the real Makefile target with a stubbed GitHub boundary:
 active statuses refuse before any label mutation, no active run arms normally,
 another head does not match, completed-success-only history arms, and the explicit
-override skips an unreachable advisory lookup with a warning. Transient API
-failures warn and arm; auth/permission or malformed responses refuse with no label
-write. Persisted before/after label state and exit codes distinguish both paths.
+override skips an unreachable or unusable advisory lookup with a warning.
+Transient API failures retry before warning and arming; a recovered active match
+still prevents label mutation. A synthetic monotonic clock verifies request,
+retry and shared-deadline bounds. Auth/permission or malformed responses stop
+automatic arming with no label write; unusable responses name the manual override.
+Persisted before/after label state and exit codes distinguish these paths.
 Topology tests retain the original concurrency contract
 and pin ownership fields.
 Workflow syntax/expression lint cannot simulate GitHub's scheduler. A real

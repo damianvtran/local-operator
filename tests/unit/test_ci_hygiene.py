@@ -48,7 +48,13 @@ from typing import Any
 import pytest
 import yaml
 
-from scripts import check_serial_controls, ci_scope, run_bounded, shard_tests
+from scripts import (
+    check_serial_controls,
+    ci_scope,
+    merge_gate_advisory,
+    run_bounded,
+    shard_tests,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 CI_YML = REPO / ".github" / "workflows" / "ci.yml"
@@ -3750,7 +3756,11 @@ if args[:2] == ["run", "list"]:
         sha = args[args.index("--commit") + 1]
         failure = os.environ.get("STUB_ACTIVE_FAIL", "0")
         if failure != "0":
-            answer(failure, 1)
+            counter = Path(os.environ["STUB_ACTIVE_COUNT"])
+            failures = int(counter.read_text()) if counter.exists() else 0
+            counter.write_text(str(failures + 1))
+            if failures < int(os.environ.get("STUB_ACTIVE_FAILURES", "999")):
+                answer(failure, 1)
         if os.environ.get("STUB_ACTIVE_RESPONSE"):
             answer(os.environ["STUB_ACTIVE_RESPONSE"], 0)
         print(json.dumps([
@@ -3797,6 +3807,7 @@ def _arm_merge_gate(
     poll_runs: str = "[]",
     active_runs: str = "[]",
     active_fail: str = "0",
+    active_failures: int = 999,
     active_response: str = "",
     know_run_exists: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
@@ -3839,6 +3850,8 @@ def _arm_merge_gate(
         "STUB_POLL_RUNS": poll_runs,
         "STUB_ACTIVE_RUNS": active_runs,
         "STUB_ACTIVE_FAIL": active_fail,
+        "STUB_ACTIVE_FAILURES": str(active_failures),
+        "STUB_ACTIVE_COUNT": str(tmp_path / "active.count"),
         "STUB_ACTIVE_RESPONSE": active_response,
     }
     proc = subprocess.run(
@@ -4036,25 +4049,59 @@ def test_merge_gate_lookup_availability_is_advisory(
         assert "WARNING: existing-gate lookup unavailable" in proc.stderr
         assert (failure or "no response") in proc.stderr
         assert "proceeding to arm" in proc.stderr
+        assert "I_KNOW_A_GATE_RUN_EXISTS=1" in proc.stderr
+        assert sum("--status" in call for call in calls) == 3
+        assert "retry 1/2" in proc.stderr and "retry 2/2" in proc.stderr
         assert labels == ["synthetic", "ready-to-merge"]
         assert (tmp_path / "label-transitions.jsonl").read_text().splitlines() == [
             '["synthetic"]',
             '["synthetic", "ready-to-merge"]',
         ]
     else:
+        assert sum("--status" in call for call in calls) == 1
+        assert "retry" not in proc.stderr
         assert "no label changed" in proc.stderr
         assert labels == ["ready-to-merge", "synthetic"]
         assert not any(call.startswith(("pr edit", "label create")) for call in calls)
         assert not (tmp_path / "label-transitions.jsonl").exists()
 
 
-@pytest.mark.parametrize("response", ["not json", '{"message":"Unauthorized"}', "null", '[{}]'])
+def test_merge_gate_retry_recovers_before_matching_active_run(tmp_path: Path) -> None:
+    """Retry is not permission to arm: a recovered queued match still wins."""
+    proc, calls = _arm_merge_gate(
+        tmp_path,
+        labels="ready-to-merge synthetic",
+        active_fail="HTTP 503 Service Unavailable",
+        active_failures=1,
+        active_runs=json.dumps(
+            [
+                {
+                    "databaseId": 4242,
+                    "url": "https://example.test/runs/4242",
+                    "headSha": _MERGE_GATE_SHA,
+                    "status": "queued",
+                }
+            ]
+        ),
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert "retry 1/2" in proc.stderr and "retry 2/2" not in proc.stderr
+    assert "queued gate run 4242" in proc.stderr
+    assert "proceeding to arm" not in proc.stderr
+    assert sum("--status" in call for call in calls) == 2
+    assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge", "synthetic"]
+    assert not any(call.startswith(("pr edit", "label create")) for call in calls)
+
+
+@pytest.mark.parametrize("response", ["not json", '{"message":"Unauthorized"}', "null", "[{}]"])
 def test_merge_gate_malformed_lookup_refuses(tmp_path: Path, response: str) -> None:
     proc, calls = _arm_merge_gate(
         tmp_path, labels="ready-to-merge synthetic", active_response=response
     )
     assert proc.returncode == 2, proc.stderr
     assert "malformed existing-gate response" in proc.stderr
+    assert "lane-owner manual recovery only:" in proc.stderr
+    assert "I_KNOW_A_GATE_RUN_EXISTS=1" in proc.stderr
     assert json.loads((tmp_path / "labels.json").read_text()) == ["ready-to-merge", "synthetic"]
     assert not any(call.startswith(("pr edit", "label create")) for call in calls)
 
@@ -4084,11 +4131,14 @@ def test_merge_gate_completed_success_history_arms(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
 
 
-def test_merge_gate_override_skips_unreachable_advisory_lookup(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure", ["request timed out", "lookup unusable"])
+def test_merge_gate_override_skips_unreachable_advisory_lookup(
+    tmp_path: Path, failure: str
+) -> None:
     proc, calls = _arm_merge_gate(
         tmp_path,
         labels="ready-to-merge synthetic",
-        active_fail="request timed out",
+        active_fail=failure,
         know_run_exists=True,
         poll_runs=_merge_gate_runs((5678, _MERGE_GATE_AFTER)),
     )
@@ -4097,6 +4147,60 @@ def test_merge_gate_override_skips_unreachable_advisory_lookup(tmp_path: Path) -
     assert "existing-gate lookup did not run (skipped)" in proc.stderr
     assert not any("--status" in call for call in calls)
     assert json.loads((tmp_path / "labels.json").read_text()) == ["synthetic", "ready-to-merge"]
+
+
+@pytest.mark.parametrize("scenario", ["recovers", "exhausted", "deadline", "auth", "unusable"])
+def test_merge_gate_advisory_retry_budget(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], scenario: str
+) -> None:
+    """A synthetic clock proves the budget even when a request consumes its cap.
+
+    This is a policy budget, not a latency benchmark. The deadline is shared by
+    the Makefile across statuses; an already-spent budget must issue no request.
+    """
+    clock = [0.0]
+    calls: list[float] = []
+    sleeps: list[float] = []
+    deadline = 1 if scenario == "deadline" else 17
+    monkeypatch.setattr(merge_gate_advisory.time, "monotonic", lambda: clock[0])
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command == ["gh", "run", "list"]
+        calls.append(kwargs["timeout"])
+        if scenario == "recovers" and len(calls) == 2:
+            return subprocess.CompletedProcess(command, 0, "[]", "")
+        if scenario in {"auth", "unusable"}:
+            return subprocess.CompletedProcess(
+                command, 1, "", "HTTP 401" if scenario == "auth" else "unknown failure"
+            )
+        clock[0] += kwargs["timeout"]
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(merge_gate_advisory.time, "sleep", sleep)
+    monkeypatch.setattr(merge_gate_advisory.subprocess, "run", run)
+    monkeypatch.setattr(sys, "argv", ["advisory", str(deadline), "gh", "run", "list"])
+    assert merge_gate_advisory.BUDGET_SECONDS == 3 * 5 + 2 * 1 == 17
+    assert "time.monotonic() + 17" in MAKEFILE.read_text()
+    assert merge_gate_advisory.main() == (0 if scenario == "recovers" else 1)
+    output = capsys.readouterr()
+    if scenario == "recovers":
+        assert calls == [5, 5] and sleeps == [1]
+        assert output.out == "[]"
+    elif scenario == "exhausted":
+        assert calls == [5, 5, 5] and sleeps == [1, 1]
+        assert clock[0] == 17
+    elif scenario == "deadline":
+        assert calls == [1] and clock[0] == 1
+        assert "timed out" in output.out
+        assert merge_gate_advisory.main() == 1
+        assert calls == [1], "a spent shared budget must not start another status request"
+    else:
+        assert calls == [5] and sleeps == []
+        assert "retry" not in output.err
 
 
 def test_full_suite_run_name_identifies_the_owning_lane_and_trigger() -> None:
