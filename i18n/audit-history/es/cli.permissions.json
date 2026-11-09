@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "cli.permissions",
-  "history_sha256": "e3ef14d8234f8a2c3006ad22ad5bfbaba670185aedc33ec6b8b71598e64395ce",
+  "history_sha256": "1fa73eb75cc223ec5ea7cd4311fcf68f218559ca39d0a017e2c0002ee0844032",
   "entries": [
     {
       "locale": "es",
@@ -24,6 +24,27 @@
       },
       "status": "passed",
       "note": "Independent audit r1-f8ab, 28/28 keys, check.py 0 problems. 0 blocker/0 major/4 minor (M1 « » vs guide “ ”; M2 app→aplicación de escritorio; M3 build→compilación; M4 Ejecútala referent). Record: i18n/audits/evidence/es/cli.permissions/r1-f8ab/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.permissions",
+      "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+      "translator": {
+        "agent": "i18n-translator (lopdev round-2 wave, commit 788cc399; session not disclosed to auditor)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "9c0ff651f525",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 2
+      },
+      "status": "changes_requested",
+      "note": "Re-audit r2-9c0f, 38/38 keys, check.py 0. R1 M1-M4 resolved. 1 MAJOR: R2-1 screen.denied pane ≠ Apple es 'Grabación de pantalla y del audio del sistema'; 1 MINOR R2-2. Record: i18n/audits/evidence/es/cli.permissions/r2-9c0f/record.json"
     }
   ]
 }

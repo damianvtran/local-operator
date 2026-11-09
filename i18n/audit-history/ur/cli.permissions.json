@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "cli.permissions",
-  "history_sha256": "757f86fa75cb8806ace0c5c5023c4f5f20583fabc7d64c0c88b5380ef366b38d",
+  "history_sha256": "c82a4ee269f37c4b9123844b372a72e716e696e262afc42027e3b155c5bbacd1",
   "entries": [
     {
       "locale": "ur",
@@ -25,6 +25,28 @@
       },
       "status": "changes_requested",
       "note": "Independent ur audit urp1 @eba1e1dd: changes_requested, 2 MAJOR (U1 screen.denied menu path, U2 explain/always_allow button: macOS has no Urdu UI, keep English labels), U3 minor, 2 NIT. Record: i18n/audits/evidence/ur/cli.permissions/urp1/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.permissions",
+      "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 round-2 wave, ur)",
+        "session": "unknown",
+        "model": "unknown",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "26eb57e200ee",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent ur re-audit urp2 @d5eed404 (ur d7c43d6f): passed, 0 BLOCKER/MAJOR; urp1 U1-U5 resolved; P1 minor (explain bullet bidi), 3 NIT. Labels verified vs Apple loctables. Record: i18n/audits/evidence/ur/cli.permissions/urp2/record.json"
     }
   ]
 }

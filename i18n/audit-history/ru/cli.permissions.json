@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "cli.permissions",
-  "history_sha256": "8794f046d09a692f8bf50ffef2b3ec9c04c960dd1291bdfec9b6a9f3e1d504c3",
+  "history_sha256": "bba932954a4352e724ddccf4bc67a0963aaa333e041c4de9fca5a421b362eafa",
   "entries": [
     {
       "locale": "ru",
@@ -25,6 +25,28 @@
       },
       "status": "changes_requested",
       "note": "Independent ru audit pa1: changes_requested, 0B/2M/5m/2n. R1 runtime must be «рантайм» (13 keys), R2 «сеансы»→«сессии». Record: i18n/audits/evidence/ru/cli.permissions/pa1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.permissions",
+      "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+      "translator": {
+        "agent": "i18n-translator (ru, PR #3691 round-2 wave; commit 788cc399410)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "a6f580403f3a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 4,
+        "unresolved_blocker_major": 2
+      },
+      "status": "changes_requested",
+      "note": "Independent ru re-audit pb2: changes_requested, 0B/2M/1m/1n; pa1 R1-R9 applied. P1 tab «Контроль доступа»→«Доступ», P2 «Всегда разрешать»→«Разрешать всегда» (Apple ru tables). Record: i18n/audits/evidence/ru/cli.permissions/pb2/record.json"
     }
   ]
 }

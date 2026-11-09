@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "cli.permissions",
-  "history_sha256": "dc8065e44736dbde97467abf7aeaacf26962cd8544acd87632baa6925ec50289",
+  "history_sha256": "ef922157cc17ce4b60b2567e0896440a053b6d11e7703f1f44de7828a3f6d7ea",
   "entries": [
     {
       "locale": "fr",
@@ -25,6 +25,28 @@
       },
       "status": "changes_requested",
       "note": "changes_requested: 1 MAJOR (fr typography: no ’/U+202F in 27/28 keys), 3 MINOR, 3 NIT. fr bytes 9eae53cdd40d. Record: i18n/audits/evidence/fr/cli.permissions/frpm1/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.permissions",
+      "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+      "translator": {
+        "agent": "i18n-translator (fr, PR #3691 round-2 wave; commit 788cc399410)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team subagent)",
+        "session": "c2890b9743dd",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 6,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent fr re-audit frpm2: passed, 0B/0M/2m/4n; frpm1 FRPM-1..4 resolved. macOS labels match Apple fr tables (macOS 27.2). fr 5fb01ed775d2. Record: i18n/audits/evidence/fr/cli.permissions/frpm2/record.json"
     }
   ]
 }
