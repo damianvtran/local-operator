@@ -149,7 +149,9 @@ def test_admin_can_introduce_a_genuine_third_device_grant() -> None:
         True,
         [newcomer["device_id"]],
     )
-    assert record.member(newcomer["device_id"]).role == "drive"
+    adopted = record.member(newcomer["device_id"])
+    assert adopted is not None
+    assert adopted.role == "drive"
 
 
 def test_member_rows_without_authenticated_supplier_are_not_admissions() -> None:
