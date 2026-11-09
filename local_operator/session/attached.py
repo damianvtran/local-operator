@@ -180,13 +180,13 @@ logger = logging.getLogger(__name__)
 def _settings_notice(message: Msg, *, kind: Literal["info", "error"]) -> NoticeEvent:
     """A viewer-local notice about this viewer's own settings switch.
 
-    Rendered in the ACTIVE locale, unlike the owner's transcript notices
-    (``session._notice`` pins ``en``): this event is delivered only to this
-    viewer's handlers (``_deliver``), is never written to the transcript and is
-    never model-facing, so it is plain UI copy for the person who clicked.
-    ``code``/``params`` still ride along for a re-rendering viewer.
+    Same envelope rule as the owner's notices (``session._notice``): ``text``
+    pinned to ``en`` and ``code``/``params`` carried, so a locale-aware viewer
+    re-renders it in the active language from the catalogue id. Pinned rather
+    than rendered here because this package's envelopes are policed as
+    possibly persisted (``tests/unit/i18n/test_envelope_locale_ratchet.py``).
     """
-    body = message.envelope()
+    body = message.envelope(locale="en")
     return NoticeEvent(text=body["text"], code=body["code"], params=body["params"], kind=kind)
 
 
