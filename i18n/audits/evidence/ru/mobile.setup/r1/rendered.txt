@@ -1,0 +1,63 @@
+# Rendered evidence — ru / mobile.setup repoint keys
+
+- Worktree: `/Users/damian/local-operator/.worktrees/fix-setup-repoint`
+- Revision under audit: `0df4ddea133`
+- Interpreter: `.venv/bin/python` (CPython 3.12.13); product modules only.
+- This file is written by `emit_render.py`, which calls the product's loader,
+  ICU engine and resolver. No value below is formatted by the audit script.
+- Generated `data/shipped.json` currently lists: ['en']
+  (the generator has not run since the new English hash; regeneration is the
+  second auditor's shared gate, so this lane does not run it).
+
+## Layer 1 — product resolver exactly as the tree stands
+
+`messages.render(code, params, locale=<locale>)` — the public resolver. Because
+`resolve.is_shipped('ru')` is False in this tree, the resolved source is English:
+
+mobile.setup.title_repoint => 'Phone access needs reconnecting to this device’s newer sign-in'
+    render_record source_locale = 'en'
+mobile.setup.repoint => 'A newer sign-in to the same Radient account is already on this device. Reconnect phone access to that sign-in — same account, same phone address.'
+    render_record source_locale = 'en'
+mobile.setup.repointed => 'Reconnected phone access to this device’s newer sign-in for the same account (credential 42).'
+    render_record source_locale = 'en'
+
+## Layer 2 — product ICU engine over the product-loaded catalogue value
+
+`runtime.render_message(catalogues.load_catalogue(locale, 'mobile.setup')[code],
+params, locale)` — the same formatter Layer 1 uses, applied to the locale's own
+bytes (verified identical to `messages._lookup(locale, 'mobile.setup', code)`).
+
+mobile.setup.title_repoint => 'Доступ с телефона нужно переподключить к более новому входу на этом устройстве'
+mobile.setup.repoint => 'На этом устройстве уже есть более новый вход в ту же учётную запись Radient. Переподключите доступ с телефона к этому входу — та же учётная запись, тот же адрес телефона.'
+mobile.setup.repointed => 'Доступ с телефона переподключён к более новому входу на этом устройстве для той же учётной записи (учётные данные 42).'
+
+## Layer 3 — full resolver chain with the shipped gate widened in process
+
+`messages.render_record(...)` after patching `resolve.shipped_locales` / 
+`resolve.is_shipped` for this measurement only (disclosed in the record). This
+exercises `render_record -> _lookup -> runtime.render_message` end to end and
+shows the catalogue locale as the provenance of the rendered bytes. No file is
+modified: `data/shipped.json` keeps its checked-in content.
+
+mobile.setup.title_repoint => 'Доступ с телефона нужно переподключить к более новому входу на этом устройстве'
+    source_locale = 'ru'
+mobile.setup.repoint => 'На этом устройстве уже есть более новый вход в ту же учётную запись Radient. Переподключите доступ с телефона к этому входу — та же учётная запись, тот же адрес телефона.'
+    source_locale = 'ru'
+mobile.setup.repointed => 'Доступ с телефона переподключён к более новому входу на этом устройстве для той же учётной записи (учётные данные 42).'
+    source_locale = 'ru'
+
+## Negative controls
+
+missing {id} => MessageFormatError: message argument 'id' was not supplied (have: none)
+unknown param accepted => RuntimeWarning path not raised
+
+## Rendered desktop/CLI/TUI reachability (code, not string, evidence)
+
+- `local_operator/tunnels/setup.py:707` maps plan step `repoint` to
+  `mobile.setup.title_repoint`; `setup.text()` emits title, then the remedy
+  (`mobile.setup.repoint`), then `_apply_command(...)` on the next line.
+- `local_operator/server/routes/desktop_tunnel_setup.py:172` ships
+  `plan['remedy']` (the rendered `mobile.setup.repoint`) as `remedy.text` with
+  `kind: 'run'`, which is the desktop's primary-action button; receipts use
+  `mobile.setup.repointed` (`tunnels/setup.py:559`). The desktop contract has no
+  title field, so `title_repoint` is CLI/TUI-only.

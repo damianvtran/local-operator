@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "mobile.setup",
+  "history_sha256": "8381edf41799df78a9efe36dfde629f9654167617b5f45a90e35b82a30d3293c",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "mobile.setup",
+      "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+      "translator": {
+        "agent": "i18n translator lane, `task` teammate of the lopdev team, session 86c6d01615c6",
+        "model": "deepseek/deepseek-flash (quota-driven cross-vendor fallback from the lane's pinned anthropic/claude-opus-5-5, descending via openai/gpt-6.1-sol; the fallback actually wrote the text)",
+        "date": "2026-11-08"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team), independent `task` subagent, session e7b6613db529; did not translate or edit any value it judged",
+        "model": "deepseek/deepseek-flash (quota-driven cross-vendor fallback from the session's pinned anthropic/claude-opus-5-5, descending via openai/gpt-6.1-sol; the fallback performed the audit)",
+        "date": "2026-11-08",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Repoint family (3 keys) appended to a complete 79-key namespace; round 1 independent audit PASSED, 0 blocker / 0 major / 0 minor / 2 nit. Evidence: i18n/audits/evidence/es/mobile.setup/r1/record.json (+ report.md, rendered.txt, receipt.json), round r1. Nits: ES-01 the receipt's 'es kept a comparative' claim holds only for the remedy body (title/receipt read superlatively, same referent); ES-02 «dirección de teléfono» vs the namespace's shipped «Dirección del teléfono». Adjudication es-d: matching the namespace's «acceso telefónico» is correct; cli.mobile_help.mobile's variant is a pre-existing es-only edge. Rendered proof: product resolver chain with {id} substituted (rendered.txt). Not verified: native-speaker review, no terminal/desktop frame.",
+      "evidence": "i18n/audits/evidence/es/mobile.setup/r1/record.json",
+      "round": "r1",
+      "keys_audited": 3
+    }
+  ]
+}

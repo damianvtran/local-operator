@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "audit_id": "r1",
+  "locale": "es",
+  "namespace": "mobile.setup",
+  "source_sha256": "f38364c1895f79f93c5565d5d5f3047065cb68ebb0b8954e429c2ea9ad6800b4",
+  "target_sha256": "7c278ff03e2bb4e2a2cd04c7b005cf4c35fc7114055b141a5681b11f19adedb1",
+  "verdict": "passed",
+  "auditor": {
+    "agent": "independent translation auditor (lopdev team, `task` subagent), session e7b6613db529; did not translate or edit any value it judged",
+    "model": "deepseek/deepseek-flash — harness-disclosed cross-vendor fallback. The session was pinned to anthropic/claude-opus-5-5 and descended on provider quota (anthropic/claude-opus-5-5 → openai/gpt-6.1-sol → deepseek/deepseek-flash) before any string was read or judged. Recorded as the fallback, not the pinned id; no native-speaker pass is claimed."
+  },
+  "hashes": {
+    "record.json": "7772ed05545369cd867cc382da6240c9bc6900e91395b52b27eb3e5b515cc42d",
+    "rendered.txt": "73a437eac1e95d58c1c5508bcb408434fc42ff479a5ce55a0494ca511ee11ca8",
+    "report.md": "0573d5426bb4eca30c4eacaaf5419e5fc4f513d1de2882664c6101bfa9230447",
+    "translator-receipt.md": "52992727010eaedfa1ace9e7726a33342a83a5ff3aaaccdf733ff7edcca55c25"
+  }
+}
