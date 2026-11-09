@@ -30,8 +30,12 @@ from local_operator.i18n.text import tr
 from local_operator.mobile import install as mobile_install
 from local_operator.network.credentials.offers import mask_label
 from local_operator.owned_tasks import join_owned
-from local_operator.providers.auth_store import AuthStore, credential_identity
-from local_operator.tunnels import config, install, report
+from local_operator.providers.auth_store import (
+    AuthStore,
+    AuthStoreError,
+    credential_identity,
+)
+from local_operator.tunnels import api, config, install, report
 from local_operator.tunnels.api import (
     RadientTunnels,
     credential_id,
@@ -228,6 +232,33 @@ def local_credential_choices() -> list[dict[str, Any]]:
     ]
 
 
+def _read_only_successor(value: dict[str, Any], pin: object) -> int | None:
+    """``pin``'s provable same-account successor, resolved WITHOUT writing (#3520).
+
+    :func:`api.usable_credential_id` answers the same question for the fresh
+    plan, but through the WRITABLE store, whose constructor creates the auth
+    database, its WAL and its schema. The desktop poll may do none of that
+    (:func:`observe_local`'s contract), so the same proof runs over a
+    ``read_only=True`` handle: every step of it is a store read, and an absent
+    database reads as an empty store. A store that cannot answer answers
+    ``None`` — the poll then keeps the honest plan it already had rather than
+    failing the whole affordance over a question it can live without.
+
+    ``owner_account`` is the cached record's ``owner_account_id``: for a pin
+    whose row is GONE it is the only same-account evidence left, and for a dead
+    row it must agree with the row's own account or the proof declines.
+    """
+    if not isinstance(pin, int) or isinstance(pin, bool):
+        return None
+    record = value.get("record")
+    cached_owner = record.get("owner_account_id") if isinstance(record, dict) else None
+    owner = cached_owner if isinstance(cached_owner, str) and cached_owner.strip() else None
+    try:
+        return api.same_account_successor(pin, owner_account=owner, read_only=True)
+    except (AuthStoreError, OSError, ValueError):
+        return None
+
+
 async def observe_local(selected: int | None = None) -> dict[str, Any]:
     """Poll-on-open facts without upstream reads, refreshes or store writes.
 
@@ -239,15 +270,25 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
     value = config.load() if (config.directory() / "config.json").exists() else {}
     pending = _pending_intent(configured=bool(value))
     pin = value.get("credential_id") if value else pending.get("credential_id")
+    # A dead or gone pin with a provable same-account successor is reported as
+    # the plan's own credential HERE too (issue #3520), through the read-only
+    # store: this is the surface the desktop polls, and it must never tick
+    # between `owner_missing` (this poll) and `repoint` (the fresh plan).
+    successor = _read_only_successor(value, pin)
+    effective = successor if successor is not None else pin
     choices = local_credential_choices()
     fields: dict[str, Any] = {
         "configured": bool(value),
         "credential_choices": choices,
-        "credential_id": selected if selected is not None else pin,
+        "credential_id": selected if selected is not None else effective,
     }
-    if pin is not None and selected is not None and selected != pin:
+    # The guard is about which row would carry the tunnel, so it compares
+    # against the RESOLVED id: the desktop's run posts the id this plan named,
+    # which for a dead pin is the successor, and rejecting it as an account
+    # switch would refuse the repair the plan just offered.
+    if pin is not None and selected is not None and selected != effective:
         return _plan("owner_choice", _t(ms.owner_mismatch()), **fields)
-    requested = selected if selected is not None else pin
+    requested = selected if selected is not None else effective
     matches = [r for r in choices if requested is None or r["id"] == requested]
     if len(matches) != 1:
         return _plan(
@@ -261,7 +302,19 @@ async def observe_local(selected: int | None = None) -> dict[str, Any]:
         )
     fields.update(credential_id=matches[0]["id"], identity_label=matches[0]["identity_label"])
     if value.get("stopped"):
+        # `install._repoint_pin` declines a stopped tunnel on purpose, so the
+        # plan must not offer an action the repair would refuse: the connector's
+        # own start-time heal moves the pin when the operator resumes, and the
+        # identity line still names the live successor.
         return _plan("stopped", _t(ms.stopped()), **fields)
+    if value and successor is not None:
+        return _plan(
+            "repoint",
+            _t(ms.repoint()),
+            ready=True,
+            previous_credential_id=pin,
+            **fields,
+        )
     if value:
         # A poll must remain loopback-only even with malformed local config;
         # do not interpolate an unchecked authority/userinfo string into a URL.
@@ -279,12 +332,29 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
         value = config.load()
     pending = _pending_intent(configured=bool(value))
     pin = value.get("credential_id") if value else pending.get("credential_id")
-    if pin is not None and usable_credential_id(pin) is None:
+    # Resolve the pin through the SAME-ACCOUNT proof, with the cached record's
+    # owner as evidence (issue #3520). Without ``owner_account`` a pin whose row
+    # is gone answers `owner_missing` even when the very same account has a live
+    # newer row on this device — and the only remedy left is a terminal command
+    # a desktop operator cannot run. A dead (grant-refused) row carries its own
+    # account id, a gone one keeps only what the record remembered, so both are
+    # needed: the row wins and the record must agree when it has one.
+    record = value.get("record")
+    cached_owner = record.get("owner_account_id") if isinstance(record, dict) else None
+    owner = cached_owner if isinstance(cached_owner, str) and cached_owner.strip() else None
+    usable = usable_credential_id(pin, owner_account=owner) if pin is not None else None
+    if pin is not None and usable is None:
         return _plan("owner_missing", _t(ms.owner_missing()))
-    if pin is not None and selected is not None and selected != pin:
+    # `usable` is the successor when the pin is dead or gone, else the pin
+    # itself; it is therefore the credential this plan is ABOUT, and the
+    # account-switch guard compares against it. The desktop's run posts the id
+    # the plan named, so comparing against the dead pin would answer
+    # `owner_choice` to the repair the plan just offered.
+    effective = usable if usable is not None else pin
+    if pin is not None and selected is not None and selected != effective:
         return _plan("owner_choice", _t(ms.owner_mismatch()))
     try:
-        selected = credential_id(selected if selected is not None else pin)
+        selected = credential_id(selected if selected is not None else effective)
     except ValueError:
         with closing(AuthStore()) as store:
             choices = [
@@ -303,7 +373,25 @@ async def observe(selected: int | None = None) -> dict[str, Any]:
         "identity_label": _identity_label(selected),
     }
     if value.get("stopped"):
+        # A stopped tunnel is one the operator is not using: `install._repoint_pin`
+        # declines it on purpose and the connector's own start-time heal moves the
+        # pin when it is resumed, so offering a re-point here would promise an
+        # action the repair refuses. The successor still names the identity line,
+        # because that is the row a resumed connector will use.
         return _plan("stopped", _t(ms.stopped()), **fields)
+    if value and usable is not None and usable != pin:
+        # A provable successor, an existing configuration and a tunnel in use:
+        # the re-point is a READY step, so the desktop renders its primary
+        # control and `_apply` performs it. Nothing else is claimed here — the
+        # quote, the cloud record and activation state are all still unread, and
+        # the ordinary flow re-observes after the pin moves.
+        return _plan(
+            "repoint",
+            _t(ms.repoint()),
+            ready=True,
+            previous_credential_id=pin,
+            **fields,
+        )
     if value:
         login = await report.login_verdict(value)
         if login.get("state") != "ok":
@@ -439,6 +527,51 @@ async def _apply(
             progress(message)
 
     try:
+        if plan.get("step") == "repoint":
+            # THE ORDER IS THE FIX (issue #3520). Every stage below reads the pin
+            # out of `config.json` (install starts the connector with it, and
+            # `tunnel configure` WRITES that file from scratch), so the pin has
+            # to move BEFORE any of them runs. The move itself is the shared
+            # file-side heal, not a hand-rolled write and not a bare
+            # `tunnel configure`: `_repoint_pin` proves the successor under
+            # compare-and-swap and keeps every other key — `cloudflared_path`
+            # and `mobile_password` among them, which a bare configure drops
+            # (#3519), silently breaking a cloud-active tunnel that needs no
+            # re-configuration at all.
+            stage = "configuration"
+            phase(_t(ms.configuring()))
+            moved = await asyncio.to_thread(
+                install._repoint_pin,
+                fresh_id=None,
+                trigger=install.HEAL_TRIGGER_SETUP_REPOINT,
+            )
+            if moved is None:
+                # The proof can vanish between the plan and this run: the
+                # successor row was deleted (a logout), a second same-account
+                # row appeared, or a concurrent configure moved the pin. Never
+                # claim success and never carry on against the dead pin — report
+                # the state that is true NOW, which is also what a retry will
+                # plan from.
+                fresh = await observe(selected)
+                if fresh.get("step") == "repoint":
+                    fresh = {**fresh, "step": "failed", "ready": False, "remedy": _t(ms.failed())}
+                return {**fresh, "receipts": receipts, "receipt_steps": receipt_steps}
+            receipt(_t(ms.repointed(id=str(moved[1]))))
+            selected = moved[1]
+            plan = await observe(selected)
+            billing = "not_activated" if plan.get("activation_required") else "already_active"
+            reservation = "existing" if plan["configured"] else "not_requested"
+            if plan["verified"] or not plan["ready"]:
+                # Re-pointed, and nothing else to advance: return the ordinary
+                # outcome for the moved pin (the receipt above stays, because a
+                # completed re-point is not rolled back).
+                return {
+                    **plan,
+                    "receipts": receipts,
+                    "receipt_steps": receipt_steps,
+                    "billing_outcome": billing,
+                    "reservation_outcome": reservation,
+                }
         if plan.get("activation_required"):
             stage = "billing"
             billing = "unconfirmed"
@@ -571,6 +704,7 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         "login": ms.title_login,
         "owner_choice": ms.title_owner_choice,
         "owner_missing": ms.title_owner_missing,
+        "repoint": ms.title_repoint,
         "quote": ms.title_quote,
         "quote_changed": ms.title_quote_changed,
         "cloudflared": ms.title_cloudflared,
@@ -659,6 +793,11 @@ def text(plan: dict[str, Any], *, surface: str = "cli", include_receipts: bool =
         remedy = remedy.replace("lop login radient", "/login radient")
         remedy = remedy.replace("lop tunnel start", "/mobile start")
     lines.append(remedy)
+    if plan["step"] == "repoint":
+        # The remedy says what the state IS; the command is the one that performs
+        # it. Surface-aware (`/mobile enable` for the TUI) and appended AFTER the
+        # token rewrites above, which do not know this plan's copy.
+        lines.append(_apply_command(plan, surface))
     if plan.get("activation_required") and plan["step"] in {"quote", "quote_changed"}:
         lines.append(_apply_command(plan, surface))
     if plan.get("credential_choices"):
