@@ -899,6 +899,16 @@ def _assert_publishable(rows: list[str]) -> None:
     assert published == rows
 
 
+def _long_pem_block() -> str:
+    """A 22-row PRIVATE KEY block, long enough to straddle a cut."""
+    line = "M7qA9zKd3PxW8sVn" * 4
+    return (
+        "-----BEGIN " + "PRIV"
+        "ATE KEY-----\n" + "\n".join([line] * 20) + "\n-----END " + "PRIV"
+        "ATE KEY-----\n"
+    )
+
+
 def _hunk_counts_match(rows: list[str]) -> bool:
     """Every ``@@`` header's counts equal the rows that follow it."""
     import re
@@ -999,10 +1009,137 @@ class TestDiffDetailsTruncatesIntoARedactableShape:
         details = builtin._diff_details("rewrite.txt", before, after)
         rows = details["diff"]
         assert _hunk_counts_match(rows)
-        # difflib renders all removals first: the kept prefix is 197 '-' rows,
-        # and the header says the new side is empty at line 0.
-        assert rows[2] == f"@@ -1,{builtin._DIFF_DETAILS_CAP_LINES - 3} +0,0 @@"
+        # Review R1-1: difflib renders all removals before all additions, so a
+        # prefix cut stored 197 red rows and no green. The cut now shares the
+        # 197-row budget: 99 '-' then 98 '+', each a contiguous prefix of its
+        # side, under a header with the observed counts.
+        assert rows[2] == "@@ -1,99 +1,98 @@"
+        body = rows[3:]
+        assert body == [f"-old {i}" for i in range(99)] + [f"+new {i}" for i in range(98)]
+        # 600 content rows, 197 kept; the header is framing, not a line.
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == 600 - 197
         _assert_publishable(rows)
+
+    def test_replace_split_after_context_and_uneven_sides(self) -> None:
+        """Context before the block stays; a short side donates its leftovers."""
+        head = "".join(f"keep {i}\n" for i in range(5))
+        before = head + "".join(f"old {i}\n" for i in range(40)) + "end\n"
+        after = head + "".join(f"new {i}\n" for i in range(400)) + "end\n"
+        details = builtin._diff_details("uneven.txt", before, after)
+        rows = details["diff"]
+        # 197 rows = 2 context + all 40 '-' + 155 '+' (the leftover budget).
+        assert rows[2] == "@@ -4,42 +4,157 @@"
+        assert rows[3:5] == [" keep 3", " keep 4"]
+        assert sum(r.startswith("-") for r in rows[3:]) == 40, "every removal kept"
+        assert rows[-1] == "+new 154"
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+
+    def test_replace_split_never_splits_an_added_private_key(self) -> None:
+        """The split's '+' prefix stops before a block it cannot keep whole."""
+        pem = _long_pem_block()
+        before = "".join(f"old {i}\n" for i in range(300))
+        after = (
+            "".join(f"new {i}\n" for i in range(90))
+            + pem
+            + "".join(f"tail {i}\n" for i in range(200))
+        )
+        rows = builtin._diff_details("pem.txt", before, after)["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in rows)
+        added = [row for row in rows[3:] if row.startswith("+")]
+        assert added == [f"+new {i}" for i in range(90)], "cut moved before the block"
+        assert any(row.startswith("-") for row in rows[3:])
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+
+    def test_deleting_a_private_key_across_the_cut_never_splits_it(self) -> None:
+        """Review R1-4: the old-side span rule, pinned with a deleted block."""
+        pem = _long_pem_block()
+        # A pure deletion: the block's rows straddle the 197-row cut.
+        before = (
+            "".join(f"x{i}\n" for i in range(185)) + pem + "".join(f"y{i}\n" for i in range(50))
+        )
+        rows = builtin._diff_details("pem.txt", before, "")["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in rows)
+        assert rows[-1] == "-x184"
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+        # Inside a replace split the old side is cut the same way: the '-'
+        # prefix stops before the block, the '+' side still shows.
+        replaced = builtin._diff_details(
+            "pem.txt",
+            "".join(f"x{i}\n" for i in range(80)) + pem + "".join(f"y{i}\n" for i in range(200)),
+            "".join(f"new {i}\n" for i in range(300)),
+        )["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in replaced)
+        assert [r for r in replaced[3:] if r.startswith("-")] == [f"-x{i}" for i in range(80)]
+        assert any(row.startswith("+") for row in replaced[3:])
+        assert _hunk_counts_match(replaced)
+        _assert_publishable(replaced)
+
+    def test_truncated_count_excludes_hunk_headers(self) -> None:
+        """Review R1-3 / QA Q1: the count is file lines, not ``@@`` rows."""
+        before_lines = [f"row {i}" for i in range(2000)]
+        after_lines = list(before_lines)
+        for index in range(0, 2000, 10):
+            after_lines[index] = f"changed {index}"
+        details = builtin._diff_details(
+            "many.txt", "\n".join(before_lines) + "\n", "\n".join(after_lines) + "\n"
+        )
+        full = ["--- ", "+++ "] + builtin._render_groups(
+            before_lines,
+            after_lines,
+            __import__("difflib")
+            .SequenceMatcher(None, before_lines, after_lines)
+            .get_grouped_opcodes(n=builtin._DIFF_CONTEXT_LINES),
+        )
+
+        def lines(rows: list[str]) -> int:
+            return sum(1 for row in rows[2:] if not row.startswith("@@"))
+
+        omitted = lines(full) - lines(details["diff"])
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == omitted
+        omitted_headers = sum(r.startswith("@@") for r in full) - sum(
+            r.startswith("@@") for r in details["diff"]
+        )
+        assert omitted_headers > 1, "the case must omit several hunks"
+
+    def test_single_long_row_up_to_the_seam_budget_is_stored(self) -> None:
+        """Review R1-2: a 110 KB one-line file stored no diff under a flat 96 KiB.
+
+        The seam accepts the 4-row shape (128 KiB per diff); the producer's
+        budget is now 120 KiB, so the row is stored and publishes unchanged.
+        """
+        content = '{"k":"' + "v" * 110_000 + '"}\n'
+        details = builtin._diff_details("min.json", "", content)
+        assert builtin.DIFF_TRUNCATED_ROWS_KEY not in details
+        assert details["diff"][3] == "+" + content.rstrip("\n")
+        _assert_publishable(details["diff"])
+
+    def test_byte_budget_boundary_matches_the_seam(self) -> None:
+        """At the cap the seam publishes, even a mask-growing redactor; past it
+        the row is omitted, never shortened. Pins the margin's arithmetic."""
+        from local_operator.harness.loop import (
+            _DIFF_DETAIL_BYTES,
+            _DIFF_DETAIL_WITHHELD,
+            _redact_diff_detail,
+        )
+
+        cap = builtin._DIFF_DETAILS_CAP_BYTES
+        assert cap <= _DIFF_DETAIL_BYTES - 8 * 1024, "keep the per-diff margin"
+        framing = len("--- ") + len("+++ ") + len("@@ -0,0 +1 @@") + len("+")
+        at_cap = "z" * (cap - framing)
+        details = builtin._diff_details("edge.txt", "", at_cap + "\n")
+        rows = details["diff"]
+        assert sum(len(r.encode()) for r in rows) == cap
+        _assert_publishable(rows)
+        # A redactor that GROWS each masked view (a short value -> "[redacted]")
+        # still fits the seam's output budget at the cap.
+        grown = _redact_diff_detail(rows, lambda text: text + "[redacted]")
+        assert _DIFF_DETAIL_WITHHELD not in grown
+        over = builtin._diff_details("edge.txt", "", at_cap + "z\n")
+        assert "diff" not in over
+        assert over[builtin.DIFF_TRUNCATED_ROWS_KEY] == 1
 
 
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:

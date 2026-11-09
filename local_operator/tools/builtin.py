@@ -11210,17 +11210,30 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
 #: ledger, not the screen.
 _DIFF_DETAILS_CAP_LINES = 200
 
-#: The stored diff's byte budget, beside the row cap. The publication seam
-#: (``harness.loop._redact_diff_detail``) withholds any diff over 128 KiB, and its
-#: redactor-call budget is 3x that across per-row AND per-hunk joined views (each
-#: row is judged alone and again inside its side's joined hunk), so a payload
-#: near 128 KiB can still exhaust it. 96 KiB stays under both with headroom for
-#: the joins' newlines; 200 rows of ordinary source lines are far below it, so it
-#: only bites on long-line content (minified JSON, data dumps).
-_DIFF_DETAILS_CAP_BYTES = 96 * 1024
+#: The stored diff's byte budget, beside the row cap, derived from the
+#: publication seam's own arithmetic (``harness.loop._redact_diff_detail``, whose
+#: ``_DIFF_DETAIL_BYTES`` is 128 KiB):
+#:
+#: * the stored rows' UTF-8 bytes, summed across EVERY row, must be <= 128 KiB;
+#: * the redactor INPUT budget is 3 x 128 KiB, spent once per row and once per
+#:   side's newline-joined hunk view. A joined side costs at most its rows' own
+#:   bytes (the dropped one-byte tag pays for the joining newline), and only a
+#:   context row is on both sides, so total input <= 3 x stored bytes;
+#: * the redactor OUTPUT budget is the same 3 x 128 KiB, and a mask longer than
+#:   the value it replaces (``[redacted]`` over a short known value) GROWS it.
+#:
+#: 120 KiB therefore keeps 8 KiB under the per-diff bound and, at the 3x input
+#: worst case, 24 KiB of output headroom for mask growth. A flat 96 KiB (round
+#: 1) double-counted the joins and dropped single-row payloads the seam accepts
+#: (review R1-2: a 110 KB one-line minified file stored no diff at all). 200 rows
+#: of ordinary source sit far below either number; this only bites on long-line
+#: content (minified JSON, data dumps).
+_DIFF_DETAILS_CAP_BYTES = 120 * 1024
 
-#: ``details`` key: rendered diff body rows the stored ``diff`` omits because of
-#: the caps above. Absent when the diff is complete. ``added``/``removed`` stay
+#: ``details`` key: diff CONTENT rows (`` ``/``+``/``-`` -- file lines, never
+#: ``@@`` hunk headers) the stored ``diff`` omits because of the caps above.
+#: Headers are excluded because the UI words this as "N more lines not
+#: recorded" (review R1-3 / QA Q1). Absent when the diff is complete. ``added``/``removed`` stay
 #: whole-file facts, so a renderer can say "N more lines not recorded" without
 #: implying the change itself was smaller. Shared contract with the desktop UI.
 DIFF_TRUNCATED_ROWS_KEY = "diff_truncated_rows"
@@ -11337,8 +11350,8 @@ def _truncate_diff_rows(
     """Bound ``diff`` to the stored caps while keeping it a VALID unified diff.
 
     Returns ``(rows, omitted)``: ``rows`` is the diff to store (``None`` when not
-    even one change row fits safely) and ``omitted`` the rendered body rows left
-    out (0 when nothing was cut).
+    even one change row fits safely) and ``omitted`` the content rows (file
+    lines, not ``@@`` headers) left out (0 when nothing was cut).
 
     Why hunk-aware, not a slice: the publication seam
     (``harness.loop._redact_diff_detail``) only publishes a diff whose every hunk
@@ -11370,7 +11383,6 @@ def _truncate_diff_rows(
     is returned unchanged: that marker is a deliberate fail-closed refusal, not
     a size cut, and the seam is meant to withhold it.
     """
-    body_rows = len(diff) - 2
     if len(diff) <= _DIFF_DETAILS_CAP_LINES and _utf8_size(diff) <= _DIFF_DETAILS_CAP_BYTES:
         return diff, 0
     parsed = _parse_diff_hunks(diff)
@@ -11403,10 +11415,17 @@ def _truncate_diff_rows(
         # follow, or the reader would see a later change with a gap they cannot
         # locate.
         break
-    kept_rows = len(out) - 2
-    if kept_rows == 0:
-        return None, body_rows
-    return out, body_rows - kept_rows
+    # Count file lines, not rendered rows: an omitted hunk's ``@@`` header is
+    # framing, and the renderer says "N more LINES" (review R1-3 / QA Q1).
+    total_lines = _content_rows(diff[2:])
+    if len(out) == 2:
+        return None, total_lines
+    return out, total_lines - _content_rows(out[2:])
+
+
+def _content_rows(rows: Sequence[str]) -> int:
+    """Rows that show a file line (context, ``-`` or ``+``), not ``@@`` framing."""
+    return sum(1 for row in rows if not row.startswith("@@"))
 
 
 def _partial_hunk(
@@ -11437,8 +11456,11 @@ def _partial_hunk(
         if tag in (" ", "+"):
             new_line += 1
     spans: list[tuple[int, int]] = []
-    for positions, blocks in ((old_at, old_blocks), (new_at, new_blocks)):
-        for block_start, block_end in blocks:
+    # Row indexes of each complete block's members, per side: the split cut
+    # below keeps a non-prefix row set, so it needs the members, not a span.
+    blocks: list[list[int]] = []
+    for positions, side_blocks in ((old_at, old_blocks), (new_at, new_blocks)):
+        for block_start, block_end in side_blocks:
             members = [
                 index
                 for index, line in enumerate(positions)
@@ -11446,6 +11468,7 @@ def _partial_hunk(
             ]
             if members:
                 spans.append((members[0], members[-1]))
+                blocks.append(members)
 
     def header_for(count: int) -> str:
         kept = rows[:count]
@@ -11460,6 +11483,13 @@ def _partial_hunk(
     # current count is conservative; re-measured each step regardless.
     while count and _utf8_size([header_for(count), *rows[:count]]) > room_bytes:
         count -= 1
+    split = _split_replace_cut(rows, count, room_rows, room_bytes, blocks)
+    if split is not None:
+        old_count = sum(1 for row in split if row[:1] in (" ", "-"))
+        new_count = sum(1 for row in split if row[:1] in (" ", "+"))
+        if not any(row[:1] in ("+", "-") for row in split):
+            return []
+        return [_format_hunk_header(old_start, old_count, new_start, new_count), *split]
     moved = True
     while moved:
         moved = False
@@ -11473,6 +11503,112 @@ def _partial_hunk(
     if not any(row[:1] in ("+", "-") for row in rows[:count]):
         return []
     return [header_for(count), *rows[:count]]
+
+
+def _split_replace_cut(
+    rows: Sequence[str],
+    count: int,
+    room_rows: int,
+    room_bytes: int,
+    blocks: Sequence[Sequence[int]],
+) -> list[str] | None:
+    """Kept rows when the cut lands inside a ``-``-then-``+`` replace block.
+
+    difflib renders a replaced run as ALL its ``-`` rows, then ALL its ``+``
+    rows, so a plain prefix cut through a large rewrite stores only red rows and
+    the reader never sees what the file became (review R1-1; the operator asked
+    for green AND red). Instead the remaining budget is shared by alternating
+    one ``-`` and one ``+`` row, half/half with any leftover going to the longer
+    side, and each side stops at its first row that no longer fits.
+
+    The result is still a truthful hunk: the kept old lines are the context
+    prefix plus a CONTIGUOUS prefix of the ``-`` rows, and the kept new lines
+    the context prefix plus a contiguous prefix of the ``+`` rows, so a header
+    with the same starts and the observed counts describes exactly what is
+    shown. A complete PRIVATE KEY block is kept whole or not at all on each
+    side (the seam's span rule needs BEGIN..END in one view); a block whose
+    first kept member is in the context prefix cannot be cut inside the block,
+    so that case returns ``None`` and the caller's prefix cut moves before it.
+
+    Returns ``None`` when the cut is not inside such a block (the prefix cut
+    applies), else the kept rows without a header.
+    """
+    if not 0 < count < len(rows) or rows[count][:1] not in ("+", "-"):
+        return None
+    start = count
+    while start and rows[start - 1][:1] in ("+", "-"):
+        start -= 1
+    end = count
+    while end < len(rows) and rows[end][:1] in ("+", "-"):
+        end += 1
+    plus_at = start
+    while plus_at < end and rows[plus_at][:1] == "-":
+        plus_at += 1
+    if (
+        start == count  # nothing of the block fit: no cut inside it
+        or plus_at in (start, end)  # pure insert or pure delete: prefix is exact
+        or any(row[:1] != "+" for row in rows[plus_at:end])
+    ):
+        return None
+    prefix = rows[:start]
+    # Header digits only shrink as counts shrink, so the uncut block's header is
+    # a safe upper bound for the one written later.
+    used_bytes = _utf8_size(prefix) + len("@@ -999999999,999999999 +999999999,999999999 @@")
+    used_rows = len(prefix)
+    kept_minus = kept_plus = 0
+    minus_total, plus_total = plus_at - start, end - plus_at
+    open_minus = open_plus = True
+    while used_rows < room_rows and (open_minus or open_plus):
+        for side in ("-", "+"):
+            if used_rows >= room_rows:
+                break
+            if side == "-":
+                if not open_minus or kept_minus >= minus_total:
+                    open_minus = False
+                    continue
+                size = _utf8_size([rows[start + kept_minus]])
+                if used_bytes + size > room_bytes:
+                    open_minus = False  # contiguity: never skip a row to fit a later one
+                    continue
+                kept_minus += 1
+            else:
+                if not open_plus or kept_plus >= plus_total:
+                    open_plus = False
+                    continue
+                size = _utf8_size([rows[plus_at + kept_plus]])
+                if used_bytes + size > room_bytes:
+                    open_plus = False
+                    continue
+                kept_plus += 1
+            used_bytes += size
+            used_rows += 1
+    moved = True
+    while moved:
+        moved = False
+        kept = (
+            set(range(start))
+            | set(range(start, start + kept_minus))
+            | set(range(plus_at, plus_at + kept_plus))
+        )
+        for members in blocks:
+            inside = [index for index in members if index in kept]
+            if not inside or len(inside) == len(members):
+                continue
+            first = inside[0]
+            if first < start:
+                return None
+            # Drop the block's kept rows on its side (members of one block are
+            # all on one side, so this only trims that side's prefix).
+            if first < plus_at:
+                kept_minus = first - start
+            else:
+                kept_plus = first - plus_at
+            moved = True
+    return [
+        *prefix,
+        *rows[start : start + kept_minus],
+        *rows[plus_at : plus_at + kept_plus],
+    ]
 
 
 def _keep_pem_blocks_whole(
