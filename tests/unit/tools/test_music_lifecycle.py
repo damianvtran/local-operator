@@ -106,3 +106,81 @@ def test_reduced_hosts_do_not_advertise_unusable_music_tools(monkeypatch):
     assert music_tool.build_generate_music_tool(ToolContext()) is None
     assert music_tool.build_modify_music_tool(ToolContext()) is None
     assert music_tool.build_music_status_tool(ToolContext()) is None
+
+
+@pytest.mark.asyncio
+async def test_real_journal_recovery_uses_newest_snapshot(tmp_path, monkeypatch):
+    from local_operator.session.transcript import Transcript, read_custom_entries
+
+    transcript = Transcript(tmp_path / "synthetic-session")
+    for state, watcher in [("registered", "old"), ("running", "current"), ("completed", "final")]:
+        await transcript.append_custom(
+            music_jobs.CUSTOM_TYPE,
+            {
+                "job": "paid-job",
+                "state": state,
+                "watcher": watcher,
+                "cancellation_requested": state != "registered",
+                "artifacts": [state],
+            },
+        )
+    entries = read_custom_entries(transcript.directory, music_jobs.CUSTOM_TYPE)
+    assert [entry.payload["details"]["state"] for entry in entries] == [
+        "completed",
+        "running",
+        "registered",
+    ]
+    latest = music_jobs.read_records(transcript.directory)["paid-job"]
+    assert latest["watcher"] == "final"
+    assert latest["cancellation_requested"] is True
+    assert latest["artifacts"] == ["completed"]
+    monkeypatch.setattr(
+        music_jobs, "register_observer", lambda *args: pytest.fail("terminal job re-armed")
+    )
+    await music_jobs.recover(ToolContext(session_dir=str(transcript.directory)))
+
+
+@pytest.mark.asyncio
+async def test_all_failed_receipt_stays_terminal_on_real_journal_recovery(tmp_path, monkeypatch):
+    from local_operator.session.transcript import Transcript, read_custom_entries
+
+    transcript = Transcript(tmp_path / "synthetic-session")
+
+    async def journal(record):
+        await transcript.append_custom(music_jobs.CUSTOM_TYPE, record)
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        async def request(self, *args, **kwargs):
+            pytest.fail("settled failure must not resubmit or poll")
+
+        async def close(self):
+            pass
+
+    context = ToolContext(session_dir=str(transcript.directory), journal_music_job=journal)
+    record = {
+        "job": "failed-job",
+        "state": "running",
+        "tracks": [
+            {
+                "id": "paid-child",
+                "settled": True,
+                "status": "FAILED",
+                "error_type": "provider_failed",
+            }
+        ],
+    }
+    with pytest.raises(RuntimeError, match="music_no_playable_results"):
+        await music_jobs.runner(context, record, client_factory=Client)(
+            "watcher", None, lambda report: None
+        )
+    # Assert the actual newest append independently of the reader regression.
+    newest = read_custom_entries(transcript.directory, music_jobs.CUSTOM_TYPE)[0]
+    assert newest.payload["details"]["state"] == "failed"
+    assert music_jobs.read_records(transcript.directory)["failed-job"]["state"] == "failed"
+    monkeypatch.setattr(
+        music_jobs, "register_observer", lambda *args: pytest.fail("settled failure re-armed")
+    )
+    await music_jobs.recover(context)

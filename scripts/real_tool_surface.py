@@ -117,6 +117,8 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         action_class="proactive",
         subagent_launcher=_stub_for(_types.SubagentLauncher),
         jobs=_stub_for(_types.JobManagerProtocol),
+        # Music submission requires durable identity before any paid request.
+        journal_music_job=lambda record: None,
         browser=_stub_for(_types.BrowserSurfaceProtocol, surface_id="stub"),
         subagent_comms=_UntypedStub(),
         agent_registry=_UntypedStub(),
@@ -326,6 +328,19 @@ def _forced_artifact_data_backend() -> Iterator[None]:
         artifact_data_tool.anthropic_grant_stored = saved
 
 
+@contextmanager
+def _forced_music_backend() -> Iterator[None]:
+    """Measure the credential-gated music tools without reading real secrets."""
+    from local_operator.tools import music_tool
+
+    saved = music_tool.radient_available
+    music_tool.radient_available = lambda *args, **kwargs: True
+    try:
+        yield
+    finally:
+        music_tool.radient_available = saved
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
     """The default tool set as a fully-capable session would advertise it.
 
@@ -345,6 +360,7 @@ def build_real_tools(cwd: str) -> list[AgentTool]:
         _forced_video_backend(),
         _forced_audio_backend(),
         _forced_artifact_data_backend(),
+        _forced_music_backend(),
     ):
         return registry.create_tools(build_real_tool_context(cwd))
 

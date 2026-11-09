@@ -36,7 +36,9 @@ def read_records(directory: Any) -> dict[str, dict[str, Any]]:
         payload = getattr(entry, "payload", None)
         details = payload.get("details") if isinstance(payload, dict) else None
         if isinstance(details, dict) and isinstance(details.get("job"), str):
-            result[details["job"]] = dict(details)
+            # Transcript readers yield newest first: retain the first valid
+            # snapshot so recovery never resurrects a settled paid request.
+            result.setdefault(details["job"], dict(details))
     return result
 
 
@@ -261,11 +263,10 @@ def runner(context: Any, initial: dict[str, Any], *, client_factory: Any = Music
                 await journal(context, record)
             raise
         except Exception as exc:
-            record["state"] = (
-                "interrupted"
-                if record.get("tracks") or not record.get("state") == "failed"
-                else "failed"
-            )
+            # Raising the no-playable-results error reports a settled failure;
+            # it must not turn that terminal receipt into resumable observation.
+            if record.get("state") not in TERMINAL:
+                record["state"] = "interrupted"
             record["error"] = getattr(exc, "code", None) or type(exc).__name__
             await journal(context, record)
             raise

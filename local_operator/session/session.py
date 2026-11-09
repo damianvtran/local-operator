@@ -6612,6 +6612,7 @@ class Session:
         # first turn — see ``_boot_video_jobs``.
         await self._boot_video_jobs()
         from local_operator.music.jobs import recover as recover_music_jobs
+
         await recover_music_jobs(self._build_tool_context())
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands

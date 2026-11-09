@@ -43,8 +43,7 @@ def build_generate_music_tool(context: ToolContext) -> AgentTool | None:
         name="generate_music",
         label=render_resolved(mk.label()),
         description=(
-            "Compose instrumental music or exact lyrics asynchronously; retains all tracks. "
-            "Requires commercially enabled Radient music. Docs: tool://generate_music."
+            "Compose instrumental/exact-lyrics music asynchronously. Guide: guide://music-generation."
         ),
         parameters=GenerateMusicParams.model_json_schema(),
         approval_tier="write",
@@ -61,8 +60,7 @@ def build_modify_music_tool(context: ToolContext) -> AgentTool | None:
         name="modify_music",
         label=render_resolved(mk.label()),
         description=(
-            "Compose around owned music ranges using keep/generate sections; asynchronous. "
-            "Unsupported upload/stem operations are refused, never emulated."
+            "Compose around owned keep/generate sections. Guide: guide://music-generation."
         ),
         parameters=GenerateMusicParams.model_json_schema(),
         approval_tier="write",
@@ -79,8 +77,7 @@ def build_music_status_tool(context: ToolContext) -> AgentTool | None:
         name="music_status",
         label=render_resolved(mk.label()),
         description=(
-            "Read music job status/capabilities or explicitly request cancellation. "
-            "Running compositions may still complete and charge; reconciliation retains outputs."
+            "Read music status/models or request cancel; started work can finish and charge."
         ),
         parameters=MusicStatusParams.model_json_schema(),
         approval_tier="read",
