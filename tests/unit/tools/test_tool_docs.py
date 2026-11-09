@@ -641,7 +641,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``edit new_text={"move":"scope"}``, which makes the verb discoverable
     # without a guide lookup. Re-measured deliberately via this test's print.
     "memory": 109,
-    "monitor": 353,
+    "monitor": 367,
     "network": 894,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
     # doc — the argumentless call's description plus the "when NOT to call

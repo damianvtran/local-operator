@@ -60,10 +60,22 @@ async def _submit(pilot, app: OperatorApp, text: str) -> None:
 
 
 async def _await_prompt(pilot, session: FakeSession) -> None:
+    """Pause until the ``@`` submit worker has recorded a prompt on the session.
+
+    The ceiling is a deadlock guard. It RAISES instead of falling out of the
+    loop: a silent return made a starved runner - or a submit that never
+    reached the session - arrive as the caller's prompt-content assertion, and
+    a caller that checks nothing else would pass after the timeout.
+    """
     for _ in range(200):
         await pilot.pause()
         if session.prompts:
             return
+    raise AssertionError(
+        "the @ submit worker never recorded a prompt within 200 pilot pauses "
+        "(session.prompts is still empty); this is a TIMEOUT waiting for the "
+        "submit path, not the prompt-content assertion failing"
+    )
 
 
 # --- Exit 1: the main prompt -------------------------------------------------

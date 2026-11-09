@@ -1273,6 +1273,19 @@ _NOTICE_MARKERS: tuple[tuple[str, str], ...] = (
     (" was DISABLED ", "disabled"),
     (" could not run its check ", "stalled"),
     (" is running again ", "restored"),
+    # The two ``bash``-result kinds (a call that cannot do its job, and one that
+    # has never returned anything). Registered here as well as in
+    # ``delivery.NOTICE_KINDS`` because this table is how a RECEIPT knows the
+    # text is a notice at all: without an entry the card rendered a failing
+    # watch with a DELTA's chrome — "N changes" envelope polish, no warning ink
+    # — which is exactly the shape that made the incident's silence look like a
+    # healthy quiet watch.
+    (" watch is failing: ", "failing"),
+    # The OTHER fault class: the check itself keeps failing (a timeout, a tool
+    # error), which charges the ordinary strike ladder and says so before the
+    # disable it announces. Registered here for the same reason as the two above.
+    (" the check keeps failing: ", "striking"),
+    (" the call returns nothing: ", "empty"),
 )
 
 

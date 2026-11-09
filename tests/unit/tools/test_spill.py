@@ -783,7 +783,8 @@ async def test_output_that_fits_gets_no_handle_and_no_footer(
     result = await _call(tools, "bash", {"command": "echo hello"}, context)
     assert "hello" in result.text
     assert spill.SPILL_SCHEME not in result.text
-    assert result.details is None
+    # Ordinary bash calls expose structured exit metadata for monitors, not a spill.
+    assert not (result.details or {}).get("spill")
     assert spill.get_store().entry_count() == 0
 
 

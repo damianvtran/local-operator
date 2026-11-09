@@ -123,10 +123,24 @@ async def _submit(app: OperatorApp, pilot, text: str) -> None:
 
 
 async def _await_prompt(pilot, session: FakeSession) -> None:
+    """Pause until the submit worker has handed the skill's prompt to the session.
+
+    The ceiling is a deadlock guard, not a timing assumption: a mounted app
+    settles this in a handful of pauses. It RAISES rather than falling out of
+    the loop, because a wait that returns None on timeout makes a starved
+    runner (or a submit path that never reached the session) surface as the
+    caller's `len(session.prompts)` assertion - which names the count, not the
+    timeout that caused it - and lets any caller that checks nothing else pass.
+    """
     for _ in range(200):
         await pilot.pause()
         if session.prompts:
             return
+    raise AssertionError(
+        "the submit worker never handed a prompt to the session within 200 "
+        "pilot pauses (session.prompts is still empty); this is a TIMEOUT "
+        "waiting for the submit path, not the prompt-content assertion failing"
+    )
 
 
 @pytest.mark.asyncio

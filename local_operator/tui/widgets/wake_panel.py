@@ -373,6 +373,12 @@ class WakePanel(Container):
             "created_at": getattr(spec, "created_at", 0) or 0,
             "every_ms": getattr(spec, "every_ms", None),
             "until_at": getattr(spec, "until_at", None),
+            # The COUNTERS file spells the episode count ``failing_ticks``; the
+            # published INDEX row spells it ``failing_checks``. ``health_hint``
+            # reads the published names (it is shared with the CLI and the desktop
+            # route), so a live-counter row has to offer the same key or the band
+            # would lose the below-threshold sentence the other surfaces show.
+            "failing_checks": counters.get("failing_checks", counters.get("failing_ticks", 0)),
         }
         disabled = bool(counters.get("disabled"))
         until = counters.get("until_at", getattr(spec, "until_at", None))
@@ -386,7 +392,20 @@ class WakePanel(Container):
         unavailable = isinstance(since, int) and not isinstance(since, bool) and since > 0
         failures = counters.get("consecutive_failures")
         fail_count = failures if isinstance(failures, int) and not isinstance(failures, bool) else 0
-        failing = fail_count > 0
+        failing_episode = bool(counters.get("failing"))
+        if failing_episode:
+            episode_checks = counters.get("failing_ticks")
+            if isinstance(episode_checks, int) and not isinstance(episode_checks, bool):
+                fail_count = episode_checks
+        # The band calls a row failing for EITHER reason: an open failing episode
+        # (which charges no strike, so the count is 0) or ordinary failed checks
+        # climbing the strike ladder.
+        failing = failing_episode or fail_count > 0
+        # THE ORDINARY LADDER'S OWN COUNT, kept apart from ``fail_count`` above,
+        # which an open failing episode repoints at its ticks: the strike hint's
+        # threshold is about consecutive FAILURES of the check, not ticks of a
+        # call that ran and reported it could not do the job.
+        strikes = failures if isinstance(failures, int) and not isinstance(failures, bool) else 0
         # EXPIRY IS THE ONE DEADLINE EVERY HOST MAY JUDGE: ``until_at`` is a spec
         # instant the owner never moves, and past it the owner never checks the
         # watch again, so "it is not running" is true however old the published
@@ -479,17 +498,48 @@ class WakePanel(Container):
             health = ""
             ink, rank = "warning", 4
         elif failing:
-            health = f"{fail_count} failed"
-            # WARNING INK IS AN ALARM, AND A PUBLISHED COUNT CANNOT RAISE ONE.
-            # ``consecutive_failures`` is reset by the first quiet success and
-            # deliberately publishes nothing (one index rewrite per tick is the
-            # cost §10.2 refuses), so a viewer's copy is the count at the last
-            # change event — a stale alarm after a recovery, and blind to the
-            # strikes it never saw. The row still states the count; it stops
-            # claiming the watch is failing right now. The ladder's TERMINAL
-            # state (disable) does publish, as an event, and keeps its ink.
-            ink = "muted" if not live_clocks else "warning"
-            rank = 6
+            # THE HINT REACHES THE BAND WHEN IT SAYS THE WATCH IS FAILING (review
+            # round 1, MINOR-4). This branch used to hardcode "N failed" and return
+            # before the hint chain, so the one surface that has the row in hand
+            # never showed "WATCH IS FAILING: <why>" that ``store.py`` promises it
+            # renders — while the CLI and the desktop rows did. A failing call also
+            # charges no strike now (BLOCKER-1), so the branch keys off the EPISODE
+            # flag, and its count is the episode's own.
+            if hint and hint.startswith("WATCH IS FAILING"):
+                health = _band_health_clause(hint)
+                ink, rank = "warning", 2
+            elif hint and strikes >= monitor_store.STRIKING_HINT_CHECKS and live_clocks:
+                # STRIKING REACHES THE BAND (QA round 2, Q-R2-4) — the other fault
+                # class, where the check cannot complete at all and the ladder WILL
+                # disable it. This branch used to end at "N failed", so the glance
+                # surface dropped both the reason and the countdown, which made the
+                # strike notice the only warning anything gave before a silent
+                # death. It renders ``store.striking_clause`` rather than the
+                # sentence's first clause: measured at 100 columns the sentence is
+                # too long for a row that must also name the monitor, and the
+                # countdown was what truncation took.
+                # LIVE COUNTS ONLY: a published copy's ``consecutive_failures`` is
+                # the count at the last change event, and a recovery republishes
+                # nothing, so "keeps failing" read from it would be an alarm about
+                # a watch that may already be well (the stale-count rule in the
+                # fallback below).
+                health = monitor_store.striking_clause(row)
+                ink, rank = "warning", 2
+            elif failing_episode and hint:
+                # A single failed check, below the reporting threshold: the
+                # sentence explains the silence, and it is not an alarm.
+                health = _band_health_clause(hint)
+                ink, rank = "muted", 6
+            else:
+                health = f"{fail_count} failed"
+                # WARNING INK IS AN ALARM, AND A PUBLISHED COUNT CANNOT RAISE ONE.
+                # ``consecutive_failures`` is reset by the first quiet success and
+                # deliberately publishes nothing, so a viewer's copy is the count
+                # at the last change event — a stale alarm after a recovery. The
+                # row still states the count; it stops claiming the watch is
+                # failing right now.
+                ink = "muted" if not live_clocks else "warning"
+                rank = 6
         elif hint and "suppressed as non-material" in hint:
             # A SUPPRESSED change is not a quiet watch (design review round 1,
             # D1): the gate filed real deltas as bookkeeping, so the row is

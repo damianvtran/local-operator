@@ -49,6 +49,7 @@ from local_operator.network.credentials.messages import render_broker_error
 from local_operator.network.credentials.placement import (
     PlacementDocument,
     merge_from_peer,
+    owner_rows_digest,
     placement_for_store,
     placement_path,
     placement_state_path,
@@ -1934,6 +1935,15 @@ class MeshCredentialClient:
         about the rows IT owns; a document that claims a third device's credential
         is dropped there rather than here.
 
+        WHAT ONE PULL COSTS, now that the cadence calls it as well. Each ask was a
+        request plus a full document — a 1.3-1.4 KB answer at six members whose content
+        was usually "nothing changed" — and an idle six-member mesh spent 53.6 % of its
+        bytes on that (measured here, and the reason this method is now conditional).
+        With ``wire.CREDENTIAL_PLACEMENT_DIGEST_V1`` negotiated the ask carries
+        ``if_digest`` and an unchanged document is answered with a ~150 B status: the
+        pull still happens at the same cadence, and every answer that could carry a
+        change is unchanged. A peer without the string is asked exactly as before.
+
         ``newly_borrowable`` IS THE REPLY'S SECOND ANSWER (audit Q5 #5): the keys
         this device could NOT reach before the pull and can reach after it. It is
         the only honest signal for "a share just arrived that a running session
@@ -1971,6 +1981,9 @@ class MeshCredentialClient:
         skipped: list[dict[str, str]] = []
         #: Members that answered the pull with a refusal (see the loop below).
         refused_by: list[str] = []
+        #: Members that CONFIRMED the digest this device asked about: their rows are
+        #: already here, so nothing was merged and nothing was written.
+        unchanged_by: list[str] = []
         #: ``{device: code}`` for the same members: the refusal's machine-readable
         #: token, ``""`` for a codeless one (the authoriser's, or a transient such as
         #: a full slow-op pool). The cadence parks only on a policy code.
@@ -1989,6 +2002,8 @@ class MeshCredentialClient:
             # the wire that a previous-release peer has no handler for. The link
             # is established first only to READ its capabilities; a failed dial
             # falls through to ``_ask_owner_directly``'s own offline handling.
+            link: Any = None
+            caps: tuple[str, ...] = ()
             ensure = getattr(self._relay, "_ensure_link_with_reason", None)
             if ensure is not None:
                 try:
@@ -1999,18 +2014,47 @@ class MeshCredentialClient:
                 if link is not None and wire.CREDENTIAL_PLACEMENT_PUSH_V1 not in caps:
                     skipped.append({"device": device, "reason": "peer_lacks_placement_push"})
                     continue
-            reply = self._ask_owner_directly(
-                device,
-                {
-                    "op": PEER_BROKER_OP,
-                    "kind": "placement",
-                    "want": "pull",
-                    "network_id": self.network_id,
-                    "from_device": self.self_device,
-                    "from_device_name": self._self_label(),
-                },
-            )
+            frame: dict[str, Any] = {
+                "op": PEER_BROKER_OP,
+                "kind": "placement",
+                "want": "pull",
+                "network_id": self.network_id,
+                "from_device": self.self_device,
+                "from_device_name": self._self_label(),
+            }
+            # CONDITIONAL ONLY ON A PEER THAT ADVERTISED THE DIGEST, the same rule the
+            # member-table pull follows: a build that predates
+            # ``wire.CREDENTIAL_PLACEMENT_DIGEST_V1`` is never sent a field it has no
+            # handler for, and keeps answering (and being asked) exactly as before.
+            # What is hashed is the rows THIS device already holds from THAT peer —
+            # the set its merge would act on — never the whole local document, which
+            # also holds rows this peer owns nothing of and would never match.
+            conditional = ""
+            if link is not None and wire.CREDENTIAL_PLACEMENT_DIGEST_V1 in caps:
+                # ``None`` is the commonest idle state — no placement file yet, so
+                # nothing is held from this peer at all — and it hashes to the empty
+                # set exactly as an empty document does.
+                conditional = owner_rows_digest(self.placement, device)
+                frame["if_digest"] = conditional
+            reply = self._ask_owner_directly(device, frame)
             detail = (reply or {}).get("detail")
+            if conditional and isinstance(detail, dict) and detail.get("unchanged") is True:
+                # CONFIRMED UNCHANGED: the peer's own rows hash to the digest this
+                # device asked about, which is precisely the state a merge leaves
+                # untouched — nothing is written, and no document crossed. The echo
+                # MUST be the digest we sent: an ``unchanged`` about some other
+                # document is not believed, and is named in ``skipped`` rather than
+                # silently counted as a converge.
+                if detail.get("digest") == conditional:
+                    from local_operator.network.credentials import sync as sync_mod
+
+                    # An owner that answers at all is no longer parked: the same rule
+                    # the document arm below applies.
+                    sync_mod.forget_owner_refusal(self._relay, device)
+                    unchanged_by.append(device)
+                    continue
+                skipped.append({"device": device, "reason": "bad_placement_digest"})
+                continue
             document = detail.get("document") if isinstance(detail, dict) else None
             if (
                 isinstance(reply, dict)
@@ -2031,6 +2075,23 @@ class MeshCredentialClient:
                 if not code and isinstance(detail, dict):
                     code = detail.get("code")
                 refused_codes[device] = str(code or "")
+                continue
+            if conditional and isinstance(reply, dict) and not isinstance(document, dict):
+                # NAMED, NOT SILENT (QA round 1, Q1). An ANSWER to a CONDITIONAL ask that
+                # is neither a document nor a refusal — ``unchanged: "yes"``, a ``detail``
+                # that is not a mapping, an empty one — already failed safe (nothing is
+                # merged, the file is untouched), but it left the operator with
+                # ``owners: 1, changed: []`` and no reason at all, while a wrong digest in
+                # a well-shaped frame IS named. Same treatment: one honest sentence in
+                # ``skipped``. Only conditional asks record it, so a peer that predates
+                # the capability keeps the reporting it always had.
+                #
+                # AN ANSWER, NOT A SILENCE: ``reply is None`` is the no-answer case (a
+                # dead link, a timeout — ``_ask_owner_directly``'s own contract), which
+                # has never been a ``skipped`` row and must not become one under a reason
+                # word that says "status". Nothing answered, so there is nothing to
+                # describe; the cadence's offline handling owns that case.
+                skipped.append({"device": device, "reason": "bad_placement_status"})
                 continue
             if isinstance(document, dict):
                 # AN ANSWERED PULL ENDS A PARKED REFUSAL (review round 1, n1), whoever
@@ -2092,6 +2153,8 @@ class MeshCredentialClient:
         }
         if skipped:
             result["skipped"] = skipped
+        if unchanged_by:
+            result["unchanged"] = unchanged_by
         if refused_by:
             result["refused_by"] = refused_by
             result["refused_codes"] = refused_codes

@@ -133,6 +133,19 @@ CREDENTIAL_PLACEMENT_PUSH_V1 = "credential-placement-push-v1"
 #: row as ``not_owner``, so reusing it would send a frame every shipped peer rejects.
 #: A peer without this string is simply not pushed to; its own pull still converges.
 CREDENTIAL_SHARE_PUSH_V1 = "credential-share-push-v1"
+#: The CONDITIONAL placement pull (``credentials/client.pull_placement``). A member's
+#: cadence asks every peer for its placement document on the tick, and an idle mesh
+#: therefore paid a full document (a 1.3-1.4 KB ack at six members) for an answer whose
+#: content was "nothing changed" — 57 % of an idle six-member link's bytes when measured
+#: on a loopback mesh, which is why this exists. With this string negotiated the asker
+#: sends ``if_digest`` (the digest of the rows it already holds FROM that peer) and the
+#: owner answers ``{unchanged: true, digest}`` (~150 B) when its own rows hash to the
+#: same value; every other case still gets the full document. A DISTINCT feature from
+#: both push strings above, on the rule that no shipped capability string is reused for
+#: a new frame kind: a build that advertises ``credential-placement-push-v1`` but
+#: predates this one answers the pull exactly as it always did and is never sent a field
+#: it does not know.
+CREDENTIAL_PLACEMENT_DIGEST_V1 = "credential-placement-digest-v1"
 LINK_CAPABILITIES: tuple[str, ...] = (
     "mesh-net-v1",
     "session-mobility-v1",
@@ -151,6 +164,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     CREDENTIAL_CATALOGUE_METADATA_V1,
     CREDENTIAL_PLACEMENT_PUSH_V1,
     CREDENTIAL_SHARE_PUSH_V1,
+    CREDENTIAL_PLACEMENT_DIGEST_V1,
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",

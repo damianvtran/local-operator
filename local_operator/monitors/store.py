@@ -255,6 +255,47 @@ def _clock(ms: int) -> str:
     return time.strftime("%H:%M", time.localtime(ms / 1000))
 
 
+#: How many consecutive empty results a published row must carry before the
+#: listing says so. Deliberately its own number rather than an import of the
+#: scheduler's ``EMPTY_CHECKS_BEFORE_NOTICE``: this module is stdlib-only (see
+#: ``health_hint``) and the reader's threshold is a rendering decision, not the
+#: scheduler's policy — three is the same number because both answer "has it
+#: EVER returned anything", not because one owns the other.
+EMPTY_HINT_CHECKS = 3
+
+#: How many consecutive ORDINARY failures the row calls "keeps failing". Mirrors
+#: ``EMPTY_HINT_CHECKS``'s reasoning: this module is stdlib-only and the
+#: reader's threshold is a rendering decision, not the scheduler's policy — two
+#: is the same number because both answer "is this one blip or a run", not
+#: because one owns the other.
+STRIKING_HINT_CHECKS = 2
+
+#: How much of a row's ``last_error`` the shared hint repeats (review round 1,
+#: MINOR-2). The counter file keeps 500 chars — the NOTICE quotes the failure in
+#: full, where the reader asked for it — but a list row is one line, and an
+#: unclipped detail measured a single 639-char row next to a neighbour that clips
+#: to 80.
+HINT_DETAIL_CHARS = 120
+
+
+def _clip_detail(text: str) -> str:
+    """One line of whitespace-collapsed detail, bounded for a list row."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= HINT_DETAIL_CHARS:
+        return flat
+    return flat[: HINT_DETAIL_CHARS - 1].rstrip() + "…"
+
+
+def _count(value: Any) -> int:
+    """A row field as a count, or 0 — ``bool`` is not an int here.
+
+    The counters round-trip through JSON and the index is written by more than one
+    composer, so a defensive read keeps a malformed row out of the sentences below
+    instead of raising inside a listing.
+    """
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def health_hint(row: Mapping[str, Any], now_ms: int | None) -> str | None:
     """One line explaining a monitor that is not doing what the reader assumes.
 
@@ -306,6 +347,67 @@ def health_hint(row: Mapping[str, Any], now_ms: int | None) -> str | None:
         return f"tool unavailable since {_clock(since)} — retrying"
     if not isinstance(row, Mapping):
         return None
+    # A FAILING WATCH MUST NOT READ AS A QUIET ONE (D8). Before this, a row whose
+    # call had been erroring every tick fell through to "nothing has changed
+    # (confirm the call observes what you expect)" — the sentence the incident's
+    # reporter was staring at for 90 minutes while the call could not run at all.
+    # The news leads, like the suppression clause below, because the TUI band
+    # renders the first em-dash clause.
+    # THE NEWS LEADS, and both failing sentences keep it in the first clause so a
+    # band that renders clause one still shows it (D8).
+    if row.get("failing") is True:
+        detail = _clip_detail(str(row.get("last_error") or "")) or "its check returned an error"
+        checks_n = _count(row.get("failing_checks"))
+        threshold_n = _count(row.get("failing_notice_checks"))
+        if checks_n and threshold_n and checks_n < threshold_n:
+            # ONE failed check of a watch that has worked is a blip the notice policy
+            # deliberately does not page on (``FAILING_CHECKS_AFTER_BASELINE``), so the
+            # row must not claim the watch IS failing — it says the count and the
+            # threshold instead (QA round 1, Q3). The threshold rides the row rather
+            # than being re-derived here: this module is stdlib-only and the scheduler
+            # owns the policy, including the no-baseline exception.
+            plural = "" if checks_n == 1 else "s"
+            return (
+                f"{checks_n} failed check{plural} so far, below the {threshold_n}-check "
+                f"threshold — {detail}"
+            )
+        # THE WHY LEADS, BESIDE THE NEWS: the TUI band renders a hint's first
+        # em-dash clause, so a sentence that put the count first and the reason
+        # after the dash showed "WATCH IS FAILING: 3 checks in a row" and dropped
+        # the only part that tells the reader what to fix (review round 1, MINOR-4).
+        tail = (
+            f"{checks_n} checks in a row, nothing is being reported"
+            if checks_n > 1
+            else "nothing is being reported"
+        )
+        return f"WATCH IS FAILING: {detail} — {tail}"
+    # The STRIKE class, which is a DIFFERENT fault from the two above (round-2
+    # manager decision): the CHECK keeps failing — a timeout, a tool error — so
+    # this watch really is heading for the disable and the row says so. One
+    # failure is below the reporting threshold, and the row states that instead of
+    # claiming the watch is failing (QA round 1, Q3).
+    strikes = _count(row.get("consecutive_failures"))
+    if strikes:
+        detail = _clip_detail(str(row.get("last_error") or "")) or "its check returned an error"
+        if strikes < STRIKING_HINT_CHECKS:
+            plural = "" if strikes == 1 else "s"
+            return (
+                f"{strikes} failed check{plural} so far, below the "
+                f"{STRIKING_HINT_CHECKS}-check threshold — {detail}"
+            )
+        limit = _count(row.get("failure_limit"))
+        at = f" at {limit}" if limit else ""
+        return f"the check keeps failing: {detail} — repeated failures disable it{at}"
+    # The "returns nothing" episode is the other silent-but-not-quiet state. It says
+    # only what is known (review round 1, MAJOR-2): the call HAS returned nothing so
+    # far. It must NOT claim the watch can never report anything — an empty result is
+    # a real digest, so the first non-empty one IS compared and delivered.
+    empty_checks = row.get("empty_checks")
+    if _count(empty_checks) >= EMPTY_HINT_CHECKS:
+        return (
+            f"the call has returned nothing for {_count(empty_checks)} checks so far — "
+            "the watch is armed and reports the first result it gets"
+        )
     threshold = _stale_threshold_ms(row)
     checks = row.get("checks")
     checks_n = int(checks) if isinstance(checks, int) and not isinstance(checks, bool) else 0
@@ -401,6 +503,29 @@ def is_idle(row: Mapping[str, Any], now_ms: int | None) -> bool:
     if not isinstance(due, int) or isinstance(due, bool):
         return False
     return now_ms - due > _stale_threshold_ms(row)
+
+
+def striking_clause(row: Mapping[str, Any]) -> str:
+    """The band's compressed form of the strike sentence (QA round 2, Q-R2-4).
+
+    ``health_hint`` writes the sentence every surface with room prints, and the
+    band shows only its FIRST clause — which for the strike class is the error,
+    so the countdown that makes the row an alarm (this watch stops at the fifth
+    failure) fell outside it and the glance surface showed neither reason nor
+    countdown, just "2 failed". Moving the countdown into that clause is not a
+    fix on its own: measured at 100 columns the full sentence runs to 106
+    characters on a row that also has to name the monitor, and truncation then
+    ate the countdown AND the name. So the band gets a shorter spelling — state,
+    then the deadline, then the reason, which is the order width can afford to
+    lose — while the CLI, the desktop rows and the lifecycle notice keep the
+    full sentence. ``disabled_clause`` is the same arrangement for a disabled
+    row: the store owns the words, the band owns the budget.
+    """
+    detail = _clip_detail(str(row.get("last_error") or "")) or "its check returned an error"
+    limit = _count(row.get("failure_limit"))
+    if limit:
+        return f"keeps failing, stops at {limit}: {detail}"
+    return f"keeps failing: {detail}"
 
 
 def disabled_clause(row: Mapping[str, Any]) -> str:

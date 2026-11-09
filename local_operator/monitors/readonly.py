@@ -673,6 +673,23 @@ _GH_FLAGS = _flags(
     long="comments log",
     valued_long="json jq template repo",
 )
+#: ``gh``'s SHORT ``--repo`` spelling: ``gh pr view 1 -R owner/name``. gh-only
+#: because it is ``gh``'s own flag name — glab's short-flag space is per verb
+#: (see ``_GLAB_MR_FLAGS``), so glab keeps the long form only.
+#:
+#: WHY it is allowed at all: ``--repo`` was already permitted (it is a
+#: repo-NAMING flag on a read-only verb, not a write surface), so a model that
+#: wrote the short spelling was refused for a spelling it could not work around
+#: — ``gh pr checks`` has no ``-R`` alternative and ``gh api`` is refused as
+#: method-flippable. It names WHERE to read, never what to write: the verb gate
+#: above still refuses every mutating subcommand, and this table is consulted
+#: only for the read-only verbs in ``_GH_SUBCOMMANDS``.
+_GH_FLAGS_SHORT_REPO = _flags(
+    "qt",
+    valued_short="qtR",
+    long="comments log",
+    valued_long="json jq template repo",
+)
 
 #: ``find`` is expression-allow-listed (no flag/operand grammar a deny-list can
 #: bound): read tests and the boolean operators in, everything else out.
@@ -1002,6 +1019,78 @@ def _git_reason(tokens: list[str]) -> str | None:
     return _flags_reason(f"git {sub}", rest, table)
 
 
+#: The characters a ``[HOST/]OWNER/REPO`` name is made of (gh's own grammar,
+#: mirrored conservatively). Used by ``_repo_value_reason`` below.
+_REPO_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@-")
+
+#: The URL prefixes ``gh`` accepts on ``-R``/``--repo``, stripped before the name
+#: grammar applies (measured against gh, see ``_repo_name_parts``).
+_REPO_URL_SCHEMES = ("https://", "http://")
+
+
+def _repo_name_parts(value: str) -> list[str] | None:
+    """The ``[HOST/]OWNER/REPO`` parts of a repo-naming flag value, or ``None``.
+
+    ``gh`` ITSELF takes a URL where these flags are used — measured: ``gh pr list
+    -R https://github.com/cli/cli``, the same with a ``.git`` suffix and with a
+    trailing slash all answer with real data — so the scan accepts one too (QA
+    round 3, Q-R3-2). The guide always said it did; the validator was the only
+    thing refusing it. The VALUE is not rewritten: gh parses the URL, and
+    re-spelling the operator's command is not this gate's job. A URL has to name
+    its host (three parts, because there is nothing else a two-part URL tail
+    could be), while a bare name may be ``OWNER/REPO``.
+    """
+    url = False
+    for scheme in _REPO_URL_SCHEMES:
+        if value.startswith(scheme):
+            value = value[len(scheme) :]
+            url = True
+            break
+    if url:
+        value = value.rstrip("/")
+        if value.endswith(".git"):
+            value = value[: -len(".git")]
+    parts = value.split("/")
+    if not 2 <= len(parts) <= 3 or (url and len(parts) != 3):
+        return None
+    if any(part in (".", "..") for part in parts):
+        return None
+    if not all(part and all(char in _REPO_NAME_CHARS for char in part) for part in parts):
+        return None
+    return parts
+
+
+def _repo_value_reason(tokens: list[str]) -> str | None:
+    """Refuse a repo-naming flag whose VALUE is not a repo name (QA round 1, Q4).
+
+    ``-R``/``--repo`` name WHERE to read, and the flag machinery deliberately
+    treats a consumed value as data — right for a path or a query, wrong for this
+    one: these values are always ``[HOST/]OWNER/REPO``, or a URL gh reduces to
+    one. A value that is neither (empty, flag-shaped, or carrying punctuation
+    noise) turned into one gh error per tick on a watch nobody could see was
+    mis-armed, so it gets a sentence at arm time instead. No shell ever sees these
+    bytes — the verb gate is the security boundary and is untouched — this is
+    legibility.
+    """
+    for index, token in enumerate(tokens):
+        value: str | None = None
+        if token in ("-R", "--repo"):
+            value = tokens[index + 1] if index + 1 < len(tokens) else ""
+        elif token.startswith("-R") and len(token) > 2:
+            value = token[2:]
+        elif token.startswith("--repo="):
+            value = token[len("--repo=") :]
+        if value is None:
+            continue
+        if _repo_name_parts(value) is None:
+            return (
+                f'"-R/--repo" wants a repo name ([HOST/]OWNER/REPO) or a repo URL, '
+                f"not {value!r} — the value is passed to gh as data, so gh would "
+                "refuse it on every check."
+            )
+    return None
+
+
 def _gh_reason(cmd: str, tokens: list[str]) -> str | None:
     if len(tokens) < 2:
         return f'{cmd} needs a subcommand like "pr view".'
@@ -1019,7 +1108,16 @@ def _gh_reason(cmd: str, tokens: list[str]) -> str | None:
             f'"{family} {verb}" is not read-only for {cmd} (that family allows: '
             f"{' '.join(sorted(verbs))})."
         )
-    return _flags_reason(f"{cmd} {family} {verb}", tokens[2:], _GH_FLAGS)
+    flags = _flags_reason(
+        f"{cmd} {family} {verb}",
+        tokens[2:],
+        _GH_FLAGS_SHORT_REPO if cmd == "gh" else _GH_FLAGS,
+    )
+    if flags is not None:
+        return flags
+    # Scoped to gh: glab's ``--repo`` takes the same shape, but its flag space is
+    # per verb and re-testing it is not this change's surface.
+    return _repo_value_reason(tokens[2:]) if cmd == "gh" else None
 
 
 # Unlike GitHub's --json field selector, glab's --output is a FORMAT enum,

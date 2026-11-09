@@ -15,9 +15,10 @@ THE SHAPE OF THE COMMAND
 
     Categories are opt-in and never defaulted: ``--repo PATH`` (repeatable; the
     operator names every repository whose linked worktrees may be considered),
-    ``--go-build-cache`` and ``--scratchpads``. Naming none is a usage error,
-    because a command that guessed a scope under disk pressure is the incident
-    this command exists to prevent.
+    ``--go-build-cache``, ``--scratchpads`` and ``--build-output PATH``
+    (repeatable; the operator names project directories whose build output may be
+    considered). Naming none is a usage error, because a command that guessed a
+    scope under disk pressure is the incident this command exists to prevent.
 
 EXIT CODES, in precedence order: 2 usage error, a refused category (a dry run
 that REFUSES a requested category also exits 2, so a script cannot mistake a
@@ -89,6 +90,17 @@ def add_parser(
         ),
     )
     reclaim.add_argument(
+        "--build-output",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "a PROJECT directory whose build output may be reclaimed (repeatable; never "
+            "defaulted or discovered; a shape directory is only considered when the "
+            "directory holds the manifest that proves the project owns it)"
+        ),
+    )
+    reclaim.add_argument(
         "--min-idle-minutes",
         type=int,
         default=None,
@@ -122,7 +134,7 @@ def main(args: argparse.Namespace) -> int:
     if action != "reclaim":
         print(  # i18n: ignore operator CLI output, English-only; disk-reclaim section
             "usage: lop disk reclaim [--repo PATH]... [--go-build-cache] [--scratchpads] "
-            "[--apply [--yes]] [--json]",
+            "[--build-output PATH]... [--apply [--yes]] [--json]",
             file=sys.stderr,
         )
         return 2
@@ -154,6 +166,7 @@ def _print_preview(plan_: Any, *, mode: str) -> None:
         (dp.CATEGORY_WORKTREE, "Linked worktrees"),
         (dp.CATEGORY_GO_CACHE, "Go build cache"),
         (dp.CATEGORY_SCRATCHPAD, "Session scratchpad content"),
+        (dp.CATEGORY_BUILD_OUTPUT, "Project build output"),
     )
     for category, title in titles:
         rows = [i for i in plan_.items if i.category == category]
@@ -162,8 +175,8 @@ def _print_preview(plan_: Any, *, mode: str) -> None:
         out(f"== {title} ==")
         for refusal in plan_.refusals:
             if refusal["category"] == category:
-                where = f" ({refusal['repo']})" if refusal.get("repo") else ""
-                out(f"  REFUSED{where}: {refusal['reason']}")
+                where = refusal.get("repo") or refusal.get("path")
+                out(f"  REFUSED{f' ({where})' if where else ''}: {refusal['reason']}")
         for item in (r for r in rows if r.action == dp.ACTION_RECLAIM):
             size = _fmt_bytes(item.allocated_bytes, item.bytes_truncated)
             out(f"  {verb:<14} {size:>12}  {item.path}")
@@ -212,6 +225,7 @@ def reclaim_command(args: argparse.Namespace) -> int:
     repos = tuple(getattr(args, "repo", None) or ())
     go_cache = bool(getattr(args, "go_build_cache", False))
     scratch = bool(getattr(args, "scratchpads", False))
+    build_output = tuple(getattr(args, "build_output", None) or ())
     apply_mode = bool(getattr(args, "apply", False))
     yes = bool(getattr(args, "yes", False))
     force = bool(getattr(args, "force", False))
@@ -232,10 +246,10 @@ def reclaim_command(args: argparse.Namespace) -> int:
         return refuse("--yes only applies with --apply")
     if force and not scratch:
         return refuse("--force only applies to --scratchpads")
-    if not (repos or go_cache or scratch):
+    if not (repos or go_cache or scratch or build_output):
         return refuse(
             "nothing selected: name at least one of --repo PATH, --go-build-cache, "
-            "--scratchpads (nothing is discovered or defaulted)"
+            "--scratchpads, --build-output PATH (nothing is discovered or defaulted)"
         )
 
     root = config_dir()
@@ -243,6 +257,7 @@ def reclaim_command(args: argparse.Namespace) -> int:
         repos=repos,
         go_build_cache=go_cache,
         scratchpads=scratch,
+        build_output=build_output,
         min_idle_minutes=min_idle,
         force=force,
     )

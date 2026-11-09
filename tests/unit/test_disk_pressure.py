@@ -180,6 +180,235 @@ def _why(item: dp.Item, wt: Path, window_s: float = 2 * 3600, cap: int = 20) -> 
     return "\n".join(lines)
 
 
+# The retry in plan_when_idle exists for ONE observed external writer, and it is
+# not a general "try again". What the fixture leaves running is git's own
+# detached auto-maintenance child: a `git commit` inside a nested repository
+# starts `git maintenance run --auto --quiet --detach` and never waits for it
+# (measured on git 2.55 from the parent's trace2 stream), and that nested repo's
+# `.git` sits INSIDE the tree the worktree category walks. On this host the child
+# wrote nothing within 5 s - a two-commit fixture meets none of its auto
+# thresholds - so the child's IDENTITY is NOT established. What IS established is
+# the shape of the write the failure reported: run 42535944532 dumped exactly ONE
+# fresh path, `<nested>/.git/objects` at 0.0 s, i.e. an entry created inside the
+# nested repository's metadata AFTER `fx.idle` had back-dated the tree by
+# something outside this module. This assertion had already failed this way twice
+# on hosted CI before this branch existed (#3389), and the branch's ~1000 added
+# tests only lengthen the shard that hosts it.
+#
+# So the retry keys on that SHAPE, never on a suspect. It fires only when the
+# plan failed on the TREE WALK (the only branch a late write under the tree can
+# produce, see :data:`_WALK_RECENT_MARKER`), only when at least one path under
+# the tree is actually fresh, and only when EVERY fresh path is git metadata of
+# a NESTED repository. It re-ages the tree between attempts, and a second
+# attempt that still reads `recent` fails exactly as before. A regression that
+# makes the PLANNER write into a worktree writes on every plan and therefore
+# survives the retry; only a one-shot external writer is absorbed.
+
+# The walk branch of the worktree idle guard, as ``disk_pressure.py`` words it.
+# `recent` has two producers and this retry may absorb only ONE of them: the walk,
+# because it is the only branch a late write INSIDE the tree can produce. The
+# other branch (the outer worktree's ``HEAD``/``index``/``logs/HEAD``) is git
+# admin metadata the planner itself touches on every plan, so absorbing it would
+# hide exactly the regression this retry is supposed to let fail. Pinned against
+# the product source by ``test_the_retry_gate_is_keyed_on_the_product_reason``: a
+# reworded reason must redden a test, not silently disable the retry.
+_WALK_RECENT_MARKER = "working tree touched within the idle window"
+
+
+def _nested_git_writes(item: dp.Item, wt: Path, window_s: float = 300.0) -> list[str] | None:
+    """Fresh paths under ``wt`` IF they are all nested-repo git metadata, else None.
+
+    ``None`` means "this is not the external-writer race", which a retry must not
+    absorb. Three ways to land there, and each is evidence this gate does NOT
+    have rather than evidence against the race alone:
+
+    * the plan did not fail on the tree walk (``item.reason`` names the admin-file
+      branch), so nothing under ``wt`` explains it;
+    * nothing under ``wt`` is fresh at all: an empty set would satisfy "every
+      fresh path is nested git metadata" VACUOUSLY and absorb a `recent` with no
+      evidence behind it;
+    * something fresh is not a nested repository's ``.git/...`` entry.
+    """
+    if _WALK_RECENT_MARKER not in item.reason:
+        return None
+    root = Path(os.path.realpath(wt))
+    now = time.time_ns()
+    fresh: list[str] = []
+    for path in [root, *root.rglob("*")]:
+        try:
+            stamp = os.lstat(path).st_mtime_ns
+        except OSError:
+            continue
+        if (now - stamp) / 1e9 > window_s:
+            continue
+        offset = path.relative_to(root).parts
+        # ``(".git",)`` is this worktree's own pointer file: ``idle`` ages it and
+        # the walk skips it. Nesting means a ``.git`` BELOW the root.
+        if len(offset) < 2 or ".git" not in offset:
+            return None
+        fresh.append(str(path))
+    if not fresh:
+        return None
+    return fresh
+
+
+def plan_when_idle(fx: Fx, wt: Path) -> dp.Plan:
+    """``plan_for`` for a fixture worktree that must read as idle.
+
+    Re-ages and re-plans at most ONCE, and only for the nested-repo git-metadata
+    write no fixture can wait out (see the comment above).
+    """
+    plan = plan_for(fx)
+    item = by_path(plan, wt)
+    if item.code != "recent":
+        return plan
+    if _nested_git_writes(item, wt) is None:
+        return plan
+    fx.idle(wt)
+    return plan_for(fx)
+
+
+def _nested_repo_worktree(fx: Fx, name: str) -> tuple[Path, Path]:
+    """A worktree with a gitignored directory holding its own repository.
+
+    The shape the hosted-CI flake walks: the nested repo's ``.git`` sits INSIDE
+    the tree the worktree category scans, so a write into it after ``fx.idle``
+    is a fresh path in the walk and nothing else.
+    """
+    wt = fx.worktree(name)
+    (wt / ".gitignore").write_text("tmp\n")
+    git(wt, "add", ".gitignore")
+    git(wt, "commit", "-qm", "ignore tmp")
+    git(wt, "push", "-q", "origin", name)
+    nested = wt / "tmp" / "scratchrepo"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    (nested / "important.txt").write_text("irreplaceable")
+    git(nested, "add", "-A")
+    git(nested, "commit", "-qm", "never pushed")
+    return wt, nested
+
+
+def test_a_git_admin_write_on_the_outer_worktree_is_not_absorbed(fx: Fx) -> None:
+    """PROBE2: the retry fires on the evidence it claims, never on none.
+
+    A one-shot ``utime`` on the OUTER worktree's admin index is the shape a
+    planner-side regression takes: the report is `recent` on the admin-file
+    branch and NOTHING under the tree is fresh. The round-4 gate returned ``[]``
+    there, and ``[]`` satisfied "every fresh path is nested git metadata"
+    vacuously, so the retry re-aged the tree and turned that regression into a
+    pass. It must stay `recent`.
+    """
+    wt = fx.worktree("admin")
+    fx.idle(wt)
+    admin = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    stamp = time.time()
+    os.utime(admin / "index", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert "git admin files touched" in first.reason, first.reason
+    assert _nested_git_writes(first, wt) is None, "no evidence under the tree: no retry"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "recent", _why(item, wt)
+    assert "git admin files touched" in item.reason, item.reason
+
+
+def test_a_git_admin_report_is_not_absorbed_even_with_nested_metadata_fresh(fx: Fx) -> None:
+    """PROBE2b: the reason gate rejects on its own, not by falling through.
+
+    PROBE2 above is rejected twice over (admin branch AND no fresh path), so on
+    its own it does not prove the reason check does any work. Here the outer
+    admin index is touched AND the nested repo's ``.git/objects`` is fresh, so
+    every fresh path IS nested-repo git metadata, the nesting filter passes —
+    and the report still says ``git admin files touched``, which is the branch
+    no write inside the tree can produce. Only the reason check rejects it.
+    """
+    wt, nested = _nested_repo_worktree(fx, "admin-nested")
+    fx.idle(wt)
+    admin = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+    stamp = time.time()
+    os.utime(admin / "index", (stamp, stamp))
+    os.utime(nested / ".git" / "objects", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert "git admin files touched" in first.reason, first.reason
+    assert _nested_git_writes(first, wt) is None, "the walk branch is not what reported"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "recent", _why(item, wt)
+
+
+def test_a_walk_report_with_no_fresh_path_is_not_absorbed(fx: Fx) -> None:
+    """The vacuity bug: a walk-branch `recent` with NOTHING fresh is no evidence.
+
+    The walk judges against the full idle window (an hour by default) while this
+    gate looks at the last five minutes, so a nested-metadata write older than
+    that leaves `recent` on the walk branch with an EMPTY fresh set — and an
+    empty set satisfies "every fresh path is nested git metadata" vacuously. No
+    fresh path means no evidence, so the tree is not re-aged and the report
+    stands. (``fx.idle`` sets every entry three days old, so the 600 s stamp
+    below is inside the idle window and outside the gate's.)
+    """
+    wt, nested = _nested_repo_worktree(fx, "stale")
+    fx.idle(wt)
+    stamp = time.time() - 600.0
+    os.utime(nested / ".git" / "objects", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert _WALK_RECENT_MARKER in first.reason, first.reason
+    assert _nested_git_writes(first, wt) is None, "no fresh path is no evidence"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "recent", _why(item, wt)
+
+
+def test_a_late_write_in_a_nested_repos_git_metadata_is_still_absorbed(fx: Fx) -> None:
+    """PROBE4: the one flake this retry exists for is still handled.
+
+    Run 42535944532 dumped exactly one fresh path, ``<nested>/.git/objects`` at
+    0.0 s, written after ``fx.idle`` had back-dated the tree by something outside
+    this module. This drives that shape: the plan reads `recent` on the walk
+    branch, the gate finds no evidence against the race, and the re-age lets it
+    pass. Reddening here means the gate got too narrow and the flake is back.
+    """
+    wt, nested = _nested_repo_worktree(fx, "late")
+    fx.idle(wt)
+    stamp = time.time()
+    os.utime(nested / ".git" / "objects", (stamp, stamp))
+
+    first = by_path(plan_for(fx), wt)
+    assert first.code == "recent", _why(first, wt)
+    assert _WALK_RECENT_MARKER in first.reason, first.reason
+    assert _nested_git_writes(first, wt), "the nested-metadata shape must pass the gate"
+
+    item = by_path(plan_when_idle(fx, wt), wt)
+    assert item.code == "ignored-content", _why(item, wt)
+
+
+def test_the_retry_gate_is_keyed_on_the_product_reason(fx: Fx) -> None:
+    """The marker above is pinned to ``disk_pressure.py``, and it is exclusive.
+
+    Keying a gate on a human reason string couples it to product wording: a
+    reworded reason would silently disable the retry, so the marker is asserted
+    against the source. And a plan that did not fail at all must fail the gate,
+    so the retry can never ride a bare marker match into a re-plan.
+    """
+    source = (REPO_ROOT / "local_operator" / "disk_pressure.py").read_text()
+    assert _WALK_RECENT_MARKER in source, (
+        "the tree-walk branch of the worktree idle guard was reworded; re-key "
+        "_nested_git_writes (and the comment above it) to the new wording"
+    )
+    wt = fx.worktree("passing")
+    fx.idle(wt)
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "reclaim", item.reason
+    assert _nested_git_writes(item, wt) is None
+
+
 # -- reclaimable cases -------------------------------------------------------
 
 
@@ -578,12 +807,18 @@ def test_git_refusal_is_the_last_word_and_reported(fx: Fx, monkeypatch: Any) -> 
 
 
 def test_removal_uses_no_force_flag_and_no_direct_deleter() -> None:
-    """Structural: no deleter call and no ``--force`` literal outside docstrings.
+    """Structural: no UNGUARDED deleter, and no ``--force`` literal outside docstrings.
 
     Parsed rather than grepped: the module docstring legitimately SAYS "without
-    --force", and a text scan cannot tell prose from an argv element. No direct
-    deleter call may appear at all — the receipt writer delegates its atomic
-    tmp/replace/unlink to the sanctioned session manifest writer.
+    --force", and a text scan cannot tell prose from an argv element.
+
+    THE DOCUMENTED AMENDMENT: build output is a directory tree that no tool-level
+    remover owns, so ``_remove_tree`` unlinks and rmdirs — inside ONE function,
+    reachable only from ``remove_build_output``, which re-validates every
+    predicate and refuses symlinks and mount points at removal time. That is
+    asserted BY NAME here rather than allowed in general: a deleter anywhere else
+    in the module still fails this test, and ``rmtree``/``removedirs``/
+    ``os.remove`` still fail everywhere.
     """
     import ast
 
@@ -602,14 +837,23 @@ def test_removal_uses_no_force_flag_and_no_direct_deleter() -> None:
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
     ]
     assert not any(text == "--force" or text.startswith("--force") for text in literals)
-    banned = {"rmtree", "remove", "removedirs", "rmdir"}
-    unlinks = 0
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            assert name not in banned, f"direct deleter call: {name}"
-    assert unlinks == 0
+    banned = {"rmtree", "remove", "removedirs"}
+    allowed_owners = {"_remove_tree", "remove_build_output"}
+    offenders: list[str] = []
+    for func in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+        for call in ast.walk(func):
+            if not isinstance(call, ast.Call):
+                continue
+            name = (
+                call.func.attr
+                if isinstance(call.func, ast.Attribute)
+                else getattr(call.func, "id", "")
+            )
+            if name in banned:
+                offenders.append(f"{func.name}: {name}")
+            elif name in {"unlink", "rmdir"} and func.name not in allowed_owners:
+                offenders.append(f"{func.name}: {name}")
+    assert not offenders, f"deleter outside the documented remover: {offenders}"
 
 
 # -- remediation round 1 (review R1-1 .. R1-9) --------------------------------
@@ -646,7 +890,7 @@ def test_ignored_nested_repo_with_unpushed_commit_is_kept(fx: Fx) -> None:
     git(nested, "add", "-A")
     git(nested, "commit", "-qm", "never pushed")
     fx.idle(wt)
-    plan = plan_for(fx)
+    plan = plan_when_idle(fx, wt)
     item = by_path(plan, wt)
     assert item.code == "ignored-content", _why(item, wt)
     dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
@@ -1110,3 +1354,1093 @@ def test_scratchpads_switch_off_is_a_refusal_unless_forced(fx_cfg: Path, capsys:
 
 def test_force_is_rejected_outside_scratchpads(fx: Fx, capsys: Any) -> None:
     assert reclaim_command(_args(str(fx.primary), force=True)) == 2
+
+
+# -- build output — the fourth category --------------------------------------
+#
+# Each case names ONE project directory (never a shape directory) and drives the
+# real planner. The liveness probes are injected (they are the only injectable
+# part) so a case can say "a build is running" without spawning one; the git
+# provenance probes are the REAL ones wherever the case is about provenance.
+# The end-to-end cases use the default probes on purpose: that is the path an
+# operator's `lop disk reclaim --build-output` takes.
+
+
+def _bo_probes(**overrides: Any) -> Any:
+    """Deterministic probes: everything answers "clear" unless a case overrides it."""
+    base: dict[str, Any] = dict(
+        toolchain_running=lambda candidate, project_root: False,
+        handles_open=lambda candidate: False,
+        tracked_files=lambda candidate: False,
+        is_git_ignored=lambda candidate: True,
+        refresh=lambda: None,
+    )
+    base.update(overrides)
+    return dp.BuildProbes(**base)
+
+
+def _project(base: Path, manifests: tuple[str, ...] = ("Cargo.toml",)) -> Path:
+    """A project root holding ``manifests`` (the provenance gate's input)."""
+    root = base / "proj"
+    root.mkdir(parents=True)
+    for manifest in manifests:
+        (root / manifest).write_text("x\n")
+    return root
+
+
+def _shape(root: Path, name: str = "target", *, entries: int = 3) -> Path:
+    shape = root / name
+    (shape / "debug").mkdir(parents=True)
+    for index in range(entries):
+        (shape / "debug" / f"obj{index}.o").write_bytes(b"x" * 2048)
+    return shape
+
+
+def _idle(tree: Path, hours: float = 8.0) -> None:
+    age(tree, time.time() - hours * 3600)
+
+
+def _silent(probe: str) -> Any:
+    """The named probe answering "cannot tell" (``None``), with its real arity."""
+    if probe == "toolchain_running":
+        return lambda candidate, project_root: None
+    return lambda candidate: None
+
+
+def plan_bo(root: Path, **kw: Any) -> tuple[list[Any], list[Any]]:
+    probes = kw.pop("probes", None) or _bo_probes()
+    now = kw.pop("now", None) or time.time()
+    min_idle = kw.pop("min_idle_minutes", dp.DEFAULT_MIN_IDLE_MINUTES)
+    return dp.plan_build_output((str(root),), now=now, min_idle_minutes=min_idle, probes=probes)
+
+
+def test_a_folder_named_build_without_a_manifest_is_never_a_candidate(tmp_path: Path) -> None:
+    """THE non-technical-user safety test: a name is not evidence.
+
+    A chat-only user's ``~/projects/build`` (or ``dist``) is their data. There is
+    no manifest beside it, so it is not a candidate at all — it does not appear as
+    a reclaim row, and it does not appear as a KEEP row either, because a keep
+    would still mean this planner considered deleting it. (``~/Documents`` is
+    refused by NAME, in its own case: see
+    :func:`test_home_and_the_data_directories_are_never_project_roots`. The gate
+    proven here is the manifest one, which holds for every directory.)
+    """
+    holder = tmp_path / "home" / "projects"
+    for name in ("build", "dist"):
+        folder = holder / name
+        folder.mkdir(parents=True)
+        for index in range(5):
+            (folder / f"invoice-{index}.pdf").write_bytes(b"x" * 4096)
+        _idle(folder, hours=800)
+    _idle(holder, hours=800)
+
+    items, refusals = plan_bo(holder)
+
+    assert items == [] and refusals == []
+    assert (holder / "build" / "invoice-0.pdf").exists()
+    assert (holder / "dist" / "invoice-0.pdf").exists()
+
+
+@pytest.mark.parametrize("shape", sorted(dp.BUILD_OUTPUT_SHAPES))
+def test_each_shape_is_a_candidate_only_with_its_manifest(tmp_path: Path, shape: str) -> None:
+    """The table is the gate: every listed manifest opens it, removing it closes it."""
+    for index, manifest in enumerate(dp.BUILD_OUTPUT_SHAPES[shape]):
+        root = _project(tmp_path / f"case{index}", manifests=(manifest,))
+        _shape(root, shape)
+        _idle(root)
+
+        items, _ = plan_bo(root)
+        assert [item.action for item in items] == [dp.ACTION_RECLAIM], (shape, manifest)
+        assert items[0].evidence["manifests"] == [manifest]
+
+        (root / manifest).unlink()
+        items, _ = plan_bo(root)
+        assert items == [], (shape, manifest)
+
+
+def test_node_modules_is_not_a_shape_and_nothing_outside_the_table_is(tmp_path: Path) -> None:
+    root = _project(tmp_path, manifests=("package.json",))
+    _shape(root, "node_modules")
+    _shape(root, "out")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert "node_modules" not in dp.BUILD_OUTPUT_SHAPES
+    assert items == []
+
+
+def test_a_named_shape_directory_is_refused_not_answered_with_nothing(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+
+    items, refusals = plan_bo(shape)
+
+    assert items == []
+    assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT]
+    assert "name the directory that contains it" in refusals[0]["reason"]
+
+
+def test_a_missing_directory_is_a_refusal(fx: Fx, capsys: Any) -> None:
+    missing = fx.root / "nope"
+    assert reclaim_command(_args(build_output=(str(missing),), json=True)) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["refusals"][0]["category"] == "build-output"
+    assert "not a directory" in payload["refusals"][0]["reason"]
+
+
+def test_a_named_root_inside_the_config_dir_is_refused(fx: Fx, capsys: Any) -> None:
+    """The sessions store lives in the config dir; this category may not reach it.
+
+    This is the enforcement the repo's no-session-deletion guard points at: the
+    scratchpads category reclaims what belongs below the config dir, under its
+    own live-claim/lease and retention guards, so `--build-output` refuses the
+    whole path rather than competes with it.
+    """
+    inside = _project(fx.cfg / "sessions" / "abc123")
+    _shape(inside)
+    _idle(inside)
+
+    assert reclaim_command(_args(build_output=(str(inside),), json=True)) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["refusals"][0]["category"] == "build-output"
+    assert "inside the config dir" in payload["refusals"][0]["reason"]
+    assert (inside / "target").exists()
+
+    # ... and the remover refuses it again, for a plan that somehow carries it.
+    items, _ = plan_bo(inside)
+    assert [item.action for item in items] == [dp.ACTION_RECLAIM]
+    detail = dp.remove_build_output(
+        items[0], min_idle_minutes=60, config_root=fx.cfg, probes=_bo_probes()
+    )
+    assert detail and detail.startswith("refusing")
+    assert (inside / "target").exists()
+
+
+def test_a_worktree_whose_own_name_is_a_shape_is_kept(fx: Fx) -> None:
+    """The round-1 repro: ``git worktree add .worktrees/target -b feat/wip``.
+
+    The candidate is a linked-worktree root, so its ``.git`` is a FILE. A
+    directory-only repository guard answers "not a repository" and the worktree's
+    branch and uncommitted work go with it.
+    """
+    holder = fx.root / ".worktrees"
+    holder.mkdir()
+    (holder / "Cargo.toml").write_text("x\n")
+    wip = holder / "target"
+    git(fx.primary, "worktree", "add", "-q", "-b", "feat/wip", str(wip))
+    (wip / "uncommitted.txt").write_text("work in progress\n")
+    _idle(holder)
+
+    items, refusals = plan_bo(holder)
+
+    assert refusals == []
+    assert [item.code for item in items] == ["git-repository"]
+    assert items[0].action == dp.ACTION_KEEP
+    # ... and the guarded remover refuses it again at removal time.
+    assert dp.remove_build_output(items[0], min_idle_minutes=60, probes=_bo_probes())
+    assert git(wip, "rev-parse", "--abbrev-ref", "HEAD") == "feat/wip"
+    assert (wip / "uncommitted.txt").read_text() == "work in progress\n"
+
+
+def test_bare_and_separate_git_dir_layouts_are_kept(tmp_path: Path) -> None:
+    """No ``.git`` entry exists in either layout, so the ENTRY test cannot see them."""
+    bare_root = _project(tmp_path / "bare")
+    subprocess.run(["git", "init", "-q", "--bare", str(bare_root / "target")], check=True)
+    _idle(bare_root)
+
+    separate_root = _project(tmp_path / "separate")
+    subprocess.run(
+        ["git", "init", "-q", f"--separate-git-dir={separate_root / 'dist'}", str(separate_root)],
+        check=True,
+        capture_output=True,
+    )
+    _idle(separate_root)
+
+    bare_items, _ = plan_bo(bare_root)
+    separate_items, _ = plan_bo(separate_root)
+
+    assert [item.code for item in bare_items] == ["git-repository"]
+    assert [item.code for item in separate_items] == ["git-repository"]
+
+
+def test_tracked_ignored_and_unignored_shapes(tmp_path: Path) -> None:
+    """Three real git states, real probes: tracked beats ignored, unignored keeps."""
+    root = _project(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    probes = _bo_probes(tracked_files=dp.probe_tracked_files, is_git_ignored=dp.probe_git_ignored)
+
+    # 1. TRACKED: committed build output is content, not cache.
+    _shape(root)
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "commit the output")
+    _idle(root)
+    items, _ = plan_bo(root, probes=probes)
+    assert [item.code for item in items] == ["git-tracked"]
+
+    # 2. UNTRACKED and NOT ignored: the owner's call, not ours.
+    subprocess.run(["git", "-C", str(root), "rm", "-rq", "--cached", "target"], check=True)
+    _idle(root)
+    items, _ = plan_bo(root, probes=probes)
+    assert [item.code for item in items] == ["git-not-ignored"]
+
+    # 3. IGNORED and untracked: reclaimable.
+    (root / ".gitignore").write_text("/target\n")
+    _idle(root)
+    items, _ = plan_bo(root, probes=probes)
+    assert [item.action for item in items] == [dp.ACTION_RECLAIM]
+
+
+def test_a_git_that_cannot_answer_keeps_the_tree(tmp_path: Path) -> None:
+    """cannot-tell is never "nothing is tracked"."""
+    root = _project(tmp_path)
+    _shape(root)
+    _idle(root)
+    items, _ = plan_bo(root, probes=_bo_probes(tracked_files=lambda candidate: None))
+    assert [item.code for item in items] == ["git-unknown"]
+    items, _ = plan_bo(root, probes=_bo_probes(is_git_ignored=lambda candidate: None))
+    assert [item.code for item in items] == ["git-unknown"]
+
+
+def test_a_running_toolchain_and_an_open_handle_both_keep(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+
+    items, _ = plan_bo(root, probes=_bo_probes(toolchain_running=lambda c, r: True))
+    assert [item.code for item in items] == ["toolchain-running"]
+
+    items, _ = plan_bo(root, probes=_bo_probes(handles_open=lambda candidate: True))
+    assert [item.code for item in items] == ["handles-open"]
+
+    assert shape.exists()
+
+
+@pytest.mark.parametrize("probe", ["toolchain_running", "handles_open"])
+def test_a_failing_liveness_probe_keeps_and_never_removes(tmp_path: Path, probe: str) -> None:
+    """The probe that cannot answer keeps the tree, at plan AND at removal time."""
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+
+    items, _ = plan_bo(root, probes=_bo_probes(**{probe: _silent(probe)}))
+    assert [item.code for item in items] == ["probe-failed"]
+
+    # Approved under a working probe, then removed under a blind one: the
+    # at-removal re-check is what has to hold, and it must not delete.
+    previewed = plan_bo(root)[0][0]
+    assert previewed.action == dp.ACTION_RECLAIM
+    detail = dp.remove_build_output(
+        previewed, min_idle_minutes=60, probes=_bo_probes(**{probe: _silent(probe)})
+    )
+
+    assert detail and detail.startswith("no longer qualifies")
+    assert shape.exists() and (shape / "debug" / "obj0.o").exists()
+
+
+def test_attribution_is_per_candidate_not_a_parent_prefix(tmp_path: Path) -> None:
+    """A producer is attributed to THIS project, and a neighbour is not."""
+    root = str(tmp_path / "proj")
+    candidate = os.path.join(root, "target")
+    sibling = str(tmp_path / "proj-old")
+
+    # cwd at the project root: a build in the repository blocks its own target/.
+    assert dp.process_touches(["cargo", "build"], root, candidate=candidate, project_root=root)
+    # The parent repository's checkout is a different tree and is not attributed.
+    assert not dp.process_touches(
+        ["cargo", "build"], sibling, candidate=candidate, project_root=root
+    )
+    # rustc's out-dir names the candidate, whatever the cwd.
+    assert dp.process_touches(
+        ["rustc", "--out-dir", os.path.join(candidate, "debug", "deps"), "lib.rs"],
+        "/",
+        candidate=candidate,
+        project_root=root,
+    )
+    # A sibling whose name merely EXTENDS the root is not attributed by path.
+    assert not dp.path_in_arg(os.path.join(sibling, "x"), (root,))
+    # Bare node/npm are NOT producers; the tool they run is.
+    assert not dp.is_producer_process(["node", "server.js"])
+    assert not dp.is_producer_process(["/usr/local/bin/npm", "run", "dev"])
+    assert dp.is_producer_process(["node", "/w/node_modules/.bin/next", "build"])
+    assert dp.is_producer_process(["python3.12", "-m", "build"])
+
+
+def test_generic_producers_are_attributed_by_cwd_only(tmp_path: Path) -> None:
+    """The measured false positive: this command's OWN argv names the project root.
+
+    ``lop disk reclaim --build-output <root>`` is a ``python`` process whose argv
+    contains the root, so argv attribution on a generic producer name blocked
+    every reclaim the command made — the guard would have been a permanent no-op.
+    """
+    root = str(tmp_path / "proj")
+    candidate = os.path.join(root, "dist")
+    own_argv = (
+        "python3.12",
+        "-c",
+        "from local_operator.cli import main",
+        "disk",
+        "reclaim",
+        "--build-output",
+        root,
+    )
+
+    assert dp.producer_kind(own_argv) == dp.PRODUCER_GENERIC
+    assert not dp.toolchain_touches(candidate, root, processes=[(1, own_argv)], handles=[])
+    # The same python process is evidence when it is WORKING in the project.
+    assert dp.toolchain_touches(
+        candidate, root, processes=[(1, own_argv)], handles=[f"pid:1:cwd={root}"]
+    )
+    # A specific toolchain keeps full argv attribution: there a path in the
+    # command line really is a build being pointed at a directory.
+    assert dp.producer_kind(["rustc", "lib.rs"]) == dp.PRODUCER_SPECIFIC
+    assert dp.toolchain_touches(
+        candidate,
+        root,
+        processes=[(2, ("rustc", "--out-dir", os.path.join(candidate, "x"), "lib.rs"))],
+        handles=[],
+    )
+
+
+def test_freshness_is_the_newest_entry_not_the_directory_mtime(tmp_path: Path) -> None:
+    """An all-ancient tree is judged on its newest entry, even when that is 1970."""
+    root = _project(tmp_path / "ancient")
+    shape = _shape(root)
+    age(root, 0.0)  # every entry stamped at the epoch
+    items, _ = plan_bo(root)
+    assert [item.action for item in items] == [dp.ACTION_RECLAIM], items
+
+    root2 = _project(tmp_path / "fresh")
+    shape2 = _shape(root2)
+    _idle(root2)
+    deep = shape2 / "debug" / "obj1.o"
+    os.utime(deep, None)  # one fresh file deep inside an otherwise ancient tree
+    items, _ = plan_bo(root2)
+    assert [item.code for item in items] == ["recent"]
+
+    assert shape.exists()
+
+
+def test_the_idle_window_is_six_hours_and_never_the_sixty_minute_floor(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    _shape(root)
+    _idle(root, hours=2.0)
+
+    items, _ = plan_bo(root, min_idle_minutes=60)
+    assert [item.code for item in items] == ["recent"]
+    assert items[0].evidence["idle_minutes"] == dp.BUILD_OUTPUT_IDLE_MINUTES
+
+    # --min-idle-minutes may RAISE the window ...
+    _idle(root, hours=8.0)
+    assert [item.action for item in plan_bo(root, min_idle_minutes=60)[0]] == [dp.ACTION_RECLAIM]
+    items, _ = plan_bo(root, min_idle_minutes=600)
+    assert [item.code for item in items] == ["recent"]
+    assert items[0].evidence["idle_minutes"] == 600
+
+
+def test_a_truncated_walk_is_idle_unproven(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = dp.walk_allocated
+    monkeypatch.setattr(dp, "walk_allocated", lambda root, **kw: real(root, max_entries=2, **kw))
+    root = _project(tmp_path)
+    _shape(root, entries=5)
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["idle-unproven"]
+    assert "entry bound" in items[0].reason
+
+
+def test_symlinks_and_mount_points_are_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "precious.txt").write_text("keep me")
+
+    # 1. The candidate IS a symlink.
+    root = _project(tmp_path / "linked")
+    (root / "target").symlink_to(elsewhere, target_is_directory=True)
+    _idle(root)
+    items, _ = plan_bo(root)
+    assert [item.code for item in items] == ["symlink"]
+    assert (elsewhere / "precious.txt").exists()
+
+    # 2. The candidate's PATH traverses a symlink: the named root itself is one.
+    real_root = _project(tmp_path / "real")
+    _shape(real_root)
+    _idle(real_root)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_root, target_is_directory=True)
+    items, _ = plan_bo(alias)
+    assert [item.code for item in items] == ["symlink"]
+
+    # 3. A mount point.
+    monkeypatch.setattr(os.path, "ismount", lambda path: True)
+    items, _ = plan_bo(real_root)
+    assert [item.code for item in items] == ["mount-point"]
+    monkeypatch.undo()
+    assert (real_root / "target" / "debug" / "obj0.o").exists()
+
+
+def test_preview_removes_nothing_and_apply_needs_confirmation(
+    fx: Fx, capsys: Any, monkeypatch: Any
+) -> None:
+    root = _project(fx.root / "bo")
+    shape = _shape(root)
+    _idle(root)
+    before = sorted(p.name for p in shape.rglob("*"))
+
+    assert reclaim_command(_args(build_output=(str(root),), json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["reclaimable"] == 1
+    assert payload["selection"]["build_output"] == [str(root)]
+    assert sorted(p.name for p in shape.rglob("*")) == before
+    assert not (fx.cfg / dp.RECEIPT_DIRNAME).exists()
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert reclaim_command(_args(build_output=(str(root),), apply=True)) == 2
+    assert "not a terminal" in capsys.readouterr().err
+    assert shape.exists()
+
+
+def test_apply_removes_the_tree_and_the_receipt_carries_the_measurements(
+    fx: Fx, capsys: Any
+) -> None:
+    """The real path, with the REAL probes: no injected liveness answer here."""
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    assert reclaim_command(_args(build_output=(str(root),), apply=True, yes=True, json=True)) == 0
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert receipt["status"] == "complete"
+    assert not shape.exists()
+    item = receipt["items"][0]
+    assert item["category"] == "build-output" and item["outcome"] == "removed"
+    assert item["evidence"]["manifests"] == ["Cargo.toml"]
+    assert item["evidence"]["allocated_bytes_at_removal"] > 0
+    assert receipt["disk_usage_before"] and receipt["disk_usage_after"]
+    on_disk = json.loads(list((fx.cfg / dp.RECEIPT_DIRNAME).glob("*.json"))[0].read_text())
+    assert on_disk["confirmation"] == "--yes"
+    assert on_disk["items"][0]["outcome"] == "removed"
+
+
+def test_a_tree_that_went_fresh_between_preview_and_apply_is_skipped(fx: Fx, capsys: Any) -> None:
+    root = _project(fx.root / "bo")
+    shape = _shape(root, entries=2)
+    _idle(root)
+    plan = dp.plan(dp.Selection(build_output=(str(root),)), fx.cfg)
+    assert [item.action for item in plan.items] == [dp.ACTION_RECLAIM]
+
+    (shape / "debug" / "obj0.o").write_bytes(b"rebuilt")  # a build just wrote it
+
+    result = dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_YES)
+
+    assert result.exit_code == 1
+    assert plan.items[0].outcome == dp.OUTCOME_SKIPPED
+    assert "no longer qualifies" in plan.items[0].detail and "recent" in plan.items[0].detail
+    assert shape.exists() and (shape / "debug" / "obj0.o").exists()
+
+
+def test_the_real_parser_accepts_build_output(fx: Fx, tmp_path: Path) -> None:
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    _shape(root)
+    _idle(root)
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from local_operator.cli import main; sys.exit(main())",
+            "disk",
+            "reclaim",
+            "--build-output",
+            str(root),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    payload = json.loads(done.stdout)
+    assert payload["summary"]["reclaimable"] == 1
+    assert payload["items"][0]["category"] == "build-output"
+    assert (root / "target").exists()
+
+
+# -- build output: the planner itself, and the edges of a tree -----------------
+#
+# Round-1 review findings, each with the case that produced it. The first is the
+# one that mattered: the command's OWN process was the live build it went looking
+# for, so `--apply --yes` from inside the named root reported `nothing-to-do` and
+# deleted nothing.
+
+
+def _handler_payload(root: Path, *, cwd: Path) -> dict[str, Any]:
+    """The REAL command, in a subprocess started from ``cwd``: its JSON payload."""
+    env = dict(os.environ, PYTHONPATH=str(REPO_ROOT))
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from local_operator.cli import main; sys.exit(main())",
+            "disk",
+            "reclaim",
+            "--build-output",
+            str(root),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=cwd,
+        timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_the_planners_own_process_is_never_the_live_build(fx: Fx) -> None:
+    """The measured self-attribution, from every cwd an operator runs it in.
+
+    ``lop disk reclaim --build-output <root>`` is a generic ``python`` producer,
+    so argv attribution is skipped for it and the CWD rule decides. From outside
+    the root the candidate was planned ``reclaim``; from the root itself it was
+    kept as ``toolchain-running``, and from inside the candidate as
+    ``handles-open`` because ``lsof`` reports its OWN cwd — which is why the
+    sweep's child pid is excluded as well as ours. All three say ``reclaim`` now,
+    and a preview still removes nothing.
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    for cwd in (fx.root, root, shape):
+        payload = _handler_payload(root, cwd=cwd)
+        assert payload["summary"]["reclaimable"] == 1, (cwd, payload)
+        assert [item["code"] for item in payload["items"]] == ["reclaim"], (cwd, payload)
+    assert shape.exists()
+
+
+def test_a_different_live_producer_in_the_project_still_keeps_it(fx: Fx) -> None:
+    """Excluding ourselves must not become attribution-blindness.
+
+    A genuinely different ``python`` working in the named root is still a live
+    build: the exclusion is by pid (ours, and the ``lsof`` child's), never by
+    "a generic producer does not count".
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    _shape(root)
+    _idle(root)
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=root)
+    try:
+        payload = _handler_payload(root, cwd=fx.root)
+        assert [item["code"] for item in payload["items"]] == ["toolchain-running"], payload
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+    assert child.poll() is not None
+
+
+def _holder(where: Path) -> subprocess.Popen[bytes]:
+    """A child of THIS process, sitting in ``where``, alive until it is killed.
+
+    Held rather than scheduled: the bug this file now covers passed locally only
+    because the offending child had exited before the snapshot, so a case that
+    races the plan proves nothing in either direction.
+    """
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], cwd=where)
+
+
+def _cwds_of(pid: int) -> list[str]:
+    """The cwd ``lsof`` reports for ``pid`` — proof the holder is where it claims.
+
+    Read with ``lsof`` directly and NOT through :func:`dp.read_open_handles`: that
+    reader excludes our own subtree, which is exactly what these cells are
+    asserting about, so it cannot also be the instrument that witnesses it.
+    """
+    done = subprocess.run(
+        ["lsof", "-a", "-d", "cwd", "-n", "-P", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    found: list[str] = []
+    for line in done.stdout.splitlines():
+        fields = line.split(None, 8)
+        if len(fields) == 9 and fields[3] == "cwd":
+            found.append(os.path.normpath(fields[8].strip()))
+    return found
+
+
+def test_a_descendant_of_the_planner_working_inside_the_candidate_is_ours(fx: Fx) -> None:
+    """Ours by ANCESTRY, not by pid: a held child of the planner does not block.
+
+    The hosted-CI failure this closes. The planner's own pid was excluded and the
+    ``lsof`` child's pid was excluded, but any child of the planner INHERITS the
+    operator's cwd (the ``git`` probes run ``git -C <root>`` with the cwd
+    inherited, and a wrapper put on ``PATH`` for ``ps``/``lsof`` inherits it too),
+    so from inside the candidate that child's cwd sentinel read as
+    ``handles-open`` on a tree nobody was using. It reddened two shards and never
+    failed locally for one reason: the child had usually exited by snapshot time.
+    This cell holds one alive across the whole plan, so it fails deterministically
+    without the subtree exclusion instead of depending on how fast the machine is.
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    held = _holder(shape)
+    try:
+        cwds = _cwds_of(held.pid)
+        assert len(cwds) == 1 and os.path.realpath(cwds[0]) == os.path.realpath(shape), (
+            "the holder must really sit in the candidate, or this cell proves nothing",
+            cwds,
+        )
+
+        plan = dp.plan(dp.Selection(build_output=(str(root),)), fx.cfg)
+
+        assert held.poll() is None, "the descendant must still be alive when the plan is read"
+        assert [(item.action, item.code) for item in plan.items] == [
+            (dp.ACTION_RECLAIM, "reclaim")
+        ], [(item.action, item.code, item.reason) for item in plan.items]
+    finally:
+        held.kill()
+        held.wait(timeout=30)
+    assert held.poll() is not None
+
+
+def test_a_third_party_working_inside_the_candidate_still_keeps_it(fx: Fx) -> None:
+    """Excluding our subtree must not become attribution-blindness.
+
+    Same directory, same ``cwd`` sentinel, and a ``python`` producer that looks
+    exactly like the descendant above — but this one is a SIBLING of the planner
+    (both are children of the test process), so the tree really is in use and must
+    be kept. Without this cell the ancestry rule could be widened to "ignore
+    anything that resembles us" and the suite would still be green.
+    """
+    root = _project(fx.root / "bo")
+    (root / ".gitignore").write_text("/target\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    shape = _shape(root)
+    _idle(root)
+
+    other = _holder(shape)
+    try:
+        assert _cwds_of(other.pid), "the third party must really sit in the candidate"
+        payload = _handler_payload(root, cwd=fx.root)
+        assert [item["code"] for item in payload["items"]] == ["handles-open"], payload
+    finally:
+        other.kill()
+        other.wait(timeout=30)
+    assert other.poll() is not None
+
+
+def test_the_subtree_rule_reads_the_parent_chain() -> None:
+    """``descendant_pids`` on a synthetic forest: total, and by ancestry.
+
+    No process table involved, so this is the cell that pins the RULE while the
+    two cells above pin its effect on the real command. A pid whose chain cannot
+    be walked back to us is not ours; the map is authoritative over anything
+    remembered about pids we once spawned, because re-parenting exists.
+    """
+    forest = {100: 1, 200: 100, 300: 200, 400: 1, 500: 400, 600: 300}
+    assert dp.descendant_pids(forest, 100) == frozenset({100, 200, 300, 600})
+    assert dp.descendant_pids(forest, 1) == frozenset({1, 100, 200, 300, 400, 500, 600})
+    assert dp.descendant_pids({700: 1000}, 100) == frozenset({100})
+
+
+def test_both_readers_drop_this_process() -> None:
+    """The exclusion lives in the READERS, so no attribution path can see us.
+
+    What is asserted is our OWN pid's absence from both tables plus, with a child
+    held alive, the CHILD's absence — the case that reddened hosted CI, where the
+    child inherits this process's cwd and its cwd sentinel names a directory in
+    use. The ``lsof`` child's pid is only knowable inside
+    :func:`read_open_handles` (it is created and reaped there), so by the time
+    this test looks it is gone and its absence proves nothing — the held child is
+    what the body can show.
+    """
+    rows = dp.read_process_table()
+    assert rows, "ps lists at least one process on every supported platform"
+    assert all(pid != os.getpid() for pid, _ in rows)
+
+    held = _holder(Path.cwd())
+    try:
+        rows = dp.read_process_table()
+        assert rows, "ps still answers with a child alive"
+        assert all(pid != held.pid for pid, _ in rows), "a child of ours is never a build"
+
+        handles = dp.read_open_handles()
+        assert handles is not None, "the end-to-end cases already require a working lsof"
+        assert not [entry for entry in handles if entry.startswith(f"pid:{os.getpid()}:cwd=")]
+        assert os.getpid() not in dp.cwds_by_pid(handles)
+        assert not [entry for entry in handles if entry.startswith(f"pid:{held.pid}:cwd=")]
+        assert held.pid not in dp.cwds_by_pid(handles)
+    finally:
+        held.kill()
+        held.wait(timeout=30)
+    assert held.poll() is not None
+
+
+def test_a_clone_inside_the_candidate_keeps_it(tmp_path: Path) -> None:
+    """Build output that a repository was cloned into: its history lives there.
+
+    ``target/vendor/tool`` is a clone somebody's build wrote (or a submodule
+    checked out under it), and it was previously collected because the ``.git``
+    guard only looked at the candidate's own root.
+    """
+    root = _project(tmp_path)
+    shape = _shape(root)
+    inner = shape / "vendor" / "tool"
+    inner.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(inner)], check=True, capture_output=True)
+    (inner / "README").write_text("history\n")
+    git(inner, "add", "-A")
+    git(inner, "commit", "-qm", "the only copy")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["git-repository"], items
+    assert items[0].action == dp.ACTION_KEEP
+    assert "nested .git" in items[0].reason
+    assert (inner / "README").read_text() == "history\n"
+
+
+def test_a_mount_point_inside_the_tree_stops_the_walk_and_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Something was mounted INSIDE the candidate: that volume is not ours.
+
+    The candidate-level ``ismount`` check cannot see it, so previously the walk
+    descended onto the other filesystem, measured it, and the remover followed it
+    there. The walk now stops at the boundary and the candidate is kept — at plan
+    time AND when the removal re-validates.
+    """
+    root = _project(tmp_path)
+    shape = _shape(root)
+    inner = shape / "debug" / "mounted"
+    inner.mkdir()
+    (inner / "other-volume.txt").write_text("not ours\n")
+    _idle(root)
+
+    real = os.path.ismount
+    monkeypatch.setattr(os.path, "ismount", lambda path: str(path) == str(inner) or real(path))
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["mount-point"], items
+    assert items[0].action == dp.ACTION_KEEP
+
+    # ... and the walk really stopped there: nothing below the boundary is counted.
+    stopped = dp.walk_allocated(str(shape), stop_at_mount=True)
+    everything = dp.walk_allocated(str(shape))
+    assert stopped.mount_crossed == str(inner)
+    assert stopped.allocated_bytes < everything.allocated_bytes
+
+    # ... and the remover refuses it too, one level further from the plan.
+    detail = dp.remove_build_output(items[0], min_idle_minutes=60, probes=_bo_probes())
+    assert detail and detail.startswith("no longer qualifies"), detail
+    assert "mount-point" in detail
+
+    monkeypatch.undo()
+    assert (inner / "other-volume.txt").exists()
+
+
+def test_home_and_the_data_directories_are_never_project_roots(tmp_path: Path) -> None:
+    """The non-developer clause: one stray manifest must not make ``~/dist`` ours.
+
+    ``~/package.json`` — anything that installs a dependency at the top of home
+    leaves one — made ``~/dist`` "provably owned build output", and the same file
+    in ``~/Documents`` did it to ``~/Documents/build``.
+    """
+    home = Path(os.environ["HOME"])
+    (home / "package.json").write_text("{}\n")
+    dist = home / "dist"
+    dist.mkdir()
+    (dist / "app.js").write_text("bundle\n")
+    _idle(home, hours=800)
+
+    items, refusals = plan_bo(home)
+
+    assert items == []
+    assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT]
+    assert "home directory" in refusals[0]["reason"]
+    assert (dist / "app.js").exists()
+
+    for name in sorted(dp.PROTECTED_DATA_DIRS):
+        holder = home / name
+        holder.mkdir(exist_ok=True)
+        (holder / "package.json").write_text("{}\n")
+        (holder / "build").mkdir(exist_ok=True)
+        (holder / "build" / "x.js").write_text("x\n")
+    _idle(home, hours=800)
+
+    for name in sorted(dp.PROTECTED_DATA_DIRS):
+        items, refusals = plan_bo(home / name)
+        assert items == [], (name, items)
+        assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT], name
+        assert "standard data directory" in refusals[0]["reason"], name
+        assert (home / name / "build" / "x.js").exists(), name
+
+
+def test_a_data_directory_inside_a_candidate_keeps_it(tmp_path: Path) -> None:
+    """``target/Documents`` is somebody's documents, even inside build output."""
+    root = _project(tmp_path)
+    shape = _shape(root)
+    documents = shape / "Documents"
+    documents.mkdir()
+    (documents / "invoice.pdf").write_text("data\n")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+
+    assert [item.code for item in items] == ["protected-location"], items
+    assert items[0].action == dp.ACTION_KEEP
+    assert (documents / "invoice.pdf").exists()
+
+
+def test_same_location_answers_by_identity_and_folds_case_without_one(
+    tmp_path: Path,
+) -> None:
+    """The comparator R2-1 turned on: inode identity first, casefold as fallback.
+
+    Both paths existing is the case ``samefile`` owns — it is the only answer that
+    holds for a trailing slash, ``.`` or a case the volume folds. Neither path
+    existing is the case it CANNOT answer (it raises), and the fallback must then
+    compare the spellings case-insensitively: that is the direction the guard
+    fails in, refusing a name rather than measuring it.
+    """
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+
+    assert dp.same_location(str(folder), str(folder) + "/") is True
+    assert dp.same_location(str(folder), str(tmp_path / "missing")) is False
+    # Neither exists, so the answer comes from the fallback: folded, they are one.
+    assert dp.same_location(str(tmp_path / "nope"), str(tmp_path / "NOPE")) is True
+
+    assert dp.is_protected_data_dir_name("documents") is True
+    assert dp.is_protected_data_dir_name("DOCUMENTS") is True
+    assert dp.is_protected_data_dir_name("Documents") is True
+    assert dp.is_protected_data_dir_name("Documents-old") is False
+    assert dp.is_protected_data_dir_name("") is False
+
+
+def test_the_home_comparison_is_identity_not_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``$HOME`` spelled in another case still IS the home directory.
+
+    The reviewer measured ``~/documents`` and ``~/Documents`` with the same
+    ``st_ino``, so the only comparison that can see what a case-folding volume
+    folds is identity — or the casefold fallback where the volume (or the path)
+    cannot answer. Either way ``~/documents`` under a differently-cased ``$HOME``
+    is a data directory, never a project root.
+    """
+    home = Path(os.environ["HOME"])
+    other = Path(str(home).upper())
+    monkeypatch.setenv("HOME", str(other))
+
+    reason = dp.protected_location_reason(str(other / "documents"))
+
+    assert reason is not None, "a case-folded spelling of home must still refuse"
+    assert "standard data directory" in reason, reason
+
+
+@pytest.mark.parametrize("spelling", ["documents", "DOCUMENTS", "DoCuMeNtS"])
+def test_the_data_directory_guard_does_not_depend_on_case(tmp_path: Path, spelling: str) -> None:
+    """R2-1 regression row: ``~/documents`` is ``~/Documents`` on APFS.
+
+    Measured through the shipped code in an isolated ``HOME`` before the fix: the
+    canonical spelling was refused while the lowercase one PLANNED A RECLAIM (same
+    ``st_ino``), and removal-time revalidation agreed with the plan. The volume
+    decides whether these spellings are one directory or two, and the answer is
+    ``protected-location`` either way.
+
+    Two comparisons are covered because they are two different code paths: the
+    project-root NAME (the casefolded table, :func:`is_protected_data_dir_name`)
+    and the containment walk's ``prune_names`` match (also casefolded), which is
+    what ``target/documents`` hits. The canonical spelling is covered by
+    :func:`test_home_and_the_data_directories_are_never_project_roots` and
+    :func:`test_a_data_directory_inside_a_candidate_keeps_it`.
+    """
+    home = Path(os.environ["HOME"])
+    holder = home / spelling
+    holder.mkdir(exist_ok=True)
+    (holder / "package.json").write_text("{}\n")
+    (holder / "build").mkdir(exist_ok=True)
+    (holder / "build" / "x.js").write_text("x\n")
+    _idle(home, hours=800)
+
+    # ... as a project ROOT, the spelling the reviewer measured a reclaim on.
+    items, refusals = plan_bo(holder)
+    assert items == [], (spelling, items)
+    assert [r["category"] for r in refusals] == [dp.CATEGORY_BUILD_OUTPUT], spelling
+    assert "standard data directory" in refusals[0]["reason"], spelling
+    assert (holder / "build" / "x.js").exists(), spelling
+
+    # ... and as a directory INSIDE a candidate, which is the walk's prune match.
+    root = _project(tmp_path)
+    shape = _shape(root)
+    inner = shape / spelling
+    inner.mkdir()
+    (inner / "invoice.pdf").write_text("data\n")
+    _idle(root)
+
+    items, _ = plan_bo(root)
+    assert [item.code for item in items] == ["protected-location"], (spelling, items)
+    assert items[0].action == dp.ACTION_KEEP, spelling
+    assert (inner / "invoice.pdf").exists(), spelling
+
+
+def test_the_walk_before_delete_reapplies_the_data_dir_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: the removal-time walk carries BOTH checks, not just the mount one.
+
+    Revalidation re-judges the whole tree, so a data directory already present is
+    refused earlier and this test would pass without the fix. The case here is the
+    RACE the second walk exists for: revalidation answers "still qualifies" and the
+    directory lands between that answer and the measurement. Without
+    ``prune_names`` on that walk the tree was measured WHOLE and handed to
+    ``_remove_tree``, which descends it — asymmetric, since the mount check WAS
+    carried through.
+    """
+    root = _project(tmp_path)
+    shape = _shape(root)
+    _idle(root)
+    items, _ = plan_bo(root)
+    assert [item.code for item in items] == ["reclaim"], items
+    item = items[0]
+
+    # Freeze revalidation's answer at "still qualifies": that is the race.
+    monkeypatch.setattr(dp, "revalidate_build_output", lambda *a, **kw: item)
+    documents = shape / "documents"
+    documents.mkdir()
+    (documents / "invoice.pdf").write_text("data\n")
+
+    detail = dp.remove_build_output(item, min_idle_minutes=60, probes=_bo_probes())
+
+    assert detail and detail.startswith("refusing"), detail
+    assert "standard data" in detail, detail
+    assert (documents / "invoice.pdf").exists(), "a refusal must not delete"
+    assert shape.exists()
+
+
+# -- the fourth category must not reach the first three ----------------------
+
+
+def test_the_worktree_walk_is_unperturbed_by_the_build_output_edges(fx: Fx) -> None:
+    """``stop_at_mount``/``prune_names`` must not reach the worktree category.
+
+    They exist for build output: a mount point ENDS that walk (another volume's
+    bytes are not ours to delete) and a standard data directory is PRUNED from
+    it (:data:`dp.PROTECTED_DATA_DIRS`). The worktree category measured every
+    one of those entries before the fourth category existed and must still: its
+    idle guard reads mtimes out of the SAME walk, so pruning there would move
+    ``newest_mtime_ns`` and turn a reclaim into a ``recent`` keep, or the
+    reverse.
+
+    Driven through the real planner over a tree built out of exactly the shapes
+    the build-output walk prunes, with the pruning walk run as a NEGATIVE
+    CONTROL: if the control stops being smaller than the measurement, the
+    fixture has stopped discriminating and this test no longer proves anything.
+    """
+    wt = fx.worktree("shapes")
+    (wt / "Cargo.toml").write_text("[package]\nname = 'x'\n")
+    (wt / "package.json").write_text("{}\n")
+    # Protected names (`Documents`/`Downloads`/`Music`) AND build-output shapes
+    # (`target` beside a Cargo.toml, `build` beside a package.json).
+    for name in ("Documents", "Downloads", "Music", "target", "build"):
+        (wt / name).mkdir()
+        (wt / name / "payload.bin").write_bytes(b"x" * 16384)
+    git(wt, "add", "-A")
+    git(wt, "commit", "-qm", "shapes")
+    git(wt, "push", "-q", "origin", "shapes")
+    fx.idle(wt)
+
+    legacy = dp.walk_allocated(str(wt), skip_top_level=frozenset({".git"}))
+    explicit = dp.walk_allocated(
+        str(wt),
+        skip_top_level=frozenset({".git"}),
+        stop_at_mount=False,
+        prune_names=frozenset(),
+    )
+    assert legacy == explicit, "the build-output parameters must default to the old walk"
+    assert explicit.pruned == [] and explicit.mount_crossed == ""
+    assert explicit.truncated is False and explicit.error == ""
+
+    control = dp.walk_allocated(
+        str(wt), skip_top_level=frozenset({".git"}), prune_names=dp.PROTECTED_DATA_DIRS
+    )
+    assert control.pruned, "negative control: these names must be prunable"
+    assert control.allocated_bytes < explicit.allocated_bytes
+
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "reclaim", item.reason
+    assert item.bytes_truncated is False
+    # The reclaim path's own sizing walk measures the tree WHOLE: the protected
+    # names and the build-output shapes are all still counted.
+    assert item.allocated_bytes == legacy.allocated_bytes
+    # ``Item.allocated_bytes`` is ``int | None``; the truthiness guard is the
+    # file's idiom for narrowing it and cannot weaken the comparison, since a
+    # strictly-greater control reading already rules out zero.
+    assert item.allocated_bytes and item.allocated_bytes > control.allocated_bytes
+
+
+def test_only_the_build_output_path_hands_the_walk_its_new_edges() -> None:
+    """Provenance: ``stop_at_mount``/``prune_names`` are build output's alone.
+
+    A default is not a contract: the next edit to the worktree, Go-cache or
+    scratchpad caller could pass one of them and silently change what that
+    category measures — the worktree's idle guard reads the same walk, so the
+    change would surface as a shifted keep reason rather than as an error.
+    Asserted on the source, and the OWNER SET is asserted too so a new walk call
+    in one of the older categories has to be argued for here.
+    """
+    import ast
+
+    source = (REPO_ROOT / "local_operator" / "disk_pressure.py").read_text()
+    edges = {"stop_at_mount", "prune_names"}
+    legacy = {"_assess", "plan_go_cache"}  # worktree (idle + sizing) and Go cache
+    owners: list[tuple[str, set[str]]] = []
+    for func in (n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef)):
+        for call in ast.walk(func):
+            if not isinstance(call, ast.Call):
+                continue
+            name = (
+                call.func.attr
+                if isinstance(call.func, ast.Attribute)
+                else getattr(call.func, "id", "")
+            )
+            if name == "walk_allocated":
+                owners.append((func.name, {kw.arg for kw in call.keywords if kw.arg}))
+
+    for owner, kwargs in owners:
+        if owner in legacy:
+            assert not (kwargs & edges), f"{owner} must keep the older walk: {sorted(kwargs)}"
+    assert {owner for owner, kwargs in owners if kwargs & edges} == {
+        "assess_build_output",
+        "remove_build_output",
+    }
+    assert {owner for owner, _ in owners} == legacy | {"assess_build_output", "remove_build_output"}

@@ -198,7 +198,14 @@ async def test_an_unspilled_result_is_compared_verbatim(tmp_path: Path, config_d
         outcome = await session._run_monitor_check(spec())
     finally:
         await session.dispose()
-    assert outcome == {"text": "one\nline", "error": None, "handle": None}
+    assert outcome == {
+        "text": "one\nline",
+        "error": None,
+        "handle": None,
+        # Non-empty, so the scheduler's empty-output counter must not
+        # start (see ``EMPTY_CHECKS_BEFORE_NOTICE``).
+        "empty": False,
+    }
 
 
 @pytest.mark.asyncio
