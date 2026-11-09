@@ -328,7 +328,21 @@ def build_monitor_spec(
         # in the daemon's directory when that happened to have the same name, which
         # is the incident's failure class one layer down.
         if not os.path.isabs(requested):
-            requested = os.path.join(cwd or os.getcwd(), requested)
+            if not cwd:
+                # NO SESSION DIRECTORY TO RESOLVE AGAINST, and inventing one is the
+                # bug class the cwd-omission census exists for: an empty cwd is the
+                # spawn-omission SENTINEL, so quietly adopting this process's
+                # directory would be the same "it ran somewhere else" failure this
+                # whole change is about. A sentence, not a guess.
+                return {
+                    "error": (
+                        f"monitor 'cwd' must be an absolute path here ({requested!r} is "
+                        "relative and this session has no directory to resolve it "
+                        "against); pass the full path, or omit 'cwd'."
+                    ),
+                    "malformed": False,
+                }
+            requested = os.path.join(cwd, requested)
         captured = _captured_cwd(requested)
         if not os.path.isdir(captured):
             # Well-formed but unsupportable, so NOT malformed: the caller can fix

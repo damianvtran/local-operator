@@ -15014,9 +15014,7 @@ class MonitorParams(BaseModel):
         default=None,
         description="Read-only tool to re-run: bash, grep, read, web_search, an mcp__ tool.",
     )
-    arguments: dict[str, Any] | None = Field(
-        default=None, description="Arguments for that call."
-    )
+    arguments: dict[str, Any] | None = Field(default=None, description="Arguments for that call.")
     cwd: str | None = Field(
         default=None,
         description="Directory the checks run in; a gh/git watch needs its repo.",

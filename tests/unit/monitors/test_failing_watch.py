@@ -647,7 +647,9 @@ async def test_bash_publishes_its_exit_status_and_stderr_as_structured_details()
     takes.
     """
     tool = build_bash_tool()
-    failed = await tool.execute("c1", {"command": "ls /definitely-not-a-real-dir-xyz"}, None, None, _tool_context())
+    failed = await tool.execute(
+        "c1", {"command": "ls /definitely-not-a-real-dir-xyz"}, None, None, _tool_context()
+    )
     assert failed.is_error is False, "the bash contract: a non-zero exit is not an error"
     assert failed.text.startswith("exit code: ")
     assert failed.details is not None
@@ -1206,7 +1208,9 @@ async def test_an_empty_result_still_reports_its_first_change(
 async def test_a_silent_non_zero_exit_is_published_as_no_output() -> None:
     """QA Q2: ``grep`` with no match published neither failing nor empty."""
     tool = build_bash_tool()
-    quiet = await tool.execute("c1", {"command": "grep -q zzz /etc/hosts"}, None, None, _tool_context())
+    quiet = await tool.execute(
+        "c1", {"command": "grep -q zzz /etc/hosts"}, None, None, _tool_context()
+    )
     assert quiet.is_error is False, "the bash contract: a non-zero exit is not an error"
     assert quiet.details is not None
     assert quiet.details["exit_code"] == 1
@@ -1290,6 +1294,26 @@ def test_a_relative_cwd_resolves_against_the_arming_session(tmp_path: Path) -> N
     )
     assert "spec" in built, built
     assert built["spec"].cwd == str(session_dir / "sub"), built["spec"].cwd
+
+    # WITH NO SESSION DIRECTORY there is nothing to resolve against, and inventing
+    # this process's cwd is the omission bug the cwd census guards (the empty
+    # string is the spawn-omission sentinel): refused as a sentence.
+    orphan = monitor_spec.build_monitor_spec(
+        {
+            "name": "rel",
+            "tool": "bash",
+            "arguments": {"command": "ls"},
+            "cwd": "sub",
+            "every": "60s",
+        },
+        monitor_id="m2",
+        now_ms=NOW,
+        settings=MonitorSettings(),
+        cwd="",
+        validate=lambda tool, args: None,
+    )
+    assert "spec" not in orphan, orphan
+    assert "must be an absolute path" in str(orphan.get("error")), orphan
 
 
 def test_a_repo_flag_value_must_look_like_a_repo_name() -> None:

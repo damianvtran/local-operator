@@ -9889,7 +9889,7 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
         # threshold") and with "the check keeps failing" once it is a run, so the
         # tail's standalone count would be the same fact said twice one line
         # apart (QA round 1, Q3).
-        if not (hint and (hint.startswith(failure_clause) or f"failed check" in hint)):
+        if not (hint and (hint.startswith(failure_clause) or "failed check" in hint)):
             parts.append(failure_clause)
     return " · ".join(parts)
 

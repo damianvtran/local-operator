@@ -1021,9 +1021,7 @@ def _git_reason(tokens: list[str]) -> str | None:
 
 #: The characters a ``[HOST/]OWNER/REPO`` name is made of (gh's own grammar,
 #: mirrored conservatively). Used by ``_repo_value_reason`` below.
-_REPO_NAME_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@-"
-)
+_REPO_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@-")
 
 
 def _repo_value_reason(tokens: list[str]) -> str | None:
