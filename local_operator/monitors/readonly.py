@@ -1019,6 +1019,48 @@ def _git_reason(tokens: list[str]) -> str | None:
     return _flags_reason(f"git {sub}", rest, table)
 
 
+#: The characters a ``[HOST/]OWNER/REPO`` name is made of (gh's own grammar,
+#: mirrored conservatively). Used by ``_repo_value_reason`` below.
+_REPO_NAME_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:@-"
+)
+
+
+def _repo_value_reason(tokens: list[str]) -> str | None:
+    """Refuse a repo-naming flag whose VALUE is not a repo name (QA round 1, Q4).
+
+    ``-R``/``--repo`` name WHERE to read, and the flag machinery deliberately
+    treats a consumed value as data — right for a path or a query, wrong for this
+    one: these values are always ``[HOST/]OWNER/REPO``. A value that is not one
+    (empty, flag-shaped, or carrying punctuation noise) turned into one gh error
+    per tick on a watch nobody could see was mis-armed, so it gets a sentence at
+    arm time instead. No shell ever sees these bytes — the verb gate is the
+    security boundary and is untouched — this is legibility.
+    """
+    for index, token in enumerate(tokens):
+        value: str | None = None
+        if token in ("-R", "--repo"):
+            value = tokens[index + 1] if index + 1 < len(tokens) else ""
+        elif token.startswith("-R") and len(token) > 2:
+            value = token[2:]
+        elif token.startswith("--repo="):
+            value = token[len("--repo=") :]
+        if value is None:
+            continue
+        parts = value.split("/")
+        named = (
+            2 <= len(parts) <= 3
+            and all(part not in (".", "..") for part in parts)
+            and all(part and all(char in _REPO_NAME_CHARS for char in part) for part in parts)
+        )
+        if not named:
+            return (
+                f'"-R/--repo" wants a repo name ([HOST/]OWNER/REPO), not {value!r} — '
+                "the value is passed to gh as data, so gh would refuse it on every check."
+            )
+    return None
+
+
 def _gh_reason(cmd: str, tokens: list[str]) -> str | None:
     if len(tokens) < 2:
         return f'{cmd} needs a subcommand like "pr view".'
@@ -1036,11 +1078,16 @@ def _gh_reason(cmd: str, tokens: list[str]) -> str | None:
             f'"{family} {verb}" is not read-only for {cmd} (that family allows: '
             f"{' '.join(sorted(verbs))})."
         )
-    return _flags_reason(
+    flags = _flags_reason(
         f"{cmd} {family} {verb}",
         tokens[2:],
         _GH_FLAGS_SHORT_REPO if cmd == "gh" else _GH_FLAGS,
     )
+    if flags is not None:
+        return flags
+    # Scoped to gh: glab's ``--repo`` takes the same shape, but its flag space is
+    # per verb and re-testing it is not this change's surface.
+    return _repo_value_reason(tokens[2:]) if cmd == "gh" else None
 
 
 # Unlike GitHub's --json field selector, glab's --output is a FORMAT enum,

@@ -1456,15 +1456,17 @@ async def test_the_stall_episode_publishes_its_two_edges_and_no_ticks(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_an_ordinary_failing_tick_publishes_nothing(tmp_path: Any) -> None:
-    """The auto-disable ladder writes the counters file alone (§10.2).
+async def test_an_ordinary_failing_tick_publishes_its_edges_not_its_ticks(tmp_path: Any) -> None:
+    """The auto-disable ladder publishes the EDGES, never every tick (§10.2).
 
-    Asserted rather than left to a comment because a VIEWER's band now derives
-    its warning ink from exactly this fact: a strike count the reader cannot
-    see move is published history, never a live alarm, so the band must not
-    paint one in warning ink (agent review round 1, MAJOR-1). If this ever
-    starts publishing per tick, the band's rule and this test disagree — which
-    is the point of pinning it here, next to the surface that depends on it.
+    ROUND-2 DECISION CHANGE (manager, this PR): this test used to assert that an
+    ordinary failing tick published NOTHING AT ALL — the strike count was invisible
+    to every cold reader, which is how `lop monitor status` kept saying "nothing has
+    changed (confirm the call observes what you expect)" about a watch that had
+    failed four times in a row (QA round 1, Q3). The rule is now the one the
+    failing/blind/unavailable episodes already follow: ONE publish when the episode
+    OPENS, and none per tick — which is the cost §10.2 refuses and the reason the
+    band still paints a count-only row in muted ink.
     """
     harness = Harness(tmp_path)
     try:
@@ -1475,9 +1477,17 @@ async def test_an_ordinary_failing_tick_publishes_nothing(tmp_path: Any) -> None
 
         harness.results.append({"error": "boom"})
         await rill(harness, 60_000)
-        assert harness.changes == before
-        # The live memory knows; the published row is the last change event's.
+        assert harness.changes == before + 1, "the episode's opening edge, once"
+        # The live memory knows, and now the published row does too.
         assert harness.scheduler.index_rows()[0]["consecutive_failures"] == 1
+
+        # Ticks INSIDE the episode publish nothing: this is the assertion that
+        # keeps the band's muted-count rule honest.
+        for _ in range(2):
+            harness.results.append({"error": "boom"})
+            await rill(harness, 120_000)
+        assert harness.changes == before + 1
+        assert harness.scheduler.index_rows()[0]["consecutive_failures"] == 3
     finally:
         harness.scheduler.dispose()
 

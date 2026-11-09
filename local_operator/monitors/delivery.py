@@ -96,9 +96,22 @@ def format_monitor_delivery_text(delivery: MonitorDelivery) -> str:
 #: ``seeing`` is its matching clear, sent only when the blind notice was told.
 #: ``failing`` names a call that RAN and could not do its job (a non-zero exit
 #: with a complaint — the shape ``bash`` reports as an ordinary success result),
-#: and ``empty`` a call that has never returned anything to compare. Both are
-#: cleared by ``restored`` when a check succeeds again.
-NOTICE_KINDS = ("disabled", "stalled", "restored", "blind", "seeing", "failing", "empty")
+#: ``striking`` the OTHER failure class (a timeout, a tool error: the check itself
+#: cannot complete, so it charges the ordinary strike ladder and announces itself
+#: at the second consecutive failure), and ``empty`` a call that has never
+#: returned anything to compare. ``failing`` and ``striking`` are both cleared by
+#: ``restored`` when a check succeeds again; ``empty`` is cleared silently,
+#: because the first result is its own news and arrives as a delivery.
+NOTICE_KINDS = (
+    "disabled",
+    "stalled",
+    "restored",
+    "blind",
+    "seeing",
+    "failing",
+    "striking",
+    "empty",
+)
 
 
 @dataclass(frozen=True)
@@ -122,8 +135,13 @@ class MonitorNotice:
     deliveries: int = 0
     #: For ``disabled``: the consecutive failed checks that disabled the watch.
     #: For ``failing``: the consecutive failing checks when it was announced. For
+    #: ``striking``: the consecutive ORDINARY failures when it was announced. For
     #: ``empty``: the consecutive empty results (the count the notice names).
     failures: int = 0
+    #: For ``striking``: the consecutive failures that disable the watch, so the
+    #: sentence can name the limit it is heading for instead of "repeated
+    #: failures" with no number.
+    failure_limit: int = 0
     #: The failure that caused a disable, or the reason a stall is not
     #: self-healing (auth-required names its own fix).
     detail: str = ""
@@ -171,6 +189,11 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
     if notice.kind == "disabled":
         if notice.failure_kind == "unreachable":
             cause = "its tool stayed unreachable for 24 hours"
+        elif notice.failure_kind == "failing":
+            # A ``failing`` episode charges no strike (``_apply_failing``), so it
+            # must not be told as one: the wording names the horizon the episode
+            # actually ended on.
+            cause = "its call failed for 24 hours"
         elif notice.failure_kind == "fatal":
             cause = "a check that cannot succeed"
         elif notice.failures:
@@ -294,21 +317,52 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
         lines.append("Monitors tick only while this session is open.")
         return _bounded("\n".join(lines))
 
+    if notice.kind == "striking":
+        # THE OTHER FAULT CLASS (round-2 manager decision; review round 1,
+        # MINOR-5). Here the CHECK keeps failing — a timeout, a tool error — so
+        # this watch really is on its way to the five-strike disable, and the
+        # notice says so. It must not be confused with ``failing`` above: there
+        # the call ran and reported it could not do the job, so the watch keeps
+        # waiting for a resource that may still appear; here the watch will stop.
+        lines = [
+            f"(monitor) {who} at {clock}{source_note} — the check keeps failing: "
+            f"{_clip(notice.detail or 'the check returned an error')}"
+        ]
+        limit = notice.failure_limit
+        consequence = (
+            f"repeated failures disable it at {limit} consecutive failed checks — this "
+            "watch stops unless the check recovers"
+            if limit
+            else "repeated failures disable it, so it stops unless the check recovers"
+        )
+        lines.append(
+            f"{notice.failures} consecutive checks failed. Nothing is reported while it "
+            f"continues, and {consequence}."
+        )
+        lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
+        lines.append("Monitors tick only while this session is open.")
+        return _bounded("\n".join(lines))
+
     if notice.kind == "empty":
         # Not a failure (D4) and not a delivery: the call works and answers with
-        # nothing. Said once, because a watch on an empty result can never report
-        # a change and the operator would otherwise wait for one forever.
+        # nothing. Said once because it is the state a reader would otherwise wait
+        # through forever — but ONLY the fact (review round 1, MAJOR-2). The first
+        # version of this text claimed "an empty result can never change, so this
+        # watch cannot report anything": false, because ``content_hash("")`` is a
+        # real digest, so the first non-empty result IS a detected change and IS
+        # delivered (executed: a clean ``git status --porcelain`` notice, then
+        # ``+ M file.txt`` delivered on the very next check).
         count = notice.failures or notice.checks
         lines = [
             f"(monitor) {who} at {clock}{source_note} — the call returns nothing: "
             f"{count} checks in a row produced no output."
         ]
         lines.append(
-            "An empty result can never change, so this watch cannot report anything. Check "
-            "that the call observes something (a path that exists, a filter that matches) "
-            "rather than waiting for a change that cannot arrive."
+            "That is the fact so far, not a verdict — the watch is still armed, and the "
+            "first check that does return output is compared and reported like any other "
+            "change. If you expected output already, check that the call observes "
+            "something (a path that exists, a filter that matches)."
         )
-        lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
         lines.append("Monitors tick only while this session is open.")
         return _bounded("\n".join(lines))
 

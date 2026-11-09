@@ -182,9 +182,14 @@ def test_an_unknown_kind_raises_rather_than_reading_as_restored() -> None:
         "restored",
         "blind",
         "seeing",
-        # The bash-result pair: a call that cannot do its job is failing,
-        # and one that has never returned anything is empty (not failing).
+        # The two failure classes, which are NOT the same fault: ``failing`` is a
+        # call that ran and could not do its job (no strike; the resource may
+        # still appear), and ``striking`` is a check that cannot complete at all
+        # (a timeout, a tool error) — it charges the ordinary ladder and says so
+        # before the disable. Plus ``empty``: a call that has never returned
+        # anything, which is not a failure at all.
         "failing",
+        "striking",
         "empty",
     }
     with pytest.raises(ValueError) as caught:

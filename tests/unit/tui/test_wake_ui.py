@@ -1862,3 +1862,47 @@ class TestSuppressedMonitorState:
         _, out = await _paint([], [(spec, counters)])
 
         assert "blind" not in out
+
+
+def test_a_failing_watch_renders_its_hint_in_the_band() -> None:
+    """Review MINOR-4: the band's failing branch returned before the hint chain.
+
+    ``store.health_hint`` is the ONE sentence every surface shares, and
+    ``store.py`` asserts this band renders the published row — but the chain
+    reached ``elif failing:`` (which hardcoded ``N failed``) before ``elif hint:``,
+    so the surface holding the row was the only one that never said
+    ``WATCH IS FAILING: <why>``. A failing call also charges no strike now, so the
+    branch has to key off the EPISODE flag rather than a failure count.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.tui.widgets.wake_panel import WakePanel
+
+    now = int(time.time() * 1000)
+    spec = SimpleNamespace(
+        id="m1",
+        tool="bash",
+        created_at=now - 600_000,
+        every_ms=60_000,
+        until_at=None,
+        name="pr-ci",
+    )
+    counters = {
+        "failing": True,
+        "failing_ticks": 3,
+        "failing_notice_checks": 2,
+        "last_error": "failed to run git: fatal: not a git repository",
+        "checks": 3,
+        "next_due_at": now + 60_000,
+    }
+    row = WakePanel._monitor_fingerprint(spec, counters)
+    health = row[5]
+    assert health.startswith("WATCH IS FAILING"), row
+    assert "not a git repository" in health, row
+
+    # A single failed check of a watch that has worked stays a count, not an
+    # alarm: the store's below-threshold sentence is what the band shows.
+    blip = dict(counters, failing_ticks=1)
+    blip_row = WakePanel._monitor_fingerprint(spec, blip)
+    assert "below the 2-check threshold" in blip_row[5], blip_row
+    assert blip_row[4] == "muted", blip_row

@@ -31750,6 +31750,13 @@ class Session:
             )
         except asyncio.TimeoutError:
             signal.abort("monitor check timed out")
+            # A TIMEOUT IS A GENUINE FAULT AND STAYS ON THE STRIKE LADDER (manager
+            # decision, round 2): a wedged call must eventually disable rather than
+            # be treated as a watch waiting on a resource that may never appear.
+            # What it must NOT do is hide: the ordinary ladder now earns ONE notice
+            # at the second consecutive failure (see ``_apply_failure``), which is
+            # what closes the "silent for five strikes" gap (review round 1,
+            # MINOR-5) without merging this fault into the ``failing`` class.
             return {"error": f"check timed out after {int(timeout_s)}s"}
         except asyncio.CancelledError:
             raise
@@ -31823,19 +31830,28 @@ class Session:
         # the tool saying it could not do the job; a silent non-zero exit is
         # indistinguishable from a quiet answer and stays on the empty-output
         # rule below rather than being reported as a failure.
-        exit_code = details.get("exit_code") if isinstance(details, Mapping) else None
+        exit_code: Any = None
+        stderr_head = ""
+        no_output: Any = None
+        if isinstance(details, Mapping):
+            # READ ONCE, NARROWED ONCE: the guard used to sit in a conditional
+            # expression, so every later read of ``details`` was an optional-member
+            # access pyright (rightly) rejected.
+            exit_code = details.get("exit_code")
+            stderr_head = str(details.get("stderr_head") or "").strip()
+            no_output = details.get("no_output")
         if isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0:
-            complaint = str(details.get("stderr_head") or "").strip()
-            if complaint:
-                return {"error": complaint, "kind": "failing", "exit_code": exit_code}
+            if stderr_head:
+                return {"error": stderr_head, "kind": "failing", "exit_code": exit_code}
         # NOTHING TO COMPARE is its own fact (D4): a watch whose call has never
         # produced output cannot ever deliver a change, but a call that is merely
         # quiet right now must not be called broken — ``grep`` with no match and
         # a file that is still empty are both legitimate. The scheduler counts
         # consecutive empties and says so once; this field is only the signal.
         # ``no_output`` covers bash, whose text is always framed and therefore
-        # never literally empty.
-        no_output = details.get("no_output") if isinstance(details, Mapping) else None
+        # never literally empty. It is published for a silent non-zero exit too
+        # (review round 1, QA Q2), so ``grep`` with no match reaches the empty
+        # rule instead of reaching no rule at all.
         empty = (not str(comparable or "").strip()) or no_output is True
         return {"text": comparable, "error": None, "handle": handle, "empty": empty}
 

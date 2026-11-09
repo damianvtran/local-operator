@@ -9736,6 +9736,17 @@ def _monitor_rows() -> "list[dict[str, Any]]":
             last = last if isinstance(last, int) and not isinstance(last, bool) else 0
             rows.append(
                 {
+                    # THE INDEX ROW IS THE BASE (QA round 1, Q1). This listing used
+                    # to re-list the health fields by hand, and a hand-written list
+                    # can only ever be one change behind: it dropped ``failing`` and
+                    # ``empty_checks`` the moment they were added, so `lop monitor
+                    # status` kept printing "nothing has changed (confirm the call
+                    # observes what you expect)" for a watch that had been failing on
+                    # every tick — the incident's own sentence, in the one reader
+                    # that had the row in hand. Spreading it means any field added to
+                    # the index reaches every surface that shares
+                    # ``store.health_hint`` instead of reaching all but this one.
+                    **raw,
                     "session_id": session_id,
                     "cwd": entry.get("cwd") or "",
                     "monitor_id": raw.get("id") or "",
@@ -9868,11 +9879,18 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
     if age is not None:
         parts.append(f"last check {format_age(age)} ago")
     failures = int(row.get("consecutive_failures") or 0)
+    failure_clause = f"{failures} failed"
     if failures and not (clause and clause.startswith(f"{failures} ")):
         # The disabled clause already carries the count when it was derived
         # from it ("5 consecutive failed checks"), and a row that says both is
-        # the D7 duplication in another form.
-        parts.append(f"{failures} failed")
+        # the D7 duplication in another form. The same rule applies to the health
+        # line on the next row: ``store.health_hint`` now OPENS with the count for
+        # a sub-threshold run ("1 failed check so far, below the 2-check
+        # threshold") and with "the check keeps failing" once it is a run, so the
+        # tail's standalone count would be the same fact said twice one line
+        # apart (QA round 1, Q3).
+        if not (hint and (hint.startswith(failure_clause) or f"failed check" in hint)):
+            parts.append(failure_clause)
     return " · ".join(parts)
 
 

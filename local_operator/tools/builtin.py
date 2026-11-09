@@ -5615,12 +5615,17 @@ async def execute_bash(
     # always framed with `--- stdout ---/(empty)`.
     result_details = dict(spill_details) if spill_details else {}
     result_details["exit_code"] = return_code
-    # Only a SUCCESSFUL command can be "returns nothing": a non-zero exit with an
-    # empty stderr is the undecided shape (see the monitor's failing rule) and
-    # claiming it printed nothing would be a second, different fact.
-    result_details["no_output"] = return_code == 0 and not (
-        stdout_raw.strip() or stderr_raw.strip()
-    )
+    # Only a command that printed NOTHING is "returns nothing".
+    #
+    # AND A SILENT NON-ZERO EXIT IS ONE OF THEM (review round 1, QA Q2):
+    # ``grep -q zzz /etc/hosts`` exits 1 with nothing on either stream, and the
+    # monitor seam then published neither ``stderr_head`` nor ``no_output`` for
+    # it — neither ``failing`` nor ``empty``, so a row said nothing at all while
+    # the call was answering with silence every tick. "Printed nothing" is the
+    # fact to publish, whatever the exit status; the shape that must NOT read as
+    # empty — a non-zero exit WITH a complaint — is already carried by
+    # ``stderr_head`` below, and the monitor's own rule ranks it as failing.
+    result_details["no_output"] = not (stdout_raw.strip() or stderr_raw.strip())
     if return_code != 0 and stderr_raw.strip():
         result_details["stderr_head"] = stderr_raw.strip()[:BASH_STDERR_HEAD_CHARS]
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=result_details)
@@ -15004,35 +15009,28 @@ class MonitorParams(BaseModel):
     op: Literal["create", "list", "cancel"] = Field(
         description="create: arm; list: show; cancel: remove."
     )
-    name: str | None = Field(default=None, description="Short label, e.g. 'slack-thread-42'.")
+    name: str | None = Field(default=None, description="Short label, e.g. 'ci-watch'.")
     tool: str | None = Field(
         default=None,
-        description=(
-            "Read-only tool to re-run: bash, web_search/web_fetch, read, grep, an mcp__ tool."
-        ),
+        description="Read-only tool to re-run: bash, grep, read, web_search, an mcp__ tool.",
     )
     arguments: dict[str, Any] | None = Field(
-        default=None, description="Exact arguments for that tool call."
+        default=None, description="Arguments for that call."
     )
     cwd: str | None = Field(
         default=None,
-        description=(
-            "Directory the check runs in (an existing directory path; ~ is expanded). "
-            "Use this for any bash watch that depends on WHERE it runs — a gh/git "
-            "command must run inside the repo, and ticks otherwise run in the arming "
-            "session's cwd, which may not be one. Omit for the session's cwd."
-        ),
+        description="Directory the checks run in; a gh/git watch needs its repo.",
     )
     every: str | None = Field(
         default=None,
-        description="Check interval: '30s'|'60s'|'5m'|'1h' (floor 30s, default 60s).",
+        description="Interval: '30s'|'60s'|'5m'|'1h' (default 60s).",
     )
-    until: str | None = Field(default=None, description="Stop time (ISO datetime); omit = durable.")
+    until: str | None = Field(default=None, description="Stop time (ISO); omit = durable.")
     description: str | None = Field(
         default=None, description="What to watch for — shown in list and on delivery."
     )
     notify: bool | None = Field(
-        default=None, description="Notify when a delivered change completes (default false)."
+        default=None, description="Notify when a change completes (default false)."
     )
     sort_lines: bool | None = Field(
         default=None, description="Unordered line compare (default false)."
@@ -15040,7 +15038,7 @@ class MonitorParams(BaseModel):
     ignore: list[str] | None = Field(
         default=None, description="Regexes dropping lines before diffing (max 8)."
     )
-    id: str | None = Field(default=None, description="Monitor id (cancel; from list).")
+    id: str | None = Field(default=None, description="Monitor id (cancel).")
 
 
 MONITOR_CALL_REPR_CHARS = 120
@@ -15256,17 +15254,21 @@ async def _monitor_create(
         # THE BASELINE ALREADY FAILED (D6): the watch is armed anyway — arming
         # on a resource that does not exist yet (a PR not opened, a file not
         # written) is legitimate — but the receipt must say so LOUDLY, in the
-        # first line, because the alternative is what the incident showed: an
+        # FIRST clause, because the alternative is what the incident showed: an
         # arm receipt that read as healthy next to a call that could never work.
+        # The warning leads and the caveat follows (QA round 1, Q5), and the
+        # second clause no longer promises a disable after five failures: a
+        # failing call charges no strike at all now (review round 1, BLOCKER-1).
         failure = _clip_monitor_text(str(outcome["baseline_error"]), 200)
         return _text(
             tool_call_id,
             "monitor",
-            f"Armed monitor '{spec.name}' ({spec.id}) — {caveat} WATCH IS FAILING: "
-            f"its baseline check already failed: {failure} "
-            f"{spec.tool} {call} every {format_duration(spec.every_ms)}, {bound}. The watch "
-            "stays armed (a resource that does not exist yet is a legitimate watch); if the "
-            "first scheduled check fails too it says so again, and repeated failures disable it.",
+            f"Armed monitor '{spec.name}' ({spec.id}) — WATCH IS FAILING: its baseline "
+            f"check already failed: {failure} {spec.tool} {call} every "
+            f"{format_duration(spec.every_ms)}, {bound}. The watch stays armed (a "
+            "resource that does not exist yet is a legitimate watch): it keeps checking, "
+            "backing off to every 15 minutes, says this once per failing episode, and is "
+            f"disabled only if the failure lasts 24 hours. {caveat}",
             details=facts,
         )
     first_clause = (
@@ -15333,10 +15335,8 @@ def build_monitor_tool(context: ToolContext) -> AgentTool | None:
         describe_approval=_describe_monitor_approval,
         description=(
             "Watch a read-only call for changes (create/list/cancel): re-runs it every "
-            "interval and wakes you only when the output differs. 'cwd' names the "
-            "directory the check runs in — pass it for any git/gh watch, which must "
-            "run inside its repository. A watch whose call fails is reported as "
-            "failing instead of being retried in silence."
+            "interval and wakes you only when the output differs. Pass 'cwd' for a gh/git "
+            "watch."
         ),
         parameters=MonitorParams.model_json_schema(),
         # write tier: create persists monitors and arms unattended future

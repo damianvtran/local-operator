@@ -678,3 +678,72 @@ def test_an_expired_blind_monitor_reads_as_expired(
     out = capsys.readouterr().out
     assert "expired" in out
     assert "BLIND" not in out
+
+
+def test_a_failing_watch_says_so_in_status_and_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 1, Q1: the CLI hand-built its row and dropped the new health keys.
+
+    The stored row is ``{'checks': 3, 'failing': True, 'last_error': …}``, so the
+    listing printed ``3 checks, 0 deliveries — nothing has changed (confirm the
+    call observes what you expect)`` for a watch that had failed on every tick —
+    the incident's own sentence, in the one reader that HAD ``failing`` in hand.
+    """
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m1",
+                checks=3,
+                deliveries=0,
+                failing=True,
+                failing_checks=3,
+                failing_notice_checks=2,
+                last_error="cat: state.txt: No such file or directory",
+                next_due_at=now + 60_000,
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "WATCH IS FAILING" in out, out
+    assert "No such file or directory" in out, out
+    assert "nothing has changed" not in out, out
+    assert "confirm the call observes what you expect" not in out, out
+
+    # The JSON listing carries the same fields, so a scripted reader cannot miss
+    # the state the table names either.
+    assert monitor_command(_args(json=True)) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows[0]["failing"] is True, rows[0]
+    assert rows[0]["failing_checks"] == 3, rows[0]
+    assert "returned nothing" not in json.dumps(rows)
+
+
+def test_a_never_returning_call_is_named_in_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ``empty`` episode reaches the CLI by the same key parity."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=4, deliveries=0, empty_checks=4, next_due_at=now + 60_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+    out = capsys.readouterr().out
+    assert "returned nothing for 4 checks" in out, out
+    assert "nothing has changed" not in out, out

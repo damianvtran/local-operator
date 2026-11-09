@@ -1281,6 +1281,10 @@ _NOTICE_MARKERS: tuple[tuple[str, str], ...] = (
     # — which is exactly the shape that made the incident's silence look like a
     # healthy quiet watch.
     (" watch is failing: ", "failing"),
+    # The OTHER fault class: the check itself keeps failing (a timeout, a tool
+    # error), which charges the ordinary strike ladder and says so before the
+    # disable it announces. Registered here for the same reason as the two above.
+    (" the check keeps failing: ", "striking"),
     (" the call returns nothing: ", "empty"),
 )
 

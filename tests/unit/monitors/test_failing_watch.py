@@ -46,6 +46,8 @@ from local_operator.monitors.delivery import MonitorNotice, format_monitor_notic
 from local_operator.monitors.scheduler import (
     EMPTY_CHECKS_BEFORE_NOTICE,
     FAILING_CHECKS_AFTER_BASELINE,
+    RETRY_CAP_MS,
+    CheckOutcome,
     MonitorScheduler,
 )
 from local_operator.monitors.settings import MonitorSettings
@@ -69,6 +71,15 @@ def _stream(request: Any, signal: Any):  # noqa: ANN202
         yield StreamEndEvent(stop_reason="stop")
 
     return gen()
+
+
+def _tool_context(cwd: str = "/") -> ToolContext:
+    """The context a real call carries.
+
+    ``ToolExecuteFn``'s fifth parameter is a required ``ToolContext`` (pyright
+    rejects ``None`` at these call sites), and bash needs a ``cwd`` to spawn in.
+    """
+    return ToolContext(cwd=cwd)
 
 
 @pytest.fixture
@@ -636,7 +647,7 @@ async def test_bash_publishes_its_exit_status_and_stderr_as_structured_details()
     takes.
     """
     tool = build_bash_tool()
-    failed = await tool.execute("c1", {"command": "ls /definitely-not-a-real-dir-xyz"}, None)
+    failed = await tool.execute("c1", {"command": "ls /definitely-not-a-real-dir-xyz"}, None, None, _tool_context())
     assert failed.is_error is False, "the bash contract: a non-zero exit is not an error"
     assert failed.text.startswith("exit code: ")
     assert failed.details is not None
@@ -644,14 +655,14 @@ async def test_bash_publishes_its_exit_status_and_stderr_as_structured_details()
     assert "definitely-not-a-real-dir-xyz" in failed.details["stderr_head"]
     assert failed.details["no_output"] is False
 
-    quiet = await tool.execute("c2", {"command": "true"}, None)
+    quiet = await tool.execute("c2", {"command": "true"}, None, None, _tool_context())
     assert quiet.details is not None
     assert quiet.details["exit_code"] == 0
     assert quiet.details["no_output"] is True
     # A SUCCESSFUL command's details stay minimal: no stderr field to carry.
     assert "stderr_head" not in quiet.details
 
-    chatty = await tool.execute("c3", {"command": "printf hi"}, None)
+    chatty = await tool.execute("c3", {"command": "printf hi"}, None, None, _tool_context())
     assert chatty.details is not None and chatty.details["no_output"] is False
 
 
@@ -691,7 +702,7 @@ class _Harness:
 
     def __init__(self, tmp_path: Path) -> None:
         self.now_ms = NOW
-        self.results: list[dict[str, Any]] = []
+        self.results: list[CheckOutcome] = []
         self.notices: list[Any] = []
         self.deliveries: list[Any] = []
         self.scheduler = MonitorScheduler(
@@ -707,7 +718,7 @@ class _Harness:
             uniform=lambda low, high: low,
         )
 
-    async def _run_check(self, monitor: MonitorSpec) -> dict[str, Any]:
+    async def _run_check(self, monitor: MonitorSpec) -> CheckOutcome:
         if self.results:
             return self.results.pop(0)
         return {"text": "same", "error": None}
@@ -783,8 +794,19 @@ async def test_the_failing_threshold_is_one_without_a_baseline_and_two_with_one(
 
 
 @pytest.mark.asyncio
-async def test_an_ordinary_tool_error_keeps_todays_ladder(tmp_path: Path) -> None:
-    """Every non-``failing`` error path is unchanged: strikes, then a disable."""
+async def test_an_ordinary_tool_error_keeps_todays_ladder_and_now_speaks_once(
+    tmp_path: Path,
+) -> None:
+    """Every non-``failing`` error path keeps its strikes; it gains ONE notice.
+
+    ROUND-2 DECISION CHANGE (manager, this PR): the round-1 version of this test
+    asserted ``["disabled"]`` — the ordinary ladder struck five times in silence
+    and then died, which is the ~35-minute hiding shape the operator named (review
+    round 1, MINOR-5). The ladder itself is UNCHANGED (five strikes, then a
+    disable); it now earns one ``striking`` notice at the second consecutive
+    failure, three strikes before the disable it announces. A timeout is one of
+    these ordinary failures, deliberately NOT the no-strike ``failing`` class.
+    """
     harness = _Harness(tmp_path)
     try:
         await harness.arm()
@@ -792,10 +814,19 @@ async def test_an_ordinary_tool_error_keeps_todays_ladder(tmp_path: Path) -> Non
             harness.results.append({"error": "the tool returned an error"})
             await harness.tick()
         kinds = [notice.kind for notice in harness.notices]
-        assert kinds == ["disabled"], kinds
+        assert kinds == ["striking", "disabled"], kinds
         assert harness.scheduler.monitors[0].id == "m1"
         counters = harness.scheduler._entries["m1"].counters
         assert counters["disabled"] is True
+        # The notice names the class that really is heading for the disable, and
+        # the limit it is heading for.
+        notice = harness.notices[0]
+        assert notice.failures == 2, notice
+        assert notice.failure_limit == MonitorSettings().max_consecutive_failures, notice
+        text = format_monitor_notice_text(notice)
+        assert "the check keeps failing:" in text, text
+        assert "watch is failing" not in text, text
+        assert "disable it at 5" in text, text
     finally:
         harness.scheduler.dispose()
 
@@ -870,3 +901,404 @@ def test_a_failing_notice_is_recognised_as_a_notice_by_the_receipt_card() -> Non
     # A call that answers with nothing is a fact, not a fault: neutral ink.
     assert "empty" not in MonitorDeltaBlock.WARNING_NOTICE_KINDS
     assert "returns nothing" in monitor_receipt_headline(empty_text)
+
+
+# ---------------------------------------------------------------------------
+# Round 2: the round-1 ledger
+#
+# BLOCKER-1 is the one that mattered most: round 1 made a failing call speak, and
+# in doing so spent the ordinary strike ladder on it — so a watch on a resource
+# that does not exist YET (which the arm receipt explicitly calls legitimate) was
+# DISABLED at its fifth failing tick (~25 minutes at a 5-minute interval) and
+# stayed dead after the resource appeared. These tests pin the rule that
+# replaced it: a failing call charges no strike, keeps the capped retry, says so
+# once per episode, and ends only by recovering or after 24 h of failure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_watch_on_a_not_yet_existing_file_survives_the_old_ladder_and_reports_it(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """BLOCKER-1, executed on a real file that does not exist yet.
+
+    Pre-fix, this exact shape: tick 1 paged, tick 5 DISABLED the watch, and the
+    three ticks after ``state.txt`` appeared produced nothing at all. Post-fix it
+    stays armed past the ladder, keeps its episode latched to one notice, then
+    picks the file up and delivers the change after it.
+    """
+    state = tmp_path / "state.txt"
+    session, sinks = _session(tmp_path, tmp_path)
+    clock = [NOW]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    try:
+        outcome = await session._monitors.create(
+            {
+                "name": "wait-for-state",
+                "tool": "bash",
+                "arguments": {"command": f"tail -n 5 {state}"},
+                "every": "60s",
+            },
+            cwd=str(tmp_path),
+        )
+        assert outcome.get("created"), outcome
+
+        # SIX failing ticks: one past ``max_consecutive_failures``, which is
+        # where the round-1 build disabled the watch.
+        for _ in range(6):
+            await _tick(session, clock)
+        assert [notice.kind for notice in sinks.notices] == ["failing"], sinks.notices
+        entry = session._monitors._entries["m1"]
+        assert entry.counters.get("disabled") is not True, entry.counters
+        assert entry.counters["consecutive_failures"] == 0, entry.counters
+        assert entry.counters["failing_ticks"] == 6, entry.counters
+
+        # The resource appears. The first successful check ESTABLISHES the
+        # baseline (there was never a result to compare), so it delivers nothing
+        # — and it must NOT be an error, a disable or a second notice.
+        state.write_text("ready\n", encoding="utf-8")
+        await _tick(session, clock)
+        assert sinks.deliveries == [], sinks.deliveries
+        assert [notice.kind for notice in sinks.notices] == ["failing", "restored"], sinks.notices
+        # The row stops saying FAILING the moment the call works.
+        hint = monitor_store.health_hint(_row(session), None) or ""
+        assert "FAILING" not in hint, hint
+
+        # The change after the baseline is DELIVERED — the thing a disabled watch
+        # could never do again.
+        state.write_text("ready\nand changed\n", encoding="utf-8")
+        await _tick(session, clock)
+        assert len(sinks.deliveries) == 1, sinks.deliveries
+        assert "and changed" in sinks.deliveries[0].delta_text, sinks.deliveries[0].delta_text
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_episode_keeps_its_capped_retry_and_never_strikes(
+    tmp_path: Path,
+) -> None:
+    """The ladder's shape for a failing call: capped backoff, zero strikes."""
+    harness = _Harness(tmp_path)
+    try:
+        await harness.arm()
+        for _ in range(8):
+            harness.results.append({"error": "cat: state.txt: No such file", "kind": "failing"})
+            await harness.tick()
+        counters = harness.scheduler._entries["m1"].counters
+        assert [notice.kind for notice in harness.notices] == ["failing"], harness.notices
+        assert counters.get("disabled") is not True, counters
+        assert counters["consecutive_failures"] == 0, counters
+        # The retry is bounded by RETRY_CAP_MS, never unbounded.
+        assert counters["next_due_at"] - harness.now_ms <= RETRY_CAP_MS, counters
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_episode_is_disabled_only_after_twenty_four_hours(
+    tmp_path: Path,
+) -> None:
+    """The horizon that replaced the five-strike disable, and the notice naming it.
+
+    A day of CONTINUOUS failure is not a resource that is about to appear. The
+    notice says which horizon it ended on — the strike count it never charged
+    would be a false claim in text the operator is meant to trust.
+    """
+    harness = _Harness(tmp_path)
+    try:
+        await harness.arm()
+        harness.results.append({"error": "cat: state.txt: No such file", "kind": "failing"})
+        await harness.tick()
+
+        # 23 hours in: still armed, still the same single notice.
+        harness.now_ms += 23 * 3_600_000
+        harness.results.append({"error": "still missing", "kind": "failing"})
+        await harness.tick()
+        counters = harness.scheduler._entries["m1"].counters
+        assert counters.get("disabled") is not True, counters
+        assert [notice.kind for notice in harness.notices] == ["failing"], harness.notices
+
+        # Past the horizon: one disable notice, naming 24 hours.
+        harness.now_ms += 2 * 3_600_000
+        harness.results.append({"error": "still missing", "kind": "failing"})
+        await harness.tick()
+        counters = harness.scheduler._entries["m1"].counters
+        assert counters["disabled"] is True, counters
+        assert counters["disabled_kind"] == "failing", counters
+        kinds = [notice.kind for notice in harness.notices]
+        assert kinds == ["failing", "disabled"], kinds
+        text = format_monitor_notice_text(harness.notices[-1])
+        assert "24 hours" in text, text
+        assert "consecutive failed check" not in text, text
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_success_clears_the_failing_episode_clock(tmp_path: Path) -> None:
+    """The horizon measures CONTINUOUS failure, so a recovery resets it."""
+    harness = _Harness(tmp_path)
+    try:
+        await harness.arm()
+        harness.results.append({"error": "boom", "kind": "failing"})
+        await harness.tick()
+        harness.now_ms += 20 * 3_600_000
+        harness.results.append({"text": "back", "error": None})
+        await harness.tick()
+        counters = harness.scheduler._entries["m1"].counters
+        assert counters["failing_since"] == 0, counters
+        assert counters["failing_ticks"] == 0, counters
+        assert counters["failing"] is False, counters
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_row_tells_a_blip_from_an_announced_episode(tmp_path: Path) -> None:
+    """QA Q3: one failed check is not "WATCH IS FAILING" — it says the threshold."""
+    harness = _Harness(tmp_path)
+    try:
+        await harness.arm()
+        harness.results.append({"text": "A", "error": None})
+        await harness.tick()  # baseline: N becomes 2
+        harness.results.append({"error": "boom: rate limited", "kind": "failing"})
+        await harness.tick()
+        assert [notice.kind for notice in harness.notices] == [], harness.notices
+
+        row = harness.scheduler.index_rows()[0]
+        hint = monitor_store.health_hint(row, None) or ""
+        assert hint.startswith("1 failed check"), hint
+        assert "below the 2-check threshold" in hint, hint
+        assert "WATCH IS FAILING" not in hint, hint
+
+        # The second consecutive failure IS the announced episode.
+        harness.results.append({"error": "boom: still failing", "kind": "failing"})
+        await harness.tick()
+        row = harness.scheduler.index_rows()[0]
+        hint = monitor_store.health_hint(row, None) or ""
+        assert hint.startswith("WATCH IS FAILING"), hint
+        assert "2 checks in a row" in hint, hint
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_row_tells_a_blip_from_a_strike_run(tmp_path: Path) -> None:
+    """QA Q3 for the OTHER class: an ordinary failure below the threshold says so.
+
+    The strike class is heading for the disable, so its row names the run and the
+    limit — but ONE failed check is still not a verdict, and the row says that
+    instead of either "nothing has changed" or "the watch is failing".
+    """
+    harness = _Harness(tmp_path)
+    try:
+        await harness.arm()
+        harness.results.append({"text": "A", "error": None})
+        await harness.tick()  # baseline
+        harness.results.append({"error": "the tool returned an error"})
+        await harness.tick()
+        assert harness.notices == [], harness.notices
+
+        row = harness.scheduler.index_rows()[0]
+        hint = monitor_store.health_hint(row, None) or ""
+        assert hint.startswith("1 failed check so far"), hint
+        assert "below the 2-check threshold" in hint, hint
+        assert "keeps failing" not in hint, hint
+
+        harness.results.append({"error": "the tool returned an error"})
+        await harness.tick()
+        assert [notice.kind for notice in harness.notices] == ["striking"], harness.notices
+        row = harness.scheduler.index_rows()[0]
+        hint = monitor_store.health_hint(row, None) or ""
+        assert hint.startswith("the check keeps failing:"), hint
+        assert "repeated failures disable it at 5" in hint, hint
+        assert "WATCH IS FAILING" not in hint, hint
+    finally:
+        harness.scheduler.dispose()
+
+
+def test_the_failing_hint_clips_its_detail() -> None:
+    """MINOR-2: a 639-char single row beside a neighbour that clips to 80."""
+    row = {
+        "failing": True,
+        "failing_checks": 3,
+        "failing_notice_checks": 1,
+        "last_error": "failed to run git: " + "x" * 600,
+    }
+    hint = monitor_store.health_hint(row, None) or ""
+    # The detail is CLIPPED inside the sentence (MINOR-2): a 500-char counter
+    # value must not become a 639-char single row beside a neighbour clipping
+    # to 80.
+    assert len(hint) < 200, len(hint)
+    assert "…" in hint, hint
+    assert "x" * 121 not in hint, hint
+    assert hint.startswith("WATCH IS FAILING"), hint
+
+
+def test_the_empty_hint_states_the_fact_and_promises_no_permanence() -> None:
+    """MAJOR-2: an empty result is a digest, so the first change IS reported."""
+    row = {"empty_checks": 4, "checks": 4, "deliveries": 0}
+    hint = monitor_store.health_hint(row, None) or ""
+    assert "returned nothing for 4 checks" in hint, hint
+    assert "reports the first result it gets" in hint, hint
+    assert "nothing to compare" not in hint, hint
+
+
+@pytest.mark.asyncio
+async def test_an_empty_result_still_reports_its_first_change(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """MAJOR-2, executed: the notice must not claim the watch cannot report.
+
+    Round 1's notice said "An empty result can never change, so this watch cannot
+    report anything" and nudged a cancel — while the executed truth is that
+    ``content_hash("")`` is a real digest, so the first non-empty result IS a
+    detected change and IS delivered on the next check.
+    """
+    repo = _git_repo(tmp_path)
+    session, sinks = _session(tmp_path, repo)
+    clock = [NOW]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    try:
+        outcome = await session._monitors.create(
+            {
+                "name": "dirty-tree",
+                "tool": "bash",
+                "arguments": {"command": "git status --porcelain"},
+                "every": "60s",
+            },
+            cwd=str(repo),
+        )
+        assert outcome.get("created"), outcome
+        for _ in range(EMPTY_CHECKS_BEFORE_NOTICE):
+            await _tick(session, clock, advance_ms=MINUTE)
+        assert [notice.kind for notice in sinks.notices] == ["empty"], sinks.notices
+
+        text = format_monitor_notice_text(sinks.notices[0])
+        assert "can never change" not in text, text
+        assert "cannot report anything" not in text, text
+        # The cancel nudge is gone with the false claim it was derived from.
+        assert 'op:"cancel"' not in text, text
+        assert "still armed" in text, text
+
+        hint = monitor_store.health_hint(_row(session), None) or ""
+        assert "nothing to compare" not in hint, hint
+
+        # THE FACT THAT MATTERS: the first change after the empty episode is
+        # detected and delivered, on the very next check.
+        (repo / "file.txt").write_text("changed\n", encoding="utf-8")
+        await _tick(session, clock, advance_ms=MINUTE)
+        assert len(sinks.deliveries) == 1, sinks.deliveries
+        assert "file.txt" in sinks.deliveries[0].delta_text, sinks.deliveries[0].delta_text
+        # ...and the empty episode is closed SILENTLY: a first result is its own
+        # news (it arrives as a delivery), so unlike the failing/blind episodes
+        # there is no matching "restored" notice to send.
+        assert [notice.kind for notice in sinks.notices] == ["empty"], sinks.notices
+        row = _row(session)
+        assert row["empty_checks"] == 0, row
+        assert "returned nothing" not in (monitor_store.health_hint(row, None) or "")
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_silent_non_zero_exit_is_published_as_no_output() -> None:
+    """QA Q2: ``grep`` with no match published neither failing nor empty."""
+    tool = build_bash_tool()
+    quiet = await tool.execute("c1", {"command": "grep -q zzz /etc/hosts"}, None, None, _tool_context())
+    assert quiet.is_error is False, "the bash contract: a non-zero exit is not an error"
+    assert quiet.details is not None
+    assert quiet.details["exit_code"] == 1
+    assert quiet.details["no_output"] is True
+    # No complaint, so no stderr field: the two facts stay distinct.
+    assert "stderr_head" not in quiet.details
+
+
+@pytest.mark.asyncio
+async def test_a_check_that_never_answers_speaks_at_the_second_failure(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """MINOR-5, on the manager's round-2 route.
+
+    A timeout is a GENUINE fault: it keeps charging strikes (so a wedged call
+    still disables — ``test_restart_stability`` pins ``consecutive_failures == 1``
+    for one timeout) but it now speaks at the second consecutive failure instead
+    of staying silent for all five.
+    """
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    session, sinks = _session(tmp_path, tmp_path)
+    clock = [NOW]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    # The production deadline is 2 minutes; the classification is the same at any
+    # value, and a 300 ms wait keeps the suite fast (the same override
+    # ``test_restart_stability`` uses).
+    session._monitors._settings = MonitorSettings(run_timeout_ms=300)
+    try:
+        outcome = await session._monitors.create(
+            {
+                "name": "never-answers",
+                "tool": "bash",
+                "arguments": {"command": f"cat {fifo}"},
+                "every": "60s",
+            },
+            cwd=str(tmp_path),
+        )
+        assert outcome.get("created"), outcome
+        # ONE timeout is a blip: it strikes, and says nothing.
+        await _tick(session, clock)
+        assert sinks.notices == [], sinks.notices
+        entry = session._monitors._entries["m1"]
+        assert entry.counters["consecutive_failures"] == 1, entry.counters
+
+        await _tick(session, clock)
+        assert [notice.kind for notice in sinks.notices] == ["striking"], sinks.notices
+        notice = sinks.notices[0]
+        assert "timed out" in notice.detail, notice.detail
+        assert entry.counters.get("disabled") is not True, entry.counters
+        text = format_monitor_notice_text(notice)
+        assert text.startswith("(monitor)"), text
+        assert "the check keeps failing:" in text, text
+        assert "timed out" in text, text
+        # The row tells the truth about the class it is in.
+        hint = monitor_store.health_hint(_row(session), None) or ""
+        assert hint.startswith("the check keeps failing:"), hint
+    finally:
+        await session.dispose()
+
+
+def test_a_relative_cwd_resolves_against_the_arming_session(tmp_path: Path) -> None:
+    """MINOR-1: ``cwd="sub"`` must mean the session's ``sub/``, not this process's."""
+    from local_operator.monitors import spec as monitor_spec
+
+    session_dir = tmp_path / "session"
+    (session_dir / "sub").mkdir(parents=True)
+    built = monitor_spec.build_monitor_spec(
+        {
+            "name": "rel",
+            "tool": "bash",
+            "arguments": {"command": "ls"},
+            "cwd": "sub",
+            "every": "60s",
+        },
+        monitor_id="m1",
+        now_ms=NOW,
+        settings=MonitorSettings(),
+        cwd=str(session_dir),
+        validate=lambda tool, args: None,
+    )
+    assert "spec" in built, built
+    assert built["spec"].cwd == str(session_dir / "sub"), built["spec"].cwd
+
+
+def test_a_repo_flag_value_must_look_like_a_repo_name() -> None:
+    """QA Q4: the flag's VALUE was accepted as opaque data."""
+    from local_operator.monitors import readonly
+
+    assert readonly._bash_verdict("gh pr view 1 -R not-a-repo-name") is not None
+    assert readonly._bash_verdict("gh pr view 1 -R ../../etc") is not None
+    assert readonly._bash_verdict("gh pr view 1 -R") is not None
+    assert readonly._bash_verdict("gh pr view 1 -R owner/name") is None
+    assert readonly._bash_verdict("gh pr view 1 --repo=owner/name") is None
+    assert readonly._bash_verdict("gh pr view 1 -Rowner/name") is None

@@ -88,6 +88,7 @@ _NOTICE_LATCH: dict[str, str] = {
     "stalled": "unavailable_notified",
     "blind": "blind_notified",
     "failing": "failing_notified",
+    "striking": "striking_notified",
     "empty": "empty_notified",
 }
 
@@ -133,6 +134,27 @@ FAILING_CHECKS_WITHOUT_BASELINE = 1
 #: written): it is only a signal once the call has never produced anything, and
 #: three checks is enough to tell "quiet right now" from "watching nothing".
 EMPTY_CHECKS_BEFORE_NOTICE = 3
+#: How long a ``failing`` episode may continue before the watch is disabled (D3).
+#: A failing call charges NO strike (see ``_apply_failing``), so "genuinely gone"
+#: has to be settled some other way, and the ``unavailable`` episode next door
+#: already settled it this way: a resource that is missing right now comes back,
+#: one that has been missing for a day does not. 24 h is that same horizon, for
+#: the same reason, and it replaces the five-strike disable that killed a watch
+#: on a not-yet-existing file after ~25 minutes of a legitimate wait (review
+#: round 1, BLOCKER-1).
+FAILING_GONE_MS = 24 * 3_600_000
+#: Consecutive ORDINARY failures that earn the operator a first notice (§D3).
+#:
+#: THE OTHER CLASS OF FAULT, and it must not be confused with ``failing`` above.
+#: A timeout, a tool error or anything else without a ``kind`` is a check that
+#: really is heading for the five-strike disable — the fault is in the watch, not
+#: in a resource that may still appear — so it keeps charging strikes. What it
+#: must not do is stay silent for all five: "35 minutes of nothing and then dead"
+#: is exactly the hiding shape the operator named. So it earns ONE notice at the
+#: second consecutive failure, three strikes before the disable it announces.
+#: Two, not one, for the reason ``FAILING_CHECKS_AFTER_BASELINE`` gives: one
+#: transient blip is not news, and no real change stays hidden through two.
+STRIKING_CHECKS_BEFORE_NOTICE = 2
 
 
 def _skipped_checks_since(last_check_at: int, every_ms: int, now_ms: int) -> int:
@@ -193,10 +215,16 @@ class CheckOutcome(TypedDict, total=False):
     - ``failing``: the call RAN and the tool said it could not do the job — a
       non-zero exit with a complaint on stderr, which ``bash`` reports as an
       ordinary success result (see ``execute_bash``'s ``exit_code``/
-      ``stderr_head`` details and ``Session._run_monitor_check``). It rides the
-      ordinary strike ladder, and additionally earns the ``failing`` notice on
-      the first failure if the watch has no baseline yet, or on the second
-      consecutive one if it has (see ``FAILING_CHECKS_AFTER_BASELINE``).
+      ``stderr_head`` details and ``Session._run_monitor_check``). It charges NO
+      strike: it keeps the capped backoff, stays armed, earns ONE latched
+      ``failing`` notice per episode (on the first failure if the watch has no
+      baseline yet, on the second consecutive one if it has — see
+      ``FAILING_CHECKS_AFTER_BASELINE``), and is disabled only after
+      ``FAILING_GONE_MS`` of continuous failure (see ``_apply_failing``). A
+      TIMEOUT is deliberately NOT this kind: the check itself cannot complete, so
+      it belongs to the ordinary ladder (which now speaks once per episode — see
+      ``STRIKING_CHECKS_BEFORE_NOTICE``), because that watch really is heading for
+      the disable.
     """
 
     text: str | None
@@ -469,6 +497,21 @@ class MonitorScheduler:
                     # open (D8). ``empty_checks`` is the "returns nothing"
                     # counterpart.
                     "failing": bool(counters.get("failing")),
+                    # ...and HOW FAR INTO the episode it is, with the policy's
+                    # own threshold beside it. The reader needs both to tell a
+                    # single failed check (deliberately not paged) from an
+                    # episode that has reached the threshold and was announced
+                    # — and it must not re-derive the threshold from
+                    # ``consecutive_failures``, which a failing tick no longer
+                    # charges (QA round 1, Q3; review round 1, BLOCKER-1).
+                    "failing_checks": counters.get("failing_ticks", 0),
+                    "failing_notice_checks": counters.get("failing_notice_checks", 0),
+                    # The strike-class counterpart: how many consecutive failures
+                    # the ordinary ladder has, and the limit it is heading for. A
+                    # reader needs both to say "one failed check, below the
+                    # threshold" instead of claiming the watch is failing (QA
+                    # round 1, Q3), and to name the disable it is heading for.
+                    "failure_limit": counters.get("failure_limit", 0),
                     "empty_checks": counters.get("empty_checks", 0),
                 }
             )
@@ -691,7 +734,57 @@ class MonitorScheduler:
             # The receipt names the failure LOUDLY (``_monitor_create`` leads its
             # text with it); the watch is armed anyway.
             result["baseline_error"] = str(probe["error"])
+            # ...and the PUBLISHED ROW says so too, or `lop monitor status` (and
+            # every other cold reader) shows a healthy row for up to a full
+            # interval after an arm that already failed (QA round 1, Q3).
+            # ``unavailable``/``blind``/``fatal`` probes are NOT opened here: their
+            # policies need a scheduled tick's accounting to stay honest, and a
+            # probe is not one.
+            probe_kind = str(probe.get("kind") or "")
+            if probe_kind not in ("unavailable", "blind", "fatal"):
+                self._record_arm_probe_failure(
+                    entry, str(probe["error"]), now, kind=probe_kind or None
+                )
         return result
+
+    def _record_arm_probe_failure(
+        self, entry: _Entry, error: str, now: int, *, kind: str | None = None
+    ) -> None:
+        """Open a failure episode from the arm-time probe, without announcing it.
+
+        The probe is a REAL call and it failed, so the row must not read healthy
+        until the next scheduled check. What it must NOT do is announce: the arm
+        receipt already carries the failure, and announcing here would say the
+        same thing twice in one turn.
+
+        BOTH failure classes are recorded, because both are real failed calls and
+        the row owes the reader the truth in the gap before tick 1 (QA round 1,
+        Q3):
+
+        - ``failing``: opens the episode as its FIRST tick and leaves the latch
+          unset, so the first scheduled check is tick 2, reaches the threshold (1
+          with no baseline) and announces exactly once — as it would have without
+          the probe;
+        - anything else: ONE strike, because that class really is heading for the
+          disable, and the count is published so the row says "1 failed check,
+          below the threshold" instead of "nothing has changed".
+
+        ``next_due_at`` is deliberately NOT touched: the probe is not a scheduled
+        check, and the receipt has already promised when the first one runs.
+        """
+        counters = entry.counters
+        counters["checks"] = int(counters.get("checks") or 0) + 1
+        counters["last_error"] = str(error)[:500]
+        if kind == "failing":
+            counters["failing"] = True
+            counters["failing_since"] = now
+            counters["failing_ticks"] = 1
+            counters["failing_notice_checks"] = FAILING_CHECKS_WITHOUT_BASELINE
+            counters["last_note"] = "the watch's call already failed at arm"
+            return
+        counters["consecutive_failures"] = int(counters.get("consecutive_failures") or 0) + 1
+        counters["failure_limit"] = self._settings.max_consecutive_failures
+        counters["last_note"] = "a check already failed at arm"
 
     async def _probe_baseline(self, spec: MonitorSpec) -> dict[str, Any]:
         """Run one arm-time check; ``{"error": …}`` or ``{"text": …, "handle": …}``.
@@ -713,7 +806,18 @@ class MonitorScheduler:
             return {"error": f"{type(exc).__name__}: {exc}"}
         error = outcome.get("error")
         if error:
-            return {"error": str(error)}
+            # THE CLASSIFICATION RIDES ALONG (QA round 1, Q3). The caller records a
+            # ``failing`` probe as the episode's first tick so the published row
+            # does not read healthy until the next scheduled check — and must not
+            # do that for an ``unavailable``/``fatal``/``blind`` probe, whose own
+            # policies already say the right thing in the counters they set.
+            classified: dict[str, Any] = {"error": str(error)}
+            if outcome.get("kind"):
+                # ``.get``, not ``[]``: CheckOutcome is ``total=False``, so the key
+                # is optional by contract and pyright is right to refuse the item
+                # access.
+                classified["kind"] = str(outcome.get("kind"))
+            return classified
         return {"text": outcome.get("text") or "", "handle": outcome.get("handle") or None}
 
     async def cancel(self, monitor_id: str) -> dict[str, Any]:
@@ -1381,7 +1485,7 @@ class MonitorScheduler:
     ) -> MonitorNotice | None:
         """Apply one failed check; returns the notice it produced, if any.
 
-        Three policies, chosen by ``kind``:
+        Four policies, chosen by ``kind``:
 
         - ``unavailable``: the call never ran, so nothing is known about the
           watched thing. NO strike is charged and the diff accounting
@@ -1391,6 +1495,9 @@ class MonitorScheduler:
           same capped ladder, keyed on ``unavailable_ticks``. A stall notice
           goes out once per episode, after ``UNAVAILABLE_STALL_MS``, and the
           episode ends by disabling at ``UNAVAILABLE_GONE_MS``;
+        - ``failing``: the call RAN and the tool said it could not do the job.
+          It is not a strike either — see ``_apply_failing``, which owns the
+          whole episode and returns before this ladder is touched;
         - ``fatal``: deterministic and never self-healing, so it disables on
           the FIRST occurrence rather than after five identical failures;
         - absent/anything else: the ordinary ladder, unchanged.
@@ -1436,52 +1543,16 @@ class MonitorScheduler:
             )
             return None
 
+        if kind == "failing":
+            # THE FAILING EPISODE IS NOT A STRIKE (D3; review round 1,
+            # BLOCKER-1). It owns its whole episode in ``_apply_failing`` and
+            # returns BEFORE this ladder is touched, so a watch on a resource
+            # that does not exist yet survives its fifth failing tick.
+            return self._apply_failing(entry, now)
         counters["checks"] = int(counters.get("checks") or 0) + 1
         counters["last_check_at"] = now
         counters["consecutive_failures"] = int(counters.get("consecutive_failures") or 0) + 1
         failures = counters["consecutive_failures"]
-        # THE FAILING EPISODE (D3). A ``kind="failing"`` check is one where the
-        # call RAN and the tool said it could not do the job (a non-zero exit with
-        # a complaint on stderr). It is not "unavailable" — nothing needs to
-        # reconnect — and it is not "fatal" — the same call may work on the next
-        # tick. So it rides the ordinary strike ladder (backoff, then disable
-        # after ``max_consecutive_failures``) and additionally earns ONE notice
-        # per episode, whose threshold depends on whether the watch has ever
-        # worked (see ``FAILING_CHECKS_AFTER_BASELINE``).
-        #
-        # The notice's latch is settled by ``_send_notice`` after the sink
-        # returned, exactly like the stall/disable latches, so a notice that never
-        # reached a session is re-earned on the next tick instead of leaving a
-        # silent episode. ``_restored_notice`` clears the episode on the next
-        # success.
-        failing_notice: MonitorNotice | None = None
-        if kind == "failing":
-            was_failing = bool(counters.get("failing"))
-            counters["failing"] = True
-            if not was_failing:
-                # The ENTER edge is published (not every failing tick): the list
-                # row and the TUI band render the published row, and a row in a
-                # failing episode must say so instead of "nothing has changed"
-                # (D8). Same rule and same reason as ``_apply_blind``.
-                self._notify_change()
-            threshold = (
-                FAILING_CHECKS_AFTER_BASELINE
-                if counters.get("content_hash")
-                else FAILING_CHECKS_WITHOUT_BASELINE
-            )
-            if failures >= threshold and not counters.get("failing_notified"):
-                failing_notice = MonitorNotice(
-                    monitor_id=entry.spec.id,
-                    name=entry.spec.name,
-                    tool=entry.spec.tool,
-                    kind="failing",
-                    at_ms=now,
-                    checks=int(counters.get("checks") or 0),
-                    deliveries=int(counters.get("deliveries") or 0),
-                    failures=failures,
-                    detail=counters["last_error"],
-                    no_baseline=not bool(counters.get("content_hash")),
-                )
         if kind == "fatal":
             self._disable(entry, counters["last_error"], now, kind="fatal")
             logger.warning(
@@ -1497,9 +1568,131 @@ class MonitorScheduler:
                 counters["last_error"],
             )
             return self._disable_notice(entry, now, failures=failures)
+        # THE STRIKE CLASS SPEAKS BEFORE IT DIES (round-2 manager decision; review
+        # round 1, MINOR-5). Everything reaching here charges a strike and is three
+        # away from the disable, so the operator gets ONE notice at the second
+        # consecutive failure instead of waiting ~35 minutes for a silent death at
+        # five. The latch is settled by ``_send_notice`` after the sink returned, as
+        # every latch in this file is, and ``_restored_notice`` clears it on the
+        # next success so the notice is never the last word.
+        if failures == 1:
+            # The ENTER edge is published, exactly like the failing episode's: the
+            # row must be able to say "1 failed check, below the threshold" instead
+            # of "nothing has changed" while the strikes are accruing.
+            counters["failure_limit"] = self._settings.max_consecutive_failures
+            self._notify_change()
+        if failures >= STRIKING_CHECKS_BEFORE_NOTICE and not counters.get("striking_notified"):
+            counters["failure_limit"] = self._settings.max_consecutive_failures
+            striking_notice = MonitorNotice(
+                monitor_id=entry.spec.id,
+                name=entry.spec.name,
+                tool=entry.spec.tool,
+                kind="striking",
+                at_ms=now,
+                checks=int(counters.get("checks") or 0),
+                deliveries=int(counters.get("deliveries") or 0),
+                failures=failures,
+                detail=counters["last_error"],
+                failure_limit=self._settings.max_consecutive_failures,
+            )
+        else:
+            striking_notice = None
         backoff = min(RETRY_CAP_MS, entry.spec.every_ms * (2 ** (failures - 1)))
         counters["next_due_at"] = now + backoff
-        return failing_notice
+        return striking_notice
+
+    def _apply_failing(self, entry: _Entry, now: int) -> MonitorNotice | None:
+        """Apply one failed CALL: keep watching, tell the operator once, no strike.
+
+        THE RULE THIS METHOD EXISTS FOR (D3; agent review round 1, BLOCKER-1). A
+        ``kind="failing"`` check ran and the tool said it could not do the job.
+        That is NOT the same fact as a check that came back wrong, and the
+        strike ladder is the wrong instrument for it: it exists to stop a watch
+        whose call never answers, and spending it here disabled a legitimate
+        watch after five ticks. A file that does not exist yet, a PR not opened
+        yet, a rate-limited source that recovers after ten minutes — each is a
+        state the arm receipt calls legitimate, and each was killed by the
+        ladder in ~25 minutes at a 5-minute interval.
+
+        So it follows the ``unavailable`` precedent in this file rather than the
+        strike ladder: NO strike (``consecutive_failures`` is left untouched, so
+        an unrelated ordinary error still gets its full ladder), the retry rides
+        the same capped backoff keyed on its OWN counter (``failing_ticks``), ONE
+        latched notice per episode, and the episode ends either by a success
+        (``_restored_notice``) or by disabling after ``FAILING_GONE_MS`` of
+        CONTINUOUS failure — the same 24 h horizon, and the same reason, as
+        ``UNAVAILABLE_GONE_MS``.
+
+        ``checks``/``last_check_at`` DO advance, unlike an unavailable tick: the
+        call ran and answered (an error is an answer), so counting it is honest
+        and keeps the "never checked" hint off a watch that has failed from its
+        first tick. The baseline (``content_hash``/snapshot) is NOT advanced, so
+        a recovery still reports everything missed as one delta.
+        """
+        counters = entry.counters
+        if not counters.get("failing_since"):
+            counters["failing_since"] = now
+        counters["failing"] = True
+        counters["failing_ticks"] = int(counters.get("failing_ticks") or 0) + 1
+        ticks = int(counters["failing_ticks"])
+        counters["checks"] = int(counters.get("checks") or 0) + 1
+        counters["last_check_at"] = now
+        counters["last_note"] = "the watch's call is failing — retrying"
+        threshold = (
+            FAILING_CHECKS_AFTER_BASELINE
+            if counters.get("content_hash")
+            else FAILING_CHECKS_WITHOUT_BASELINE
+        )
+        # PUBLISHED, not just used here: every reader outside this process
+        # renders the index row, and the row has to be able to tell a single
+        # failed check (deliberately not paged) from an episode that has reached
+        # the threshold (QA round 1, Q3) without importing this module's policy.
+        counters["failing_notice_checks"] = threshold
+        if ticks == 1:
+            # The ENTER edge is published (not every failing tick): the list row
+            # and the TUI band render the published row, and a row in a failing
+            # episode must say so instead of "nothing has changed" (D8). Same
+            # rule and same reason as ``_apply_blind``.
+            self._notify_change()
+        if now - int(counters["failing_since"]) >= FAILING_GONE_MS:
+            # A DAY of continuous failure is not a resource that is about to
+            # appear. The notice names the failure, and ``disabled_kind``
+            # carries WHY so the retro-announce (which reads the counters file
+            # alone) cannot claim a strike count this episode never charged
+            # (review round 1, R3).
+            self._disable(
+                entry,
+                str(counters.get("last_error") or "its call kept failing"),
+                now,
+                kind="failing",
+            )
+            logger.warning(
+                "monitor %s disabled after 24h of failing calls: %s",
+                entry.spec.id,
+                counters.get("last_error"),
+            )
+            return self._disable_notice(entry, now, failures=ticks)
+        counters["next_due_at"] = now + min(
+            RETRY_CAP_MS, entry.spec.every_ms * (2 ** max(0, ticks - 1))
+        )
+        if ticks < threshold or counters.get("failing_notified"):
+            return None
+        # The latch is settled by ``_send_notice`` AFTER the sink returned,
+        # exactly like the stall/disable latches, so a notice that never reached
+        # a session is re-earned on the next tick instead of leaving a silent
+        # episode. ``_restored_notice`` clears the episode on the next success.
+        return MonitorNotice(
+            monitor_id=entry.spec.id,
+            name=entry.spec.name,
+            tool=entry.spec.tool,
+            kind="failing",
+            at_ms=now,
+            checks=int(counters.get("checks") or 0),
+            deliveries=int(counters.get("deliveries") or 0),
+            failures=ticks,
+            detail=counters["last_error"],
+            no_baseline=not bool(counters.get("content_hash")),
+        )
 
     def _disable(self, entry: _Entry, reason: str, now: int, *, kind: str = "checks") -> None:
         """Mark one monitor disabled; the counters file is the durable record.
@@ -1521,6 +1714,12 @@ class MonitorScheduler:
         counters["next_due_at"] = None
         counters["unavailable_since"] = 0
         counters["unavailable_ticks"] = 0
+        # The failing episode's own bookkeeping ends with the disable for the same
+        # reason: a reactivated monitor must not inherit an episode clock, which
+        # would disable it again on its very first failing tick.
+        counters["failing"] = False
+        counters["failing_since"] = 0
+        counters["failing_ticks"] = 0
 
     def _disable_notice(self, entry: _Entry, now: int, *, failures: int) -> MonitorNotice | None:
         """The disable notice, unless this monitor's has already gone out.
@@ -1553,32 +1752,45 @@ class MonitorScheduler:
         )
 
     def _restored_notice(self, entry: _Entry, now: int) -> MonitorNotice | None:
-        """Clear an unavailable OR failing episode on the first success.
+        """Clear a struck, unavailable OR failing episode on the first success.
 
         A silent episode resumes silently — there is nothing to tell anyone.
         One the operator was TOLD about gets a matching "running again", so the
-        stall/failing notice is never the last word.
+        stall/failing/striking notice is never the last word.
 
-        The failing episode is cleared here for the same reason the unavailable
-        one is: both are "the watch cannot see right now", both are told once per
-        episode, and both owe the operator the matching recovery. The published
-        index is refreshed on the exit edge so no surface keeps saying "watch is
-        failing" about a watch that has just worked.
+        All three are cleared here because all three are "this watch cannot report
+        right now": each is told once per episode, and each owes the operator the
+        matching recovery. The published index is refreshed on the exit edge so no
+        surface keeps saying "watch is failing" about a watch that has just worked.
+
+        The STRIKE class is identified by its LATCH, not by
+        ``consecutive_failures``: ``_apply_success`` has already reset that counter
+        by the time this runs, and a latch is what survives the recovery tick.
         """
         counters = entry.counters
         available = bool(counters.get("unavailable_since") or counters.get("unavailable_ticks"))
         was_failing = bool(counters.get("failing"))
-        if not available and not was_failing:
+        was_striking = bool(counters.get("striking_notified"))
+        if not available and not was_failing and not was_striking:
             return None
-        notified = bool(counters.get("unavailable_notified")) or bool(
-            counters.get("failing_notified")
+        notified = (
+            bool(counters.get("unavailable_notified"))
+            or bool(counters.get("failing_notified"))
+            or was_striking
         )
         counters["unavailable_since"] = 0
         counters["unavailable_ticks"] = 0
         counters["unavailable_notified"] = False
         counters["failing"] = False
         counters["failing_notified"] = False
-        if was_failing:
+        counters["striking_notified"] = False
+        # The EPISODE CLOCK goes with them: the 24 h horizon measures CONTINUOUS
+        # failure, so a success resets it exactly as it resets the ticks
+        # (``UNAVAILABLE_GONE_MS``'s counterpart; without this a watch that fails
+        # for an hour a day would be disabled on its third day).
+        counters["failing_since"] = 0
+        counters["failing_ticks"] = 0
+        if was_failing or was_striking:
             # Same edge-publish rule as ``_clear_blind``: a cold reader renders
             # the published row, and a stale "watch is failing" would outlive
             # the episode it describes.
@@ -1698,8 +1910,15 @@ class MonitorScheduler:
         """
         counters = entry.counters
         if not empty:
+            was_empty = bool(counters.get("empty_checks")) or bool(counters.get("empty_notified"))
             counters["empty_checks"] = 0
             counters["empty_notified"] = False
+            if was_empty:
+                # THE EXIT EDGE IS PUBLISHED for the same reason as the blind
+                # clear: the row is what every cold reader renders, and it must
+                # stop saying "returned nothing" the moment the call returns
+                # something (review round 1, MAJOR-2).
+                self._notify_change()
             return None
         counters["empty_checks"] = int(counters.get("empty_checks") or 0) + 1
         count = counters["empty_checks"]

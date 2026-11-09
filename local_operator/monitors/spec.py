@@ -321,6 +321,14 @@ def build_monitor_spec(
     arm_cwd = cwd
     requested = (named_cwd or "").strip()
     if requested:
+        # A RELATIVE NAME RESOLVES AGAINST THE SESSION'S DIRECTORY, not against
+        # whatever directory this process happens to sit in (review round 1,
+        # MINOR-1). ``os.path.abspath`` read the daemon's own cwd, so ``cwd="sub"``
+        # was REFUSED for a session that has ``sub/`` — and would have silently run
+        # in the daemon's directory when that happened to have the same name, which
+        # is the incident's failure class one layer down.
+        if not os.path.isabs(requested):
+            requested = os.path.join(cwd or os.getcwd(), requested)
         captured = _captured_cwd(requested)
         if not os.path.isdir(captured):
             # Well-formed but unsupportable, so NOT malformed: the caller can fix
