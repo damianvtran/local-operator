@@ -50,7 +50,7 @@
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
       "bytes": 12033,
-      "sha256": "664d6f1e5a792c86d8ac6286651d28720dc1dc0091656621e75ca1f14b616d74"
+      "sha256": "b23420cf309978529c290f8b942edf4f29f8971f0040a9e375e49bc3de72b31b"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -349,8 +349,8 @@
     },
     {
       "path": "experimental/meter_proxy.py",
-      "bytes": 54081,
-      "sha256": "c867a789df311c877aa24438a25f45be383774f4d46262ae379a33e86206772c"
+      "bytes": 54343,
+      "sha256": "722c5a7fd7faac71cd442966b4be696a207934b511f032fa76b503338f4bae19"
     },
     {
       "path": "experimental/package_egress.py",

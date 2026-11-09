@@ -782,7 +782,7 @@ REJECTION_BILL_FIELDS = frozenset(TOKEN_RATE_KEYS) | frozenset(
 
 
 def no_charge_rejection(
-    status: int, usage: object, unpriced: frozenset, body: object
+    status: int, usage: object, unpriced: frozenset[str], body: object
 ) -> dict[str, object] | None:
     """Row fields marking a 4xx that rejected the request bill-free, or ``None``.
 
@@ -1007,7 +1007,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         def write_row(
             usage: WireObject,
             extra: dict[str, object] | None = None,
-            unpriced: frozenset = frozenset(),
+            unpriced: frozenset[str] = frozenset(),
             body: object = None,
         ) -> None:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
@@ -1118,12 +1118,15 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         finally:
             await resp.aclose()
         usage: WireObject = {}
-        unpriced: frozenset = frozenset()
+        unpriced: frozenset[str] = frozenset()
         extra: dict[str, object] = {"stream": False}
-        body: object = None
+        # The decoded body, for the rejection rule to read the provider's own
+        # error type/code. Deliberately not ``body``: this function already has a
+        # request ``body`` and one name must not carry two types.
+        parsed_body: object = None
         try:
             d = json.loads(content)
-            body = d
+            parsed_body = d
             if is_messages:
                 usage = d.get("usage") or {}
                 unpriced = frozenset(unpriced_usage(d.get("usage")))
@@ -1134,7 +1137,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         except Exception:
             pass
         owned = False
-        write_row(usage, extra, unpriced, body)
+        write_row(usage, extra, unpriced, parsed_body)
         return Response(content, status_code=status, headers=passthrough_headers)
     finally:
         if owned:

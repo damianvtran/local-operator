@@ -245,8 +245,8 @@
       "sha256": "afefded4938e6384a472d88c08005c29370c4036aa9edac55b99bef109f86287"
     },
     "meter_proxy.py": {
-      "bytes": 54081,
-      "sha256": "c867a789df311c877aa24438a25f45be383774f4d46262ae379a33e86206772c"
+      "bytes": 54343,
+      "sha256": "722c5a7fd7faac71cd442966b4be696a207934b511f032fa76b503338f4bae19"
     },
     "package_egress.py": {
       "bytes": 15609,
