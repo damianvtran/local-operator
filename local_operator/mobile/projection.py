@@ -1576,6 +1576,11 @@ def fold_messages_to_entries(
     bang_pending = False
     for message in history:
         if isinstance(message, CustomMessage):
+            # Session-state snapshots are agent context, not conversation. Drop
+            # the typed metadata before row budgets/grouping; never match text,
+            # since users and peers can legitimately quote its marker.
+            if message.custom_type == "session_state":
+                continue
             if message.custom_type == HUB_MESSAGE_TYPE:
                 # The parent's own words (``body``), never the model-facing
                 # envelope in ``details["text"]``. Reading the envelope here
@@ -2402,11 +2407,16 @@ class ProjectionFold:
             self._bump()
 
     def fold_event(self, event: AgentEvent) -> None:
+        from local_operator.harness.types import PeerMessageDeliveredEvent, ToolResult
+
+        # Typed context metadata is invisible, including to the peer grouping
+        # state machine. In particular it must not reset a pending peer cycle.
+        if isinstance(event, PeerMessageDeliveredEvent) and event.custom_type == "session_state":
+            return
         self._fold_event(event)
         if self.projection.peer_cycles != 1:
             return
         from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
-        from local_operator.harness.types import PeerMessageDeliveredEvent, ToolResult
 
         if isinstance(event, ToolExecutionEndEvent) and (
             not isinstance(event.result, ToolResult)
@@ -3074,7 +3084,9 @@ class ProjectionFold:
         decision is made by the caller BEFORE this method is reached (§ the
         ``PeerMessageDeliveredEvent`` arm). The phone tolerates detail keys it
         does not read, so this stays additive on the wire."""
-        if cross_session_hidden():
+        # Match the history fold: context snapshots must not become optimistic
+        # delivery rows, consume the tail budget, or emit a changed frame.
+        if custom_type == "session_state" or cross_session_hidden():
             return
         if message_id and any(row.id == message_id for row in self.projection.transcript):
             return

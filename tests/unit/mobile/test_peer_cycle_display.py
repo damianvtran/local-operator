@@ -246,6 +246,30 @@ def test_live_phone_certifies_a_genuine_direct_peer_from_typed_tool_events():
     assert stamped[0].details["peer_cycle"]["member_ids"] == ["qa-real", "tc-qa-send"]
 
 
+def test_live_session_state_does_not_interrupt_pending_peer_cycle():
+    """Invisible context is not a conversation boundary or a delivery count."""
+    from local_operator.harness.types import PeerMessageDeliveredEvent
+
+    projection, fold = _bound_fold()
+    fold.fold_event(
+        PeerMessageDeliveredEvent(
+            message_id="qa-real", body="Synthetic peer", sender={}, custom_type="peer_message"
+        )
+    )
+    before = projection.to_json()
+    fold.fold_event(
+        PeerMessageDeliveredEvent(
+            message_id="qa-state", body="Private context", custom_type="session_state"
+        )
+    )
+    assert projection.to_json() == before
+    _live_close(fold)
+    stamped = [row for row in projection.transcript if "peer_cycle" in row.details]
+    assert len(stamped) == 1
+    assert stamped[0].details["peer_cycle"]["member_ids"] == ["qa-real", "tc-qa-send"]
+    assert all(row.id != "qa-state" for row in projection.transcript)
+
+
 @pytest.mark.parametrize("custom_type", ["team_bridge_message", "future_custom_kind"])
 @pytest.mark.parametrize("position", ["opener", "pending"])
 def test_live_phone_keeps_a_nonpeer_delivery_visible_and_uncertified(custom_type, position):
