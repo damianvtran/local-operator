@@ -944,6 +944,59 @@ def mutate(
         document.save()
 
 
+def owner_rows_digest(document: PlacementDocument | None, owner_device: str) -> str:
+    """The digest of the rows ONE device owns — the set a peer's merge would act on.
+
+    THE VALIDATOR OF THE CONDITIONAL PULL (``wire.CREDENTIAL_PLACEMENT_DIGEST_V1``),
+    and its contract is the whole safety argument: EQUAL DIGESTS MUST IMPLY THAT
+    :func:`merge_from_peer` WOULD CHANGE NOTHING. That is why it hashes exactly the
+    rows ``merge`` can adopt — those whose ``owner_device`` is ``owner_device``, since a
+    peer may only ever tell us about the rows IT owns — and nothing else:
+
+    * THE DOCUMENT'S ``epoch`` IS EXCLUDED. ``merge`` only lifts it on a pass that
+      changed a row, so an epoch-only difference changes nothing; hashing it would
+      stop two files that are legitimately in step from ever answering ``unchanged``.
+    * THE ROWS' OWN FIELDS ARE INCLUDED WHOLESALE, ``doc_rev`` and ``declared_at``
+      among them, through the same :meth:`CredentialPlacementEntry.to_json` both ends
+      serialise with. Re-serialising on the reader's side is what keeps the two
+      digests over ONE shape: a field a build defaults differently would otherwise
+      make an unchanged pair disagree for ever (harmless, but the saving would never
+      arrive).
+
+    BOTH SIDES CALL THIS. The owner passes its own device id over its own document; a
+    peer passes the id of the device it pulled over its own copy. A digest that does
+    not match is always safe — it costs exactly the full document the pull sends today.
+
+    AND ON ONE PAIR IT CAN BE THE PERMANENT ANSWER (review round 1, M3). ``merge`` only
+    ever ADOPTS: it has no deletion branch, so a row the owner stops publishing — an
+    owner sign-out, ``revoke_device_everywhere`` deleting a row it owned — stays in the
+    asker's file, and the asker's digest then includes a row the owner no longer hashes.
+    That pair never answers ``unchanged`` again: every later pull is a full document,
+    each merge is a no-op, and nothing clears it. Safe (no stale authority, because the
+    owner authorises every grant against its own row and its own document) and not a
+    regression against the pre-digest behaviour, which sent that full document anyway —
+    but it is a durability caveat, not an occasional mismatch. The sweep that would
+    prune a dropped row is deliberately NOT here; the loss is bytes, never access.
+
+    NO SECRET IS HASHED. This is the same metadata the unanswered pull puts on the
+    wire in full (``_assert_no_material`` guards the document itself), so an answer of
+    ``unchanged`` discloses strictly less than the document it replaces.
+
+    ``document`` may be ``None`` — a device with no placement file at all holds nothing
+    from anyone, and that is the COMMONEST idle state (nothing has been shared yet). It
+    must hash to the empty set rather than being skipped, or the biggest saving on a
+    fresh mesh would never be taken.
+    """
+    from local_operator.network import wire
+
+    rows = [
+        entry.to_json()
+        for _, entry in sorted((document.entries if document is not None else {}).items())
+        if entry.owner_device == owner_device
+    ]
+    return wire.hex64(wire.sha256(wire.canonical_json(rows)))
+
+
 def merge_from_peer(
     network_id: str,
     incoming: dict[str, Any],
