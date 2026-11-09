@@ -74,6 +74,9 @@ async def test_injected_phases_are_distinct(rig, monkeypatch, phase):
 
     async def cold(*args, **kwargs):
         assert kwargs["deferred_history"] is True
+        # The cold summary must join this exact acquisition, not just another
+        # overlapping open of the same session.
+        assert kwargs["_trace_span"] == rig.rows[0]["acquire_id"]
         if phase == "cold":
             clock.now += 1
         if phase == "loop":
