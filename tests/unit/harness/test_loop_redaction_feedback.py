@@ -1976,7 +1976,11 @@ async def test_over_cap_write_diff_reaches_the_durable_row_unwithheld(tmp_path):
     transcript row.
     """
     from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
-    from local_operator.harness.types import StreamEndEvent, StreamTextDelta, StreamToolCallDelta
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
     from local_operator.session.session import Session
     from local_operator.session.transcript import Transcript
     from local_operator.tools.builtin import DIFF_TRUNCATED_ROWS_KEY, build_write_tool

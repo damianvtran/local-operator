@@ -973,7 +973,8 @@ class TestDiffDetailsTruncatesIntoARedactableShape:
     def test_cut_never_splits_a_private_key_block(self) -> None:
         line = "M7qA9zKd3PxW8sVn" * 4
         pem = (
-            "-----BEGIN " + "PRIV" "ATE KEY-----\n" + "\n".join([line] * 20) + "\n-----END " + "PRIV"
+            "-----BEGIN " + "PRIV"
+            "ATE KEY-----\n" + "\n".join([line] * 20) + "\n-----END " + "PRIV"
             "ATE KEY-----\n"
         )
         # The block's 22 rows straddle row ~197 of a new file.
