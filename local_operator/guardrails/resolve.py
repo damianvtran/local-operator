@@ -2413,7 +2413,8 @@ class _Walker:
                         target.forced = forced
                         target.force_count = sum(
                             1 if f == "--force" else f[1:].count("f")
-                            for f in flags if f.startswith("-")
+                            for f in flags
+                            if f.startswith("-")
                         )
                 finally:
                     self.state.cwd = saved
@@ -2594,6 +2595,48 @@ _GUARDED_READERS = frozenset(
 )
 
 
+#: Long options per guarded reader, split by whether they can write.
+#: WHY a closed allowlist (review round 2, M2): getopt_long accepts any
+#: unambiguous PREFIX, so ``sort --out=F``, ``--outp F``, ``--compress-prog=sh``,
+#: ``--temp=D`` and ``file --comp`` are the writing switches under other
+#: spellings — measured on this host (``/usr/bin/sort`` 2.3-Apple wrote ``o.txt``
+#: from ``--out=``; ``file --comp`` wrote ``magic.mgc``). A long option counts as
+#: read-only only when it is a prefix of a known read-only option AND of no
+#: writing one; anything unknown (another platform's spelling, a typo) fails
+#: closed to the backstop — a misread costs a judge call, never a LOW write.
+_SORT_WRITING_LONGS = ("--output", "--compress-program", "--temporary-directory")
+_SORT_READ_LONGS = (
+    "--ignore-leading-blanks", "--dictionary-order", "--ignore-case",
+    "--general-numeric-sort", "--ignore-nonprinting", "--month-sort",
+    "--human-numeric-sort", "--numeric-sort", "--random-sort", "--random-source",
+    "--reverse", "--sort", "--version-sort", "--batch-size", "--check", "--debug",
+    "--files0-from", "--key", "--merge", "--buffer-size", "--field-separator",
+    "--stable", "--unique", "--zero-terminated", "--parallel", "--help", "--version",
+    "--mmap", "--radixsort", "--mergesort", "--qsort", "--heapsort",
+)  # fmt: skip
+_FILE_WRITING_LONGS = ("--compile",)
+_FILE_READ_LONGS = (
+    "--apple", "--brief", "--checking-printout", "--dereference", "--exclude",
+    "--exclude-quiet", "--extension", "--files-from", "--keep-going", "--list",
+    "--magic-file", "--mime", "--mime-type", "--mime-encoding", "--no-buffer",
+    "--no-dereference", "--no-pad", "--print0", "--preserve-date", "--raw",
+    "--separator", "--special-files", "--uncompress", "--uncompress-noreport",
+    "--parameter", "--help", "--version",
+)  # fmt: skip
+
+
+def _long_prefixes(key: str, options: Sequence[str]) -> bool:
+    """Could ``key`` (``--x``, value stripped) be getopt_long's abbreviation of
+    any of ``options``? ``--`` alone ends options and abbreviates nothing."""
+    return len(key) > 2 and any(o.startswith(key) for o in options)
+
+
+def _longs_read_only(longs: list[str], reads: Sequence[str], writes: Sequence[str]) -> bool:
+    return all(
+        k == "--" or (_long_prefixes(k, reads) and not _long_prefixes(k, writes)) for k in longs
+    )
+
+
 def _guarded_reader_read_only(name: str, argv: list[str]) -> bool:
     shorts = [a[1:] for a in argv if a.startswith("-") and not a.startswith("--") and a != "-"]
     longs = [a.split("=", 1)[0] for a in argv if a.startswith("--")]
@@ -2602,17 +2645,16 @@ def _guarded_reader_read_only(name: str, argv: list[str]) -> bool:
         # (``-to``): a misread costs a judge call, never a LOW write.
         if any("o" in c or "T" in c for c in shorts):
             return False
-        return not any(
-            k.startswith(("--output", "--compress-program", "--temporary-directory"))
-            for k in longs
-        )
+        return _longs_read_only(longs, _SORT_READ_LONGS, _SORT_WRITING_LONGS)
     if name == "uniq":
         # A second operand is the output file. ``-f N``/``-s N`` values count
         # as operands here — fail closed, never an unseen write.
         operands = [a for a in argv if not a.startswith("-") or a == "-"]
         return len(operands) <= 1
     if name == "file":
-        return not any("C" in c for c in shorts) and "--compile" not in longs
+        if any("C" in c for c in shorts):
+            return False
+        return _longs_read_only(longs, _FILE_READ_LONGS, _FILE_WRITING_LONGS)
     return True  # shasum/md5/*sum
 
 
@@ -3011,7 +3053,10 @@ def _write_surface(
     if name == "sort":
         # ``sort -o FILE`` writes FILE (it may also be an input: ``sort -o x x``).
         # Never fully modelled, so its other path words reach the backstop too.
-        return _cluster_value(args, "o", "--output"), False
+        # ``--out=F``/``--outp F`` are getopt_long abbreviations of ``--output``
+        # (review round 2, M2): name them too, so a write into evidence stays
+        # CRITICAL rather than falling to the backstop's HIGH.
+        return _cluster_value(args, "o", "--output") + _sort_output_abbrev(args), False
     if name in ("mkdir", "gmkdir"):
         return [], _flags_known(args, _MKDIR_FLAGS)  # resolver creations
     if name in ("chmod", "chown", "chgrp", "xattr"):
@@ -3094,6 +3139,21 @@ def _write_surface(
     if name == "git":
         return _git_writes(args), False
     return None
+
+
+def _sort_output_abbrev(args: list[Expanded]) -> list[Expanded]:
+    """Values of ``--output`` abbreviations (``--o``…``--outpu``). No other sort
+    long option starts with ``o``, so even ``--o`` means ``--output``."""
+    out: list[Expanded] = []
+    for k, w in enumerate(args):
+        key, eq, value = w.text.partition("=")
+        if key == "--output" or not _long_prefixes(key, ("--output",)):
+            continue  # the full spelling is ``_cluster_value``'s
+        if eq:
+            out.append(Expanded(text=value, empty=w.empty))
+        elif k + 1 < len(args):
+            out.append(args[k + 1])
+    return out
 
 
 def _cluster_value(args: list[Expanded], letter: str, long: str) -> list[Expanded]:

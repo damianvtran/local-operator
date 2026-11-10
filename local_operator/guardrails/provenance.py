@@ -1057,8 +1057,19 @@ def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
     env = dict(os.environ, GH_PROMPT_DISABLED="1")
     try:
         proc = subprocess.run(
-            ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
-             "--json", "number"],
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "number",
+            ],
             capture_output=True,
             text=True,
             timeout=_GH_TIMEOUT_S,
@@ -1169,8 +1180,11 @@ def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
     prs = lookup(repo, branch)
     if prs is None:
         return WorktreeActivity(
-            branch, "unknown", pr_label=label,
-            pr_detail=f"{tool} lookup on {repo} failed or timed out", owners_running=owners,
+            branch,
+            "unknown",
+            pr_label=label,
+            pr_detail=f"{tool} lookup on {repo} failed or timed out",
+            owners_running=owners,
         )
     if prs:
         return WorktreeActivity(

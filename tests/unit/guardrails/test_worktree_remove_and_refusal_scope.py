@@ -314,6 +314,7 @@ def test_stale_initializing_double_force_only(home: Path, repo: Path, flags: str
     _git("worktree", "lock", "--reason", "initializing", str(wt), cwd=repo)
     lock = repo / ".git" / "worktrees" / "stale" / "locked"
     import time
+
     old = time.time() - 7200
     os.utime(lock, (old, old))
     assert prov.worktree_state(str(wt)) == "stale-initializing"
@@ -343,6 +344,7 @@ def test_process_inventory_timeout_fails_closed(monkeypatch: pytest.MonkeyPatch)
     def timeout(*args, **kwargs):
         assert kwargs["timeout"] == prov._CWD_INVENTORY_TIMEOUT_S == 20.0
         raise subprocess.TimeoutExpired(args[0], 20)
+
     monkeypatch.setattr(prov.subprocess, "run", timeout)
     # Exercise macOS branch independently of the CI runner's /proc.
     real_isdir = os.path.isdir
@@ -565,6 +567,50 @@ def test_sort_output_into_session_state_is_still_refused(home: Path) -> None:
         assert verdict.risk is Risk.HIGH, command
 
 
+@pytest.mark.parametrize(
+    ("template", "risk"),
+    [
+        # Review round 2, M2: getopt_long accepts any unambiguous prefix, so the
+        # abbreviated writing switches are the same write (measured: Apple
+        # sort ``--out=`` wrote the file; ``file --comp`` wrote ``.mgc``).
+        ("sort -o {other} {other}", Risk.CRITICAL),
+        ("sort --output={other} /dev/null", Risk.CRITICAL),
+        ("sort --out={other} /dev/null", Risk.CRITICAL),
+        ("sort --outp {other} /dev/null", Risk.CRITICAL),
+        ("sort --o={other} /dev/null", Risk.CRITICAL),
+        ("sort --compress-prog=sh {other}", Risk.HIGH),
+        # m4: ``-T``/``--temp*`` only writes sort's own temp files — HIGH, not CRITICAL.
+        ("sort --temp={cwd} {other}", Risk.HIGH),
+        ("sort -T {cwd} {other}", Risk.HIGH),
+        ("file --comp -m {other}", Risk.HIGH),
+        # An unknown long option fails closed rather than reading as LOW.
+        ("sort --no-such-option {other}", Risk.HIGH),
+    ],
+)
+def test_abbreviated_writing_long_options_are_not_read_only(
+    home: Path, template: str, risk: Risk
+) -> None:
+    (home / ".local-operator" / "sessions" / "cccccccccccc").mkdir()
+    cwd = _session_dir(home)
+    command = template.format(other=f"{cwd}/cccccccccccc/x", cwd=cwd)
+    verdict = classify_bash(command, cwd=cwd, env=_env(home), scratchpad=None, session_id=SID)
+    assert verdict.risk is risk, (command, [t.reason for t in verdict.targets])
+
+
+def test_abbreviated_read_only_long_options_stay_low(home: Path) -> None:
+    """The allowlist admits read-only abbreviations (``--rev``, ``--bri``)."""
+    (home / ".local-operator" / "sessions" / "cccccccccccc").mkdir()
+    cwd = _session_dir(home)
+    other = f"{cwd}/cccccccccccc/x"
+    for command in (
+        f"sort --rev --numeric-sort --key=2 {other}",
+        f"sort --uniq -- {other}",
+        f"file --bri --mime-type {other}",
+    ):
+        verdict = classify_bash(command, cwd=cwd, env=_env(home), scratchpad=None, session_id=SID)
+        assert verdict.risk is Risk.LOW, (command, [t.reason for t in verdict.targets])
+
+
 def test_refusal_text_says_another_route_is_the_same_action() -> None:
     """Review m2: the anti-reroute clause is in the text read at refusal time."""
     assert "by another route is still the same action" in REFUSAL_SCOPE
@@ -618,7 +664,15 @@ def test_glab_lookup_parses_remotes_and_never_prompts(
     monkeypatch.setattr(prov.subprocess, "run", run)
     assert prov._glab_open_mrs("g/p", "feat/x") == [7]
     assert seen["argv"] == [
-        "glab", "mr", "list", "--repo", "g/p", "--source-branch", "feat/x", "-F", "json"
+        "glab",
+        "mr",
+        "list",
+        "--repo",
+        "g/p",
+        "--source-branch",
+        "feat/x",
+        "-F",
+        "json",
     ]
     assert seen["timeout"] == prov._GH_TIMEOUT_S and seen["prompt"] == "1"
 

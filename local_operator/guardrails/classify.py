@@ -887,7 +887,10 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         # locked, unknown, not linked) takes the ordinary ranking below, which
         # then names that state: the refusal otherwise says only "a git
         # repository root" and hides the one fact the agent can act on.
-        from local_operator.guardrails.provenance import worktree_activity, worktree_state
+        from local_operator.guardrails.provenance import (
+            worktree_activity,
+            worktree_state,
+        )
 
         state = worktree_state(path)
         if state != "not-linked":
