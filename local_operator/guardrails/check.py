@@ -206,6 +206,25 @@ class CallContext:
     messages: Any = None
 
 
+#: How far a refusal reaches, appended to every refusal text. Model-facing
+#: (English by design, like ``BLOCK_MARKER``). WHY: "final; never reword or
+#: retry" was read too broadly — in session 4e70660bd1bf (local-operator-ui
+#: PR #1813) an auditor, after a correct refusal to import ANOTHER session's
+#: receipt, declined to write its OWN freshly authored receipt to the repo's
+#: mandated ``i18n/receipts/`` as a "reroute", and the operator had to step in
+#: for something no guard ever refused. Finality covers the same effect on the
+#: same targets; fresh work is a different action. The system prompt
+#: (``prompts_md/system.md``) and ``guide://guardrails`` say the same.
+REFUSAL_SCOPE = (
+    "This refusal is final for THIS action: the same effect on the same targets, by any "
+    "spelling or path, is a reroute. A new artifact from your own fresh work, written to "
+    "your own worktree's mandated location, is a different action and needs no approval. "
+    # Review m2 (PR #3700): the anti-reroute clause lived only in the guide,
+    # but this text is what the agent reads at the moment of refusal.
+    "Copying or importing the blocked material in by another route is still the same action."
+)
+
+
 def _targets_text(verdict: Verdict) -> str:
     flagged = verdict.flagged_targets or verdict.targets
     parts = [f"{t.shown or t.path} ({t.reason})" for t in flagged[:6]]
@@ -234,7 +253,7 @@ def _critical_text(verdict: Verdict) -> str:
         f"or overwrite {_targets_text(verdict)}. Nothing was run. This is not retryable by "
         "rewording, and no approval lifts it from inside the session. If a narrower path was "
         "intended, target it directly (for example a path inside your own scratchpad); "
-        "otherwise ask the operator."
+        f"otherwise ask the operator. {REFUSAL_SCOPE}"
     )
 
 
@@ -244,7 +263,10 @@ def review_text(rule: str, reason: str, targets: str) -> str:
         if rule == DANGEROUS_DELETE_RULE
         else ("Ask the user, or target a narrower path.")
     )
-    return f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. {tail}"
+    return (
+        f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. "
+        f"{tail} {REFUSAL_SCOPE}"
+    )
 
 
 def rule_block_text(rule: Rule) -> str:
@@ -257,7 +279,7 @@ def rule_block_text(rule: Rule) -> str:
     body = f" {rule.body}" if rule.body else ""
     return (
         f"{BLOCK_MARKER} {rule.name} (block): this call matched a user rule. "
-        f"Nothing was run.{body}"
+        f"Nothing was run.{body} {REFUSAL_SCOPE}"
     )
 
 

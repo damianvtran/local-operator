@@ -838,6 +838,7 @@ def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
 def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
     path = target.path
     notes: list[str] = list(target.empty)
+    worktree_note = ""
     if target.climbs:
         # S2-5b: say where the ``..`` starts from, not that it is inside it.
         notes.append(f"climbs out of {target.path} by an unknown amount (unresolved)")
@@ -877,16 +878,77 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
-    if target.worktree_remove and not target.forced and target.pattern is None:
+    if target.worktree_remove and target.pattern is None:
         # ``git worktree remove`` without --force: git refuses tracked or
         # untracked changes itself, but deletes IGNORED files and a detached
         # HEAD's unreferenced commits. ``worktree_state`` proves those absent
-        # (only regenerable ignored output, HEAD reachable from a ref). Anything
-        # else (dirty, unknown, not linked) takes the ordinary ranking below.
-        from local_operator.guardrails.provenance import worktree_state
+        # (only regenerable ignored output, HEAD on a branch or reachable from a
+        # ref; a branch HEAD needs no pushed/merged test because the removal
+        # keeps the branch ref — see ``worktree_state``). Dirty, locked, busy or
+        # unknown ranks HIGH with that state named (the one fact the agent can
+        # act on); not-linked takes the ordinary ranking below.
+        from local_operator.guardrails.provenance import (
+            worktree_activity,
+            worktree_state,
+        )
 
-        if worktree_state(path) == "clean":
-            return RankedTarget(target, Risk.LOW, "a clean linked git worktree")
+        state = worktree_state(path)
+        if state != "not-linked":
+            # Clean is not idle (operator incident 2026-11-09: a clean worktree
+            # whose branch had an OPEN PR under QA was removed, deleting 34
+            # tracked files from under it). An open PR is an unliftable refusal
+            # at ANY state: an earlier answered ask naming the path was given
+            # before that fact was on the table, so it cannot cover it. A
+            # running owner or an unknown PR state only withholds the LOW, so
+            # the judge sees those facts. ``worktree_activity`` explains both.
+            activity = worktree_activity(path, session_id)
+            facts = activity.facts()
+            if activity.pr_state == "open":
+                return RankedTarget(
+                    target,
+                    Risk.CRITICAL,
+                    f"branch {activity.branch} has open {activity.pr_ref}; "
+                    f"finish or close it first ({facts})",
+                )
+            idle = activity.pr_state == "none" and not activity.owners_running
+            if idle and state == "clean" and not target.forced:
+                return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
+            if idle and state == "stale-initializing" and target.force_count == 2:
+                return RankedTarget(
+                    target,
+                    Risk.LOW,
+                    f"a clean linked git worktree with a stale initializing lock ({facts})",
+                )
+            if not idle:
+                # Straight to the judge, past the ledger-ownership LOW below:
+                # someone else is in the tree, or nobody could say whether a
+                # PR/MR is open (no GitHub/GitLab remote, gh/glab failed or timed out).
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    f"a git repository root; linked worktree state: {state}; {facts}",
+                )
+            if state not in ("clean", "stale-initializing"):
+                # QA round 3 (Q3-OBS): dirty, locked, busy, unknown or timeout
+                # with no open PR and no owner used to append a note here and
+                # fall through to the ordinary-path LOW below, which drops the
+                # notes, so a sibling worktree outside any protected root
+                # holding uncommitted work ranked LOW even with ``--force``,
+                # which deletes that work. Only a clean tree (or a verified
+                # stale initializing lock) can lose nothing; every other state
+                # goes to the judge with the state named.
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    "; ".join(
+                        [f"a git repository root; linked worktree state: {state}; {facts}", *notes]
+                    ),
+                )
+            # Clean but forced, or stale-initializing without ``-f -f`` (git
+            # refuses that itself): nothing uncommitted to lose, so the ordinary
+            # ranking applies, but the state stays in whatever reason it gives.
+            worktree_note = f"linked worktree state: {state}; {facts}"
+            notes.append(worktree_note)
     for spelling in _spellings(path):
         reason = _high_reason(spelling, target, prot)
         if reason is not None:
@@ -912,6 +974,9 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+    if worktree_note:
+        # Never discard the worktree state the branch above recorded.
+        return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
     return RankedTarget(target, Risk.LOW, "ordinary path")
 
 
