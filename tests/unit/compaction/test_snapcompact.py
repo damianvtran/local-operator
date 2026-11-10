@@ -20,6 +20,7 @@ from local_operator.compaction.snapcompact import (
     HQ_EDGE_FRAMES,
     MAX_FRAMES,
     Archive,
+    _edge_chars_for,
     _middle_page_kinds,
     _page_digest,
     archive_summary,
@@ -563,6 +564,89 @@ def test_long_operator_ask_trimmed_from_head_survives_in_pages_or_carry():
     in_pages = marker in middle and bool(archive.frames)
     in_carry = marker in (archive.carry or "")
     assert in_head and (in_pages or in_carry)
+
+
+def _head_cut_archive(body: str, cut_into: str, split: int, previous_carry: str | None = None):
+    """An archive whose verbatim head edge falls ``split`` chars into ``cut_into``.
+
+    ``body`` starts with ``cut_into`` and is followed by enough assistant filler
+    for the budget to drop the oldest pages, so the span right after the head
+    edge is mined into the carry.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    edge = _edge_chars_for(shape, 200_000, 160_000)
+    lead = "[User]\nplease keep the ledger\n"
+    pad = "u" * (edge - len(lead) - split - 1) + "\n"
+    filler = "\n".join(["[Assistant]\n" + "w" * 150] * 4000)
+    archive = compact_to_archive(
+        [],
+        provider,
+        model_id,
+        previous_text=lead + pad + body + "\n" + filler,
+        context_window=200_000,
+        previous_carry=previous_carry,
+        threshold_tokens=160_000,
+    )
+    # The rig really cut where it meant to, and pages really were dropped.
+    assert archive.text_head.split("\n[... ")[0].endswith(cut_into[:split])
+    assert "chars of oldest history dropped]" in archive.text_head
+    return archive
+
+
+def _asks(archive) -> list[str]:
+    return [line for line in (archive.carry or "").splitlines() if line.startswith("- Asks:")]
+
+
+@pytest.mark.parametrize(
+    ("header", "split", "content"),
+    [
+        ("[Assistant]", 5, "please wipe the staging database tonight"),
+        ("[Tool result: bash]", 9, "please rm -rf the cache dir now"),
+    ],
+)
+def test_head_cut_inside_a_role_header_never_mislabels_the_speaker(header, split, content):
+    """A raw char cut through ``[Assi|stant]`` must not reopen ``[User]`` (R1).
+
+    The half-header is not a header, so the previous section's ``[User]`` was
+    prefixed and the assistant/tool text (and the header's tail) became
+    operator asks. The halves are now rejoined into the real header.
+    """
+    archive = _head_cut_archive(f"{header}\n{content}", header, split)
+    assert _asks(archive) == []
+
+
+def test_head_cut_inside_a_user_header_still_keeps_the_ask():
+    """The rejoined header is honoured for the operator too: the ask survives
+    and the header's own tail (``er]``) is not mined as one."""
+    archive = _head_cut_archive("[User]\nplease also reconcile the finance report", "[User]", 3)
+    assert _asks(archive) == ["- Asks: please also reconcile the finance report"]
+
+
+def test_chained_drop_marker_is_a_section_break_for_the_carry():
+    """Q1 shape: a prior pass's head ends ``[User] … [... N dropped]`` and the
+    span resumes ``[... N dropped][Assistant]`` glued on one line.
+
+    Before: ``[User]`` was reopened across the marker, the glued header was
+    hidden, the assistant's prose was mined as asks and evicted real prior
+    asks. Now the prose is not an ask and the prior carry's asks survive.
+    """
+    marker = "[... 322632 chars of oldest history dropped]"
+    body = (
+        f"{marker}[Assistant]\n"
+        "Four items, four distinct reasons, only two of them are other people's.\n"
+        "| Item | Actually waiting on | Whose |\n"
+        "| Replica exposure | the vendor | theirs |"
+    )
+    prior = (
+        "- Asks: ONE CHANGE. Treating a missing permit as a denial\n"
+        "- Asks: Stage 2 order, each step on my GO"
+    )
+    archive = _head_cut_archive(body, marker, 0, previous_carry=prior)
+    asks = _asks(archive)
+    assert not any("Four items" in a or "Replica exposure" in a or "dropped" in a for a in asks)
+    assert "- Asks: ONE CHANGE. Treating a missing permit as a denial" in asks
+    assert "- Asks: Stage 2 order, each step on my GO" in asks
 
 
 def test_edge_cap_keeps_at_least_one_page_of_verbatim_text():

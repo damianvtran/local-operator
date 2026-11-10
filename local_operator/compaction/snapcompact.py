@@ -61,6 +61,7 @@ from .marker import marker_details
 from .mine import (
     CARRY_FRESH_TOKEN_ALLOWANCE,
     CARRY_TOKEN_BUDGET,
+    DROPPED_HISTORY_MARKER,
     INJECTED_HEADER,
     carry_digest_lines,
     is_role_header,
@@ -974,7 +975,7 @@ def compact_to_archive(
     # HQ_EDGE_FRAMES * capacity they are ~31.5k tokens for the Anthropic 1932px
     # reader (pair 126000 chars) — and MORE than the whole archive budget on a
     # small window, where the loop drops every frame and the pass still
-    # overshoots its own 0.5*window budget by 2x (measured: a 64k window gives
+    # overshoots its own archive budget (0.5 × basis) by 2x (measured: a 64k window gives
     # a 32k budget against a ~31.5k edge-only replay). That is the same "a pass
     # meant to get under the line ends up above it" failure the frame budget
     # exists to prevent, one layer down. So bound the per-edge char count to a
@@ -1081,11 +1082,32 @@ def compact_to_archive(
     # boundary is mined as role-less text and kept nowhere. The span starts at
     # ``image_text[0]`` only when the OLDEST page is among those dropped, which
     # the drop loops guarantee (they always take from the front).
-    first_line = dropped_text.lstrip().split("\n", 1)[0] if dropped_text else ""
-    if dropped_text and not is_role_header(first_line):
-        continuing = last_role_header(text_head)
-        if continuing:
-            dropped_text = f"{continuing}\n{dropped_text}"
+    #
+    # A header is prefixed only when the speaker is CERTAIN; otherwise nothing
+    # is (the role-less default), because a wrong ``[User]`` turns assistant or
+    # tool text into operator asks (review round 1 on PR #3750, R1; QA Q1):
+    # - The head edge is a raw char slice, so the cut can split ONE line, even
+    #   a header (``[Assi`` | ``stant]``). Rejoin the head's trailing partial
+    #   line with the span's first RAW line (R2: unstripped, so the halves line
+    #   up). If that forms a header, restore it whole; the speaker is then
+    #   explicit and no earlier header may claim the text.
+    # - Otherwise the joined line is body text of the section the head's
+    #   COMPLETE lines end in, found with the partial line excluded.
+    # - A span opening with the oldest-history drop marker (a chained pass)
+    #   resumes an unknown speaker; ``last_role_header`` likewise stops at a
+    #   marker, and ``mine_carry`` resets the role at it.
+    # Read from the head BEFORE this pass's own drop marker was appended above:
+    # that marker would end every truncated head and hide its last header.
+    if dropped_text:
+        head_body = archive_text[:edge_chars]
+        partial = head_body.rpartition("\n")[2]
+        joined = partial + dropped_text.partition("\n")[0]
+        if is_role_header(joined):
+            dropped_text = partial + dropped_text
+        elif DROPPED_HISTORY_MARKER.match(joined.strip()) is None:
+            continuing = last_role_header(head_body[: len(head_body) - len(partial)])
+            if continuing:
+                dropped_text = f"{continuing}\n{dropped_text}"
     fresh = mine_carry(dropped_text) if dropped_text else mine_carry("")
     # ``parse_carry`` reads the archive's own ``render_carry`` form (plain
     # headings); the caller always hands this function the archive's exact
