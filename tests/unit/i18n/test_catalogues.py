@@ -162,6 +162,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Carried by all seven locales, each with its own passed ledger row.
         "wire.outcome_notices",
         "wire.push_alert",
+        # The host-filed org-hub pull consent ask (PR #3693): its own namespace
+        # so no audited catalogue's hash moves; its locales ride the same PR.
+        "wire.hub_pull",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "audit_id": "pm1",
+  "locale": "hi",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "key_count": 28,
+  "source_revision": "50badda034d755ebb049c4f542f3073439bf823e",
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "d94d672abfb8",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "actual_model_source": "session system context (Model: anthropic/claude-opus-5-5); no provider fallback observed",
+    "note": "translator and auditor share the Claude model family (disclosed)"
+  },
+  "translator": {
+    "agent": "PR #3691 coder agent",
+    "session": "ad99821ab9e1",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/cli.permissions.json",
+      "sha256": "7abc04904f11563e0ccc160e7a702815b9d87c103b9f1f311e7c8bada189060c"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/hi/cli.permissions/pm1/report.md",
+      "sha256": "c8417a478f0713e7e9f05634fe306162460e4b075a737b660e7a3e5b5ecf75b3"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/hi/cli.permissions/pm1/audit.log",
+      "sha256": "4f10d1233fceef4e0c59bd3b316e49f33c251ba5f8ddce2ce6b1a618b50ecd56"
+    }
+  },
+  "audit_notes_not_execution_log": "report.md holds reasoning and findings; audit.log holds the actual command output captured this session.",
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "H1",
+      "H2",
+      "H3",
+      "H4",
+      "H5"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 1,
+      "minor": 2,
+      "nit": 2
+    }
+  },
+  "second_pass": "not performed by this auditor",
+  "ledger_receipt": {
+    "path": "i18n/audit-history/hi/cli.permissions.json",
+    "history_sha256_after_append": "e80243d4528ffed128b2b26e9d14bfadb1587e253b0076c3af1b4ea8488348e1"
+  }
+}

@@ -1,0 +1,16 @@
+"""Print Apple's installed en/fr strings for every macOS label cli.permissions names."""
+import plistlib
+SP='/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/'
+SS='/System/Applications/System Settings.app/Contents/Resources/'
+SA='/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/'
+KA='/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/'
+rows=[(SS+'InfoPlist.loctable','CFBundleDisplayName'),(SP+'InfoPlist.loctable','CFBundleDisplayName'),
+ (SP+'Localizable.loctable','SCREEN_CAPTURE'),(SP+'Localizable.loctable','SCREEN_CAPTURE_HEADER'),(SP+'Localizable.loctable','SCREENANDAUDIOCAPTURE'),
+ (SP+'Localizable.loctable','FILE_ACCESS_COMBINED'),(SP+'Localizable.loctable','ACCESSIBILITY'),
+ (SA+'ConfirmAccess.loctable','100268.title'),(SA+'ConfirmAccess.loctable','100267.title'),(SA+'ConfirmAccess.loctable','100266.title'),
+ (KA+'InfoPlist.loctable','CFBundleDisplayName'),(KA+'KeyEditor.loctable','302.label'),(KA+'Localizable.loctable','private key'),
+ (KA+'ACLEditor.loctable','100175.title')]
+for path,key in rows:
+    d=plistlib.load(open(path,'rb'))
+    en=(d.get('en') or d.get('en_GB') or {}).get(key)
+    print(f"{path.split('/Contents/')[0].split('/')[-1]} :: {path.split('/')[-1]} :: {key} :: en={en!r} :: fr={d.get('fr',{}).get(key)!r}")

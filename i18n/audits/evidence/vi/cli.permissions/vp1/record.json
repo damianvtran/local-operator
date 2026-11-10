@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "audit_id": "vp1",
+  "locale": "vi",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "key_count": 28,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team member, task subagent of the PR #3691 manager)",
+    "session": "fe66a4c43d27",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": "ad99821ab9e1",
+    "translator_model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "auditor session's own system-prompt model header (Model: anthropic/claude-opus-5-5); no provider fallback observed",
+    "independence_note": "different session from the translator; same model family (disclosed)"
+  },
+  "source_audit_revision": "50badda034d755ebb049c4f542f3073439bf823e",
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/cli.permissions.json",
+      "sha256": "794cb3a79453d613e9d20eb73d760e062a658637be881b688f518f327f163fc3"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/vi.md",
+      "sha256": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp1/report.md",
+      "sha256": "03b655de995b389e7a781311afae6b41475bc279a03c10e42d45b79c1fe504d5"
+    },
+    "findings.json": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp1/findings.json",
+      "sha256": "f96a935218cb111ce4774531a658ca72dfa7762667f5fadb0865912a7681fc51"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/vi/cli.permissions/vp1/audit.log",
+      "sha256": "ad7135102260929ec3e8f9be11dd6193747c4707e2ca89c063ed394413a0afe7"
+    }
+  },
+  "audit_notes_not_execution_log": "report.md and findings.json are auditor judgement; audit.log holds actual command output (check.py exit 0, mechanical parity script, hashes, history-sha).",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "m1",
+      "m2",
+      "n1",
+      "n2",
+      "n3",
+      "n4"
+    ]
+  },
+  "limits": "no rendered frame, no human native-speaker review, single independent pass"
+}

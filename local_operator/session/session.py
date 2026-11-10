@@ -3803,6 +3803,11 @@ class Session:
         self._run_owner_text_bindings: list[str | None] = []
         self._run_owner_consent = False
         self._run_untrusted_input = False
+        #: Ask ids a PERSON answered in this run (``ask_answer_is_person``). The
+        #: hub-pull consent seam grants only on an answered HOST-FILED consent ask
+        #: that arrived in the run doing the write, so a stale yes from an older
+        #: turn cannot authorise a pull the user is no longer looking at.
+        self._run_answered_ask_ids: set[str] = set()
         self._run_last_trigger: str | None = None
         self._run_user_text: str = ""
         #: Wall-clock start of the current pipeline (the logical turn), frozen onto the
@@ -7427,6 +7432,37 @@ class Session:
             )
         )
         return result
+
+    def request_route_reprobe(self, *, withdraw: bool = False, launch_pin: object = None) -> None:
+        """Make this session's NEXT model call a quota re-probe boundary.
+
+        The entry ``hub op='set_model'`` and ``hub op='steer'`` use on a RUNNING
+        subagent. A child's task is one user message, so the message-boundary
+        re-probe that returns a parent to its recovered primary never fires for
+        it; without this a child that fell back stayed there for the rest of its
+        task (the 2026-11 quota incident). Nothing is torn down: the child keeps
+        its job id, its own subagents and any browser tab it owns.
+
+        ``withdraw`` drops an active fallback now (the display AND the stream's
+        route), like an explicit ``/model`` re-selection. ``launch_pin`` is
+        ``None`` to leave the stream's launch pin alone, ``""`` to clear it (the
+        child now inherits), or a ``provider/model_id`` selector to re-pin it.
+        """
+        stream = self._stream_fn
+        if withdraw and self._active_fallback is not None:
+            self._drop_fallback_pin(self._model, "re-probe requested")
+        if isinstance(launch_pin, str):
+            if launch_pin:
+                mark = getattr(stream, "mark_launch_pin", None)
+                if callable(mark):
+                    mark(launch_pin)
+            else:
+                clear = getattr(stream, "clear_launch_pin", None)
+                if callable(clear):
+                    clear()
+        request = getattr(stream, "request_reprobe", None)
+        if callable(request):
+            request(withdraw=withdraw)
 
     def set_model(
         self,
@@ -14764,6 +14800,11 @@ class Session:
             profile_field_label,
         )
 
+        if intent.operation == "hub_pull":
+            # Its own ladder (below): a hub_pull grant can never fall through to,
+            # or be reached from, the profile-edit paths, and no other operation
+            # can be granted by it.
+            return await self._authorize_hub_pull(intent)
         consent = self._profile_owner_consent()
         if consent and intent.operation in {"create", "update", "revert"}:
             names = (
@@ -14891,6 +14932,177 @@ class Session:
             if await ask_approval(self._request_approval, ACCOUNT_PROFILE_GATE, card, None)
             else "refused"
         )
+
+    #: How long the host-filed hub-pull ask stays answerable. A day, the
+    #: queue's maximum: the question is "take your org's latest", which stays
+    #: valid that long, and the person it is for is often not at the screen
+    #: when a teammate's message woke this turn (the Victor incident).
+    HUB_PULL_ASK_TIMEOUT_S = 86400
+
+    async def _authorize_hub_pull(self, intent: "DurableWriteIntent") -> Any:
+        """Consent for an agent's org-hub pull/update (``agent op=org_pull``).
+
+        WHY A SEPARATE LADDER. Pulling the organization's items, and updating
+        ones already pulled, is the safe class: nothing is deleted, replaced,
+        unlinked or pushed, a conflicting local copy is kept (adopt-link) and a
+        conflicting update is reported for review rather than forced. Turns that
+        want it are usually woken by a teammate (Team Bridge), a peer or a wake,
+        where no card can be shown, so refusing sent non-technical users to a CLI.
+        Every step decides from HOST-HELD state only; the plan on the intent is
+        built by the tool from the catalogue, never by the model. In order:
+
+        1. Standing consent: the matching auto policy is on (org auto-enrol for
+           new items, hub-sync auto-update per kind for updates) and nothing
+           needs re-subscribing. The daemon performs the identical write
+           unattended under that policy, so asking again would add nothing.
+        2. A person answered, IN THIS RUN, a host-filed consent ask for the same
+           tenant whose kinds AND exact items (:func:`consent_items`: hub ids,
+           update target revisions) cover this plan, with its affirmative
+           option; not a bridge/relay ask; not already spent. Spent here
+           (single use). The exact "Not now" option is a decline: nothing is
+           written and nothing is re-asked in this run.
+        3. Otherwise file ONE host-authored ask carrying the plan (an open ask
+           is reused only when its items cover this plan) and return
+           :class:`QueuedHubPull`: the tool tells the model to end the turn and
+           retry when the answer arrives.
+
+        WHAT IS DELIBERATELY NOT HERE (PR #3693 review round 1):
+
+        * No "the owner's message asked for it" rung (R1). Keyword matching on
+          free text cannot tell "update my skills" from "do not update my
+          skills" or "get the agent logs"; guessing authorisation from prose is
+          the failure. The owner who asks gets the same one-tap ask instead,
+          which the operator accepted as the ceiling on friction.
+        * No attached approval card (D2). The shared account-profile gate
+          titled it "Allow account profile save?" with run-this-call options;
+          one queued ask is the single, correctly worded surface whether or not
+          someone is attached, and both paths grant identically.
+        * A typed ("Other") answer is NEITHER a yes nor a no (D3): the ask card
+          always offers free text, and a typed "yes please" must not silently
+          decline, nor may fuzzy prose grant. It is skipped, and a fresh ask with
+          the exact options is filed.
+        * A stale yes is not reused (R2): if the plan now holds an item or
+          revision the person did not see, the answer does not cover it and the
+          host asks again with the current plan.
+
+        A teammate's or another agent's request is never consent: no step reads
+        message text at all.
+        """
+        from local_operator.harness.approval import (
+            ACCOUNT_PROFILE_GATE,
+            ApprovalUnavailableError,
+        )
+        from local_operator.harness.types import QueuedHubPull
+        from local_operator.hub_org.consent import ask_question, consent_items
+
+        plan = dict(intent.plan or {})
+        tenant = str(plan.get("tenant") or "")
+        kinds = {str(k) for k in (plan.get("kinds") or ())}
+        items = set(consent_items(plan))
+        if not tenant or not kinds or not items:
+            # No host plan, or a plan that writes nothing: there is nothing a
+            # grant could be bound to, so there is no grant (fail closed). The
+            # tool never asks for an empty plan; it reports a no-op instead.
+            return None
+        if self._hub_pull_auto_policy_covers(plan):
+            return f"auto-policy:hub_pull:{tenant}"
+        queue = self.ask_queue()
+        if queue is None:
+            raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no ask queue to ask the user")
+
+        def covers(consent: Mapping[str, Any]) -> bool:
+            return kinds <= {str(k) for k in (consent.get("kinds") or ())} and items <= {
+                str(k) for k in (consent.get("items") or ())
+            }
+
+        for ask_id in sorted(self._run_answered_ask_ids):
+            record = queue.find(ask_id)
+            consent = (record or {}).get("consent")
+            if not isinstance(consent, Mapping) or consent.get("op") != "hub_pull":
+                continue
+            if str(consent.get("tenant") or "") != tenant:
+                continue
+            if record.get("relay") or self._is_bridge_ask_record(record):
+                continue
+            if record.get("status") != "answered" or record.get("consent_used"):
+                continue
+            picks = [str(v) for v in (record.get("answers") or {}).get("hub_pull") or ()]
+            decline = str(consent.get("decline") or "")
+            if decline and picks == [decline]:
+                # The person picked "Not now" for this organization: that IS
+                # their answer, whatever the plan now holds. Decline, and do not
+                # file the same question again in this run.
+                return None
+            if picks != [str(consent.get("affirm") or "")] or not covers(consent):
+                # Typed text (D3) or a yes to a different plan (R2): not consent
+                # for THIS plan. Fall through to asking with the exact options.
+                continue
+            if not queue.mark_consent_used(ask_id):
+                return None  # an unrecorded spend could be spent twice
+            return f"ask:{ask_id}"
+        for record in queue.open_records():
+            consent = record.get("consent")
+            if (
+                isinstance(consent, Mapping)
+                and consent.get("op") == "hub_pull"
+                and str(consent.get("tenant") or "") == tenant
+                # Reuse only an open ask whose yes would cover THIS plan; a wider
+                # or changed pull files its own question rather than relying on
+                # an answer to something else.
+                and covers(consent)
+            ):
+                return QueuedHubPull(ask_id=str(record["ask_id"]), tenant=tenant, reused=True)
+        question, affirm = ask_question(plan)
+        receipt = queue.enqueue(
+            [question],
+            self.HUB_PULL_ASK_TIMEOUT_S,
+            tool_call_id=intent.tool_call_id,
+            consent={
+                "op": "hub_pull",
+                "tenant": tenant,
+                "kinds": sorted(kinds),
+                "items": sorted(items),
+                "affirm": affirm,
+                # The persisted labels, never re-rendered strings: a language
+                # change between asking and answering cannot flip an answer.
+                "decline": str(question["options"][1]["label"]),
+            },
+        )
+        if not receipt.get("ok"):
+            logger.warning("hub-pull consent ask not filed: %s", receipt.get("error"))
+            return None
+        return QueuedHubPull(ask_id=str(receipt["details"]["ask_id"]), tenant=tenant)
+
+    @staticmethod
+    def _hub_pull_auto_policy_covers(plan: Mapping[str, Any]) -> bool:
+        """Whether the user's standing auto policy already authorises this plan.
+
+        Mirrors what the daemon writes unattended: org auto-enrol pulls new items
+        (``hub_org.enrol``), and the hub-sync runner applies available updates
+        for kinds whose auto-update is on (``auto_for``: skills follow the agents
+        switch there, kept so this never grants more than the runner would). The
+        runner skips unsubscribed links, so any re-subscribe needs a person.
+        Any read failure is "not covered" (fail closed to asking).
+        """
+        if plan.get("resubscribe"):
+            return False
+        try:
+            from local_operator.config import read_config_values
+            from local_operator.hub_org.settings import auto_enrol_enabled
+            from local_operator.hub_sync.settings import HubSyncSettings
+            from local_operator.paths import config_dir as _resolve_config_dir
+
+            root = _resolve_config_dir()
+            if plan.get("new") and not auto_enrol_enabled(root):
+                return False
+            update_kinds = {str(row.get("kind")) for row in plan.get("updates") or ()}
+            if update_kinds:
+                settings = HubSyncSettings.from_values(read_config_values(root) or {})
+                if not all(settings.auto_for(kind) for kind in update_kinds):
+                    return False
+        except Exception:  # noqa: BLE001 - an unreadable policy is not consent
+            return False
+        return bool(plan.get("new") or plan.get("updates"))
 
     def _profile_labels(self, intent: "DurableWriteIntent") -> list[str]:
         """The target row's display label, so "update the Code Reviewer" names it."""
@@ -16725,6 +16937,9 @@ class Session:
             # (``ask_timeout``), a ``declined`` or ``late`` response, and every
             # harness-minted row (``attribution`` system/agent) stay refused.
             if ask_answer_is_person(message):
+                answered_id = (getattr(message, "details", None) or {}).get("ask_id")
+                if isinstance(answered_id, str) and answered_id:
+                    self._run_answered_ask_ids.add(answered_id)
                 self._run_typed_user = True
                 self._run_last_trigger = TRIGGER_TYPED
                 self._run_user_text = ask_answer_text(
@@ -19338,6 +19553,7 @@ class Session:
         self._run_owner_text_bindings = []
         self._run_owner_consent = False
         self._run_untrusted_input = False
+        self._run_answered_ask_ids = set()
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()

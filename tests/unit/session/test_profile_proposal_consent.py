@@ -455,3 +455,69 @@ async def test_identical_refile_of_rejected_proposal_is_not_revived(stores):
         assert P.list_proposals(root) == []
     finally:
         await session.dispose()
+
+
+async def test_hub_pull_keeps_its_own_ladder_beside_owner_profile_writes(stores, tmp_path):
+    """Convergence with main's hub-pull consent (#3711 merge, PR #3704).
+
+    The two consent seams share ``_authorize_account_profile_write``. Main's
+    ``hub_pull`` guard must run FIRST, so an owner message that would satisfy
+    this branch's direct create/edit rung can never grant an org pull: the pull
+    still files its host-owned ask (``QueuedHubPull``) and shows no profile
+    card. In the SAME run, the owner's direct creation request still applies
+    without a card, so neither seam swallowed the other in the merge.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import DurableWriteIntent, QueuedHubPull
+    from local_operator.profile_scope import durable_write_decision
+    from tests.unit.session.test_hub_pull_consent import _with_queue
+
+    # Standing auto policy OFF so only a person's answered ask could grant.
+    ConfigManager(tmp_path / "config").set_config_value(
+        "hub", {"auto_update": {"agents": False, "teams": False}, "org": {"auto_enrol": False}}
+    )
+    gate = Gate(answer=True)  # any card would say yes: proving none is shown
+    session = _session(stores, gate=gate)
+    queue = _with_queue(session)  # main's helper: the host hook that enables the queue
+    try:
+        session._run_answered_ask_ids = set()
+        # Names the pull target in a direct create imperative: the strongest
+        # owner wording this branch's direct rung accepts.
+        start(
+            session,
+            Message.user("Please create a team marketing and update org tenant-minerva now"),
+        )
+        intent = DurableWriteIntent(
+            kind="agent",
+            operation="hub_pull",
+            name="org tenant-minerva",
+            plan={
+                "tenant": "tenant-minerva",
+                "org_name": "Minerva",
+                "kinds": ["agent"],
+                "new": [{"kind": "agent", "name": "x", "hub_id": "h-x", "local_edits": False}],
+                "updates": [],
+                "resubscribe": [],
+            },
+            tool_call_id="tc-hub",
+        )
+        origin = await session._authorize_account_profile_write(intent)
+        assert isinstance(origin, QueuedHubPull), origin
+        assert queue.find(origin.ask_id)["consent"]["op"] == "hub_pull"
+        _origin, reason = await durable_write_decision(_ctx(session, stores), intent)
+        assert reason == "ask_queued"  # the reused ask, not a profile grant
+        assert gate.cards == []
+
+        result = await execute_team(
+            "t1",
+            {"op": "create", "name": "marketing", "manager": "reviewer", "scope": "global"},
+            None,
+            None,
+            _ctx(session, stores),
+        )
+        assert not result.is_error, result.content
+        assert _details(result).get("status") != "proposed", result.content
+        assert stores["teams"].get_team_by_name("marketing") is not None
+        assert gate.cards == []
+    finally:
+        await session.dispose()

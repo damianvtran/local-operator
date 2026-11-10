@@ -1,0 +1,88 @@
+{
+  "audit_id": "urp3",
+  "round": 3,
+  "locale": "ur",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "source_audit_revision": "85fb35811f9d17fb6dfadfc2d5df3269db04bd12",
+  "scope": "round 2+: urp2 findings P1-P4 + keys changed/added in 788cc399..85fb3581 (status.scope, setup.already_signed, setup.always_allow_kept, setup.explain)",
+  "key_count": 39,
+  "keys_audited_this_round": 4,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "df1f78befebc",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "host system prompt (Model: anthropic/claude-opus-5-5)",
+    "fallback": null,
+    "independent_from_translator_session": true,
+    "independent_from_prior_auditor_sessions": [
+      "ffe80a68ac43",
+      "26eb57e200ee"
+    ],
+    "independence": "Distinct agent/session from the round-3 ur translator (commit 85fb35811f9; session not disclosed) and from round-1/2 auditors. Same model family: independent agent, not independent vendor."
+  },
+  "translator": {
+    "agent": "i18n-translator (PR #3691 round-3 wave, ur)",
+    "session": "not disclosed to auditor",
+    "model": "not disclosed to auditor",
+    "commit": "85fb35811f9d17fb6dfadfc2d5df3269db04bd12"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/cli.permissions.json",
+      "sha256": "83ea8d20d41cc939d9bdc7b0c1a3023130c8c487538878acb5af4375db975132"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256_ledger": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41",
+  "prior_round": {
+    "record": "i18n/audits/evidence/ur/cli.permissions/urp2/record.json",
+    "findings_disposition": {
+      "P1": "fixed",
+      "P2": "fixed",
+      "P3": "fixed (via P1 wording)",
+      "P4": "not applied; accepted/closed (optional NIT, consistent with status.screen.* labels)"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp3/report.md",
+      "sha256": "db5f3b0e5da24380e02b09142c10cdc949fbfb7a8415fd387618a3298bcbfd08"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp3/audit.log",
+      "sha256": "afc374b7125eea3899bc27f6d41f78f72289cbfa4ee516577cc71360676a3bce"
+    },
+    "mech_check.py.txt": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp3/mech_check.py.txt",
+      "sha256": "c533bdad9ed2cde4d3c8fa4e2a7556e3fbf4571aae8b24024f9dde8e03016fb5"
+    },
+    "apple_labels.py.txt": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp3/apple_labels.py.txt",
+      "sha256": "ac391b29bdcb641a9621a6425f801d84a9daa97260b6913fe6fb327961815f6c"
+    },
+    "keychain_labels.py.txt": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp3/keychain_labels.py.txt",
+      "sha256": "6d38d4388b1167a500b6cea534e87e4633b06db7876b8be260f56802adff6f14"
+    }
+  },
+  "audit_log_is_execution_log": true,
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log holds actual command output from this session (check.py, shasum, git diff --stat, mech_check, Apple loctable reads, sw_vers). *.py.txt are the exact scripts run.",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severities": {}
+  },
+  "mt_service_used": false,
+  "original_lost_evidence": null
+}

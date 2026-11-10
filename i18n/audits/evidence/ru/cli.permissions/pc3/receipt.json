@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "record": "i18n/audits/evidence/ru/cli.permissions/pc3/record.json",
+  "companions": {
+    "i18n/audits/evidence/ru/cli.permissions/pc3/report.md": "c5be38c33a78e6bc769881ba9d274c02439298e5e918a2227b76c5cb7318476f",
+    "i18n/audits/evidence/ru/cli.permissions/pc3/audit.log": "df2125e18bcc8f33b2f2b5adb663a5e3a8506b34c41089b1b36cc0bf55066f3f",
+    "i18n/audits/evidence/ru/cli.permissions/pc3/parity.py.txt": "a8141186c1a23e7d7a46d8b95c03a086064b32e5fc67a24bb6ff3bae33d82639",
+    "i18n/audits/evidence/ru/cli.permissions/pc3/labels.py.txt": "9f5adea1bedca0942f25d02ce756c434e367d2226b66d8440dddb0e5f5835dd9"
+  }
+}

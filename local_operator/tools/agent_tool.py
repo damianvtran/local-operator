@@ -1438,9 +1438,11 @@ async def _op_sync(
             # write the account on its own. A host with NO conversation store
             # (``needs_consent`` False) keeps pre-S2 behaviour and runs the arm.
             return seed.render() + (
-                "\n\nHub updates were not applied: they change roles saved in the "
-                "user's account, which needs their confirmation. The user can run "
-                "`lop agents sync` to apply them."
+                # No CLI command for the user (the people this reaches are
+                # often non-technical): org_pull files the consent ask itself.
+                "\n\nHub updates were not applied: they change items saved in the "
+                "user's account, which needs their confirmation. Use op='org_pull' "
+                "to update them; it asks the user when needed."
             )
         from local_operator.config import ConfigManager
 
@@ -2558,7 +2560,17 @@ async def _op_org(
         )
         return _error(tool_call_id, "agent", f"{lead}; pass org= one of: {listed}")
     registry = _registry(context)
-    if params.op == "org_pull" and getattr(registry, "session_registry", None) is not None:
+    org = next((o for o in orgs if o.tenant_id == tenant), None)
+    org_name = str(getattr(org, "tenant_name", "") or tenant)
+    role = str(getattr(org, "role", "") or "member")
+    # THE SAFE CLASS (``hub_pull``): adopt-link/skip never overwrite a local copy,
+    # and the linked-update arm below never forces a conflict. Hub-wins ``adopt``
+    # and LLM ``reconcile`` keep the ``sync`` intent + confirm_replace, so a
+    # hub_pull grant (auto policy, the owner's words, an answered host ask) can
+    # never authorise them.
+    safe_pull = params.op == "org_pull" and conflict in ("adopt-link", "skip")
+    scoped_host = getattr(registry, "session_registry", None) is not None
+    if params.op == "org_pull" and not safe_pull and scoped_host:
         from local_operator.profile_scope import (
             durable_write_decision,
             durable_write_refusal,
@@ -2575,47 +2587,29 @@ async def _op_org(
     ref = (params.name or "").strip()
     query = (params.query or "").strip().casefold()
 
-    def run() -> str:
+    def prepare() -> tuple[Any, str]:
+        """``(state, error)``: clients, the resolved reference and (org_pull) the plan."""
         from local_operator.config import ConfigManager
         from local_operator.hub_org import catalogue as cat
         from local_operator.hub_org.client import build_org_client
-        from local_operator.hub_org.pull import pull_all
 
         manager = ConfigManager(config_dir)
         client = build_org_client(manager).client
         if client is None:
-            return "error: not signed in to Radient (the user runs `lop login`)."
+            return None, "error: not signed in to Radient (the user runs `lop login`)."
         # Org items are ACCOUNT rows (the runner keeps them current for every
         # conversation), so a conversation-scoped host writes its global arm.
         account = getattr(registry, "global_registry", None) or registry
+        state: dict[str, Any] = {
+            "manager": manager,
+            "client": client,
+            "account": account,
+            "header": [],
+            "names": None,
+            "plan": None,
+        }
         if params.op == "org_list":
-            result = cat.catalogue_result(
-                client, tenant, kinds, config_dir=config_dir, agent_registry=account
-            )
-            rows = [
-                i
-                for i in result.items
-                if not query or query in f"{i.name} {i.description}".casefold()
-            ]
-            lines = [
-                f"{i.kind} {i.name} [{i.local}{' as ' + i.local_name if i.local_name else ''}]"
-                f" id={i.hub_id}"
-                for i in rows[:_ORG_ROW_CAP]
-            ]
-            # Model-facing tool output (English by design, AGENTS.md i18n).
-            if len(rows) > _ORG_ROW_CAP:
-                lines.append(  # i18n: ignore model-facing tool result
-                    f"... {len(rows) - _ORG_ROW_CAP} more (narrow with query/kinds)"
-                )
-            unlinked = [i.name for i in result.unlinked_local_copies()]
-            if unlinked:
-                lines.append(  # i18n: ignore model-facing tool result
-                    f"unlinked local copies: {', '.join(unlinked)} — op='org_pull' adopts them"
-                )
-            lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
-            return "\n".join(lines) or "the organization shares nothing of these kinds yet"
-        header: list[str] = []
-        names: list[str] | None = None
+            return state, ""
         if ref:
             # The CLI's rule, not a second one (UX review U2, QA Q1): exact id,
             # exact name, then a unique prefix; an ambiguous prefix REFUSES
@@ -2628,36 +2622,191 @@ async def _op_org(
             except cat.ReferenceError_ as error:
                 if not error.candidates:
                     scope = "/".join(kinds)
-                    return f"error: no {scope} item in organization {tenant} matches {ref!r}."
+                    return None, f"error: no {scope} item in organization {tenant} matches {ref!r}."
                 listed = "; ".join(
                     f"{c.kind} {c.name} (id {c.hub_id})" for c in error.candidates[:_ORG_ROW_CAP]
                 )
-                return (
+                return None, (
                     f"error: {ref!r} is ambiguous; pass name= one of these ids or a longer "
                     f"name: {listed}"
                 )
-            names = [item.hub_id]
+            state["names"] = [item.hub_id]
             if item.hub_id != ref:
-                header.append(f"resolved {ref!r} → {item.kind} {item.name} (id {item.hub_id})")
-        report = pull_all(
-            manager,
-            tenant,
-            kinds=kinds,
-            names=names,
-            subscribe=True,
-            auto_push=False,
-            on_conflict=conflict,  # type: ignore[arg-type]
-            client=client,
-            agent_registry=account,
+                state["header"].append(
+                    f"resolved {ref!r} → {item.kind} {item.name} (id {item.hub_id})"
+                )
+        if safe_pull:
+            from local_operator.hub_org.consent import build_plan
+
+            state["plan"] = build_plan(
+                manager,
+                tenant,
+                kinds,
+                client=client,
+                agent_registry=account,
+                hub_ids=state["names"],
+                on_conflict=conflict,
+                org_name=org_name,
+            )
+        return state, ""
+
+    state, failure = await asyncio.to_thread(prepare)
+    if state is None:
+        return _text(tool_call_id, "agent", failure)
+    plan = state["plan"]
+    # PINNED EXECUTION (PR #3693 review R2). On a scoped host the plan built
+    # above is the ONLY thing the grant covers, so the run below writes exactly
+    # it: new items by the hub ids the plan named (never a fresh all-catalogue
+    # pull), linked updates from the plan's own checks, re-subscriptions from its
+    # rows. An EMPTY plan (nothing to do, or every planning read failed) is a
+    # report, never a pull: a second read that found work would otherwise write
+    # without anyone having been asked.
+    # A plan-typed name bound only on the pinned path: a bare ``pinned`` bool does
+    # not narrow ``plan`` for the checker, and this keeps every pinned read on a plan
+    # proven non-None rather than relying on the flag and the plan staying in step.
+    pinned_plan = plan if safe_pull and scoped_host and plan is not None else None
+    pinned = pinned_plan is not None
+    if pinned_plan is not None and pinned_plan.is_empty():
+        lines = state["header"] + [
+            f"{r['kind']} {r['name']}: up-to-date" for r in pinned_plan.current
+        ]
+        lines += [f"{k}: check failed ({c})" for k, c in pinned_plan.errors.items()]
+        if pinned_plan.errors:
+            lines.append(  # i18n: ignore model-facing tool result
+                "nothing was changed: a check failed, so nothing could be confirmed; " "retry later"
+            )
+        return _text(
+            tool_call_id,
+            "agent",
+            "\n".join(lines) or "nothing to pull: no new items and no updates",
         )
-        lines = header + [
+    if pinned_plan is not None:
+        from local_operator.profile_scope import (
+            durable_write_decision,
+            hub_pull_refusal,
+        )
+
+        intent = DurableWriteIntent(
+            kind="agent",
+            operation="hub_pull",
+            name=f"org {tenant}",
+            plan=pinned_plan.to_dict(),
+            tool_call_id=tool_call_id,
+        )
+        authorized_by, reason = await durable_write_decision(
+            context, intent  # type: ignore[arg-type]
+        )
+        if reason == "ask_queued":
+            # Not an error: the host asked the user. A plain result (with the ask
+            # id in details) so the model ends its turn instead of "recovering".
+            ask_id = str(getattr(authorized_by, "ask_id", "") or "")
+            return _text(
+                tool_call_id,
+                "agent",
+                hub_pull_refusal("ask_queued", ask_id),
+                details={"status": "ask_queued", "ask_id": ask_id, "tenant": tenant},
+            )
+        if authorized_by is None:
+            return _error(tool_call_id, "agent", hub_pull_refusal(reason))
+
+    def run() -> str:
+        from local_operator.hub_org.pull import pull_all
+
+        manager, client, account = state["manager"], state["client"], state["account"]
+        if params.op == "org_list":
+            from local_operator.hub_org import catalogue as cat
+            from local_operator.hub_org.consent import build_plan, update_states
+
+            result = cat.catalogue_result(
+                client, tenant, kinds, config_dir=config_dir, agent_registry=account
+            )
+            rows = [
+                i
+                for i in result.items
+                if not query or query in f"{i.name} {i.description}".casefold()
+            ]
+            # LINKED ROWS SAY WHETHER THEY ARE CURRENT (Ben's agent could not
+            # tell). The same host check the pull plans from; only when a listed
+            # row is linked, so an unlinked catalogue costs nothing extra.
+            states: dict[tuple[str, str], str] = {}
+            if any(i.local == "linked" for i in rows[:_ORG_ROW_CAP]):
+                states = update_states(
+                    build_plan(
+                        manager,
+                        tenant,
+                        kinds,
+                        client=client,
+                        agent_registry=account,
+                        hub_ids=[i.hub_id for i in rows[:_ORG_ROW_CAP] if i.local == "linked"],
+                        org_name=org_name,
+                    )
+                )
+
+            def standing(i: Any) -> str:
+                text = i.local + (" as " + i.local_name if i.local_name else "")
+                state_word = states.get((i.kind, i.local_name or i.name))
+                return f"{text}, {state_word}" if state_word else text
+
+            lines = [
+                f"{i.kind} {i.name} [{standing(i)}] id={i.hub_id}" for i in rows[:_ORG_ROW_CAP]
+            ]
+            # Model-facing tool output (English by design, AGENTS.md i18n).
+            if len(rows) > _ORG_ROW_CAP:
+                lines.append(  # i18n: ignore model-facing tool result
+                    f"... {len(rows) - _ORG_ROW_CAP} more (narrow with query/kinds)"
+                )
+            unlinked = [i.name for i in result.unlinked_local_copies()]
+            if unlinked:
+                lines.append(  # i18n: ignore model-facing tool result
+                    f"unlinked local copies: {', '.join(unlinked)} — op='org_pull' adopts them"
+                )
+            if any(word == "update-available" for word in states.values()):
+                lines.append(  # i18n: ignore model-facing tool result
+                    "update-available items: op='org_pull' updates them (it asks the user first "
+                    "when needed)"
+                )
+            lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
+            return "\n".join(lines) or "the organization shares nothing of these kinds yet"
+        names = state["names"]
+        if pinned_plan is not None:
+            names = [str(r["hub_id"]) for r in pinned_plan.new if r.get("hub_id")]
+        if pinned and not names:
+            # Only updates/re-subscriptions were approved: no catalogue pull at
+            # all (an empty ``names`` would mean "everything").
+            from local_operator.hub_org.pull import OrgPullReport
+
+            report = OrgPullReport(items=(), adopted=(), errors={})
+        else:
+            report = pull_all(
+                manager,
+                tenant,
+                kinds=kinds,
+                names=names,
+                subscribe=True,
+                auto_push=False,
+                on_conflict=conflict,  # type: ignore[arg-type]
+                # The safe class never spends the user's model budget: identical to
+                # what org auto-enrol runs unattended. reconcile keeps its LLM path.
+                allow_llm=not safe_pull,
+                client=client,
+                agent_registry=account,
+            )
+        lines = state["header"] + [
             f"{i.kind} {i.name} id={i.hub_id}: {i.outcome}" + (f" ({i.detail})" if i.detail else "")
             for i in report.items
+            # Linked items are reported by the update arm below, with their outcome.
+            if not (plan is not None and i.outcome == "already-linked")
         ]
         lines += [
             f"adopted {a['kind']} {a['name']}: {a['result']} (backup {a.get('backup')})"
             for a in report.adopted
         ]
+        if plan is not None:
+            from local_operator.hub_org.consent import apply_linked
+
+            lines += apply_linked(manager, plan, client=client, agent_registry=account, role=role)
+            lines += [f"{r['kind']} {r['name']}: up-to-date" for r in plan.current]
+            lines += [f"{k}: check failed ({c})" for k, c in plan.errors.items()]
         lines += [f"{k} list failed: {c}" for k, c in report.errors.items()]
         return "\n".join(lines) or "nothing matched"
 
