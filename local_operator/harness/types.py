@@ -1993,17 +1993,29 @@ AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]
 
 
 @dataclass(frozen=True)
-class QueuedProfileWrite:
-    """Host-filed durable request, explicitly NOT a grant or a denial."""
+class ProposedProfileWrite:
+    """Host-filed profile PROPOSAL, explicitly NOT a grant or a denial.
 
-    approval_id: str
-    request_digest: str
-    expires_at: float
-    receipt_id: str
+    The consent seam returns this when the account write was not asked for by
+    the owner in their own words: the change is stored in
+    ``local_operator.profile_proposals`` and reviewed in Agents → <name>, or
+    applied with the ``profile_proposal`` tool after the user agrees.
+    """
+
+    proposal_id: str
     profile_kind: str
     profile_name: str
     changes: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    #: The record's real state. ``pending`` for a fresh filing; an identical
+    #: re-filing of an already-decided or expired proposal reports that state
+    #: so the receipt never claims a pending proposal that does not exist.
+    state: str = "pending"
+
+
+#: Kept for one release so out-of-tree imports of the old name keep resolving;
+#: the signed mesh filing it described is gone (proposals live in Agents now).
+QueuedProfileWrite = ProposedProfileWrite
 
 
 @dataclass(frozen=True)
@@ -2047,7 +2059,7 @@ class DurableWriteIntent:
     they land in the account store.
     """
 
-    kind: Literal["agent", "team"]
+    kind: Literal["agent", "team", "skill"]
     #: ``sync`` is here because syncing rewrites installed account rows and its
     #: hub arm fetches account definitions — both are account mutations the
     #: seam is asked about, even though the tool's own verb is a different one.
@@ -2336,8 +2348,12 @@ class ToolContext(BaseModel):
         default=None, exclude=True
     )
     authorize_durable_write: (
-        Callable[[DurableWriteIntent], Awaitable[str | QueuedProfileWrite | None]] | None
+        Callable[[DurableWriteIntent], Awaitable[str | ProposedProfileWrite | None]] | None
     ) = Field(default=None, exclude=True, repr=False)
+    #: Host-held consent decision, never a model-supplied permission flag.
+    decide_profile_proposal: Callable[[str, str], Awaitable[str]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process

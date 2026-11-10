@@ -771,6 +771,10 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
             # above, so the inventory below includes it and the assertion
             # compares like-for-like against DEFAULT_TOOL_NAMES.
             bridge_runtime=object(),
+            # ``skill`` (a deferred default since the profile-proposals change)
+            # is createIf-gated on the profile root every real session carries;
+            # presence-only here, same rule as the gates above.
+            memory_config_dir="/stub-profile-root",
             # ``notify`` (docs/design/notifications-inbox.md §3.2) is
             # createIf-gated on the inbox door a top-level session binds —
             # presence-only here, same rule as the gates above.
