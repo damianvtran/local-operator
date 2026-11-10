@@ -1855,9 +1855,12 @@ async def _wait_for_supervisor_health(client: httpx.AsyncClient, port: int) -> d
                 except httpx.ConnectError as failure:
                     last_error = failure
                     continue
-                health = reply.json()
-                if health.get("reason"):
-                    return health
+                # A fresh local: assigning Any to the declared `dict | None` would
+                # leave pyright treating it as possibly None.
+                body: dict[str, Any] = reply.json()
+                health = body
+                if body.get("reason"):
+                    return body
     except TimeoutError:
         pass
     if health is None:
@@ -1867,6 +1870,7 @@ async def _wait_for_supervisor_health(client: httpx.AsyncClient, port: int) -> d
         )
     # A listener that answers with the wrong state must reach the caller's
     # original supervisor assertions, not be relabelled as a startup failure.
+    assert health is not None
     return health
 
 
