@@ -1109,9 +1109,11 @@ class Resolution:
 #: Interpreters whose first positional word is a script FILE they run.
 _INTERPRETER_RE = re.compile(r"(?:node|python(?:3(?:\.\d+)?)?)")
 #: An option naming an output: ``-o``, ``--out``, ``--output``, ``--outfile``,
-#: ``--write``, ``--write-to``… alone (value in the next word) or glued.
-_OUTPUT_FLAG_RE = re.compile(r"(?:-o|--out[\w-]*|--write[\w-]*)")
-_OUTPUT_GLUED_RE = re.compile(r"(?:-o.|--out[\w-]*=|--write[\w-]*=)")
+#: ``--write``, ``--write-to``… alone (value in the next word) or glued, and
+#: the in-place forms ``-i``/``--in-place``/``--inplace`` (review R2-m2): a
+#: script told to rewrite its input writes the file it was handed.
+_OUTPUT_FLAG_RE = re.compile(r"(?:-o|-i|--out[\w-]*|--write[\w-]*|--in-?place)")
+_OUTPUT_GLUED_RE = re.compile(r"(?:-o.|-i.|--out[\w-]*=|--write[\w-]*=|--in-?place=)")
 
 
 def _interpreter_script(name: str, words: list[Expanded], cwd: str | None) -> str | None:

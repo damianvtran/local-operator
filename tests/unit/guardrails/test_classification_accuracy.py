@@ -512,6 +512,49 @@ async def test_non_affirmative_pick_is_never_settled(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "options", "picked"),
+    [
+        # Review R2-M1 repros: a narrowing pick never approves fr.
+        ("Delete {es} and {fr}?", (("Delete es only", ""), ("Keep both", "")))
+        + ("Delete es only",),
+        (
+            "Delete {es} and {fr}?",
+            (("Delete the es receipt", ""), ("Keep both", "")),
+            "Delete the es receipt",
+        ),
+        ("Delete {es}?", (("Delete", "removes es; {fr} remains"), ("Keep", ""))) + ("Delete",),
+        (
+            "What to do with {es}?",
+            (("Delete es", "removes es; {fr} is excluded"), ("Keep", ""), ("Move", "")),
+            "Delete es",
+        ),
+    ],
+)
+async def test_narrowing_pick_never_approves_an_excluded_path(
+    home: Path, question: str, options: tuple[tuple[str, str], ...], picked: str
+) -> None:
+    files = _stranger_receipts(home)
+    names = {"es": files[0], "fr": files[1]}
+    opts = tuple((lbl, desc.format(**names)) for lbl, desc in options)
+    _ask(home, PARENT, "a-beef", question.format(**names), picked, opts)
+    judge = _TimedOutJudge()
+    outcome = await _check(home, f"rm -f {files[1]}", PARENT, [], judge)
+    assert outcome is not None and outcome.blocked, outcome
+    assert judge.calls == 1
+
+
+@pytest.mark.parametrize(
+    "label", ["Yes", "Delete", "Remove all 57", "Go ahead", "Yes, delete them"]
+)
+def test_whole_set_pick_approves_the_question(label: str) -> None:
+    q = {"question": "Delete /x/a and /x/b?"}
+    opts = [{"label": label, "description": "d /x/c"}, {"label": "Keep them", "description": ""}]
+    out = prov._approved_text(q, opts, [label, "Keep them"], [label])
+    assert "Delete /x/a and /x/b?" in out and not any("/x/c" in o for o in out)
+
+
+@pytest.mark.asyncio
 async def test_ask_never_settles_a_repository_root(home: Path) -> None:
     """Cross-PR safety (#3700): a target holding ``.git`` keeps the judge."""
     repo = _pad(home, STRANGER) / "clone"
@@ -630,10 +673,19 @@ def test_mismatched_loop_families_keep_the_fan_out(home: Path) -> None:
 # -- 7. case 7: a tracked script reading a task-tree teammate's scratch file ------------
 
 
-def _repo_with_script(home: Path) -> Path:
+def _git_env() -> dict[str, str]:
+    return {
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def _repo_with_script(home: Path, repo: Path | None = None) -> Path:
     import subprocess
 
-    repo = home / "work" / "ui"
+    repo = repo or home / "work" / "ui"
     (repo / "scripts").mkdir(parents=True)
     (repo / "scripts" / "ledger-assemble.mjs").write_text("// reads receipts\n")
     (repo / "scripts" / "untracked.mjs").write_text("// not in git\n")
@@ -643,7 +695,11 @@ def _repo_with_script(home: Path) -> Path:
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
     }
-    for args in (["init", "-q"], ["add", "scripts/ledger-assemble.mjs"]):
+    for args in (
+        ["init", "-q"],
+        ["add", "scripts/ledger-assemble.mjs"],
+        ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "s"],
+    ):
         subprocess.run(["git", "-C", str(repo), *args], check=True, env=env)
     return repo
 
@@ -679,6 +735,11 @@ def test_tracked_script_reading_a_siblings_receipt_is_low(home: Path) -> None:
         ("node scripts/ledger-assemble.mjs --out {f}", "named as output"),
         ("node scripts/ledger-assemble.mjs -o {f}", "named as output"),
         ("node scripts/ledger-assemble.mjs --write-receipt={f}", "named as output"),
+        # Review R2-m2: in-place rewrites write the file they are handed.
+        ("node scripts/ledger-assemble.mjs -i {f}", "in-place"),
+        ("node scripts/ledger-assemble.mjs --in-place {f}", "in-place"),
+        ("node scripts/ledger-assemble.mjs --inplace {f}", "in-place"),
+        ("node scripts/ledger-assemble.mjs --in-place={f}", "in-place"),
         ("node -e 'x' {f}", "no script file"),
     ],
 )
@@ -703,6 +764,47 @@ def test_tracked_script_reading_a_strangers_scratch_stays_high(home: Path) -> No
     verdict = _tree_verdict(home, command, CHILD, repo)
     assert verdict.risk is Risk.HIGH
     assert not any("task tree" in r for r in verdict.reasons)
+
+
+def test_symlink_in_a_siblings_pad_to_a_strangers_pad_stays_high(home: Path) -> None:
+    """Review R2-M2: the owner is the session the RESOLVED path lands in."""
+    manager = "dddddddddddd"
+    _child_of(home, CHILD, manager)
+    _child_of(home, PARENT, manager)
+    repo = _repo_with_script(home)
+    secret = _pad(home, STRANGER) / "secret.md"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_text("synthetic\n")
+    link = _pad(home, PARENT) / "lnk"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(_pad(home, STRANGER))
+    command = f"node scripts/ledger-assemble.mjs --receipt {link}/secret.md"
+    verdict = _tree_verdict(home, command, CHILD, repo)
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+    assert not any("task tree" in r for r in verdict.reasons)
+
+
+def test_tracked_script_with_uncommitted_edits_is_high(home: Path) -> None:
+    """Review R2-m1: an edited tracked script is the agent's code, not the repo's."""
+    manager = "dddddddddddd"
+    _child_of(home, CHILD, manager)
+    _child_of(home, PARENT, manager)
+    repo = _repo_with_script(home)
+    (repo / "scripts" / "ledger-assemble.mjs").write_text("writeFileSync(argv[2], '')\n")
+    receipt = _receipt(home, PARENT)
+    command = f"node scripts/ledger-assemble.mjs --receipt {receipt}"
+    assert _tree_verdict(home, command, CHILD, repo).risk is Risk.HIGH
+
+
+def test_committed_script_in_a_scratchpad_repo_is_high(home: Path) -> None:
+    """Review R2-m1: a repo the agent ``git init``-ed in its own pad is not reviewed code."""
+    manager = "dddddddddddd"
+    _child_of(home, CHILD, manager)
+    _child_of(home, PARENT, manager)
+    repo = _repo_with_script(home, _pad(home, CHILD) / "rig")
+    receipt = _receipt(home, PARENT)
+    command = f"node scripts/ledger-assemble.mjs --receipt {receipt}"
+    assert _tree_verdict(home, command, CHILD, repo).risk is Risk.HIGH
 
 
 def test_tracked_script_handed_a_siblings_evidence_file_stays_critical(home: Path) -> None:
@@ -738,3 +840,35 @@ def test_policy_block_keeps_the_policy_wording() -> None:
 
     text = review_text("some-rule", "the safety check refused this call", "x")
     assert "could not reach a verdict" not in text and "(review): the safety check refused" in text
+
+
+@pytest.mark.asyncio
+async def test_a_block_mentioning_judge_unavailable_is_still_a_policy_block() -> None:
+    """Review R2-n2: wording follows ``JudgeResult.no_verdict``, not the reason's prefix."""
+    from local_operator.guardrails.judge import JudgeBrief, run_judge
+
+    async def judge(system: str, prompt: str) -> str:
+        return "BLOCK judge unavailable: pretend"
+
+    async def off(system: str, prompt: str) -> str:
+        return "maybe"
+
+    brief = JudgeBrief(tool="bash", call_text="x", flagged="x")
+    blocked = await run_judge(brief, judge, timeout=5)
+    assert not blocked.allowed and not blocked.no_verdict
+    assert (await run_judge(brief, off, timeout=5)).no_verdict
+    assert (await run_judge(brief, None, timeout=5)).no_verdict
+
+
+def test_user_rule_no_verdict_names_the_call_not_paths() -> None:
+    """Review R2-n1: a user rule's targets are the call, not paths."""
+    from local_operator.guardrails.check import review_text
+
+    text = review_text(
+        "my-rule",
+        "judge unavailable: timeout after 1s",
+        "this bash call",
+        no_verdict=True,
+        paths=False,
+    )
+    assert "naming this call" in text and "these paths" not in text

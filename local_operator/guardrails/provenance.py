@@ -133,6 +133,17 @@ _BARE_AFFIRM_RE = re.compile(
 #: A PICKED option label that says yes to the question (review R1-M1): only
 #: such a pick settles without the judge; "Abort", "Installer only", "Nah"
 #: never do, whatever their description names.
+#: A picked label that says yes to the WHOLE question, nothing narrower
+#: (review R2-M1): "Yes", "Delete", "Yes, delete them", "Remove all 57",
+#: "Go ahead", "Delete both". "Delete es only" or "Delete the es receipt"
+#: does not match, so it approves only the paths its own label names.
+_WHOLE_SET_OPTION_RE = re.compile(
+    r"(?i)\W*(?:yes|ok|okay|sure|approved?|go ahead|proceed|confirm|do it"
+    r"|delete|remove|copy|move|overwrite|replace|clean ?up)"
+    r"(?:[\s,]+(?:and\s+)?(?:delete|remove|copy|move|overwrite|replace|proceed|go ahead|do it))?"
+    r"(?:\s+(?:all(?:\s+(?:\d+|of\s+them|them))?|them(?:\s+all)?|everything|both|it|these|those))?"
+    r"\W*"
+)
 _AFFIRM_OPTION_RE = re.compile(
     r"(?i)^\W*(?:yes|ok|okay|sure|approve[ds]?|go ahead|proceed|confirm|do it"
     r"|delete|remove|copy|move|overwrite|replace|clean ?up)\b"
@@ -1595,15 +1606,19 @@ def _approved_text(
     """What this answer approves WITHOUT a judge reading it (``OperatorWords.approved``).
 
     Settled deterministically only when the answer can mean one thing:
-    * the question itself, when it is a yes/no ask — every option but the one
-      picked declines (a-a382: "Remove all 57" vs "Keep them") — or the
-      operator typed a BARE affirmative ("Go ahead and copy", whole answer);
-    * otherwise only the PICKED options' own label and description, and only
-      when each picked label says yes and nothing in it declines.
-    Anything else approves nothing here: a qualified typed answer ("yes but
-    not fr", a-daca's "… but also send this to Aida …") or a pick like
-    "Installer only" / "Abort" still reaches the judge as the operator's
-    words (``OperatorWords.text``), unless ``_answer_declines`` vetoed it.
+    * the WHOLE question, when it is a yes/no ask (every option but the one
+      picked declines) and each picked label is a bare affirmative over the
+      whole set — "Yes", "Delete", a-a382's "Remove all 57", "Go ahead" — or
+      the operator typed a bare affirmative ("Go ahead and copy");
+    * otherwise only the paths a picked label NAMES ITSELF, and only when
+      each picked label says yes and nothing in it declines.
+    An option's description approves nothing (review R2-M1): "Delete es only"
+    described as "…; fr remains" must not settle fr, and a narrowing label
+    ("Delete es only", "Delete the es receipt") must not approve the
+    question's other paths. Anything else — a qualified typed answer, a pick
+    like "Installer only" / "Abort" — still reaches the judge as the
+    operator's words (``OperatorWords.text``), unless ``_answer_declines``
+    vetoed it.
     """
     out: list[str] = []
     picked = [o for o in opts if str(o.get("label") or "") in chosen]
@@ -1618,15 +1633,17 @@ def _approved_text(
     ]
     if len(affirmed) != len(picked):
         return []
-    for o in affirmed:
-        out.append(f"{o.get('label') or ''}: {o.get('description') or ''}")
-    others = [lbl for lbl in labels if lbl not in chosen]
-    yes_no = bool(picked) and bool(others) and all(_DECLINE_RE.search(lbl) for lbl in others)
     if typed and not all(_BARE_AFFIRM_RE.fullmatch(v) for v in typed):
         # A qualified typed answer is the judge's to read (R1-B2); the
         # question text is never approved by it, nor are picks beside it.
         return []
-    if (yes_no and not typed) or typed:
+    # Only the label: it is what the operator read and chose. The label's own
+    # paths are approved; a description is context, never consent (R2-M1).
+    out.extend(str(o.get("label") or "") for o in affirmed)
+    others = [lbl for lbl in labels if lbl not in chosen]
+    yes_no = bool(picked) and bool(others) and all(_DECLINE_RE.search(lbl) for lbl in others)
+    whole = all(_WHOLE_SET_OPTION_RE.fullmatch(str(o.get("label") or "")) for o in affirmed)
+    if (yes_no and whole) or (typed and not picked):
         out.append(str(q.get("question") or ""))
     return out
 
@@ -1817,12 +1834,36 @@ def same_task_tree(a: str, b: str, *, state_root: str | os.PathLike[str] | None 
     return "descendant" if a in lineage_b else "sibling"
 
 
-def tracked_script(path: str | None) -> bool:
-    """Is ``path`` a regular file git tracks in a repository working tree?"""
+def tracked_script(path: str | None, *, state_roots: Iterable[str] = ()) -> bool:
+    """Is ``path`` a committed, unmodified file of a repository outside every session dir?
+
+    Review R2-m1: "in the index" was not enough. A tracked script with
+    uncommitted edits, or one staged in a repo the agent just ``git init``-ed
+    in a scratchpad, is code the agent wrote, not the project's reviewed
+    tool, so it keeps the HIGH. The bar is therefore: tracked
+    (``ls-files --error-unmatch``), identical to ``HEAD`` (``diff --quiet``,
+    which also fails when there is no commit) and in a repository whose
+    top level is not under any state root's ``sessions/`` directory.
+    """
     if not path or os.path.islink(path) or not os.path.isfile(path):
         return False
     directory, name = os.path.split(path)
-    return _git(["ls-files", "--error-unmatch", "--", name], directory) is not None
+    if _git(["ls-files", "--error-unmatch", "--", name], directory) is None:
+        return False
+    if _git(["diff", "--quiet", "HEAD", "--", name], directory) is None:
+        return False
+    top = _git(["rev-parse", "--show-toplevel"], directory)
+    if not top:
+        return False
+    top_real = os.path.realpath(top.strip())
+    for state in state_roots:
+        for spelling in {state, os.path.realpath(state)}:
+            sessions = os.path.join(spelling, "sessions") + os.sep
+            if (top_real + os.sep).startswith(sessions) or (top.strip() + os.sep).startswith(
+                sessions
+            ):
+                return False
+    return True
 
 
 def operator_brief(

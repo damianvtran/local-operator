@@ -261,8 +261,17 @@ def _critical_text(verdict: Verdict) -> str:
 JUDGE_UNAVAILABLE = "judge unavailable"
 
 
-def review_text(rule: str, reason: str, targets: str) -> str:
-    if reason.startswith(JUDGE_UNAVAILABLE):
+def review_text(
+    rule: str, reason: str, targets: str, *, no_verdict: bool = False, paths: bool = True
+) -> str:
+    """The refusal text of a reviewed call.
+
+    ``no_verdict`` comes from ``JudgeResult.no_verdict``, never from the
+    reason's wording (review R2-n2). ``paths`` is False when ``targets``
+    names the call itself (a user rule), so the remedy asks for an
+    instruction naming this call rather than "these paths" (R2-n1).
+    """
+    if no_verdict:
         # Issue #3613: a timeout, an exception, a host with no judge model or
         # an off-contract answer is NO verdict. The call still fails closed,
         # but the agent must not read it as a policy refusal and "adapt" by
@@ -274,7 +283,7 @@ def review_text(rule: str, reason: str, targets: str) -> str:
             f"({reason}). This is not a policy decision: nothing judged this call unsafe, "
             f"but a call that cannot be checked is not run. Targets: {targets}. Nothing was "
             "run. Retry later, or settle it with a store-verified `ask` answer or an "
-            "explicit operator instruction naming these paths."
+            f"explicit operator instruction naming {'these paths' if paths else 'this call'}."
         )
     tail = (
         SUPPORTED_DELETE_PATHS
@@ -779,7 +788,13 @@ async def _dangerous_delete(
         return outcome
     return GuardOutcome(
         blocked=True,
-        text=review_text(DANGEROUS_DELETE_RULE, reason, targets),
+        text=review_text(
+            DANGEROUS_DELETE_RULE,
+            reason,
+            targets,
+            # A verification failure after an ALLOW is a real refusal.
+            no_verdict=result.no_verdict and reason == result.reason,
+        ),
         rule=DANGEROUS_DELETE_RULE,
         risk=risk_name,
         destructive=True,
@@ -912,7 +927,13 @@ async def _check_tool_call(
         if not result.allowed:
             return GuardOutcome(
                 blocked=True,
-                text=review_text(rule.name, result.reason, f"this {tool_name} call"),
+                text=review_text(
+                    rule.name,
+                    result.reason,
+                    f"this {tool_name} call",
+                    no_verdict=result.no_verdict,
+                    paths=False,
+                ),
                 rule=rule.name,
                 risk="rule",
                 destructive=bool(outcome and outcome.destructive),
