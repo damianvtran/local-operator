@@ -821,7 +821,23 @@ class LibraryIndexer:
                 complete=bool(entry.get("complete")),
                 revision=revision,
             )
-            revision = self.store.bump_revision(connection)
+            # The catalog revision is what tells a listing its cursor is stale
+            # (``cursor_reset``), so it moves only when something a listing
+            # shows moved: an asset row, a new session, its title or its
+            # completeness (the scanned/total progress). A rescan that changed
+            # none of those — the common case at ~2 rescans/s — keeps the
+            # revision, sparing the idx_state write and a needless client
+            # refetch, the same rule ``_forget`` applies to a no-op removal.
+            listing_moved = (
+                bool(affected)
+                or known is None
+                or bool(known.get("complete")) != bool(entry.get("complete"))
+                or str(known.get("title") or "") != title
+            )
+            if listing_moved:
+                revision = self.store.bump_revision(connection)
+            else:
+                revision = self.store._revision(connection)
         self._enqueue_thumbs(assets)
         # The revision ``bump_revision`` returned, not a fresh read: that would
         # open another connection per session (623 of them on a cold backfill).

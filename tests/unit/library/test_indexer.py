@@ -1056,9 +1056,12 @@ def test_a_rescan_that_finds_nothing_new_rewrites_no_catalog_row(tmp_path, monke
     # A plain chat line: the journal moved, so the session is rescanned.
     with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(user_row("u1", 10.0, "just talking")) + "\n")
+    revision = LibraryStore(root).revision()
     index = indexer.LibraryIndexer(root)
     assert index.scan_session(SESSION) is True
     assert _catalog_rows(root) == before
+    # Nothing a listing shows moved, so no listing cursor is invalidated.
+    assert LibraryStore(root).revision() == revision
 
     # One new file: exactly one new asset row, the other six untouched.
     with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
@@ -1068,5 +1071,6 @@ def test_a_rescan_that_finds_nothing_new_rewrites_no_catalog_row(tmp_path, monke
     after = _catalog_rows(root)
     assert set(before["assets"]) < set(after["assets"])
     assert len(after["assets"]) == 7
+    assert LibraryStore(root).revision() > revision
     assert set(before["occurrences"]) < set(after["occurrences"])
     assert names(root) == {f"f{number}.txt" for number in range(6)} | {"new.txt"}
