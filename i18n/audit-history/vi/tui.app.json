@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.app",
+  "history_sha256": "94b9e6e883415fbbeb4a9e65681b7fba2ea4ccf6ad2466699110bc2e1ec4084e",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.app",
+      "source_sha256": "5587089e1159c87e4d22e7de5a539fb210582b6c517bb6725af5c30e7acd24e7",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3753 implementer, remediation 90fdf91871d)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi."
+    }
+  ]
+}

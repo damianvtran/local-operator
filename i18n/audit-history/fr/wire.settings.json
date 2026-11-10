@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "a6e011a478250a1d4dbeda230c32de8f376c48dcfa3758deea4b2687d63a951b",
+  "history_sha256": "7e3e742d8673f8019bdd34b911949029c391eef9f789e8b5beae2d5d55ee953d",
   "entries": [
     {
       "locale": "fr",
@@ -129,6 +129,26 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'et repasser en complet ne les rétablit pas' checked for accuracy, glossary (choice label 'complet' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b) against en, glossary and fr guide. F1 MAJOR glossary: help said 'compaction'; glossary and the section title use 'compactage' (11 shipped uses) -> fixed. F2 minor accuracy: label 'Reprise' dropped 'replay' -> 'Rejeu à la reprise' (precedent cli.global_help.resume 'en rejouant'); full.label 'complète' -> 'complet' to agree with 'rejeu' (matches display_dock 'complet'). F3 minor idiom+typography: card.description 'non littéraux' reads as 'figurative' and ';' was preceded by U+0020 -> 'sans les tours antérieurs mot pour mot' with U+202F. F4 nit: 'la fin récente' for 'tail' accepted. No placeholders/ICU/plurals/markup in source or target; U+2019 apostrophes correct. Receipt valid only if the applied bytes equal expected-final-values.json (verify.py)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "f578d07fc5d37b7011d665647d4354db9e675794bd6764f1ce9c34d05da17f67",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3753 implementer, remediation 90fdf91871d)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi."
     }
   ]
 }

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "c2f736b66807179ed9b329680dce2cb93e5b9ab4a1c7173cebe9fee2fc15b152",
+  "history_sha256": "4fecaa5267bb8f333463ffe913a56e0184a7d9ce974ff92c4d58add765962ab8",
   "entries": [
     {
       "locale": "vi",
@@ -129,6 +129,26 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'và chuyển lại đầy đủ cũng không khôi phục chúng' checked for accuracy, glossary (choice label 'đầy đủ' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass; R2-V1 nit: 'chuyển lại' could read 'chuyển về', accepted unchanged. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). Passed as submitted. N1 nit: help opening 'Những gì một phiên được tiếp tục phát lại sau khi nén' is parseable but slightly heavy; accepted. nén/phiên/tiếp tục/lượt/người vận hành/thẻ/phát lại all match glossary and shipped vi. No placeholders/ICU/plurals."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "f578d07fc5d37b7011d665647d4354db9e675794bd6764f1ce9c34d05da17f67",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3753 implementer, remediation 90fdf91871d)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi."
     }
   ]
 }

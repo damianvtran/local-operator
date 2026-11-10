@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings",
-  "history_sha256": "f8f956b9689811b5b773362415403484953206d781c6027c58b232448f8daa32",
+  "history_sha256": "9273525f8e20b26d3de54e9bc90e7dd30e95012ad77a6417cb212250441206cc",
   "entries": [
     {
       "locale": "ru",
@@ -129,6 +129,26 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'и возврат к «полностью» их не восстанавливает' checked for accuracy, glossary (choice label 'полностью' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). Passed as submitted, nits only. N1: 'реплики' for turn where the catalogue mostly uses 'ход' (192 uses) - accepted, because the sentence is about verbatim text and 'реплика' names the text of a turn. N2: label 'Воспроизведение при возобновлении' 33 chars vs en 13, inside the namespace's existing label range (max 49) - optional 'Повтор при возобновлении'. N3: full.label adverb 'полностью' beside noun 'карточка' - accepted. сжатие/сессия/карточка/воспроизведение match glossary and cli.global_help.resume. No placeholders/ICU/plurals."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "f578d07fc5d37b7011d665647d4354db9e675794bd6764f1ce9c34d05da17f67",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3753 implementer, remediation 90fdf91871d)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi. 1 minor deferred in PR thread."
     }
   ]
 }
