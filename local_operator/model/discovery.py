@@ -2779,6 +2779,7 @@ def _warm_relayed_effort_source(cache_dir: Path | None) -> None:
         _relayed_warm_last[key] = now
 
         def run() -> None:
+            source_key = _cache_key(RELAYED_EFFORT_SOURCE)
             try:
                 with collect_unavailable():
                     available_models(
@@ -2789,6 +2790,18 @@ def _warm_relayed_effort_source(cache_dir: Path | None) -> None:
                     )
             except Exception as exc:  # noqa: BLE001 — a display dial is never worth a crash
                 logger.debug("could not warm %s ladders: %s", RELAYED_EFFORT_SOURCE, exc)
+            finally:
+                # A failed warm must not stand as OPENROUTER'S failure backoff
+                # (review round 2, MAJOR-1): that document's own readers would
+                # then be answered ``stale`` for a minute because a Radient read
+                # asked for ladders. Only when there is still no document, so a
+                # usable stale one is never dropped; ``invalidate`` forgets the
+                # backoff and unlinks nothing that exists.
+                try:
+                    if peek_listing(source_key, cache_dir=cache_dir).payload is None:
+                        invalidate(source_key, cache_dir=cache_dir)
+                except Exception as exc:  # noqa: BLE001 — bookkeeping only
+                    logger.debug("could not clear %s warm backoff: %s", RELAYED_EFFORT_SOURCE, exc)
 
         thread = threading.Thread(target=run, name="relayed-effort-warm", daemon=True)
         _relayed_warm_threads[key] = thread
@@ -2872,7 +2885,7 @@ def _borrow_relayed_efforts(
     return [
         (
             dataclasses.replace(row, reasoning_efforts=ladders[row.id])
-            if row.id in silent_ids and row.id in ladders
+            if row.reasoning_efforts is None and row.id in silent_ids and row.id in ladders
             else row
         )
         for row in live_rows

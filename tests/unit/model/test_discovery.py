@@ -3010,19 +3010,24 @@ def test_a_cold_source_never_blocks_or_degrades_the_radient_read(
     monkeypatch.setattr(discovery, "fetch_models", hung)
     rows = _silent_radient_rows()
 
-    began = time.monotonic()
-    with catalogue.collect_unavailable() as unavailable:
-        out = discovery._borrow_relayed_efforts("radient", rows, cache_dir=tmp_path, client=None)
-    elapsed = time.monotonic() - began
-
-    assert out == rows, "a cold source leaves the rows untouched"
-    assert elapsed < 1.0, "the caller must not wait on the fetch"
-    assert unavailable == [], "the warm must not mark the caller's resolution degraded"
-    assert started.wait(timeout=5), "premise: the warm really started a fetch"
-    release.set()
+    try:
+        with catalogue.collect_unavailable() as unavailable:
+            # Returning at all while the fetch is still parked on `release` is
+            # the structural proof that the caller does not wait on it.
+            out = discovery._borrow_relayed_efforts(
+                "radient", rows, cache_dir=tmp_path, client=None
+            )
+        assert not release.is_set(), "premise: the fetch was still parked when the call returned"
+        assert out == rows, "a cold source leaves the rows untouched"
+        assert unavailable == [], "the warm must not mark the caller's resolution degraded"
+        assert started.wait(timeout=5), "premise: the warm really started a fetch"
+    finally:
+        release.set()
     for thread in list(discovery._relayed_warm_threads.values()):
         thread.join(timeout=5)
     assert not (tmp_path / "openrouter.listing.json").exists()
+    # And the failed warm leaves no failure backoff on OpenRouter's own document.
+    assert str(tmp_path / "openrouter.listing.json") not in catalogue._last_failure
 
 
 def test_the_warm_fills_the_source_for_the_next_read(
@@ -3151,3 +3156,47 @@ def test_a_router_id_is_never_given_a_borrowed_ladder(tmp_path, _no_relayed_warm
     by_id = {row.id: row for row in out}
     assert by_id["auto"].reasoning_efforts is None
     assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts == ("none", "high")
+
+
+def test_a_failed_warm_does_not_back_off_openrouters_own_readers(
+    tmp_path, monkeypatch, _no_relayed_warm_state
+) -> None:
+    """Review round 2, MAJOR-1: the warm's failure used to stand as OpenRouter's
+    60 s failure backoff, so a user who then opened OpenRouter was answered
+    ``stale`` for a minute because a Radient read had asked for ladders."""
+    up = False
+    calls: list[str] = []
+
+    def fetch(provider_id: str, **_k: object) -> list[discovery.DiscoveredModel] | None:
+        calls.append(provider_id)
+        return _openrouter_rows() if up else None
+
+    monkeypatch.setattr(discovery, "fetch_models", fetch)
+
+    discovery._borrow_relayed_efforts(
+        "radient", _silent_radient_rows(), cache_dir=tmp_path, client=None
+    )
+    for thread in list(discovery._relayed_warm_threads.values()):
+        thread.join(timeout=5)
+    assert calls == ["openrouter"], "premise: the warm ran and failed"
+
+    up = True
+    rows, status = available_models("openrouter", api_key=None, cache_dir=tmp_path)
+
+    assert calls == ["openrouter", "openrouter"], "OpenRouter's own read was not suppressed"
+    assert status == "ok"
+    assert rows
+
+
+def test_a_row_that_states_its_own_ladder_survives_a_duplicate_silent_id(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+    rows = [
+        discovery.DiscoveredModel(id="deepseek/deepseek-v4.1-flash"),
+        discovery.DiscoveredModel(id="deepseek/deepseek-v4.1-flash", reasoning_efforts=("low",)),
+    ]
+
+    out = discovery._borrow_relayed_efforts(
+        "radient", rows, cache_dir=tmp_path, client=_StubClient([])
+    )
+
+    assert [row.reasoning_efforts for row in out] == [("none", "low", "high", "max"), ("low",)]
