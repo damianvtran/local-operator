@@ -258,8 +258,13 @@ def test_an_unknown_tag_still_decodes_to_the_pre_contract_ref(value: str) -> Non
     assert ref is not None and ref.thread_root_id is None
 
 
-def test_a_ref_longer_than_the_previous_releases_bound_is_refused() -> None:
-    assert parse_conversation_ref_value(f"{CONV}/bcmsg_m1/4/0/agent/a=1/b=2/c=3") is None
+def test_a_ref_beyond_the_sane_upper_bound_is_refused() -> None:
+    # The old fixed (4, 5, 6, 7) cap refused every encoder shape past
+    # seven parts — including the 8-part threaded reply carrying
+    # sender_kind + thread_root + addressed + relation. The bound is now
+    # a sane upper limit on the total; a ref past it is still malformed.
+    too_long = f"{CONV}/bcmsg_m1/4/0/agent/a=1/b=2/c=3/d=4/e=5/f=6/g=7"
+    assert parse_conversation_ref_value(too_long) is None
 
 
 def test_the_feed_projection_carries_the_thread_root_and_nothing_else() -> None:
