@@ -340,6 +340,25 @@ describe("Send recording: when nothing is sent, the words stay in the box", () =
 	});
 });
 
+describe("a send that is NOT Send recording still discards a live take, and says so", () => {
+	it("tapping a no-argument slash command from the tray while recording runs it and drops the take", async () => {
+		vi.mocked(api.getCommands).mockResolvedValue({
+			commands: [{ name: "compact", description: "Compact the conversation context", aliases: [], arguments: "none" }],
+		} as Awaited<ReturnType<typeof api.getCommands>>);
+		renderComposer();
+		const recorder = await startRecording();
+		fireEvent.change(field(), { target: { value: "/" } });
+
+		fireEvent.click(await screen.findByRole("button", { name: /\/compact/ }));
+
+		await waitFor(() => expect(mockedSendCommand).toHaveBeenCalledOnce());
+		expect(screen.getByText("Voice input discarded.")).toBeTruthy();
+		expect(mockedTranscribe).not.toHaveBeenCalled();
+		expect(recorder.state).toBe("inactive");
+		await waitFor(() => expect(roles()).toEqual(["send"]));
+	});
+});
+
 describe("a plain Send is inert while the take is being transcribed", () => {
 	it("the disc is disabled (a press would abort the request and send the old draft)", async () => {
 		renderComposer();

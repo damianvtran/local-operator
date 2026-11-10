@@ -673,8 +673,10 @@ function PrimaryButton({
 	if (role === "send-recording-busy") {
 		/* The press was taken: a static disc that still names what it was, inert.
 		   `aria-disabled` + a no-op rather than `disabled`, so the disc keeps its
-		   look and focus (the working line's Stop does the same). Slot A carries the
-		   one spinner for this wait. */
+		   accent look instead of the sunken disabled one (the working line's Stop
+		   does the same). It is a fresh button (keyed by role), so a press that
+		   began on the role before it cannot complete here; focus is handed to the
+		   field by the role-change effect. Slot A carries the one spinner. */
 		return (
 			<button
 				type="button"
@@ -1778,6 +1780,7 @@ export function Composer({
 				images === pending.draft.images &&
 				!sending &&
 				!retryPending &&
+				!disabled &&
 				!isSlashDraft(text, images.length);
 			if (entered) void send(text);
 			else setDictationNotice(DICTATION_ADDED);
