@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "audit_id": "frpm2",
+  "round": 2,
+  "locale": "fr",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "packaged_at_utc": "2026-11-09T19:43:09Z",
+  "key_count": 38,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team task subagent; did not translate or edit any copy)",
+    "session": "c2890b9743dd",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "translator_session": null,
+    "translator_note": "round-2 fr translator session not identifiable from the worktree; translation landed in commit 788cc399410. Independent of round-1 translator ad99821ab9e1 and round-1 auditor 144ca81a304c.",
+    "actual_model_source": "this session's own system-prompt model header (Model: anthropic/claude-opus-5-5); no provider fallback observed during the audit"
+  },
+  "source_audit_revision": "788cc399410196b080cfc9f7e7bd558ccb713140",
+  "previous_round_record": "i18n/audits/evidence/fr/cli.permissions/frpm1/record.json",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/cli.permissions.json",
+      "sha256": "5fb01ed775d2034e74224166fdf0aadec15475b582f896184d76239d168ebac4"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "macos_label_sources": "Apple .loctable resources on macOS 27.2 (26B123): System Settings.app, SecurityPrivacyExtension.appex, SecurityAgent.bundle ConfirmAccess, Keychain Access.app; output in audit.log",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "FRPM2-1",
+      "FRPM2-2",
+      "FRPM2-N1",
+      "FRPM2-N2",
+      "FRPM2-N3",
+      "FRPM2-N4"
+    ],
+    "finding_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 2,
+      "nit": 4
+    },
+    "source_observation_ids": [
+      "FRPM2-S1",
+      "FRPM2-S2"
+    ],
+    "round1_findings": {
+      "FRPM-1": "resolved",
+      "FRPM-2": "resolved",
+      "FRPM-3": "resolved",
+      "FRPM-4": "resolved",
+      "FRPM-N1": "applied",
+      "FRPM-N2": "superseded (en changed)",
+      "FRPM-N3": "applied"
+    }
+  },
+  "audit_notes_not_execution_log": "report.md and findings.json are reasoning/notes; audit.log alone is captured command output.",
+  "limitations": [
+    "Independent LLM review, not native-speaker certification.",
+    "Scalar text only: no rendered terminal frame; plain print output with no declared width budget.",
+    "Catalogue bytes read directly from the PR worktree at the revision above."
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm2/audit_checks.py.txt",
+      "sha256": "8297f2f834b3637ecb5e2cad8e2d0b690622567685e31ed2e3a1218f390611d7"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm2/apple_labels.py.txt",
+      "sha256": "81539dc7ef8d838b6dd75d262e1b43f73fa0a3a005db717bbc5f1d91cc8fe1f2"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm2/audit.log",
+      "sha256": "a2e9d8fc66929dbf4ee7c904340854687578a3d1b151ec22bf7341719e17a300"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm2/findings.json",
+      "sha256": "a89375252d4c24f0511d45e293ad3929115ed92d6e126dfb47d44f5e80ec399b"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm2/report.md",
+      "sha256": "7b86ff3e9dfcbdfbd0deaa204d0af309614ba6331b1c502f22febd524ba44eb3"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/cli.permissions/frpm2/receipt.json",
+      "sha256": "see receipt.json (hashes record.json; not self-hashed)"
+    }
+  ]
+}

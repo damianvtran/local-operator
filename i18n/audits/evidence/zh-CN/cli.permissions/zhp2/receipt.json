@@ -1,0 +1,38 @@
+{
+  "record": "i18n/audits/evidence/zh-CN/cli.permissions/zhp2/record.json",
+  "record_sha256": "c9c94484f65903e526c2e72ec81acce7a77f8f809c2a643dcd9f72f3e01075da",
+  "companions": {
+    "report.md": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp2/report.md",
+      "sha256": "00c3fcfe27f9ab2df14a8cf0811f288bb0582afb367f1ded0dd8147623ec2f66"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp2/audit.log",
+      "sha256": "2bb1526ffdf9832134acab84fcda06fcca1719fdeb0e86270c8a24f4b34807bc"
+    }
+  },
+  "auditor_session": "bb7ced26a175",
+  "model": "anthropic/claude-opus-5-5",
+  "ledger_receipt": {
+    "locale": "zh-CN",
+    "namespace": "cli.permissions",
+    "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+    "translator": {
+      "agent": "i18n-translator (PR #3691 round-2 wave, commit 788cc399)",
+      "session": "unrecorded (not in repo or brief)",
+      "model": "unrecorded",
+      "date": "2026-11-09"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev team subagent)",
+      "session": "bb7ced26a175",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-09",
+      "result": "changes_requested",
+      "findings": 4,
+      "unresolved_blocker_major": 1
+    },
+    "status": "changes_requested",
+    "note": "Independent zh-CN re-audit zhp2 @d5eed404: changes_requested, 1 MAJOR (Z8 screen.denied 隐私与安全性≠macOS 27.2 隐私与安全), 1 MINOR, 2 NIT; round-1 Z1–Z7 resolved. Record: i18n/audits/evidence/zh-CN/cli.permissions/zhp2/record.json"
+  }
+}

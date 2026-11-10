@@ -1,0 +1,45 @@
+# audit.log — actual command output, captured 2026-11-09T18:57:00Z in /Users/damian/local-operator/.worktrees/runtime-privacy-identity @ 50badda034d7
+$ .venv/bin/python i18n/audits/evidence/fr/cli.permissions/frpm1/audit_checks.py.txt ; .venv/bin/python scripts/i18n/check.py --catalogues-only
+sha256 en/cli.permissions.json eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f
+sha256 en/cli.permissions.context.json aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce
+sha256 fr/cli.permissions.json 9eae53cdd40de70bc8103c41cd10288e1ad2a3023ec91a43c3c850283fb1badd
+keys en/fr 28 28 added/dropped []
+placeholder parity True code-span parity True
+ICU plural/select in en False
+U+0027 apostrophe keys 22
+U+0020 before :;?!» or after « keys 20
+U+2019 count 0 U+202F count 0
+union typography-defect keys 27 of 28
+'app de bureau' keys ['cli.permissions.help.setup', 'cli.permissions.setup.done', 'cli.permissions.setup.explain', 'cli.permissions.setup.no_app', 'cli.permissions.status.app.found', 'cli.permissions.status.app.missing', 'cli.permissions.status.identity.team', 'cli.permissions.status.optin.off']
+trailing space kept (confirm, always_allow) True True
+cells cli.permissions.help.permissions 72 100
+cells cli.permissions.help.status 84 108
+cells cli.permissions.help.setup 94 115
+cells cli.permissions.status.not_macos 56 84
+cells cli.permissions.status.identity.team 78 96
+cells cli.permissions.status.identity.adhoc 68 85
+cells cli.permissions.status.identity.legacy 105 140
+cells cli.permissions.status.identity.none 79 90
+cells cli.permissions.status.image 13 14
+cells cli.permissions.status.optin.on 51 65
+cells cli.permissions.status.optin.off 78 106
+cells cli.permissions.status.optin.blocked 52 62
+cells cli.permissions.status.app.found 33 38
+cells cli.permissions.status.app.missing 26 29
+cells cli.permissions.status.screen.granted 45 62
+cells cli.permissions.status.screen.denied 126 166
+cells cli.permissions.status.screen.unknown 58 75
+cells cli.permissions.status.guide 30 33
+cells cli.permissions.setup.refused.tty 61 67
+cells cli.permissions.setup.refused.isolated 89 121
+cells cli.permissions.setup.no_app 88 104
+cells cli.permissions.setup.no_identity 131 158
+cells cli.permissions.setup.explain 221 300
+cells cli.permissions.setup.confirm 16 18
+cells cli.permissions.setup.cancelled 31 29
+cells cli.permissions.setup.failed 113 140
+cells cli.permissions.setup.always_allow 63 92
+cells cli.permissions.setup.done 130 171
+exit=0
+check.py: catalogue checks: 0 problem(s)
+exit=0
