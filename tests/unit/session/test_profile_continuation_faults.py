@@ -97,7 +97,11 @@ async def file_legacy_signed_receipt(session: Session, directory: Path, call_id:
     )
     [intent] = captured
     assert intent.proposal is not None, "a bounded update must carry a proposal"
-    root = Path(session.agent_registry.config_dir)
+    # ``new_session`` always attaches a scoped registry; the assert narrows the
+    # Optional for the type checker and fails loudly if that rig ever changes.
+    registry = session.agent_registry
+    assert registry is not None, "new_session must attach an agent registry"
+    root = Path(registry.config_dir)
     data = P.build(root, session_id=session._session_id, tool_call_id=call_id, **intent.proposal)
     record = P.file_request(root, data)
     return ToolResult(
