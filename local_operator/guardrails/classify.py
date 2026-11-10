@@ -387,6 +387,73 @@ def _in_session_scratchpad(path: str, sessions: str, *, pattern: bool = False) -
 OTHER_SCRATCHPAD = "another session's files"
 
 
+def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
+    """Case 7 (2026-11-09): a read of a TASK-TREE session's scratch file.
+
+    The settings lane ran ``node scripts/i18n/ledger-assemble.mjs --receipt
+    <auditor pad>/….json``; the auditor was its sibling under one manager,
+    and the backstop refused it as another session's files. ``None`` = LOW:
+    the file exists, its session is in the caller's subagent tree
+    (``provenance.same_task_tree``), the interpreter runs a git-tracked script
+    (``Target.script``) and no output flag names the file. Otherwise the
+    suffix shown with the HIGH: the lineage fact when there is one, so the
+    judge sees it; ``""`` for a stranger's pad (unchanged). Evidence files
+    never reach here (``_touch_reason`` returns another reason for them).
+    """
+    from local_operator.guardrails import provenance
+
+    path = target.path
+    if not path or not session_id or target.pattern is not None or target.opaque:
+        return ""
+    # Review R2-M2: the owner comes from EVERY spelling, the resolved one
+    # included. ``<sibling pad>/lnk -> <stranger pad>`` names the sibling
+    # lexically but the kernel reads the stranger's file, so a lexical owner
+    # alone would carry the tree's LOW to a session outside the tree.
+    spellings = {path, os.path.realpath(path)}
+    if target.raw_path:
+        spellings.add(os.path.realpath(target.raw_path))
+    roots = set(prot.state_roots) | {os.path.realpath(s) for s in prot.state_roots}
+    relations: dict[str, str] = {}
+    for spelling in spellings:
+        owner = _pad_owner(spelling, roots)
+        if owner is None:
+            return ""
+        if owner not in relations:
+            relation = provenance.same_task_tree(
+                session_id, owner, state_root=_owner_root(owner, roots)
+            )
+            if not relation:
+                return ""
+            relations[owner] = relation
+    if (
+        os.path.isfile(path)
+        and not os.path.islink(path)
+        and not target.as_output
+        and provenance.tracked_script(target.script, state_roots=roots)
+    ):
+        return None
+    owner = _pad_owner(os.path.realpath(path), roots) or ""
+    return f" (session {owner} is this session's {relations.get(owner, '')} in one task tree)"
+
+
+def _pad_owner(path: str, roots: set[str]) -> str | None:
+    """The session id whose directory ``path`` lies under, in any state root."""
+    for state in roots:
+        sessions = os.path.join(state, _SESSIONS_DIRNAME) + os.sep
+        if path.startswith(sessions):
+            owner = path[len(sessions) :].split(os.sep, 1)[0]
+            return owner or None
+    return None
+
+
+def _owner_root(owner: str, roots: set[str]) -> str:
+    """The state root holding ``owner``'s session dir (lineage lives beside it)."""
+    for state in sorted(roots):
+        if os.path.isdir(os.path.join(state, _SESSIONS_DIRNAME, owner)):
+            return state
+    return sorted(roots)[0]
+
+
 def _hardlinked_file(path: str | None) -> bool:
     """Is ``path`` a regular file with more than one name? ``realpath`` cannot
     see a hardlink, so ``<pad>/h`` linked to a ``transcript.jsonl`` looks like
@@ -1098,10 +1165,15 @@ def classify_targets(
             if t.op != "touch" or t.path in critical:
                 continue
             reason = _touch_reason(t, prot, globstar=globstar)
-            if reason is not None:
-                evidence_hits.append(
-                    RankedTarget(t, Risk.HIGH, f"{reason}, handed to {t.program or 'a program'}")
-                )
+            if reason is None:
+                continue
+            shown = f"{reason}, handed to {t.program or 'a program'}"
+            if reason == OTHER_SCRATCHPAD:
+                tree = _tree_read(t, prot, session_id)
+                if tree is None:
+                    continue  # LOW: a tracked script reading a teammate's file
+                shown += tree
+            evidence_hits.append(RankedTarget(t, Risk.HIGH, shown))
     for name in dict.fromkeys(blind):
         evidence_hits.append(
             RankedTarget(

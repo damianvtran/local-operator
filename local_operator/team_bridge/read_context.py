@@ -301,7 +301,13 @@ def admit_read_content(
     if not isinstance(policy, Mapping) or not isinstance(receipt, Mapping):
         return ContentAdmission(False, "proof_missing")
     authority, damage, _note = receipt_authority(
-        context.owner, policy, receipt, release=proof.get("release")
+        context.owner,
+        policy,
+        receipt,
+        release=proof.get("release"),
+        # An owner-principal receipt is authorised by WHO sent this message,
+        # re-derived here from the hub-stored participant the envelope carries.
+        principal=(envelope.sender_account, envelope.sender_kind),
     )
     if authority is None:
         # ``_note`` is the write-side diagnostic (R-8) and is deliberately not

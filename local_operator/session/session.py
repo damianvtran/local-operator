@@ -45,6 +45,7 @@ import json
 import logging
 import math
 import os
+import re
 import string
 import tempfile
 import time
@@ -3810,6 +3811,14 @@ class Session:
         #: the only input that can authorize an account profile save without a
         #: card (``_authorize_account_profile_write``). Reset at the pipeline head.
         self._run_owner_texts: list[str] = []
+        self._last_displayed_profile_proposal: str | None = None
+        # Parallel to ``_run_owner_texts``: the proposal that was displayed when
+        # each owner text ARRIVED. A contextual "yes" binds only to that, so a
+        # ``profile_proposal op=show`` the model runs after the owner spoke can
+        # never rebind the owner's earlier words to a different proposal.
+        self._run_owner_text_bindings: list[str | None] = []
+        self._run_owner_consent = False
+        self._run_untrusted_input = False
         #: Ask ids a PERSON answered in this run (``ask_answer_is_person``). The
         #: hub-pull consent seam grants only on an answered HOST-FILED consent ask
         #: that arrived in the run doing the write, so a stale yes from an older
@@ -4419,10 +4428,11 @@ class Session:
         )
         self._request_approval = request_approval
         self._authorize_durable_write = authorize_durable_write
-        if authorize_durable_write is None and owner_prompt_consent and not self._parent_session_id:
-            # TOP-LEVEL ONLY: a subagent's opening prompt is its parent's text,
-            # never the person's, so a child never gets the owner-prompt seam
-            # (and the callback re-checks the parent id at call time anyway).
+        if authorize_durable_write is None and owner_prompt_consent:
+            # Installed for every session; children are refused at call time:
+            # ``_profile_owner_consent`` requires no parent session, because a
+            # subagent's opening prompt is its parent's text, never the person's.
+            # A child's writes are therefore filed as proposals, never granted.
             self._authorize_durable_write = self._authorize_account_profile_write
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
@@ -14793,34 +14803,16 @@ class Session:
         return resolver(name) if resolver is not None else None
 
     async def _authorize_account_profile_write(self, intent: "DurableWriteIntent") -> Any:
-        """The session-owned consent seam for tool-issued ACCOUNT profile writes.
+        """Use host-held input witnesses; otherwise file a bounded proposal.
 
-        Users ask their agents to edit agent and team profiles; before this seam
-        no host installed ``authorize_durable_write`` and every such write was
-        refused even right after the user asked. It decides from HOST-HELD state
-        only — no tool parameter and no model text grants anything:
-
-        * PATH A, the user asked: this run took in the owner's own typed,
-          non-injected message (``_run_owner_texts``; ask answers, peer and
-          Team Bridge messages, wakes, monitors, remote prompts and job results
-          never write it), the session has no parent, and that message names
-          the profile AND explicitly requests the definition fields in a direct
-          edit imperative. Only wording-only update/revert (instructions, label
-          or description) qualifies; ambiguous mentions, policy fields and every
-          other operation ask.
-          The name match narrows only: failing it routes to path B.
-        * PATH B, anything else: the host's tool-approval gate, asked with a
-          card naming the profile, the operation, the changed fields and a diff
-          summary. That gate's approve is an authority-checked answer
-          (``approval_answer`` is in ``harness.approval.AUTHORITY_OPS``) and is
-          never auto-approved (``never_auto_approved``), so ``--yolo`` and
-          approve-all cannot grant it. It pauses this one tool call, not the
-          session. The base revision on the intent is re-checked by the tool
-          under the write lock, so an approval cannot land on a moved row.
+        A child or an untrusted input can suggest a change, never authorize it.
+        Naming the profile narrows direct owner edits without imposing a brittle
+        edit-verb regex. Seed operations retain the never-auto-approved card.
         """
-        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE, ask_approval
         from local_operator.profile_scope import (
-            owner_text_requests_profile_edit,
+            owner_text_requests_profile_change,
+            owner_text_requests_profile_creation,
             profile_field_label,
         )
 
@@ -14829,53 +14821,49 @@ class Session:
             # or be reached from, the profile-edit paths, and no other operation
             # can be granted by it.
             return await self._authorize_hub_pull(intent)
-        # A name mention is not permission to change policy. Only ordinary
-        # wording edits and their revert may use the no-card path; every other
-        # operation or field (including a model-selected create name) asks.
-        wording_only = (
-            intent.operation in {"update", "revert"}
-            and bool(intent.changes)
-            and set(intent.changes) <= {"instructions", "description", "label"}
-        )
-        if wording_only and not self._parent_session_id and self._run_owner_texts:
-            names = [intent.name, *self._profile_labels(intent)]
+        consent = self._profile_owner_consent()
+        if consent and intent.operation in {"create", "update", "revert"}:
+            names = (
+                [intent.name]
+                if intent.kind == "skill"
+                else [intent.name, *self._profile_labels(intent)]
+            )
             if any(
-                owner_text_requests_profile_edit(
-                    text, names, operation=intent.operation, fields=intent.changes
+                owner_text_requests_profile_change(text, names)
+                or (
+                    intent.operation == "create"
+                    and owner_text_requests_profile_creation(text, intent.kind)
                 )
                 for text in self._run_owner_texts
             ):
                 run_ms = int(self._run_started_at * 1000)
                 return f"owner-prompt:{self._session_id or 'session'}@{run_ms}"
-        # No parked turn, and no model retry: the typed signed provider is the
-        # continuation. Filing itself confers no mutation/signing authority.
-        #
-        # OPS WITHOUT A BOUNDED PROPOSAL keep the pre-existing card path: a seed
-        # reset, a sync, a promote or an install names a packaged artefact rather
-        # than authored values, so there is nothing to state exactly in a signed
-        # payload. They are unchanged here on purpose (falls through below).
         if intent.proposal is not None:
-            from local_operator import profile_approval
-            from local_operator.harness.types import QueuedProfileWrite
+            from local_operator import profile_proposals
+            from local_operator.harness.types import ProposedProfileWrite
 
             registry = self.agent_registry if intent.kind == "agent" else self.team_registry
             if registry is None:
                 return None
-            root = Path(registry.config_dir)
-            data = profile_approval.build(
-                root,
+            record = profile_proposals.file(
+                Path(registry.config_dir),
                 session_id=self._session_id,
                 tool_call_id=intent.tool_call_id,
+                trust="untrusted" if self._run_untrusted_input else "owner" if consent else "agent",
+                trigger=self._run_last_trigger or "internal",
                 **intent.proposal,
             )
-            record = profile_approval.file_request(root, data)
-            return QueuedProfileWrite(
-                approval_id=record["approval_id"],
-                request_digest=record["request_digest"],
-                expires_at=record["expires_at"],
-                receipt_id=data.receipt_id,
-                profile_kind=data.profile_kind,
-                profile_name=data.name,
+            if record["state"] == profile_proposals.STATE_PENDING:
+                # The receipt tells the model to show this proposal to the user,
+                # so it is what a LATER owner "yes" may refer to (see
+                # ``_note_run_input``, which binds each owner text to the
+                # proposal displayed before it arrived).
+                self._last_displayed_profile_proposal = record["id"]
+            return ProposedProfileWrite(
+                state=str(record["state"]),
+                proposal_id=record["id"],
+                profile_kind=record["kind"],
+                profile_name=record["name"],
                 changes=intent.changes,
                 diff=tuple(intent.summary.splitlines()),
             )
@@ -14896,6 +14884,70 @@ class Session:
         if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
             return f"approval:{intent.base_revision or 'new'}"
         return None
+
+    def _profile_owner_consent(self) -> bool:
+        """Only a top-level owner's clean run may authorize account writes."""
+        return bool(
+            not self._parent_session_id
+            and (self._run_owner_texts or self._run_owner_consent)
+            and not self._run_untrusted_input
+        )
+
+    async def decide_profile_proposal(self, proposal_id: str, action: str) -> str:
+        """Host-only decision: model parameters cannot manufacture owner consent."""
+        from local_operator import profile_proposals as P
+        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE, ask_approval
+        from local_operator.profile_scope import owner_text_assents
+
+        if self._parent_session_id or action not in {"apply", "reject", "show"}:
+            return "refused"
+        registry = self.agent_registry or self.team_registry
+        if registry is None:
+            return "refused"
+        proposal = P.get(Path(registry.config_dir), proposal_id)
+        if proposal is None:
+            return "refused"
+        if action == "show":
+            self._last_displayed_profile_proposal = proposal_id
+            return "shown"
+        # A generic owner input is not approval. A contextual assent binds only
+        # to the proposal that was displayed BEFORE that owner text arrived
+        # (snapshotted per text in ``_note_run_input``), and an explicit
+        # apply/reject instruction must name this exact proposal ID. Model
+        # parameters and model-run ``show`` calls never manufacture consent.
+        explicit = any(
+            (binding == proposal_id and owner_text_assents(text))
+            or (
+                proposal_id in text
+                and re.match(r"^\s*(?:please\s+)?(?:apply|accept|approve|reject)\b", text, re.I)
+            )
+            for text, binding in zip(
+                self._run_owner_texts, self._run_owner_text_bindings, strict=False
+            )
+        )
+        # FAIL CLOSED on ask answers: ``_run_owner_consent`` (a person answered
+        # an ask) is not bound to any proposal, so it never grants one here;
+        # the exact-proposal card below remains the route for that case.
+        consent = self._profile_owner_consent() and explicit
+        if action == "reject":
+            return "granted" if consent else "refused"
+        if consent and proposal["origin"]["trust"] != "untrusted":
+            return "granted"
+        if self._request_approval is None:
+            return "refused"
+        card = (
+            f"Apply proposal {proposal_id} to {proposal['kind']} {proposal['name']!r}?\n"
+            f"Origin: {proposal['origin']['trust']}. Review in Agents → {proposal['name']}.\n"
+            + "\n".join(
+                f"{c['label']}: {c['before_text']} → {c['after_text']}"
+                for c in P.detail(Path(registry.config_dir), proposal)["changes"]
+            )
+        )
+        return (
+            "card"
+            if await ask_approval(self._request_approval, ACCOUNT_PROFILE_GATE, card, None)
+            else "refused"
+        )
 
     #: How long the host-filed hub-pull ask stays answerable. A day, the
     #: queue's maximum: the question is "take your org's latest", which stays
@@ -16857,6 +16909,34 @@ class Session:
         deliberately cannot — and no other reader may be taught a new name.
         """
         custom_type = getattr(message, "custom_type", None)
+        # Fail CLOSED: unknown internal inputs and remote prompts taint the
+        # entire run, including inputs drained after an owner's typed message.
+        # Ask rows currently omit answered_by, so phone answers cannot be
+        # distinguished: they require the approval card rather than granting.
+        benign = {
+            "wake_prompt",
+            "monitor_prompt",
+            "job_result",
+            "session_incident",
+            "session_model_switch",
+            "session_credential_redaction",
+            "todo_reminder",
+            "project_reminder",
+            "profile_proposal_result",
+        }
+        if _is_remote_prompt(message) or is_harness_injection(message):
+            self._run_untrusted_input = True
+        elif custom_type == "ask_response":
+            details = getattr(message, "details", None) or {}
+            by = details.get("answered_by") or {}
+            if ask_answer_is_person(message) and by.get("surface") in {"tui", "desktop", "chat"}:
+                self._run_owner_consent = True
+            else:
+                self._run_untrusted_input = True
+        elif custom_type is not None and custom_type not in benign:
+            self._run_untrusted_input = True
+        elif custom_type is None and getattr(message, "role", None) != "user":
+            self._run_untrusted_input = True
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
             self._run_triggers.add(str(custom_type))
             self._run_last_trigger = str(custom_type)
@@ -16926,6 +17006,7 @@ class Session:
                 # here. Full text, untruncated: the name match must see it all.
                 if not _is_remote_prompt(message):
                     self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
+                    self._run_owner_text_bindings.append(self._last_displayed_profile_proposal)
 
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
@@ -19537,6 +19618,9 @@ class Session:
         self._run_aida_checkin = False
         self._run_typed_user = False
         self._run_owner_texts = []
+        self._run_owner_text_bindings = []
+        self._run_owner_consent = False
+        self._run_untrusted_input = False
         self._run_answered_ask_ids = set()
         self._run_last_trigger = None
         self._run_user_text = ""
@@ -21747,6 +21831,7 @@ class Session:
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
             authorize_durable_write=self._authorize_durable_write,
+            decide_profile_proposal=self.decide_profile_proposal,
             register_profile_action=self._profile_actions.register,
             ask_user=self._ask_user,
             # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path

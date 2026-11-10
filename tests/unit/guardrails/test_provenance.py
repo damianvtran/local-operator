@@ -1018,6 +1018,7 @@ _READS = [
     # commands are never dangerous-delete"); ``sort -o`` stays a write.
     (f"sort ~/.local-operator/sessions/{CHILD}/transcript.jsonl | uniq -c", Risk.LOW),
     (f"xxd ~/.local-operator/sessions/{CHILD}/transcript.jsonl | head", Risk.HIGH),
+    # 2026-11-09: a digest only reads its operands (``resolve._DIGEST_READERS``).
     (f"shasum ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.LOW),
     (f"python3 -m json.tool ~/.local-operator/sessions/{CHILD}/origin.json", Risk.HIGH),
     (f"cp ~/.local-operator/sessions/{CHILD}/transcript.jsonl ~/work/t.jsonl", Risk.LOW),

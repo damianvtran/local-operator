@@ -103,6 +103,12 @@ class JudgeResult:
     #: The judge's first line verbatim: the dangerous-delete checkpoint parses
     #: its citations (``evidence=…``, ``ask=…``, ``operator``) and verifies them.
     answer: str = ""
+    #: No verdict was reached (timeout, exception, no judge model, an
+    #: off-contract answer): the call fails closed, but the refusal text must
+    #: not read as a policy decision (issue #3613). Structured rather than a
+    #: ``reason`` prefix so a judge replying ``BLOCK judge unavailable: …`` is
+    #: still a real BLOCK (review R2-n2).
+    no_verdict: bool = False
 
 
 def _clip(text: str, limit: int) -> str:
@@ -156,6 +162,11 @@ def render_brief(brief: JudgeBrief) -> str:
     return "\n\n".join(lines)
 
 
+#: ``parse_answer``'s reason for an answer that is neither ALLOW nor BLOCK:
+#: ``run_judge`` marks it ``no_verdict`` from the same ALLOW/BLOCK branch.
+OFF_CONTRACT = "judge unavailable: answer was not ALLOW or BLOCK"
+
+
 def parse_answer(text: str) -> tuple[bool, str]:
     """``(allowed, reason)``; anything off-contract is a block."""
     first = (text or "").strip().splitlines()[0].strip() if (text or "").strip() else ""
@@ -168,28 +179,39 @@ def parse_answer(text: str) -> tuple[bool, str]:
     if stripped.upper().startswith("BLOCK"):
         reason = stripped[5:].lstrip(":- ").strip()
         return False, reason or "the safety check refused this call"
-    return False, "judge unavailable: answer was not ALLOW or BLOCK"
+    return False, OFF_CONTRACT
 
 
 async def run_judge(brief: JudgeBrief, judge: JudgeCall | None, *, timeout: float) -> JudgeResult:
     """Ask the judge; every failure mode is a block with a named reason."""
     started = time.monotonic()
     if judge is None:
-        return JudgeResult(False, "judge unavailable: this host has no safety-check model", 0.0)
+        return JudgeResult(
+            False, "judge unavailable: this host has no safety-check model", 0.0, no_verdict=True
+        )
     try:
         answer = await asyncio.wait_for(judge(JUDGE_SYSTEM_PROMPT, render_brief(brief)), timeout)
     except asyncio.CancelledError:
         raise
     except TimeoutError:
         return JudgeResult(
-            False, f"judge unavailable: timeout after {timeout:g}s", time.monotonic() - started
+            False,
+            f"judge unavailable: timeout after {timeout:g}s",
+            time.monotonic() - started,
+            no_verdict=True,
         )
     except Exception as exc:  # noqa: BLE001 — a failed check is a block, never a crash
         logger.warning("guardrail judge failed: %s", type(exc).__name__, exc_info=True)
         return JudgeResult(
-            False, f"judge unavailable: {type(exc).__name__}", time.monotonic() - started
+            False,
+            f"judge unavailable: {type(exc).__name__}",
+            time.monotonic() - started,
+            no_verdict=True,
         )
     text = answer if isinstance(answer, str) else ""
     allowed, reason = parse_answer(text)
     first = text.strip().splitlines()[0].strip() if text.strip() else ""
-    return JudgeResult(allowed, reason, time.monotonic() - started, first)
+    # Off-contract is decided by ``parse_answer``'s own branch, not by
+    # the reason text a real ``BLOCK …`` reply could also carry.
+    off_contract = not allowed and not first.strip('*`" ').upper().startswith("BLOCK")
+    return JudgeResult(allowed, reason, time.monotonic() - started, first, no_verdict=off_contract)

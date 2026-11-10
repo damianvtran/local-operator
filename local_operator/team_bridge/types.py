@@ -877,6 +877,12 @@ def _optional_id(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+#: agent-server's closed v5 routing vocabularies (``bridge.ScreenAddressed*`` /
+#: ``bridge.ScreenRelation*``), as the hub sends them on ``events[].ids``.
+FEED_ADDRESSED_VALUES = frozenset({"direct", "thread", "everyone", "ambient"})
+FEED_RELATION_VALUES = frozenset({"owner", "member"})
+
+
 @dataclass(frozen=True)
 class ConversationFeedRef:
     """Contentless durable locator, never a cache of display names.
@@ -905,6 +911,16 @@ class ConversationFeedRef:
     #: a ref written before threads parses exactly as it did, and a reader that
     #: does not know the tag ignores it.
     thread_root_id: str | None = None
+    #: The hub's ROUTING facts for this delivery (agent-server ``events[].ids.addressed`` /
+    #: ``sender_relation``), carried so the screener can render bridge-screen-v5's
+    #: ``Addressed:``/``Relation:`` lines from what the SERVER resolved — never from body
+    #: text a sender controls. Persisted as tagged slots (``/addressed=…``, ``/relation=…``)
+    #: for the same reason as ``thread_root``: an older reader ignores an unknown tag, so a
+    #: queue row written here still decodes after a rollback. ``None`` = the hub did not say
+    #: (an older hub, or a row queued before this build); the connector then derives a value
+    #: from the mention/DM/thread facts instead.
+    addressed: str | None = None
+    sender_relation: str | None = None
 
     def validated(self) -> "ConversationFeedRef":
         """Refuse a ref the parser could not read back (never guess)."""
@@ -934,6 +950,16 @@ class ConversationFeedRef:
             _CONVERSATION_MESSAGE_ID.fullmatch(self.thread_root_id) is None
         ):
             raise TeamBridgeTypeError("thread_root_id is not a bcmsg_ id")
+        if self.addressed is not None and self.addressed not in FEED_ADDRESSED_VALUES:
+            raise TeamBridgeTypeError("addressed is not a known routing value")
+        if self.sender_relation is not None and self.sender_relation not in FEED_RELATION_VALUES:
+            raise TeamBridgeTypeError("sender_relation is not a known relation")
+        if self.legacy_alias is not None and (
+            self.addressed is not None or self.sender_relation is not None
+        ):
+            # Same rule as thread_root + legacy_alias: no released writer mints an alias
+            # on a ref the routing-aware feed parser produced.
+            raise TeamBridgeTypeError("routing tags never ride a legacy alias")
         return self
 
     def encode(self) -> str:
@@ -951,6 +977,12 @@ class ConversationFeedRef:
         if self.thread_root_id is not None:
             self.validated()
             encoded += f"/thread_root={self.thread_root_id}"
+        if self.addressed is not None:
+            self.validated()
+            encoded += f"/addressed={self.addressed}"
+        if self.sender_relation is not None:
+            self.validated()
+            encoded += f"/relation={self.sender_relation}"
         return encoded
 
 
@@ -1044,6 +1076,12 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
         # reader starts honouring shapes nobody ever meant to persist.
         return None
     thread_root_id = tags.get("thread_root") or None
+    # Routing tags: a KNOWN tag must carry a known value (``validated`` refuses
+    # anything else, so a damaged row reads as malformed, never as "ambient").
+    if "addressed" in tags and tags["addressed"] not in FEED_ADDRESSED_VALUES:
+        return None
+    if "relation" in tags and tags["relation"] not in FEED_RELATION_VALUES:
+        return None
     try:
         return ConversationFeedRef(
             conversation_id=conversation_id,
@@ -1053,6 +1091,8 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
             sender_kind=kind,
             legacy_alias=legacy_alias,
             thread_root_id=thread_root_id,
+            addressed=tags.get("addressed") or None,
+            sender_relation=tags.get("relation") or None,
         ).validated()
     except TeamBridgeTypeError:
         return None
@@ -1321,6 +1361,18 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                 # a hub that sends one without the other gets the pre-thread
                 # card rather than an unencodable ref.
                 thread_root_id = None
+            # Routing facts for bridge-screen-v5 (``omitempty`` on the server). A value
+            # outside the closed vocabulary — a newer hub's addition — is DROPPED, never
+            # refused: the message still screens, under a derived value or v2, rather than
+            # costing the whole events page. A missing relation beside a stated
+            # ``addressed`` is the hub's "member" (its documented default), resolved at
+            # render time so the ref records only what the hub actually said.
+            addressed = ids.get("addressed")
+            if not isinstance(addressed, str) or addressed not in FEED_ADDRESSED_VALUES:
+                addressed = None
+            relation = ids.get("sender_relation")
+            if not isinstance(relation, str) or relation not in FEED_RELATION_VALUES:
+                relation = None
             at = raw.get("at")
             if not isinstance(at, str) or not at:
                 raise TeamBridgeTypeError(f"events[{index}].at must be a non-empty string")
@@ -1332,6 +1384,8 @@ def project_events_batch(result: Mapping[str, Any]) -> tuple[FeedSeq, tuple[str,
                     mention=mention,
                     sender_kind=kind,
                     thread_root_id=thread_root_id,
+                    addressed=addressed,
+                    sender_relation=relation,
                 )
                 .validated()
                 .encode()
