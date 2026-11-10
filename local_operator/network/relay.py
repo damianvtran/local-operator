@@ -5704,6 +5704,10 @@ class RelayServer:
         #: metadata again on every heartbeat would be a per-15-seconds import for a
         #: string that cannot change while this process lives.
         self.build = build_stamp()
+        #: Where this process's output really goes, read once (fd 1 cannot be
+        #: re-pointed under a running relay), falling back to this process's own
+        #: config-derived path when stdout is not a file.
+        self.output_log = _own_output_path() or str(log_path())
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -6978,6 +6982,7 @@ class RelayServer:
             capabilities=list(wire.LINK_CAPABILITIES),
             version=build.get("version", ""),
             source_ref=build.get("source_ref", ""),
+            log_path=self.output_log,
             started_at=self.started_at,
         )
 
@@ -14795,7 +14800,7 @@ class RelayServer:
             "audit_published_through": self.audit.published_through,
             "audit_recorded_through": self.audit.recorded_through,
             "audit_path": str(store.audit_path(self.root)),
-            "log_path": str(log_path()),
+            "log_path": self.output_log,
             "uptime_s": round(time.time() - self.started_at, 1),
         }
 
@@ -15575,6 +15580,48 @@ RELAY_OOM_SCORE_ADJUST = -500
 
 def log_path() -> Path:
     return log_dir() / "network.log"
+
+
+def _own_output_path() -> str:
+    """The regular file THIS process's stdout is appended to, or ``""``.
+
+    The ground truth for "where does the relay log": launchd's
+    ``StandardOutPath`` and systemd's ``StandardOutput=append:`` are opened by the
+    supervisor before exec, from whatever path was rendered into the unit at
+    install time, so neither this process's environment nor a reader's can be
+    trusted to recompute it. The kernel knows: ``/proc/self/fd/1`` on Linux,
+    ``F_GETPATH`` on macOS. Anything that is not a regular file (a terminal, the
+    journal's socket, a pipe) has no path a person could open, so it is ``""``.
+    Never raises: this is decoration on a status row.
+    """
+    import stat as stat_mod
+
+    try:
+        if not stat_mod.S_ISREG(os.fstat(1).st_mode):
+            return ""
+        if sys.platform.startswith("linux"):
+            return os.readlink("/proc/self/fd/1")
+        if sys.platform == "darwin":
+            import fcntl
+
+            raw = fcntl.fcntl(1, getattr(fcntl, "F_GETPATH", 50), b"\0" * 1024)
+            return bytes(raw).split(b"\0", 1)[0].decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return ""
+    return ""
+
+
+def reported_log_path(live: Mapping[str, Any] | None, record: Any) -> str:
+    """The log path to SHOW: the running relay's own word first, then a guess.
+
+    Order: what the answering relay reports (its fd), what its record says (a
+    wedged relay still has one), and only then this READER's ``log_path()``,
+    which is right for a relay this process would start and wrong for one an
+    install with another config dir started.
+    """
+    told = str((live or {}).get("log_path") or "") if isinstance(live, Mapping) else ""
+    recorded = str(getattr(record, "log_path", "") or "") if record is not None else ""
+    return told or recorded or str(log_path())
 
 
 def ensure_log_parent(*, strict: bool = True) -> None:
@@ -17821,7 +17868,17 @@ def generation_reading(pid: int | None) -> dict[str, Any]:
                         update.generation_version(target_generation) or None
                     )
                 if isinstance(pid, int) and pid > 0:
-                    reading["relay_generation_stale"] = update.generation_staleness_of_process(pid)
+                    stale = update.generation_staleness_of_process(pid)
+                    if stale is True and update.process_build_matches_current(pid):
+                        # A DIFFERENT GENERATION OF THE SAME BUILD IS NOT BEHIND.
+                        # Reinstalling one wheel makes a new generation directory,
+                        # so the name comparison says "behind" and the row told the
+                        # operator to restart onto byte-identical code. Only the
+                        # SURFACE is corrected here: the repair and the reapers keep
+                        # the name comparison, which also moves a process off a
+                        # generation that pruning may remove.
+                        stale = False
+                    reading["relay_generation_stale"] = stale
             else:
                 reading["installed_build"] = update.version_of_image(target_image) or None
                 pinned = _named_generation(target_image)
@@ -17972,7 +18029,8 @@ def status(port: int = DEFAULT_PORT, *, refresh: bool = False) -> dict[str, Any]
         "relay": live,
         "record": record.to_json() if record is not None else None,
         "port": port,
-        "log": str(log_path()),
+        # THE RUNNING RELAY'S path, not this reader's: see ``reported_log_path``.
+        "log": reported_log_path(live, record),
         "listening": live.get("listen") if live else None,
         "identity_present": (store.network_root() / "identity" / "device.json").exists(),
         # Local records when no relay is running: this command is most useful
