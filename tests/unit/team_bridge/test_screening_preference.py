@@ -88,6 +88,28 @@ def test_an_absent_key_is_no_choice(tmp_path) -> None:
     )
 
 
+@pytest.mark.parametrize("review_held", [True, False])
+def test_preference_and_held_review_are_independent(review_held: bool) -> None:
+    """Convergence with #3714 must retain both readers, not pick one feature.
+
+    A model preference changes only chain order; it neither enables the bridge
+    through the consent hold nor overrides the owner's held-review switch.
+    """
+
+    values = tb.TeamBridgeSettings.from_values(
+        {
+            "team_bridge": {
+                "screening": {"model": "anthropic/claude-opus-5-5"},
+                "review_held": review_held,
+            }
+        }
+    )
+    assert values.screening_model == OPUS
+    assert values.review_held is review_held
+    assert values.enabled is False
+    assert values.hold_release is False
+
+
 def test_a_listed_pair_splits_on_the_first_separator(tmp_path) -> None:
     """A Radient id carries its OWN slash, so the split cannot come from the right."""
 

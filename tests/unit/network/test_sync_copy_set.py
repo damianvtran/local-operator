@@ -971,6 +971,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "entry of one and never carried in one — a card records THIS device's consent, "
         "so a move must not transport it",
     ),
+    "local_operator/profile_proposals.py": (
+        2,
+        "``PROPOSALS_DIRNAME`` (``profile-proposals``) and its ``AUDIT_FILENAME`` "
+        "(``audit.jsonl``): the account-level proposal store under "
+        "``<config>/profile-proposals``, beside ``agents/``/``teams/`` — never a "
+        "session entry and never carried in one; a proposal targets this account's "
+        "profiles and is reviewed in Agents here",
+    ),
     "local_operator/network/types.py": (
         1,
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",

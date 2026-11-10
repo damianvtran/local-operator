@@ -740,6 +740,44 @@ def test_the_stored_choice_screens_first_and_its_verdict_is_preferred(
     assert result.receipt.model == "claude-opus-5-5"
 
 
+@pytest.mark.parametrize(
+    ("reply", "disposition"),
+    [(DELIVER, "deliver"), ("VERDICT: hold\nREASON: doubt.", "hold")],
+)
+def test_a_blank_stored_choice_uses_the_vetted_fallback_without_verdict_shopping(
+    tmp_path, monkeypatch, credentials, reply, disposition
+) -> None:
+    """#3714's unusable-reply redraw follows #3632's reordered chain.
+
+    The fallback's actual identity owns provenance. A parseable hold is terminal
+    even though the receiver's default would deliver: preference is not bypass.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("reply", ""),
+            "claude-sonnet-5-5": ("reply", reply),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS, OPUS, SONNET]
+    assert result.disposition == disposition
+    if disposition == "deliver":
+        assert result.receipt.model == SONNET[1]
+        assert result.screener_preferred is True
+    else:
+        assert result.hold_code == "model_hold"
+        assert _rows(tmp_path, "SELECT 1 FROM screening_receipts") == []
+
+
 def test_a_stored_choice_with_no_credential_still_screens_on_the_default(
     tmp_path, monkeypatch, credentials
 ) -> None:

@@ -149,6 +149,8 @@ _RETRY_ALONE_HOLD_CODES = frozenset(
         "model_refused",
         "reply_truncated",
         "parse_failed",
+        # A blank reply on every hop may be the body's doing too (2026-11-09).
+        "empty_reply",
         "bounce_without_category",
         # B4b: a converted work-scope bounce is the message's own doing too.
         "work_scope_hold",
