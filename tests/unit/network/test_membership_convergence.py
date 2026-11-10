@@ -2485,6 +2485,87 @@ def _backed_off(a: Any, c: Any) -> bool:
     )
 
 
+class _MembershipClocks:
+    """Gate every SELF-TIMED membership writer on some relays, so a cell can park them.
+
+    WHY: a cell that reads a link's pull schedule (``member_pulled_at`` /
+    ``member_pull_interval_s``) and then asserts what the NEXT
+    ``refresh_membership`` does is racing two background writers of exactly those
+    fields on every relay:
+
+    * ``mesh-membership`` (:meth:`RelayServer._membership_loop`) pulls any due link
+      on its own. Once a change has merged, that pull is a legitimate confirmed-
+      equal answer, so it re-stamps the link and lifts it to the repair ceiling —
+      a backdated stamp the cell set up is consumed before the cell's own refresh
+      runs, which then finds the link ``not_due`` and asks nothing (the CI
+      ``AssertionError: []``).
+    * ``mesh-member-changes`` (:meth:`RelayServer._publish_member_changes`) pushes
+      the changed table (#3670). Adopting that push wakes the peer's loop, whose
+      verifying pull again lands at the ceiling before the cell reads the floor
+      (``0.8 == 0.2``).
+
+    Both are correct product behaviour; the cell just must not share the link with
+    them. Changing ``MEMBERSHIP_PULL_PASS_S`` cannot park them provably: a loop that
+    finished an iteration just BEFORE the switch and reads the interval just after
+    it is parked with no observable sign, so "wait for one more iteration" can wait
+    forever. Instead each loop's method is wrapped on the INSTANCE (both loops look
+    it up on ``self`` every iteration) and run under a lock; :meth:`park` takes the
+    lock — so no background call is mid-flight — and every later background call
+    is a no-op. Calls from the cell's own thread (the one that built this gate,
+    not assumed to be the main thread under xdist) always run unwrapped.
+    """
+
+    _NAMES = ("refresh_membership", "_publish_member_changes")
+
+    def __init__(self, servers: list[Any], monkeypatch: pytest.MonkeyPatch) -> None:
+        self._parked = False
+        self._cell = threading.current_thread()
+        self._entered: dict[tuple[int, str], int] = {}
+        self._locks: dict[tuple[int, str], threading.Lock] = {}
+        self._servers = servers
+        for server in servers:
+            for name in self._NAMES:
+                self._wrap(server, name, monkeypatch)
+
+    def _wrap(self, server: Any, name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        original = getattr(server, name)
+        key = (id(server), name)
+        lock = self._locks[key] = threading.Lock()
+
+        def _gated(*args: Any, **kwargs: Any) -> Any:
+            if threading.current_thread() is self._cell:
+                return original(*args, **kwargs)
+            with lock:
+                self._entered[key] = self._entered.get(key, 0) + 1
+                if self._parked:
+                    # Both loops ignore the return value and run again on their tick.
+                    return None
+                return original(*args, **kwargs)
+
+        monkeypatch.setattr(server, name, _gated)
+
+    def park(self) -> None:
+        """Return once no background membership writer can touch these relays again.
+
+        A loop is only known to be calling the WRAPPED method once it has entered it
+        once: an iteration that began before the wrap holds no lock. The loops are
+        serial, so one wrapped entry means every unwrapped call has returned.
+        """
+        for server in self._servers:
+            for name in self._NAMES:
+                key = (id(server), name)
+                assert net_fixtures.wait_for(
+                    lambda key=key: self._entered.get(key, 0) > 0
+                ), f"{name} on {server.identity.device_id} never ran wrapped"
+        for lock in self._locks.values():
+            lock.acquire()
+        try:
+            self._parked = True
+        finally:
+            for lock in self._locks.values():
+                lock.release()
+
+
 def _rename_own_row(device: Any, network_id: str, name: str) -> None:
     """Rename ``device``'s own row, the change that travels ONLY by this pull."""
     with store.mutate(network_id, device.root) as copy:
@@ -2545,7 +2626,18 @@ def test_a_change_resets_the_interval_to_the_floor_immediately(
     """
     seen = _spy_member_list(monkeypatch)
     a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    clocks = _MembershipClocks([a.server, c.server], monkeypatch)
     assert net_fixtures.wait_for(lambda: _backed_off(a, c)), link.member_pull_interval_s
+    # THE CELL MUST BE THE ONLY THING DRIVING THIS LINK'S SCHEDULE. Since #3670 the
+    # rename is also pushed, and either relay's cadence may pull the backdated link
+    # first; both legitimately leave it at the ceiling and turn the reads below
+    # into a race (see `_MembershipClocks`). Parked AFTER settling, because
+    # settling is what the cadence is for. The link is re-resolved after the park:
+    # a handshake during settling can replace the one `dial` returned.
+    clocks.park()
+    link = a.server._link_for(c.device_id)  # noqa: SLF001
+    assert link is not None and link.alive, link
+    assert link.member_pull_interval_s >= _BACKOFF_CEILING_S, link.member_pull_interval_s
 
     _rename_own_row(c, network_id, "hub-renamed")
     link.member_pulled_at = time.time() - (_BACKOFF_CEILING_S + 0.05)
