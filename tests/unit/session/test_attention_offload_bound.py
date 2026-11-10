@@ -23,7 +23,11 @@ import pytest
 import local_operator.session.session as session_module
 from local_operator.harness.types import AgentEndEvent, StreamEndEvent, StreamTextDelta
 from local_operator.paths import config_dir
-from local_operator.session.attention import AttentionStore, conversation_identity, provisional_anchor
+from local_operator.session.attention import (
+    AttentionStore,
+    conversation_identity,
+    provisional_anchor,
+)
 from tests.unit.session.test_quiet_acceptance import SETTLE_TIMEOUT_S, peer_input
 from tests.unit.session.test_session import ScriptedStream, make_session
 
@@ -31,7 +35,9 @@ TEST_CEILING_S = 0.3
 
 
 def _answer():
-    return ScriptedStream([[StreamTextDelta(delta="an answer"), StreamEndEvent(stop_reason="stop")]])
+    return ScriptedStream(
+        [[StreamTextDelta(delta="an answer"), StreamEndEvent(stop_reason="stop")]]
+    )
 
 
 def test_shipping_ceilings_leave_room_inside_the_settle_window():
@@ -129,7 +135,10 @@ async def test_a_wedged_republish_rung_does_not_pin_the_turn_lock(tmp_path, monk
         return real_publish(self, conversation, token, *args, **kwargs)
 
     monkeypatch.setattr(AttentionStore, "publish", maybe_blocked)
-    session = make_session(tmp_path, ScriptedStream([[StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")]] * 2))
+    session = make_session(
+        tmp_path,
+        ScriptedStream([[StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")]] * 2),
+    )
     try:
         await asyncio.wait_for(session._prompt_messages([peer_input()]), timeout=5)
         wedge["on"] = True
