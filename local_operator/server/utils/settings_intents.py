@@ -1273,9 +1273,7 @@ class BridgeDriver:
                 return Outcome(
                     "terminal",
                     "session_unknown",
-                    _wd.requested_not_found().envelope(
-                        code="session_unknown", locale="en"
-                    )["text"],
+                    _wd.requested_not_found().envelope(code="session_unknown", locale="en")["text"],
                 )
             if kind == "effort" and isinstance(error, ValueError):
                 return Outcome("terminal", "effort_unsupported", str(error))
