@@ -1524,10 +1524,10 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline and _alive(child):
             await asyncio.sleep(0.2)
-        assert not _alive(child), "the drain latched and the runtime NEVER exited:\n" + chr(
-            10
-        ).join(_lines_for_pid(pid)[-10:]) + armed_probe_diagnostics.evidence(
-            transcript, stderr_path
+        assert not _alive(child), (
+            "the drain latched and the runtime NEVER exited:\n"
+            + chr(10).join(_lines_for_pid(pid)[-10:])
+            + armed_probe_diagnostics.evidence(transcript, stderr_path)
         )
         assert child.returncode == 0, f"the runtime exited {child.returncode}, not cleanly" + (
             armed_probe_diagnostics.evidence(transcript, stderr_path)
@@ -1546,11 +1546,11 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         # a turn off.
         attention = _completion_attention(config, session_id)
         assert attention, f"no completion was recorded at all:\n{durable[-2000:]}"
-        assert [
-            row for row in attention if row.get("kind") == "error"
-        ] == [], "the drain cut the turn off:\n" + json.dumps(
-            armed_probe_diagnostics.redacted_rows(attention), indent=2
-        ) + armed_probe_diagnostics.evidence(transcript, stderr_path)
+        assert [row for row in attention if row.get("kind") == "error"] == [], (
+            "the drain cut the turn off:\n"
+            + json.dumps(armed_probe_diagnostics.redacted_rows(attention), indent=2)
+            + armed_probe_diagnostics.evidence(transcript, stderr_path)
+        )
         assert any(row.get("kind") == "complete" for row in attention), attention
     finally:
         if viewer is not None:

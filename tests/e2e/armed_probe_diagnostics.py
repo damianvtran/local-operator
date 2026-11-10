@@ -32,7 +32,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from local_operator.redaction_shapes import REDACTION_MARKER, is_credential_name, scrub_secrets
+from local_operator.redaction_shapes import (
+    REDACTION_MARKER,
+    is_credential_name,
+    scrub_secrets,
+)
 
 #: Per-field and whole-report bounds. A CI log line, not an archive: the row
 #: count bounds a runaway transcript, the excerpt bounds one huge tool output,
