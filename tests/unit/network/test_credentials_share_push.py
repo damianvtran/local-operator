@@ -24,7 +24,9 @@ parser, a real ``AuthStore`` on the owner. The ambient config root is the OWNER'
 from __future__ import annotations
 
 import json
+import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -59,6 +61,11 @@ def drive_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
     stub_idp: RotatingIdP = request.getfixturevalue("idp")
     server_a, server_b, host, port = request.getfixturevalue("devices")
     record, _host, _port = _pair((server_a, server_b, host, port), monkeypatch, role="drive")
+    # Installed before either row learns the other's address, so every dial that could
+    # read a live endpoint is counted (``_partition`` waits these out).
+    dials = {
+        id(server): _count_outbound_dials(server, monkeypatch) for server in (server_a, server_b)
+    }
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     host_b, port_b = server_b.bind()
     server_b.bind_control()
@@ -98,9 +105,47 @@ def drive_mesh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) 
             "idp": stub_idp,
             "b_endpoint": f"{host_b}:{port_b}",
             "a_endpoint": f"{host}:{port}",
+            "dials": dials,
         },
     )
     server_b.stop()
+
+
+class _DialCounter:
+    """How many outbound link attempts a relay has open right now, counted from the
+    moment one READS the member row until its handshake has written back to it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = 0
+
+    def wrap(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            with self._lock:
+                self.active += 1
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                with self._lock:
+                    self.active -= 1
+
+        return counted
+
+
+def _count_outbound_dials(server: Any, monkeypatch: pytest.MonkeyPatch) -> _DialCounter:
+    """Count a relay's in-flight OUTBOUND handshakes; the listener already counts inbound.
+
+    The relay keeps ``_handshakes_active`` for connections it ACCEPTED, but nothing for
+    the ones it dials. Both entry points are wrapped: ``_ensure_link_with_probe`` reads
+    the member row and connects BEFORE it calls ``dial`` (so a counter on ``dial`` alone
+    would miss a dial that already holds the live address), and ``dial`` is also called
+    directly by the probe surface. Instance attributes shadow the methods, and the
+    relay calls both through ``self``, so the product path itself is what gets counted.
+    """
+    counter = _DialCounter()
+    for name in ("_ensure_link_with_probe", "dial"):
+        monkeypatch.setattr(server, name, counter.wrap(getattr(server, name)))
+    return counter
 
 
 def _start_b(mesh: Any) -> None:
@@ -426,19 +471,64 @@ def _partition(mesh: Any) -> None:
     """Neither side can reach the other: both addresses dead, every live link dropped.
 
     BOTH directions: B's own cadences redial A, and a link B opened is one A's push
-    would reuse — so a one-way partition delivered the push under load."""
-    for server, other in ((mesh.a, mesh.borrower), (mesh.b, mesh.owner)):
-        with store.mutate(mesh.network_id, server.root) as copy:
-            row = copy.member(other)
-            assert row is not None
-            row.endpoints = ["127.0.0.1:9"]
-            store.save(copy, server.root)
-    for server in (mesh.a, mesh.b):
-        for link in list(server.links.values()):
+    would reuse — so a one-way partition delivered the push under load.
+
+    AND NO HANDSHAKE STILL IN FLIGHT, which is the second form of the same race. A
+    handshake that began before the dead addresses were written finishes afterwards
+    and undoes the partition: the dialler and the listener each record the other's
+    DECLARED endpoints on completion (``_note_peer_endpoints``), writing the live
+    address back over ``127.0.0.1:9``, and the listener admits a fresh link after the
+    "no link is alive" check had already passed. A's push then finds a live link or a
+    live address and reports ``pushed`` where this cell asserts ``offline`` (seen on
+    two independent PR gates; reproduced by holding A's inbound admit until just after
+    the rows were written). "No link alive" was a proxy for the partition; this waits
+    for the partition itself, re-asserting whatever a late handshake undid, until one
+    pass finds nothing in flight on either side, no live link, and both rows dead.
+
+    A handshake that STARTS after the rows are dead reads the dead address and cannot
+    connect, so once nothing is in flight the state is stable.
+    """
+    dead = ["127.0.0.1:9"]
+    pairs = ((mesh.a, mesh.borrower), (mesh.b, mesh.owner))
+
+    def kill_rows() -> bool:
+        """Write the dead address wherever it is missing; True when nothing needed it."""
+        clean = True
+        for server, other in pairs:
+            with store.mutate(mesh.network_id, server.root) as copy:
+                row = copy.member(other)
+                assert row is not None
+                if list(row.endpoints) != dead:
+                    clean = False
+                    row.endpoints = list(dead)
+                    store.save(copy, server.root)
+        return clean
+
+    def drop_links() -> bool:
+        """Close every live link; True when there was none to close."""
+        live = [x for s in (mesh.a, mesh.b) for x in list(s.links.values()) if x.alive]
+        for link in live:
             link.close()
-    assert net_fixtures.wait_for(
-        lambda: not any(x.alive for x in [*mesh.a.links.values(), *mesh.b.links.values()])
-    )
+        return not live
+
+    def in_flight() -> bool:
+        return any(
+            server._handshakes_active or mesh.dials[id(server)].active  # noqa: SLF001
+            for server in (mesh.a, mesh.b)
+        )
+
+    def partitioned() -> bool:
+        # Order matters: in-flight first, so a handshake that completes during this
+        # pass is caught by the row and link checks that follow it, or by the next pass.
+        if in_flight():
+            return False
+        rows_clean = kill_rows()
+        links_clean = drop_links()
+        return rows_clean and links_clean
+
+    kill_rows()
+    drop_links()
+    assert net_fixtures.wait_for(partitioned), "a handshake kept undoing the partition"
 
 
 def _heal(mesh: Any) -> None:
