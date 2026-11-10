@@ -468,3 +468,53 @@ async def test_a_tier_word_resolves_the_tier_model_as_task_does(tmp_path, monkey
     assert manager.reprobes[-1] == {"withdraw": True, "launch_pin": "anthropic/opus-5-5"}
     both = await comms.set_model(["mgr"], model="inherit", effort="lo")
     assert both[0].outcome == "failed" and "omit model=" in (both[0].error or "")
+
+
+# -- review/QA round 2 remediation ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_tier_switch_survives_the_resume(tmp_path, monkeypatch):
+    """R2.1: a manager launched on ``lo`` and moved to ``hi`` must come back on
+    ``hi``. The tier switch leaves ``model_selector`` empty, so the tier on the
+    record is the pin resume re-resolves from."""
+    comms, root, _manager, _a, _b = incident_tree(tmp_path)
+    comms._records["mgr"].effort = "lo"
+    root.jobs.jobs["mgr"].effort = "lo"
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.model_may_choose_tier", lambda *a, **k: True
+    )
+    root._resolve_subagent_selection = (  # type: ignore[attr-defined]
+        lambda role, tier, **kwargs: (OPUS, "effort")
+    )
+    out = await comms.set_model(["mgr"], model=None, effort="hi")
+    assert out[0].outcome == "switched"
+    record = comms._records["mgr"]
+    assert (record.effort, record.model_selector) == ("hi", None)
+    assert root.jobs.jobs["mgr"].effort == "hi"
+
+    assert (await comms.pause("mgr")).outcome == "paused"
+    _settle_paused(comms, ("wa", "wb", "mgr"))
+    launched = _capture_launches(monkeypatch)
+    assert comms.resume("mgr", "carry on")[1] is None
+    assert launched[0]["effort"] == "hi" and launched[0]["model_selector"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_child_cancelled_while_paused_is_listed_as_cancelled(tmp_path):
+    """Q3: the pause stamped ``child-paused`` ("can be resumed"); the cancel is
+    the newer word, so the list row's attribution must say cancelled."""
+    comms, *_ = incident_tree(tmp_path)
+    assert (await comms.pause("mgr")).outcome == "paused"
+    _settle_paused(comms, ("wa", "wb", "mgr"))
+    # The runner's teardown records the pause as the cause, as it does live.
+    comms.note_checkpoint("wa", death_cause="child-paused")
+    assert (await comms.cancel("wa")).outcome == "cancelled"
+
+    rows = {row.job_id: row for row in comms.roster()}
+    assert rows["wa"].death_cause == "child-cancelled"
+    assert rows["wb"].death_cause != "child-cancelled"  # its sibling stays paused
+    ctx = ToolContext(cwd=".", subagent_comms=comms)
+    text = body(await execute_hub("c1", {"op": "list"}, None, None, ctx))
+    wa_block = text.split("worker-a (wa)", 1)[1].split("worker-b", 1)[0]
+    assert "child-cancelled" in wa_block and "child-paused" not in wa_block, text

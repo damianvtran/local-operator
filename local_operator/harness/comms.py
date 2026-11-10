@@ -2853,6 +2853,14 @@ class SubagentComms:
             # pinned one "fallen back" onto its parent's model).
             record.model_selector = "inherit" if launch_pin == "" else model
             record.model_selection_source = new_source
+            if tier is not None and model is None:
+                # A tier switch leaves the selector empty, so the TIER is the
+                # pin: ``resume`` and ``_owned_model`` re-resolve from
+                # ``record.effort``, and keeping the launch tier there brought a
+                # manager moved to ``hi`` back on ``lo`` (review round 2, R2.1).
+                record.effort = tier
+                if job is not None:
+                    job.effort = tier
             if job is not None:
                 job.model_selector = record.model_selector
                 job.model_selection_source = new_source
@@ -3370,6 +3378,13 @@ class SubagentComms:
                 record.subtree_paused_by = ""
                 if record.outcome is None:
                     record.outcome = "cancelled"
+                # The pause's settle stamped ``child-paused`` ("can be
+                # resumed"); the cancel is the newer word, so the roster's
+                # attribution must say cancelled, not paused (QA round 2, Q3).
+                cause = "child-parent-gone" if by == "parent-teardown" else "child-cancelled"
+                record.death_cause = cause
+                if job is not None:
+                    job.death_cause = cause
                 # A cancel of a parked child is still a deliberate end by an
                 # actor, so the record is attributed — but NO RECEIPT is staged:
                 # the receipt attests to a ``jobs.cancel`` that this branch never

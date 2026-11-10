@@ -615,7 +615,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # row, its ``effort``/``cascade`` fields and the subtree clause on
     # ``pause``, net of the trimmed ``to``/``message``/``steps`` wording that
     # kept the wire schema inside bench_context_budget.py's budget. Re-measured.
-    "hub": 873,
+    # 873 -> 875 (round 2, R2.3 + context-budget): the ops row names the
+    # ``model_choice=model`` a tier needs (+), net of trimming the ``model``
+    # and ``to`` field blurbs that put the wire schema 3 tokens over CI's
+    # budget (-). Re-measured.
+    "hub": 875,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.

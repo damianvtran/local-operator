@@ -34247,7 +34247,9 @@ class HubParams(BaseModel):
     model: str | None = Field(
         default=None,
         description=(
-            "resume/set_model. Omit to keep role/tier defaults. 'inherit' follows the parent, "
+            # Trimmed again in review round 2 (context-budget CI was 3 tokens
+            # over): same facts, the tool:// ops table carries the detail.
+            "resume/set_model. Omit: role/tier default. 'inherit': the parent's, "
             "skipping role pins; provider/model-id pins this run."
         ),
     )
@@ -34294,8 +34296,8 @@ class HubParams(BaseModel):
     to: list[str] | None = Field(
         default=None,
         description=(
-            "Job ids (see 'hub op=list') or labels, or [\"all\"] for "
-            "every running subagent; 'ask'/'peek' take exactly one. Omit for op='list'."
+            "Job ids (see 'hub op=list'), labels, or [\"all\"] (every running "
+            "subagent); 'ask'/'peek' take exactly one. Omit for list."
         ),
     )
 
