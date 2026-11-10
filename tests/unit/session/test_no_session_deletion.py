@@ -324,6 +324,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
         "never a directory",
     ),
+    # -- permissions_cli: the team-signing opt-in record ----------------------
+    (
+        "local_operator/permissions_cli.py::_restore_optin",
+        "<path>.unlink",
+        # ``procname._optin_path()``: <passwd home>/.local-operator/
+        # runtime-signing.json, a fixed file name under the passwd-derived
+        # home, never a directory and never under sessions/.
+        "Removes the team-signing opt-in file a failed `lop permissions setup` wrote",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
@@ -384,12 +393,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "this module made",
     ),
     (
-        "local_operator/procname.py::_plant_runtime",
+        # ``_publish_tree`` is the one publish protocol every runtime tree
+        # shape (legacy and both bundle flavors) shares since the bundle
+        # identity work; it inherited ``_plant_runtime``'s rename and rmtrees.
+        "local_operator/procname.py::_publish_tree",
         "os.rename",
-        "Publishes this plant's staging dir as <runtime root>/<key>; both interpreter-derived",
+        "Publishes this plant's staging dir as <runtime root>/<key>[-<flavor>]; "
+        "both interpreter-derived",
     ),
     (
-        "local_operator/procname.py::_plant_runtime",
+        "local_operator/procname.py::_publish_tree",
         "shutil.rmtree",
         # Two: the failed-build staging tree (a clone that died on ENOSPC must
         # never be renamed onto the build key) and a staging tree whose rename

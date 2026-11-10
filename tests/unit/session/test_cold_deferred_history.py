@@ -1591,3 +1591,224 @@ async def test_a_second_prewarm_over_an_untouched_journal_leaves_the_record_alon
     replay_cache.replay_cache().clear()  # the next boot: an empty RAM cache
     assert await prewarm.warm_replay_cache(isolated_config) == 1
     assert (record.read_bytes(), record.stat().st_mtime_ns, record.stat().st_ino) == before
+
+
+@pytest.fixture
+def cold_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Use the actual JSONL writer and a local clock, never the loop's clock.
+
+    Advancing this clock inside real cold dependencies is a deterministic delay
+    injection: scheduler load cannot make the wrong phase look expensive.
+    """
+    import time
+    from types import SimpleNamespace
+
+    from local_operator.session import open_trace
+
+    path = tmp_path / "cold.jsonl"
+    ticks = [100.0]
+    monkeypatch.setattr(open_trace, "_PATH", str(path))
+    monkeypatch.setattr(
+        open_trace, "time", SimpleNamespace(monotonic=lambda: ticks[0], time=time.time)
+    )
+    return path, ticks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proof", ["hit", "tail", "none"])
+async def test_cold_trace_discriminates_actual_proof_and_delays(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch, cold_trace, proof: str
+) -> None:
+    """Real journal, real cold, real writer; only the clock/delays are synthetic."""
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session import attached, open_trace
+
+    path, ticks = cold_trace
+    # Seed the durable record with tracing disabled, so one cold = one row.
+    monkeypatch.setattr(open_trace, "_PATH", None)
+    await seed_journal(isolated_config)
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    monkeypatch.setattr(open_trace, "_PATH", str(path))
+    if proof != "hit":
+        monkeypatch.setattr(attached, "read_cold_metadata", lambda *args: None)
+    if proof == "none":
+        monkeypatch.setattr(attached, "build_cold_tail_metadata", lambda *args: None)
+
+    for method, delay in [
+        ("_deferred_cold_details", 11),
+        ("_synthesise_cold_state", 23),
+        ("_load_history", 41),
+        ("_restore_cold_details", 53),
+    ]:
+        original = getattr(AttachedSession, method)
+
+        async def delayed(self, *args, _original=original, _delay=delay, **kwargs):
+            ticks[0] += _delay / 1000
+            return await _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(AttachedSession, method, delayed)
+
+    async def account(config, model, **kwargs):
+        ticks[0] += 0.037
+        return model.model_copy(
+            update={"display_name": "Synthetic account", "context_window": 765432}
+        )
+
+    monkeypatch.setattr(attached, "resolve_context_metadata", account)
+    # The nested account stage is synthetic; do not let an unknown fixture
+    # model trigger enrichment/catalogue discovery while resolving its base.
+    monkeypatch.setattr(
+        "local_operator.model.configure.build_model_spec",
+        lambda *args: ModelSpec(provider="openai", model_id="synthetic", display_name="Synthetic"),
+    )
+    install = AttachedSession._install_frontend
+
+    def delayed_install(self, *args, **kwargs):
+        ticks[0] += 0.067
+        return install(self, *args, **kwargs)
+
+    monkeypatch.setattr(AttachedSession, "_install_frontend", delayed_install)
+    facade = await AttachedSession.cold(
+        SESSION_ID,
+        config_dir=isolated_config,
+        cwd=str(isolated_config),
+        takeover_factory=_never_take_over,
+        deferred_history=True,
+        initial_model=ModelSpec(provider="openai", model_id="synthetic", display_name="Synthetic"),
+        _trace_span="synthetic-acquire",
+    )
+    try:
+        assert "_cold_open_trace" not in vars(facade)
+        selected_model = facade.frontend_state.selected_model
+        assert selected_model is not None
+        assert selected_model.display_name == "Synthetic account"
+        assert selected_model.context_window == 765432
+    finally:
+        await facade.dispose()
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["stage"] == "cold.summary" and row["outcome"] == "ok"
+    assert row["session"] == SESSION_ID and row["span"] == "synthetic-acquire"
+    assert row["metadata_record"] == ("hit" if proof == "hit" else "miss")
+    assert row["proof_result"] is (proof != "none")
+    assert row["eager_history_chosen"] is (proof == "none")
+    assert row["deferred_proof_ms"] == 11
+    assert row["model_synthesis_ms"] == 60  # includes nested account lookup
+    assert row["account_context_ms"] == 37
+    assert row["restore_ms"] == 53
+    assert row["install_finalize_ms"] == 67
+    if proof == "none":
+        assert row["eager_history_ms"] == 41
+    else:
+        assert "eager_history_ms" not in row
+    assert row["ms"] == 191 + (41 if proof == "none" else 0)
+    assert row["at"] >= row["started_at"]
+    assert "question" not in path.read_text() and "Synthetic" not in path.read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deferred", [True, False])
+async def test_cold_trace_off_on_preserves_state_witness_and_thread_calls(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch, cold_trace, deferred: bool
+) -> None:
+    from local_operator.session import open_trace
+
+    path, _ = cold_trace
+    monkeypatch.setattr(open_trace, "_PATH", None)
+    await seed_journal(isolated_config)
+    first = await cold_open(isolated_config, deferred=False)
+    await first.dispose()
+    calls = []
+    to_thread = asyncio.to_thread
+
+    async def counted(fn, *args, **kwargs):
+        calls.append(fn.__name__)
+        return await to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", counted)
+    snapshots = []
+    for enabled in (False, True):
+        monkeypatch.setattr(open_trace, "_PATH", str(path) if enabled else None)
+        calls.clear()
+        facade = await cold_open(isolated_config, deferred=deferred)
+        snapshots.append(
+            (
+                frontend_payload(facade),
+                facade._deferred_history.witness if facade._deferred_history else None,
+                facade._history_hydrated,
+                set(facade._history_ids),
+                list(calls),
+            )
+        )
+        assert facade._runtime_ready.is_set()
+        assert "_cold_open_trace" not in vars(facade)
+        await facade.dispose()
+    assert snapshots[0] == snapshots[1]
+    assert len(path.read_text().splitlines()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["error", "cancel"])
+async def test_cold_trace_closes_partial_record_without_swallowing_failure(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch, cold_trace, failure: str
+) -> None:
+    path, _ = cold_trace
+    entered = asyncio.Event()
+    instances = []
+
+    async def interrupted(self, *args, **kwargs):
+        instances.append(self)
+        entered.set()
+        if failure == "error":
+            raise ValueError("sensitive-error-must-not-be-written")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(AttachedSession, "_synthesise_cold_state", interrupted)
+    task = asyncio.create_task(cold_open(isolated_config, deferred=True))
+    await entered.wait()
+    if failure == "cancel":
+        task.cancel()
+    with pytest.raises(ValueError if failure == "error" else asyncio.CancelledError):
+        await task
+    row = json.loads(path.read_text())
+    assert row["outcome"] == ("failed" if failure == "error" else "cancelled")
+    assert "model_synthesis_ms" in row
+    assert "deferred_proof_ms" not in row  # no transcript, no invented zero
+    assert "restore_ms" not in row and "install_finalize_ms" not in row
+    assert "sensitive" not in path.read_text()
+    assert "_cold_open_trace" not in vars(instances[0])
+    await instances[0].dispose()
+
+
+@pytest.mark.asyncio
+async def test_cold_trace_disabled_never_constructs_instrumentation(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session import open_trace
+
+    monkeypatch.setattr(open_trace, "_PATH", None)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("disabled cold constructed instrumentation")
+
+    monkeypatch.setattr(open_trace, "ColdOpenTrace", forbidden)
+    facade = await cold_open(isolated_config, deferred=True)
+    assert facade._runtime_ready.is_set()
+    await facade.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cold_trace_writer_failure_cannot_fail_open(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator.session import open_trace
+
+    # A directory cannot be opened as an append-only JSONL file. Exercise the
+    # shipped writer's failure isolation rather than replacing mark with a mock.
+    monkeypatch.setattr(open_trace, "_PATH", str(tmp_path))
+    facade = await cold_open(isolated_config, deferred=True)
+    assert facade._runtime_ready.is_set()
+    assert "_cold_open_trace" not in vars(facade)
+    await facade.dispose()

@@ -321,10 +321,14 @@ async def durable_write_decision(
             "durable-write consent seam failed: %s; refusing", type(exc).__name__, exc_info=True
         )
         return None, WriteReason("error", fault=type(exc).__name__)
-    from local_operator.harness.types import QueuedProfileWrite
+    from local_operator.harness.types import QueuedHubPull, QueuedProfileWrite
 
     if isinstance(origin, QueuedProfileWrite):
         return origin, WriteReason("queued")
+    if isinstance(origin, QueuedHubPull):
+        # Not a grant: the host filed ONE consent ask. The caller reports it and
+        # the model retries the same call once the person's answer arrives.
+        return origin, WriteReason("ask_queued")
     return (str(origin), WriteReason("granted")) if origin else (None, WriteReason("declined"))
 
 
@@ -520,6 +524,41 @@ async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> st
     return origin
 
 
+def hub_pull_refusal(reason: str, ask_id: str = "") -> str:
+    """Model-facing outcome of an unconsented org-hub pull (English by design).
+
+    NEVER a CLI command addressed to the user: the people this reaches are often
+    non-technical, and the old text sent them to ``lop agents sync``, which does
+    not even touch skills. The remedy is always an ask or the user's own words.
+    """
+    if reason == "ask_queued":
+        return (
+            f"Asked the user to confirm this hub update (ask {ask_id}); nothing was "
+            "changed yet. End your turn now. When their answer arrives, retry the same "
+            "org_pull call: a yes lets it through, a 'Not now' means stop. Do not give "
+            "them commands to run."
+        )
+    if reason == "declined":
+        return (
+            "The user chose not to update from the hub now, so nothing was changed. "
+            "Do not retry unless they ask again."
+        )
+    if reason == "error":
+        fault = getattr(reason, "fault", "")
+        return (
+            "The confirmation step failed before the user could answer"
+            + (f" ({fault})" if fault else "")
+            + ", so nothing was changed. Tell the user it failed; do not retry unchanged."
+        )
+    return (
+        # No "say 'update my hub items'" hint any more: the owner's wording is
+        # not consent (PR #3693 review R1); only an answered host ask is.
+        "This run has no way to ask the user, so nothing was changed. Tell them you "
+        "need their confirmation and will ask for it in a conversation they can "
+        "answer. Do not give them commands to run."
+    )
+
+
 def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam") -> str:
     """Why a tool-issued account write was refused, and the ONE next action.
 
@@ -541,6 +580,8 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
+    if intent.operation == "hub_pull":
+        return hub_pull_refusal(reason)
     if reason == "declined":
         return (
             f"the user declined to save this {intent.kind} for every conversation, so "

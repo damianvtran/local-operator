@@ -1,0 +1,23 @@
+import json,re,unicodedata
+en=json.load(open('local_operator/i18n/catalogues/en/cli.permissions.json'))
+ur=json.load(open('local_operator/i18n/catalogues/ur/cli.permissions.json'))
+ctx=json.load(open('local_operator/i18n/catalogues/en/cli.permissions.context.json'))
+print('keys',len(en),len(ur),'order_equal',list(en)==list(ur),'ctx_has_new',('cli.permissions.setup.always_allow_kept' in ctx))
+changed=['cli.permissions.status.scope','cli.permissions.setup.already_signed','cli.permissions.setup.always_allow_kept','cli.permissions.setup.explain']
+toks=['Files & Folders','Accessibility','"Always Allow"','"Allow"','Keychain Access','Access Control','private key','codesign','Developer ID','`lop update`','/update','Local Operator Runtime','[y/N]']
+def first_strong(s):
+    for ch in s:
+        b=unicodedata.bidirectional(ch)
+        if b in('L',):return 'L'
+        if b in('R','AL'):return 'R'
+    return None
+for k in changed:
+    e,u=en[k],ur[k]
+    ph=(sorted(re.findall(r'\{\w+\}',e))==sorted(re.findall(r'\{\w+\}',u)))
+    bt=(re.findall(r'`[^`]+`',e)==re.findall(r'`[^`]+`',u))
+    tc={t:(e.count(t),u.count(t)) for t in toks if e.count(t) or u.count(t)}
+    bad={t:v for t,v in tc.items() if v[0]!=v[1]}
+    lines=[first_strong(l) for l in u.split('\n')]
+    bidi=[c for c in u if unicodedata.category(c)=='Cf']
+    digits=re.findall('[\u0660-\u0669\u06f0-\u06f9]',u)
+    print(k,'ph',ph,'backticks',bt,'tok_mismatch',bad,'line_first_strong',lines,'cf',len(bidi),'arabic_digits',len(digits),'nlines',len(e.split('\n')),len(u.split('\n')),'ends',repr(u[-1]))

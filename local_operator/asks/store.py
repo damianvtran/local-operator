@@ -126,6 +126,18 @@ EVENT_RELAY_SURFACED = "relay-surfaced"
 #: the merged case.
 EVENT_CONTEXT = "context"
 
+#: HOST-FILED CONSENT (``hub_org.consent``; agent org-hub pulls). A ``queued``
+#: event may carry a ``consent`` mapping that ONLY host code writes
+#: (``AskQueue.enqueue(consent=...)`` is keyword-only, the model's ``ask`` path
+#: never passes it, and ``_question_shape`` drops unknown question keys), naming
+#: the account write an affirmative answer authorises: ``{"op": "hub_pull",
+#: "tenant", "kinds", "affirm"}``. The grant is SINGLE USE: the session appends
+#: this event when it spends the answer, and the fold publishes
+#: ``consent_used`` so a second org_pull, a restart or a re-fold cannot spend the
+#: same yes twice. Additive under the unknown-kind contract above: an older fold
+#: ignores both the key and the event.
+EVENT_CONSENT_USED = "consent-used"
+
 #: Caps on folded context, so a chatty agent cannot grow one ask's row on every
 #: surface without bound: the newest entries win, each body truncated to the
 #: notify store's own body cap.
@@ -774,6 +786,11 @@ def fold(
                 and now <= window_end
                 and not record["delivered"]
             )
+        consent = queued.get("consent")
+        if isinstance(consent, Mapping):
+            # ABSENT, never empty: an ordinary ask keeps its exact record shape.
+            record["consent"] = dict(consent)
+            record["consent_used"] = _first(events, ask_id, EVENT_CONSENT_USED) is not None
         folded = context_by_ask.get(ask_id)
         if folded:
             # ABSENT, never empty (the ``surfaced_in`` rule): an ask with no
