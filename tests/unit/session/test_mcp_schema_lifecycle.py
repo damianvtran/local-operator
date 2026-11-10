@@ -104,6 +104,15 @@ async def _wire(session, manager, monkeypatch) -> session_factory._KnowledgeHook
     return hooks
 
 
+def _deferred(session: Any) -> set[tuple[str, str]]:
+    """The deferred-origin set ``wire_mcp_into_session`` attaches with setattr.
+
+    It is dynamic (never declared on ``Session``), so a typed accessor is the
+    only way to read it without pyright reporting a missing attribute.
+    """
+    return getattr(session, "_mcp_deferred_origins")
+
+
 def _sent(stream: ScriptedStream, index: int) -> list[str]:
     return [tool.name for tool in stream.requests[index].tools if tool.name.startswith("mcp__")]
 
@@ -167,7 +176,7 @@ async def test_a_per_tool_read_never_changes_the_array_and_is_callable_the_same_
     assert _results(session)["c2"] == f"{SMALL_NAME} ran"
     assert dispatched and dispatched[0]["is_error"] is False
     assert executed.count(SMALL_NAME) == 2
-    assert (SERVER, SMALL) in session._mcp_deferred_origins
+    assert (SERVER, SMALL) in _deferred(session)
     await session.dispose()
 
 
@@ -185,6 +194,7 @@ async def _published_big(tmp_path, monkeypatch, *, preload: bool = False, **kwar
     )
     hooks = await _wire(session, manager, monkeypatch)
     if not preload:
+        assert hooks.mcp_resolver is not None
         reply = hooks.mcp_resolver(f"mcp://{SERVER}/{BIG}")
         assert reply is not None and "too large to show inline" in reply
     await session.prompt("first " + "detail " * 30)
@@ -225,7 +235,7 @@ async def test_compaction_commit_demotes_an_idle_published_schema_on_the_next_re
     assert _last_sent(stream) == _sent(stream, before)
 
     # Demoted is not unresolvable: the deferred resolver still serves it.
-    assert (SERVER, BIG) in session._mcp_deferred_origins
+    assert (SERVER, BIG) in _deferred(session)
     resolved = session._resolve_tool_outside_inventory(BIG_NAME)
     assert resolved is not None and resolved.name == BIG_NAME
     await session.dispose()
@@ -353,7 +363,7 @@ async def test_a_child_publishes_only_the_parents_live_set_and_resolves_demoted_
     assert restricted._resolve_tool_outside_inventory(BIG_NAME) is not None
     reply = restricted._skill_resolver(f"mcp://{SERVER}/{SMALL}")
     assert reply is not None and "# MCP tool not enabled" in reply
-    assert (SERVER, SMALL) not in restricted._mcp_deferred_origins
+    assert (SERVER, SMALL) not in _deferred(restricted)
     assert restricted._resolve_tool_outside_inventory(SMALL_NAME) is None
     await restricted.dispose()
     await session.dispose()
