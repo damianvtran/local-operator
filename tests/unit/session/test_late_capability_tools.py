@@ -318,8 +318,15 @@ async def test_every_session_gated_tool_is_in_the_merge_set(
     session.set_ask_handler(answer_nothing)
 
     # What ``session_factory`` builds the inventory from: no session fields.
+    # The factory's warm context DOES carry the profile root (session_factory
+    # sets ``memory_config_dir``), which is the ``skill`` tool's whole createIf,
+    # so ``skill`` is factory-built rather than a session capability and must
+    # stay out of the merge set.
     factory_side = {
-        tool.name for tool in create_tools(ToolContext(cwd=".", session_id="s", has_ui=True))
+        tool.name
+        for tool in create_tools(
+            ToolContext(cwd=".", session_id="s", has_ui=True, memory_config_dir=str(tmp_path))
+        )
     }
     session_side = {tool.name for tool in create_tools(session._build_tool_context())}
 

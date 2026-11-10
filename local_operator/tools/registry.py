@@ -221,12 +221,14 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # purpose: appending never shifts a provider-visible array prefix, which is
     # what the prompt cache keys on.
     "notify": lambda context: builtin.build_notify_tool(context),
+    # Deferred: filing receipts name the conversation decision door.
+    "profile_proposal": lambda context: build_profile_proposal_tool(context),
     # Standard authoring tool, reachable in owner conversations as well as the
     # Agents configuration run. Mutations independently require host consent;
     # availability alone cannot authorize a remote or delegated account write.
+    # Kept in the SAME relative order as ``DEFAULT_TOOL_NAMES`` below so both
+    # tables share one tail (pinned by test_the_newest_appends_stay_last...).
     "skill": lambda context: build_skill_tool(context),
-    # Deferred: filing receipts name the conversation decision door.
-    "profile_proposal": lambda context: build_profile_proposal_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit

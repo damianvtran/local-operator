@@ -23,9 +23,11 @@ from local_operator.harness.approval import mint_operator_cap, remember_operator
 from local_operator.harness.types import (
     Message,
     ModelSpec,
+    TextContent,
     ToolCall,
     ToolContext,
     ToolExecutionEndEvent,
+    ToolResult,
 )
 from local_operator.mobile.attach_client import AttachClient
 from local_operator.mobile.peer_client import send_peer_message
@@ -62,6 +64,61 @@ def new_session(root: Path, directory: Path) -> Session:
     )
 
 
+async def file_legacy_signed_receipt(session: Session, directory: Path, call_id: str, args):
+    """Mint a GENUINE legacy ``queued`` signed-continuation receipt.
+
+    WHY: the ``agent`` tool no longer files signed mesh requests (an unasked
+    account write is now a proposal in Agents → <name>), but signed requests
+    filed before that change -- and their spooled continuations -- must still
+    complete exactly once. So the receipt is built the way the pre-proposal
+    host did (``Session._authorize_durable_write`` on main before PR #3704):
+    the real tool computes the bounded ``intent.proposal`` through the consent
+    seam, then ``profile_approval.build`` + ``file_request`` file it, and the
+    tool result carries the legacy ``queued`` details. Nothing is labelled by
+    hand except the receipt shape the old ``_queued_profile_receipt`` wrote.
+    """
+    captured = []
+
+    async def capture(intent):
+        captured.append(intent)
+        return None  # Refuse: this call only derives the authored proposal.
+
+    await execute_agent(
+        call_id,
+        args,
+        None,
+        None,
+        ToolContext(
+            cwd=".",
+            session_dir=str(directory),
+            agent_registry=session.agent_registry,
+            authorize_durable_write=capture,
+        ),
+    )
+    [intent] = captured
+    assert intent.proposal is not None, "a bounded update must carry a proposal"
+    root = Path(session.agent_registry.config_dir)
+    data = P.build(root, session_id=session._session_id, tool_call_id=call_id, **intent.proposal)
+    record = P.file_request(root, data)
+    return ToolResult(
+        tool_call_id=call_id,
+        tool_name="agent",
+        content=[TextContent(text=f"Queued agent {data.name!r} for durable approval.")],
+        details={
+            "status": "queued",
+            "fields": list(intent.changes),
+            "diff": intent.summary.splitlines(),
+            "approval_id": record["approval_id"],
+            "request_digest": record["request_digest"],
+            "expires_at": record["expires_at"],
+            "receipt_id": data.receipt_id,
+            "profile_kind": data.profile_kind,
+            "profile_name": data.name,
+            "scope": "global",
+        },
+    )
+
+
 def applied_rows(directory: Path, call_id: str):
     return [
         row
@@ -79,8 +136,11 @@ async def test_busy_actual_socket_hint_has_one_owned_continuation(root, monkeypa
     directory = root / "sessions" / "synthetic-session"
     session = new_session(root, directory)
     args = {"op": "update", "name": "reviewer", "instructions": "Signed while busy."}
-    queued = await execute_agent(
-        "busy-real-call",
+    # The CURRENT host files this unasked update as an Agents proposal, never a
+    # signed mesh request -- pinned here so the legacy rig below cannot drift
+    # into describing the live path.
+    current = await execute_agent(
+        "busy-current-call",
         args,
         None,
         None,
@@ -91,6 +151,9 @@ async def test_busy_actual_socket_hint_has_one_owned_continuation(root, monkeypa
             authorize_durable_write=session._authorize_durable_write,
         ),
     )
+    assert current.details is not None and current.details["status"] == "proposed"
+    assert "approval_id" not in current.details and "receipt_id" not in current.details
+    queued = await file_legacy_signed_receipt(session, directory, "busy-real-call", args)
     details = queued.details
     assert details is not None and details["status"] == "queued"
     pair = [
@@ -185,8 +248,15 @@ async def test_busy_actual_socket_hint_has_one_owned_continuation(root, monkeypa
             finally:
                 await resumed.dispose()
         else:
+            # Wait for BOTH halves of delivery: ``receive_profile_save_result``
+            # commits the applied row to the transcript and only then awaits
+            # its ``ToolExecutionEndEvent`` emit, so polling the row alone
+            # races the event count asserted below (observed locally as a
+            # 1-in-4 ``0 == 1`` on the end-event count).
             async with asyncio.timeout(3):
-                while not applied_rows(directory, queued.tool_call_id):
+                while not applied_rows(directory, queued.tool_call_id) or not [
+                    e for e in events if isinstance(e, ToolExecutionEndEvent)
+                ]:
                     await asyncio.sleep(0.01)
         assert len([e for e in events if isinstance(e, ToolExecutionEndEvent)]) == 1
         assert len(applied_rows(directory, queued.tool_call_id)) == 1
