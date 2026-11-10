@@ -1074,8 +1074,9 @@ async def test_settings_get_passes_the_payload_through(api):
     FakeClient.behavior["settings"] = payload
     response = await client.get("/v1/desktop/team-bridge/settings?tenant_id=tnt_1")
     assert response.status_code == 200
-    # Passed through untouched, plus the ONE additive provenance flag.
-    assert response.json()["result"] == {**payload, "default_on": False}
+    # Passed through untouched, plus the additive provenance flag and the
+    # machine-local typing preference (default on; typing design §7).
+    assert response.json()["result"] == {**payload, "default_on": False, "share_typing": True}
 
 
 # -- default-on (bridge_consent_v2) additive contract ------------------------

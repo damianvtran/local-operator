@@ -1,0 +1,27 @@
+"""Independent mechanical parity: keys, placeholders, backticks, newlines, [y/N] trailing space, NFC, quotes, verbatim tokens."""
+import json, re, unicodedata, sys
+C = 'local_operator/i18n/catalogues'
+def flat(d, p=''):
+    o = {}
+    for k, v in d.items():
+        kk = f'{p}.{k}' if p else k
+        o.update(flat(v, kk) if isinstance(v, dict) else {kk: v})
+    return o
+E = flat(json.load(open(f'{C}/en/cli.permissions.json'))); V = flat(json.load(open(f'{C}/vi/cli.permissions.json')))
+bad = 0
+print('keys en/vi', len(E), len(V), 'missing', sorted(set(E) - set(V)), 'extra', sorted(set(V) - set(E)))
+verb = ['Local Operator Runtime', 'Local Operator', 'Developer ID Application', 'Developer ID', 'guide://permissions', 'codesign', '/update', 'HOME', 'LOCAL_OPERATOR_RUNTIME_ROOT', 'LOCAL_OPERATOR_CONFIG_DIR', '~/.local-operator', 'macOS']
+for k in E:
+    e, v = E[k], V[k]; probs = []
+    if sorted(re.findall(r'\{[^}]+\}', e)) != sorted(re.findall(r'\{[^}]+\}', v)): probs.append('placeholders')
+    if re.findall(r'`[^`]+`', e) != re.findall(r'`[^`]+`', v): probs.append('backticks')
+    if e.count('\n') != v.count('\n'): probs.append('newlines')
+    if e.endswith(' ') != v.endswith(' '): probs.append('trailing-space')
+    if ('[y/N]' in e) != ('[y/N]' in v): probs.append('y/N')
+    if unicodedata.normalize('NFC', v) != v: probs.append('not-NFC')
+    if '"' in v: probs.append('ascii-quote')
+    for t in verb:
+        if e.count(t) and v.count(t) < e.count(t) and t not in ('macOS',): probs.append(f'verbatim:{t}')
+    if probs: bad += 1
+    print(('FAIL ' if probs else 'ok   ') + k, probs or '')
+print('parity failures:', bad); sys.exit(1 if bad else 0)

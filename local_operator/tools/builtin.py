@@ -11210,6 +11210,34 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
 #: ledger, not the screen.
 _DIFF_DETAILS_CAP_LINES = 200
 
+#: The stored diff's byte budget, beside the row cap, derived from the
+#: publication seam's own arithmetic (``harness.loop._redact_diff_detail``, whose
+#: ``_DIFF_DETAIL_BYTES`` is 128 KiB):
+#:
+#: * the stored rows' UTF-8 bytes, summed across EVERY row, must be <= 128 KiB;
+#: * the redactor INPUT budget is 3 x 128 KiB, spent once per row and once per
+#:   side's newline-joined hunk view. A joined side costs at most its rows' own
+#:   bytes (the dropped one-byte tag pays for the joining newline), and only a
+#:   context row is on both sides, so total input <= 3 x stored bytes;
+#: * the redactor OUTPUT budget is the same 3 x 128 KiB, and a mask longer than
+#:   the value it replaces (``[redacted]`` over a short known value) GROWS it.
+#:
+#: 120 KiB therefore keeps 8 KiB under the per-diff bound and, at the 3x input
+#: worst case, 24 KiB of output headroom for mask growth. A flat 96 KiB (round
+#: 1) double-counted the joins and dropped single-row payloads the seam accepts
+#: (review R1-2: a 110 KB one-line minified file stored no diff at all). 200 rows
+#: of ordinary source sit far below either number; this only bites on long-line
+#: content (minified JSON, data dumps).
+_DIFF_DETAILS_CAP_BYTES = 120 * 1024
+
+#: ``details`` key: diff CONTENT rows (`` ``/``+``/``-`` -- file lines, never
+#: ``@@`` hunk headers) the stored ``diff`` omits because of the caps above.
+#: Headers are excluded because the UI words this as "N more lines not
+#: recorded" (review R1-3 / QA Q1). Absent when the diff is complete. ``added``/``removed`` stay
+#: whole-file facts, so a renderer can say "N more lines not recorded" without
+#: implying the change itself was smaller. Shared contract with the desktop UI.
+DIFF_TRUNCATED_ROWS_KEY = "diff_truncated_rows"
+
 #: Context lines the rendered diff shows around each change. Named because the
 #: widening re-renders hunks and must grow from the SAME gap difflib proved.
 _DIFF_CONTEXT_LINES = 2
@@ -11300,9 +11328,287 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
         matcher.get_grouped_opcodes(n=_DIFF_CONTEXT_LINES),
     )
     diff = _keep_pem_blocks_whole(diff, before_lines, after_lines, opcodes)
-    if len(diff) > _DIFF_DETAILS_CAP_LINES:
-        diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
-    return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+    details: dict[str, Any] = {"path": str(path), "added": added, "removed": removed}
+    kept, omitted = _truncate_diff_rows(diff, before_lines, after_lines)
+    if kept is not None:
+        details["diff"] = kept
+    if omitted:
+        details[DIFF_TRUNCATED_ROWS_KEY] = omitted
+    return details
+
+
+def _utf8_size(rows: Sequence[str]) -> int:
+    """UTF-8 bytes of ``rows`` as the publication seam measures them."""
+    return sum(len(row.encode("utf-8", errors="surrogatepass")) for row in rows)
+
+
+def _truncate_diff_rows(
+    diff: list[str],
+    before_lines: Sequence[str],
+    after_lines: Sequence[str],
+) -> tuple[list[str] | None, int]:
+    """Bound ``diff`` to the stored caps while keeping it a VALID unified diff.
+
+    Returns ``(rows, omitted)``: ``rows`` is the diff to store (``None`` when not
+    even one change row fits safely) and ``omitted`` the content rows (file
+    lines, not ``@@`` headers) left out (0 when nothing was cut).
+
+    Why hunk-aware, not a slice: the publication seam
+    (``harness.loop._redact_diff_detail``) only publishes a diff whose every hunk
+    header's counts equal its observed rows -- a cut credential span must never
+    pass as a complete view -- and refuses anything else by withholding the
+    WHOLE field. The old ``diff[:cap] + ["…"]`` cut mid-hunk and appended a row
+    that is not a diff row at all, so every write/edit diff over the cap reached
+    replay, subagent and transcript views as a withheld marker. Here whole hunks
+    are kept while they fit; the hunk that crosses the cap is cut at the
+    boundary and its header REWRITTEN to the observed counts, so the seam judges
+    a complete (shorter) diff instead of refusing it. The seam's strictness is
+    unchanged; the producer simply stops handing it an invalid shape.
+
+    Constraints the cut keeps:
+
+    * never inside a complete PRIVATE KEY block on either side -- the seam's
+      span rule needs BEGIN..END in one view, so the cut moves to before the
+      block's first row in the hunk (``_keep_pem_blocks_whole`` already made
+      every such block whole within its hunk);
+    * a partial hunk with no ``+``/``-`` row is dropped -- the seam refuses
+      context-only hunks;
+    * the byte budget (``_DIFF_DETAILS_CAP_BYTES``) as well as the row cap, since
+      a few long rows would otherwise cross the seam's byte bound and be
+      withheld just the same;
+    * a row is never shortened: a clipped row could hide the tail a secret
+      detector needs, so a row that does not fit is omitted whole.
+
+    A diff the PEM widening could not verify arrives as ``[---, +++, "…"]`` and
+    is returned unchanged: that marker is a deliberate fail-closed refusal, not
+    a size cut, and the seam is meant to withhold it.
+    """
+    if len(diff) <= _DIFF_DETAILS_CAP_LINES and _utf8_size(diff) <= _DIFF_DETAILS_CAP_BYTES:
+        return diff, 0
+    parsed = _parse_diff_hunks(diff)
+    if parsed is None:
+        # Not a shape this producer rendered (or the widening's own refusal):
+        # never guess at hunk boundaries in it. The marker makes the seam
+        # withhold the field, the fail-closed direction.
+        return diff[:2] + ["…"], 0
+    old_blocks = _complete_pem_blocks(before_lines)
+    new_blocks = _complete_pem_blocks(after_lines)
+    out = list(diff[:2])
+    for old_start, old_count, new_start, new_count, rows in parsed:
+        # ``_parse_diff_hunks`` subtracts one from the printed start, but an
+        # EMPTY side is printed as the line BEFORE it (``-0,0`` for a new file),
+        # so its 0-based start is the printed value itself. Normalised here so a
+        # re-rendered header round-trips (``-0,0``, never ``-1,0``).
+        old_start += 0 if old_count else 1
+        new_start += 0 if new_count else 1
+        header = _format_hunk_header(old_start, old_count, new_start, new_count)
+        if (
+            len(out) + 1 + len(rows) <= _DIFF_DETAILS_CAP_LINES
+            and _utf8_size(out) + _utf8_size([header, *rows]) <= _DIFF_DETAILS_CAP_BYTES
+        ):
+            out.append(header)
+            out.extend(rows)
+            continue
+        partial = _partial_hunk(out, old_start, new_start, rows, old_blocks, new_blocks)
+        out.extend(partial)
+        # Hunks are emitted in file order; once one is cut nothing after it may
+        # follow, or the reader would see a later change with a gap they cannot
+        # locate.
+        break
+    # Count file lines, not rendered rows: an omitted hunk's ``@@`` header is
+    # framing, and the renderer says "N more LINES" (review R1-3 / QA Q1).
+    total_lines = _content_rows(diff[2:])
+    if len(out) == 2:
+        return None, total_lines
+    return out, total_lines - _content_rows(out[2:])
+
+
+def _content_rows(rows: Sequence[str]) -> int:
+    """Rows that show a file line (context, ``-`` or ``+``), not ``@@`` framing."""
+    return sum(1 for row in rows if not row.startswith("@@"))
+
+
+def _partial_hunk(
+    out: Sequence[str],
+    old_start: int,
+    new_start: int,
+    rows: Sequence[str],
+    old_blocks: Sequence[tuple[int, int]],
+    new_blocks: Sequence[tuple[int, int]],
+) -> list[str]:
+    """The longest safe prefix of one hunk, as ``[header, *rows]`` (or ``[]``).
+
+    ``old_start``/``new_start`` are 0-based. The header is recomputed from the
+    OBSERVED kept rows, never carried over from the uncut hunk.
+    """
+    # Map each row to the before/after line it consumes, by walking tags -- the
+    # same derivation ``_keep_pem_blocks_whole`` uses, so block membership is
+    # judged on exactly the lines the rows show.
+    old_at: list[int | None] = []
+    new_at: list[int | None] = []
+    old_line, new_line = old_start, new_start
+    for row in rows:
+        tag = row[:1]
+        old_at.append(old_line if tag in (" ", "-") else None)
+        new_at.append(new_line if tag in (" ", "+") else None)
+        if tag in (" ", "-"):
+            old_line += 1
+        if tag in (" ", "+"):
+            new_line += 1
+    spans: list[tuple[int, int]] = []
+    # Row indexes of each complete block's members, per side: the split cut
+    # below keeps a non-prefix row set, so it needs the members, not a span.
+    blocks: list[list[int]] = []
+    for positions, side_blocks in ((old_at, old_blocks), (new_at, new_blocks)):
+        for block_start, block_end in side_blocks:
+            members = [
+                index
+                for index, line in enumerate(positions)
+                if line is not None and block_start <= line <= block_end
+            ]
+            if members:
+                spans.append((members[0], members[-1]))
+                blocks.append(members)
+
+    def header_for(count: int) -> str:
+        kept = rows[:count]
+        old_count = sum(1 for row in kept if row[:1] in (" ", "-"))
+        new_count = sum(1 for row in kept if row[:1] in (" ", "+"))
+        return _format_hunk_header(old_start, old_count, new_start, new_count)
+
+    room_rows = _DIFF_DETAILS_CAP_LINES - len(out) - 1
+    room_bytes = _DIFF_DETAILS_CAP_BYTES - _utf8_size(out)
+    count = max(0, min(len(rows), room_rows))
+    # The header only shrinks as rows are dropped, so measuring it with the
+    # current count is conservative; re-measured each step regardless.
+    while count and _utf8_size([header_for(count), *rows[:count]]) > room_bytes:
+        count -= 1
+    split = _split_replace_cut(rows, count, room_rows, room_bytes, blocks)
+    if split is not None:
+        old_count = sum(1 for row in split if row[:1] in (" ", "-"))
+        new_count = sum(1 for row in split if row[:1] in (" ", "+"))
+        if not any(row[:1] in ("+", "-") for row in split):
+            return []
+        return [_format_hunk_header(old_start, old_count, new_start, new_count), *split]
+    moved = True
+    while moved:
+        moved = False
+        for first, last in spans:
+            # A cut strictly inside [first, last] would split the block: move it
+            # to before the block's first row. Repeat, since the new cut may
+            # land inside an earlier (overlapping) block.
+            if first < count <= last:
+                count = first
+                moved = True
+    if not any(row[:1] in ("+", "-") for row in rows[:count]):
+        return []
+    return [header_for(count), *rows[:count]]
+
+
+def _split_replace_cut(
+    rows: Sequence[str],
+    count: int,
+    room_rows: int,
+    room_bytes: int,
+    blocks: Sequence[Sequence[int]],
+) -> list[str] | None:
+    """Kept rows when the cut lands inside a ``-``-then-``+`` replace block.
+
+    difflib renders a replaced run as ALL its ``-`` rows, then ALL its ``+``
+    rows, so a plain prefix cut through a large rewrite stores only red rows and
+    the reader never sees what the file became (review R1-1; the operator asked
+    for green AND red). Instead the remaining budget is shared by alternating
+    one ``-`` and one ``+`` row, half/half with any leftover going to the longer
+    side, and each side stops at its first row that no longer fits.
+
+    The result is still a truthful hunk: the kept old lines are the context
+    prefix plus a CONTIGUOUS prefix of the ``-`` rows, and the kept new lines
+    the context prefix plus a contiguous prefix of the ``+`` rows, so a header
+    with the same starts and the observed counts describes exactly what is
+    shown. A complete PRIVATE KEY block is kept whole or not at all on each
+    side (the seam's span rule needs BEGIN..END in one view); a block whose
+    first kept member is in the context prefix cannot be cut inside the block,
+    so that case returns ``None`` and the caller's prefix cut moves before it.
+
+    Returns ``None`` when the cut is not inside such a block (the prefix cut
+    applies), else the kept rows without a header.
+    """
+    if not 0 < count < len(rows) or rows[count][:1] not in ("+", "-"):
+        return None
+    start = count
+    while start and rows[start - 1][:1] in ("+", "-"):
+        start -= 1
+    end = count
+    while end < len(rows) and rows[end][:1] in ("+", "-"):
+        end += 1
+    plus_at = start
+    while plus_at < end and rows[plus_at][:1] == "-":
+        plus_at += 1
+    if (
+        start == count  # nothing of the block fit: no cut inside it
+        or plus_at in (start, end)  # pure insert or pure delete: prefix is exact
+        or any(row[:1] != "+" for row in rows[plus_at:end])
+    ):
+        return None
+    prefix = rows[:start]
+    # Header digits only shrink as counts shrink, so the uncut block's header is
+    # a safe upper bound for the one written later.
+    used_bytes = _utf8_size(prefix) + len("@@ -999999999,999999999 +999999999,999999999 @@")
+    used_rows = len(prefix)
+    kept_minus = kept_plus = 0
+    minus_total, plus_total = plus_at - start, end - plus_at
+    open_minus = open_plus = True
+    while used_rows < room_rows and (open_minus or open_plus):
+        for side in ("-", "+"):
+            if used_rows >= room_rows:
+                break
+            if side == "-":
+                if not open_minus or kept_minus >= minus_total:
+                    open_minus = False
+                    continue
+                size = _utf8_size([rows[start + kept_minus]])
+                if used_bytes + size > room_bytes:
+                    open_minus = False  # contiguity: never skip a row to fit a later one
+                    continue
+                kept_minus += 1
+            else:
+                if not open_plus or kept_plus >= plus_total:
+                    open_plus = False
+                    continue
+                size = _utf8_size([rows[plus_at + kept_plus]])
+                if used_bytes + size > room_bytes:
+                    open_plus = False
+                    continue
+                kept_plus += 1
+            used_bytes += size
+            used_rows += 1
+    moved = True
+    while moved:
+        moved = False
+        kept = (
+            set(range(start))
+            | set(range(start, start + kept_minus))
+            | set(range(plus_at, plus_at + kept_plus))
+        )
+        for members in blocks:
+            inside = [index for index in members if index in kept]
+            if not inside or len(inside) == len(members):
+                continue
+            first = inside[0]
+            if first < start:
+                return None
+            # Drop the block's kept rows on its side (members of one block are
+            # all on one side, so this only trims that side's prefix).
+            if first < plus_at:
+                kept_minus = first - start
+            else:
+                kept_plus = first - plus_at
+            moved = True
+    return [
+        *prefix,
+        *rows[start : start + kept_minus],
+        *rows[plus_at : plus_at + kept_plus],
+    ]
 
 
 def _keep_pem_blocks_whole(
@@ -27537,9 +27843,16 @@ async def _browser_download(
         return _error(
             tool_call_id,
             "browser",
-            f"no download started within {wait:g} s. If the page needs a click first, "
-            "call 'click' on its Download control and retry with selector=..., or the "
-            "file may be behind a login — ask the user to sign in, then retry.",
+            # An empty capture is not proof a one-time provider operation failed.
+            # Keep the fallback as safe as the host's hint: arm before the click,
+            # and never encourage replaying a mutation solely to recover its file.
+            f"no download started within {wait:g} s. For a click-triggered download, "
+            "use download(selector=<final confirm button>) to arm capture before clicking. "
+            "Without a selector, capture only waits for a future download event; "
+            "it cannot recover a download already dispatched or cancelled. "
+            "This timeout does not prove the click handler failed or a server mutation "
+            "did not happen; check the provider-side effect before repeating a Generate key, "
+            "create or export operation.",
         )
 
     kept: list[dict[str, Any]] = []

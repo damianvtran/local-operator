@@ -876,9 +876,15 @@ download selector=e12                     # click it and capture what lands
   the result** — quote it to the user, or pass it straight to another tool
   (`send_gmail_message` with `attachments=[{"path": "…"}]` is the last mile).
 - `lop browser status` prints the root and its current size.
-- A page that starts a download on its own needs no `selector`; a page whose
-  download only begins after a click takes the control's selector (or `click`
-  first, then `download`).
+- For a click-triggered download, use `download selector=<final confirm button>`
+  to arm capture **before clicking** the control that actually starts the download,
+  including a final confirmation in a dialog. Do not `click` it first.
+- Without a `selector`, `download` only waits for a **future download event** while
+  capture is armed. It cannot recover a download already dispatched or cancelled.
+- An empty capture timeout does not prove the click handler failed or that a
+  server mutation did not happen. Before repeating a Generate key, create or
+  export operation, check the provider-side effect first; do not blindly retry a
+  potentially one-time operation just because no file was captured.
 - Nothing over the caps is kept; an executable is deleted and its class named; a
   file whose content disagrees with its name is KEPT, renamed, and the rename is
   reported. A file the harness cannot classify is kept and flagged `unverified` —
