@@ -2634,11 +2634,17 @@ async def _op_org(
     # rows. An EMPTY plan (nothing to do, or every planning read failed) is a
     # report, never a pull: a second read that found work would otherwise write
     # without anyone having been asked.
-    pinned = safe_pull and plan is not None and scoped_host
-    if pinned and plan.is_empty():
-        lines = state["header"] + [f"{r['kind']} {r['name']}: up-to-date" for r in plan.current]
-        lines += [f"{k}: check failed ({c})" for k, c in plan.errors.items()]
-        if plan.errors:
+    # A plan-typed name bound only on the pinned path: a bare ``pinned`` bool does
+    # not narrow ``plan`` for the checker, and this keeps every pinned read on a plan
+    # proven non-None rather than relying on the flag and the plan staying in step.
+    pinned_plan = plan if safe_pull and scoped_host and plan is not None else None
+    pinned = pinned_plan is not None
+    if pinned_plan is not None and pinned_plan.is_empty():
+        lines = state["header"] + [
+            f"{r['kind']} {r['name']}: up-to-date" for r in pinned_plan.current
+        ]
+        lines += [f"{k}: check failed ({c})" for k, c in pinned_plan.errors.items()]
+        if pinned_plan.errors:
             lines.append(  # i18n: ignore model-facing tool result
                 "nothing was changed: a check failed, so nothing could be confirmed; " "retry later"
             )
@@ -2647,7 +2653,7 @@ async def _op_org(
             "agent",
             "\n".join(lines) or "nothing to pull: no new items and no updates",
         )
-    if pinned:
+    if pinned_plan is not None:
         from local_operator.profile_scope import (
             durable_write_decision,
             hub_pull_refusal,
@@ -2657,7 +2663,7 @@ async def _op_org(
             kind="agent",
             operation="hub_pull",
             name=f"org {tenant}",
-            plan=plan.to_dict(),
+            plan=pinned_plan.to_dict(),
             tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(
@@ -2735,8 +2741,8 @@ async def _op_org(
             lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
             return "\n".join(lines) or "the organization shares nothing of these kinds yet"
         names = state["names"]
-        if pinned:
-            names = [str(r["hub_id"]) for r in plan.new if r.get("hub_id")]
+        if pinned_plan is not None:
+            names = [str(r["hub_id"]) for r in pinned_plan.new if r.get("hub_id")]
         if pinned and not names:
             # Only updates/re-subscriptions were approved: no catalogue pull at
             # all (an empty ``names`` would mean "everything").
