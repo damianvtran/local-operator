@@ -3140,7 +3140,10 @@ class Store:
         """
 
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+        from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
         from local_operator.team_bridge.types import is_conversation_message_id
+
+        review_codes = sorted(REVIEW_HOLD_CODES)
 
         empty: dict[str, Any] = {"count": 0}
         cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
@@ -3158,13 +3161,27 @@ class Store:
             # so it leaves this count ONLY once that notice was actually
             # recorded (``notified_at``). A refused notice keeps it here, so no
             # held message can be invisible to both alerts.
+            #
+            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) with a decision
+            # row leaves it too (operator report 2026-11-10: "the sidebar badge
+            # is sufficient", at most one daily rollup). Its decision row IS the
+            # Deliver/Discard item the Agent messages badge and holds list show,
+            # so the owner already sees it; counting it here made this keyed
+            # rollup re-revision (re-banner) on every count change during a
+            # model_hold flood. Keyed on the DECISION, not the hold code alone:
+            # with ``review_held: false`` no decision is written, the hold has no
+            # badge exit, and it stays counted here so it is never invisible to
+            # every alert. Work-scope holds and screening-unavailable codes
+            # (provider errors, parse failures) are unaffected.
             try:
                 noticed = {
                     str(r["message_id"])
                     for r in conn.execute(
                         "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
-                        "AND notified_at IS NOT NULL",
-                        (_owner_key(owner),),
+                        "AND (notified_at IS NOT NULL OR hold_code IN ({}))".format(
+                            ",".join("?" * len(review_codes))
+                        ),
+                        (_owner_key(owner), *review_codes),
                     ).fetchall()
                 }
             except sqlite3.OperationalError:
@@ -8220,10 +8237,17 @@ class Store:
         return int(rows[0]["n"]) if rows else 0
 
     def unnotified_work_scope_holds(self, owner: OwnerSnapshot) -> int:
+        from local_operator.team_bridge.hold_release import WORK_SCOPE_HOLD
+
         rows = self._work_scope_rows(
             "SELECT COUNT(*) AS n FROM work_scope_decisions WHERE owner_key = ? "
-            "AND eligible = 1 AND notified_at IS NULL AND cleared_at IS NULL",
-            (_owner_key(owner),),
+            "AND eligible = 1 AND notified_at IS NULL AND cleared_at IS NULL "
+            # Only work-scope holds can be waiting for a per-message notice: a
+            # review hold is badge-only and never notified (operator report
+            # 2026-11-10), so counting it would inflate the overflow's "N more"
+            # forever.
+            "AND hold_code = ?",
+            (_owner_key(owner), WORK_SCOPE_HOLD),
         )
         return int(rows[0]["n"]) if rows else 0
 

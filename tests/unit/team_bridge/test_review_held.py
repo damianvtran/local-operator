@@ -231,11 +231,11 @@ def test_model_hold_raises_no_notice_and_deliver_admits(
     assert held["action"] == "hold" and held["code"] == "model_hold"
     decision = store.work_scope_decision(owner, MESSAGE_ID)
     assert decision is not None and decision["hold_code"] == "model_hold" and decision["eligible"]
-    # Operator report 2026-11-10: no inbox row at all for a review hold, and the
-    # hold stays in the ONE keyed long-hold count (``notified_at`` NULL).
+    # Operator report 2026-11-10: no inbox row at all for a review hold — not the
+    # per-message notice and not the keyed long-hold rollup (the badge is enough).
     assert _all_notifications(config_dir) == []
     assert decision["notified_at"] is None
-    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 1
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 0
 
     from local_operator.server.utils import desktop_team_bridge_holds as holds
 
@@ -938,3 +938,107 @@ def test_the_connector_loop_retires_on_start_and_survives_a_failure(tmp_path, mo
 
     assert asyncio.run(drive()) is None
     assert calls == [(owner.endpoint_id, tmp_path)] and len(polls) == 1
+
+
+# --- the long-hold rollup and the overflow count ignore review holds -------------
+#
+# Operator report 2026-11-10: "the sidebar badge is sufficient", at most ONE daily
+# rollup. The keyed long-hold alert re-revisions (and is bannerable again) on every
+# count change, so a review flood past 60 minutes still re-notified; review holds
+# with a Deliver/Discard row now leave that count entirely.
+
+
+def _tick_late(config_dir, owner, *, hours: float = 2.0, stamp: float = 1000.0) -> str:
+    import time
+
+    from local_operator.team_bridge import hold_alert
+
+    return asyncio.run(
+        hold_alert.tick(
+            owner, config_dir, now=time.time() + hours * 3600.0, monotonic=lambda: stamp
+        )
+    )
+
+
+@pytest.fixture
+def _fresh_alert_state():
+    from local_operator.team_bridge import hold_alert
+
+    hold_alert._last_tick.clear()
+    hold_alert._raised.clear()
+    yield
+    hold_alert._last_tick.clear()
+    hold_alert._raised.clear()
+
+
+def test_a_review_only_burst_past_the_threshold_raises_no_long_hold_alert(
+    rig, _fresh_alert_state  # noqa: F811 — imported fixture
+) -> None:
+    config_dir, store, owner = rig
+    _review_burst(config_dir, store, owner)
+    assert _tick_late(config_dir, owner) == "none_held"
+    assert _tick_late(config_dir, owner, hours=30.0, stamp=10**6) == "none_held"
+    assert _all_notifications(config_dir) == []
+
+
+def test_mixed_holds_alert_counts_only_work_scope_and_screening_failures(
+    rig, _fresh_alert_state  # noqa: F811 — imported fixture
+) -> None:
+    import time
+
+    from local_operator.team_bridge import hold_alert
+    from tests.unit.team_bridge.test_screening_status import _raw_hold
+
+    config_dir, store, owner = rig
+    _review_burst(config_dir, store, owner)
+    now = time.time()
+    # A provider failure (retried, no decision) and a work-scope hold whose own
+    # notice was never recorded: both must stay visible to the long-hold alert.
+    _raw_hold(config_dir, "bcmsg_provider01", "provider_error", created_at=now)
+    _raw_hold(config_dir, "bcmsg_workscope1", hr.WORK_SCOPE_HOLD, created_at=now)
+    # A review code with NO decision row (``review_held: false`` writes none): it
+    # has no badge exit, so it still counts.
+    _raw_hold(config_dir, "bcmsg_reviewoff1", "model_hold", created_at=now)
+
+    later = now + 2 * 3600.0
+    assert store.long_holds_readonly(owner, older_than_s=3600.0, now=later) == {"count": 3}
+    assert _tick_late(config_dir, owner) == "raised"
+    rows = [r for r in _all_notifications(config_dir) if r["dismissed_at"] is None]
+    assert [r["key"] for r in rows] == [hold_alert._key(owner.endpoint_id)]
+
+
+def test_a_standing_rollup_of_only_review_holds_is_cleared(
+    rig, _fresh_alert_state  # noqa: F811 — imported fixture
+) -> None:
+    """An alert raised by the old code for review holds goes away on the next tick."""
+
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.team_bridge import hold_alert
+
+    config_dir, store, owner = rig
+    _review_burst(config_dir, store, owner)
+    key = hold_alert._key(owner.endpoint_id)
+    NotificationStore(config_dir).notify(
+        "s1", title="held", body_md="12 held", priority="normal", key=key
+    )
+    assert _tick_late(config_dir, owner) == "cleared"
+    (item,) = NotificationStore(config_dir).find_by_key(key)
+    assert item["priority"] == "low"  # the existing zero-count "cleared" update
+
+
+def test_the_overflow_waiting_count_ignores_review_holds(
+    rig, monkeypatch  # noqa: F811 — imported fixture
+) -> None:
+    config_dir, store, owner = rig
+    _review_burst(config_dir, store, owner)
+    assert store.unnotified_work_scope_holds(owner) == 0
+    # A work-scope hold whose notice was refused is the only kind still waiting.
+    from local_operator.notifications import store as nstore
+
+    def refuse(self, *a, **k):
+        raise nstore.NotifyRefused("rate_limited", "refused")
+
+    monkeypatch.setattr(nstore.NotificationStore, "notify", refuse)
+    _server, _wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    assert store.unnotified_work_scope_holds(owner) == 1
