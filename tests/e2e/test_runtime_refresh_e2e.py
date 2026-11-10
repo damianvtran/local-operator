@@ -48,6 +48,7 @@ from local_operator.session.runtime.inbox import (
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.update import BuildStamp
+from tests.e2e import armed_probe_diagnostics
 from tests.e2e.harness import NO_NOTIFY_ENV, transcript_text, wait_for_adoption
 from tests.e2e.watchdog import bounded
 
@@ -1309,7 +1310,9 @@ def _completion_attention(config_dir: Path, session_id: str) -> list[dict[str, A
     ]
 
 
-def _completion_attention_report(config_dir: Path, session_id: str) -> str:
+def _completion_attention_report(
+    config_dir: Path, session_id: str, stderr_path: Path | None = None
+) -> str:
     """Which of the two ways a missing latch happened, in words.
 
     "The latch must land while the turn is STILL running" is false in two
@@ -1321,6 +1324,13 @@ def _completion_attention_report(config_dir: Path, session_id: str) -> str:
     (review round 3, MINOR 1).
     """
     rows = _completion_attention(config_dir, session_id)
+    # Appended to BOTH branches: the completion rows alone read "complete,
+    # complete" on the CI failure while the turn's bash result was a synthetic
+    # abort — see ``tests/e2e/armed_probe_diagnostics.py`` for why and when to
+    # remove it. Its only caller is the armed-probe cell.
+    extra = armed_probe_diagnostics.evidence(
+        config_dir / "sessions" / session_id / "transcript.jsonl", stderr_path
+    )
     killed = [
         row
         for row in rows
@@ -1330,9 +1340,13 @@ def _completion_attention_report(config_dir: Path, session_id: str) -> str:
         return (
             "THE DELETED TREE KILLED THE TURN, NOT A LATE DRAIN — the child's own "
             f"site-packages is what a function-local import in its turn prelude "
-            f"reaches for, and this cell removed it: {killed!r}"
+            f"reaches for, and this cell removed it: "
+            f"{armed_probe_diagnostics.redacted_rows(killed)!r}" + extra
         )
-    return f"the turn's completion rows so far: {rows!r}"
+    return (
+        f"the turn's completion rows so far: {armed_probe_diagnostics.redacted_rows(rows)!r}"
+        + extra
+    )
 
 
 def _install_probe(prefix: Path) -> list[str]:
@@ -1413,6 +1427,12 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
     assert "UV_TOOL" in probe[1], f"install_kind is not UV_TOOL: {probe}"
     assert probe[2] == "True", f"the probe is not armed: {probe}"
 
+    # The child's stderr goes to a test-owned FILE instead of DEVNULL so a red
+    # cell can quote its tail (the CI failure left nothing to read). Neither is
+    # a tty, so the child sees the same kind of stream; the parent's handle is
+    # closed right after the spawn and only read back in a failure message.
+    stderr_path = tmp_path / "armed-child-stderr.log"
+    stderr_file = stderr_path.open("wb")
     child = subprocess.Popen(
         [str(prefix / "bin" / "python"), "-m", "local_operator.session.runtime.process"],
         env=_armed_child_env(config, session_id),
@@ -1424,9 +1444,11 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         cwd=str(tmp_path),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_file,
         start_new_session=True,
     )
+    stderr_file.close()
+    transcript = config / "sessions" / session_id / "transcript.jsonl"
     viewer = None
     try:
         record = await _wait_for_record(config, session_id)
@@ -1487,12 +1509,14 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             if drain_lines:
                 break
             await asyncio.sleep(0.1)
-        assert drain_lines, f"never drained:\n{chr(10).join(_runtime_log_lines()[-30:])}"
+        assert drain_lines, f"never drained:\n{chr(10).join(_runtime_log_lines()[-30:])}" + (
+            armed_probe_diagnostics.evidence(transcript, stderr_path)
+        )
         assert "loaded module tree is gone" in drain_lines[0], drain_lines[0]
         assert getattr(
             viewer.frontend_state, "streaming", False
         ), "the latch must land while the turn is STILL running — " + _completion_attention_report(
-            config, session_id
+            config, session_id, stderr_path
         )
 
         # (b) It EXITS — the Q-1 pin. On the wedged head this loop timed out with
@@ -1502,8 +1526,12 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             await asyncio.sleep(0.2)
         assert not _alive(child), "the drain latched and the runtime NEVER exited:\n" + chr(
             10
-        ).join(_lines_for_pid(pid)[-10:])
-        assert child.returncode == 0, f"the runtime exited {child.returncode}, not cleanly"
+        ).join(_lines_for_pid(pid)[-10:]) + armed_probe_diagnostics.evidence(
+            transcript, stderr_path
+        )
+        assert child.returncode == 0, f"the runtime exited {child.returncode}, not cleanly" + (
+            armed_probe_diagnostics.evidence(transcript, stderr_path)
+        )
 
         # (c) Nothing in flight was aborted: the turn's own reply is durable.
         durable = (config / "sessions" / session_id / "transcript.jsonl").read_text(
@@ -1520,7 +1548,9 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         assert attention, f"no completion was recorded at all:\n{durable[-2000:]}"
         assert [
             row for row in attention if row.get("kind") == "error"
-        ] == [], "the drain cut the turn off:\n" + json.dumps(attention, indent=2)
+        ] == [], "the drain cut the turn off:\n" + json.dumps(
+            armed_probe_diagnostics.redacted_rows(attention), indent=2
+        ) + armed_probe_diagnostics.evidence(transcript, stderr_path)
         assert any(row.get("kind") == "complete" for row in attention), attention
     finally:
         if viewer is not None:
