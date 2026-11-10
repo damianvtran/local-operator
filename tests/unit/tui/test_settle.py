@@ -37,7 +37,7 @@ class StarvedPilot:
         await asyncio.sleep(0)
 
 
-class Probe(App):
+class Probe(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.threaded = False

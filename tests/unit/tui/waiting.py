@@ -139,9 +139,9 @@ class ThreadRegistry:
     """
 
     def __init__(self) -> None:
-        self.tasks: list[asyncio.Future] = []
+        self.tasks: list[asyncio.Future[object]] = []
 
-    def pending(self) -> list[asyncio.Future]:
+    def pending(self) -> list[asyncio.Future[object]]:
         return [task for task in self.tasks if not task.done()]
 
     async def join(self) -> None:
@@ -180,7 +180,7 @@ async def settle(
     *,
     what: str,
     workers: Collection[str] = (),
-    joins: Iterable[Awaitable] = (),
+    joins: Iterable[Awaitable[object]] = (),
     refresh: bool = True,
     max_turns: int | None = None,
     deadline_s: float = 30.0,
@@ -206,8 +206,8 @@ async def settle(
     # are the tasks settle itself made: it owns them, so the ``finally`` below
     # cancels any still running when settle raises and retrieves their outcome,
     # rather than leaving an orphan to log "never retrieved" at teardown.
-    created: list[asyncio.Future] = []
-    owned: list[ThreadRegistry | asyncio.Future] = []
+    created: list[asyncio.Future[object]] = []
+    owned: list[ThreadRegistry | asyncio.Future[object]] = []
     for join in joins:
         if isinstance(join, ThreadRegistry) or asyncio.isfuture(join):
             owned.append(join)
@@ -218,7 +218,7 @@ async def settle(
     started = time.monotonic()
     turns = 0
 
-    def unfinished(only_named: bool) -> list[Worker]:
+    def unfinished(only_named: bool) -> list[Worker[object]]:
         return [
             worker
             for worker in app.workers
@@ -236,7 +236,7 @@ async def settle(
             f"unfinished workers: {pending or 'none'}"
         )
 
-    async def bounded(awaitable: Awaitable) -> None:
+    async def bounded(awaitable: Awaitable[object]) -> None:
         remaining = deadline_s - (time.monotonic() - started)
         if remaining <= 0:
             if asyncio.iscoroutine(awaitable):
@@ -253,7 +253,7 @@ async def settle(
                 raise fail(f"deadline {deadline_s}s") from error
             raise
 
-    def retrieve(task: asyncio.Future) -> None:
+    def retrieve(task: asyncio.Future[object]) -> None:
         # Done-callback for tasks settle outlives or shields: marks the outcome
         # retrieved so asyncio never logs "Task exception was never retrieved".
         # The outcome itself is reported elsewhere (or belongs to the worker).
@@ -265,7 +265,7 @@ async def settle(
     # was seen unfinished (at call time or after any pause) and then failed. It
     # cannot see a worker that starts AND finishes inside a single pause; that
     # worker's effects are still covered by the predicate.
-    seen: dict[Worker, None] = dict.fromkeys(unfinished(only_named=True))
+    seen: dict[Worker[object], None] = dict.fromkeys(unfinished(only_named=True))
     try:
         while True:
             if max_turns is not None and turns >= max_turns:
