@@ -149,6 +149,8 @@ _RETRY_ALONE_HOLD_CODES = frozenset(
         "model_refused",
         "reply_truncated",
         "parse_failed",
+        # A blank reply on every hop may be the body's doing too (2026-11-09).
+        "empty_reply",
         "bounce_without_category",
         # B4b: a converted work-scope bounce is the message's own doing too.
         "work_scope_hold",
@@ -1113,6 +1115,18 @@ async def run_forever(
             raise
         except Exception:  # noqa: BLE001
             logger.info("bridge connector: long-hold alert skipped code=hold_alert_failed")
+        # Retire the per-message review-hold inbox rows #3714 wrote, once per
+        # process per endpoint, so an inbox flooded before the upgrade clears
+        # without waiting for a new hold (operator report 2026-11-10). Here, not
+        # in the iteration, for the same reason as the alert: it needs no hub.
+        try:
+            from local_operator.team_bridge import hold_release
+
+            await asyncio.to_thread(hold_release.retire_review_notices_once, owner, config_dir)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — chrome; never stops the receiver
+            logger.info("bridge connector: review notice retire skipped code=failed")
         started = _time.monotonic()
         try:
             access = await access_provider()

@@ -47,6 +47,7 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamTextDelta,
     TextContent,
 )
 from local_operator.mobile.projection import fold_messages_to_entries
@@ -81,7 +82,14 @@ class ScriptedStream:
 
     def __call__(self, request, signal):
         self.requests.append(request)
-        script = self.scripts.pop(0) if self.scripts else [StreamEndEvent(stop_reason="stop")]
+        # An answer, not a bare stop: a person-asked turn on which the provider
+        # sends nothing at all is re-issued and then FAILS, journalling an incident
+        # row this file's leak assertions would count.
+        script = (
+            self.scripts.pop(0)
+            if self.scripts
+            else [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+        )
 
         async def gen():
             for event in script:

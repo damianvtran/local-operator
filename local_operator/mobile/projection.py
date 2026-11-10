@@ -679,8 +679,17 @@ def _tool_row_details(
         details["output"] = output[-TOOL_OUTPUT_TAIL_CHARS:]
     if result_details:
         # Diff payloads ride through whole — the expanded row renders the
-        # coloured unified diff from them.
-        for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
+        # coloured unified diff from them. ``diff_truncated_rows`` is the
+        # producer's count of rows the stored diff omits (``_diff_details``'s
+        # caps), so a renderer can say the record is partial.
+        for key in (
+            "diff",
+            "diff_truncated_rows",
+            "added",
+            "removed",
+            "lines_added",
+            "lines_removed",
+        ):
             if key in result_details:
                 details[key] = result_details[key]
         # THE SETTLE PATH CARRIES THE CANONICAL BAG TOO (review round 1, F1).

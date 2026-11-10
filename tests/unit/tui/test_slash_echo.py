@@ -30,6 +30,7 @@ from local_operator.tui.widgets.editor import Editor, InlineCommandRequested
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.usage_panel import UsagePanel
 from local_operator.tui.widgets.welcome import WelcomeView
+from tests.unit.tui._settle import settle
 from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _factory
 
 #: The settled policy, one row per registry entry.
@@ -2287,7 +2288,24 @@ async def test_a_stopped_session_does_not_swallow_tab_and_enter() -> None:
         await pilot.pause()
         for ch in "/team ":
             await pilot.press(ch if ch != " " else "space")
-        await pilot.pause()
+
+        # SETTLE ON THE PRODUCT'S LATCH, not on one paused turn. `is_loading()`
+        # is exactly what gates Tab/Enter (`editor.py`: `if key in ("tab",
+        # "enter") and self._picker.is_loading(): return`), and the /team roster
+        # worker clears it a turn or two after the text lands. One
+        # `pilot.pause()` is therefore a bet that the worker finished inside a
+        # single pumped batch — the race that failed this node on three
+        # unrelated heads, reported as "Enter was swallowed". The wait is a
+        # bounded COUNT of pumped turns, which survives contention where a
+        # wall-clock budget does not. ``settle`` raises "did not settle" when the
+        # latch never clears, so a stranded reserve still fails here; the assert
+        # that follows restates the same predicate for the reader, and the real
+        # subject is the Enter assertion after it.
+        await settle(
+            pilot,
+            lambda: editor.picker.is_loading() is False,
+            what="/team's loading reserve cleared",
+        )
 
         # No latch, so accept keys reach their ordinary handlers.
         assert editor.picker.is_loading() is False

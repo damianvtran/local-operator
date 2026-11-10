@@ -146,7 +146,7 @@ from local_operator.imaging import (
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
 )
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import python_argv, session_python_argv
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
 from local_operator.procstate import (
@@ -210,6 +210,7 @@ from local_operator.tools.confinement import (
     shell_sandbox_unavailable_reason_async,
     shell_write_confinement_of,
 )
+from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT, fits_source_evidence
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -10909,11 +10910,11 @@ async def execute_edit(
     if pad_advisory:
         text = f"{text}\n{pad_advisory}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "edit",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -11121,7 +11122,7 @@ def _edit_file_result_locked(
             )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    details = _diff_details(str(path), original, current)
+    details = _with_diff_source(_diff_details(str(path), original, current), original, current)
     if pad_advisory:
         # The worker thread already returns ``details``; this private, popped key
         # carries the receipt line without changing that transaction's shape.
@@ -11210,6 +11211,34 @@ def _line_delta(before: str, after: str) -> tuple[int, int]:
 #: ledger, not the screen.
 _DIFF_DETAILS_CAP_LINES = 200
 
+#: The stored diff's byte budget, beside the row cap, derived from the
+#: publication seam's own arithmetic (``harness.loop._redact_diff_detail``, whose
+#: ``_DIFF_DETAIL_BYTES`` is 128 KiB):
+#:
+#: * the stored rows' UTF-8 bytes, summed across EVERY row, must be <= 128 KiB;
+#: * the redactor INPUT budget is 3 x 128 KiB, spent once per row and once per
+#:   side's newline-joined hunk view. A joined side costs at most its rows' own
+#:   bytes (the dropped one-byte tag pays for the joining newline), and only a
+#:   context row is on both sides, so total input <= 3 x stored bytes;
+#: * the redactor OUTPUT budget is the same 3 x 128 KiB, and a mask longer than
+#:   the value it replaces (``[redacted]`` over a short known value) GROWS it.
+#:
+#: 120 KiB therefore keeps 8 KiB under the per-diff bound and, at the 3x input
+#: worst case, 24 KiB of output headroom for mask growth. A flat 96 KiB (round
+#: 1) double-counted the joins and dropped single-row payloads the seam accepts
+#: (review R1-2: a 110 KB one-line minified file stored no diff at all). 200 rows
+#: of ordinary source sit far below either number; this only bites on long-line
+#: content (minified JSON, data dumps).
+_DIFF_DETAILS_CAP_BYTES = 120 * 1024
+
+#: ``details`` key: diff CONTENT rows (`` ``/``+``/``-`` -- file lines, never
+#: ``@@`` hunk headers) the stored ``diff`` omits because of the caps above.
+#: Headers are excluded because the UI words this as "N more lines not
+#: recorded" (review R1-3 / QA Q1). Absent when the diff is complete. ``added``/``removed`` stay
+#: whole-file facts, so a renderer can say "N more lines not recorded" without
+#: implying the change itself was smaller. Shared contract with the desktop UI.
+DIFF_TRUNCATED_ROWS_KEY = "diff_truncated_rows"
+
 #: Context lines the rendered diff shows around each change. Named because the
 #: widening re-renders hunks and must grow from the SAME gap difflib proved.
 _DIFF_CONTEXT_LINES = 2
@@ -11222,6 +11251,11 @@ _MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
 #: The same one-way worker-to-receipt channel for a pad's soft crossing line.
 #: It is popped before rendering, so the structured diff remains unchanged.
 _SCRATCHPAD_ADVISORY_KEY = "_scratchpad_advisory"
+
+#: The same one-way worker-to-result channel for the complete raw file sides.
+#: Popped by ``_diff_text_result`` onto a private ``ToolResult`` attribute, so
+#: it never reaches the persisted details.
+_DIFF_SOURCE_KEY = "_diff_source"
 
 
 #: One unified-diff hunk header. Counts default to 1 when omitted, which the
@@ -11300,9 +11334,329 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
         matcher.get_grouped_opcodes(n=_DIFF_CONTEXT_LINES),
     )
     diff = _keep_pem_blocks_whole(diff, before_lines, after_lines, opcodes)
-    if len(diff) > _DIFF_DETAILS_CAP_LINES:
-        diff = diff[:_DIFF_DETAILS_CAP_LINES] + ["…"]
-    return {"path": str(path), "added": added, "removed": removed, "diff": diff}
+    details: dict[str, Any] = {"path": str(path), "added": added, "removed": removed}
+    kept, omitted = _truncate_diff_rows(diff, before_lines, after_lines)
+    if kept is not None:
+        details["diff"] = kept
+    if omitted:
+        details[DIFF_TRUNCATED_ROWS_KEY] = omitted
+    return details
+
+
+def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[str, Any]:
+    """Attach the complete sides as source evidence for the loop's seam.
+
+    Called by the write/edit transactions with the exact bytes they diffed.
+    The scratch key is popped onto a private ``ToolResult`` attribute by
+    ``_diff_text_result`` (see ``tools/diff_limits`` for why the per-hunk
+    judgement alone is not enough). Over the bound no complete-side proof is
+    possible, so the diff is withheld instead; counters and path stay exact.
+    """
+    if not isinstance(details.get("diff"), list):
+        return details
+    if fits_source_evidence(before, after):
+        details[_DIFF_SOURCE_KEY] = (before, after)
+    else:
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    return details
+
+
+def _diff_text_result(
+    tool_call_id: str, tool_name: str, text: str, details: dict[str, Any]
+) -> ToolResult:
+    """``_text`` for write/edit, moving the raw source evidence off ``details``.
+
+    ``details`` is serialized everywhere, so the raw sides must leave it before
+    a ``ToolResult`` exists. They ride the private ``_diff_source`` together
+    with the raw preview, and the public preview becomes the withheld receipt
+    until the loop's seam (``AgentLoop._settle_write_diff``) publishes the
+    source-masked copy. A path that never reaches that seam (a direct
+    ``execute`` caller, a copy that dropped the private attribute) therefore
+    publishes the receipt, never raw rows.
+    """
+    source = details.pop(_DIFF_SOURCE_KEY, None)
+    preview = details.get("diff")
+    if source is not None and isinstance(preview, list):
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    result = _text(tool_call_id, tool_name, text, details=details)
+    if source is not None and isinstance(preview, list):
+        before, after = source
+        result._diff_source = (before, after, tuple(preview))
+    return result
+
+
+def _utf8_size(rows: Sequence[str]) -> int:
+    """UTF-8 bytes of ``rows`` as the publication seam measures them."""
+    return sum(len(row.encode("utf-8", errors="surrogatepass")) for row in rows)
+
+
+def _truncate_diff_rows(
+    diff: list[str],
+    before_lines: Sequence[str],
+    after_lines: Sequence[str],
+) -> tuple[list[str] | None, int]:
+    """Bound ``diff`` to the stored caps while keeping it a VALID unified diff.
+
+    Returns ``(rows, omitted)``: ``rows`` is the diff to store (``None`` when not
+    even one change row fits safely) and ``omitted`` the content rows (file
+    lines, not ``@@`` headers) left out (0 when nothing was cut).
+
+    Why hunk-aware, not a slice: the publication seam
+    (``harness.loop._redact_diff_detail``) only publishes a diff whose every hunk
+    header's counts equal its observed rows -- a cut credential span must never
+    pass as a complete view -- and refuses anything else by withholding the
+    WHOLE field. The old ``diff[:cap] + ["…"]`` cut mid-hunk and appended a row
+    that is not a diff row at all, so every write/edit diff over the cap reached
+    replay, subagent and transcript views as a withheld marker. Here whole hunks
+    are kept while they fit; the hunk that crosses the cap is cut at the
+    boundary and its header REWRITTEN to the observed counts, so the seam judges
+    a complete (shorter) diff instead of refusing it. The seam's strictness is
+    unchanged; the producer simply stops handing it an invalid shape.
+
+    Constraints the cut keeps:
+
+    * never inside a complete PRIVATE KEY block on either side -- the seam's
+      span rule needs BEGIN..END in one view, so the cut moves to before the
+      block's first row in the hunk (``_keep_pem_blocks_whole`` already made
+      every such block whole within its hunk);
+    * a partial hunk with no ``+``/``-`` row is dropped -- the seam refuses
+      context-only hunks;
+    * the byte budget (``_DIFF_DETAILS_CAP_BYTES``) as well as the row cap, since
+      a few long rows would otherwise cross the seam's byte bound and be
+      withheld just the same;
+    * a row is never shortened: a clipped row could hide the tail a secret
+      detector needs, so a row that does not fit is omitted whole.
+
+    A diff the PEM widening could not verify arrives as ``[---, +++, "…"]`` and
+    is returned unchanged: that marker is a deliberate fail-closed refusal, not
+    a size cut, and the seam is meant to withhold it.
+    """
+    if len(diff) <= _DIFF_DETAILS_CAP_LINES and _utf8_size(diff) <= _DIFF_DETAILS_CAP_BYTES:
+        return diff, 0
+    parsed = _parse_diff_hunks(diff)
+    if parsed is None:
+        # Not a shape this producer rendered (or the widening's own refusal):
+        # never guess at hunk boundaries in it. The marker makes the seam
+        # withhold the field, the fail-closed direction.
+        return diff[:2] + ["…"], 0
+    old_blocks = _complete_pem_blocks(before_lines)
+    new_blocks = _complete_pem_blocks(after_lines)
+    out = list(diff[:2])
+    for old_start, old_count, new_start, new_count, rows in parsed:
+        # ``_parse_diff_hunks`` subtracts one from the printed start, but an
+        # EMPTY side is printed as the line BEFORE it (``-0,0`` for a new file),
+        # so its 0-based start is the printed value itself. Normalised here so a
+        # re-rendered header round-trips (``-0,0``, never ``-1,0``).
+        old_start += 0 if old_count else 1
+        new_start += 0 if new_count else 1
+        header = _format_hunk_header(old_start, old_count, new_start, new_count)
+        if (
+            len(out) + 1 + len(rows) <= _DIFF_DETAILS_CAP_LINES
+            and _utf8_size(out) + _utf8_size([header, *rows]) <= _DIFF_DETAILS_CAP_BYTES
+        ):
+            out.append(header)
+            out.extend(rows)
+            continue
+        partial = _partial_hunk(out, old_start, new_start, rows, old_blocks, new_blocks)
+        out.extend(partial)
+        # Hunks are emitted in file order; once one is cut nothing after it may
+        # follow, or the reader would see a later change with a gap they cannot
+        # locate.
+        break
+    # Count file lines, not rendered rows: an omitted hunk's ``@@`` header is
+    # framing, and the renderer says "N more LINES" (review R1-3 / QA Q1).
+    total_lines = _content_rows(diff[2:])
+    if len(out) == 2:
+        return None, total_lines
+    return out, total_lines - _content_rows(out[2:])
+
+
+def _content_rows(rows: Sequence[str]) -> int:
+    """Rows that show a file line (context, ``-`` or ``+``), not ``@@`` framing."""
+    return sum(1 for row in rows if not row.startswith("@@"))
+
+
+def _partial_hunk(
+    out: Sequence[str],
+    old_start: int,
+    new_start: int,
+    rows: Sequence[str],
+    old_blocks: Sequence[tuple[int, int]],
+    new_blocks: Sequence[tuple[int, int]],
+) -> list[str]:
+    """The longest safe prefix of one hunk, as ``[header, *rows]`` (or ``[]``).
+
+    ``old_start``/``new_start`` are 0-based. The header is recomputed from the
+    OBSERVED kept rows, never carried over from the uncut hunk.
+    """
+    # Map each row to the before/after line it consumes, by walking tags -- the
+    # same derivation ``_keep_pem_blocks_whole`` uses, so block membership is
+    # judged on exactly the lines the rows show.
+    old_at: list[int | None] = []
+    new_at: list[int | None] = []
+    old_line, new_line = old_start, new_start
+    for row in rows:
+        tag = row[:1]
+        old_at.append(old_line if tag in (" ", "-") else None)
+        new_at.append(new_line if tag in (" ", "+") else None)
+        if tag in (" ", "-"):
+            old_line += 1
+        if tag in (" ", "+"):
+            new_line += 1
+    spans: list[tuple[int, int]] = []
+    # Row indexes of each complete block's members, per side: the split cut
+    # below keeps a non-prefix row set, so it needs the members, not a span.
+    blocks: list[list[int]] = []
+    for positions, side_blocks in ((old_at, old_blocks), (new_at, new_blocks)):
+        for block_start, block_end in side_blocks:
+            members = [
+                index
+                for index, line in enumerate(positions)
+                if line is not None and block_start <= line <= block_end
+            ]
+            if members:
+                spans.append((members[0], members[-1]))
+                blocks.append(members)
+
+    def header_for(count: int) -> str:
+        kept = rows[:count]
+        old_count = sum(1 for row in kept if row[:1] in (" ", "-"))
+        new_count = sum(1 for row in kept if row[:1] in (" ", "+"))
+        return _format_hunk_header(old_start, old_count, new_start, new_count)
+
+    room_rows = _DIFF_DETAILS_CAP_LINES - len(out) - 1
+    room_bytes = _DIFF_DETAILS_CAP_BYTES - _utf8_size(out)
+    count = max(0, min(len(rows), room_rows))
+    # The header only shrinks as rows are dropped, so measuring it with the
+    # current count is conservative; re-measured each step regardless.
+    while count and _utf8_size([header_for(count), *rows[:count]]) > room_bytes:
+        count -= 1
+    split = _split_replace_cut(rows, count, room_rows, room_bytes, blocks)
+    if split is not None:
+        old_count = sum(1 for row in split if row[:1] in (" ", "-"))
+        new_count = sum(1 for row in split if row[:1] in (" ", "+"))
+        if not any(row[:1] in ("+", "-") for row in split):
+            return []
+        return [_format_hunk_header(old_start, old_count, new_start, new_count), *split]
+    moved = True
+    while moved:
+        moved = False
+        for first, last in spans:
+            # A cut strictly inside [first, last] would split the block: move it
+            # to before the block's first row. Repeat, since the new cut may
+            # land inside an earlier (overlapping) block.
+            if first < count <= last:
+                count = first
+                moved = True
+    if not any(row[:1] in ("+", "-") for row in rows[:count]):
+        return []
+    return [header_for(count), *rows[:count]]
+
+
+def _split_replace_cut(
+    rows: Sequence[str],
+    count: int,
+    room_rows: int,
+    room_bytes: int,
+    blocks: Sequence[Sequence[int]],
+) -> list[str] | None:
+    """Kept rows when the cut lands inside a ``-``-then-``+`` replace block.
+
+    difflib renders a replaced run as ALL its ``-`` rows, then ALL its ``+``
+    rows, so a plain prefix cut through a large rewrite stores only red rows and
+    the reader never sees what the file became (review R1-1; the operator asked
+    for green AND red). Instead the remaining budget is shared by alternating
+    one ``-`` and one ``+`` row, half/half with any leftover going to the longer
+    side, and each side stops at its first row that no longer fits.
+
+    The result is still a truthful hunk: the kept old lines are the context
+    prefix plus a CONTIGUOUS prefix of the ``-`` rows, and the kept new lines
+    the context prefix plus a contiguous prefix of the ``+`` rows, so a header
+    with the same starts and the observed counts describes exactly what is
+    shown. A complete PRIVATE KEY block is kept whole or not at all on each
+    side (the seam's span rule needs BEGIN..END in one view); a block whose
+    first kept member is in the context prefix cannot be cut inside the block,
+    so that case returns ``None`` and the caller's prefix cut moves before it.
+
+    Returns ``None`` when the cut is not inside such a block (the prefix cut
+    applies), else the kept rows without a header.
+    """
+    if not 0 < count < len(rows) or rows[count][:1] not in ("+", "-"):
+        return None
+    start = count
+    while start and rows[start - 1][:1] in ("+", "-"):
+        start -= 1
+    end = count
+    while end < len(rows) and rows[end][:1] in ("+", "-"):
+        end += 1
+    plus_at = start
+    while plus_at < end and rows[plus_at][:1] == "-":
+        plus_at += 1
+    if (
+        start == count  # nothing of the block fit: no cut inside it
+        or plus_at in (start, end)  # pure insert or pure delete: prefix is exact
+        or any(row[:1] != "+" for row in rows[plus_at:end])
+    ):
+        return None
+    prefix = rows[:start]
+    # Header digits only shrink as counts shrink, so the uncut block's header is
+    # a safe upper bound for the one written later.
+    used_bytes = _utf8_size(prefix) + len("@@ -999999999,999999999 +999999999,999999999 @@")
+    used_rows = len(prefix)
+    kept_minus = kept_plus = 0
+    minus_total, plus_total = plus_at - start, end - plus_at
+    open_minus = open_plus = True
+    while used_rows < room_rows and (open_minus or open_plus):
+        for side in ("-", "+"):
+            if used_rows >= room_rows:
+                break
+            if side == "-":
+                if not open_minus or kept_minus >= minus_total:
+                    open_minus = False
+                    continue
+                size = _utf8_size([rows[start + kept_minus]])
+                if used_bytes + size > room_bytes:
+                    open_minus = False  # contiguity: never skip a row to fit a later one
+                    continue
+                kept_minus += 1
+            else:
+                if not open_plus or kept_plus >= plus_total:
+                    open_plus = False
+                    continue
+                size = _utf8_size([rows[plus_at + kept_plus]])
+                if used_bytes + size > room_bytes:
+                    open_plus = False
+                    continue
+                kept_plus += 1
+            used_bytes += size
+            used_rows += 1
+    moved = True
+    while moved:
+        moved = False
+        kept = (
+            set(range(start))
+            | set(range(start, start + kept_minus))
+            | set(range(plus_at, plus_at + kept_plus))
+        )
+        for members in blocks:
+            inside = [index for index in members if index in kept]
+            if not inside or len(inside) == len(members):
+                continue
+            first = inside[0]
+            if first < start:
+                return None
+            # Drop the block's kept rows on its side (members of one block are
+            # all on one side, so this only trims that side's prefix).
+            if first < plus_at:
+                kept_minus = first - start
+            else:
+                kept_plus = first - plus_at
+            moved = True
+    return [
+        *prefix,
+        *rows[start : start + kept_minus],
+        *rows[plus_at : plus_at + kept_plus],
+    ]
 
 
 def _keep_pem_blocks_whole(
@@ -11698,11 +12052,11 @@ async def execute_write(
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "write",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -11730,7 +12084,7 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    details = _diff_details(str(path), previous, content)
+    details = _with_diff_source(_diff_details(str(path), previous, content), previous, content)
     introduced = _marker_introduced(previous, content)
     if introduced:
         details[_MARKER_INTRODUCED_KEY] = introduced
@@ -19800,22 +20154,22 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
 async def _sessions_launch(
     argv: list[str], env: dict[str, str], cwd: str | None
 ) -> tuple[int, str]:
-    """Run THIS build's CLI (``python -P -m local_operator.cli …``) and return
-    ``(returncode, stderr)``.
+    """Run the new session's CLI and return ``(returncode, stderr)``.
 
-    Not ``shutil.which("lop")``: the ``lop`` on PATH may be a different build
-    (a global install, a generation pointer) than the session that spawned
-    it, and the two could disagree about a flag the argv above uses.
-    ``python_argv`` adds ``-P`` so a checkout that merely happens to be the
-    cwd cannot shadow the installed package — the same spelling
-    ``update.py``'s relaunch and ``tui/session_move.py``'s nested run use.
+    A generation-installed parent resolves the concrete CURRENT interpreter
+    for this independent session, not its own pinned old build. Developer and
+    legacy installs stay on their own interpreter. Never use PATH's ``lop``:
+    it may belong to an unrelated install. ``session_python_argv`` also keeps
+    ``-P`` so a checkout in the cwd cannot shadow the selected distribution.
+    This boundary intentionally follows updates; same-session helpers and mesh
+    protocol calls continue to use their parent's build.
 
     The child is its own process group so a fired bound can reap the whole
     tree; ``stdin`` is /dev/null because an exec run is never interactive
     (``--control`` is deliberately not exposed by this tool).
     """
     process = await asyncio.create_subprocess_exec(
-        *python_argv(*_SESSIONS_CLI, *argv),
+        *session_python_argv(*_SESSIONS_CLI, *argv),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -27537,9 +27891,16 @@ async def _browser_download(
         return _error(
             tool_call_id,
             "browser",
-            f"no download started within {wait:g} s. If the page needs a click first, "
-            "call 'click' on its Download control and retry with selector=..., or the "
-            "file may be behind a login — ask the user to sign in, then retry.",
+            # An empty capture is not proof a one-time provider operation failed.
+            # Keep the fallback as safe as the host's hint: arm before the click,
+            # and never encourage replaying a mutation solely to recover its file.
+            f"no download started within {wait:g} s. For a click-triggered download, "
+            "use download(selector=<final confirm button>) to arm capture before clicking. "
+            "Without a selector, capture only waits for a future download event; "
+            "it cannot recover a download already dispatched or cancelled. "
+            "This timeout does not prove the click handler failed or a server mutation "
+            "did not happen; check the provider-side effect before repeating a Generate key, "
+            "create or export operation.",
         )
 
     kept: list[dict[str, Any]] = []
@@ -33761,7 +34122,16 @@ async def execute_jobs(
         # reading the feature exists for was the hardest to find. Emitting it here
         # as its own FIXED-WIDTH cell keeps that emphasis while leaving every
         # label in the grid starting at one column.
-        rows_out.append((f"{job.id}  {job.status:<9}  {age} {sense:<4}", clause or "", job.label))
+        label = job.label
+        if getattr(job, "type", "") == "task":
+            # The model a subagent is served by NOW, after the label so the
+            # aligned grid and every non-task row stay byte-identical. Same
+            # rule as ``hub list``: live rows always, settled rows only when
+            # they ended off their pin.
+            model = _job_model_clause(context, job)
+            if model and (running or model.startswith("pinned ")):
+                label = f"{label}  [{model}]"
+        rows_out.append((f"{job.id}  {job.status:<9}  {age} {sense:<4}", clause or "", label))
     cell_width = max((len(clause) for _, clause, _ in rows_out if clause), default=0)
     lines = []
     for cells, clause, label in rows_out:
@@ -33925,8 +34295,10 @@ class HubParams(BaseModel):
     model: str | None = Field(
         default=None,
         description=(
-            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
-            "provider/model-id pins this run. Never combine with effort."
+            # Trimmed again in review round 2 (context-budget CI was 3 tokens
+            # over): same facts, the tool:// ops table carries the detail.
+            "resume/set_model. Omit: role/tier default. 'inherit': the parent's, "
+            "skipping role pins; provider/model-id pins this run."
         ),
     )
 
@@ -33945,9 +34317,19 @@ class HubParams(BaseModel):
     # (audit items 2+3): `read tool://hub` renders the same blurbs, and the
     # tool description above already names every verb at a fraction of the
     # cost. The enum literals stay, so a reader still learns the op set here.
-    op: Literal["list", "peek", "send", "ask", "steer", "pause", "cancel", "resume"] = Field(
-        description="The verb to run."
+    op: Literal[
+        "list", "peek", "send", "ask", "steer", "pause", "cancel", "resume", "set_model"
+    ] = Field(description="The verb to run.")
+    # ``set_model`` (2026-11 quota incident): switch a RUNNING child in place.
+    # Two fields, kept terse because this schema rides every request of the
+    # top session and of every delegating child; the contract lives in the
+    # tool:// ops table. ``effort`` is a reasoning LEVEL on the chosen model,
+    # not a task tier: the child is already running, there is no launch to
+    # route through a tier.
+    effort: str | None = Field(
+        default=None, description="set_model: reasoning level, or lo|med|hi tier."
     )
+    cascade: bool = Field(default=False, description="set_model: also running descendants.")
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
     # ``anyOf``, and this module's schemas reach Gemini verbatim as
     # ``function_declarations`` (providers/clients.py builds the body with
@@ -33962,9 +34344,8 @@ class HubParams(BaseModel):
     to: list[str] | None = Field(
         default=None,
         description=(
-            "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
-            "labels, or [\"all\"] for every running subagent; 'ask' and 'peek' take "
-            "exactly one. Omit for op='list'."
+            "Job ids (see 'hub op=list'), labels, or [\"all\"] (every running "
+            "subagent); 'ask'/'peek' take exactly one. Omit for list."
         ),
     )
 
@@ -33979,8 +34360,9 @@ class HubParams(BaseModel):
     message: str | None = Field(
         default=None,
         description=(
-            "Body. Required for send/ask/steer/resume; for pause/cancel it is "
-            "recorded as the reason the child ended; ignored by list/peek."
+            # Trimmed with the set_model fields (context budget): same facts.
+            "Body: required for send/ask/steer/resume; pause/cancel record it as "
+            "why the child ended."
         ),
     )
     timeout_ms: int = Field(
@@ -34006,10 +34388,7 @@ class HubParams(BaseModel):
     steps: int | None = Field(
         default=None,
         ge=1,
-        description=(
-            "op='peek' only: shorthand for the last N steps (overrides range). "
-            "Omit for the default (5)."
-        ),
+        description=("op='peek': the last N steps (overrides range; default 5)."),
     )
 
 
@@ -34213,7 +34592,7 @@ def _hub_list(
     completed_ids = [row.job_id for row in rows if row.status == "completed"]
     shown_completed = set(completed_ids[-HUB_LIST_COMPLETED_SHOWN:])
     folded = len(completed_ids) - len(shown_completed)
-    all_lines = _hub_roster_lines(rows)
+    all_lines = _hub_roster_lines(rows, comms)
     # A FOLD NEEDS SOMEWHERE TO PUT WHAT IT FOLDS. The handle is what keeps the
     # older rows \u2014 and the ``transcript <id>`` a ``--resume`` needs \u2014 reachable,
     # so a store that refused the write means NO fold: every row renders, exactly
@@ -34224,7 +34603,7 @@ def _hub_list(
         visible = [
             row for row in rows if row.status != "completed" or row.job_id in shown_completed
         ]
-        lines = _hub_roster_lines(visible)
+        lines = _hub_roster_lines(visible, comms)
         lines[0] = f"{len(rows)} subagent(s), {len(visible)} shown:"
         lines.insert(
             1,
@@ -34261,6 +34640,8 @@ def _hub_list(
                 # rendered line) so the mobile/desktop projection can show
                 # WHO stopped a child without re-deriving it from prose.
                 "ended_by": row.ended_by,
+                # The served/pinned pair behind the rendered model clause.
+                **_model_detail(comms, row.job_id),
             }
             for row in rows
         ],
@@ -34272,7 +34653,7 @@ def _hub_list(
     return _text(tool_call_id, "hub", "\n".join(lines), details=details)
 
 
-def _hub_roster_lines(rows: list[Any]) -> list[str]:
+def _hub_roster_lines(rows: list[Any], comms: Any = None) -> list[str]:
     """The roster rows for ``hub op='list'``: a count line, then one block per child."""
     lines = [f"{len(rows)} subagent(s):"]
     # FUNCTION-LOCAL: ``builtin`` is a denied-module boundary (see the note
@@ -34304,6 +34685,15 @@ def _hub_roster_lines(rows: list[Any]) -> list[str]:
         if row.resumable and row.session_id:
             extras += f", transcript {row.session_id}"
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age}{idle} — {extras}")
+        # The model clause: always for a live row (what answers it NOW), and
+        # for a settled row only when it ended on something other than its
+        # pin — a long roster of completed children must not pay a line each
+        # for a fact nobody acts on.
+        if comms is not None:
+            clause = _served_model_clause(comms, row.job_id)
+            live = row.status in ("running", "starting", "queued", "pausing")
+            if clause and (live or clause.startswith("pinned ")):
+                lines.append(f"    {clause}")
         # WHO ended it, and why. The field the old ``del reason`` discarded:
         # without this line a cancelled child read as a bare ``cancelled`` with
         # no actor anywhere, which is the second half of the complaint.
@@ -34419,6 +34809,103 @@ async def _hub_peek(tool_call_id: str, comms: Any, params: Any, ids: list[str]) 
     )
 
 
+def _served_model_clause(comms: Any, job_id: str) -> str:
+    """``on X`` or ``pinned X, ran on Y``: the model serving a child NOW.
+
+    The one rendering ``hub list``, ``jobs`` and the ``set_model`` receipt
+    share, read from ``SubagentComms.model_reading`` (the live route state),
+    so no surface can say a child is on its pin while a fallback answers —
+    before this the served model showed only in the run-details badge.
+    ``""`` when nothing recorded a model, or the host predates the reader.
+    """
+    reading = getattr(comms, "model_reading", None)
+    if not callable(reading):
+        return ""
+    served, pinned = cast("tuple[str, str]", reading(job_id))
+    if not served:
+        return ""
+    if not pinned:
+        return f"on {served}"
+    # "pinned" only when a pin chose the primary: an inheriting child that
+    # fell back names its primary without claiming a pin (review round 1, R7).
+    owns = getattr(comms, "model_pinned", None)
+    if callable(owns) and not owns(job_id):
+        return f"on {served} (primary {pinned})"
+    return f"pinned {pinned}, ran on {served}"
+
+
+def _job_model_clause(context: ToolContext | None, job: Any) -> str:
+    """:func:`_served_model_clause` for a ``jobs`` row, from the row alone if needed.
+
+    Prefers the comms reader (the live child's route state). A host without
+    comms still has the row's own ``model_label`` (rewritten by every route
+    edge the relay sees) and ``requested_model_label`` (the launch pin).
+    """
+    comms = getattr(context, "subagent_comms", None) if context is not None else None
+    if comms is not None and callable(getattr(comms, "model_reading", None)):
+        return _served_model_clause(comms, job.id)
+    served = str(getattr(job, "model_label", "") or "")
+    pinned = str(getattr(job, "requested_model_label", "") or "")
+    if not served:
+        return ""
+    return f"pinned {pinned}, ran on {served}" if pinned and pinned != served else f"on {served}"
+
+
+def _model_detail(comms: Any, job_id: str) -> dict[str, str]:
+    """``{"model", "pinned_model"}`` for a roster row's ``details``, or ``{}``."""
+    reading = getattr(comms, "model_reading", None)
+    if not callable(reading):
+        return {}
+    served, pinned = cast("tuple[str, str]", reading(job_id))
+    return {"model": served, "pinned_model": pinned} if served else {}
+
+
+async def _hub_set_model(
+    tool_call_id: str,
+    comms: Any,
+    params: Any,
+    ids: list[str],
+    errors: list[str],
+    scope: str | None,
+) -> ToolResult:
+    """Render ``hub op='set_model'``: one receipt line per child, naming the
+    SERVED model after the switch (not the requested one) and any kept pin."""
+    deliveries = await comms.set_model(
+        ids,
+        model=params.model,
+        effort=params.effort,
+        cascade=params.cascade,
+        scope=scope,
+    )
+    acted = [delivery for delivery in deliveries if delivery.outcome != "failed"]
+    lines = [f"set_model: {len(acted)}/{len(deliveries)} subagent(s)"]
+    for delivery in deliveries:
+        line = f"- {delivery.label} ({delivery.job_id}): {delivery.outcome}"
+        if delivery.outcome != "failed":
+            clause = _served_model_clause(comms, delivery.job_id)
+            line += f", {clause}" if clause else ""
+        line += f" — {delivery.error}" if delivery.error else ""
+        lines.append(line)
+    lines.extend(f"- {error}" for error in errors)
+    if acted:
+        lines.append(
+            "Applies at each one's next model call; same job ids, subagents and tabs. "
+            "A primary still out of quota falls back again on that call."
+        )
+    return _text(
+        tool_call_id,
+        "hub",
+        "\n".join(lines),
+        details={
+            "op": "set_model",
+            "job_ids": [delivery.job_id for delivery in deliveries],
+            "acted": len(acted),
+            "useless": not acted,
+        },
+        useless=not acted,
+    )
+
+
 def _hub_receipt_lines(deliveries: list[Any]) -> list[str]:
     return [
         (
@@ -34499,8 +34986,10 @@ async def _execute_hub_parent(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "hub", exc)
 
-    if params.model is not None and params.op != "resume":
-        return _error(tool_call_id, "hub", "model is only valid for op='resume'")
+    if params.model is not None and params.op not in ("resume", "set_model"):
+        return _error(tool_call_id, "hub", "model is only valid for op='resume' or 'set_model'")
+    if (params.effort is not None or params.cascade) and params.op != "set_model":
+        return _error(tool_call_id, "hub", "effort and cascade are only valid for op='set_model'")
     if params.op == "list":
         return _hub_list(tool_call_id, comms, scope, context)
 
@@ -34517,7 +35006,10 @@ async def _execute_hub_parent(
         outcome = comms.reply_to_parent(scope, params.message or "")
         return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
 
-    if params.op not in ("cancel", "pause", "peek") and not (params.message or "").strip():
+    if (
+        params.op not in ("cancel", "pause", "peek", "set_model")
+        and not (params.message or "").strip()
+    ):
         return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
 
     if not params.to:
@@ -34551,6 +35043,8 @@ async def _execute_hub_parent(
 
     if params.op == "peek":
         return await _hub_peek(tool_call_id, comms, params, ids)
+    if params.op == "set_model":
+        return await _hub_set_model(tool_call_id, comms, params, ids, errors, scope)
 
     message = params.message or ""
     if params.op == "ask":

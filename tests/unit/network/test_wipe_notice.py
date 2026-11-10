@@ -85,10 +85,23 @@ def copied_mesh(request: pytest.FixtureRequest) -> Any:
     # the first half raced them with a margin of zero: CI saw `member rm` print no
     # ending sentence at all ("timed out" / "could NOT be confirmed" both absent).
     # Reproduced by delaying the owner's `record_ack` 0.5 s: 4 cells failed.
+    _wait_for_owner_ack(mesh)
+    return mesh
+
+
+def _wait_for_owner_ack(mesh: Any) -> None:
+    """Block until the OWNER's ledger holds the member's ack row for ``KEY``.
+
+    Shared by ``copied_mesh`` and every test that drives ``secret_mesh`` straight
+    into a revoke: ``_member_has`` true is only the first half of "delivered".
+    A revoke issued before the owner's broker records the ack finds no copy to
+    wipe ("no copy of ... is recorded on device-b, so there is no wipe to send")
+    and the later wipe wait times out -- seen on CI for the one-run test, and
+    reproduced locally by delaying ``owner_ack`` 0.5 s before its lock.
+    """
     assert net_fixtures.wait_for(
         lambda: (SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY) is not None)
     ), "the owner never recorded the member's ack of the delivered copy"
-    return mesh
 
 
 def _ledger_wiped(mesh: Any) -> bool:
@@ -484,6 +497,9 @@ def test_a_wipe_spares_rows_another_owner_or_key_wrote(request: pytest.FixtureRe
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
     assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, SECRET_NAME))
+    # The revoke derives its wipe from the owner-side ack row, not from the
+    # member's store: wait for that second half of delivery first.
+    _wait_for_owner_ack(mesh)
 
     assert _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name) == 0
     assert sync.credentials_sync_step(mesh.a, mesh.member) in ("scheduled", "in_sync")
@@ -520,6 +536,10 @@ def test_copy_use_revoke_wipe_in_one_run(request: pytest.FixtureRequest) -> None
     code = sync.credentials_sync_step(mesh.a, mesh.member)
     assert code in ("scheduled", "in_sync"), code
     assert net_fixtures.wait_for(lambda: _member_has(mesh.b.root, SECRET_NAME))
+
+    # Same race as ``copied_mesh``: the revoke below reads the owner's ack row,
+    # so a revoke before it lands sends no wipe and the wipe wait times out.
+    _wait_for_owner_ack(mesh)
 
     handle = _secret_store(mesh.b.root)
     assert handle.get(SECRET_NAME) == VALUE_1  # the member uses its copy

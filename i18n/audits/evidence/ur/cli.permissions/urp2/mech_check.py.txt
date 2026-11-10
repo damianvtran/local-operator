@@ -1,0 +1,20 @@
+import json,re,sys
+p=lambda l:f'local_operator/i18n/catalogues/{l}/cli.permissions.json'
+en=json.load(open(p('en')));ur=json.load(open(p('ur')))
+out=[]
+print('keys',len(en),len(ur),'order_equal',list(en)==list(ur))
+tokens=['Local Operator Runtime','Local Operator','Developer ID Application','Developer ID','codesign','guide://permissions','/update','HOME','LOCAL_OPERATOR_RUNTIME_ROOT','LOCAL_OPERATOR_CONFIG_DIR','~/.local-operator','[y/N] ','System Settings','Privacy & Security','Screen & System Audio Recording','Files & Folders','Accessibility','Keychain Access','Access Control','"Allow"','"Always Allow"','Python','macOS']
+for k in en:
+    e,u=en[k],ur[k]
+    if sorted(re.findall(r'\{\w+\}',e))!=sorted(re.findall(r'\{\w+\}',u)): out.append((k,'PLACEHOLDER'))
+    if sorted(re.findall(r'`[^`]+`',e))!=sorted(re.findall(r'`[^`]+`',u)): out.append((k,'CODE'))
+    for t in tokens:
+        if e.count(t)!=u.count(t): out.append((k,'TOKEN',t,e.count(t),u.count(t)))
+    if e.endswith(' ')!=u.endswith(' '): out.append((k,'TRAILING_SPACE'))
+    if e.count('\n')!=u.count('\n'): out.append((k,'NEWLINES'))
+    if re.search('[\u200e\u200f\u2066-\u2069\u202a-\u202e\u0964\u06f0-\u06f9\u0660-\u0669]',u): out.append((k,'BIDI_CTRL_OR_NONLATIN_DIGIT'))
+    for i,line in enumerate(u.split('\n')):
+        m=re.search(r'[A-Za-z\u0600-\u06FF]',line)
+        if m and m.group().isascii(): out.append((k,'FIRST_STRONG_LATIN_line%d'%i,line[:24]))
+for o in out: print(*o)
+print('findings',len(out))

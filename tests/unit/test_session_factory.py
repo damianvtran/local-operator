@@ -7830,9 +7830,17 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
     profile root the factory resolved. A one-file update must keep the reference
     file (the patch overlay), and the declaration's op scope must refuse an op the
     run was not given.
+
+    Since the profile-proposals change every skill MUTATION passes the session's
+    host-held account-write seam (``Session._authorize_account_profile_write``),
+    even in a configuration run: tool availability is not consent. So the update
+    is driven twice -- with no owner input it must refuse and write nothing, then
+    with the owner's typed request naming the skill (recorded through the real
+    ``_note_run_input`` classifier) it must apply.
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
+    from local_operator.harness.types import Message
     from local_operator.server.utils import desktop_skill_writes as writes
     from local_operator.session.session import Session
 
@@ -7851,6 +7859,10 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
         _args(hosting="test", model="test", yolo=True, resume=run_id),
         ConfigManager(run_root),
         AgentRegistry(run_root),
+        # As the desktop runtime hosting a real configuration run passes it:
+        # a person is in front of this session, so their typed request is a
+        # consent witness (the SDK default keeps the ``no_seam`` refusal).
+        owner_prompt_consent=True,
     )
     assert isinstance(session, Session)
     try:
@@ -7871,18 +7883,26 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
             line.split()[1] for line in text.splitlines() if line.startswith("fingerprint:")
         )
         assert "references/notes.md" in text
-        updated = await skill.execute(
-            "c2",
-            {
-                "op": "update",
-                "name": "demo",
-                "expected_fingerprint": fingerprint,
-                "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Troubleshooting\n")}],
-            },
-            None,
-            None,
-            context,
+        update = {
+            "op": "update",
+            "name": "demo",
+            "expected_fingerprint": fingerprint,
+            "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Troubleshooting\n")}],
+        }
+        # No owner input and no approval surface: refused, nothing written.
+        unasked = await skill.execute("c2a", update, None, None, context)
+        assert unasked.is_error
+        assert "not asked for" in _result_text(unasked)
+        assert "Troubleshooting" not in (run_root / "skills" / "demo" / "SKILL.md").read_text()
+        # The owner's typed request in this run, classified by the real seam.
+        session._run_owner_texts = []
+        session._run_owner_text_bindings = []
+        session._run_owner_consent = False
+        session._run_untrusted_input = False
+        session._note_run_input(
+            Message.user("Update the demo skill to add a Troubleshooting section.")
         )
+        updated = await skill.execute("c2", update, None, None, context)
         assert not updated.is_error, _result_text(updated)
         folder = run_root / "skills" / "demo"
         assert "Troubleshooting" in (folder / "SKILL.md").read_text()
@@ -7895,14 +7915,17 @@ async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
 
 
 @pytest.mark.asyncio
-async def test_an_ordinary_session_has_no_skill_tool(
+async def test_an_ordinary_session_has_skill_but_a_declaration_without_it_does_not(
     run_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Negative control for the test above: same factory, no run marker, no tool.
+    """Control for the test above: same factory, no run marker.
 
-    And the merge cannot smuggle it into a declared session that does not name it:
-    the shape's ``_merge_capability_tools(("skill",))`` filters through the
-    declaration, so a run declared WITHOUT ``skill`` stays without it.
+    Since the profile-proposals change ``skill`` is a (deferred) DEFAULT tool, so
+    an ordinary owner conversation builds it from the factory's profile root;
+    mutations stay behind the consent seam pinned above. A declaration still
+    bounds it: a run declared WITHOUT ``skill`` drops it, and the shape's
+    ``_merge_capability_tools(("skill",))`` filters through the declaration, so
+    the merge cannot smuggle it back.
     """
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
@@ -7916,8 +7939,9 @@ async def test_an_ordinary_session_has_no_skill_tool(
     assert isinstance(session, Session)
     try:
         names = [tool.name for tool in session._tools]
-        assert "skill" not in names and "agent" in names
+        assert "skill" in names and "agent" in names
         session.set_tool_inventory(("agent", "team"))
+        assert "skill" not in {tool.name for tool in session._tools}
         session._merge_capability_tools(("skill",))
         assert "skill" not in {tool.name for tool in session._tools}
     finally:

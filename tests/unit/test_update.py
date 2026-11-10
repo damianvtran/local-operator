@@ -3522,6 +3522,30 @@ def test_a_failed_services_tail_fails_the_run_and_names_serve(
     assert report["failure"]["error"] == "the serve daemon did not move"
 
 
+def test_the_cli_update_passes_team_signing_prompt_consent(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 (PR #3691): only the ``lop update`` CLI entry may let codesign prompt.
+
+    The TUI's ``/update`` reaches ``perform_upgrade`` too, with a TTY, in the
+    middle of a session; it leaves ``team_signing_prompt`` at its False default.
+    """
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(update_mod, "check_latest", _check_latest_double("0.27.0", "0.28.0", True))
+    monkeypatch.setattr(update_mod, "install_kind", lambda: update_mod.InstallKind.UV_TOOL)
+    monkeypatch.setattr(update_mod, "is_git_snapshot", lambda: False)
+
+    def record(**kwargs: object) -> str:
+        seen.append(kwargs)
+        raise update_mod.UpdateError("stop after the call under test")
+
+    monkeypatch.setattr(update_mod, "perform_upgrade", record)
+
+    update_command(check=False)
+    capsys.readouterr()
+    assert [call.get("team_signing_prompt") for call in seen] == [True]
+
+
 def test_a_failed_wheel_route_reports_step_publish_and_kind_publication(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -5492,7 +5516,9 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     ):
         assert update_mod._snapshot_command("v1.2.3") == 0
 
-    assert calls == [(None, {"version": "1.2.3", "note": ""})]
+    # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
+    # terminal and may answer the signing dialog (review round 1, R2).
+    assert calls == [(None, {"version": "1.2.3", "note": "", "team_signing_prompt": True})]
     bundle.assert_not_called()
     assert not snapshot.exists(), "the wheel route must still reclaim the ref extract"
     out = capsys.readouterr().out
@@ -5712,8 +5738,13 @@ def test_from_snapshot_allow_downgrade_installs_the_wheel_and_records_the_overri
     ):
         assert update_mod._snapshot_command("v0.9.8", allow_downgrade=True) == 0
 
+    # ``lop update --from-snapshot`` is a CLI entry, so the operator is at the
+    # terminal and may answer the signing dialog (review round 1, R2).
     assert calls == [
-        (None, {"version": "0.9.8", "note": "downgrade-allowed"})
+        (
+            None,
+            {"version": "0.9.8", "note": "downgrade-allowed", "team_signing_prompt": True},
+        )
     ], "the override installs the older wheel and the marker note records it"
     tail.assert_called_once_with(
         0,
@@ -5844,7 +5875,8 @@ def test_from_snapshot_newer_version_installs_untouched(
     ):
         assert update_mod._snapshot_command("v0.9.10") == 0
 
-    assert calls == [(None, {"version": "0.9.10", "note": ""})]
+    # CLI entry: the signing dialog may be answered (review round 1, R2).
+    assert calls == [(None, {"version": "0.9.10", "note": "", "team_signing_prompt": True})]
     captured = capsys.readouterr()
     assert "refusing" not in captured.err
     assert "downgrading on purpose" not in captured.err
@@ -6094,8 +6126,19 @@ def test_perform_upgrade_never_collects_previous_generations(
         )
         == "0.70.19"
     )
+    # perform_upgrade defaults to no signing dialog: it also runs unattended
+    # (auto-update), where nobody can answer one (review round 1, R2).
     assert installs == [
-        (None, {"version": "0.70.19", "commit": "", "ref": "", "target_mode": "latest"})
+        (
+            None,
+            {
+                "version": "0.70.19",
+                "commit": "",
+                "ref": "",
+                "target_mode": "latest",
+                "team_signing_prompt": False,
+            },
+        )
     ]
     assert collections == [] and notices == []
 

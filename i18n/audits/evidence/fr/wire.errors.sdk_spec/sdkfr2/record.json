@@ -1,0 +1,246 @@
+{
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "f990c30424edb03801b1ba2325f27092572c3a27",
+  "audit_date": "2026-11-10T01:58:05.751396+00:00",
+  "key_count": 21,
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.json",
+      "sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.context.json",
+      "sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.errors.sdk_spec.json",
+      "sha256": "d758be6d6f429af51854e2aacf702239f05eed54c5724565d4f43380cec9387e"
+    }
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "anthropic/claude-sonnet-5-5",
+    "source": "delegation brief"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "8b6d46ca9257",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "host session model metadata",
+    "fallback": null,
+    "independent_from_translator_session": true
+  },
+  "per_key": [
+    {
+      "key": "wire.errors.sdk_spec.agent_identity_conflict",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_callback_gate_required",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_declared_tools_empty",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_handler_wrong_mode",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_tools_wrong_mode",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_fields_unsupported",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_output_unsupported",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_resume_required",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.mode_invalid",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_format_invalid",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_retries_range",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_retries_requires_format",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_schema_requires_format",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.resume_empty",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "meaning": "accepted",
+      "findings": [
+        "FR2-T1"
+      ]
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "meaning": "accepted",
+      "findings": [
+        "FR2-T2"
+      ]
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_output_unsupported",
+      "meaning": "accepted",
+      "findings": [
+        "FR2-T3"
+      ]
+    },
+    {
+      "key": "wire.errors.sdk_spec.tools_empty",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.world_root_empty",
+      "meaning": "accepted",
+      "findings": []
+    },
+    {
+      "key": "wire.errors.sdk_spec.yolo_approval_unreachable",
+      "meaning": "accepted",
+      "findings": []
+    }
+  ],
+  "findings": [
+    {
+      "id": "FR2-T1",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "current_text": "birth_effort d’une nouvelle session lancée fait partie des paramètres initiaux et exige que le couple hosting/model soit également fourni ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle.",
+      "evidence": {
+        "punctuation_offsets": [
+          138
+        ],
+        "preceding_codepoint": "U+0020",
+        "required": "U+202F",
+        "rule": "i18n/style-guides/fr.md:95-96"
+      },
+      "problem": "Ordinary space before prose semicolon; French guide requires narrow no-break space. Meaning is correct.",
+      "suggested_value": "birth_effort d’une nouvelle session lancée fait partie des paramètres initiaux et exige que le couple hosting/model soit également fourni ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle."
+    },
+    {
+      "id": "FR2-T2",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "current_text": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "evidence": {
+        "punctuation_offsets": [
+          111
+        ],
+        "preceding_codepoint": "U+0020",
+        "required": "U+202F",
+        "rule": "i18n/style-guides/fr.md:95-96"
+      },
+      "problem": "Ordinary space before prose semicolon; French guide requires narrow no-break space. Meaning is correct.",
+      "suggested_value": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine)."
+    },
+    {
+      "id": "FR2-T3",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_output_unsupported",
+      "current_text": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis confiez-lui une tâche",
+      "evidence": {
+        "punctuation_offsets": [
+          70
+        ],
+        "preceding_codepoint": "U+0020",
+        "required": "U+202F",
+        "rule": "i18n/style-guides/fr.md:95-96"
+      },
+      "problem": "Ordinary space before prose semicolon; French guide requires narrow no-break space. Meaning is correct.",
+      "suggested_value": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis confiez-lui une tâche"
+    }
+  ],
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 0
+  },
+  "verdict": "clean-with-findings",
+  "round_1_confirmation": {
+    "FR1": "fixed: literal NEW present",
+    "FR2": "fixed in both keys: paramètres initiaux",
+    "FR3": "fixed: puis confiez-lui une tâche"
+  },
+  "terminology_precedents": {
+    "approbation": "wire.errors.desktop.json:wire.errors.desktop.question_no_longer_pending",
+    "runtime / racine / identifiant / rattacher": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_hosting_unconfigured",
+    "processus / spawn_session / mode own": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.attach_runtime_missing",
+    "profil": "wire.errors.sdk_startup.json:wire.errors.sdk_startup.profile_attach_failed",
+    "équipe": "wire.errors.desktop.json:wire.errors.desktop.agents_config_local_only",
+    "modèle / configuration": "wire.errors.desktop.json:wire.errors.desktop.agents_config_client_fields",
+    "tâche": "wire.errors.agents.json:wire.errors.agents.job_cannot_cancel",
+    "session": "wire.errors.session_host.json:wire.errors.session_host.unsupported",
+    "outil": "No sibling wire.errors precedent found; glossary §2 tool → outil",
+    "paramètres initiaux / contrainte de sortie / contrôle d’approbation appelable / lecteur / objectif / libérer / restaurer": "No sibling wire.errors precedent found; accepted contextual native French, not attributed to a shipped precedent",
+    "NEW / remaining API names and fields": "English context sidecar + glossary §1 preserved identifiers; no sibling NEW precedent claimed"
+  },
+  "checks": {
+    "json_key_parity": true,
+    "placeholder_names_order_and_simple_string_kind": true,
+    "all_ascii_apostrophes_are_doubled": true,
+    "plural_select_count": 0,
+    "yolo_prefix_codepoints": [
+      121,
+      111,
+      108,
+      111,
+      61,
+      84,
+      114,
+      117,
+      101
+    ],
+    "literal_redaction_markers": 0,
+    "manual_bidi_controls": 0,
+    "sidecar_width_caps": "none",
+    "full_validator": "not run: host resource restriction; check.py argument/plural logic and runtime apostrophe parser read",
+    "rendering": "not run: resource restriction",
+    "terminology_probe": "first read-only sibling scan timed out due repeated git show; replaced by single-load worktree JSON scan; no validator or tests were attempted"
+  },
+  "record_kind": "candidate audit notes, not validator execution log"
+}

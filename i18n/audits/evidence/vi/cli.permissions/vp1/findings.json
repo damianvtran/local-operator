@@ -1,0 +1,8 @@
+{"audit_id":"vp1","locale":"vi","namespace":"cli.permissions","unresolved_blocker_major_count":0,
+ "findings":[
+  {"id":"m1","severity":"MINOR","key":"cli.permissions.setup.always_allow","suggested":"Bạn đã chọn \"Luôn cho phép\" hoặc không thấy hộp thoại nào hiện ra, đúng không? [y/N] "},
+  {"id":"m2","severity":"MINOR","key":"cli.permissions.setup.failed","suggested":"Việc ký không hoàn tất. Runtime vẫn giữ dòng \"Local Operator Runtime\". Chạy `lop permissions status` để xem chi tiết."},
+  {"id":"n1","severity":"NIT","key":"(7 keys with quoted labels)","suggested":"“ ” per vi style guide"},
+  {"id":"n2","severity":"NIT","key":"cli.permissions.status.identity.none","suggested":"Danh tính runtime: chưa được tạo; sẽ được tạo khi runtime khởi động lần tới"},
+  {"id":"n3","severity":"NIT","key":"cli.permissions.status.identity.* / setup.*","suggested":"mục instead of dòng for System Settings rows"},
+  {"id":"n4","severity":"NIT","key":"cli.permissions.status.optin.*","suggested":"Ký bằng nhóm nhà phát triển"}]}

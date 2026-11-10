@@ -12744,12 +12744,28 @@ async def test_the_chevron_brightens_on_focus_and_never_spends_the_accent() -> N
         app._append_block(card)
         await pilot.pause()
         card.focus()
-        await pilot.pause()
+        # Settle on the class, not on one pause. The class is written only by
+        # `_sync_composer_focus`, which runs when the APP receives the bubbling
+        # `DescendantFocus`/`DescendantBlur`. That is the last hop of a chain of
+        # separate message queues: App (`Widget.focus` is `call_later(set_focus)`)
+        # -> card/Editor (`Focus`/`Blur`, which set `has_focus`) -> each ancestor
+        # re-posting the bubbling event -> App. `pilot.pause()` joins only the
+        # messages queued when it was called, then `wait_for_idle(0)`, which
+        # reads a CPU-starved process (a loaded `-n 4` runner) as idle. Traced
+        # with that reading forced: the pause returned with focus already on the
+        # card and `Editor.has_focus` False but NO descendant event yet at the
+        # App, so the class was still on; it cleared ~6 ms later when the hop
+        # landed. Waiting on the settled class is the real condition; the
+        # asserts below still fail if it never settles.
+        await _settle(pilot, lambda: not dock.has_class(COMPOSER_FOCUSED_CLASS))
         assert not dock.has_class(COMPOSER_FOCUSED_CLASS)
         assert chevron_colour(composer_cells(app)) == dim, "the chevron stayed lit"
 
         app.query_one(Editor).focus()
-        await pilot.pause()
+        # The same multi-queue chain in the other direction (the editor's
+        # `Focus` sets `has_focus` before its `DescendantFocus` bubbles up),
+        # so the same settle rather than one pause.
+        await _settle(pilot, lambda: dock.has_class(COMPOSER_FOCUSED_CLASS))
         assert dock.has_class(COMPOSER_FOCUSED_CLASS)
         assert chevron_colour(composer_cells(app)) == focused_ink
 
