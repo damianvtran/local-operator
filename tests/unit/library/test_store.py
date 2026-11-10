@@ -1460,3 +1460,60 @@ def test_a_metadata_first_read_on_a_replaced_file_does_not_raise(tmp_path, monke
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert {"tags", "assets", "asset_tags"}.issubset(names)
+
+
+def test_replacing_identical_occurrences_writes_nothing(tmp_path, monkeypatch) -> None:
+    """Regression for the 2026-11-10 write churn: a no-op rescan is a no-op write.
+
+    ``replace_session_occurrences`` returns only the assets whose rows changed
+    and ``recompute_assets`` skips an unchanged aggregate, so the second,
+    identical pass must leave ``total_changes`` where it was. A dropped row is
+    still deleted and its asset recomputed (removed) — no stale data survives.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    store = LibraryStore(root)
+    store.ensure_schema()
+    paths = [root.parent / f"doc{number}.txt" for number in range(3)]
+    rows = []
+    for number, path in enumerate(paths):
+        path.write_text(str(number))
+        key = identity.key_for(str(path), None)
+        rows.append(
+            _row(
+                asset_id=identity.asset_id(key),
+                key=key,
+                path=str(path),
+                name=path.name,
+                size_bytes=1,
+                first_ts=float(number),
+                last_ts=float(number) + 0.5,
+            )
+        )
+    with store.write() as connection:
+        changed = store.replace_session_occurrences(connection, THIRD, rows)
+        assert changed == {row["asset_id"] for row in rows}
+        store.recompute_assets(connection, changed)
+
+    with store.write() as connection:
+        start = connection.total_changes
+        assert store.replace_session_occurrences(connection, THIRD, list(rows)) == set()
+        # Even asked to recompute everything, unchanged aggregates are not rewritten.
+        store.recompute_assets(connection, [row["asset_id"] for row in rows])
+        assert connection.total_changes == start
+
+    # One row's content moved, one row disappeared: exactly those two assets change.
+    moved = dict(rows[0], last_ts=9.0, touches=2)
+    with store.write() as connection:
+        changed = store.replace_session_occurrences(connection, THIRD, [moved, rows[1]])
+        assert changed == {rows[0]["asset_id"], rows[2]["asset_id"]}
+        store.recompute_assets(connection, changed)
+    with store.read() as connection:
+        assets = {
+            str(row["asset_id"]): float(row["last_ts"])
+            for row in connection.execute("SELECT asset_id, last_ts FROM idx_assets")
+        }
+        occurrences = connection.execute(
+            "SELECT touches FROM idx_occurrences WHERE asset_id = ?", (rows[0]["asset_id"],)
+        ).fetchall()
+    assert assets == {rows[0]["asset_id"]: 9.0, rows[1]["asset_id"]: 1.5}
+    assert [int(row["touches"]) for row in occurrences] == [2]

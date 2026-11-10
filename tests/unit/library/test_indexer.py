@@ -1013,3 +1013,60 @@ def test_a_periodic_reconcile_over_a_broken_index_still_warns(
     # store, not an arbitrary exception the worker happened to catch.
     with pytest.raises(IndexUnavailable, match="no such table: idx_occurrences"):
         index.reconcile()
+
+
+def _catalog_rows(root: Path) -> dict[str, Any]:
+    """Every derived row with its rowid and ``indexed_at``: a rewrite moves one."""
+    connection = sqlite3.connect(root / "library" / "library.sqlite3")
+    try:
+        return {
+            "occurrences": connection.execute(
+                "SELECT rowid, * FROM idx_occurrences ORDER BY asset_id, child_id"
+            ).fetchall(),
+            "assets": connection.execute(
+                "SELECT rowid, * FROM idx_assets ORDER BY asset_id"
+            ).fetchall(),
+        }
+    finally:
+        connection.close()
+
+
+def test_a_rescan_that_finds_nothing_new_rewrites_no_catalog_row(tmp_path, monkeypatch) -> None:
+    """Regression (2026-11-10, ``lop serve`` ~1 GiB/min of disk writes).
+
+    Every journal append rescans its session. The old write path deleted and
+    re-inserted every occurrence of the session and re-upserted every asset it
+    touched (bumping ``indexed_at``, which fired the FTS and facet-count
+    triggers), so an append that recorded no file still rewrote the session's
+    whole slice of the catalog. Now an append with no new file record leaves
+    every occurrence and asset row byte-identical — same rowid, same
+    ``indexed_at`` — and an append that adds one file writes only that asset.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    # An opening user line pins the derived session title, so the later chat
+    # line cannot legitimately change ``session_titles``.
+    rows: list[dict[str, Any]] = [user_row("u0", 0.5, "opening line")]
+    for number in range(6):
+        rows.extend(write_rows(f"w{number}", float(number + 1), written(root, f"f{number}.txt")))
+    directory = session(root, SESSION, rows)
+    indexer.rebuild_now(root)
+    before = _catalog_rows(root)
+    assert len(before["assets"]) == 6
+
+    # A plain chat line: the journal moved, so the session is rescanned.
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(user_row("u1", 10.0, "just talking")) + "\n")
+    index = indexer.LibraryIndexer(root)
+    assert index.scan_session(SESSION) is True
+    assert _catalog_rows(root) == before
+
+    # One new file: exactly one new asset row, the other six untouched.
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        for row in write_rows("w9", 11.0, written(root, "new.txt")):
+            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+    assert index.scan_session(SESSION) is True
+    after = _catalog_rows(root)
+    assert set(before["assets"]) < set(after["assets"])
+    assert len(after["assets"]) == 7
+    assert set(before["occurrences"]) < set(after["occurrences"])
+    assert names(root) == {f"f{number}.txt" for number in range(6)} | {"new.txt"}

@@ -567,6 +567,102 @@ def fts_expression(q: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+#: ``idx_assets`` columns ``recompute_assets`` derives, in its value order:
+#: everything except the key and ``indexed_at``. Comparing exactly these is
+#: what lets an unchanged aggregate skip its write.
+_ASSET_COMPARED_COLUMNS: Final = (
+    "key",
+    "path",
+    "digest",
+    "derived_name",
+    "effective_name",
+    "description",
+    "category",
+    "kind",
+    "content_type",
+    "origin",
+    "origin_group",
+    "origins",
+    "highlighted",
+    "size_bytes",
+    "width",
+    "height",
+    "duration_s",
+    "first_ts",
+    "last_ts",
+    "is_final",
+    "tag_names",
+    "session_titles",
+)
+
+
+#: ``idx_occurrences`` columns in the order :func:`_occurrence_values` builds
+#: them; the diff in ``replace_session_occurrences`` compares tuples read back
+#: in this same order, so the two must never drift apart.
+_OCCURRENCE_COLUMNS: Final = (
+    "asset_id",
+    "key",
+    "session_id",
+    "title",
+    "origin",
+    "child_id",
+    "label",
+    "tool",
+    "intent",
+    "first_ts",
+    "last_ts",
+    "first_seq",
+    "last_seq",
+    "touches",
+    "highlighted",
+    "name",
+    "path",
+    "kind",
+    "content_type",
+    "size_bytes",
+    "width",
+    "height",
+    "duration_s",
+)
+
+
+def _occurrence_values(session_id: str, row: dict[str, Any]) -> tuple[Any, ...]:
+    """One scan row normalised to exactly what SQLite stores and returns.
+
+    The coercions are the ones the column affinities apply anyway, done here so
+    a stored row compares EQUAL to its rescanned twin: a mismatch would rewrite
+    the row on every scan and quietly bring the write churn back.
+    """
+    return (
+        row["asset_id"],
+        row.get("key") or "",
+        session_id,
+        row.get("title") or "",
+        row.get("origin") or "mentioned",
+        row.get("child_id") or "",
+        row.get("label"),
+        row.get("tool") or "",
+        row.get("intent"),
+        float(row.get("first_ts") or 0.0),
+        float(row.get("last_ts") or 0.0),
+        int(row.get("first_seq") or 0),
+        int(row.get("last_seq") or 0),
+        int(row.get("touches") or 1),
+        1 if row.get("highlighted") else 0,
+        row.get("name") or "",
+        row.get("path"),
+        row.get("kind") or "other",
+        # NULL, not the column default: a recorded MIME wins in ``classify``,
+        # so substituting one here would make every text file
+        # "application/octet-stream".
+        row.get("content_type") or None,
+        row.get("size_bytes"),
+        row.get("width"),
+        row.get("height"),
+        row.get("duration_s"),
+    )
+
+
 class LibraryStore:
     """The derived index. One connection per call, like the metadata store.
 
@@ -1360,56 +1456,59 @@ class LibraryStore:
         session_id: str,
         rows: Sequence[dict[str, Any]],
     ) -> set[str]:
-        """Replace one session's occurrence rows; return every asset they touch.
+        """Make one session's occurrence rows equal ``rows``; return the assets that CHANGED.
 
-        The union includes assets the session STOPPED touching: their aggregate
-        is now different (a dropped origin can demote ``origin_group``), so the
-        caller must recompute them even though no new row mentions them.
+        Why a diff and not ``DELETE`` + reinsert: the watcher rescans a session
+        on every journal append and every roster-sidecar replace, ~2 scans/s
+        across ~25 live sessions on the operator's Mac (measured 2026-11-10,
+        ``idx_state.revision`` advancing 1.95/s). The old full rewrite deleted
+        and re-inserted every row of the session (up to 2,286 for one session)
+        on each scan and the caller then rewrote every one of those assets
+        (plus their FTS and facet-count rows through the triggers), so a scan
+        that found nothing new still wrote megabytes: ``lop serve`` sustained
+        ~1 GiB/min of disk writes. Only rows whose content differs are written
+        now, so a scan's write cost follows what the journal actually added.
+
+        The returned set is every asset whose occurrence rows were inserted,
+        updated or deleted — including assets the session STOPPED touching:
+        their aggregate is now different (a dropped origin can demote
+        ``origin_group``), so the caller must recompute them. An asset whose
+        rows are byte-identical has an unchanged aggregate (the aggregate is a
+        function of the occurrence set alone; name/description/tag edits reach
+        ``idx_assets`` through the metadata triggers), so it is left alone.
+
+        ``rows`` may repeat a primary key; the last one wins, exactly as the
+        ``INSERT OR REPLACE`` it replaced behaved.
         """
-        affected: set[str] = set()
+        desired: dict[tuple[str, str], tuple[Any, ...]] = {}
+        for row in rows:
+            values = _occurrence_values(session_id, row)
+            desired[(values[0], values[5])] = values
+        existing: dict[tuple[str, str], tuple[Any, ...]] = {}
         for row in connection.execute(
-            "SELECT DISTINCT asset_id FROM idx_occurrences WHERE session_id = ?", (session_id,)
+            "SELECT " + ", ".join(_OCCURRENCE_COLUMNS) + " FROM idx_occurrences "
+            "WHERE session_id = ?",
+            (session_id,),
         ):
-            affected.add(str(row["asset_id"]))
-        connection.execute("DELETE FROM idx_occurrences WHERE session_id = ?", (session_id,))
-        connection.executemany(
-            "INSERT OR REPLACE INTO idx_occurrences(asset_id, key, session_id, title, origin, "
-            "child_id, label, tool, intent, first_ts, last_ts, first_seq, last_seq, touches, "
-            "highlighted, name, path, kind, content_type, size_bytes, width, height, "
-            "duration_s) VALUES(" + ", ".join(["?"] * 23) + ")",
-            [
-                (
-                    row["asset_id"],
-                    row.get("key") or "",
-                    session_id,
-                    row.get("title") or "",
-                    row.get("origin") or "mentioned",
-                    row.get("child_id") or "",
-                    row.get("label"),
-                    row.get("tool") or "",
-                    row.get("intent"),
-                    float(row.get("first_ts") or 0.0),
-                    float(row.get("last_ts") or 0.0),
-                    int(row.get("first_seq") or 0),
-                    int(row.get("last_seq") or 0),
-                    int(row.get("touches") or 1),
-                    1 if row.get("highlighted") else 0,
-                    row.get("name") or "",
-                    row.get("path"),
-                    row.get("kind") or "other",
-                    # NULL, not the column default: a recorded MIME wins in
-                    # ``classify``, so substituting one here would make every
-                    # text file "application/octet-stream".
-                    row.get("content_type") or None,
-                    row.get("size_bytes"),
-                    row.get("width"),
-                    row.get("height"),
-                    row.get("duration_s"),
-                )
-                for row in rows
-            ],
-        )
-        affected.update(row["asset_id"] for row in rows)
+            values = tuple(row)
+            existing[(values[0], values[5])] = values
+        affected: set[str] = set()
+        stale = [key for key in existing if key not in desired]
+        if stale:
+            connection.executemany(
+                "DELETE FROM idx_occurrences WHERE asset_id = ? AND session_id = ? "
+                "AND child_id = ?",
+                [(asset_id, session_id, child_id) for asset_id, child_id in stale],
+            )
+            affected.update(asset_id for asset_id, _ in stale)
+        changed = [values for key, values in desired.items() if existing.get(key) != values]
+        if changed:
+            connection.executemany(
+                "INSERT OR REPLACE INTO idx_occurrences(" + ", ".join(_OCCURRENCE_COLUMNS) + ") "
+                "VALUES(" + ", ".join(["?"] * len(_OCCURRENCE_COLUMNS)) + ")",
+                changed,
+            )
+            affected.update(values[0] for values in changed)
         return affected
 
     def recompute_assets(
@@ -1439,7 +1538,9 @@ class LibraryStore:
                 )
             )
             existing = connection.execute(
-                "SELECT key FROM idx_assets WHERE asset_id = ?", (asset_id,)
+                "SELECT " + ", ".join(_ASSET_COMPARED_COLUMNS) + " FROM idx_assets "
+                "WHERE asset_id = ?",
+                (asset_id,),
             ).fetchone()
             if not rows:
                 connection.execute("DELETE FROM idx_assets WHERE asset_id = ?", (asset_id,))
@@ -1465,56 +1566,53 @@ class LibraryStore:
                 meta["description_source"] if meta else None,
                 "",
             )
+            # Tag names are the metadata store's, not the previous idx row's:
+            # an asset whose metadata row survived a rebuild must come back
+            # searchable by its tags without waiting for the next tag write.
+            tag_row = connection.execute(
+                "SELECT COALESCE((SELECT GROUP_CONCAT(t.name, ' ') FROM asset_tags at "
+                "JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = ?), '')",
+                (asset_id,),
+            ).fetchone()
+            values = (
+                aggregate.key,
+                aggregate.path,
+                aggregate.digest,
+                aggregate.derived_name,
+                effective_name,
+                description,
+                aggregate.category,
+                aggregate.kind,
+                aggregate.content_type,
+                aggregate.origin,
+                aggregate.origin_group,
+                json.dumps(aggregate.origins),
+                1 if aggregate.highlighted else 0,
+                aggregate.size_bytes,
+                aggregate.width,
+                aggregate.height,
+                aggregate.duration_s,
+                aggregate.first_ts,
+                aggregate.last_ts,
+                1 if is_final(aggregate) else 0,
+                str(tag_row[0]) if tag_row else "",
+                " ".join(aggregate.session_titles),
+            )
+            if existing is not None and tuple(existing) == values:
+                # Unchanged aggregate: skip the upsert. ``indexed_at`` is the
+                # only column that would differ, and rewriting the row for it
+                # also fires the FTS delete+insert and facet-count triggers —
+                # that per-asset rewrite on every rescan was most of the
+                # ``lop serve`` write churn measured on 2026-11-10. Nothing
+                # reads ``indexed_at`` as a freshness signal for listings.
+                continue
             connection.execute(
-                "INSERT INTO idx_assets(asset_id, key, path, digest, derived_name, "
-                "effective_name, description, category, kind, content_type, origin, "
-                "origin_group, origins, highlighted, size_bytes, width, height, duration_s, "
-                "first_ts, last_ts, is_final, tag_names, session_titles, indexed_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                # Tag names are the metadata store's, not the previous idx row's:
-                # an asset whose metadata row survived a rebuild must come back
-                # searchable by its tags without waiting for the next tag write.
-                "  COALESCE((SELECT GROUP_CONCAT(t.name, ' ') FROM asset_tags at "
-                "            JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = ?), ''), "
-                "  ?, "
-                "  ?) "
-                "ON CONFLICT(asset_id) DO UPDATE SET key = excluded.key, path = excluded.path, "
-                "digest = excluded.digest, derived_name = excluded.derived_name, "
-                "effective_name = excluded.effective_name, description = excluded.description, "
-                "category = excluded.category, kind = excluded.kind, "
-                "content_type = excluded.content_type, origin = excluded.origin, "
-                "origin_group = excluded.origin_group, origins = excluded.origins, "
-                "highlighted = excluded.highlighted, size_bytes = excluded.size_bytes, "
-                "width = excluded.width, height = excluded.height, "
-                "duration_s = excluded.duration_s, first_ts = excluded.first_ts, "
-                "last_ts = excluded.last_ts, is_final = excluded.is_final, "
-                "session_titles = excluded.session_titles, indexed_at = excluded.indexed_at",
-                (
-                    asset_id,
-                    aggregate.key,
-                    aggregate.path,
-                    aggregate.digest,
-                    aggregate.derived_name,
-                    effective_name,
-                    description,
-                    aggregate.category,
-                    aggregate.kind,
-                    aggregate.content_type,
-                    aggregate.origin,
-                    aggregate.origin_group,
-                    json.dumps(aggregate.origins),
-                    1 if aggregate.highlighted else 0,
-                    aggregate.size_bytes,
-                    aggregate.width,
-                    aggregate.height,
-                    aggregate.duration_s,
-                    aggregate.first_ts,
-                    aggregate.last_ts,
-                    1 if is_final(aggregate) else 0,
-                    asset_id,
-                    " ".join(aggregate.session_titles),
-                    time.time(),
-                ),
+                "INSERT INTO idx_assets(asset_id, " + ", ".join(_ASSET_COMPARED_COLUMNS) + ", "
+                "indexed_at) VALUES(" + ", ".join(["?"] * (len(_ASSET_COMPARED_COLUMNS) + 2)) + ") "
+                "ON CONFLICT(asset_id) DO UPDATE SET "
+                + ", ".join(f"{column} = excluded.{column}" for column in _ASSET_COMPARED_COLUMNS)
+                + ", indexed_at = excluded.indexed_at",
+                (asset_id, *values, time.time()),
             )
 
     # -- read path ----------------------------------------------------------

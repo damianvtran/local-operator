@@ -797,8 +797,6 @@ class LibraryIndexer:
         title = str(entry.get("title") or "") or title_key or session_id
         rows = _occurrence_rows(session_id, entry, title)
         assets = {row["asset_id"]: (row["key"], row["name"]) for row in rows if row["asset_id"]}
-        previous = self.store.occurrence_assets(session_id)
-        affected = set(assets) | previous
         # Outside the write transaction on purpose: MetadataStore opens its own
         # connection, and a writer waiting on its own lock is a deadlock, not a
         # slow write.
@@ -806,7 +804,12 @@ class LibraryIndexer:
             (asset_id, assets[asset_id][0], assets[asset_id][1] or None) for asset_id in assets
         )
         with self.store.write() as connection:
-            self.store.replace_session_occurrences(connection, session_id, rows)
+            # Only the assets whose occurrence rows actually changed are
+            # recomputed: a rescan that found the same records (a roster
+            # sidecar replaced by a sibling's heartbeat, an append that touched
+            # no file) must not rewrite the session's whole slice of the
+            # catalog. See ``replace_session_occurrences`` for the measurement.
+            affected = self.store.replace_session_occurrences(connection, session_id, rows)
             self.store.recompute_assets(connection, affected)
             self.store.record_session(
                 connection,
