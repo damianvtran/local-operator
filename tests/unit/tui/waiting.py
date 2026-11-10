@@ -90,12 +90,22 @@ class MessageWaiter:
 # failure this guards against.
 #
 # Constraints, deliberately:
-#   * No sleeps and no widened timeouts. The two bounds only turn a missing edge
-#     into a loud diagnostic. ``max_turns`` is the fast signal (each turn costs at
-#     least one 20 ms idle probe, so 300 turns is >= ~6 s on a healthy box and
-#     can only get slower, never fire earlier, under starvation). ``deadline_s``
-#     is the backstop for one wedged join, so every join runs under
-#     ``asyncio.timeout(remaining)``.
+#   * No sleeps and no widened timeouts. ``deadline_s`` is the only default
+#     bound: it turns a missing edge into a loud diagnostic, and every join runs
+#     under ``asyncio.timeout(remaining)`` so one wedged join cannot outlive it.
+#     ``max_turns`` defaults to None (no cap). A turn is NOT a unit of time: under
+#     a starved pause one turn costs ~1 ms (QA measured 300 turns in 0.20-0.49 s
+#     on PR #3732), so a turn cap fires in well under a second on exactly the
+#     loaded box this helper exists for, failing a cascade that was still
+#     making progress. That is a flake source, not a bound. The parameter stays
+#     for the helper's own contract tests, where ``max_turns=1`` proves a join
+#     is exact (one turn suffices) rather than won by repeated polling.
+#   * Wait for every state the predicate reads, not just the paint. The first
+#     migration compared the sidebar's painted state with its live state while
+#     the boot session's adoption (``current_id`` '' -> 'sess') could land after
+#     the paint without requesting a repaint; the predicate then never held,
+#     with the screen idle and clean. A predicate over state that can change
+#     without a refresh needs its own earlier ``settle`` for that state.
 #   * Name only worker groups whose workers terminate. A long-lived poller group
 #     never joins and ends at the deadline. Likewise a test that asserts an
 #     *intermediate* state (a "pending" latch) must not join the worker that
@@ -113,6 +123,10 @@ class MessageWaiter:
 #                  what="omp session list painted", workers=("harness-import",))
 #     threads = track_threads(monkeypatch)   # opt-in, before the code under test
 #     await settle(pilot, lambda: done, what="probe finished", joins=(threads,))
+
+
+class _Unsettled(AssertionError):
+    """settle's own bound firing, kept apart from a join's own failure."""
 
 
 class ThreadRegistry:
@@ -168,13 +182,13 @@ async def settle(
     workers: Collection[str] = (),
     joins: Iterable[Awaitable] = (),
     refresh: bool = True,
-    max_turns: int = 300,
+    max_turns: int | None = None,
     deadline_s: float = 30.0,
 ) -> None:
     """Join messages, named workers, ``joins`` and refresh; return once ``until()``.
 
     Raises ``AssertionError`` naming ``what`` at whichever bound fires first
-    (``max_turns`` or ``deadline_s``), with the turn count, elapsed time and the
+    (``deadline_s``, or ``max_turns`` when given), with the turn count, elapsed time and the
     app's unfinished workers. A named-group worker that failed re-raises as an
     ``AssertionError`` naming ``what``; a cancelled one (``exclusive=True``
     replacing it) is ignored. Settled also requires the named groups to be
@@ -188,10 +202,19 @@ async def settle(
     app = pilot.app
     groups = frozenset(workers)
     # Futures are re-awaitable, coroutines are not: wrap once so each turn can
-    # await every join again (a finished one returns immediately).
-    owned = [
-        join if isinstance(join, ThreadRegistry) else asyncio.ensure_future(join) for join in joins
-    ]
+    # await every join again (a finished one returns immediately). ``created``
+    # are the tasks settle itself made: it owns them, so the ``finally`` below
+    # cancels any still running when settle raises and retrieves their outcome,
+    # rather than leaving an orphan to log "never retrieved" at teardown.
+    created: list[asyncio.Future] = []
+    owned: list[ThreadRegistry | asyncio.Future] = []
+    for join in joins:
+        if isinstance(join, ThreadRegistry) or asyncio.isfuture(join):
+            owned.append(join)
+        else:
+            task = asyncio.ensure_future(join)
+            created.append(task)
+            owned.append(task)
     started = time.monotonic()
     turns = 0
 
@@ -202,12 +225,12 @@ async def settle(
             if not worker.is_finished and (not only_named or worker.group in groups)
         ]
 
-    def fail(bound: str, cause: BaseException | None = None) -> AssertionError:
+    def fail(bound: str) -> AssertionError:
         pending = ", ".join(
             f"{worker.group or '<no group>'}/{worker.name or '?'}={worker.state.name}"
             for worker in unfinished(only_named=False)
         )
-        return AssertionError(
+        return _Unsettled(
             f"never settled: {what} — {bound} after {turns} turn(s), "
             f"{time.monotonic() - started:.2f}s elapsed; "
             f"unfinished workers: {pending or 'none'}"
@@ -219,39 +242,79 @@ async def settle(
             if asyncio.iscoroutine(awaitable):
                 awaitable.close()  # never started; don't leak a "never awaited" warning
             raise fail(f"deadline {deadline_s}s")
+        timeout = asyncio.timeout(remaining)
         try:
-            async with asyncio.timeout(remaining):
+            async with timeout:
                 await awaitable
         except TimeoutError as error:
-            raise fail(f"deadline {deadline_s}s") from error
+            # Only OUR timeout is a deadline; a TimeoutError a join raised itself
+            # is that join's failure and propagates as such.
+            if timeout.expired():
+                raise fail(f"deadline {deadline_s}s") from error
+            raise
+
+    def retrieve(task: asyncio.Future) -> None:
+        # Done-callback for tasks settle outlives or shields: marks the outcome
+        # retrieved so asyncio never logs "Task exception was never retrieved".
+        # The outcome itself is reported elsewhere (or belongs to the worker).
+        if not task.cancelled():
+            task.exception()
 
     # Every named-group worker seen so far, from call time on. Textual drops a
-    # worker from ``app.workers`` the moment it finishes, so a worker that fails
-    # during the first pause would otherwise vanish before any snapshot sees it.
+    # worker from ``app.workers`` the moment it finishes, so this keeps one that
+    # was seen unfinished (at call time or after any pause) and then failed. It
+    # cannot see a worker that starts AND finishes inside a single pause; that
+    # worker's effects are still covered by the predicate.
     seen: dict[Worker, None] = dict.fromkeys(unfinished(only_named=True))
-    while True:
-        if turns >= max_turns:
-            raise fail(f"turn cap {max_turns}")
-        turns += 1
-        await bounded(pilot.pause())
-        seen.update(dict.fromkeys(unfinished(only_named=True)))
-        for worker in seen:
-            if worker.state == WorkerState.PENDING:
-                continue  # not started; Worker.wait() refuses it, next turn joins it
-            try:
+    try:
+        while True:
+            if max_turns is not None and turns >= max_turns:
+                raise fail(f"turn cap {max_turns}")
+            turns += 1
+            await bounded(pilot.pause())
+            seen.update(dict.fromkeys(unfinished(only_named=True)))
+            for worker in seen:
+                if worker.state == WorkerState.PENDING:
+                    continue  # not started; Worker.wait() refuses it, next turn joins it
                 # Shield: a deadline must fail this wait, not cancel the worker
-                # (Worker.wait awaits the worker's own task).
-                await bounded(asyncio.shield(worker.wait()))
-            except WorkerCancelled:
-                pass
-            except WorkerFailed as error:
-                raise AssertionError(
-                    f"{what}: worker {worker.group}/{worker.name} failed: {error.error!r}"
-                ) from error
-        for join in owned:
-            # Shield: a deadline must fail this wait, not cancel the caller's task.
-            await bounded(join if isinstance(join, ThreadRegistry) else asyncio.shield(join))
-        if refresh and app.is_running:
-            await bounded(app.screen.wait_for_refresh())
-        if not unfinished(only_named=True) and until():
-            return
+                # (Worker.wait awaits the worker's own task). The inner task is
+                # made first so it can carry ``retrieve``: after a deadline it
+                # outlives this wait and ends WorkerCancelled at app teardown.
+                waiter = asyncio.ensure_future(worker.wait())
+                waiter.add_done_callback(retrieve)
+                try:
+                    await bounded(asyncio.shield(waiter))
+                except WorkerCancelled:
+                    pass
+                except WorkerFailed as error:
+                    raise AssertionError(
+                        f"{what}: worker {worker.group}/{worker.name} failed: {error.error!r}"
+                    ) from error
+            for join in owned:
+                try:
+                    if isinstance(join, ThreadRegistry):
+                        await bounded(join)
+                    else:
+                        # Shield: a deadline must fail this wait, not cancel the
+                        # caller's task.
+                        await bounded(asyncio.shield(join))
+                except _Unsettled:
+                    raise
+                except Exception as error:
+                    coro = join.get_coro() if isinstance(join, asyncio.Task) else None
+                    label = getattr(coro, "__qualname__", None) or repr(join)
+                    raise AssertionError(f"{what}: join {label} failed: {error!r}") from error
+            if refresh and app.is_running:
+                # One after-refresh callback per turn. Measured on PR #3732 this
+                # does not hold the paint back: in every stalled run the screen
+                # was clean (no layout/repaint flags, no dirty widgets), its
+                # update timer paused and its queue empty, i.e. the paint had
+                # landed and only the predicate's own state was stale.
+                await bounded(app.screen.wait_for_refresh())
+            if not unfinished(only_named=True) and until():
+                return
+    finally:
+        for task in created:
+            if not task.done():
+                task.cancel()
+            task.add_done_callback(retrieve)

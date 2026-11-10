@@ -32,7 +32,18 @@ def isolated_sidebar(tmp_path, monkeypatch):
 
 
 async def prepare(app, pilot, entries):
-    await pilot.pause()
+    # The boot session's adoption calls ``sidebar.set_current('sess')``, which
+    # changes ``_paint_state()`` but requests no repaint while 'sess' is not one
+    # of the fixture rows. Landing after the paint below, it left the painted
+    # state stale for good (the paint settle never held: PR #3732 Q-1); landing
+    # after prepare returned, it drifted the state a test measures from. So
+    # adoption is the first thing joined, before any fixture state exists.
+    await settle(
+        pilot,
+        lambda: bool(app._adopted_session_id)
+        and app._session_sidebar.current_id == app._adopted_session_id,
+        what="the boot session was adopted",
+    )
     app._set_sidebar_open(True)
     # Retire both the immediate read and future timer reads before installing
     # synthetic rows; a real empty catalog must not overwrite this fixture.
@@ -51,6 +62,30 @@ async def prepare(app, pilot, entries):
         what="the sidebar painted the fixture rows",
     )
     return sidebar
+
+
+@pytest.mark.asyncio
+async def test_prepare_waits_out_a_late_boot_adoption(monkeypatch):
+    """Regression for PR #3732 Q-1: adoption landing after the fixture paint.
+
+    Defers the boot adoption by 0.3 s of wall time, which on any box puts it
+    after the first fixture paint. A ``prepare`` that does not join adoption
+    first either never settles (stale painted ``current_id``) or returns with
+    ``current_id`` still '' and the adoption still to come.
+    """
+    original = OperatorApp._adopt_session
+
+    def late_adopt(self, session, **kwargs):
+        self.set_timer(0.3, lambda: original(self, session, **kwargs))
+
+    monkeypatch.setattr(OperatorApp, "_adopt_session", late_adopt)
+    entries = [CatalogEntry(SessionRow("aaaaaaaaaaa1", 940, "One", live_state="idle"))]
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    with patch("local_operator.tui.widgets.session_sidebar.time.time", return_value=1000):
+        async with app.run_test(size=(150, 40)) as pilot:
+            sidebar = await prepare(app, pilot, entries)
+            assert sidebar.current_id == app._adopted_session_id == "sess"
+            assert sidebar._painted_state == sidebar._paint_state()
 
 
 @pytest.mark.asyncio
