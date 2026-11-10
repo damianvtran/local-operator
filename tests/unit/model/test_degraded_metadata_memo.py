@@ -45,6 +45,9 @@ def listing(monkeypatch, tmp_path) -> Iterator[dict[str, bool]]:
         return [DiscoveredModel(id=MODEL, name=MODEL, context_window=HEALTHY_WINDOW)]
 
     monkeypatch.setattr(discovery, "fetch_models", fetch_models)
+    # The OpenRouter ladder warm is a separate, background leg; it is not under
+    # test here and must not start a real thread beside the stubbed fetch.
+    monkeypatch.setattr(discovery, "_warm_relayed_effort_source", lambda _cache_dir: None)
     configure_mod.invalidate_model_info_cache()
     with catalogue._failure_lock:
         catalogue._last_failure.clear()

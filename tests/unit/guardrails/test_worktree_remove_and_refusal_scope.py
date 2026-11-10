@@ -321,14 +321,14 @@ def test_critical_refusal_scopes_finality(home: Path) -> None:
 
 
 def test_system_prompt_and_guide_scope_finality_and_keep_import_a_reroute() -> None:
-    """The prompt line stays terse (CI's context-budget had 33 tokens of headroom
-    on the base); the guide and the refusal text carry the full scope."""
+    """The prompt line stays terse (CI's context-budget sits within tokens of its
+    ceiling); the guide and the refusal text carry the full scope."""
     from local_operator.prompts_api import render_template
 
     prompt = " ".join(render_template("system.md", {}).split())
     assert (
-        "A `BLOCKED by guardrail` result is final for that action (same effect, same "
-        "targets, any route): report it. Fresh work of your own is not a reroute."
+        "`BLOCKED by guardrail` is final for that effect on those targets, by any "
+        "route: report it. Fresh work of your own is not a reroute."
     ) in prompt
     root = Path(prov.__file__).resolve().parents[1]
     guide = " ".join((root / "guides" / "guardrails" / "GUIDE.md").read_text().split())
