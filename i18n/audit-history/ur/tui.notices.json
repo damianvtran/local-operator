@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tui.notices",
-  "history_sha256": "5a5b0ea397395162c8369ee180c105a4781113997bc84bb1c566888500f98077",
+  "history_sha256": "12f4e7286ce2652640eb5ce5931d52580cc33683a74a0d6e80ca4a73226d739e",
   "entries": [
     {
       "locale": "ur",
@@ -26,6 +26,31 @@
       },
       "status": "passed",
       "note": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 2 added key(s) read, 0 findings; 30 unchanged keys byte-identical to the passed row at base. Target 9f34416b9ab7a7d6ddbe20fe54f69e7c4655b67a4b81f72d450d251e223d6127. Evidence: i18n/audits/evidence/ur/tui.notices/settings-1b1866b4f2ed/record.json Translator provenance: all 21 added translations authored in the resumed run on anthropic/claude-opus-5-5, no fallback during translation; initial implementation had an openai/gpt-6.1-sol handoff fallback only."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.notices",
+      "source_sha256": "e5a954b53492546bc38c646641449ab7e8ab88ec78df0e36a740d4417b88bd63",
+      "translator": {
+        "agent": "remediate-settings-lane (coder, lopdev) for the round-2 changed/added keys; coder-settings-lane (session 769ec448c35a) for carried model_switch_refused",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (per manager brief 2026-11-09)",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translators)",
+        "session": "1b1866b4f2ed",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "R2 2026-11-09 reviewer 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 2 keys read; 0 findings; 30 unchanged keys byte-identical to passed base row. Evidence: i18n/audits/evidence/ur/tui.notices/settings-r2-1b1866b4f2ed/record.json"
     }
   ]
 }
