@@ -235,14 +235,49 @@ describe("Send recording: stop, transcribe and submit in one press", () => {
 		await waitFor(() => expect(roles()).not.toContain("send-recording-busy"));
 	});
 
-	it("Enter is refused while recording: the take is kept", async () => {
+	it("Enter while recording inserts the transcript (as Insert transcript on desktop) and sends nothing", async () => {
 		renderComposer();
 		fireEvent.change(field(), { target: { value: "typed" } });
+		mockedTranscribe.mockResolvedValueOnce(transcript("spoken"));
 		const recorder = await startRecording();
 		fireEvent.keyDown(field(), { key: "Enter" });
+		await waitFor(() => expect(field().value).toBe("typed spoken"));
+		expect(recorder.state).toBe("inactive");
 		await new Promise((r) => setTimeout(r, 0));
 		expect(mockedSendCommand).not.toHaveBeenCalled();
-		expect(recorder.state).toBe("recording");
+		expect(roles()).not.toContain("send-recording-busy");
+	});
+
+	it("Enter while Send recording is busy is inert: no extra command, the take is not discarded", async () => {
+		renderComposer();
+		const held = holdTranscription();
+		await startRecording();
+		fireEvent.click(sendRecordingDisc());
+		await waitFor(() => expect(roles()).toEqual(["send-recording-busy"]));
+
+		fireEvent.keyDown(field(), { key: "Enter" });
+		fireEvent.keyDown(document.body, { key: "Enter" });
+		await new Promise((r) => setTimeout(r, 0));
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+		expect(mockedTranscribe).toHaveBeenCalledOnce();
+		expect((mockedTranscribe.mock.calls[0]![1] as AbortSignal).aborted).toBe(false);
+
+		/* The take still goes out once, as the Send recording press asked. */
+		await act(async () => held.resolve(transcript("go")));
+		await waitFor(() => expect(mockedSendCommand).toHaveBeenCalledOnce());
+	});
+
+	it("Enter on the focused Send recording disc keeps its own action: it sends the take", async () => {
+		renderComposer();
+		mockedTranscribe.mockResolvedValueOnce(transcript("go"));
+		await startRecording();
+		/* A keyboard Enter on a focused button arrives as a click (detail 0) AND a keydown. */
+		const disc = sendRecordingDisc();
+		fireEvent.keyDown(disc, { key: "Enter" });
+		await new Promise((r) => setTimeout(r, 0));
+		expect(mockedTranscribe).not.toHaveBeenCalled();
+		fireEvent.click(disc, { detail: 0 });
+		await waitFor(() => expect(mockedSendCommand).toHaveBeenCalledOnce());
 	});
 });
 

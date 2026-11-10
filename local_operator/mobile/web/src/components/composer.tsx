@@ -1376,6 +1376,30 @@ export function Composer({
 		}
 	};
 
+	/* ENTER DURING A TAKE IS "INSERT TRANSCRIPT", AS ON DESKTOP: stop the take,
+	   transcribe it, put the words in the box, send nothing. It is a window-level
+	   key (the mic or Cancel the user just tapped holds focus, not the box), claimed
+	   only while a take is RECORDING: while it is transcribing there is no recorder
+	   left to stop, and `dictation !== "recording"` leaves the key inert, so the take
+	   in flight is neither discarded nor sent (the Send recording phase is also
+	   transcribing, so its busy disc is covered by the same rule). A focused button
+	   keeps its own native Enter (Cancel cancels, the Send recording disc sends the
+	   take); Shift+Enter stays the box's newline, and an IME owns Enter while it
+	   composes a candidate. */
+	useEffect(() => {
+		if (dictation !== "recording") return undefined;
+		const onKey = (event: KeyboardEvent) => {
+			if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+			const target = event.target;
+			if (target instanceof Element && target !== textareaRef.current && target.closest("button, a, input, select, textarea, summary, [role='dialog']")) return;
+			event.preventDefault();
+			stopDictation();
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- `stopDictation` reads refs and stable setters only
+	}, [dictation]);
+
 	const finishDictation = async (recorder: MediaRecorder) => {
 		clearDictationTimers();
 		releaseDictationTracks();
@@ -2256,7 +2280,9 @@ export function Composer({
 								e.preventDefault();
 								/* While a take is recording or transcribing, Enter must not send the
 								   typed draft: `send` discards the take, and the words the user just
-								   spoke vanish. The desktop composer refuses it the same way. */
+								   spoke vanish. The desktop composer refuses it the same way. During
+								   a RECORDING the window-level handler above turns this same key
+								   into Insert transcript; here it only keeps the newline out. */
 								if (dictationRef.current !== "idle" || sendRecording !== "idle") return;
 								void send(text);
 							}

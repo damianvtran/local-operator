@@ -339,20 +339,66 @@ describe("cancel, refusal and failure", () => {
 describe("interaction with send", () => {
 	/* Before the Send recording slot, the disc at the Send spot (and Enter) sent the
 	   typed draft and THREW THE TAKE AWAY. The disc now sends the take
-	   (composer.send-recording.test.tsx); Enter is refused while a take is live. */
-	it("Enter while recording sends nothing and keeps the take", async () => {
+	   (composer.send-recording.test.tsx); Enter during a take is the desktop's
+	   "Insert transcript": stop, transcribe, put the words in the box, send nothing. */
+	it("Enter while recording stops the take and inserts the transcript without sending", async () => {
 		renderComposer();
 		fireEvent.change(field(), { target: { value: "typed text" } });
+		mockedTranscribe.mockResolvedValueOnce({ text: "spoken", provider: "radient", model: null, path: "provider_stt_radient" });
 		const recorder = await startRecording();
 		recorder.emitChunk("audio-bytes");
 
 		fireEvent.keyDown(field(), { key: "Enter" });
+
+		await waitFor(() => expect(field().value).toBe("typed text spoken"));
+		expect(recorder.state).toBe("inactive");
+		expect(mockedTranscribe).toHaveBeenCalledOnce();
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+	});
+
+	it("Enter with focus outside the box (window level) also inserts the transcript", async () => {
+		renderComposer();
+		mockedTranscribe.mockResolvedValueOnce({ text: "spoken", provider: "radient", model: null, path: "provider_stt_radient" });
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+
+		fireEvent.keyDown(document.body, { key: "Enter" });
+
+		await waitFor(() => expect(field().value).toBe("spoken"));
+		expect(recorder.state).toBe("inactive");
+		expect(mockedSendCommand).not.toHaveBeenCalled();
+	});
+
+	it("Enter on a focused button keeps that button's own action (Enter on cancel is not Insert)", async () => {
+		renderComposer();
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+
+		fireEvent.keyDown(screen.getByRole("button", { name: "cancel recording" }), { key: "Enter" });
 		await new Promise((r) => setTimeout(r, 0));
 
-		expect(mockedSendCommand).not.toHaveBeenCalled();
+		expect(mockedTranscribe).not.toHaveBeenCalled();
 		expect(recorder.state).toBe("recording");
-		expect(screen.getByRole("button", { name: "stop and transcribe" })).toBeTruthy();
-		expect(field().value).toBe("typed text");
+	});
+
+	it("Shift+Enter during a take is not claimed (it stays the box's newline key)", async () => {
+		renderComposer();
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+
+		fireEvent.keyDown(field(), { key: "Enter", shiftKey: true });
+		await new Promise((r) => setTimeout(r, 0));
+
+		expect(mockedTranscribe).not.toHaveBeenCalled();
+		expect(recorder.state).toBe("recording");
+	});
+
+	it("Enter when not recording is not claimed: it still sends the typed draft", async () => {
+		renderComposer();
+		fireEvent.change(field(), { target: { value: "typed text" } });
+		fireEvent.keyDown(field(), { key: "Enter" });
+		await waitFor(() => expect(mockedSendCommand).toHaveBeenCalledOnce());
+		expect(mockedTranscribe).not.toHaveBeenCalled();
 	});
 
 	it("the 120 s cap stops the recorder rather than discarding", async () => {
@@ -412,6 +458,7 @@ describe("empty transcript, discards and cancels", () => {
 		await screen.findByText("Transcribing…");
 
 		fireEvent.keyDown(field(), { key: "Enter" });
+		fireEvent.keyDown(document.body, { key: "Enter" });
 		/* The disc is inert too: a press would abort the request and send the old draft. */
 		expect((screen.getByRole("button", { name: "send" }) as HTMLButtonElement).disabled).toBe(true);
 		expect(mockedSendCommand).not.toHaveBeenCalled();
@@ -419,6 +466,8 @@ describe("empty transcript, discards and cancels", () => {
 		held!({ text: "more", provider: "radient", model: null, path: "provider_stt_radient" });
 		await waitFor(() => expect(field().value).toBe("typed text more"));
 		expect(mockedSendCommand).not.toHaveBeenCalled();
+		/* Enter did not stop or discard the take: the one request was the tap's. */
+		expect(mockedTranscribe).toHaveBeenCalledOnce();
 	});
 
 	it("cancels an in-flight transcription from the status row (U5)", async () => {
