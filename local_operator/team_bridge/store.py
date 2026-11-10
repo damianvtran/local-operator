@@ -406,6 +406,18 @@ CREATE TABLE IF NOT EXISTS screening_answer_holds (
         owner_key, body_sha256, template_sha256, model, admission_revision, envelope_digest
     )
 );
+-- How many passes in a row EVERY screening hop answered unusably for one
+-- message (``Store.note_unusable_screening_pass``). Keyed by message id and
+-- separate from ``screening_holds`` because the conversation loop deletes the
+-- screener's bare hold row every tick (QA round 2, Q4); terminal outcomes clear
+-- it. Not in ``_V3_TABLES``: a store without it is simply one with no counts.
+CREATE TABLE IF NOT EXISTS screening_unusable_passes (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    passes INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, message_id)
+);
 CREATE TABLE IF NOT EXISTS screening_policy (
     owner_key TEXT PRIMARY KEY,
     version TEXT NOT NULL,
@@ -598,6 +610,23 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_unusable_pass_table(conn: sqlite3.Connection) -> None:
+    """Create the unusable-pass counter on a store that predates it (QA round 2, Q4).
+
+    The same rule as :func:`_ensure_answer_hold_table`: a stamped current-version
+    store never re-runs schema DDL, so the paths that touch the table create it
+    (``IF NOT EXISTS``, inside the caller's write transaction). Purely additive and
+    authority-free: a lost row costs at most a few more retry passes before a
+    person is asked, never a verdict, budget or receipt.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_unusable_passes ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, passes INTEGER NOT NULL, "
+        "updated_at REAL NOT NULL, PRIMARY KEY (owner_key, message_id))"
+    )
 
 
 def _ensure_budget_episode_table(conn: sqlite3.Connection) -> None:
@@ -3457,11 +3486,20 @@ class Store:
         that survives a connector restart (the loop's ``_RETRY_ATTEMPTS`` is
         in-memory).
 
-        Lives on the message's own ``screening_holds`` row (just written by the
-        caller), so a delivered message's receipt commit deletes it with the row.
-        ADDITIVE AND NULLABLE, the :meth:`_ensure_hold_failure_class_column` rule:
-        an older binary never names the column. ``0`` when no row matched (the
-        hold write itself was refused), which never converts anything.
+        WHY ITS OWN TABLE (QA round 2, Q4). The count first lived on the
+        message's ``screening_holds`` row, but on the conversation lane that row
+        is the screener's bare ``bcmsg_`` duplicate, which the loop deletes every
+        tick once due (:meth:`retire_due_bare_conversation_holds`) before the
+        lane's feed-ref row re-screens it — so every pass counted 1 and the bound
+        was never reached. ``screening_unusable_passes`` is keyed by the message
+        id alone and the retire never touches it; the receipt commits and
+        :meth:`delete_hold` clear it (:meth:`_clear_unusable_passes`), so a
+        delivered, admitted or discarded message leaves no count behind.
+
+        Counts only while the caller's hold row exists (the pipeline writes it
+        just before calling): ``0`` when the hold write itself was refused, which
+        never converts anything. Additive (:func:`_ensure_unusable_pass_table`), not
+        in ``_V3_TABLES``, so its absence is never damage.
         """
 
         keys = [message_id]
@@ -3476,24 +3514,46 @@ class Store:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
-            if "unusable_passes" not in columns:
-                conn.execute("ALTER TABLE screening_holds ADD COLUMN unusable_passes INTEGER")
+            _ensure_unusable_pass_table(conn)
             total = 0
             for key in keys:
-                conn.execute(
-                    "UPDATE screening_holds SET unusable_passes = COALESCE(unusable_passes, 0) + 1 "
-                    "WHERE owner_key = ? AND message_id = ?",
+                held = conn.execute(
+                    "SELECT 1 FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                     (owner_key, key),
+                ).fetchone()
+                if held is None:
+                    continue
+                conn.execute(
+                    "INSERT INTO screening_unusable_passes "
+                    "(owner_key, message_id, passes, updated_at) VALUES (?, ?, 1, ?) "
+                    "ON CONFLICT (owner_key, message_id) DO UPDATE SET "
+                    "passes = passes + 1, updated_at = excluded.updated_at",
+                    (owner_key, key, time.time()),
                 )
                 row = conn.execute(
-                    "SELECT unusable_passes FROM screening_holds "
+                    "SELECT passes FROM screening_unusable_passes "
                     "WHERE owner_key = ? AND message_id = ?",
                     (owner_key, key),
                 ).fetchone()
                 if row is not None:
                     total = max(total, int(row[0] or 0))
             return total
+
+    @staticmethod
+    def _clear_unusable_passes(conn: sqlite3.Connection, owner_key: str, message_id: str) -> None:
+        """Drop a message's unusable-pass count once it reaches a terminal outcome.
+
+        Called beside every terminal ``DELETE FROM screening_holds`` (receipt
+        commits, owner releases, :meth:`delete_hold`) but deliberately NOT by
+        :meth:`retire_due_bare_conversation_holds`: that retire is a per-tick
+        de-duplication, not an outcome, and clearing there is exactly the Q4 bug.
+        """
+
+        _ensure_unusable_pass_table(conn)
+        conn.execute(
+            "DELETE FROM screening_unusable_passes WHERE owner_key = ? AND message_id = ?",
+            (owner_key, message_id),
+        )
 
     @staticmethod
     def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
@@ -5657,6 +5717,7 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (key, str(message_id)),
             )
+            self._clear_unusable_passes(conn, key, str(message_id))
             return dict(
                 decoded,
                 rendered_template_sha256=source["rendered_template_sha256"],
@@ -7059,6 +7120,7 @@ class Store:
                     "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                     (key, message_id),
                 )
+                self._clear_unusable_passes(conn, key, message_id)
             else:
                 # WRITE-ONCE per attempt (reviewer R7): once this attempt has
                 # committed a receipt, a later hold for the same attempt is
@@ -7467,6 +7529,9 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), _contentless_delivery_key(message_id)),
             )
+            # Both spellings: the count is keyed by the id the screener saw.
+            for counted in {message_id, _contentless_delivery_key(message_id)}:
+                self._clear_unusable_passes(conn, _owner_key(owner), counted)
             return bool(deleted.rowcount)
 
     def make_holds_due(self, owner: OwnerSnapshot, hold_code: str, *, now: float) -> int:
@@ -8347,3 +8412,4 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (key, message_id),
             )
+            self._clear_unusable_passes(conn, key, message_id)

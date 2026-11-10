@@ -4505,9 +4505,10 @@ class TeamBridgeClient:
 
         has_grant = attachments_hash is not None or files_hash is not None
         # A TEXT-ONLY admission may name its template only when that template is the
-        # pinned bridge-screen-v5: v5 is a text-only prompt, and the hub's admission
-        # row must record which prompt judged the message (agent-server
-        # ``admitAttachmentGrant`` accepts a known template with no grant). Any other
+        # pinned bridge-screen-v5: v5 is a text-only prompt, and the hub validates
+        # the template vocabulary on a text-only admit (agent-server
+        # ``admitAttachmentGrant`` accepts a known template with no grant; it does not
+        # record it, code review round 2, N1). Any other
         # template without a grant is still a caller bug: v3/v4 hashes exist to bind
         # image/file grants, and presenting one with no grant would claim a vision
         # screen nobody can check. (QA round 1 Q1: this used to raise for every v5

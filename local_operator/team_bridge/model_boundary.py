@@ -1583,7 +1583,10 @@ class ScreenChainRunner:
         #: primary is up and the advance was the reply's doing -- which a sender
         #: can provoke -- so the fallback's parseable hold is the message's
         #: answer and must be cached, or every backoff pass re-draws it until it
-        #: says deliver (code review round 1, R1).
+        #: says deliver (code review round 1, R1). Set by an unusable reply on
+        #: ANY hop before the one that answered (round 2, M1): a route-failed
+        #: hop 0 followed by an off-grammar hop 1 is the same reply-driven
+        #: advance, and the name is kept for the pipeline's reader.
         self.primary_answered_unusably = False
 
     @property
@@ -1720,8 +1723,10 @@ class ScreenChainRunner:
                 # real ``hold``/``bounce`` is usable and returned above, so this
                 # can never shop for a ``deliver`` among parseable verdicts.
                 self.unusable_replies += 1
-                if index == 0:
-                    self.primary_answered_unusably = True
+                # ANY unusable reply before the serving hop, not only hop 0's
+                # (code review round 2, M1): with hop 0 route-failed and hop 1
+                # off-grammar, the advance to hop 2 was still the reply's doing.
+                self.primary_answered_unusably = True
                 unusable = (reply, actual)
                 unusable_hop = (index, hop)
                 logger.info(

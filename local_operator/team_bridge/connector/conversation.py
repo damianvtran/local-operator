@@ -1371,10 +1371,11 @@ def _text_admit_template(result: Any) -> str | None:
 
     ``None`` (omitted) is the pre-v5 shape: the hub reads it as the ``screening``
     slot's template. A screen that actually rendered bridge-screen-v5 must say so,
-    because the hub's admission row records which prompt judged the message and
-    accepts the v5 hash beside the older text templates (agent-server
-    ``admitAttachmentGrant``). Only the pinned v5 hash qualifies; any other
-    rendered value (a cache hit renders nothing) keeps the omitted shape.
+    because the hub validates a named template's vocabulary on a text-only admit
+    and accepts the v5 hash beside the older text templates (agent-server
+    ``admitAttachmentGrant``; it does not record it, code review round 2, N1).
+    Only the pinned v5 hash qualifies; any other rendered value (a cache hit
+    renders nothing) keeps the omitted shape.
     """
 
     if (

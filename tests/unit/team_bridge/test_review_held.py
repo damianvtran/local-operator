@@ -449,6 +449,112 @@ def test_blank_on_every_hop_becomes_a_review_hold_after_the_bound(
     assert out.disposition == "deliver" and len(log) == before
 
 
+def test_the_unusable_count_survives_the_loops_bare_hold_retire(
+    rig,  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
+    """QA round 2 Q4: the R4 bound is reached on the CONNECTOR path, not only back to back.
+
+    Between passes the conversation loop deletes the screener's due bare ``bcmsg_``
+    hold row (``connector/loop.py`` -> ``retire_due_bare_conversation_holds``). The
+    count lived on that row, so every pass counted 1 and an all-blank message rode
+    the retry ladder forever. Before the fix: ``["empty_reply"] * 4``.
+    """
+
+    import time
+
+    config_dir, store, owner = rig
+    policy = Policy()
+    codes, calls = [], []
+    make_chain, log = _two_hop_chain(policy, [""], [""])
+    for index in range(screening.UNUSABLE_PASSES_BEFORE_REVIEW + 1):
+        if index:
+            # The loop's own step at the top of the next tick, once the row is due
+            # (any backoff has elapsed): the previous pass's bare row is gone.
+            retired = store.retire_due_bare_conversation_holds(owner, now=time.time() + 86_400)
+            assert retired == [MESSAGE_ID]
+        before = len(log)
+        out = screening.screen_message(
+            owner, _item(), config_dir=config_dir, policy=policy, runner=make_chain()
+        )
+        codes.append(out.hold_code)
+        calls.append(len(log) - before)
+    bound = screening.UNUSABLE_PASSES_BEFORE_REVIEW
+    assert codes == ["empty_reply"] * (bound - 1) + ["model_hold", "model_hold"]
+    # The pass after conversion replays the decision row: no draw.
+    assert calls == [4] * bound + [0]
+    assert _count(config_dir, "screening_unusable_passes") == 1
+    # A terminal outcome clears the count with the hold.
+    _decide(config_dir, owner, "deliver")
+    out = screening.screen_message(
+        owner, _item(), config_dir=config_dir, policy=policy, runner=make_chain()
+    )
+    assert out.disposition == "deliver"
+    assert _count(config_dir, "screening_unusable_passes") == 0
+
+
+def test_delete_hold_clears_the_unusable_count(rig) -> None:  # noqa: F811 — imported fixture
+    """The conversation lane's explicit terminal clear drops the count too (Q4)."""
+
+    config_dir, store, owner = rig
+    policy = Policy()
+    make_chain, _log = _two_hop_chain(policy, [""], [""])
+    screening.screen_message(
+        owner, _item(), config_dir=config_dir, policy=policy, runner=make_chain()
+    )
+    assert _count(config_dir, "screening_unusable_passes") == 1
+    store.delete_hold(owner, MESSAGE_ID)
+    assert _count(config_dir, "screening_unusable_passes") == 0
+
+
+def test_a_route_failed_primary_then_off_grammar_hop_still_caches_the_answer(
+    rig,  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
+    """Code review round 2 M1: hop 0 route-fails, hop 1 answers off-grammar, hop 2 holds.
+
+    The advance past hop 1 was the reply's doing, so hop 2's hold is the answer and is
+    cached under the primary's key even with review off. Before the fix (flag set only
+    on hop 0): ``[model_hold, model_hold, deliver]`` with 0 cache rows.
+    """
+
+    from local_operator.model.configure import build_model_spec
+    from local_operator.team_bridge import model_boundary as mb
+
+    config_dir, _store, owner = rig
+    _off(config_dir)
+    policy = Policy()
+    models = (policy.default_model, "claude-opus-5-5", "claude-sonnet-5")
+    setattr(policy, "approved_serving_identities", models)
+    log: list[str] = []
+
+    class _Down:
+        async def acall(self, prompt: str, *, default_model: str, **_: Any) -> Any:
+            log.append(models[0])
+            failure = RuntimeError("route down")
+            setattr(failure, mb._ADVANCE_ATTR, True)  # the guard's "advance" verdict
+            raise failure
+
+    scripts = {
+        models[0]: _Down(),
+        models[1]: _Scripted(["I cannot comply"], models[1], log),
+        models[2]: _Scripted([DOUBT, DOUBT, DELIVER], models[2], log),
+    }
+    hops = [
+        mb.DefaultSelection(policy.provider, m, build_model_spec(policy.provider, m))
+        for m in models
+    ]
+    outcomes = []
+    for _ in range(3):
+        chain = mb.ScreenChainRunner(hops, lambda hop: scripts[hop.model_id])
+        out = screening.screen_message(
+            owner, _item(), config_dir=config_dir, policy=policy, runner=chain
+        )
+        outcomes.append((out.disposition, out.hold_code))
+    assert outcomes == [("hold", "model_hold")] * 3
+    assert _count(config_dir, "screening_answer_holds") == 1
+    # One pass of draws, then replays from the cache.
+    assert log == [models[0], models[1], models[1], models[2]]
+
+
 def test_blank_passes_keep_retrying_with_review_off(rig) -> None:  # noqa: F811 — imported fixture
     config_dir, store, owner = rig
     _off(config_dir)
