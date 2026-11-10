@@ -95,8 +95,7 @@ async def test_conflict_reason_is_safe_and_fail_closed(reason, stage, caplog):
         )
         with pytest.raises(ProviderError) as caught:
             _ = [
-                event
-                async for event in client._stream_responses(request, None, None, codex=False)
+                event async for event in client._stream_responses(request, None, None, codex=False)
             ]
     error = caught.value
     assert error.message == f"responses_tool_arguments_conflict (reason={reason}, event={stage})"
