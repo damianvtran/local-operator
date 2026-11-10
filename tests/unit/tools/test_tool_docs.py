@@ -301,7 +301,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (profile proposals, PR #3704): 1462 -> 1498 (+36), the notes
     # line routing unasked account edits to Agents -> <name> and the
     # ``profile_proposal`` apply step; ``team`` gains the same line (+36).
-    "agent": 1498,
+    # RE-MEASURED (PR #3704 context-budget trim): 1498 -> 1471 (-27). Wire
+    # field descriptions (description/tools/saver/delegate/action_class/kind/
+    # backup_id) shortened to win back the start-context budget the deferred
+    # ``skill``/``profile_proposal`` inventory entries cost; the full
+    # action_class/kind rationale stays in this tool's notes. Same printed table.
+    "agent": 1471,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -829,7 +834,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: as the canonical arm; ``task`` stays 764 (Saver is not a launch field).
 #: RE-MEASURED (profile proposals, PR #3704): agent 1491 -> 1527, the same +36
 #: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1527, "task": 764}
+#: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
+#: -27 field-description trim as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1500, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

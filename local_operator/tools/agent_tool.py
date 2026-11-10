@@ -161,8 +161,8 @@ class AgentParams(BaseModel):
     description: str | None = Field(
         default=None,
         description=(
-            "create/update: when to use this profile. Semantic routing matches "
-            "this, so write the trigger condition, not a job title."
+            "create/update: when to use it. Semantic routing matches this: "
+            "write the trigger, not a job title."
         ),
     )
     instructions: str | None = Field(
@@ -175,8 +175,8 @@ class AgentParams(BaseModel):
     tools: list[str] | None = Field(
         default=None,
         description=(
-            "create/update on a ROLE: restrict the profile to these tools. "
-            "Omit for all. A specialist carries no tool allow-list."
+            "create/update on a ROLE: restrict it to these tools; omit for all. "
+            "Not on a specialist."
         ),
     )
     # A free string rather than a Literal for the same reason as the ``task``
@@ -194,7 +194,7 @@ class AgentParams(BaseModel):
 
     saver: Literal["on", "off", "inherit"] | None = Field(
         default=None,
-        description="create/update: pin Radient Saver for this role; inherit clears the pin.",
+        description="create/update: pin Radient Saver for this role; inherit clears it.",
     )
 
     @field_validator("effort", mode="before")
@@ -257,24 +257,25 @@ class AgentParams(BaseModel):
     delegate: bool | None = Field(
         default=None,
         description=(
-            "create/update on a ROLE: may this profile launch subagents? "
-            "Default no; only coordinating roles should. A specialist cannot delegate."
+            "create/update on a ROLE: may it launch subagents? "
+            "Default no; only coordinating roles should. A specialist cannot."
         ),
     )
     action_class: Literal["reactive", "proactive"] | None = Field(
         default=None,
         description=(
-            "create/update: 'reactive' (default) or 'proactive'. Set proactive "
-            "ONLY when the user clearly asked for a proactive use case: it can "
-            "message them unprompted, so it is sparing by default."
+            # The full rationale lives in the tool:// notes (tool_docs.py); the
+            # wire keeps only the rule, trimmed for the start-context budget.
+            "create/update: 'reactive' (default) or 'proactive' — ONLY when the "
+            "user clearly asked for a proactive use case (it messages them unprompted)."
         ),
     )
     kind: Literal["role", "specialist"] | None = Field(
         default=None,
         description=(
-            "create: 'role' (default; a reusable task(agent=...) target) or "
+            "create: 'role' (default; a task(agent=...) target) or "
             "'specialist' (a durable named agent, may sit on a team roster). "
-            "Ignored on update: kind cannot change."
+            "Fixed after create."
         ),
     )
     scope: Literal["global", "session"] | None = Field(
@@ -292,7 +293,7 @@ class AgentParams(BaseModel):
     )
     backup_id: str | None = Field(
         default=None,
-        description="revert: the backup_id an account save's receipt returned.",
+        description="revert: backup_id from an account save's receipt.",
     )
     # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
     # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
