@@ -4042,6 +4042,7 @@ async def tool_call_diff(
     call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
     start: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ):
     """One page of a write/edit call's COMPLETE, source-redacted diff.
 
@@ -4051,11 +4052,17 @@ async def tool_call_diff(
     this session's own transcript row for ``call_id``. Unknown session,
     foreign call or a non-write/edit call are one 404; bad paging is 422; a
     captured-but-unservable diff (``oversized``/``withheld``/``unavailable``/
-    ``evicted``) and an old row (``not_recorded``) are 200 answers with no rows.
+    ``evicted``) and an old row (``not_recorded``) are 200 answers with no rows;
+    so is a call id that two distinct persisted rows share (``unavailable``:
+    serving either could be the wrong capture). ``offset`` is the opaque,
+    server-issued continuation into one row too large for a page (see
+    ``ToolCallDiffPage``); a client echoes ``next_offset`` and never computes it.
     """
     async with errors(request):
         page = await _diff_page_or_422(
-            host(request).tool_call_diff(session_id, call_id, start=start, limit=limit)
+            host(request).tool_call_diff(
+                session_id, call_id, start=start, limit=limit, offset=offset
+            )
         )
     return _diff_reply(page)
 
@@ -4071,6 +4078,7 @@ async def child_tool_call_diff(
     call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
     start: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ):
     """The child reader's twin of :func:`tool_call_diff`.
 
@@ -4080,7 +4088,7 @@ async def child_tool_call_diff(
     async with errors(request):
         page = await _diff_page_or_422(
             host(request).child_tool_call_diff(
-                session_id, child_id, call_id, start=start, limit=limit
+                session_id, child_id, call_id, start=start, limit=limit, offset=offset
             )
         )
     return _diff_reply(page)

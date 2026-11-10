@@ -127,14 +127,20 @@ async def test_routes_are_bearer_gated_no_store_and_follow_the_contract(tmp_path
         assert result == {
             "state": "archived",
             "start": 0,
+            "offset": 0,
             "total_rows": 6,
             "rows": ROWS,
             "hunk_header": None,
             "next_start": None,
+            "next_offset": None,
             "clipped_rows": [],
         }
         child_ok = client.get(child + "?start=3&limit=1", headers=auth).json()["result"]
         assert child_ok["rows"] == ["+first"] and child_ok["next_start"] == 4
+        assert child_ok["next_offset"] == 0
+        # A server-issued offset resumes inside a row body; one past it is 422.
+        resumed = client.get(child + "?start=3&offset=2", headers=auth).json()["result"]
+        assert resumed["rows"][0] == "+rst" and resumed["offset"] == 2
         missing = [
             f"/v1/desktop/sessions/{PARENT_ID}/tool-calls/nope/diff",
             f"/v1/desktop/sessions/{PARENT_ID}/tool-calls/c-1/diff",
@@ -145,7 +151,15 @@ async def test_routes_are_bearer_gated_no_store_and_follow_the_contract(tmp_path
         ]
         statuses = {path: client.get(path, headers=auth).status_code for path in missing}
         assert set(statuses.values()) == {404}, statuses
-        for query in ("start=-1", "limit=0", "limit=201", "start=6", "start=x"):
+        for query in (
+            "start=-1",
+            "limit=0",
+            "limit=201",
+            "start=6",
+            "start=x",
+            "offset=-1",
+            "start=3&offset=5",
+        ):
             bad = client.get(parent + "?" + query, headers=auth)
             assert bad.status_code == 422, (query, bad.text)
         long_id = client.get(
@@ -169,5 +183,6 @@ def test_openapi_declares_both_routes_with_the_page_model():
     ):
         params = {p["name"]: p for p in paths[path]["get"]["parameters"]}
         assert params["limit"]["schema"]["maximum"] == 200
+        assert params["offset"]["schema"]["minimum"] == 0
         assert params["call_id"]["schema"]["maxLength"] == 256
         assert "digest" not in params

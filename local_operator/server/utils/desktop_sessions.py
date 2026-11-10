@@ -7119,7 +7119,13 @@ def _persisted_children(
 
 
 def _diff_page(
-    session_dir: Path, session_id: str, call_id: str, start: int, limit: int, root: Path
+    session_dir: Path,
+    session_id: str,
+    call_id: str,
+    start: int,
+    limit: int,
+    offset: int,
+    root: Path,
 ) -> dict[str, Any]:
     """``diff_archive.load_page`` with its refusals mapped to the host's errors.
 
@@ -7131,7 +7137,13 @@ def _diff_page(
 
     try:
         return diff_archive.load_page(
-            session_dir, session_id, call_id, start=start, limit=limit, config_root=root
+            session_dir,
+            session_id,
+            call_id,
+            start=start,
+            limit=limit,
+            offset=offset,
+            config_root=root,
         )
     except diff_archive.DiffArchiveNotFound:
         raise KeyError("Unknown tool call") from None
@@ -8653,7 +8665,13 @@ class DesktopSessions:
         return await asyncio.to_thread(read)
 
     async def tool_call_diff(
-        self, session_id: str, call_id: str, *, start: int = 0, limit: int = 200
+        self,
+        session_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """One page of a write/edit call's complete, source-redacted diff.
 
@@ -8677,12 +8695,19 @@ class DesktopSessions:
             path = self.root / "sessions" / session_id
             if not path.is_dir() or not is_user_session(path):
                 raise KeyError("Unknown session")
-            return _diff_page(path, session_id, call_id, start, limit, self.root)
+            return _diff_page(path, session_id, call_id, start, limit, offset, self.root)
 
         return await asyncio.to_thread(read)
 
     async def child_tool_call_diff(
-        self, session_id: str, child_id: str, call_id: str, *, start: int = 0, limit: int = 200
+        self,
+        session_id: str,
+        child_id: str,
+        call_id: str,
+        *,
+        start: int = 0,
+        limit: int = 200,
+        offset: int = 0,
     ) -> dict[str, Any]:
         """The child twin of :meth:`tool_call_diff`, behind the child containment proof.
 
@@ -8696,7 +8721,7 @@ class DesktopSessions:
 
         def read() -> dict[str, Any]:
             child_dir = _contained_child_dir(self.root, session_id, child_id)
-            return _diff_page(child_dir, child_dir.name, call_id, start, limit, self.root)
+            return _diff_page(child_dir, child_dir.name, call_id, start, limit, offset, self.root)
 
         return await asyncio.to_thread(read)
 

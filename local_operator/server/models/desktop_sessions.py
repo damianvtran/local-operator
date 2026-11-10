@@ -885,16 +885,24 @@ class ToolCallDiffPage(BaseModel):
     The frozen v1 contract the desktop renderer pages through. ``rows`` are
     unified-diff rows verbatim (the nameless ``--- ``/``+++ `` pair first), so
     the renderer's existing green/red classifier applies unchanged.
-    ``next_start`` is ``start + len(rows)`` and ``None`` only at the end;
-    ``clipped_rows`` are ABSOLUTE indices of rows cut to fit one page.
+    A row too large for one page continues on the next through the
+    server-issued ``(next_start, next_offset)`` cursor: ``offset`` is a
+    code-point offset into the row's body (after its diff marker), every
+    fragment starts with the row's original marker, and the client joins
+    fragments of one row (``start + i``) by appending later fragments minus
+    their marker. ``next_offset`` > 0 means the last fragment is partial; both
+    cursors are ``None`` only at the end. ``clipped_rows`` is kept for wire
+    compatibility and is always ``[]`` (nothing is ever cut away).
     """
 
     state: ToolCallDiffState
     start: int
+    offset: int
     total_rows: int
     rows: list[str]
     hunk_header: str | None
     next_start: int | None
+    next_offset: int | None
     clipped_rows: list[int]
 
 

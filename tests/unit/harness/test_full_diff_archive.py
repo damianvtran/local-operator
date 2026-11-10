@@ -44,7 +44,8 @@ pytestmark = pytest.mark.asyncio
 SESSION_ID = "fd0000000001"
 
 
-def _provider(calls: list[tuple[str, str, dict[str, Any]]]):
+def _provider(calls: list[tuple[str, str, dict[str, Any]] | None]):
+    """Scripted provider: a call per request, ``None`` (or past the end) ends the turn."""
     requests: list[Any] = []
 
     def provider(request, signal=None):
@@ -52,8 +53,9 @@ def _provider(calls: list[tuple[str, str, dict[str, Any]]]):
         requests.append(request)
 
         async def generate():
-            if index < len(calls):
-                call_id, name, args = calls[index]
+            step = calls[index] if index < len(calls) else None
+            if step is not None:
+                call_id, name, args = step
                 yield StreamToolCallDelta(
                     index=0, id=call_id, name=name, argument_delta=json.dumps(args)
                 )
@@ -69,7 +71,7 @@ def _provider(calls: list[tuple[str, str, dict[str, Any]]]):
 
 async def _run(
     tmp_path: Path,
-    calls: list[tuple[str, str, dict[str, Any]]],
+    calls: list[tuple[str, str, dict[str, Any]] | None],
     *,
     secrets: tuple[str, ...] = (),
     redact: bool = True,
@@ -97,17 +99,55 @@ def _session_dir(tmp_path: Path) -> Path:
     return tmp_path / "sessions" / SESSION_ID
 
 
-def _all_rows(tmp_path: Path, call_id: str) -> list[str]:
+def _reconstruct(
+    session_dir: Path, call_id: str, *, limit: int = 200
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Walk the server-issued cursor to the end and re-join every row.
+
+    Asserts the v1 continuation contract on every page: the exact requested
+    cursor is echoed, the WHOLE response (CRUD envelope included, JSON-escaped)
+    fits the byte ceiling, fragments keep their row's marker, the cursor always
+    moves forward, and ``None`` arrives only at the end.
+    """
     rows: list[str] = []
+    pages: list[dict[str, Any]] = []
     start: int | None = 0
+    offset = 0
     while start is not None:
-        page = diff_archive.load_page(_session_dir(tmp_path), SESSION_ID, call_id, start=start)
+        page = diff_archive.load_page(
+            session_dir, SESSION_ID, call_id, start=start, offset=offset, limit=limit
+        )
+        pages.append(page)
         assert page["state"] == "archived", page
-        assert page["start"] == start
+        assert (page["start"], page["offset"]) == (start, offset)
         assert page["clipped_rows"] == []
-        rows.extend(page["rows"])
-        assert page["next_start"] in (None, start + len(page["rows"]))
-        start = page["next_start"]
+        assert 1 <= len(page["rows"]) <= limit
+        envelope = {"status": 200, "message": "Desktop session result.", "result": page}
+        assert len(json.dumps(envelope)) <= diff_archive.PAGE_MAX_BYTES
+        for i, fragment in enumerate(page["rows"]):
+            if i == 0 and offset:
+                assert rows[-1][:1] == fragment[:1]
+                rows[-1] += fragment[1:]
+            else:
+                rows.append(fragment)
+        next_start, next_offset = page["next_start"], page["next_offset"]
+        if next_start is None:
+            assert next_offset is None
+            assert start + len(page["rows"]) == page["total_rows"]
+        elif next_offset:
+            assert next_start == start + len(page["rows"]) - 1
+            if next_start == start:
+                assert next_offset > offset, "same-row continuation must advance"
+        else:
+            assert next_offset == 0 and next_start == start + len(page["rows"])
+        start, offset = next_start, next_offset or 0
+    assert len(rows) == pages[-1]["total_rows"]
+    return rows, pages
+
+
+def _all_rows(tmp_path: Path, call_id: str) -> list[str]:
+    rows, pages = _reconstruct(_session_dir(tmp_path), call_id)
+    assert all(page["next_offset"] in (0, None) for page in pages), "no row was split"
     return rows
 
 
@@ -366,7 +406,14 @@ async def test_direct_execute_without_the_seam_keeps_carrier_private(tmp_path):
     assert result.model_copy()._diff_source is None
 
 
-def _fake_row(tmp_path: Path, call_id: str, desc: dict[str, Any], tool: str = "write") -> Path:
+def _fake_row(
+    tmp_path: Path,
+    call_id: str,
+    desc: dict[str, Any],
+    tool: str = "write",
+    *,
+    entry_id: str | None = None,
+) -> Path:
     session_dir = _session_dir(tmp_path)
     session_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -377,26 +424,118 @@ def _fake_row(tmp_path: Path, call_id: str, desc: dict[str, Any], tool: str = "w
     }
     with (session_dir / "transcript.jsonl").open("a") as handle:
         handle.write(
-            json.dumps({"id": f"m-{call_id}", "ts": 0, "type": "message", "payload": payload})
+            json.dumps(
+                {
+                    "id": entry_id or f"m-{call_id}",
+                    "ts": 0,
+                    "type": "message",
+                    "payload": payload,
+                }
+            )
             + "\n"
         )
     return session_dir
 
 
-async def test_page_byte_budget_counts_json_escaping_and_clips_one_huge_row(tmp_path):
-    worst = "+" + "\t\\\u00e9\U0001f600" * 20000  # every char escapes on the wire
-    rows = ["--- ", "+++ ", "@@ -0,0 +1,3 @@", "+a", worst, "+z"]
+#: Rows that cannot fit one 120 KiB page, each built to stress one encoding
+#: worst case: plain ASCII, astral + combining code points, JSON escapes (tab,
+#: backslash, quote, NUL and other controls cost up to 6 bytes each).
+_HUGE_BODIES = {
+    "ascii": "x" * 400_000,
+    "astral-combining": ("e\u0301\U0001f600\u00e9" * 30_000),
+    "json-escapes": ('\t\\"\x00\x01' * 50_000),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_HUGE_BODIES))
+async def test_huge_rows_are_served_whole_across_pages(tmp_path, kind):
+    body = _HUGE_BODIES[kind]
+    rows = ["--- ", "+++ ", "@@ -1,2 +1,3 @@", " ctx", "+" + body, "-" + body[::-1], "+" + body]
+    desc = diff_archive.write_archive(rows, session_id=SESSION_ID, call_id="j", tool_name="write")
+    assert desc["state"] == "archived", desc
+    session_dir = _fake_row(tmp_path, "j", desc)
+    for limit in (200, 1):
+        got, pages = _reconstruct(session_dir, "j", limit=limit)
+        assert got == rows, "every stored character is recovered, in order"
+        assert any(page["next_offset"] for page in pages), "the huge rows were split"
+    # The final row is huge too: the last page ends exactly at the end.
+    assert pages[-1]["next_start"] is None and pages[-1]["next_offset"] is None
+
+
+async def test_continuation_cursor_rejects_offsets_it_never_issued(tmp_path):
+    rows = ["--- ", "+++ ", "@@ -0,0 +1,2 @@", "+ab", "+" + "y" * 300_000]
     desc = diff_archive.write_archive(rows, session_id=SESSION_ID, call_id="j", tool_name="write")
     session_dir = _fake_row(tmp_path, "j", desc)
     first = diff_archive.load_page(session_dir, SESSION_ID, "j")
-    assert first["rows"] == rows[:4] and first["next_start"] == 4
-    huge = diff_archive.load_page(session_dir, SESSION_ID, "j", start=4)
-    assert huge["clipped_rows"] == [4] and huge["rows"][0].startswith("+")
-    assert len(json.dumps(huge["rows"][0])) <= diff_archive.PAGE_MAX_BYTES
-    assert worst.startswith(huge["rows"][0])
-    assert huge["next_start"] == 5 and huge["hunk_header"] == "@@ -0,0 +1,3 @@"
-    tail = diff_archive.load_page(session_dir, SESSION_ID, "j", start=5)
-    assert tail["rows"] == ["+z"] and tail["next_start"] is None
+    # A partial final fragment: its row, a positive offset, marker kept.
+    assert first["next_start"] == 4 and first["next_offset"] > 0
+    assert first["rows"][-1].startswith("+y")
+    assert first["start"] + len(first["rows"]) - 1 == first["next_start"]
+    resumed = diff_archive.load_page(
+        session_dir, SESSION_ID, "j", start=4, offset=first["next_offset"]
+    )
+    assert resumed["rows"][0] == "+" + "y" * len(resumed["rows"][0][1:])
+    assert resumed["hunk_header"] == "@@ -0,0 +1,2 @@"
+    for start, offset in ((3, 2), (3, 5), (4, 300_000), (4, -1), (5, 0)):
+        with pytest.raises(diff_archive.DiffPageRangeError):
+            diff_archive.load_page(session_dir, SESSION_ID, "j", start=start, offset=offset)
+    # offset 1 into "+ab" is inside the body: a valid (if unusual) cursor.
+    inside = diff_archive.load_page(session_dir, SESSION_ID, "j", start=3, offset=1, limit=1)
+    assert inside["rows"] == ["+b"] and inside["next_start"] == 4 and inside["next_offset"] == 0
+
+
+async def test_unservable_surrogate_rows_are_withheld_not_altered(tmp_path):
+    desc = diff_archive.write_archive(
+        ["--- ", "+++ ", "@@ -0,0 +1 @@", "+bad\udcff"],
+        session_id=SESSION_ID,
+        call_id="u",
+        tool_name="write",
+    )
+    assert desc == {"v": 1, "state": "withheld"}
+
+
+async def test_two_distinct_rows_for_one_call_id_fail_closed(tmp_path):
+    desc = diff_archive.write_archive(
+        ["--- ", "+++ ", "@@ -0,0 +1 @@", "+x"],
+        session_id=SESSION_ID,
+        call_id="dup",
+        tool_name="write",
+    )
+    session_dir = _fake_row(tmp_path, "dup", desc)
+    assert diff_archive.load_page(session_dir, SESSION_ID, "dup")["rows"] == [
+        "--- ",
+        "+++ ",
+        "@@ -0,0 +1 @@",
+        "+x",
+    ]
+    # The SAME entry written twice is still one row.
+    line = (session_dir / "transcript.jsonl").read_text()
+    (session_dir / "transcript.jsonl").write_text(line + line)
+    assert diff_archive.load_page(session_dir, SESSION_ID, "dup")["state"] == "archived"
+    # A DIFFERENT row with the same call id: neither capture is served.
+    _fake_row(tmp_path, "dup", desc, entry_id="m-dup-2")
+    page = diff_archive.load_page(session_dir, SESSION_ID, "dup")
+    assert page["state"] == "unavailable" and page["rows"] == []
+    assert page["next_start"] is None and page["next_offset"] is None
+
+
+async def test_real_session_reusing_a_call_id_never_serves_the_wrong_capture(tmp_path):
+    """Two prompts whose provider reuses ONE call id, mutating the same file."""
+    target = tmp_path / "same.py"
+    calls = [
+        ("dup-id", "write", {"path": str(target), "content": _big(500)}),
+        None,  # first prompt ends
+        ("dup-id", "write", {"path": str(target), "content": _big(450, "!")}),
+    ]
+    session, _ = await _run(tmp_path, calls)
+    first = _all_rows(tmp_path, "dup-id")
+    assert "+MIDDLE_SENTINEL = 2" in first
+    # Second prompt on the SAME session: the provider reuses the call id.
+    await session.prompt("again")
+    details = _details(session)
+    assert len(details) == 2
+    page = diff_archive.load_page(_session_dir(tmp_path), SESSION_ID, "dup-id")
+    assert page["state"] == "unavailable" and page["rows"] == []
 
 
 async def test_non_diff_tool_and_digest_from_another_call_are_not_found(tmp_path):

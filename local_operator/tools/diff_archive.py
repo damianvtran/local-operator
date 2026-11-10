@@ -86,9 +86,17 @@ ARCHIVE_REDACT_BYTES = 4 * 1024 * 1024
 #: Page ceilings. Rows match the child transcript page; bytes match the inline
 #: preview's 120 KiB so one page never costs more than the preview already does.
 #: Bytes are measured on the JSON-ESCAPED form (``ensure_ascii``), the encoding
-#: worst case, so the bound holds whichever encoder the route uses.
+#: worst case (never below the UTF-8 length), so the bound holds whichever
+#: encoder the route uses. The byte ceiling covers the WHOLE response: rows,
+#: their separators, the hunk header and :data:`PAGE_ENVELOPE_RESERVE`.
 PAGE_MAX_ROWS = 200
 PAGE_MAX_BYTES = 120 * 1024
+
+#: Bytes kept for everything in the response that is not a row or the hunk
+#: header: the CRUD envelope (``status``/``message``) and the page's own
+#: integer/state fields. Their worst case is under 400 bytes (fixed keys,
+#: ints of at most 19 digits); 1 KiB leaves margin without costing rows.
+PAGE_ENVELOPE_RESERVE = 1024
 
 #: A hunk header the producer renders is ``@@ -a,b +c,d @@`` (< 50 chars); the
 #: page metadata is bounded anyway so a crafted artifact cannot inflate it.
@@ -203,6 +211,14 @@ def write_archive(
     """
     if not session_id or not call_id:
         return descriptor(STATE_UNAVAILABLE)
+    try:
+        for row in rows:
+            row.encode("utf-8")
+    except UnicodeEncodeError:
+        # A lone surrogate (a file decoded with ``surrogateescape``) cannot be
+        # served as UTF-8 JSON, and the pager must never alter a stored
+        # character to make it fit: refuse whole, honestly.
+        return descriptor(STATE_WITHHELD)
     text = _encode(rows, session_id=session_id, call_id=call_id, tool_name=tool_name)
     if len(text.encode("utf-8")) > SPILL_ENTRY_LIMIT_BYTES:
         return descriptor(STATE_OVERSIZED)
@@ -215,12 +231,23 @@ def write_archive(
 # -- reading ----------------------------------------------------------------
 
 
-def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, Any]] | None:
-    """``(tool_name, details)`` of the persisted tool row for ``call_id``.
+class AmbiguousToolCall(LookupError):
+    """Two or more DISTINCT persisted tool-result rows carry the same call id."""
 
-    The newest matching row wins (the cursor locator's rule). A byte prefilter
-    on the JSON-encoded id keeps the walk from parsing unrelated rows; the
-    parsed payload is the authority. Read-only: never creates the journal.
+
+def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, Any]] | None:
+    """``(tool_name, details)`` of THE persisted tool row for ``call_id``.
+
+    Call ids are provider-minted and nothing proves them unique within one
+    session (a retried turn, a second prompt, a provider that reuses ids), so
+    "newest wins" could hand a reader the WRONG historical capture. The walk
+    therefore fails closed: a second distinct row (a different entry id) with
+    the same ``role:"tool"`` + ``tool_call_id`` raises
+    :class:`AmbiguousToolCall` and it stops there, so memory stays bounded
+    (chunked backward reads, at most two parsed matches). The same entry
+    written twice is one row. A byte prefilter on the JSON-encoded id keeps
+    the walk from parsing unrelated rows; the parsed payload is the authority.
+    Read-only: never creates the journal.
     """
     from local_operator.session.transcript import (
         TranscriptEntry,
@@ -239,6 +266,8 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
         handle = path.open("rb")
     except OSError:
         return None
+    found: tuple[str, dict[str, Any]] | None = None
+    found_id: object = None
     with handle:
         handle.seek(0, os.SEEK_END)
         for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
@@ -251,33 +280,45 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
                 payload = entry.payload
                 if payload.get("role") != "tool" or payload.get("tool_call_id") != call_id:
                     continue
+                if found is not None:
+                    if entry.id == found_id:
+                        continue
+                    raise AmbiguousToolCall(call_id)
                 provider = payload.get("provider_payload")
                 details = provider.get("details") if isinstance(provider, dict) else None
-                return str(payload.get("tool_name") or ""), (
-                    details if isinstance(details, dict) else {}
+                found = (
+                    str(payload.get("tool_name") or ""),
+                    details if isinstance(details, dict) else {},
                 )
-    return None
+                found_id = entry.id
+    return found
 
 
 def _json_cost(row: str) -> int:
     return len(json.dumps(row))
 
 
-def _clip_row(row: str, budget: int) -> str:
-    """The longest prefix of ``row`` whose JSON form fits ``budget``.
+def _fragment_cost(marker: str, body: str, offset: int, length: int) -> int:
+    """Bytes one returned fragment costs in the rows array (``,`` included)."""
+    return _json_cost(marker + body[offset : offset + length]) + 1
 
-    Only ever applied to an already-redacted row, so the cut exposes nothing.
-    Slicing a ``str`` cuts between code points, so the result is valid UTF-8
-    once encoded; the first character (the +/-/space sign) is always kept.
+
+def _fit_length(marker: str, body: str, offset: int, budget: int) -> int:
+    """Most body CODE POINTS from ``offset`` whose fragment fits ``budget``.
+
+    Monotone in the length, so a binary search finds it. Slicing a ``str`` cuts
+    between code points, so a fragment is always valid UTF-8 (a combining mark
+    may land in the next fragment; the client re-joins fragments before
+    rendering, so nothing is lost). Only ever applied to already-redacted rows.
     """
-    low, high = 1, len(row)
+    low, high = 0, len(body) - offset
     while low < high:
         mid = (low + high + 1) // 2
-        if _json_cost(row[:mid]) <= budget:
+        if _fragment_cost(marker, body, offset, mid) <= budget:
             low = mid
         else:
             high = mid - 1
-    return row[:low]
+    return low
 
 
 def _hunk_header(rows: Sequence[str], start: int) -> str | None:
@@ -290,14 +331,16 @@ def _hunk_header(rows: Sequence[str], start: int) -> str | None:
     return None
 
 
-def _empty(state: str, start: int = 0) -> dict[str, Any]:
+def _empty(state: str, start: int = 0, offset: int = 0) -> dict[str, Any]:
     return {
         "state": state,
         "start": start,
+        "offset": offset,
         "total_rows": 0,
         "rows": [],
         "hunk_header": None,
         "next_start": None,
+        "next_offset": None,
         "clipped_rows": [],
     }
 
@@ -348,6 +391,7 @@ def load_page(
     *,
     start: int = 0,
     limit: int = PAGE_MAX_ROWS,
+    offset: int = 0,
     config_root: Path | None = None,
 ) -> dict[str, Any]:
     """One page of the archived diff of ``call_id`` in ``session_dir``.
@@ -356,16 +400,34 @@ def load_page(
     :class:`DiffArchiveNotFound` for anything that is not a persisted
     ``write``/``edit`` row of THIS session, and :class:`DiffPageRangeError` for
     bad paging. Non-archived states answer with no rows -- they are answers,
-    not errors.
+    not errors. Two distinct persisted rows for one call id answer
+    ``unavailable``: serving either could be the wrong historical capture.
 
-    ``next_start`` is the row after the last row ACTUALLY returned (the byte
-    ceiling can end a page before ``limit``), ``None`` only at the end. A
-    single row larger than a whole page is returned clipped, its ABSOLUTE index
-    listed in ``clipped_rows``, and the cursor still advances past it.
+    CONTINUATION CURSOR (v1). A row is ``marker + body`` (``marker`` is its
+    first character: ``+``/``-``/space, or the ``-``/``+``/``@`` of a header).
+    ``offset`` is a CODE-POINT offset into the BODY of row ``start`` (server
+    issued; a client never computes it). Every returned fragment starts with
+    its row's original marker followed by an exact body chunk, so a row too
+    large for one page is served across pages and nothing is ever discarded:
+    the client re-joins fragments of the same row (the first whole, later ones
+    minus their marker). When the last fragment is partial, ``next_start`` is
+    its row and ``next_offset`` > 0; when it completed, ``next_start`` is the
+    next row and ``next_offset`` is 0; both are ``None`` only at the end.
+    ``clipped_rows`` stays for wire compatibility and is always ``[]``.
     """
-    if start < 0 or not 1 <= limit <= PAGE_MAX_ROWS:
-        raise DiffPageRangeError("start/limit out of range")
-    found = find_tool_details(session_dir, call_id)
+    if start < 0 or offset < 0 or not 1 <= limit <= PAGE_MAX_ROWS:
+        raise DiffPageRangeError("start/limit/offset out of range")
+    try:
+        found = find_tool_details(session_dir, call_id)
+    except AmbiguousToolCall:
+        found = None
+        ambiguous = True
+    else:
+        ambiguous = False
+    if ambiguous:
+        if start or offset:
+            raise DiffPageRangeError("start beyond the last row")
+        return _empty(STATE_UNAVAILABLE)
     if found is None:
         raise DiffArchiveNotFound(call_id)
     tool_name, details = found
@@ -373,50 +435,68 @@ def load_page(
         raise DiffArchiveNotFound(call_id)
     desc = details.get(DIFF_FULL_KEY)
     if not isinstance(desc, dict):
-        if details.get("diff_truncated_rows"):
-            state = STATE_NOT_RECORDED
-        else:
-            state = STATE_INLINE
-        if start:
-            raise DiffPageRangeError("start beyond the last row")
-        return _empty(state)
-    state = desc.get("state")
-    if state not in _STORED_STATES:
-        state = STATE_UNAVAILABLE
-    if state != STATE_ARCHIVED:
-        if start:
-            raise DiffPageRangeError("start beyond the last row")
-        return _empty(state)
-    rows = _load_rows(desc, session_id, call_id, config_root)
+        state = STATE_NOT_RECORDED if details.get("diff_truncated_rows") else STATE_INLINE
+    else:
+        state = desc.get("state")
+        if state not in _STORED_STATES:
+            state = STATE_UNAVAILABLE
+    rows = _load_rows(desc, session_id, call_id, config_root) if state == STATE_ARCHIVED else None
+    if state == STATE_ARCHIVED and rows is None:
+        state = STATE_EVICTED
     if rows is None:
-        if start:
+        if start or offset:
             raise DiffPageRangeError("start beyond the last row")
-        return _empty(STATE_EVICTED)
+        return _empty(state)
     total = len(rows)
-    if start >= total and not (start == 0 and total == 0):
+    if total == 0:
+        if start or offset:
+            raise DiffPageRangeError("start beyond the last row")
+        return {**_empty(STATE_ARCHIVED), "total_rows": 0}
+    if start >= total:
         raise DiffPageRangeError("start beyond the last row")
+    if offset and offset >= len(rows[start][1:]):
+        # An offset is only ever issued INSIDE a body; one at or past its end
+        # is not a cursor this server handed out.
+        raise DiffPageRangeError("offset beyond the row body")
+    header = _hunk_header(rows, start)
+    budget = PAGE_MAX_BYTES - PAGE_ENVELOPE_RESERVE - (_json_cost(header) if header else 4)
     out: list[str] = []
-    clipped: list[int] = []
     spent = 0
-    index = start
+    index, at = start, offset
+    next_offset = 0
     while index < total and len(out) < limit:
         row = rows[index]
-        cost = _json_cost(row)
-        if spent + cost > PAGE_MAX_BYTES:
-            if out:
-                break
-            row = _clip_row(row, PAGE_MAX_BYTES)
-            clipped.append(index)
-            cost = _json_cost(row)
-        out.append(row)
-        spent += cost
-        index += 1
+        marker, body = row[:1], row[1:]
+        remaining = len(body) - at
+        if _fragment_cost(marker, body, at, remaining) <= budget - spent:
+            out.append(marker + body[at:])
+            spent += _fragment_cost(marker, body, at, remaining)
+            index, at = index + 1, 0
+            continue
+        take = _fit_length(marker, body, at, budget - spent)
+        if take > 0:
+            # Partial: always forward progress (``take`` >= 1 code point).
+            out.append(marker + body[at : at + take])
+            next_offset = at + take
+        elif not out:
+            # Unreachable with the fixed budgets (a marker plus one escaped
+            # code point is <= 14 bytes); refuse rather than loop forever.
+            raise DiffPageRangeError("page budget cannot hold one fragment")
+        break
+    if next_offset:
+        next_start: int | None = index
+    elif index < total:
+        next_start = index
+    else:
+        next_start = None
     return {
         "state": STATE_ARCHIVED,
         "start": start,
+        "offset": offset,
         "total_rows": total,
         "rows": out,
-        "hunk_header": _hunk_header(rows, start),
-        "next_start": index if index < total else None,
-        "clipped_rows": clipped,
+        "hunk_header": header,
+        "next_start": next_start,
+        "next_offset": next_offset if next_start is not None else None,
+        "clipped_rows": [],
     }
