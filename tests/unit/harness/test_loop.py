@@ -1077,6 +1077,134 @@ async def test_courtesy_steering_waits_for_the_running_tool():
 
 
 @pytest.mark.asyncio
+async def test_queued_delivery_never_cancels_nor_skips():
+    """A ``queue``-mode peek that never goes urgent rides past the tool.
+
+    The session-level twin pins the map; here the loop's own behaviour: while
+    the peek answers False the running interruptible tool completes with its
+    REAL result and every batch call runs.
+    """
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    executed: list[str] = []
+    drained = {"done": False}
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        await release_tool.wait()
+        executed.append("a")
+        return ToolResult(tool_call_id=tool_call_id, tool_name="a", content=[TextContent(text="a")])
+
+    async def echo_execute(tool_call_id, args, signal, on_update, context):
+        executed.append("b")
+        return ToolResult(tool_call_id=tool_call_id, tool_name="b", content=[TextContent(text="b")])
+
+    tool_a = AgentTool(
+        name="a", parameters={"type": "object"}, interruptible=True, execute=blocking_execute
+    )
+    tool_b = AgentTool(
+        name="b", parameters={"type": "object"}, interruptible=True, execute=echo_execute
+    )
+
+    async def get_steering():
+        if drained["done"]:
+            return []
+        drained["done"] = True
+        return [Message.user("queued note")]
+
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="a", args="{}"),
+                tool_call_delta(1, id="c2", name="b", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool_a, tool_b])
+    config = make_config(
+        stream,
+        interrupt_mode="immediate",
+        get_steering_messages=get_steering,
+        has_steering_messages=lambda: True,
+        has_urgent_steering_messages=lambda: False,
+    )
+    loop = AgentLoop()
+    task = asyncio.ensure_future(loop.run_to_end([Message.user("go")], context, config, None))
+    await asyncio.wait_for(tool_started.wait(), timeout=5)
+    await asyncio.sleep(STEERING_INTERRUPT_POLL_S * 3)
+    assert not task.done(), "a queued delivery cancelled the running tool"
+    release_tool.set()
+    messages = await asyncio.wait_for(task, timeout=5)
+    assert sorted(executed) == ["a", "b"], "a queued delivery must not skip batch calls"
+    results = [m for m in messages if isinstance(m, Message) and m.role == "tool"]
+    assert results and not any(r.is_error for r in results), "results must be REAL, not synthetic"
+
+
+@pytest.mark.asyncio
+async def test_both_delivery_cancels_once_it_flips_urgent():
+    """``both`` below threshold rides past; past threshold it cancels like steer.
+
+    The peek is the session's ``_has_urgent_steering`` in production (wired at
+    session.py:20618); here a mutable flag stands in for its time-based flip.
+    """
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    outcome: dict[str, str] = {}
+    urgent = {"value": False}
+    drained = {"done": False}
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        try:
+            await release_tool.wait()
+        except asyncio.CancelledError:
+            outcome["a"] = "cancelled"
+            raise
+        outcome["a"] = "completed"
+        return ToolResult(tool_call_id=tool_call_id, tool_name="a", content=[TextContent(text="a")])
+
+    tool_a = AgentTool(
+        name="a", parameters={"type": "object"}, interruptible=True, execute=blocking_execute
+    )
+
+    async def get_steering():
+        if drained["done"]:
+            return []
+        drained["done"] = True
+        return [Message.user("both note")]
+
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="a", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[tool_a])
+    config = make_config(
+        stream,
+        interrupt_mode="immediate",
+        get_steering_messages=get_steering,
+        has_steering_messages=lambda: True,
+        has_urgent_steering_messages=lambda: urgent["value"],
+    )
+    loop = AgentLoop()
+    task = asyncio.ensure_future(loop.run_to_end([Message.user("go")], context, config, None))
+    await asyncio.wait_for(tool_started.wait(), timeout=5)
+    await asyncio.sleep(STEERING_INTERRUPT_POLL_S * 3)
+    assert not task.done(), "both cancelled the tool before the threshold"
+    urgent["value"] = True  # threshold passed: the item now counts urgent
+    messages = await asyncio.wait_for(task, timeout=5)
+    assert outcome == {"a": "cancelled"}
+    results = [m for m in messages if isinstance(m, Message) and m.role == "tool"]
+    assert results and results[0].is_error and "skipped" in results[0].text.lower()
+
+
+@pytest.mark.asyncio
 async def test_urgent_steering_still_interrupts_a_running_tool():
     """The urgent peek answering True keeps the immediate semantics: the
     running interruptible tool is cancelled and the steer jumps the queue."""

@@ -62,6 +62,7 @@ from local_operator.providers.failover import ProviderError
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.session import (
     _PRE_ABORT_DROP_NOTICE_AT,
+    BUSY_QUEUE_ESCALATE_AFTER_S,
     IMAGE_DROPPED_NOTICE,
     IMAGE_MISSING_MEDIA_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
@@ -637,6 +638,83 @@ async def test_wake_delivery_goes_through_prompt_path(tmp_path):
 
 def _persisted_wakes_payload(schedules) -> dict[str, object]:
     return {"schedules": [s.model_dump() for s in schedules]}
+
+
+@pytest.mark.asyncio
+async def test_queue_delivery_is_not_urgent_and_both_escalates_by_age(tmp_path, monkeypatch):
+    """Busy-send modes at the session's urgent test (design D2/D4).
+
+    ``queue`` never counts urgent; ``both`` counts urgent only after
+    ``BUSY_QUEUE_ESCALATE_AFTER_S``; a later ``steer`` makes the whole queue
+    urgent. A fake clock drives the escalation without waiting 45 s. The
+    session is idle here, so ``steer``'s wake arm is quiesced by marking it
+    streaming: only the map and the peek are under test.
+    """
+    import time as _time
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(_time, "monotonic", lambda: clock["now"])
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    session._is_streaming = True
+    try:
+        queued = Message.user("held for later")
+        session.steer_message(queued, delivery="queue")
+        assert session._steering_queue.qsize() == 1
+        assert not session._has_urgent_steering(), "a queue item must never count urgent"
+
+        later = Message.user("escalates")
+        session.steer_message(later, delivery="both")
+        assert not session._has_urgent_steering()
+        clock["now"] += BUSY_QUEUE_ESCALATE_AFTER_S - 1
+        assert not session._has_urgent_steering(), "both must not escalate early"
+        clock["now"] += 2
+        assert session._has_urgent_steering(), "both must count urgent after the threshold"
+
+        # D4: a later steer makes the whole FIFO queue urgent, even the queue
+        # item ahead of it.
+        urgent = Message.user("cut in")
+        session.steer_message(urgent)
+        assert session._has_urgent_steering()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_delivery_entries_clear_on_recall_drain_and_dispose(tmp_path):
+    """No count drift: every consumer leaves ``_steer_delivery`` empty."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="toolUse")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    try:
+        # Recall: the recalled item's entry is gone, a survivor keeps its own.
+        recalled = Message.user("recalled")
+        survivor = Message.user("survivor")
+        session.steer_message(recalled, delivery="queue")
+        session.steer_message(survivor, delivery="both")
+        assert len(session._steer_delivery) == 2
+        assert session.recall_steering(recalled)
+        assert len(session._steer_delivery) == 1
+        assert id(survivor) in session._steer_delivery
+
+        # Drain: the boundary consumer clears the survivor's entry.
+        await session._drain_steering()
+        assert session._steering_queue.empty()
+        assert session._steer_delivery == {}, "a drained item must not leave an entry"
+
+        # Dispose: entries for still-queued items are cleared with the queue.
+        pending = Message.user("pending")
+        session.steer_message(pending, delivery="queue")
+        assert len(session._steer_delivery) == 1
+        await session.dispose()
+        assert session._steer_delivery == {}
+    finally:
+        # ``dispose`` ran above; a second call must stay a no-op join.
+        await session.dispose()
 
 
 @pytest.mark.asyncio

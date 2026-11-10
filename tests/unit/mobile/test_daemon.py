@@ -3981,6 +3981,29 @@ def test_a_steer_is_forwarded_once_and_says_so(tmp_path, monkeypatch) -> None:
     assert "wait_for_turn" not in frames[0]
 
 
+def test_a_queued_prompt_fallback_keeps_delivery(tmp_path, monkeypatch) -> None:
+    """The prompt -> steer fallback carries ``delivery``: a queued send must not
+    arrive as an urgent steer after ``TurnInFlight``."""
+    client, frames = _continuation_rig(tmp_path, monkeypatch, busy=True)
+    reply = client.post(
+        "/api/sessions/steer-me/command",
+        json={"op": "prompt", **_CONTINUATION, "delivery": "queue"},
+    )
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["delivered_as"] == "steer"
+    assert [(f["op"], f.get("delivery")) for f in frames] == [
+        ("prompt", "queue"),
+        ("steer", "queue"),
+    ]
+    # A bad mode is refused at the wire, never forwarded.
+    refused = client.post(
+        "/api/sessions/steer-me/command",
+        json={"op": "prompt", **_CONTINUATION, "delivery": "whenever"},
+    )
+    assert refused.status_code == 422, refused.text
+    assert len(frames) == 2, "a refused delivery must not reach the owner"
+
+
 def test_summary_rows_carry_the_background_work_fact(tmp_path: Path, monkeypatch) -> None:
     """The relay ships ``background_work`` + ``jobs_running`` + ``waiting_on`` (2026-11-07).
 

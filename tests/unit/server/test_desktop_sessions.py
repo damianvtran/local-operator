@@ -525,6 +525,53 @@ async def test_active_bridge_is_never_evicted_or_duplicated(tmp_path, monkeypatc
         assert first not in pool.bridges
 
 
+def test_prompt_delivery_enum_validates_at_the_wire() -> None:
+    """``Prompt.delivery``: out-of-vocabulary is a 422-equivalent never-coerce."""
+    from pydantic import ValidationError
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert body.delivery == "queue"
+    assert Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi").delivery is None
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, "whenever"),
+        )
+    with pytest.raises(ValidationError):
+        Prompt(
+            request_id="12345678-1234-4678-9234-567812345678",
+            text="hi",
+            delivery=cast(Any, ""),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
+    """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""
+    calls: list[dict[str, Any]] = []
+
+    async def op():
+        calls.append({"delivery": "queue"})
+        return {"result": "queued"}
+
+    receipts = DesktopReceipts(tmp_path)
+    body = {"text": "held", "delivery": "queue"}
+    assert (await receipts.run("s:id", body, op))["result"] == "queued"
+    replay = await receipts.run("s:id", body, op)
+    assert replay["replayed"] is True, replay
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held", "delivery": "both"}, op)
+    with pytest.raises(ReceiptConflict, match="different input"):
+        await receipts.run("s:id", {"text": "held"}, op)
+    assert len(calls) == 1
+    # And a legacy body hashes as legacy: no key added, receipt unchanged.
+    legacy = DesktopReceipts(tmp_path)
+    legacy_body: dict[str, Any] = {"text": "held"}
+    assert (await legacy.run("s:legacy", legacy_body, op))["result"] == "queued"
+    assert (await legacy.run("s:legacy", legacy_body, op))["replayed"] is True
+
+
 @pytest.mark.asyncio
 async def test_receipts_survive_adapter_restart_and_reject_changed_body(tmp_path):
     calls = []

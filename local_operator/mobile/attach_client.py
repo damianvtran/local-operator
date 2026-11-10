@@ -78,6 +78,8 @@ from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
     ASK_ATTACHMENTS_UNSUPPORTED,
     ATTACH_ACTIVITY_CAPABILITY,
+    BUSY_DELIVERY_CAPABILITY,
+    BUSY_DELIVERY_UNSUPPORTED,
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
@@ -1083,6 +1085,7 @@ class AttachClient:
         self._activity_supported = False
         self._exclusive_move_supported = False
         self._ask_attachments_supported = False
+        self._busy_delivery_supported = False
         self._connected = False
 
     @property
@@ -1219,6 +1222,11 @@ class AttachClient:
             SUPPLEMENTS_CAPABILITY in record.capabilities
         )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
+        # MAY THIS OWNER HONOUR THE BUSY-SEND DELIVERY MODES, resolved per dial
+        # like its neighbours. Unlike ``_input_mode_supported`` this gates a
+        # REFUSAL, not a strip: a ``queue``/``both`` the owner would silently
+        # drop is a silent downgrade to an urgent steer (see ``_delivery_fields``).
+        self._busy_delivery_supported = BUSY_DELIVERY_CAPABILITY in record.capabilities
         # MAY THIS OWNER KEEP IMAGES ON A QUEUED-ASK ANSWER, resolved per dial like
         # its neighbours. Unlike ``_input_mode_supported`` this gates a REFUSAL, not
         # a strip: see ``ask_respond``.
@@ -2033,6 +2041,10 @@ class AttachClient:
         """
         if getattr(self, "_input_mode_supported", False):
             return fields
+        # ``delivery`` is deliberately NOT stripped here: it gates a REFUSAL,
+        # not a strip (see ``_delivery_fields``), so a frame carrying a mode to
+        # an owner that cannot honour it must be refused before this point,
+        # never silently downgraded by the write point.
         if "input_mode" not in fields and "input_path" not in fields:
             return fields
         return {
@@ -2064,6 +2076,24 @@ class AttachClient:
             fields["input_path"] = input_path
         return self._strip_unsupported_annotation(fields)
 
+    def _delivery_fields(self, delivery: str) -> dict[str, Any]:
+        """The carriage field for a busy-send delivery mode, with its refusal.
+
+        ``steer``/absent/empty returns NOTHING — the legacy frame carries no
+        key, so an owner from before the feature sees byte-identical frames.
+        ``queue``/``both`` ride the field ONLY when the owner advertised
+        ``busy-delivery-v1``; otherwise the send is REFUSED, never forwarded
+        without its mode: an old owner would silently drop it and deliver an
+        urgent steer the user explicitly did not ask for. Same fail-closed
+        ``getattr`` courtesy as ``_strip_unsupported_annotation`` for
+        construction-free doubles.
+        """
+        if not delivery or delivery == "steer":
+            return {}
+        if not getattr(self, "_busy_delivery_supported", False):
+            raise ValueError(BUSY_DELIVERY_UNSUPPORTED)
+        return {"delivery": delivery}
+
     async def prompt(
         self,
         text: str,
@@ -2072,6 +2102,7 @@ class AttachClient:
         images: list[dict[str, str]] | None = None,
         input_mode: str = "",
         input_path: str = "",
+        delivery: str = "",
     ) -> str:
         return await self._request(
             "prompt",
@@ -2079,6 +2110,7 @@ class AttachClient:
             text=text,
             images=list(images or []),
             **self._annotation_fields(input_mode, input_path),
+            **self._delivery_fields(delivery),
         )
 
     async def send_command(self, command: ContinuationCommand, *, streaming: bool = False) -> str:
@@ -2097,6 +2129,7 @@ class AttachClient:
                 images=command.images,
                 input_mode=command.input_mode,
                 input_path=command.input_path,
+                delivery=command.delivery,
             )
         try:
             return await self.prompt(
@@ -2105,6 +2138,7 @@ class AttachClient:
                 images=command.images,
                 input_mode=command.input_mode,
                 input_path=command.input_path,
+                delivery=command.delivery,
             )
         except RuntimeError as exc:
             # Local import, matching this module's other `session.errors` use:
@@ -2120,6 +2154,7 @@ class AttachClient:
                 images=command.images,
                 input_mode=command.input_mode,
                 input_path=command.input_path,
+                delivery=command.delivery,
             )
 
     async def steer(
@@ -2130,6 +2165,7 @@ class AttachClient:
         images: list[dict[str, str]] | None = None,
         input_mode: str = "",
         input_path: str = "",
+        delivery: str = "",
     ) -> str:
         return await self._request(
             "steer",
@@ -2137,6 +2173,7 @@ class AttachClient:
             text=text,
             images=list(images or []),
             **self._annotation_fields(input_mode, input_path),
+            **self._delivery_fields(delivery),
         )
 
     async def desktop_watch(self, *, visible: bool, can_notify: bool) -> str:

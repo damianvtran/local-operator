@@ -1340,6 +1340,18 @@ class Prompt(Input):
     # place the same rule lives, and a message the READER refuses is a dropped
     # row, not a refused request, so the refusal belongs at the door.
     input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # THE BUSY-SEND DELIVERY MODE: how a send to a busy session is delivered.
+    # ``steer`` is today's urgent behaviour; ``queue`` never cancels a running
+    # tool; ``both`` is ``queue`` until it has waited, then urgent. The enum is
+    # enforced HERE, at the wire, so a value outside the vocabulary gets a 422
+    # before anything is admitted — never coerced into a mode nobody sent.
+    # Absent/empty reads as ``steer``; ignored when the session is idle.
+    #
+    # RETRY CONTRACT: the receipt journal fingerprints the WHOLE request body
+    # (``server/utils/desktop_receipts.py``), so a retry under the same
+    # ``request_id`` must repeat these bytes BYTE-FOR-BYTE — a pinned delivery
+    # is part of the retry identity, like ``input_mode`` above.
+    delivery: Literal["steer", "queue", "both"] | None = None
     # An OPEN string on purpose (see ``Message.input_path``): the STT cascade
     # owns this vocabulary and the carriage must not fork it behind an enum.
     # Absent/null = the classic server-transcription path.
@@ -4412,6 +4424,11 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # owner from before the carriage never sees the keys.
                             input_mode=body.input_mode,
                             input_path=body.input_path,
+                            # Busy-send delivery mode, omitted from the attach frame
+                            # when absent/``steer`` (``admit_prompt`` drops it), so a
+                            # legacy-sender frame stays byte-identical and an owner
+                            # from before the modes never sees the key.
+                            delivery=body.delivery,
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event

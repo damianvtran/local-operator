@@ -5339,6 +5339,7 @@ class ServingSessionHandle(SessionHandle):
         files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
         owner_typed: bool = True,
+        delivery: str | None = None,
     ) -> str:
         # ``owner_typed``: see ``prompt`` — False for a remote connection's steer.
         self._check_loop_thread()
@@ -5404,6 +5405,7 @@ class ServingSessionHandle(SessionHandle):
                     carries_attachments=carries_attachments,
                     harness_injected=harness_injected,
                     owner_typed=owner_typed,
+                    delivery=delivery,
                 )
             )
             receipt, raise_successor = await self._await_steer_admission(admission)
@@ -5482,6 +5484,7 @@ class ServingSessionHandle(SessionHandle):
         carries_attachments: bool,
         harness_injected: bool,
         owner_typed: bool = True,
+        delivery: str | None = None,
     ) -> tuple[str, bool]:
         """The admission half of :meth:`steer`, once its blocks are decoded.
 
@@ -5610,6 +5613,11 @@ class ServingSessionHandle(SessionHandle):
             fields["harness_injected"] = harness_injected
         if "owner_typed" in parameters and not owner_typed:
             fields["owner_typed"] = False
+        # The busy-send delivery mode: probed like the fields above, so a
+        # session that predates the keyword never receives it. Added only
+        # when the wire carried one, so a legacy steer stays byte-identical.
+        if "delivery" in parameters and delivery is not None:
+            fields["delivery"] = delivery
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:

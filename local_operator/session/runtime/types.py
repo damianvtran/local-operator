@@ -224,6 +224,30 @@ OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
 #: that may send one may send the other.
 INPUT_MODE_CAPABILITY = "input-mode-v1"
 
+#: Additive attach capability: this owner's ``prompt``/``steer`` carry the
+#: ``delivery`` busy-send mode (``steer``/``queue``/``both``; see
+#: ``Session._steer_delivery``) from the attach frame onto the queued steering
+#: item. Advertised only when the handle's ``steer`` AND ``prompt`` take the
+#: keyword (``_takes_delivery``), because a client must never send a mode the
+#: owner would silently drop: for ``queue``/``both`` a silent drop is a silent
+#: downgrade to an urgent steer — the one outcome this string exists to
+#: prevent. The client REFUSES ``queue``/``both`` against an owner without it,
+#: never strips the field and sends anyway. One string for both ops, like
+#: ``input-mode-v1``: the prompt arm is the busy-session fallback that steers
+#: under the same command id, so the mode must ride both or the fallback
+#: would deliver a queued send as an urgent one.
+BUSY_DELIVERY_CAPABILITY = "busy-delivery-v1"
+
+#: The refusal for a ``queue``/``both`` send to an owner that did not advertise
+#: :data:`BUSY_DELIVERY_CAPABILITY`. Worded for the person who pressed send:
+#: what happened, and the one move that still works. ONE constant because the
+#: senders that gate on the same record — the attach client and the desktop
+#: admit path — quote it rather than a copy that could drift.
+BUSY_DELIVERY_UNSUPPORTED = (
+    "this session's runtime predates delivery modes (queue/both); "
+    "send it as a steer, or update the runtime"
+)
+
 #: Additive attach capability: this owner's ``prompt``/``steer`` take the
 #: ``files`` keyword and resolve ``Prompt.files`` references against its own
 #: attachment store. Advertised only by a handle that does, because the send

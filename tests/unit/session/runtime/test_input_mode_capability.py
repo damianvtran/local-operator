@@ -26,7 +26,10 @@ from __future__ import annotations
 import pytest
 
 from local_operator.session.runtime.server import RuntimeServer
-from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+from local_operator.session.runtime.types import (
+    BUSY_DELIVERY_CAPABILITY,
+    INPUT_MODE_CAPABILITY,
+)
 from tests.unit.session.runtime.test_server import FakeHandle
 
 
@@ -86,3 +89,60 @@ async def test_the_token_is_absent_on_a_kwargs_only_handle() -> None:
 @pytest.mark.asyncio
 async def test_the_token_needs_both_ops() -> None:
     assert INPUT_MODE_CAPABILITY not in _capabilities(HalfCarryingHandle())
+
+
+class DeliveryCarryingHandle(FakeHandle):
+    """The production shape for delivery modes: both ops take the keyword."""
+
+    async def prompt(
+        self, text, images=None, command_id=None, delivery=None
+    ):  # noqa: ANN001, ANN202
+        return await self._record("prompt", text)
+
+    async def steer(
+        self, text, images=None, command_id=None, delivery=None
+    ):  # noqa: ANN001, ANN202
+        return await self._record("steer", text)
+
+
+class DeliveryKwargsHandle(FakeHandle):
+    """A ``**kwargs``-only acceptor: the dispatch does not pass the keyword."""
+
+    async def prompt(self, text, images=None, command_id=None, **kwargs):  # noqa: ANN001, ANN202
+        return await self._record("prompt", text)
+
+    async def steer(self, text, images=None, **kwargs):  # noqa: ANN001, ANN202
+        return await self._record("steer", text)
+
+
+class DeliveryHalfCarryingHandle(FakeHandle):
+    """Only ``steer`` reads the keyword; the token needs both ops."""
+
+    async def steer(
+        self, text, images=None, command_id=None, delivery=None
+    ):  # noqa: ANN001, ANN202
+        return await self._record("steer", text)
+
+
+def _delivery_capabilities(handle: FakeHandle) -> list[str]:
+    return RuntimeServer(handle, kind="tui")._record.capabilities
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_present_when_both_ops_take_keyword() -> None:
+    assert BUSY_DELIVERY_CAPABILITY in _delivery_capabilities(DeliveryCarryingHandle())
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_absent_on_legacy_handle() -> None:
+    assert BUSY_DELIVERY_CAPABILITY not in _delivery_capabilities(FakeHandle())
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_absent_on_kwargs_only_handle() -> None:
+    assert BUSY_DELIVERY_CAPABILITY not in _delivery_capabilities(DeliveryKwargsHandle())
+
+
+@pytest.mark.asyncio
+async def test_delivery_token_needs_both_ops() -> None:
+    assert BUSY_DELIVERY_CAPABILITY not in _delivery_capabilities(DeliveryHalfCarryingHandle())

@@ -1602,6 +1602,109 @@ async def _sent_ask_frame(client: AttachClient, **kwargs: Any) -> dict[str, Any]
 
 
 @pytest.mark.asyncio
+async def test_a_queued_send_to_an_old_owner_is_refused_never_downgraded() -> None:
+    """REFUSE, NEVER STRIP: ``queue``/``both`` without the capability writes no frame."""
+    from local_operator.mobile.types import ContinuationCommand
+    from local_operator.session.runtime.types import BUSY_DELIVERY_UNSUPPORTED
+
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    client._session_id = "sess-a"
+    client._writer = cast(Any, _RecordingWriter())
+    assert client._busy_delivery_supported is False
+
+    command = ContinuationCommand(
+        command_id="12345678-1234-4678-9234-567812345678",
+        session_id="sess-a",
+        text="held",
+        delivery="queue",
+    )
+    with pytest.raises(ValueError) as refused:
+        await client.send_command(command)
+    assert str(refused.value) == BUSY_DELIVERY_UNSUPPORTED
+    with pytest.raises(ValueError):
+        await client.steer("held", delivery="both")
+    frames = cast(Any, client._writer).frames
+    assert frames == [], "a refused delivery must not be written to the owner"
+    assert client._pending == {}
+
+
+@pytest.mark.asyncio
+async def test_a_steer_to_an_old_owner_stays_byte_identical() -> None:
+    """OLD owner, legacy mode: no ``delivery`` key reaches the wire."""
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    client._writer = cast(Any, _RawRecordingWriter())
+    for delivery in ("", "steer"):
+        task = asyncio.create_task(client.steer("hi", delivery=delivery))
+        await _wait_until(lambda: bool(client._pending))
+        ((req, future),) = client._pending.items()
+        future.set_result({"op": "ack", "req": req, "detail": "steering queued"})
+        await task
+    assert len(cast(Any, client._writer).raw) == 2
+    assert b'"delivery"' not in b"".join(cast(Any, client._writer).raw)
+
+
+@pytest.mark.asyncio
+async def test_a_capable_owner_gets_delivery_on_both_ops() -> None:
+    from local_operator.mobile.types import ContinuationCommand
+
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._connected = True
+    client._session_id = "sess-a"
+    client._busy_delivery_supported = True
+    client._writer = cast(Any, _RecordingWriter())
+    command = ContinuationCommand(
+        command_id="12345678-1234-4678-9234-567812345678",
+        session_id="sess-a",
+        text="held",
+        delivery="both",
+    )
+
+    async def drive(coro: Any) -> dict[str, Any]:
+        task = asyncio.create_task(coro)
+        await _wait_until(lambda: bool(client._pending))
+        ((req, future),) = client._pending.items()
+        future.set_result({"op": "ack", "req": req, "detail": "queued"})
+        await task
+        return cast(Any, client._writer).frames[-1]
+
+    prompt_frame = await drive(client.send_command(command))
+    assert prompt_frame["op"] == "prompt" and prompt_frame["delivery"] == "both"
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_fallback_keeps_delivery() -> None:
+    """``TurnInFlight`` reconciles the prompt as a steer under the same id AND mode."""
+    from local_operator.mobile.types import ContinuationCommand
+    from local_operator.session.errors import TurnInFlight
+
+    client = AttachClient(lambda p: None, lambda reason: None)
+    client._session_id = "sess-a"
+    client._busy_delivery_supported = True
+    calls: list[dict[str, Any]] = []
+
+    async def fake_request_frame(op: str, **fields: Any) -> dict[str, Any]:
+        calls.append({"op": op, **fields})
+        if op == "prompt":
+            raise TurnInFlight()
+        return {"op": "ack"}
+
+    client._request_frame = fake_request_frame  # type: ignore[assignment]
+    command = ContinuationCommand(
+        command_id="12345678-1234-4678-9234-567812345678",
+        session_id="sess-a",
+        text="held",
+        delivery="queue",
+    )
+    await client.send_command(command)
+    assert [(c["op"], c.get("delivery")) for c in calls] == [
+        ("prompt", "queue"),
+        ("steer", "queue"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_an_owner_without_the_capability_refuses_images_and_writes_no_frame() -> None:
     """NEW core -> OLD owner runtime. Unlike ``input_mode`` this must NOT strip: the
     text would be recorded as a terminal answer and the picture lost without a word."""

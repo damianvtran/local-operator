@@ -750,3 +750,70 @@ def test_ask_dismiss_accepts_the_two_reasons(reason: str) -> None:
 def test_ask_dismiss_refuses_an_unknown_reason_at_the_wire(reason: Any) -> None:
     with pytest.raises(ValueError, match="reason must be"):
         validate_control_frame({"op": "ask_dismiss", "ask_id": "a-1", "reason": reason})
+
+
+def test_delivery_validation_accepts_absent_empty_and_each_mode() -> None:
+    """``delivery`` mirrors the annotation pair: absent/empty is the legacy read."""
+    base = {
+        "op": "prompt",
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "session_id": "s1",
+        "text": "hello",
+    }
+    validate_control_frame(base)
+    validate_control_frame({**base, "delivery": ""})
+    validate_control_frame({**base, "delivery": "steer"})
+    validate_control_frame({**base, "delivery": "queue"})
+    validate_control_frame({**base, "delivery": "both"})
+    validate_control_frame({"op": "steer", "text": "more", "delivery": "queue"})
+
+    with pytest.raises(ValueError, match="delivery"):
+        validate_control_frame({**base, "delivery": "whenever"})
+    with pytest.raises(ValueError, match="delivery"):
+        validate_control_frame({**base, "delivery": 9})
+    with pytest.raises(ValueError, match="delivery"):
+        validate_control_frame({"op": "steer", "text": "more", "delivery": "urgently"})
+
+
+def test_continuation_command_round_trips_delivery() -> None:
+    from local_operator.mobile.types import ContinuationCommand
+
+    payload = {
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "session_id": "s1",
+        "text": "hello",
+        "delivery": "queue",
+    }
+    command = ContinuationCommand.from_json(payload)
+    assert command.delivery == "queue"
+    # The envelope is the immutable identity a retry replays: the mode must
+    # survive the round trip or a queued retry would arrive as a steer.
+    assert ContinuationCommand.from_json(command.to_json()).delivery == "queue"
+    for mode in ("", "steer", "both"):
+        assert ContinuationCommand.from_json({**payload, "delivery": mode}).delivery == mode
+
+
+def test_a_legacy_and_steer_command_reads_as_no_delivery() -> None:
+    from local_operator.mobile.types import ContinuationCommand
+
+    base = {
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "session_id": "s1",
+        "text": "hello",
+    }
+    assert ContinuationCommand.from_json(base).delivery == ""
+    assert ContinuationCommand.from_json({**base, "delivery": ""}).delivery == ""
+
+
+def test_a_malformed_delivery_refuses_the_command_payload() -> None:
+    from local_operator.mobile.types import ContinuationCommand
+
+    base = {
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "session_id": "s1",
+        "text": "hello",
+    }
+    with pytest.raises(ValueError, match="delivery"):
+        ContinuationCommand.from_json({**base, "delivery": "someday"})
+    with pytest.raises(ValueError, match="delivery"):
+        ContinuationCommand.from_json({**base, "delivery": ["queue"]})

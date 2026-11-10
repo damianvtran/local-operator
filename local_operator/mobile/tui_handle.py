@@ -635,6 +635,7 @@ class TuiSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | None = None,
         command_id: str | None = None,
+        delivery: str | None = None,
     ) -> str:
         if not command_id:
             raise ValueError("command_id is required")
@@ -648,6 +649,11 @@ class TuiSessionHandle(SessionHandle):
                 fields: dict[str, Any] = {"message_id": command_id}
                 if "producer_command_id" in inspect.signature(session.steer).parameters:
                     fields["producer_command_id"] = command_id
+                if (
+                    "delivery" in inspect.signature(session.steer).parameters
+                    and delivery is not None
+                ):
+                    fields["delivery"] = delivery
                 session.steer(text, image_blocks, **fields)
             except Exception:
                 self._command_reservations.reject(command_id)
