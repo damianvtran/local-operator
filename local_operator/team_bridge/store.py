@@ -406,6 +406,18 @@ CREATE TABLE IF NOT EXISTS screening_answer_holds (
         owner_key, body_sha256, template_sha256, model, admission_revision, envelope_digest
     )
 );
+-- How many passes in a row EVERY screening hop answered unusably for one
+-- message (``Store.note_unusable_screening_pass``). Keyed by message id and
+-- separate from ``screening_holds`` because the conversation loop deletes the
+-- screener's bare hold row every tick (QA round 2, Q4); terminal outcomes clear
+-- it. Not in ``_V3_TABLES``: a store without it is simply one with no counts.
+CREATE TABLE IF NOT EXISTS screening_unusable_passes (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    passes INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, message_id)
+);
 CREATE TABLE IF NOT EXISTS screening_policy (
     owner_key TEXT PRIMARY KEY,
     version TEXT NOT NULL,
@@ -598,6 +610,23 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_unusable_pass_table(conn: sqlite3.Connection) -> None:
+    """Create the unusable-pass counter on a store that predates it (QA round 2, Q4).
+
+    The same rule as :func:`_ensure_answer_hold_table`: a stamped current-version
+    store never re-runs schema DDL, so the paths that touch the table create it
+    (``IF NOT EXISTS``, inside the caller's write transaction). Purely additive and
+    authority-free: a lost row costs at most a few more retry passes before a
+    person is asked, never a verdict, budget or receipt.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_unusable_passes ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, passes INTEGER NOT NULL, "
+        "updated_at REAL NOT NULL, PRIMARY KEY (owner_key, message_id))"
+    )
 
 
 def _ensure_budget_episode_table(conn: sqlite3.Connection) -> None:
@@ -1137,14 +1166,57 @@ def _owner_release_sha256() -> str:
     return OWNER_RELEASE_SHA256
 
 
+#: OWNER-PRINCIPAL provenance (operator report 2026-11-09). The receiver's own
+#: owner, posting as a HUMAN under the SAME account this endpoint is enrolled
+#: for, is the principal the screener protects — not a stranger to screen. The
+#: hub fans a member's own post out to their own agent (it skips a recipient
+#: only when account AND endpoint match, and a human sender has no endpoint),
+#: so before this the owner's own channel post was screened by their own CoS,
+#: and a cached ``model_hold`` on it never cleared (``bcmsg_15f004fa``, held
+#: 17:48:07 on the owner's own receiver). Such a message is admitted with no
+#: model call and no budget charge, under a receipt whose template is the
+#: sha256 of a fixed domain string: no published screening template can equal
+#: it, and every cache lookup filters on the policy template, so the receipt
+#: can never be replayed as a verdict for another sender's identical body.
+OWNER_PRINCIPAL_MODEL = "owner_principal"
+OWNER_PRINCIPAL_PROMPT_VERSION = "owner-principal-v1"
+OWNER_PRINCIPAL_SHA256 = hashlib.sha256(
+    b"local-operator team-bridge owner-principal v1"
+).hexdigest()
+
+
+def is_owner_principal(owner: OwnerSnapshot, sender_account: str, sender_kind: str) -> bool:
+    """Is this HUB-STORED sender the receiver's own owner, posting as a person?
+
+    Both values must come from the server's stored participant identity
+    (``validate_envelope``'s participant block, filled from the classification
+    read's ``sender_account_id``/``sender_kind``) — never a display name, which
+    any member can copy. ``kind == "human"`` is required: an AGENT under the same
+    account (another endpoint of the owner's, or a pre-#327 server that states
+    no class) is still screened, because an agent can relay a stranger's words.
+    """
+
+    return bool(
+        sender_account
+        and isinstance(owner.account_id, str)
+        and sender_account == owner.account_id
+        and sender_kind == "human"
+    )
+
+
 def receipt_authority(
     owner: OwnerSnapshot,
     policy: Mapping[str, Any],
     receipt: Mapping[str, Any],
     *,
     release: Mapping[str, Any] | None = None,
+    principal: tuple[str, str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
+
+    ``principal`` is the validated envelope's ``(sender_account, sender_kind)``;
+    only an :data:`OWNER_PRINCIPAL_SHA256` receipt reads it (see
+    :func:`is_owner_principal`).
 
     WHY THIS IS ONE FUNCTION, called from two sides of the store: the WRITE-side
     consumption point (:meth:`Store.consume_screening_receipt`, which must refuse
@@ -1187,7 +1259,23 @@ def receipt_authority(
     never rendered to a caller: the machine-readable half stays the closed code.
     """
 
-    if receipt.get("template_sha256") == _owner_release_sha256():
+    if receipt.get("template_sha256") == OWNER_PRINCIPAL_SHA256:
+        # The ONLY authority for an owner-principal receipt is that the message's
+        # hub-stored sender IS this owner, as a person — re-derived by the caller
+        # from the validated envelope (``principal``), never read from the row.
+        # A caller that cannot supply it (the write-side cache consumers, which
+        # filter on the policy template and so never select this row) gets
+        # DAMAGE, the fail-closed answer, exactly like an unverified release.
+        if not (
+            isinstance(principal, tuple)
+            and len(principal) == 2
+            and is_owner_principal(owner, str(principal[0]), str(principal[1]))
+            and receipt.get("verdict") == "allow"
+        ):
+            return None, RECEIPT_CORRUPT, "owner-principal receipt for a non-owner sender"
+        if policy.get("revision") != receipt.get("admission_revision"):
+            return None, RECEIPT_STALE, ""
+    elif receipt.get("template_sha256") == _owner_release_sha256():
         word = "deliver" if receipt.get("verdict") == "allow" else "discard"
         if not (
             isinstance(release, Mapping)
@@ -1513,16 +1601,15 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         "busy",
         "budget_exhausted",
         "screening_unavailable",
-        # The provider ANSWERED but the reply cannot admit (#3200, #3195): the
-        # screening model's own safety refusal, or a reply cut off at the
-        # output ceiling. Neither is the sender's fault and neither is
-        # terminal — the message is re-screened on the next drain exactly like
-        # a provider error — so the sender is told screening is temporarily
-        # unavailable, never that their message was judged and held for review.
-        # Named EXPLICITLY rather than left to the fallback: the conservative
-        # class would claim a human is reviewing it, which is not what happens.
-        "model_refused",
-        "reply_truncated",
+        # Every hop answered BLANK even after the re-draw and failover: like
+        # ``parse_failed`` it is NOT cached and is re-screened on the backoff
+        # (operator report 2026-11-09), so it is genuinely transient.
+        "empty_reply",
+        # ``model_refused``/``reply_truncated`` are deliberately NOT here any
+        # more (operator report 2026-11-09): both are cached ANSWERS that are
+        # never re-screened, so telling the sender "temporarily unavailable"
+        # promised a retry that never came. They are owner-review holds now
+        # (``hold_release.REVIEW_HOLD_CODES``) and publish ``awaiting_review``.
         # PR #3400: a batch that could not conclude the message; it is
         # re-screened alone at once, so screening is only briefly pending.
         "batch_unresolved",
@@ -3386,6 +3473,87 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_policy)")}
         if "approved_serving" not in columns:
             conn.execute("ALTER TABLE screening_policy ADD COLUMN approved_serving TEXT")
+
+    def note_unusable_screening_pass(self, owner: OwnerSnapshot, message_id: str) -> int:
+        """Count one more pass on which EVERY hop answered unusably; return the total.
+
+        WHY (code review round 1, R4). ``empty_reply``/``parse_failed`` are not
+        answers, so they are not cached and the backoff re-screens them — but a
+        body that reliably blanks every hop used to be re-drawn (2 draws x hops a
+        pass) for as long as the retry ladder ran, with the sender told
+        "temporarily unavailable" throughout. The pipeline turns the hold into a
+        person's review once this count reaches its bound, which needs a count
+        that survives a connector restart (the loop's ``_RETRY_ATTEMPTS`` is
+        in-memory).
+
+        WHY ITS OWN TABLE (QA round 2, Q4). The count first lived on the
+        message's ``screening_holds`` row, but on the conversation lane that row
+        is the screener's bare ``bcmsg_`` duplicate, which the loop deletes every
+        tick once due (:meth:`retire_due_bare_conversation_holds`) before the
+        lane's feed-ref row re-screens it — so every pass counted 1 and the bound
+        was never reached. ``screening_unusable_passes`` is keyed by the message
+        id alone and the retire never touches it; the receipt commits and
+        :meth:`delete_hold` clear it (:meth:`_clear_unusable_passes`), so a
+        delivered, admitted or discarded message leaves no count behind.
+
+        Counts only while the caller's hold row exists (the pipeline writes it
+        just before calling): ``0`` when the hold write itself was refused, which
+        never converts anything. Additive (:func:`_ensure_unusable_pass_table`), not
+        in ``_V3_TABLES``, so its absence is never damage.
+        """
+
+        keys = [message_id]
+        try:
+            canonical = _contentless_delivery_key(message_id)
+        except Exception:  # noqa: BLE001 — a malformed ref keeps the raw key only
+            canonical = message_id
+        if canonical != message_id:
+            keys.append(canonical)
+        owner_key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            _ensure_unusable_pass_table(conn)
+            total = 0
+            for key in keys:
+                held = conn.execute(
+                    "SELECT 1 FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, key),
+                ).fetchone()
+                if held is None:
+                    continue
+                conn.execute(
+                    "INSERT INTO screening_unusable_passes "
+                    "(owner_key, message_id, passes, updated_at) VALUES (?, ?, 1, ?) "
+                    "ON CONFLICT (owner_key, message_id) DO UPDATE SET "
+                    "passes = passes + 1, updated_at = excluded.updated_at",
+                    (owner_key, key, time.time()),
+                )
+                row = conn.execute(
+                    "SELECT passes FROM screening_unusable_passes "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, key),
+                ).fetchone()
+                if row is not None:
+                    total = max(total, int(row[0] or 0))
+            return total
+
+    @staticmethod
+    def _clear_unusable_passes(conn: sqlite3.Connection, owner_key: str, message_id: str) -> None:
+        """Drop a message's unusable-pass count once it reaches a terminal outcome.
+
+        Called beside every terminal ``DELETE FROM screening_holds`` (receipt
+        commits, owner releases, :meth:`delete_hold`) but deliberately NOT by
+        :meth:`retire_due_bare_conversation_holds`: that retire is a per-tick
+        de-duplication, not an outcome, and clearing there is exactly the Q4 bug.
+        """
+
+        _ensure_unusable_pass_table(conn)
+        conn.execute(
+            "DELETE FROM screening_unusable_passes WHERE owner_key = ? AND message_id = ?",
+            (owner_key, message_id),
+        )
 
     @staticmethod
     def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
@@ -5549,6 +5717,7 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (key, str(message_id)),
             )
+            self._clear_unusable_passes(conn, key, str(message_id))
             return dict(
                 decoded,
                 rendered_template_sha256=source["rendered_template_sha256"],
@@ -6509,6 +6678,26 @@ class Store:
                 ).fetchone()
                 if row is None:
                     return None
+                if row["engine_version"] != engine_version:
+                    # Another engine's answer can never be replayed by this build
+                    # (QA round 1 Q3): drop THIS exact row on the read that finds
+                    # it, so an engine bump leaves no inert rows behind. Narrow on
+                    # purpose -- one keyed row, inside this write transaction --
+                    # and the only cost to a downgraded build is one re-screen.
+                    conn.execute(
+                        "DELETE FROM screening_answer_holds WHERE owner_key = ? "
+                        "AND body_sha256 = ? AND template_sha256 = ? AND model = ? "
+                        "AND admission_revision = ? AND envelope_digest = ?",
+                        (
+                            key,
+                            body_sha256,
+                            template_sha256,
+                            model,
+                            admission_revision,
+                            envelope_digest,
+                        ),
+                    )
+                    return None
                 if (
                     policy["template_sha256"] != template_sha256
                     or policy["default_model"] != model
@@ -6931,6 +7120,7 @@ class Store:
                     "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                     (key, message_id),
                 )
+                self._clear_unusable_passes(conn, key, message_id)
             else:
                 # WRITE-ONCE per attempt (reviewer R7): once this attempt has
                 # committed a receipt, a later hold for the same attempt is
@@ -7339,6 +7529,9 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), _contentless_delivery_key(message_id)),
             )
+            # Both spellings: the count is keyed by the id the screener saw.
+            for counted in {message_id, _contentless_delivery_key(message_id)}:
+                self._clear_unusable_passes(conn, _owner_key(owner), counted)
             return bool(deleted.rowcount)
 
     def make_holds_due(self, owner: OwnerSnapshot, hold_code: str, *, now: float) -> int:
@@ -7876,8 +8069,13 @@ class Store:
         screener_verdict: str = "",
         screener_hop: int = -1,
         screener_preferred: bool = False,
+        hold_code: str = "",
     ) -> dict[str, Any]:
         """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
+
+        ``hold_code`` defaults to the work-scope class; a review code
+        (``hold_release.REVIEW_HOLD_CODES``) is always eligible — see there for
+        why it needs neither a preferred screener nor the sender budget.
 
         Eligibility is computed HERE, in the same write transaction as the
         per-sender budget count, so two passes cannot both spend the last unit.
@@ -7897,8 +8095,13 @@ class Store:
             ).fetchone()
             if existing is not None:
                 return dict(existing)
+            code = hold_code or hr.WORK_SCOPE_HOLD
+            if code not in hr.RELEASABLE_HOLD_CODES:
+                raise StoreRefused("invalid_decision", "hold code is not releasable")
             reason: str | None = None
-            if not screener_preferred:
+            if code in hr.REVIEW_HOLD_CODES:
+                pass
+            elif not screener_preferred:
                 # Amendment 2: only trusted PREFERRED-stage provenance is releasable;
                 # a later preferred Opus qualifies, an ordinary cascade Opus does not.
                 reason = hr.INELIGIBLE_SCREENER
@@ -7924,7 +8127,7 @@ class Store:
                     conversation_id,
                     body_sha256,
                     envelope_digest,
-                    hr.WORK_SCOPE_HOLD,
+                    code,
                     screener_provider,
                     screener_model,
                     template_sha256,
@@ -8209,3 +8412,4 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (key, message_id),
             )
+            self._clear_unusable_passes(conn, key, message_id)
