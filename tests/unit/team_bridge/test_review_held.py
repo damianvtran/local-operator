@@ -522,7 +522,9 @@ def test_a_route_failed_primary_then_off_grammar_hop_still_caches_the_answer(
     config_dir, _store, owner = rig
     _off(config_dir)
     policy = Policy()
-    models = (policy.default_model, "claude-opus-5-5", "claude-sonnet-5")
+    primary = policy.default_model
+    assert primary is not None
+    models = (primary, "claude-opus-5-5", "claude-sonnet-5")
     setattr(policy, "approved_serving_identities", models)
     log: list[str] = []
 
