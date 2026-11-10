@@ -34276,7 +34276,9 @@ class HubParams(BaseModel):
     # tool:// ops table. ``effort`` is a reasoning LEVEL on the chosen model,
     # not a task tier: the child is already running, there is no launch to
     # route through a tier.
-    effort: str | None = Field(default=None, description="set_model: reasoning level.")
+    effort: str | None = Field(
+        default=None, description="set_model: reasoning level, or lo|med|hi tier."
+    )
     cascade: bool = Field(default=False, description="set_model: also running descendants.")
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
     # ``anyOf``, and this module's schemas reach Gemini verbatim as
@@ -34772,7 +34774,14 @@ def _served_model_clause(comms: Any, job_id: str) -> str:
     served, pinned = cast("tuple[str, str]", reading(job_id))
     if not served:
         return ""
-    return f"pinned {pinned}, ran on {served}" if pinned else f"on {served}"
+    if not pinned:
+        return f"on {served}"
+    # "pinned" only when a pin chose the primary: an inheriting child that
+    # fell back names its primary without claiming a pin (review round 1, R7).
+    owns = getattr(comms, "model_pinned", None)
+    if callable(owns) and not owns(job_id):
+        return f"on {served} (primary {pinned})"
+    return f"pinned {pinned}, ran on {served}"
 
 
 def _job_model_clause(context: ToolContext | None, job: Any) -> str:

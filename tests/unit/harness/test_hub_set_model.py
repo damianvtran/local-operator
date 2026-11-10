@@ -238,6 +238,13 @@ async def test_hub_list_and_jobs_show_pinned_x_ran_on_y(tmp_path):
     root.jobs.list = lambda: list(root.jobs.jobs.values())  # type: ignore[attr-defined]
     ctx = ToolContext(cwd=".", subagent_comms=comms, jobs=root.jobs)  # type: ignore[arg-type]
 
+    # R7: the manager INHERITS (no pin), so its fallback names the primary
+    # without claiming a pin nobody set.
+    listed = body(await execute_hub("c0", {"op": "list"}, None, None, ctx))
+    assert "on openai/gpt-6.1-sol (primary anthropic/fable-5.2)" in listed
+    assert "pinned anthropic/fable-5.2" not in listed
+    # A real pin (the launch recorded ``owns_model``) keeps the pin wording.
+    row.owns_model = True
     listed = body(await execute_hub("c1", {"op": "list"}, None, None, ctx))
     assert "pinned anthropic/fable-5.2, ran on openai/gpt-6.1-sol" in listed
     jobs = body(await execute_jobs("c2", {}, None, None, ctx))
@@ -330,3 +337,134 @@ async def test_pausing_a_leaf_touches_nothing_else(tmp_path):
     delivery = await comms.pause("wa")
     assert delivery.error is None and manager.jobs.cancelled == ["wa"]
     assert root.jobs.cancelled == []
+
+
+# -- review/QA round 1 remediation ---------------------------------------------
+
+
+def _settle_paused(comms: SubagentComms, job_ids: tuple[str, ...]) -> None:
+    """Write each paused child's transcript and detach it, as teardown would."""
+    for job_id in job_ids:
+        session_dir = comms._records[job_id].session_dir
+        assert session_dir is not None
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+        comms.detach(job_id)
+
+
+def _capture_launches(monkeypatch) -> list[dict[str, Any]]:
+    launched: list[dict[str, Any]] = []
+
+    def run_subagent(**kwargs: Any) -> str:
+        launched.append(kwargs)
+        return f"{kwargs['label']}-2"
+
+    monkeypatch.setattr("local_operator.harness.subagent.run_subagent", run_subagent)
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.resolve_launch_target",
+        lambda agent, parent, *, carried=None: LaunchTarget(
+            role=agent, team=None, team_lineage=(), depth=1, reports_to="", is_team_launch=False
+        ),
+    )
+    return launched
+
+
+@pytest.mark.asyncio
+async def test_a_child_cancelled_while_its_manager_is_paused_stays_cancelled(tmp_path, monkeypatch):
+    """R1: the cancel is the newer word; the manager's resume must not relaunch it."""
+    import asyncio
+
+    comms, root, _manager, _a, _b = incident_tree(tmp_path)
+    assert (await comms.pause("mgr")).outcome == "paused"
+    _settle_paused(comms, ("wa", "wb", "mgr"))
+
+    assert (await comms.cancel("wa")).outcome == "cancelled"
+    record = comms._records["wa"]
+    assert (record.outcome, record.subtree_paused_by) == ("cancelled", "")
+
+    launched = _capture_launches(monkeypatch)
+    assert comms.resume("mgr", "carry on")[1] is None
+    root.jobs.add("manager-2")
+    comms.record_launch("manager-2", "manager", agent_role="manager")
+    comms.attach("manager-2", ModelChild(FABLE), tmp_path / "mgr")  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    assert sorted(kwargs["label"] for kwargs in launched[1:]) == ["worker-b"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_manager_pause_names_its_paused_subtree(tmp_path):
+    """R2: the children's pauses landed; the failure receipt must say so."""
+    comms, root, _manager, _a, _b = incident_tree(tmp_path)
+
+    async def refuse(job_id: str, **_kwargs: Any) -> bool:
+        return False
+
+    root.jobs.cancel = refuse  # type: ignore[method-assign]
+    delivery = await comms.pause("mgr")
+    assert delivery.outcome == "failed"
+    error = delivery.error or ""
+    assert "worker-a (wa)" in error and "worker-b (wb)" in error
+    assert "hub op='resume'" in error
+    assert comms._records["mgr"].paused is False
+
+
+@pytest.mark.asyncio
+async def test_pause_all_counts_cascade_paused_children_as_paused(tmp_path):
+    """Q1: one batch reaching the manager first pauses its workers; the batch
+    must report them as paused with it, not 'failed — already gone'."""
+    comms, *_ = incident_tree(tmp_path)
+    ctx = ToolContext(cwd=".", subagent_comms=comms)
+    text = body(await execute_hub("c1", {"op": "pause", "to": ["all"]}, None, None, ctx))
+    assert "3/3" in text, text
+    assert "worker-a (wa): paused — already paused with its parent manager" in text
+    assert "failed" not in text
+
+
+@pytest.mark.asyncio
+async def test_unknown_effort_is_refused_and_the_receipt_names_the_applied_level(tmp_path):
+    """R4/Q2: an unknown word no longer clamps silently to the default."""
+    comms, _root, manager, _a, _b = incident_tree(tmp_path)
+    out = await comms.set_model(["mgr"], model=None, effort="turbo")
+    assert out[0].outcome == "failed" and "unknown effort 'turbo'" in (out[0].error or "")
+    assert manager.switches == []
+
+    manager.model = FABLE.model_copy(
+        update={"reasoning_efforts": ["low", "high"], "reasoning_default_effort": "high"}
+    )
+    out = await comms.set_model(["mgr"], model=None, effort="medium")
+    # medium clamps onto the ladder; the receipt says the rung actually applied.
+    applied = manager.switches[-1][0].reasoning_effort
+    assert applied in ("low", "high") and out[0].error == f"effort {applied}"
+
+    out = await comms.set_model(["mgr"], model=None, effort="auto")
+    spec, _explicit, choice = manager.switches[-1]
+    assert spec.reasoning_effort == "high" and choice is None
+    assert "effort auto" in (out[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_a_tier_word_resolves_the_tier_model_as_task_does(tmp_path, monkeypatch):
+    """R4: lo|med|hi is task()'s vocabulary — it picks the tier's MODEL."""
+    comms, root, manager, _a, _b = incident_tree(tmp_path)
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.model_may_choose_tier", lambda *a, **k: False
+    )
+    out = await comms.set_model(["mgr"], model=None, effort="hi")
+    assert out[0].outcome == "failed" and "model_choice=model" in (out[0].error or "")
+
+    monkeypatch.setattr(
+        "local_operator.harness.subagent.model_may_choose_tier", lambda *a, **k: True
+    )
+    calls: list[tuple[Any, ...]] = []
+
+    def resolve(role: str, tier: str | None, **kwargs: Any) -> tuple[ModelSpec, str]:
+        calls.append((role, tier, kwargs.get("model")))
+        return OPUS, "effort"
+
+    root._resolve_subagent_selection = resolve  # type: ignore[attr-defined]
+    out = await comms.set_model(["mgr"], model=None, effort="HI")
+    assert calls == [("manager", "hi", None)]
+    assert manager.model == OPUS and out[0].error == "tier hi"
+    assert manager.reprobes[-1] == {"withdraw": True, "launch_pin": "anthropic/opus-5-5"}
+    both = await comms.set_model(["mgr"], model="inherit", effort="lo")
+    assert both[0].outcome == "failed" and "omit model=" in (both[0].error or "")

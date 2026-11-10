@@ -226,11 +226,13 @@ ending its turn:
   same subagents, same tabs. A primary still out of quota fails over again on
   that call — the receipt and `hub list` show the model actually serving.
 - **`hub op='steer'`** re-probes like a new user message: a quota pin is
-  re-checked (with `usageAwareFallback: true`), a transport pin keeps its
-  cooldown.
+  re-checked either way (with `usageAwareFallback: true` the primary's quota
+  is read first; otherwise the next call simply retries the primary), and a
+  transport pin keeps its cooldown.
 
-`hub list` and `jobs` show each child's served model, as `pinned X, ran on Y`
-when it differs from the model it is pinned to.
+`hub list` and `jobs` show each child's served model when it differs from its
+primary: `pinned X, ran on Y` for a pinned child, `on Y (primary X)` for one
+that inherits.
 
 ## Retry and backoff
 

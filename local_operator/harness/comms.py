@@ -282,6 +282,11 @@ DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "switched
 #: same caller may move them.
 ROLE_PIN_SOURCES = frozenset({"role", "team", "role_inherit"})
 
+#: Selection sources that PIN a model (``role_inherit`` pins the inherit
+#: sentinel, i.e. no model). Only the roster wording reads this, and only
+#: for rows without ``owns_model`` (see ``SubagentComms.model_pinned``).
+PINNING_SOURCES = frozenset({"role", "team", "effort", "explicit_model"})
+
 #: The instruction a paused subtree's children are resumed with when their
 #: paused parent resumes (``SubagentComms.pause`` / ``attach``). They were
 #: stopped mid-task by their parent's pause, not by anything they did, so the
@@ -2608,6 +2613,26 @@ class SubagentComms:
             pinned = str(getattr(self.job(job_id), "requested_model_label", "") or "")
         return served, pinned if pinned and pinned != served else ""
 
+    def model_pinned(self, job_id: str) -> bool:
+        """Whether a pin (tier, role, team or explicit model) chose this child's model.
+
+        Decides the WORDING of a fallback reading: ``pinned X, ran on Y`` only
+        when something pinned X; an inheriting child that fell back reads
+        ``on Y (primary X)`` so a roster never claims a pin nobody set (review
+        round 1, R7). The job row's ``owns_model`` is the launch-time answer
+        (rewritten by ``set_model``); the selection source answers for rows
+        that never recorded it.
+        """
+        record = self._record(job_id)
+        job = (record.job_ref if record is not None else None) or self.job(job_id)
+        owns = getattr(job, "owns_model", None)
+        if owns is not None:
+            return bool(owns)
+        source = str(getattr(job, "model_selection_source", "") or "") or (
+            record.model_selection_source if record is not None else ""
+        )
+        return source in PINNING_SOURCES
+
     async def set_model(
         self,
         job_ids: Sequence[str],
@@ -2641,16 +2666,30 @@ class SubagentComms:
         """
         from local_operator.harness.subagent import model_may_choose_tier
         from local_operator.mobile.peer_model import prepared_subagent_selections
+        from local_operator.model.effort import CANONICAL_EFFORT_TIERS, TIER_EFFORTS
 
-        if model is not None and model != "inherit" and not model_may_choose_tier():
+        # ``effort`` takes the two vocabularies agents already use, and nothing
+        # else (review round 1, R4/Q2): a reasoning level (``auto`` or an
+        # EFFORT_ORDER rung, clamped onto the model's ladder) or a ``task()``
+        # tier word, which — exactly as in ``task`` — picks the tier's MODEL
+        # (``subagents.models.<tier>``), not a depth. An unknown word used to
+        # clamp silently to the default while the receipt said ``switched``.
+        level = effort.strip().lower() if effort and effort.strip() else None
+        tier: str | None = None
+        refusal: str | None = None
+        if level in CANONICAL_EFFORT_TIERS:
+            tier, level = level, None
+            if model is not None:
+                refusal = f"effort={tier} picks a model tier as in task(); omit model="
+            elif not model_may_choose_tier():
+                refusal = "model tiers require subagents.model_choice=model; use a reasoning level"
+        elif level is not None and level not in TIER_EFFORTS:
+            refusal = f"unknown effort {effort!r}; use {'|'.join(TIER_EFFORTS)} or lo|med|hi"
+        elif model is not None and model != "inherit" and not model_may_choose_tier():
+            refusal = "specific models require subagents.model_choice=model; use 'inherit'"
+        if refusal is not None:
             return [
-                Delivery(
-                    job_id,
-                    self.label_of(job_id),
-                    "failed",
-                    "specific models require subagents.model_choice=model; use 'inherit'",
-                )
-                for job_id in job_ids
+                Delivery(job_id, self.label_of(job_id), "failed", refusal) for job_id in job_ids
             ]
         targets: dict[str, bool] = {}
         for job_id in job_ids:
@@ -2678,7 +2717,9 @@ class SubagentComms:
                     # pick a model up on resume and need no receipt line.
                     continue
                 out.append(
-                    self._apply_model(record, model, effort, override=direct and scope is None)
+                    self._apply_model(
+                        record, model, level, tier=tier, override=direct and scope is None
+                    )
                 )
         return out
 
@@ -2689,6 +2730,7 @@ class SubagentComms:
         effort: str | None,
         *,
         override: bool,
+        tier: str | None = None,
     ) -> Delivery:
         """One child's half of :meth:`set_model`; see there for the policy."""
         from local_operator.harness.subagent import SubagentModelUnavailable
@@ -2726,14 +2768,18 @@ class SubagentComms:
         launch_pin: str | None = None
         spec = current
         new_source = source
-        if role_pinned and not override and (model is not None or effort is not None):
+        if (
+            role_pinned
+            and not override
+            and (model is not None or effort is not None or tier is not None)
+        ):
             # Kept, not skipped: the child is still re-probed back onto its own
             # pin, which is what a quota-stranded pinned child needs anyway.
             note = (
                 f"kept its role pin {current.provider}/{current.model_id} and re-probed it; "
                 "only the top session can override a role pin by naming the child"
             )
-            effort = None
+            effort = tier = None
         elif model == "inherit":
             inherited, why = self._inherited_model(record)
             parent_model = inherited or getattr(self._session, "model", None)
@@ -2746,7 +2792,9 @@ class SubagentComms:
                 )
             spec, launch_pin, new_source = parent_model, "", "explicit_inherit"
             note = why or None
-        elif model is not None:
+        elif model is not None or tier is not None:
+            # A tier goes through the same resolver ``task(effort=...)`` uses,
+            # so ``set_model effort=hi`` lands where a fresh ``hi`` launch would.
             role, kwargs = self._record_resolution(record)
             resolve = getattr(self._session, "_resolve_subagent_selection", None)
             if not callable(resolve):
@@ -2757,7 +2805,7 @@ class SubagentComms:
                     "this session cannot resolve models",
                 )
             try:
-                outcome = resolve(role, None, strict=True, model=model, **kwargs)
+                outcome = resolve(role, tier, strict=True, model=model, **kwargs)
                 # ``getattr`` erases the ``(spec, source)`` pair; named as resume does.
                 resolved, new_source = cast("tuple[ModelSpec | None, str]", outcome)
             except (SubagentModelUnavailable, ValueError) as exc:
@@ -2767,22 +2815,33 @@ class SubagentComms:
                     record.job_id,
                     record.label,
                     "failed",
-                    f"{model} did not resolve to a model",
+                    f"{model or tier} did not resolve to a model",
                 )
             spec = resolved
             launch_pin = f"{spec.provider}/{spec.model_id}"
-        if effort:
-            spec = spec.model_copy(
-                update={
-                    "reasoning_effort": resolve_effort_in(
-                        spec.reasoning_efforts, spec.reasoning_default_effort, effort
-                    )
-                }
+        # The receipt states the depth actually applied, not the word asked
+        # for: a rung clamps onto the model's ladder, and a model with no
+        # ladder has none to apply (R4/Q2).
+        choice: object = EFFORT_CHOICE_UNSET
+        applied = ""
+        if effort == "auto":
+            spec = spec.model_copy(update={"reasoning_effort": spec.reasoning_default_effort})
+            choice, applied = None, "effort auto (model default)"
+        elif effort:
+            rung = resolve_effort_in(spec.reasoning_efforts, spec.reasoning_default_effort, effort)
+            spec = spec.model_copy(update={"reasoning_effort": rung})
+            choice = rung or effort
+            applied = f"effort {rung}" if rung else f"effort {effort}: no levels on this model"
+        elif tier is not None:
+            applied = f"tier {tier}" + (
+                f" @{spec.reasoning_effort}" if spec.reasoning_effort else ""
             )
+        if applied:
+            note = f"{applied}; {note}" if note else applied
         # ``explicit=True`` is what withdraws an active fallback even when the
         # pair did not move (the same-model re-selection path), so a child
         # pinned to fable and served by sol returns to fable at its next call.
-        switch(spec, explicit=True, effort_choice=effort if effort else EFFORT_CHOICE_UNSET)
+        switch(spec, explicit=True, effort_choice=choice)
         reprobe = getattr(child, "request_route_reprobe", None)
         if callable(reprobe):
             reprobe(withdraw=True, launch_pin=launch_pin)
@@ -3304,6 +3363,11 @@ class SubagentComms:
             # still possible for anyone who kept the id.
             if record is not None and record.paused:
                 record.paused = False
+                # Also leave the parent's subtree: a child paused WITH its
+                # parent and then cancelled must not be relaunched when that
+                # parent's continuation attaches (``_resume_paused_subtree``
+                # matches on this field alone) — the cancel is the newer word.
+                record.subtree_paused_by = ""
                 if record.outcome is None:
                     record.outcome = "cancelled"
                 # A cancel of a parked child is still a deliberate end by an
@@ -3371,6 +3435,15 @@ class SubagentComms:
             )
         job = jobs.get(job_id)
         if job is None or job.status != "running":
+            if record.paused and record.subtree_paused_by:
+                # Already paused by a parent's subtree pause — typically one
+                # batch (``to=["all"]``) that reached the manager first. The
+                # caller's intent holds, so report it as paused rather than as
+                # a failure advising a resume (QA round 1, Q1).
+                parent = self.label_of(record.subtree_paused_by)
+                return Delivery(
+                    job_id, record.label, "paused", f"already paused with its parent {parent}"
+                )
             state = job.status if job is not None else "gone"
             return Delivery(
                 job_id,
@@ -3401,6 +3474,19 @@ class SubagentComms:
         if not await jobs.cancel(job_id):
             record.paused = False
             self.abandon_stop(stamp)
+            if subtree:
+                # The children's pauses already landed and cannot be taken
+                # back atomically; name them so they are not stranded unseen.
+                # Their ``subtree_paused_by`` stays: resuming this manager
+                # later still brings them back under it (review round 1, R2).
+                names = ", ".join(f"{item.label} ({item.job_id})" for item in subtree)
+                return Delivery(
+                    job_id,
+                    record.label,
+                    "failed",
+                    f"job stopped before the pause landed, but its subtree was paused: "
+                    f"{names}; resume them with hub op='resume' (or resume this one)",
+                )
             return Delivery(job_id, record.label, "failed", "job stopped before the pause landed")
         if subtree:
             names = ", ".join(f"{item.label} ({item.job_id})" for item in subtree)

@@ -586,10 +586,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "Switch a RUNNING subagent at its next model call — no pause, same "
                     "job id, subagents and tabs — and re-probe its primary. model="
                     "'inherit' (parent's current model) or provider/id; omit model to "
-                    "only re-probe. effort= sets the reasoning level; cascade=true adds "
+                    "only re-probe. effort= a reasoning level or lo|med|hi tier; cascade=true adds "
                     "every running descendant. Role-pinned children keep their pin "
-                    "(re-probed) unless the top session names them directly. The "
-                    "receipt names the SERVED model."
+                    "(re-probed) unless the top session names them directly — only "
+                    "when the operator asks. The receipt names the SERVED model."
                 ),
             ),
             ToolDocOp(op="cancel", blurb="Stop it for good."),
