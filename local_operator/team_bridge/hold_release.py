@@ -78,7 +78,20 @@ logger = logging.getLogger(__name__)
 #: The ONE hold code a person may release. A closed set of one: a hold code
 #: added later is not releasable until a reviewed change says so (D1).
 WORK_SCOPE_HOLD = "work_scope_hold"
-RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD})
+
+#: Cached ANSWER holds the receiving person may REVIEW (``team_bridge.review_held``,
+#: default on; operator report 2026-11-09). Each is a model answer the answer cache
+#: replays forever so a re-draw cannot shop for ``deliver`` — which also meant it
+#: had no exit. Reviewing one releases nothing by itself: Deliver/Discard is the
+#: person's signed word through the same verified release path as a work-scope
+#: hold. Unlike the work-scope class, eligibility needs no preferred screener and
+#: spends no sender budget: those gates exist because a work-scope conversion
+#: TRUSTS the screener's category to offer a release, while a review hold trusts
+#: only the person, and a hold with no exit is the failure this closes.
+REVIEW_HOLD_CODES = frozenset(
+    {"model_hold", "model_refused", "reply_truncated", "bounce_without_category"}
+)
+RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD}) | REVIEW_HOLD_CODES
 
 #: The ONLY category tuple that may become a releasable hold (Amendment 1, D2).
 RELEASABLE_CATEGORIES = ("new_work_request",)
@@ -254,6 +267,50 @@ def enabled(config_dir: Path | str) -> bool:
     if values is None:
         return False
     return TeamBridgeSettings.from_values(values).hold_release
+
+
+def review_enabled(config_dir: Path | str) -> bool:
+    """``team_bridge.review_held``: ON unless the file says a real ``false``."""
+
+    from local_operator.config import read_config_values
+    from local_operator.team_bridge.settings import (
+        DEFAULT_REVIEW_HELD,
+        TeamBridgeSettings,
+    )
+
+    values = read_config_values(Path(config_dir))
+    if values is None:
+        return DEFAULT_REVIEW_HELD
+    return TeamBridgeSettings.from_values(values).review_held
+
+
+def enabled_for(config_dir: Path | str, hold_code: str | None) -> bool:
+    """Is the release path open for a decision/release of THIS hold code?
+
+    Review codes follow ``review_held``; the work-scope code (and anything
+    else) follows ``hold_release`` exactly as before.
+    """
+
+    if hold_code in REVIEW_HOLD_CODES:
+        return review_enabled(config_dir)
+    return enabled(config_dir)
+
+
+def any_enabled(config_dir: Path | str) -> bool:
+    """Whether ANY release path is open (the desktop list's ``enabled`` flag)."""
+
+    return enabled(config_dir) or review_enabled(config_dir)
+
+
+def trusted_decision(decision: Mapping[str, Any]) -> bool:
+    """The screener-provenance gate a release needs for THIS decision's class.
+
+    A work-scope decision must come from a preferred screener (Amendment 2); a
+    review decision trusts only the person's signed word (see REVIEW_HOLD_CODES).
+    """
+
+    code = str(decision.get("hold_code") or "")
+    return code in REVIEW_HOLD_CODES or bool(decision.get("screener_preferred"))
 
 
 def sender_digest(sender_account_id: str) -> str:
@@ -479,7 +536,7 @@ def release_matches_decision(release: Mapping[str, Any], decision: Mapping[str, 
         return False
     if decoded_categories(release) != decoded_categories(decision):
         return False
-    if not bool(decision.get("screener_preferred")):
+    if not trusted_decision(decision):
         return False
     return str(decision.get("hold_code") or "") in RELEASABLE_HOLD_CODES
 
@@ -570,10 +627,15 @@ def raise_notice(
         priority = _banner_priority(
             str(owner.endpoint_id), str(decision.get("sender_digest") or ""), monotonic()
         )
+        # The work-scope body names "new work", which is false for a review hold
+        # (the screener was unsure, refused, or answered off-grammar). Until a
+        # dedicated keyed string ships through the i18n ledger, a review hold
+        # reuses the audited generic "waiting for your review" copy.
+        review = str(decision.get("hold_code") or "") in REVIEW_HOLD_CODES
         notifications.notify(
             session_id,
             title=t(_k.held_title()),
-            body_md=t(_k.held_body()),
+            body_md=t(_k.more_body(count=1)) if review else t(_k.held_body()),
             priority=priority,
             key=notice_key(owner.endpoint_id, message_id),
         )

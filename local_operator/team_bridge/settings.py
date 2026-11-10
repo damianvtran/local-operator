@@ -197,6 +197,26 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: OFF, because a release path must never open on a value nobody wrote.
 DEFAULT_HOLD_RELEASE = False
 
+#: ``team_bridge.review_held`` — the owner-review EXIT for a cached screening
+#: ANSWER hold (``hold_release.REVIEW_HOLD_CODES``: ``model_hold``,
+#: ``model_refused``, ``reply_truncated``, ``bounce_without_category``).
+#:
+#: WHY ON BY DEFAULT (operator report 2026-11-09). Such a hold is the model's
+#: answer, cached so a re-draw cannot shop for a ``deliver``; before this it
+#: had no exit at all. All 29 held messages on the operator's machine had sat
+#: up to 9.2 days with nothing re-screening them and the sender told only
+#: "waiting to be screened". With this on, the hold raises the per-message
+#: notice with Deliver/Discard (the B4b signed-release path) the moment it is
+#: written, so every held message ends delivered or not-delivered by a person.
+#: Unlike ``hold_release`` it releases nothing on its own: the screener said
+#: "unsure", and only the receiving person's signed word moves it.
+#:
+#: Turning it OFF restores the old behaviour exactly (cached hold, count-only
+#: 60-minute alert). Only a real ``false`` turns it off; absent/garbled is ON,
+#: because the safe default for a hold is an exit a person controls. No
+#: ``/settings`` row, for the same i18n-ledger reason as ``hold_release``.
+DEFAULT_REVIEW_HELD = True
+
 #: ``team_bridge.share_typing`` — whether this person's composers tell the other
 #: members of a conversation "X is typing" (typing-indicators design §7).
 #:
@@ -264,6 +284,7 @@ DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
+REVIEW_HELD_PATH = ("team_bridge", "review_held")
 SHARE_TYPING_PATH = ("team_bridge", "share_typing")
 #: The SUBTREE the four screening ceilings live under. Readers take this tuple,
 #: so no consumer re-spells "where screening lives" and drifts from the writer.
@@ -598,6 +619,9 @@ class TeamBridgeSettings:
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
     #: B4b owner release (``hold_release.py``); OFF unless a real ``true``.
     hold_release: bool = DEFAULT_HOLD_RELEASE
+    #: Owner review of cached answer holds (``hold_release.REVIEW_HOLD_CODES``);
+    #: ON unless the file says a real ``false``.
+    review_held: bool = DEFAULT_REVIEW_HELD
     #: Whether this person's composers report "is typing" (sender-side only).
     share_typing: bool = DEFAULT_TEAM_BRIDGE_SHARE_TYPING
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
@@ -659,6 +683,7 @@ class TeamBridgeSettings:
             ),
             # ``is True``: a release path opens on an explicit boolean only.
             hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is True,
+            review_held=get(REVIEW_HELD_PATH, DEFAULT_REVIEW_HELD) is not False,
             share_typing=_share_typing(get(SHARE_TYPING_PATH, _MISSING)),
         )
 

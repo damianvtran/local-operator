@@ -278,6 +278,32 @@ the designated session and clears it once nothing is held that long. It has no
 receiver re-reads it without a restart. `lop team-bridge receiver status` shows
 what is held.
 
+### Which held messages clear on their own, and which wait for a person
+
+Every hold ends in one of two ways; none waits forever:
+
+- **Retried automatically** (the sender sees "screening temporarily
+  unavailable"): provider errors, an open breaker, a spent budget, and a reply
+  the screener could not be read from — `empty_reply` (every model answered
+  blank, even after one re-draw and a failover to the next model in the chain)
+  and `parse_failed` (it answered off-format). These are never cached; the
+  receiver re-screens them on its backoff (doubling to one hour).
+- **Waiting for the owner's review** (the sender sees "awaiting review"): the
+  screener's own answer said hold — `model_hold` (unsure), `model_refused` (its
+  safety refusal), `reply_truncated`, `bounce_without_category`. The answer is
+  cached, so a retry never re-draws it hoping for "deliver". With
+  `team_bridge.review_held` on (the default), the hold raises a per-message
+  notification in the designated session at once, and the desktop Agent
+  messages holds list offers **Deliver** (the agent gets it, marked as released
+  by its owner) or **Discard** (the sender sees "not delivered"). Set
+  `review_held: false` under `values:` > `team_bridge:` to go back to holds
+  that only the long-hold alert counts.
+
+The owner's own posts are never screened by their own agent: a message whose
+server-recorded sender is the owner's account, posting as a person, is
+delivered with no model call and no budget spent. A teammate with the same
+display name, or an agent under the owner's account, is still screened.
+
 ## Screening budgets
 
 Every message is screened before an agent reads it (the admission gate). The
