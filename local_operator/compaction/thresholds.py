@@ -32,6 +32,10 @@ __all__ = [
     "DEFAULT_THRESHOLD_TOKENS",
     "DEFAULT_WIRE_BYTES_BUDGET",
     "DEFAULT_WIRE_BYTES_TRIGGER",
+    "DEFAULT_IDLE_ADVISOR",
+    "DEFAULT_IDLE_ENABLED",
+    "DEFAULT_IDLE_MIN_GROWTH_TOKENS",
+    "DEFAULT_IDLE_THRESHOLD_TOKENS",
     "CompactionSettings",
     "RECOVERY_BAND",
     "WIRE_RECOVERY_BAND",
@@ -91,6 +95,43 @@ DEFAULT_WIRE_BYTES_BUDGET = 24_000_000
 #: that a screenshot-heavy session compacts *properly and early* instead of
 #: surviving by shedding frames at the wall.
 DEFAULT_WIRE_BYTES_TRIGGER = 16_000_000
+
+# --- Idle / pre-wake compaction defaults (see ``compaction/idle.py``) -------
+#
+# Mirrored as literals in ``settings_io`` for the reason DEFAULT_THRESHOLD_TOKENS
+# is; ``tests/unit/test_settings_io.py::_consumer_defaults`` pins the pairs.
+
+#: Idle passes are on by default. They cannot fire without the parked
+#: advisor's explicit "compact now" (``DEFAULT_IDLE_ADVISOR``), and only while
+#: the prompt cache is still warm, so the default cost of being on is one
+#: cache-READ advisor call per qualifying idle gap.
+DEFAULT_IDLE_ENABLED = True
+
+#: Context size an idle pass starts being considered at (the effective figure
+#: is ``min(this, 0.6 * T_eff)`` so small windows scale; see
+#: ``idle.idle_threshold_for``). 200k because post-compaction contexts measured
+#: 135-287k (avg 188.5k, n=27 markers across the live session store; architect
+#: audit for this PR): a lower absolute line would sit inside the floor that
+#: ordinary passes already leave, and only the growth gate below would stop an
+#: idle pass refiring on a context that was just compacted.
+DEFAULT_IDLE_THRESHOLD_TOKENS = 200_000
+
+#: Growth required since the last pass (or the last idle-advisor decline)
+#: before another idle pass may be considered: ``min(this, 0.25 * T_eff)``. It
+#: is THE anti-thrash rule. With the measured 135-287k post-pass floor a 200k
+#: threshold alone would refire straight after every pass that landed above
+#: it; demanding 60k of NEW material guarantees each idle pass has fresh
+#: history to fold, and the pass itself refuses unless at least G/2 tokens
+#: would be summarized, so the reclaim always pays for the cold rewrite of the
+#: shortened prefix (1.25x input price on a 5m write, 2x on 1h) against an
+#: advisor cost of ~0.1x C (a cache read of the warm prefix).
+DEFAULT_IDLE_MIN_GROWTH_TOKENS = 60_000
+
+#: The parked advisor gates every idle pass. Off means NO idle passes at all:
+#: compacting a session nobody is watching, without a model judging whether
+#: the moment is safe and what must survive verbatim, is exactly the "lose
+#: material information" risk the feature was asked not to take.
+DEFAULT_IDLE_ADVISOR = True
 
 
 class CompactionSettings(BaseModel):
@@ -311,6 +352,47 @@ class CompactionSettings(BaseModel):
             "Turns the advisor is suppressed for after an advisor-triggered"
             " pass. Anti-thrash: the pass just moved the boundary it would be"
             " asked to judge."
+        ),
+    )
+
+    # --- Idle / pre-wake compaction (see ``compaction/idle.py``) -----------
+    #
+    # A session that ends a turn above the idle threshold and then sits idle
+    # (waiting on a wake, or on the operator) pays a full re-read of its
+    # context on the next request, at cache-WRITE price once the provider
+    # cache has expired. An idle pass, run shortly before the cache TTL lapses
+    # and only on the parked advisor's say-so, lets that next request start on
+    # a reduced context instead. Independent of the beta ``advisor_enabled``
+    # switch: the parked advisor is a different call asking a different
+    # question ("is it safe to fold now that nobody is working?").
+    idle_enabled: bool = Field(
+        default=DEFAULT_IDLE_ENABLED,
+        description=(
+            "Compact an idle session shortly before its prompt cache expires,"
+            " so the next wake or message starts on a smaller context. Needs"
+            " idle_advisor; never runs for subagents."
+        ),
+    )
+    idle_threshold_tokens: int = Field(
+        default=DEFAULT_IDLE_THRESHOLD_TOKENS,
+        description=(
+            "Context size from which an idle pass is considered (capped at 60%"
+            " of the effective compaction threshold)."
+        ),
+    )
+    idle_min_growth_tokens: int = Field(
+        default=DEFAULT_IDLE_MIN_GROWTH_TOKENS,
+        description=(
+            "New context required since the last compaction or idle decline"
+            " before another idle pass (capped at 25% of the effective"
+            " threshold). The anti-thrash rule."
+        ),
+    )
+    idle_advisor: bool = Field(
+        default=DEFAULT_IDLE_ADVISOR,
+        description=(
+            "Ask the model, as a cache read, whether an idle pass is safe and"
+            " what must stay verbatim. Off disables idle passes entirely."
         ),
     )
 

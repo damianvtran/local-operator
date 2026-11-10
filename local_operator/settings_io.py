@@ -4470,6 +4470,56 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
         ),
     ),
+    # Idle / pre-wake compaction (``compaction/idle.py``). Defaults are literals
+    # mirroring ``compaction.thresholds.DEFAULT_IDLE_*`` (importing that module
+    # here would pull the pass engine into every settings read); the consumer
+    # map in ``tests/unit/test_settings_io.py`` pins each pair.
+    Setting(
+        key="compaction.idle_enabled",
+        path=("compaction", "idle_enabled"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.compaction_idle_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_idle_enabled_choice_true_description()),
+            _t(_ws.compaction_idle_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="compaction.idle_threshold_tokens",
+        path=("compaction", "idle_threshold_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_threshold_tokens_label()),
+        kind=Kind.INT,
+        default=200_000,
+        help=_t(_ws.compaction_idle_threshold_tokens_help()),
+        minimum=0,
+    ),
+    Setting(
+        key="compaction.idle_min_growth_tokens",
+        path=("compaction", "idle_min_growth_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_min_growth_tokens_label()),
+        kind=Kind.INT,
+        default=60_000,
+        help=_t(_ws.compaction_idle_min_growth_tokens_help()),
+        minimum=1,
+    ),
+    Setting(
+        key="compaction.idle_advisor",
+        path=("compaction", "idle_advisor"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_advisor_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.compaction_idle_advisor_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_idle_advisor_choice_true_description()),
+            _t(_ws.compaction_idle_advisor_choice_false_description()),
+        ),
+    ),
     # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
     # ``compaction/thresholds.py``. The help text must keep saying that earlier
     # operator turns stop surviving verbatim in card mode, and that switching
