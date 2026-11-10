@@ -2697,6 +2697,7 @@ def _available_models(
     # DeepSeek documents /models as its complete current inventory, not a partial
     # entitlement snapshot. Keep legacy aliases only for offline fallback/manual
     # selectors; unioning them here resurrects retired models after a good fetch.
+    live_rows = _borrow_relayed_efforts(provider_id, live_rows, cache_dir=cache_dir, client=client)
     authoritative_live = _listing_replaces_static(
         provider_id, live_rows, account_scoped=account_scoped
     )
@@ -2706,6 +2707,111 @@ def _available_models(
         include_static_only=not authoritative_live,
     )
     return merged, _status_of(listing, live_rows)
+
+
+#: Providers whose model listing RELAYS OpenRouter's catalogue but strips its
+#: ``reasoning`` object. Radient's ``/v1/models`` carries the same ids as
+#: OpenRouter's (430 of 431 on 2026-11-10) with ``id``/``name``/``pricing``/
+#: ``context_length`` only, so :func:`_row_from_openai_entry` finds no
+#: ``reasoning.supported_efforts`` and every row reads "the listing said
+#: nothing". For the models that really do take an effort knob that is a false
+#: silence: ``radient/deepseek/deepseek-v4.1-flash`` booted with no ladder, no
+#: ``reasoning`` flag and no effort control, while the same id on OpenRouter
+#: states none/low/high/max and Radient accepts every one of those rungs
+#: (measured live, HTTP 200, reasoning tokens scaling with the rung).
+#:
+#: The proper fix is Radient passing the object through; until it does, the
+#: ladder is borrowed from OpenRouter's listing for the SAME id. Borrowing is
+#: deliberately narrow, see :func:`_borrow_relayed_efforts`.
+RELAYED_EFFORT_PROVIDERS = frozenset({"radient", "radient-key"})
+
+#: The listing the ladders are borrowed from.
+RELAYED_EFFORT_SOURCE = "openrouter"
+
+#: Ceiling for the keyless OpenRouter fetch a cold cache costs a Radient user.
+#: Short on purpose: the ladder is a display dial, so a slow host must cost the
+#: dial, never the start of the session that is waiting on the Radient row.
+RELAYED_EFFORT_FETCH_TIMEOUT_S = 3.0
+
+
+def _relayed_effort_source_rows(
+    *, cache_dir: Path | None, client: httpx.Client | None
+) -> list[DiscoveredModel]:
+    """OpenRouter's rows, for their ladders; ``[]`` when none can be had.
+
+    Cache first. A caller that injected its own transport (``client``) is
+    deciding what the network does, so it reads the stored document only and
+    never gets a second, unannounced request on the same stub. Otherwise a cold
+    or expired cache goes through :func:`available_models`' own stale-while-
+    revalidate path, which is a public, credential-free listing the harness
+    already reads for OpenRouter users, so a Radient-only user is not locked out
+    of the fix by never having opened OpenRouter. Never raises.
+    """
+    try:
+        if client is not None:
+            rows = _rows_from_payload(
+                peek_listing(_cache_key(RELAYED_EFFORT_SOURCE), cache_dir=cache_dir).payload,
+                listing_capture_version(RELAYED_EFFORT_SOURCE),
+            )
+            return rows or []
+        rows, _status = available_models(
+            RELAYED_EFFORT_SOURCE,
+            api_key=None,
+            cache_dir=cache_dir,
+            timeout=RELAYED_EFFORT_FETCH_TIMEOUT_S,
+            allow_shared=False,
+        )
+        return rows
+    except Exception as exc:  # noqa: BLE001 — a display dial is never worth a failed listing
+        logger.debug("no %s ladders to borrow: %s", RELAYED_EFFORT_SOURCE, exc)
+        return []
+
+
+def _borrow_relayed_efforts(
+    provider_id: str,
+    live_rows: list[DiscoveredModel],
+    *,
+    cache_dir: Path | None,
+    client: httpx.Client | None,
+) -> list[DiscoveredModel]:
+    """``live_rows`` with a missing effort ladder filled from OpenRouter's row.
+
+    Three rules keep this from inventing anything:
+
+    * Only a SILENT row is touched (``reasoning_efforts is None``). A ladder the
+      provider states itself, including a stated empty one, always wins, so the
+      day Radient passes the object through this stops mattering by itself.
+    * Same id only, exact match. No normalisation and no family guessing: the
+      ladders differ inside one vendor (``deepseek-v4.1-flash`` is
+      none/low/high/max, ``deepseek-v4-flash`` is none/high/xhigh).
+    * Only the LADDER is borrowed. ``reasoning_default_effort`` stays unset, so
+      nothing is seeded on the wire: an aggregator route sends an effort key only
+      after the user picks a rung (see ``build_model_spec``).
+
+    Applied at read time and never written back to the cached document, so the
+    stored Radient listing stays an honest copy of what Radient said and a
+    refreshed OpenRouter listing is picked up without a refetch of Radient's.
+    """
+    if provider_id not in RELAYED_EFFORT_PROVIDERS:
+        return live_rows
+    silent = [row for row in live_rows if row.reasoning_efforts is None]
+    if not silent:
+        return live_rows
+    ladders = {
+        row.id: row.reasoning_efforts
+        for row in _relayed_effort_source_rows(cache_dir=cache_dir, client=client)
+        if row.reasoning_efforts
+    }
+    if not ladders:
+        return live_rows
+    return [
+        (
+            dataclasses.replace(row, reasoning_efforts=ladders[row.id])
+            if row.reasoning_efforts is None and row.id in ladders
+            else row
+        )
+        for row in live_rows
+    ]
 
 
 def _status_of(listing: Listing, live_rows: list[DiscoveredModel]) -> ListingStatus:

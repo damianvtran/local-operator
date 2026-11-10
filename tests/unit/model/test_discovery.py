@@ -2792,3 +2792,164 @@ def test_a_cached_kimi_document_from_before_the_native_read_is_refetched(tmp_pat
     by_id = {row.id: row for row in models}
     assert by_id["k3.1-pro"].reasoning_efforts == ("low", "high", "max")
     assert json.loads(stale.read_text())["payload"]["capture"] == 2
+
+
+# --- Radient relays OpenRouter's ids but strips the ``reasoning`` object --------
+
+_OR_LADDER_BODY = {
+    "data": [
+        {
+            "id": "deepseek/deepseek-v4.1-flash",
+            "reasoning": {"supported_efforts": ["none", "low", "high", "max"]},
+        },
+        {
+            "id": "deepseek/deepseek-v4-flash",
+            "reasoning": {
+                "supported_efforts": ["none", "high", "xhigh"],
+                "default_effort": "high",
+            },
+        },
+        {"id": "meta/stated-by-both", "reasoning": {"supported_efforts": ["low", "high"]}},
+        {"id": "plain/no-reasoning"},
+    ]
+}
+
+_RADIENT_SILENT_BODY = {
+    "data": [
+        {"id": "deepseek/deepseek-v4.1-flash"},
+        {"id": "deepseek/deepseek-v4-flash"},
+        {"id": "meta/stated-by-both", "reasoning": {"supported_efforts": ["medium", "high"]}},
+        {"id": "plain/no-reasoning"},
+        {"id": "only/on-radient"},
+        {"id": "auto"},
+    ]
+}
+
+
+def _seed_openrouter(tmp_path) -> None:
+    available_models(
+        "openrouter",
+        api_key=None,
+        client=_StubClient([_Response(200, _OR_LADDER_BODY)]),
+        cache_dir=tmp_path,
+    )
+
+
+def _radient_rows(tmp_path, provider: str = "radient", body=_RADIENT_SILENT_BODY):
+    client = _StubClient([_Response(200, body)])
+    rows, status = available_models(provider, api_key="k", client=client, cache_dir=tmp_path)
+    assert status == "ok"
+    assert len(client.calls) == 1, "borrowing must not issue a second request on an injected client"
+    return {row.id: row for row in rows}
+
+
+@pytest.mark.parametrize("provider", ["radient", "radient-key"])
+def test_a_silent_radient_row_borrows_the_ladder_of_the_same_openrouter_id(
+    tmp_path, provider
+) -> None:
+    """The reported gap: ``radient/deepseek/deepseek-v4.1-flash`` booted with no
+    ladder because Radient's listing never carries OpenRouter's ``reasoning``
+    object, while Radient accepts every rung OpenRouter states."""
+    _seed_openrouter(tmp_path)
+
+    by_id = _radient_rows(tmp_path, provider)
+
+    assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts == (
+        "none",
+        "low",
+        "high",
+        "max",
+    )
+    # Exact id, not family: the sibling has its own ladder.
+    assert by_id["deepseek/deepseek-v4-flash"].reasoning_efforts == ("none", "high", "xhigh")
+
+
+def test_only_the_ladder_is_borrowed_never_the_default(tmp_path) -> None:
+    """A listing default seeded on the wire switched reasoning ON for models that
+    run without it when the key is omitted (measured on OpenRouter), so nothing
+    but the rungs crosses over."""
+    _seed_openrouter(tmp_path)
+
+    row = _radient_rows(tmp_path)["deepseek/deepseek-v4-flash"]
+
+    assert row.reasoning_efforts == ("none", "high", "xhigh")
+    assert row.reasoning_default_effort is None
+
+
+def test_a_ladder_radient_states_itself_wins_over_the_borrowed_one(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+
+    by_id = _radient_rows(tmp_path)
+
+    assert by_id["meta/stated-by-both"].reasoning_efforts == ("medium", "high")
+
+
+def test_a_model_openrouter_does_not_list_with_a_ladder_stays_unstated(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+
+    by_id = _radient_rows(tmp_path)
+
+    # Absent from OpenRouter, present without a ladder, and the router: all
+    # stay "the listing said nothing", which defers to the hand-written table.
+    assert by_id["only/on-radient"].reasoning_efforts is None
+    assert by_id["plain/no-reasoning"].reasoning_efforts is None
+    assert by_id["auto"].reasoning_efforts is None
+
+
+def test_a_cold_openrouter_cache_leaves_radient_rows_untouched_without_a_request(
+    tmp_path,
+) -> None:
+    by_id = _radient_rows(tmp_path)
+
+    assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts is None
+
+
+def test_the_borrowed_ladder_is_not_written_into_radients_cached_document(tmp_path) -> None:
+    """Applied at read time: the stored Radient document stays a copy of what
+    Radient said, and a refreshed OpenRouter listing is picked up without
+    refetching Radient's."""
+    _seed_openrouter(tmp_path)
+    _radient_rows(tmp_path)
+
+    stored = json.loads((tmp_path / "radient.listing.json").read_text())["payload"]["models"]
+
+    by_id = {entry["id"]: entry for entry in stored}
+    assert not by_id["deepseek/deepseek-v4.1-flash"].get("reasoning_efforts")
+    assert not by_id["deepseek/deepseek-v4-flash"].get("reasoning_efforts")
+    # What Radient itself stated is stored, as before.
+    assert by_id["meta/stated-by-both"]["reasoning_efforts"] == ["medium", "high"]
+
+    cached, status = available_models(
+        "radient", api_key="k", client=_StubClient([]), cache_dir=tmp_path
+    )
+    assert status == "cached"
+    assert {row.id: row.reasoning_efforts for row in cached}["deepseek/deepseek-v4.1-flash"] == (
+        "none",
+        "low",
+        "high",
+        "max",
+    )
+
+
+def test_borrowing_is_scoped_to_the_radient_providers(tmp_path) -> None:
+    _seed_openrouter(tmp_path)
+    rows = [discovery.DiscoveredModel(id="deepseek/deepseek-v4.1-flash", name="x")]
+
+    for provider in ("deepseek", "openai", "ollama"):
+        assert (
+            discovery._borrow_relayed_efforts(
+                provider, rows, cache_dir=tmp_path, client=_StubClient([])
+            )
+            == rows
+        )
+
+
+def test_a_broken_source_listing_never_fails_the_radient_listing(tmp_path, monkeypatch) -> None:
+    def boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("cache exploded")
+
+    monkeypatch.setattr(discovery, "peek_listing", boom)
+
+    by_id = _radient_rows(tmp_path)
+
+    assert by_id["deepseek/deepseek-v4.1-flash"].reasoning_efforts is None
