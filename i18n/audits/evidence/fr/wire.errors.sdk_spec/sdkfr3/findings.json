@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "audit_id": "sdkfr3",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "255b798d112ca6a31f0eeaae59c069332c9e55c5",
+  "catalogue_sha256": "e0b8217ba430c8d1b686f2bffc4581a3eef2eacc60071ae2e34c107bca76dd8e",
+  "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 2
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "current": "spawn_session() ne peut pas transmettre un état postérieur à l’ouverture à un nouveau processus enfant du runtime ; …",
+      "problem": "Two consecutive « à » phrases: « postérieur à l’ouverture » already opens a prepositional group, then the dative « à un nouveau processus enfant du runtime » has to close it. The reader backtracks to find where « transmettre » sends the state.",
+      "suggested": "spawn_session() ne peut pas transmettre d’état post-ouverture à un nouveau processus enfant du runtime ; champs non pris en charge dans ce spec : {fields}. …",
+      "meaning_at_risk": false
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "current": "attachez ce dont vous avez besoin, libérez-la (dispose), puis relancez … resume restaure ce qui a été attaché",
+      "problem": "The same attach operation is named « attacher » here and « rattacher » in the three attach_* keys of the same group (« il ne rattache ni équipes… », « un lecteur se rattache à un identifiant »). A reader cannot tell whether rattacher is a different mechanism from attacher.",
+      "suggested": "Align on the corpus/precedent verb « rattacher »: « rattachez ce dont vous avez besoin » and « resume restaure ce qui a été rattaché ».",
+      "meaning_at_risk": false
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "key": "wire.errors.sdk_spec.approval_callback_gate_required",
+      "current": "ApprovalPolicy.callback() exige un contrôle d’approbation appelable",
+      "problem": "« appelable » (callable) qualifies a function, not a check — mild category slip. The term « contrôle d’approbation » for approval gate is right (precedent fr cli.group_help.json:cli.group_help.operator).",
+      "suggested": "ApprovalPolicy.callback() exige une fonction de contrôle d’approbation appelable (optional; meaning is not at risk as written).",
+      "meaning_at_risk": false
+    },
+    {
+      "id": "F4",
+      "severity": "nit",
+      "key": "wire.errors.sdk_spec.attach_fields_unsupported",
+      "current": "mode=''attach'' ouvre un lecteur sur spec.resume / un lecteur se rattache à un identifiant (attach_resume_required)",
+      "problem": "« viewer » is rendered « visionneuse » in the shipped TUI (fr tui.viewer.json:tui.viewer.title « visionneuse de fichiers »); here it is « lecteur ». Different surfaces (SDK read-only session handle vs file viewer), so this may be deliberate.",
+      "suggested": "Keep « lecteur » if the SDK handle is deliberately not the TUI file viewer; otherwise « visionneuse » for corpus consistency.",
+      "meaning_at_risk": false
+    }
+  ],
+  "report_comment": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6757119153"
+}
