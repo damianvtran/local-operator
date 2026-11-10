@@ -37,6 +37,7 @@ from local_operator.tools.builtin import (
     build_edit_tool,
     build_write_tool,
 )
+from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 from local_operator.variables import VariableStore
 
 pytestmark = pytest.mark.asyncio
@@ -512,11 +513,55 @@ async def test_two_distinct_rows_for_one_call_id_fail_closed(tmp_path):
     line = (session_dir / "transcript.jsonl").read_text()
     (session_dir / "transcript.jsonl").write_text(line + line)
     assert diff_archive.load_page(session_dir, SESSION_ID, "dup")["state"] == "archived"
+    # The SAME entry id with DIFFERENT content (another capture): fail closed.
+    conflicting = (session_dir / "transcript.jsonl").read_text().splitlines()[0]
+    other = json.loads(conflicting)
+    other["payload"]["provider_payload"]["details"]["diff_full"] = {
+        **desc,
+        "digest": "0" * 32,
+    }
+    original_text = (session_dir / "transcript.jsonl").read_text()
+    (session_dir / "transcript.jsonl").write_text(original_text + json.dumps(other) + "\n")
+    same_id = diff_archive.load_page(session_dir, SESSION_ID, "dup")
+    assert same_id["state"] == "unavailable" and same_id["rows"] == []
+    (session_dir / "transcript.jsonl").write_text(original_text)
     # A DIFFERENT row with the same call id: neither capture is served.
     _fake_row(tmp_path, "dup", desc, entry_id="m-dup-2")
     page = diff_archive.load_page(session_dir, SESSION_ID, "dup")
     assert page["state"] == "unavailable" and page["rows"] == []
     assert page["next_start"] is None and page["next_offset"] is None
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_first_and_only_huge_line_is_archived_not_lost(tmp_path, tool):
+    """No preview row fits (one 200 KiB line): still archived and reachable.
+
+    Regression: the truncator returns no preview at all when the FIRST/ONLY
+    change row exceeds the preview byte cap, and the full diff used to be
+    dropped with it -- no inline view and no archive.
+    """
+    huge = "Z" * (200 * 1024)
+    target = tmp_path / "one.txt"
+    if tool == "write":
+        calls = [("h-1", "write", {"path": str(target), "content": huge + "\n"})]
+    else:
+        target.write_text("old-line\n")
+        calls = [("h-1", "edit", {"path": str(target), "old_text": "old-line", "new_text": huge})]
+    session, events = await _run(tmp_path, calls)
+    details = _details(session)[0]
+    assert details[DIFF_TRUNCATED_ROWS_KEY] > 0
+    if tool == "write":
+        # The only row did not fit the preview: the inline form is the fixed
+        # receipt, never a raw prefix of the line.
+        assert details["diff"] == [DIFF_WITHHELD_TEXT]
+    assert huge not in json.dumps(details["diff"])
+    desc = details[diff_archive.DIFF_FULL_KEY]
+    assert desc["state"] == "archived", desc
+    ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+    assert ends[0].result.details[diff_archive.DIFF_FULL_KEY] == desc
+    rows, pages = _reconstruct(_session_dir(tmp_path), "h-1")
+    assert "+" + huge in rows
+    assert any(page["next_offset"] for page in pages), "the huge row spans pages"
 
 
 async def test_real_session_reusing_a_call_id_never_serves_the_wrong_capture(tmp_path):

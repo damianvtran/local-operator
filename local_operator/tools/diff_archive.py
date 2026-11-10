@@ -241,11 +241,14 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
     Call ids are provider-minted and nothing proves them unique within one
     session (a retried turn, a second prompt, a provider that reuses ids), so
     "newest wins" could hand a reader the WRONG historical capture. The walk
-    therefore fails closed: a second distinct row (a different entry id) with
+    therefore fails closed: a second distinct persisted row with
     the same ``role:"tool"`` + ``tool_call_id`` raises
     :class:`AmbiguousToolCall` and it stops there, so memory stays bounded
     (chunked backward reads, at most two parsed matches). The same entry
-    written twice is one row. A byte prefilter on the JSON-encoded id keeps
+    written twice is one row -- but only when the two lines are BYTE-IDENTICAL:
+    the same entry id with different content (other details, another digest)
+    is two captures as far as a reader can prove, and fails closed like two
+    different ids. A byte prefilter on the JSON-encoded id keeps
     the walk from parsing unrelated rows; the parsed payload is the authority.
     Read-only: never creates the journal.
     """
@@ -267,7 +270,7 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
     except OSError:
         return None
     found: tuple[str, dict[str, Any]] | None = None
-    found_id: object = None
+    found_raw: bytes | None = None
     with handle:
         handle.seek(0, os.SEEK_END)
         for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
@@ -281,7 +284,7 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
                 if payload.get("role") != "tool" or payload.get("tool_call_id") != call_id:
                     continue
                 if found is not None:
-                    if entry.id == found_id:
+                    if raw.rstrip(b"\r\n") == found_raw:
                         continue
                     raise AmbiguousToolCall(call_id)
                 provider = payload.get("provider_payload")
@@ -290,7 +293,7 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
                     str(payload.get("tool_name") or ""),
                     details if isinstance(details, dict) else {},
                 )
-                found_id = entry.id
+                found_raw = raw.rstrip(b"\r\n")
     return found
 
 

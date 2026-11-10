@@ -11358,8 +11358,13 @@ def _diff_details_and_full(
     if omitted:
         details[DIFF_TRUNCATED_ROWS_KEY] = omitted
     # The complete diff only matters when the preview lost rows; an uncut
-    # preview IS the whole diff, so archiving it would store a duplicate.
-    return details, (diff if kept is not None and omitted else None)
+    # preview IS the whole diff, so archiving it would store a duplicate. It is
+    # returned even when NO preview row fit (``kept is None``: a first/only row
+    # over the preview byte cap) -- that row can still be under the archive
+    # ceilings, and dropping it here left the change with no inline view AND
+    # no archive. ``omitted == 0`` (an uncut diff, or the PEM widening's own
+    # fail-closed marker) never yields one, so that geometry is unchanged.
+    return details, (diff if omitted else None)
 
 
 def _with_diff_source(
@@ -11373,6 +11378,12 @@ def _with_diff_source(
     judgement alone is not enough). Over the bound no complete-side proof is
     possible, so the diff is withheld instead; counters and path stay exact.
     """
+    if full is not None and "diff" not in details:
+        # No preview row fit, but the complete diff exists: publish the fixed
+        # withheld receipt inline (never a raw prefix) so the result still
+        # carries the source carrier, and the archive descriptor the loop adds
+        # is what the reader follows to the whole change.
+        details["diff"] = [DIFF_WITHHELD_TEXT]
     if not isinstance(details.get("diff"), list):
         return details
     if fits_source_evidence(before, after):

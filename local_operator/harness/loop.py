@@ -7831,6 +7831,12 @@ class AgentLoop:
                 old = _source_affected_lines(before, redact)
                 new = _source_affected_lines(after, redact)
                 affected.append((old, new))
+                if tuple(preview) == (_DIFF_DETAIL_WITHHELD,):
+                    # The producer had no preview row that fit (only the
+                    # archive can show this change); the receipt is already
+                    # the safe public form, and the projection above still
+                    # feeds the archive.
+                    return list(preview)
                 masked = _mask_by_source_evidence(preview, old, new)
                 out = _redact_diff_detail(masked, redact)
             if not isinstance(out, list):
