@@ -16562,19 +16562,44 @@ class Session:
                 # `sqlite3.Error` around exactly this call for exactly that reason.
                 # Logged rather than silent: the store row is what the sidebar
                 # reads, so a failure to write it is real.
-                await asyncio.to_thread(
-                    AttentionStore().publish,
-                    identity,
-                    saved["token"],
-                    saved["anchor"],
-                    saved["kind"],
-                    reason=str(saved.get("reason") or ""),
-                    cause=str(saved.get("cause") or ""),
-                    # §14.3: the marker carries the run's computed value; a
-                    # pre-notify marker (key absent) means notify=1 — its
-                    # behaviour, verbatim.
-                    notify=bool(saved.get("notify", True)),
+                # BOUNDED FOR THE SAME REASON AS THE TURN'S OWN PUBLISH
+                # (``ATTENTION_PUBLISH_OFFLOAD_CEILING_S``): this call holds
+                # ``_attention_publish_lock``, and the NEXT turn's
+                # ``_publish_attention_outcome`` takes that lock inside its
+                # ``finally`` with ``_turn_lock`` held. An unbounded wait here
+                # on a wedged store would pin the lock, hence the turn lock,
+                # beyond the settle window. WORST CASE the next turn waits:
+                # lock hold <= 3.0 s (this ceiling) + its own offload 3.0 s +
+                # banner stamp 1.0 s = 7.0 s < 8 s ``SETTLE_TIMEOUT_S``. The
+                # turn's acquire needs no separate timeout of its own: a
+                # timed-out acquire there would precede the journal append and
+                # lose the outcome, and with every holder bounded the acquire
+                # wait is already capped by this ceiling. Expiry orphans the
+                # worker (it cannot be killed; publish is idempotent by token)
+                # and returns False so the latch stays armed for the next rung.
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        AttentionStore().publish,
+                        identity,
+                        saved["token"],
+                        saved["anchor"],
+                        saved["kind"],
+                        reason=str(saved.get("reason") or ""),
+                        cause=str(saved.get("cause") or ""),
+                        # §14.3: the marker carries the run's computed value; a
+                        # pre-notify marker (key absent) means notify=1 — its
+                        # behaviour, verbatim.
+                        notify=bool(saved.get("notify", True)),
+                    ),
+                    timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
                 )
+            except TimeoutError:
+                logger.warning(
+                    "attention: republish still running after %gs; worker orphaned, "
+                    "latch stays armed",
+                    ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
+                )
+                return False
             except AttentionWriteDeferred:
                 # CONTENTION: the ladder's own case, and the latch stays armed for
                 # it.

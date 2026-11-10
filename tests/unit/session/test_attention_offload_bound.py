@@ -39,7 +39,15 @@ def test_shipping_ceilings_leave_room_inside_the_settle_window():
         session_module.ATTENTION_PUBLISH_OFFLOAD_CEILING_S
         + session_module.ATTENTION_BANNER_STAMP_CEILING_S
     )
-    assert total < SETTLE_TIMEOUT_S / 2
+    # The property needed: the turn's own offload wait plus the banner stamp, AND
+    # a republish rung's lock hold (same ceiling, see
+    # `_republish_journalled_outcome`) that the next turn may queue behind, all
+    # fit inside the settle window: 3.0 + 3.0 + 1.0 = 7.0 <= 8.
+    assert (
+        2 * session_module.ATTENTION_PUBLISH_OFFLOAD_CEILING_S
+        + session_module.ATTENTION_BANNER_STAMP_CEILING_S
+        <= SETTLE_TIMEOUT_S
+    ), total
 
 
 @pytest.mark.asyncio
@@ -92,6 +100,50 @@ async def test_a_blocked_store_write_does_not_pin_the_turn_lock(tmp_path, monkey
         before = store.revision()
         assert await session._republish_journalled_outcome() in (True, False)
         assert store.revision() == before
+    finally:
+        release.set()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_republish_rung_does_not_pin_the_turn_lock(tmp_path, monkeypatch):
+    """A rung wedged in the store must not hold the publish lock past the ceiling.
+
+    Fails on af886150: the rung's ``to_thread`` was unbounded, so it held
+    ``_attention_publish_lock`` until ``release`` fired (30 s), the next turn's
+    publish queued behind it with ``_turn_lock`` held, and the outer
+    ``wait_for`` below expired.
+    """
+    monkeypatch.setattr(
+        session_module, "ATTENTION_PUBLISH_OFFLOAD_CEILING_S", TEST_CEILING_S, raising=False
+    )
+    release = threading.Event()
+    entered = threading.Event()
+    real_publish = AttentionStore.publish
+    wedge = {"on": False}
+
+    def maybe_blocked(self, conversation, token, *args, **kwargs):
+        if wedge["on"]:
+            entered.set()
+            release.wait(30)
+        return real_publish(self, conversation, token, *args, **kwargs)
+
+    monkeypatch.setattr(AttentionStore, "publish", maybe_blocked)
+    session = make_session(tmp_path, ScriptedStream([[StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")]] * 2))
+    try:
+        await asyncio.wait_for(session._prompt_messages([peer_input()]), timeout=5)
+        wedge["on"] = True
+        rung = asyncio.create_task(session._republish_journalled_outcome())
+        for _ in range(200):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set(), "the rung never reached the store"
+        # The next turn queues behind the rung's lock hold, then must settle.
+        await asyncio.wait_for(session._prompt_messages([peer_input()]), timeout=5)
+        assert not session._turn_lock.locked()
+        assert await asyncio.wait_for(rung, timeout=5) is False
+        assert not session._attention_publish_lock.locked()
     finally:
         release.set()
         await session.dispose()
