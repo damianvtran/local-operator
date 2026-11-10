@@ -697,6 +697,22 @@ def _frontend_jobs_delay(last_cost_s: float) -> float:
 #: rather than waiting out the shipped delays.
 ATTENTION_REPUBLISH_DELAYS_S: tuple[float, ...] = (1.0, 5.0, 20.0, 60.0)
 
+#: CEILING ON THE TURN'S OWN WAIT for the attention store write (and the banner
+#: stamp after it), in seconds. `_publish_attention_outcome` runs in a turn's
+#: ``finally`` with ``_turn_lock`` held, and the store write it offloads with
+#: ``asyncio.to_thread`` can legitimately block for up to ~12 s under SQLite
+#: contention (``attention._retry_contention``: 2 attempts x 5 s busy timeout),
+#: far longer than a healthy ~ms write. Unbounded, one wedged store pinned the
+#: lock, so the NEXT queued input never got an owner (hosted gate failures of
+#: ``test_input_after_accepted_end_gets_a_new_pipeline_and_generation``:
+#: agent_end_count=2, is_streaming=False, turn_lock_locked=True, parked in
+#: ``to_thread``). The journal marker is already durable before the offload and
+#: publication is idempotent by token, so giving up the WAIT loses nothing: the
+#: expiry is handled exactly like ``AttentionWriteDeferred`` (republish ladder).
+#: Kept well under the 8 s settle window the acceptance tests allow.
+ATTENTION_PUBLISH_OFFLOAD_CEILING_S: float = 3.0
+ATTENTION_BANNER_STAMP_CEILING_S: float = 1.0
+
 #: Self-prompt scheduled after a compaction pass that cleared the recovery
 #: band, so the model resumes where the summary left off.
 #:
@@ -18160,16 +18176,34 @@ class Session:
                 },
             )
             try:
-                self._attention = await asyncio.to_thread(
-                    AttentionStore().publish,
-                    conversation_identity(self._transcript.directory),
-                    token,
-                    anchor,
-                    kind,
-                    reason=reason,
-                    cause=cause,
-                    notify=notify,
-                )
+                # BOUNDED WAIT, NOT A BOUNDED THREAD: ``wait_for`` cancels our
+                # await, but a running worker thread cannot be killed. The
+                # orphan finishes (or fails) on its own; it touches only the
+                # store, through an idempotent ``INSERT OR IGNORE`` by token,
+                # and its result is discarded here (``self._attention`` is
+                # assigned only on success), so a late finish cannot corrupt
+                # session state -- the republish ladder armed on expiry
+                # re-publishes the same token, a no-op if the orphan landed.
+                try:
+                    self._attention = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            AttentionStore().publish,
+                            conversation_identity(self._transcript.directory),
+                            token,
+                            anchor,
+                            kind,
+                            reason=reason,
+                            cause=cause,
+                            notify=notify,
+                        ),
+                        timeout=ATTENTION_PUBLISH_OFFLOAD_CEILING_S,
+                    )
+                except TimeoutError as expired:
+                    raise AttentionWriteDeferred(
+                        "store write still running after "
+                        f"{ATTENTION_PUBLISH_OFFLOAD_CEILING_S:g}s; the worker thread "
+                        "is orphaned and the turn lock released"
+                    ) from expired
                 if notify and self._run_aida_checkin:
                     # THE BANNER BUDGET'S STAMP (``aida.proactive``
                     # ``MAX_BANNERS_PER_DAY``): one timestamp per True publish
@@ -18191,7 +18225,16 @@ class Session:
                     try:
                         from local_operator.aida import proactive as _aida_proactive
 
-                        await asyncio.to_thread(_aida_proactive.note_banner_sent, self._config_dir)
+                        await asyncio.wait_for(
+                            asyncio.to_thread(_aida_proactive.note_banner_sent, self._config_dir),
+                            timeout=ATTENTION_BANNER_STAMP_CEILING_S,
+                        )
+                    except TimeoutError:
+                        logger.warning(
+                            "aida: banner-budget stamp still running after %gs; the worker "
+                            "thread is orphaned and the turn lock is released",
+                            ATTENTION_BANNER_STAMP_CEILING_S,
+                        )
                     except Exception:  # noqa: BLE001 — see above
                         logger.debug("aida: could not stamp the banner budget", exc_info=True)
             except AttentionWriteDeferred as deferred:
