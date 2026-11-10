@@ -1,0 +1,38 @@
+{
+  "record": "i18n/audits/evidence/zh-CN/cli.permissions/zhp3/record.json",
+  "record_sha256": "3c7a79a801c6b886339281dd4d2c379ff99bd934d4255cec5a7c14e4d2f4accf",
+  "companions": {
+    "report.md": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp3/report.md",
+      "sha256": "731e631fb33580ab05e3208cc23828810458649334628cf3a207ca6580ad90f8"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp3/audit.log",
+      "sha256": "d2b0b91a47fc1e45bceb458885f0c48ed61bebe3e84941baae1cbbd1207fd6f7"
+    }
+  },
+  "auditor_session": "e1cf8e96b473",
+  "model": "anthropic/claude-opus-5-5",
+  "ledger_receipt": {
+    "locale": "zh-CN",
+    "namespace": "cli.permissions",
+    "source_sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41",
+    "translator": {
+      "agent": "i18n-translator (PR #3691 round-3 wave, commit 85fb35811f9)",
+      "session": "unrecorded (not in repo or brief)",
+      "model": "unrecorded",
+      "date": "2026-11-09"
+    },
+    "auditor": {
+      "agent": "i18n-auditor (lopdev team subagent)",
+      "session": "e1cf8e96b473",
+      "model": "anthropic/claude-opus-5-5",
+      "date": "2026-11-09",
+      "result": "passed",
+      "findings": 0,
+      "unresolved_blocker_major": 0
+    },
+    "status": "passed",
+    "note": "Independent zh-CN re-audit zhp3 @58e58c3b: passed, 0 findings; zhp2 Z8 (隐私与安全) fixed, Z9–Z11 resolved; new always_allow_kept verified vs macOS 27.2 tables. Record: i18n/audits/evidence/zh-CN/cli.permissions/zhp3/record.json"
+  }
+}

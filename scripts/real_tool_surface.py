@@ -167,6 +167,11 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # measure a surface one tool short of every such session's
         # (``notify``). The builder checks presence only; never awaited here.
         notify_inbox=_allow_notify,
+        # The ``skill`` tool's createIf is the managed profile root
+        # (``skill_tool._config_dir``). A real session always has one; without
+        # it here the measurement silently dropped ``skill`` from the surface.
+        # Never read or written by a measurement.
+        memory_config_dir=f"{cwd}/.stub-config",
     )
 
 

@@ -241,7 +241,30 @@ def shadow_in_other_store(registry: Any, scope: Scope, name: str, *, kind: str) 
     return None
 
 
-async def durable_write_decision(context: Any, intent: "DurableWriteIntent") -> tuple[Any, str]:
+class WriteReason(str):
+    """A seam reason that can still name the fault behind an ``error``.
+
+    ``str``, not a record: every caller keeps its ``reason == "queued"`` /
+    ``"declined"`` comparison exactly as written, and the VALUE stays the
+    contract. ``fault`` is the extra: for an unexpected internal failure the
+    refusal sentence can name WHAT broke (and the log line carries the same),
+    which is the difference tonight's incident could not show. A model told only
+    "the confirmation channel failed" cannot tell "nobody to ask" from "this
+    build broke", and it answered by asking the user to retry a file that never
+    happened.
+    """
+
+    fault: str = ""
+
+    def __new__(cls, value: str, fault: str = "") -> "WriteReason":
+        made = super().__new__(cls, value)
+        made.fault = fault
+        return made
+
+
+async def durable_write_decision(
+    context: Any, intent: "DurableWriteIntent"
+) -> tuple[Any, WriteReason]:
     """Ask the HOST to approve a write into the account's shared store.
 
     THE ONE CONSENT SEAM (LOH-9 S2). The decision is the host's: a model must not
@@ -261,23 +284,48 @@ async def durable_write_decision(context: Any, intent: "DurableWriteIntent") -> 
     """
     callback = getattr(context, "authorize_durable_write", None) if context is not None else None
     if callback is None:
-        return None, "no_seam"
+        return None, WriteReason("no_seam")
     from local_operator.harness.approval import ApprovalUnavailableError
+    from local_operator.network.types import MeshRefusal
 
     try:
         origin = await callback(intent)
     except ApprovalUnavailableError:
         # Nobody could be asked (headless, no tty, no attached surface). Named
         # apart from "error": the remedy is the user's own message, not a retry.
-        return None, "unavailable"
-    except Exception:  # noqa: BLE001 — an unavailable consent seam is a refusal
-        logger.warning("durable-write consent seam failed; refusing", exc_info=True)
-        return None, "error"
-    from local_operator.harness.types import QueuedProfileWrite
+        return None, WriteReason("unavailable")
+    except MeshRefusal as exc:
+        # A refusal whose CODE says this host has no authority to file rejects
+        # the request before it exists: no card can be presented, so "nobody to
+        # ask" is the honest class, and its remedy sentence (the user's own
+        # message) is the right one. EVERY other refusal keeps ``error`` with its
+        # code named — a refusal that names a real cause must never be silently
+        # reclassified as "no surface".
+        logger.warning(
+            "durable-write consent seam refused: %s (%s); refusing",
+            type(exc).__name__,
+            exc.code,
+            exc_info=True,
+        )
+        return None, WriteReason("error", fault=f"{type(exc).__name__}({exc.code})")
+    except Exception as exc:  # noqa: BLE001 — an unavailable consent seam is a refusal
+        # The TYPE rides both the log line and the refusal sentence: an
+        # operator diagnosing this later must see WHAT broke, and the model must
+        # not read a masked fault as "this host cannot ask".
+        logger.warning(
+            "durable-write consent seam failed: %s; refusing", type(exc).__name__, exc_info=True
+        )
+        return None, WriteReason("error", fault=type(exc).__name__)
+    from local_operator.harness.types import ProposedProfileWrite, QueuedHubPull
 
-    if isinstance(origin, QueuedProfileWrite):
-        return origin, "queued"
-    return (str(origin), "granted") if origin else (None, "declined")
+    if isinstance(origin, ProposedProfileWrite):
+        # Filed for review in Agents; not a grant and not a refusal.
+        return origin, WriteReason("proposed")
+    if isinstance(origin, QueuedHubPull):
+        # Not a grant: the host filed ONE consent ask. The caller reports it and
+        # the model retries the same call once the person's answer arrives.
+        return origin, WriteReason("ask_queued")
+    return (str(origin), WriteReason("granted")) if origin else (None, WriteReason("declined"))
 
 
 def profile_field_label(field: str) -> str:
@@ -353,6 +401,109 @@ def owner_text_requests_profile_edit(
             if set(fields) <= requested:
                 return True
     return False
+
+
+#: Leading clauses that do not change who is asking: interjections, politeness
+#: and "let's"/"I'd like you to" framings, any number of them in a row
+#: ("Hey, could you please …"). Anchored at the start of the owner's own text,
+#: so a quoted, reported or questioned phrasing ("tell me how to create …",
+#: '"create a team" he said') still does not match. The SAFETY of a direct
+#: write is the host's input witness (clean, top-level, owner-typed run), not
+#: this grammar; the grammar only separates "do it" from "talk about it".
+_OWNER_LEAD = (
+    r"^\s*(?:(?:hey|hi|hello|ok|okay|so|alright|right|now|please|kindly|"
+    r"can you|could you|would you|will you|can we|could we|"
+    r"let'?s|let us|go ahead and|"
+    r"i want you to|i'?d like you to|i would like you to|i need you to)"
+    r"[\s,!.:-]+)*"
+)
+
+
+def _normalize_owner_text(text: str) -> str:
+    # Typographic apostrophes ("Let’s") come from macOS/phone keyboards.
+    return text.replace("\u2019", "'").replace("\u2018", "'")
+
+
+def owner_text_requests_profile_change(text: str, names: Iterable[str]) -> bool:
+    """An actual edit imperative naming the target, not a mere name mention.
+
+    Accepts natural requests such as “make lopdev's manager more concise” or
+    “Can you please make marketer more concise?”, and covers policy fields.
+    Anchoring at the (optionally introduced) imperative excludes “tell me how to
+    change reviewer”, quotations and negations.
+    """
+    import re
+
+    prefix = (
+        _OWNER_LEAD
+        + r"(?:update|change|edit|make|set|add|remove|rewrite|replace|create|revert|restore|"
+        r"shorten|expand|revise|tighten|simplify|improve|tweak|adjust|refine|fix|rename|"
+        r"set\s+up|tune)\s+"
+        r"(?:(?:the|that|this|a|an|your|my|our)\s+)?"
+        r"(?:(?:agent|team|skill|role|profile)\s+)?"
+    )
+    text = _normalize_owner_text(text)
+    return any(
+        re.match(prefix + re.escape(str(name)) + r"(?![\w-])", text, re.IGNORECASE)
+        for name in names
+        if name
+    )
+
+
+def owner_text_requests_profile_creation(text: str, kind: str) -> bool:
+    """Explicit creation may let the model choose a new name, never an update.
+
+    Limited to a creation request naming the kind (“Set up a team for
+    launches”, “I need a new team marketing”, “Hey, make me a launch team”).
+    An unrelated profile name mention, or a request about HOW to create one,
+    cannot grant.
+    """
+    import re
+
+    noun = {"agent": "(?:agent|role|specialist)", "team": "team", "skill": "skill"}[kind]
+    return bool(
+        re.match(
+            _OWNER_LEAD + r"(?:create|make|build|add|set\s*up|spin\s+up|stand\s+up|put\s+together|"
+            r"(?:i|we)\s+(?:need|want|'d like|would like))\s+"
+            r"(?:(?:me|us|a|an|new|another|reusable|fresh)\s+)*"
+            + r"(?:[\w-]+\s+){0,3}"
+            + noun
+            + r"\b",
+            _normalize_owner_text(text),
+            re.IGNORECASE,
+        )
+    )
+
+
+def owner_text_assents(text: str) -> bool:
+    """Whether an owner's short reply is plain assent ("ok", "lgtm, apply it").
+
+    Used ONLY together with a binding to the proposal that was displayed before
+    the text arrived (``Session.decide_profile_proposal``): assent alone names
+    nothing. Hedges, negations, questions and counter-instructions are not
+    assent, so "yes but change the tone" or "no, don't apply" never apply.
+    """
+    import re
+
+    text = _normalize_owner_text(text).strip()
+    if not text or len(text) > 120 or "?" in text:
+        return False
+    if re.search(
+        r"\b(?:no|nope|not|don'?t|do not|never|wait|hold|stop|cancel|reject|but|however|"
+        r"instead|except|without|rather|later)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return False
+    return bool(
+        re.match(
+            r"^(?:yes|yep|yeah|yup|sure|ok|okay|k|approved?|accept(?:ed)?|confirm(?:ed)?|"
+            r"go ahead|go for it|apply|do it|ship it|lgtm|looks good|sounds good|"
+            r"perfect|great|please apply|please do)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
 
 
 def owner_text_names_profile(text: str, names: Iterable[str]) -> bool:
@@ -472,6 +623,41 @@ async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> st
     return origin
 
 
+def hub_pull_refusal(reason: str, ask_id: str = "") -> str:
+    """Model-facing outcome of an unconsented org-hub pull (English by design).
+
+    NEVER a CLI command addressed to the user: the people this reaches are often
+    non-technical, and the old text sent them to ``lop agents sync``, which does
+    not even touch skills. The remedy is always an ask or the user's own words.
+    """
+    if reason == "ask_queued":
+        return (
+            f"Asked the user to confirm this hub update (ask {ask_id}); nothing was "
+            "changed yet. End your turn now. When their answer arrives, retry the same "
+            "org_pull call: a yes lets it through, a 'Not now' means stop. Do not give "
+            "them commands to run."
+        )
+    if reason == "declined":
+        return (
+            "The user chose not to update from the hub now, so nothing was changed. "
+            "Do not retry unless they ask again."
+        )
+    if reason == "error":
+        fault = getattr(reason, "fault", "")
+        return (
+            "The confirmation step failed before the user could answer"
+            + (f" ({fault})" if fault else "")
+            + ", so nothing was changed. Tell the user it failed; do not retry unchanged."
+        )
+    return (
+        # No "say 'update my hub items'" hint any more: the owner's wording is
+        # not consent (PR #3693 review R1); only an answered host ask is.
+        "This run has no way to ask the user, so nothing was changed. Tell them you "
+        "need their confirmation and will ask for it in a conversation they can "
+        "answer. Do not give them commands to run."
+    )
+
+
 def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam") -> str:
     """Why a tool-issued account write was refused, and the ONE next action.
 
@@ -493,6 +679,8 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
+    if intent.operation == "hub_pull":
+        return hub_pull_refusal(reason)
     if reason == "declined":
         return (
             f"the user declined to save this {intent.kind} for every conversation, so "
@@ -503,17 +691,26 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
             "the confirmation channel failed before the user could answer, so nothing "
             "in their account was changed."
         )
+        fault = getattr(reason, "fault", "")
+        if fault:
+            # Named rather than masked: this is a fault in the run, NOT a host
+            # that cannot ask, and the two have different next actions. A retry
+            # of the same call is not one of them.
+            opening += (
+                f" The consent seam itself broke ({fault}), which is an internal fault "
+                "rather than a refusal to ask: tell the user it failed and do not retry "
+                "this call unchanged."
+            )
     elif reason == "unavailable":
+        fault = getattr(reason, "fault", "")
         # The owner-prompt path (``Session._authorize_account_profile_write``)
         # saves without a card when the user's own message names the profile;
         # that is the remedy worth naming, before the manual surfaces.
         opening = (
             f"this {intent.kind} change was not asked for in the user's own message, and "
             "no one is attached to approve it, so nothing in their account was changed. "
-            f"For a wording-only update, the user can ask in their own local message, "
-            f"naming {intent.name!r} and the definition fields to edit. Policy changes and "
-            "other operations need an attached "
-            "approval surface. No durable queued approval was filed."
+            f"The user can request the edit in their own local message, naming {intent.name!r}, "
+            f"or review the proposed change in Agents → {intent.name}."
         )
     elif intent.operation == "promote":
         opening = (
@@ -1077,6 +1274,14 @@ class ScopedTeamRegistry:
         return "session" if self._session_row(getattr(team, "id", "")) is not None else "global"
 
     # -- reads ----------------------------------------------------------------
+    def refresh(self, *, recovery_wait: float | None = None) -> None:
+        """Re-read both stores now, ignoring the snapshot interval (see
+        :meth:`local_operator.teams.TeamRegistry.refresh`)."""
+        for registry in (self.global_registry, self.session_registry):
+            refresh = getattr(registry, "refresh", None)
+            if callable(refresh):
+                refresh(recovery_wait=recovery_wait)
+
     def list_teams(self, *, recovery_wait: float | None = None) -> list[Any]:
         return list(self.session_registry.list_teams(recovery_wait=recovery_wait)) + list(
             self.global_registry.list_teams(recovery_wait=recovery_wait)

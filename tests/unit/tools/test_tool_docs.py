@@ -303,7 +303,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (account profile save consent): 1441 -> 1486 (+45). The
     # ``revert`` op row and the ``backup_id`` param it needs; ``team`` gains the
     # same pair (1431 -> 1464, +33).
-    "agent": 1462,
+    # RE-MEASURED (profile proposals, PR #3704): 1462 -> 1498 (+36), the notes
+    # line routing unasked account edits to Agents -> <name> and the
+    # ``profile_proposal`` apply step; ``team`` gains the same line (+36).
+    # RE-MEASURED (PR #3704 context-budget trim): 1498 -> 1471 (-27). Wire
+    # field descriptions (description/tools/saver/delegate/action_class/kind/
+    # backup_id) shortened to win back the start-context budget the deferred
+    # ``skill``/``profile_proposal`` inventory entries cost; the full
+    # action_class/kind rationale stays in this tool's notes. Same printed table.
+    "agent": 1471,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -616,7 +624,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
-    "hub": 721,
+    # 721 -> 853 (hub set_model, 2026-11 quota incident): the ``set_model`` op
+    # row, its ``effort``/``cascade`` fields and the subtree clause on
+    # ``pause``, net of the trimmed ``to``/``message``/``steps`` wording that
+    # kept the wire schema inside bench_context_budget.py's budget. Re-measured.
+    # 873 -> 875 (round 2, R2.3 + context-budget): the ops row names the
+    # ``model_choice=model`` a tier needs (+), net of trimming the ``model``
+    # and ``to`` field blurbs that put the wire schema 3 tokens over CI's
+    # budget (-). Re-measured.
+    "hub": 875,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
@@ -672,6 +688,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # re-measured through this test's own printed table, not pasted.
     "project": 1143,
     "project_delete": 91,
+    # NEW (profile proposals, PR #3704): the deferred list/show/apply/reject
+    # tool for Agents proposals; 116 tokens through this test's printed table.
+    "profile_proposal": 116,
     "read": 345,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
@@ -689,6 +708,10 @@ MEASURED_TOKENS: dict[str, int] = {
     "read_public_copy": 133,
     "read_variable": 67,
     "secret": 186,
+    # NEW in this ledger (profile proposals, PR #3704): ``skill`` became a
+    # deferred DEFAULT tool, so the default surface this test walks now renders
+    # it; 427 tokens through this test's printed table, schema unchanged.
+    "skill": 427,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,
@@ -761,7 +784,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # the same -1 as the agent twin.
     # RE-MEASURED (PR #3143, Radient Saver pins): 1399 -> 1431 (+32), the
     # per-slot ``saver`` member field; the same printed table as ``agent``.
-    "team": 1464,
+    # RE-MEASURED (profile proposals, PR #3704): 1464 -> 1500 (+36), the same
+    # Agents-proposal notes line as ``agent``.
+    "team": 1500,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -812,7 +837,11 @@ MEASURED_TOKENS: dict[str, int] = {
 #: wording as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3143): agent 1437 -> 1470, the same +33 ``saver`` param
 #: as the canonical arm; ``task`` stays 764 (Saver is not a launch field).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1491, "task": 764}
+#: RE-MEASURED (profile proposals, PR #3704): agent 1491 -> 1527, the same +36
+#: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
+#: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
+#: -27 field-description trim as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1500, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

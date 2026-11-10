@@ -233,6 +233,7 @@ async def prescreen_conversation_refs(
             body=fetched.body,
             body_hash=fetched.body_hash,
             sender=sender,
+            **_conversation.screening_routing(ref, fetched.display),
         )
         item["allocation"] = allocation
         candidates.append((ref, fetched, item))

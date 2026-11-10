@@ -4,8 +4,8 @@
 		"repo": "damianvtran/local-operator-ui",
 		"path": "scripts/fixtures/condense.parity.json",
 		"manifest": "scripts/fixtures/condense.parity.manifest.json",
-		"sha256": "de2a6d53ef5d45a50c22fce129038a4323da12c69ffa1f39398995dc014fbaa8",
-		"sourceHash": "f5025ba234b3264b50690b1816c6c471b906d0584ec5941895c41d5a458c597f"
+		"sha256": "5f029f372f3c3e9d2ff5d370871663221a7b8a033edf74211b975da956007dfe",
+		"sourceHash": "0c813b32dce83e3deedea12ffd02aef7230065647bf22e78dc8a5ce2ae31e338"
 	},
 	"quiet-groups.parity.json": {
 		"repo": "damianvtran/local-operator-ui",

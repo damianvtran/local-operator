@@ -28,6 +28,9 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from uuid import uuid4
 
 #: Reads the variable ONCE at import: the mark sites guard on :func:`enabled`,
 #: and a per-call ``getenv`` would be a string lookup on the read path the trace
@@ -57,3 +60,39 @@ def mark(stage: str, ms: float | None = None, **fields: object) -> None:
             handle.write(line + "\n")
     except Exception:  # noqa: BLE001 — see the module docstring: observability
         pass  # must never fail the read it observes.
+
+
+class ColdOpenTrace:
+    """One bounded summary per cold call; never retain facade or journal data.
+
+    Phases include scheduling time in existing awaits. The final row also closes
+    failed/cancelled calls, with no exception text or extra task/thread/timer.
+    Construct only behind ``enabled()`` so disabled opens read no new clocks.
+    Session + span joins the enclosing acquire when supplied; otherwise epoch
+    interval + a fresh span disambiguates
+    concurrent cold calls for the same session without a global registry.
+    """
+
+    def __init__(self, session_id: str, span: str | None = None) -> None:
+        self.fields: dict[str, object] = {
+            "session": session_id,
+            "span": span or uuid4().hex,
+            "started_at": time.time() * 1000.0,
+        }
+        self.started = time.monotonic()
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.fields[name + "_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+
+    def finish(self, outcome: str) -> None:
+        mark(
+            "cold.summary",
+            (time.monotonic() - self.started) * 1000.0,
+            outcome=outcome,
+            **self.fields,
+        )

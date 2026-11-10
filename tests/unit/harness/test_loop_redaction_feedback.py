@@ -869,17 +869,19 @@ class TestWrittenContentInDetailsTakesTheResultMask:
         assert DETAILS_KEY not in json.dumps(row.provider_payload)
         # ...and the ENFORCER of the rule, both ways: the disk holds the caller's
         # bytes exactly (which is also the proof the executor received the original
-        # argument — the receipt reports the ORIGINAL length), while the executor's
-        # own result, the one the live event carries, still describes those bytes.
+        # argument — the receipt reports the ORIGINAL length). The live end
+        # event no longer quotes the raw bytes: its diff is settled from the
+        # complete file sides before it is queued
+        # (``AgentLoop._settle_write_diff``), so it is masked like the row.
         assert target.read_bytes() == content.encode()
         assert f"({len(content)} chars)" in _result_text(row)
         executor = [event for event in events if isinstance(event, ToolExecutionEndEvent)][-1]
         # ``or {}``/``or []`` so the Optional ``details`` is never subscripted
         # directly (pyright reportOptionalSubscript; CI type-check).
         executor_diff = (executor.result.details or {}).get("diff") or []
-        assert DETAILS_KEY in "\n".join(
+        assert executor_diff and DETAILS_KEY not in "\n".join(
             executor_diff
-        ), "the executor's own record must describe the bytes it wrote"
+        ), "the live event must not quote the written key"
 
         transcript = Transcript(tmp_path / "session")
         for message in end.messages:
@@ -1553,9 +1555,11 @@ async def test_q3_actual_write_durable_provider_and_fork_no_longer_publish_body_
     await session.prompt("Run the synthetic write and read")
     assert len(requests) == 3 and len(raw_results) == 1
     assert target.read_bytes() == body.encode()
-    # The executor/live-event object remains ground truth. Only publication
-    # copies, provider history, durable rows and actual in-process fork change.
-    assert prefix in "\n".join(raw_results[0].details["diff"])
+    # The disk is ground truth. The executor's result object is the live
+    # event's too, and its diff is settled from the complete file sides before
+    # the event is queued (``AgentLoop._settle_write_diff``), so it no longer
+    # quotes the body either.
+    assert prefix not in "\n".join(raw_results[0].details["diff"])
     history = list(session.transcript.build_llm_history())
     tools = [m for m in history if m.role == "tool"]
     assert len(tools) == 2
@@ -1869,13 +1873,12 @@ class TestQ3BoundedDiffProjection:
     async def test_producer_over_cap_truncation_is_withheld_at_the_seam(self, tmp_path):
         """The fail-closed credential direction for a block bigger than the cap.
 
-        ``_diff_details`` cannot keep an over-cap block whole, so it ends the
-        payload with its truncation marker. That marker is what the seam refuses,
-        so the whole field is withheld: the credential direction is HIDDEN, never
-        a partially published block. This drives both halves together.
+        ``_diff_details`` cannot keep an over-cap block whole, so its hunk-aware
+        cut moves before the block; with no change row left it stores NO diff
+        rows at all and reports only the omitted count. The direction is still
+        HIDDEN, never a partially published block. This drives both halves.
         """
-        from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
-        from local_operator.tools.builtin import _diff_details
+        from local_operator.tools.builtin import DIFF_TRUNCATED_ROWS_KEY, _diff_details
         from local_operator.variables import VariableStore
 
         _, body_line = _q3_pem()
@@ -1887,12 +1890,13 @@ class TestQ3BoundedDiffProjection:
         before = big + "Middle guidance 111.\n" + big
         after = before.replace("Middle guidance 111.", "Middle guidance 222.", 1)
         details = _diff_details("synthetic-over-cap.md", before, after)
-        assert details["diff"][-1] == "…"
+        assert "diff" not in details
+        assert details[DIFF_TRUNCATED_ROWS_KEY] > 200
         out = await AgentLoop._redact_details(
             details, VariableStore(cwd=str(tmp_path)).redact, "edit", None
         )
         assert out is not None
-        assert out["diff"][0] == _DIFF_DETAIL_WITHHELD
+        assert "diff" not in out
         assert body_line not in repr(out), "no body row may reach the published payload"
 
     @pytest.mark.parametrize(
@@ -1961,3 +1965,69 @@ class TestQ3BoundedDiffProjection:
         out = _redact_diff_detail(oversized, lambda text: text)
         assert out[0] == _DIFF_DETAIL_WITHHELD and out[-1] is oversized[-1]
         assert len(out) == len(oversized)
+
+
+@pytest.mark.asyncio
+async def test_over_cap_write_diff_reaches_the_durable_row_unwithheld(tmp_path):
+    """A >200-row write diff must survive the REAL seam into the stored row.
+
+    The defect (operator report, subagent view): ``_diff_details`` capped the
+    diff with ``diff[:200] + ["…"]``, cutting a hunk mid-way; the seam refused
+    the count mismatch and the transcript, replay and every subagent view showed
+    ``[output withheld: credential redaction requires a complete bounded diff]``
+    for EVERY write/edit diff over 200 rows. Driven end to end: a real Session,
+    the real write tool, the session's own redactor and the persisted
+    transcript row.
+    """
+    from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD
+    from local_operator.harness.types import (
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.builtin import DIFF_TRUNCATED_ROWS_KEY, build_write_tool
+    from local_operator.variables import VariableStore
+
+    target = tmp_path / "big.py"
+    content = "".join(f"value_{index} = {index}\n" for index in range(500))
+    requests: list[Any] = []
+
+    def provider(request, signal=None):
+        index = len(requests)
+        requests.append(request)
+
+        async def generate():
+            if index == 0:
+                args = {"path": str(target), "content": content}
+                yield StreamToolCallDelta(
+                    index=0, id="big-0", name="write", argument_delta=json.dumps(args)
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return generate()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=100000),
+        stream_fn=provider,
+        tools=[build_write_tool()],
+        transcript=Transcript(tmp_path / "sessions" / "bigdiffsynthetic01"),
+        system_blocks_provider=lambda *_: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    await session.prompt("Write the big file")
+    durable = session.transcript.path.read_text()
+    assert _DIFF_DETAIL_WITHHELD not in durable, "over-cap diff was withheld in storage"
+    tools = [m for m in session.transcript.build_llm_history() if m.role == "tool"]
+    details = cast(dict[str, Any], tools[0].provider_payload)["details"]
+    diff = list(details["diff"])
+    assert diff[2].startswith("@@ -0,0 +1,") and diff[3] == "+value_0 = 0"
+    assert "…" not in diff
+    assert details["added"] == 500
+    assert details[DIFF_TRUNCATED_ROWS_KEY] == 501 - (len(diff) - 2)

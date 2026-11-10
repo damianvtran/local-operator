@@ -1797,86 +1797,130 @@ class DesktopSessionBridge:
         behind the paint and announces its outcome as a ``frontend.replace``
         (see :meth:`_read_attach_settled`).
         """
+        tracing = open_trace.enabled()
+        trace_at = time.monotonic() if tracing else 0.0
+        # Nested spans, not additive: birth/cold belong to facade, facade to
+        # held. Missing fields mean the phase was skipped or did not finish.
+        # Pass this call's metadata explicitly; readers share the bridge/task.
+        phases: dict[str, float] | None = {} if tracing else None
+        trace_id = uuid.uuid4().hex if tracing else None
+        loop_handle: asyncio.Handle | None = None
+        loop_delay_ms: float | None = None
+        if tracing:
+            # A single queued callback witnesses loop scheduling delay, not owner
+            # responsiveness. No heartbeat, bridge state, or work when disabled.
+            def witness() -> None:
+                nonlocal loop_delay_ms
+                loop_delay_ms = (time.monotonic() - trace_at) * 1000
+
+            loop_handle = asyncio.get_running_loop().call_soon(witness)
+            open_trace.mark("a.acquire.start", session=self.session_id, acquire_id=trace_id)
         task: asyncio.Task[bool] | None = None
-        trace_at = time.monotonic()
         attach_landed: bool | None = None
-        async with self.lock:
-            self.users += 1
-            self.touched = time.monotonic()
-            try:
-                remote = await self._ensure_facade()
-            except BaseException:
-                self.users -= 1
-                if self.users == 0 and not self.dwelling:
-                    await self._detach()
-                raise
-            if read:
-                task = self._start_read_attach(remote)
+        completed = False
         try:
-            if read:
-                if task is not None:
-                    # ``asyncio.wait`` rather than ``wait_for``: this caller stops
-                    # WAITING at the grace, while the attempt belongs to the bridge
-                    # and must not be cancelled with the request that started it
-                    # (``wait`` never cancels what it waits on; a cancelled request
-                    # leaves the task running for the other readers and the
-                    # stream).
-                    #
-                    # A PEER'S CONVERSATION GETS A LONGER GRACE, and the reason is
-                    # that the grace exists for the OPPOSITE situation. 50 ms is
-                    # right when the durable answer is already on this disk: the
-                    # paint cannot be improved by waiting, because the journal was
-                    # read synchronously a moment ago. For a conversation on
-                    # another device there IS no local durable answer -- the wire
-                    # is the only source -- so a first paint that stops waiting at
-                    # 50 ms is a first paint with NOTHING IN IT, and the renderer
-                    # then spends a second round trip reconciling through
-                    # ``/history``. Waiting up to the read attempt's own budget
-                    # buys the whole transcript in the frame the click asked for,
-                    # and a peer that does not answer inside it still gets the cold
-                    # paint and its ``attaching`` flag exactly as before.
-                    grace = (
-                        REMOTE_READ_FIRST_FRAME_GRACE_S
-                        if self.remote_row is not None
-                        else READ_FIRST_FRAME_GRACE_S
+            lock_wait_at = time.monotonic() if phases is not None else 0.0
+            async with self.lock:
+                lock_at = time.monotonic() if phases is not None else 0.0
+                if phases is not None:
+                    phases["lock_wait_ms"] = (lock_at - lock_wait_at) * 1000
+                self.users += 1
+                self.touched = time.monotonic()
+                try:
+                    facade_at = time.monotonic() if phases is not None else 0.0
+                    remote = (
+                        await self._ensure_facade(phase_times=phases, trace_span=trace_id)
+                        if phases is not None
+                        else await self._ensure_facade()
                     )
-                    done, _ = await asyncio.wait({task}, timeout=grace)
-                    attach_landed = bool(done)
-                    if not done:
-                        self.read_attach_outran.add(task)
-            else:
-                await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
-        except BaseException:
-            # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
-            # review rounds 2 and 3 (review round 1 of this change, F4).
-            # ``release`` awaits the bridge lock, which every other route on this
-            # session contends, and ``_detach`` awaits the owner connection's
-            # tear-down; a cancellation delivered at either await propagates into
-            # an unshielded release and leaves ``users`` incremented for good —
-            # ``release`` is the only thing that drops it, and eviction only ever
-            # considers ``users == 0``. Shielded, the request unwinds promptly
-            # while the release runs to completion exactly once; shield's own
-            # callback retrieves the release's failure when nobody is left to
-            # raise it to.
-            await asyncio.shield(self.release())
-            raise
-        if self.attention_task is None:
-            self.attention_task = asyncio.create_task(self._poll_attention())
-        if open_trace.enabled():
-            # The read envelope's own decomposition: the work before the wait
-            # (lock, facade, attach start) versus the attach wait itself, and
-            # whether the attach landed inside the grace. ``attach_landed`` is
-            # None when no wait happened at all (an already-attached facade) —
-            # the difference between "warm" and "waited and still cold".
-            open_trace.mark(
-                "a.acquire",
-                (time.monotonic() - trace_at) * 1000,
-                session=self.session_id,
-                read=read,
-                attach_started=task is not None,
-                attach_landed=attach_landed,
-            )
-        return remote
+                    if phases is not None:
+                        phases["facade_ms"] = (time.monotonic() - facade_at) * 1000
+                except BaseException:
+                    self.users -= 1
+                    if self.users == 0 and not self.dwelling:
+                        await self._detach()
+                    raise
+                if read:
+                    task = self._start_read_attach(remote)
+                if phases is not None:
+                    phases["lock_held_ms"] = (time.monotonic() - lock_at) * 1000
+            try:
+                if read:
+                    if task is not None:
+                        # ``asyncio.wait`` rather than ``wait_for``: this caller stops
+                        # WAITING at the grace, while the attempt belongs to the bridge
+                        # and must not be cancelled with the request that started it
+                        # (``wait`` never cancels what it waits on; a cancelled request
+                        # leaves the task running for the other readers and the
+                        # stream).
+                        #
+                        # A PEER'S CONVERSATION GETS A LONGER GRACE, and the reason is
+                        # that the grace exists for the OPPOSITE situation. 50 ms is
+                        # right when the durable answer is already on this disk: the
+                        # paint cannot be improved by waiting, because the journal was
+                        # read synchronously a moment ago. For a conversation on
+                        # another device there IS no local durable answer -- the wire
+                        # is the only source -- so a first paint that stops waiting at
+                        # 50 ms is a first paint with NOTHING IN IT, and the renderer
+                        # then spends a second round trip reconciling through
+                        # ``/history``. Waiting up to the read attempt's own budget
+                        # buys the whole transcript in the frame the click asked for,
+                        # and a peer that does not answer inside it still gets the cold
+                        # paint and its ``attaching`` flag exactly as before.
+                        grace = (
+                            REMOTE_READ_FIRST_FRAME_GRACE_S
+                            if self.remote_row is not None
+                            else READ_FIRST_FRAME_GRACE_S
+                        )
+                        if phases is not None:
+                            phases["selected_grace_ms"] = grace * 1000
+                        wait_at = time.monotonic() if phases is not None else 0.0
+                        done, _ = await asyncio.wait({task}, timeout=grace)
+                        if phases is not None:
+                            phases["grace_elapsed_ms"] = (time.monotonic() - wait_at) * 1000
+                        attach_landed = bool(done)
+                        if not done:
+                            self.read_attach_outran.add(task)
+                else:
+                    await remote.attach_existing(control_budget=DESKTOP_CONTROL_ATTACH_S)
+            except BaseException:
+                # SHIELDED, the shape the routes' ``_give_the_bridge_back`` settled in
+                # review rounds 2 and 3 (review round 1 of this change, F4).
+                # ``release`` awaits the bridge lock, which every other route on this
+                # session contends, and ``_detach`` awaits the owner connection's
+                # tear-down; a cancellation delivered at either await propagates into
+                # an unshielded release and leaves ``users`` incremented for good —
+                # ``release`` is the only thing that drops it, and eviction only ever
+                # considers ``users == 0``. Shielded, the request unwinds promptly
+                # while the release runs to completion exactly once; shield's own
+                # callback retrieves the release's failure when nobody is left to
+                # raise it to.
+                await asyncio.shield(self.release())
+                raise
+            if self.attention_task is None:
+                self.attention_task = asyncio.create_task(self._poll_attention())
+            completed = True
+            return remote
+        finally:
+            if loop_handle is not None:
+                loop_handle.cancel()
+                # Keep attach_landed's historical completion meaning. Never read
+                # task.result(): failure/cancellation belongs to the existing path.
+                open_trace.mark(
+                    "a.acquire",
+                    (time.monotonic() - trace_at) * 1000,
+                    session=self.session_id,
+                    acquire_id=trace_id,
+                    read=read,
+                    completed=completed,
+                    attach_started=task is not None,
+                    attach_landed=attach_landed,
+                    attach_task_completed=task.done() if task is not None else None,
+                    remote_branch=self.remote_row is not None,
+                    loop_witness_ran=loop_delay_ms is not None,
+                    loop_queue_delay_ms=loop_delay_ms,
+                    **(phases or {}),
+                )
 
     def _start_read_attach(self, remote: AttachedSession) -> asyncio.Task[bool] | None:
         """The bridge's one read-envelope attach attempt, started if none is live.
@@ -1936,7 +1980,9 @@ class DesktopSessionBridge:
         # own late rollover still follows if the owner answers.
         self.publish_frontend_replace()
 
-    async def _ensure_facade(self) -> AttachedSession:
+    async def _ensure_facade(
+        self, *, phase_times: dict[str, float] | None = None, trace_span: str | None = None
+    ) -> AttachedSession:
         """This bridge's facade, constructed cold on first use. Caller holds the lock."""
         if self.remote is None:
             if self.remote_row is not None:
@@ -2001,12 +2047,16 @@ class DesktopSessionBridge:
                 # ``session_id`` here instead would birth the first turn on the
                 # configured default — the one outcome the draft's model pick
                 # exists to avoid.
+                birth_at = time.monotonic() if phase_times is not None else 0.0
                 if self.draft is not None:
                     birth = self.draft.model
                 else:
                     birth = await asyncio.to_thread(
                         draft_birth_selection, self.root, self.session_id
                     )
+                if phase_times is not None:
+                    phase_times["birth_await_ms"] = (time.monotonic() - birth_at) * 1000
+                cold_at = time.monotonic() if phase_times is not None else 0.0
                 remote = await AttachedSession.cold(
                     self.session_id,
                     config_dir=self.root,
@@ -2032,7 +2082,10 @@ class DesktopSessionBridge:
                     # argument and stay eager, because each of them paints or
                     # folds ``history()`` and none has a page reader behind it.
                     deferred_history=True,
+                    _trace_span=trace_span,
                 )
+                if phase_times is not None:
+                    phase_times["cold_ms"] = (time.monotonic() - cold_at) * 1000
             self.remote = remote
             # A detached interval has no receipt feed. A new epoch makes
             # that gap explicit even when the runtime itself never died.

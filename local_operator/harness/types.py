@@ -1010,6 +1010,50 @@ class ToolResult(BaseModel):
     # the native loop must consume it before hooks or events can publish the row.
     _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
 
+    # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
+    # file texts plus the raw rendered diff preview, as
+    # ``(before, after, preview_rows)``. While it is attached,
+    # ``details['diff']`` holds only the withheld receipt. The native loop's
+    # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
+    # masks every preview row whose source line the redactor touched, then runs
+    # the ordinary per-hunk seam and publishes that. Hunks hold two context
+    # lines, so a registered multi-line value longer than the hunk window never
+    # appears whole in the diff and the per-hunk seam alone published its
+    # fragments (architect proof on dfc7411: 5 of 10 lines of an edited
+    # literal); only the whole file side carries the proof.
+    #
+    # RAW executor bytes, so it must never reach a public surface: a
+    # PrivateAttr is outside ``model_dump``/JSON, and the hooks below drop it
+    # from every copy (``model_copy``, ``copy``/``deepcopy``, pickle), because
+    # pydantic otherwise carries private state into all of them -- a retained
+    # event copy or deep-copied trajectory row would keep raw file text alive.
+    # Only the ORIGINAL object carries it; a result that never reaches the
+    # seam keeps the withheld receipt (fail-closed by construction).
+    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+
+    def __copy__(self) -> "ToolResult":
+        copied = super().__copy__()
+        _drop_diff_source(copied)
+        return copied
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "ToolResult":
+        copied = super().__deepcopy__(memo)
+        _drop_diff_source(copied)
+        return copied
+
+    def __getstate__(self) -> dict[Any, Any]:
+        state = super().__getstate__()
+        private = state.get("__pydantic_private__")
+        if isinstance(private, dict) and private.get("_diff_source") is not None:
+            state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
+        return state
+
+    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+        """Return and CLEAR the raw source-evidence carrier (single consumption)."""
+        source = self._diff_source
+        self._diff_source = None
+        return source
+
     @classmethod
     def one_turn_secret(
         cls,
@@ -1065,6 +1109,17 @@ class ToolResult(BaseModel):
     @property
     def text(self) -> str:
         return "".join(block.text for block in self.content if isinstance(block, TextContent))
+
+
+def _drop_diff_source(result: "ToolResult") -> None:
+    """Clear a copy's raw source-evidence carrier without touching the original's.
+
+    ``super().__copy__`` SHALLOW-copies the private dict, so the copy owns its
+    own dict and rewriting it here cannot clear the original's carrier.
+    """
+    private = getattr(result, "__pydantic_private__", None)
+    if isinstance(private, dict) and private.get("_diff_source") is not None:
+        object.__setattr__(result, "__pydantic_private__", {**private, "_diff_source": None})
 
 
 # ---------------------------------------------------------------------------
@@ -1993,17 +2048,49 @@ AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]
 
 
 @dataclass(frozen=True)
-class QueuedProfileWrite:
-    """Host-filed durable request, explicitly NOT a grant or a denial."""
+class ProposedProfileWrite:
+    """Host-filed profile PROPOSAL, explicitly NOT a grant or a denial.
 
-    approval_id: str
-    request_digest: str
-    expires_at: float
-    receipt_id: str
+    The consent seam returns this when the account write was not asked for by
+    the owner in their own words: the change is stored in
+    ``local_operator.profile_proposals`` and reviewed in Agents → <name>, or
+    applied with the ``profile_proposal`` tool after the user agrees.
+    """
+
+    proposal_id: str
     profile_kind: str
     profile_name: str
     changes: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    #: The record's real state. ``pending`` for a fresh filing; an identical
+    #: re-filing of an already-decided or expired proposal reports that state
+    #: so the receipt never claims a pending proposal that does not exist.
+    state: str = "pending"
+
+
+#: Kept for one release so out-of-tree imports of the old name keep resolving;
+#: the signed mesh filing it described is gone (proposals live in Agents now).
+QueuedProfileWrite = ProposedProfileWrite
+
+
+@dataclass(frozen=True)
+class QueuedHubPull:
+    """The host filed a hub-pull consent ask: explicitly NOT a grant or a denial.
+
+    WHY a separate outcome. An org-hub pull is most often requested from a turn
+    with nobody attached to answer a card (a Team Bridge message, a peer, a
+    wake). Refusing there told users to run CLI commands they do not know. The
+    host instead queues ONE host-authored ask carrying the exact plan; the
+    user's affirmative answer, arriving as its own turn, is what the seam later
+    grants on (single use, bound to tenant and kinds). The tool reports this as
+    "asked — end the turn, retry when the answer arrives".
+    """
+
+    ask_id: str
+    tenant: str
+    #: True when an OPEN ask for the same tenant already existed and was reused,
+    #: so the model is not told it filed a second question.
+    reused: bool = False
 
 
 @dataclass(frozen=True)
@@ -2027,7 +2114,7 @@ class DurableWriteIntent:
     they land in the account store.
     """
 
-    kind: Literal["agent", "team"]
+    kind: Literal["agent", "team", "skill"]
     #: ``sync`` is here because syncing rewrites installed account rows and its
     #: hub arm fetches account definitions — both are account mutations the
     #: seam is asked about, even though the tool's own verb is a different one.
@@ -2036,8 +2123,23 @@ class DurableWriteIntent:
     #: surface can authorise it, which is exactly what the seam answers.
     #: ``revert`` restores a row from the backup a granted save took; it is an
     #: account write like any other, so it goes through the same seam.
+    #: ``hub_pull`` is the org-hub pull/update class (``org_pull`` with
+    #: ``on_conflict`` adopt-link|skip): new items linked without overwriting
+    #: anything, already-linked items updated through the sync merge with no
+    #: forced conflict, and links re-subscribed. It is a separate operation so
+    #: the consent it can earn (auto policy, the owner's request, an answered
+    #: host-filed ask) can never authorise hub-wins ``adopt``/``reconcile``,
+    #: which stay ``sync`` + ``confirm_replace``.
     operation: Literal[
-        "create", "update", "delete", "install", "reset", "sync", "promote", "revert"
+        "create",
+        "update",
+        "delete",
+        "install",
+        "reset",
+        "sync",
+        "promote",
+        "revert",
+        "hub_pull",
     ]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
@@ -2059,6 +2161,12 @@ class DurableWriteIntent:
     #: binds session/anchor/expiry when filing the signed operation request.
     proposal: dict[str, Any] | None = None
     tool_call_id: str = ""
+    #: ``hub_pull`` only: the HOST-COMPUTED plan (tenant, kinds, new items,
+    #: linked items with an available update and their revisions, links to
+    #: re-subscribe). Built by the tool from the catalogue and the sync check,
+    #: never from a model parameter; the seam renders it on the ask/card and
+    #: binds a grant to its tenant and kinds. Shape: ``hub_org.consent``.
+    plan: dict[str, Any] | None = None
 
 
 class ToolContext(BaseModel):
@@ -2295,8 +2403,12 @@ class ToolContext(BaseModel):
         default=None, exclude=True
     )
     authorize_durable_write: (
-        Callable[[DurableWriteIntent], Awaitable[str | QueuedProfileWrite | None]] | None
+        Callable[[DurableWriteIntent], Awaitable[str | ProposedProfileWrite | None]] | None
     ) = Field(default=None, exclude=True, repr=False)
+    #: Host-held consent decision, never a model-supplied permission flag.
+    decide_profile_proposal: Callable[[str, str], Awaitable[str]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process

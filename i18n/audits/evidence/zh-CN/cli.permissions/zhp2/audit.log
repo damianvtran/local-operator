@@ -1,0 +1,70 @@
+# audit.log — actual command output, session bb7ced26a175, 2026-11-09T19:41:20Z
+## $ git rev-parse HEAD
+788cc399410196b080cfc9f7e7bd558ccb713140
+## $ env -u CMUX_SOCKET_PATH .venv/bin/python scripts/i18n/check.py
+advisory: local_operator/team_bridge/link_preview/extract.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/store.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/agent_tool.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/builtin.py: 142 literal(s) against a ceiling of 118
+advisory: local_operator/tools/confinement.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/secret_tool.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/tools/skill_tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tui/session_move.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/tunnels/cli.py: 14 literal(s) against a ceiling of 13
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/wakes/supervisor.py: 8 literal(s) against a ceiling of 5
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 215 file(s) scanned, 2539 literal(s) at or below the baseline, catalogues consistent; 81 advisory finding(s) (report-only until activated)
+rc=0
+## $ shasum -a 256 inputs
+d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186  local_operator/i18n/catalogues/en/cli.permissions.json
+f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099  local_operator/i18n/catalogues/en/cli.permissions.context.json
+2b018162dcb4e58b61b9d5c783a855438a09127460ea6a873bb4f461191b6d3c  local_operator/i18n/catalogues/zh-CN/cli.permissions.json
+## $ sw_vers
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+## $ .venv/bin/python $S/parity.py  (own parity check)
+keys en/zh: 38 38 diff: []
+keys with issues: 0
+ICU plural/select in en: []
+## half-width punctuation outside code/placeholders/Latin runs (own check)
+cli.permissions.status.screen.denied ['>', '>']
+## round-1 finding re-check (own)
+'请' 0
+'一行' 0
+'这一行' 0
+'根本' 0
+'继续吗' 0
+'下次启动运行时' 0
+'屏幕录制”' 0
+'录屏与系统录音' 1
+'始终允许' 3
+'钥匙串访问' 1
+'访问控制' 1
+'文件与文件夹' 1
+'系统设置' 1
+'隐私与安全性' 1
+'辅助功能' 1
+## Apple localized strings on this Mac (python plistlib over .loctable, en -> zh_CN)
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | 'Privacy & Security' | 'Privacy & Security' -> '隐私与安全'
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | 'Accessibility' | 'Accessibility' -> '无障碍'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'SCREEN_CAPTURE_HEADER' | 'Screen & System Audio Recording' -> '录屏与系统录音'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'FILE_ACCESS_COMBINED' | 'Files & Folders' -> '文件与文件夹'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'Allow' | 'Allow' -> '允许'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'SCREEN_CAPTURE' | 'Screen Recording' -> '录屏'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'SCREENANDAUDIOCAPTURE' | 'Screen & System Audio Recording' -> '录屏与系统录音'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable | 'CFBundleDisplayName' | 'Privacy & Security' -> '隐私与安全'
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable | 'CFBundleName' | 'Privacy & Security' -> '隐私与安全'
+Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Localizable.loctable | 'Keychain Access' | 'Keychain Access' -> '钥匙串访问'
+Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/InfoPlist.loctable | 'CFBundleName' | 'Keychain Access' -> '钥匙串访问'
+Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/InfoPlist.loctable | 'CFBundleDisplayName' | 'Keychain Access' -> '钥匙串访问'
+  "zh_CN" => {
+    "CFBundleDisplayName" => "系统设置"
+    "CFBundleName" => "系统设置"
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | ACCESSIBILITY | 'Device Control and Data Access' -> '设备控制和数据访问'
+Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/KeyEditor.loctable | 302.label | 'Access Control' -> '访问控制'
+Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable | 100267.title | 'Always Allow' -> '始终允许'
+Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable | 100268.title | 'Allow' -> '允许'

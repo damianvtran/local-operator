@@ -4177,10 +4177,15 @@ class OpenAICompatClient:
         call_identities: dict[int, tuple[str, str, str]] = {}
         finalized_arguments: set[int] = set()
 
-        def conflicting_call() -> ProviderError:
+        def conflicting_call(reason: str) -> ProviderError:
+            # A single marker hid which invariant failed in context-dependent
+            # streams. Name only the local check and its recognized SSE branch:
+            # arguments, identities and raw payloads may contain user secrets.
+            # All callers supply literal reasons, and event_type is reachable
+            # here only through the explicitly handled lifecycle events below.
             return ProviderError(
                 None,
-                "responses_tool_arguments_conflict",
+                f"responses_tool_arguments_conflict (reason={reason}, event={event_type})",
                 retryable=False,
                 fail_closed=True,
             )
@@ -4197,7 +4202,7 @@ class OpenAICompatClient:
             parts = argument_parts.setdefault(index, [])
             streamed = "".join(parts)
             if not arguments.startswith(streamed):
-                raise conflicting_call()
+                raise conflicting_call("argument_prefix")
             suffix = arguments[len(streamed) :]
             if not suffix:
                 return []
@@ -4214,7 +4219,7 @@ class OpenAICompatClient:
                 # already owns this output slot. Partial deltas are pending,
                 # not permission to execute a call contradicted by its final.
                 if output_index in output_call_indexes:
-                    raise conflicting_call()
+                    raise conflicting_call("slot_type")
                 return []
             call_id = item.get("call_id") or item.get("id") or ""
             item_id = item.get("id") or ""
@@ -4222,13 +4227,13 @@ class OpenAICompatClient:
             position_index = output_call_indexes.get(output_index)
             if position_index is not None:
                 if index is not None and index != position_index:
-                    raise conflicting_call()
+                    raise conflicting_call("slot_identity")
                 index = position_index
             identity = (call_id, item_id, item.get("name") or "")
             if index is not None and call_identities[index] != identity:
-                raise conflicting_call()
+                raise conflicting_call("call_identity")
             if final and not isinstance(item.get("arguments"), str):
-                raise conflicting_call()
+                raise conflicting_call("final_arguments_type")
             events: list[StreamToolCallDelta] = []
             if index is None:
                 index = tool_call_count
@@ -4247,7 +4252,7 @@ class OpenAICompatClient:
             if final:
                 snapshot = added_argument_snapshots.get(index, "")
                 if not isinstance(arguments, str) or not arguments.startswith(snapshot):
-                    raise conflicting_call()
+                    raise conflicting_call("added_argument_prefix")
                 events.extend(reconcile_arguments(index, arguments))
             elif isinstance(arguments, str) and arguments:
                 # The added item is a snapshot, not the first argument delta:
@@ -4256,7 +4261,7 @@ class OpenAICompatClient:
                 # them, so native replay and dispatch cannot disagree.
                 previous = added_argument_snapshots.get(index)
                 if previous is not None and previous != arguments:
-                    raise conflicting_call()
+                    raise conflicting_call("added_arguments_changed")
                 if previous is None:
                     added_argument_bytes += len(arguments.encode("utf-8"))
                     envelope.check(added_argument_bytes)
@@ -4344,7 +4349,7 @@ class OpenAICompatClient:
                     index = call_indexes.get(call_id)
                     if index is not None:
                         if not isinstance(payload.get("arguments"), str):
-                            raise conflicting_call()
+                            raise conflicting_call("done_arguments_type")
                         finalized_arguments.add(index)
                         for event in reconcile_arguments(index, payload.get("arguments")):
                             yield event
@@ -4358,7 +4363,7 @@ class OpenAICompatClient:
                             call_id, output_call_indexes.get(fallback_index, fallback_index)
                         )
                         if index in finalized_arguments:
-                            raise conflicting_call()
+                            raise conflicting_call("delta_after_final")
                         argument_parts.setdefault(index, []).append(delta)
                         yield StreamToolCallDelta(index=index, argument_delta=delta)
                 elif event_type == "response.output_text.delta":
@@ -4392,7 +4397,7 @@ class OpenAICompatClient:
                     else:
                         native = response_obj["output"]
                         if not isinstance(native, list):
-                            raise conflicting_call()
+                            raise conflicting_call("terminal_output_type")
                         native_indexes = list(range(len(native)))
                     envelope.check(
                         _responses_output_bytes(
@@ -4408,7 +4413,7 @@ class OpenAICompatClient:
                             if item.get("type") == "function_call":
                                 index = output_call_indexes[output_index]
                                 if index in final_call_indices:
-                                    raise conflicting_call()
+                                    raise conflicting_call("duplicate_terminal_call")
                                 final_call_indices.add(index)
                                 final_call_positions.add(output_index)
                     if not explicit_output:
@@ -4422,7 +4427,7 @@ class OpenAICompatClient:
                                 for event in reconcile_arguments(index, snapshot):
                                     yield event
                             elif not streamed.startswith(snapshot):
-                                raise conflicting_call()
+                                raise conflicting_call("legacy_argument_prefix")
                     # Never dispatch survivors of an explicitly contradictory
                     # batch. An absent field is not a membership assertion:
                     # legacy delta-only streams and length truncation retain
@@ -4430,7 +4435,7 @@ class OpenAICompatClient:
                     if explicit_output and not expected_call_positions.issubset(
                         final_call_positions
                     ):
-                        raise conflicting_call()
+                        raise conflicting_call("terminal_call_membership")
                     # Terminal output is authoritative; .done events cover
                     # compatible endpoints whose terminal omits output.
                     replay_text: list[str] = []

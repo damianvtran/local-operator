@@ -78,6 +78,7 @@
   "wire.errors.desktop.session_is_remote_open": "{session_id} находится на {label}, а этот рабочий стол пока не умеет открывать разговор на другом устройстве. Перенесите её домой командой `lop sessions move {session_id} --to local` или работайте из терминала через `/network sessions --peer {label} --engage {session_id}`.",
   "wire.errors.desktop.session_is_remote_write": "{noun} сессии {session_id} находится на {label}, а этот рабочий стол пока не умеет писать туда; здесь ничего не изменено.",
   "wire.errors.desktop.session_not_found": "нет разговора с id {session_id}",
+  "wire.errors.desktop.settings_intent_generation_moved": "Это изменение заменено более новым, поэтому отменять нечего.",
   "wire.errors.desktop.skill_alias_occupied": "Это имя уже используется локальным навыком. Выполните pull навыка Hub с --dry-run, чтобы проверить merge при принятии под управление Hub, или выберите другое имя.",
   "wire.errors.desktop.skill_local_changes_unpublished": "В этом навыке есть локальные изменения, которые так и не были опубликованы, и при удалении они пропадут. Сначала опубликуйте их или всё равно удалите навык, чтобы отбросить изменения.",
   "wire.errors.desktop.skill_not_editable": "Здесь этот навык доступен только для чтения. Скопируйте его в свои навыки, чтобы вносить изменения.",

@@ -1,0 +1,22 @@
+{
+ "locale": "vi",
+ "namespace": "cli.permissions",
+ "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+ "translator": {
+  "agent": "i18n-translator (vi, PR #3691 round-2 wave; commit 788cc399410)",
+  "session": null,
+  "model": null,
+  "date": "2026-11-09"
+ },
+ "auditor": {
+  "agent": "i18n-auditor (lopdev team subagent)",
+  "session": "bac062ad618b",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-09",
+  "result": "passed",
+  "findings": 2,
+  "unresolved_blocker_major": 0
+ },
+ "status": "passed",
+ "note": "Independent vi re-audit vp2 (session bac062ad618b, anthropic/claude-opus-5-5) of 38/38 keys: passed, 0B/0M/1m/1n; vp1 m1-n4 resolved; macOS labels match Apple vi loctables. Record: i18n/audits/evidence/vi/cli.permissions/vp2/record.json"
+}
