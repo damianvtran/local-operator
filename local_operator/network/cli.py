@@ -395,7 +395,7 @@ def add_parser(
         help="capability to grant on join (repeatable; default: approve)",
     )
     approval_request.add_argument(
-        "--session", default="", help="the session id this request is filed from"
+        "--session", default=None, help="the session id this request is filed from"
     )
     approval_request.add_argument(
         "--request-id",
@@ -429,7 +429,7 @@ def add_parser(
     )
     approval_withdraw.add_argument("approval")
     approval_withdraw.add_argument(
-        "--session", default="", help="the session id this request was filed from"
+        "--session", default=None, help="the session id this request was filed from"
     )
     approval_withdraw.add_argument("--json", action="store_true")
     approval_run = approval_actions.add_parser(
@@ -10499,9 +10499,15 @@ def _env_filing_session() -> str:
     For the credential request factories, whose own ``--session`` flag is the lend's
     TARGET scope and must never be read as attribution (nor this as a target).
     """
+    from local_operator.network.approvals import filing_session
     from local_operator.secrets.access import session_id
 
-    return session_id() or ""
+    # PINNED HERE, once, for every reader (#3436 review R1-3 / QA Q-1): the env is
+    # now the DEFAULT source and any same-uid process can set it, so a value not
+    # shaped like a session id (QA filed ``ctx-deadbeef`` on a device card) is no
+    # attribution at all. The next slice shows these cards inline, where free text
+    # would read as a real session.
+    return filing_session(session_id() or "")
 
 
 def _filing_session(args: argparse.Namespace) -> str:
@@ -10516,8 +10522,13 @@ def _filing_session(args: argparse.Namespace) -> str:
     lend's TARGET scope) do not read it. An explicit flag wins; an empty env is the
     legacy empty attribution, unchanged.
     """
-    explicit = str(getattr(args, "session", "") or "")
-    return explicit or _env_filing_session()
+    # ``None`` is "not given"; ``--session ""`` is an explicit EMPTY value and wins
+    # too (#3436 review R1-2), so a tool child can still withdraw a card that was
+    # filed unattributed. The explicit value is passed as typed, as it always was.
+    explicit = getattr(args, "session", None)
+    if explicit is not None:
+        return str(explicit)
+    return _env_filing_session()
 
 
 def _cmd_approvals_request(args: argparse.Namespace) -> int:
