@@ -1727,7 +1727,7 @@ def test_receipt_timeout_evidence_degrades_on_partial_and_total_probe_failure(
         },
     )
     text = _receipt_timeout_evidence("refusal wait", directory, child, tmp_path)
-    assert "SIGTERM: pending=no, blocked=no" in text
+    assert "pending=no (ps shows 0" in text
     assert 't0="unavailable (ps rc=1' in text and "'S 0:00.03'" in text
     assert "signal timing: not recorded for this child" in text
     # Total: every ps raises.
