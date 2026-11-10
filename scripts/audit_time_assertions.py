@@ -53,10 +53,30 @@ class Finding(TypedDict):
     line: int
     fn: str
     expr: str
-    op: str
+    #: The comparison operators, read from ``ast.Compare.ops`` — never regexed
+    #: out of source text, where a ``<`` inside a string literal would count.
+    ops: list[str]
+    #: The value of every operand built only from numeric literals (``0.5``,
+    #: ``-1``, ``0.4 * 1.8``). Gates whether the row exists at all.
     consts: list[int | float]
+    #: Any operand is a clock read or a name assigned from one.
     measured: bool
-    body: str
+    #: Some ``small <= large`` pair puts a measured quantity on the small side
+    #: with no fresh clock read on the large side: the only shape a stall can
+    #: push past its bound. ``False`` means every pair is a lower bound.
+    ceiling: bool
+    #: The ceiling pairs' literal bounds IN SECONDS (``elapsed_ms < 500`` -> 0.5).
+    bound_consts: list[int | float]
+    #: Source of the bound side(s), for the code-constant check.
+    bound_expr: str
+    #: The bound side names a calibrated / measured-floor value (see
+    #: ``CALIBRATED_NAME``) — read from identifiers in the compared expression,
+    #: never from the docstring, comments or unrelated variables in the body.
+    calibrated: bool
+    #: A ``time.time()`` read sits on the measured side: a stamp-vs-now check.
+    stamp: bool
+    #: The measured side is CPU time, not wall clock.
+    cpu: bool
     bucket: str
     why: str
 
@@ -80,7 +100,15 @@ TIME_STRICT = re.compile(
 )
 CLOCKCALL = re.compile(r"perf_counter|time\.monotonic|monotonic\(|time\.time\(")
 CODE_CONST = re.compile(r"\b[A-Z][A-Z0-9_]{3,}\b")
-CALIBRATED = re.compile(r"(calibrat|noise)", re.I)
+#: An identifier on the BOUND side whose name says it was measured in-run (a
+#: calibrated noise floor, a baseline). Matched against ``ast.Name``/attribute
+#: identifiers of the compared expression only: a QA pass found the earlier
+#: whole-body regex filing hard-coded ceilings as calibrated because the word
+#: "noise" appeared in a docstring, a comment or an unrelated variable.
+CALIBRATED_NAME = re.compile(r"(calibrat|floor|baseline|noise)", re.I)
+CPU_NAME = re.compile(r"(\bcpu|cpu_|_cpu|process_time|thread_time)", re.I)
+#: ``ast`` comparison operator -> spelling, for the ordering ops this audit reads.
+ORDER_OPS: dict[type[ast.cmpop], str] = {ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}
 FUNC = (ast.FunctionDef, ast.AsyncFunctionDef)
 SETTLE = re.compile(r"(\.pause\(\)|asyncio\.sleep\(|time\.sleep\()")
 
@@ -164,13 +192,18 @@ def classify(row: Finding) -> tuple[str, str]:
     """Bucket one finding. Rules are ordered; the first match wins."""
     if not row["measured"]:
         return "A", "no clock read — code constants / policy values; load cannot move it"
-    ops = re.findall(r"<=|>=|<|>", row["expr"])
-    if not any(op in ("<", "<=") for op in ops):
+    if not row["ceiling"]:
         return "A", "lower bound on elapsed — load only inflates it"
-    literal = max(abs(value) for value in row["consts"])
-    if CODE_CONST.search(row["expr"]):
+    if CODE_CONST.search(row["bound_expr"]):
         return "A", "derived — the bound is a code constant the implementation owns"
-    if "time.time()" in row["expr"]:
+    if row["calibrated"]:
+        return "A", "derived — the bound names a value measured in the same run"
+    if not row["bound_consts"]:
+        # The literal that admitted the row sits on a lower-bound pair, and the
+        # ceiling is an expression: neither provably derived nor a stated number.
+        return "B", f"bound `{row['bound_expr']}` is a local value — hard-coded unless derived"
+    literal = max(abs(value) for value in row["bound_consts"])
+    if row["stamp"]:
         if literal >= 30:
             return "A", (
                 f"{literal:g} s timestamp tolerance — load does not move wall-clock arithmetic"
@@ -178,11 +211,194 @@ def classify(row: Finding) -> tuple[str, str]:
         return "B", (
             f"{literal:g} s stamp-vs-now tolerance — a stall between write and read crosses it"
         )
-    if CALIBRATED.search(row["body"]):
-        return "A", "derived — calibrated against a measured noise floor"
+    clock = "CPU-time" if row["cpu"] else "wall-clock"
     if literal >= 3.0:
-        return "D", f"{literal:g} s ceiling over a blocking path — only a real hang trips it"
-    return "B", f"hard-coded {literal:g} s wall-clock ceiling — a loaded runner crosses it"
+        return "D", (
+            f"{literal:g} s {clock} ceiling over a blocking path — only a real hang trips it"
+        )
+    return "B", f"hard-coded {literal:g} s {clock} ceiling — a loaded runner crosses it"
+
+
+def _is_clock_call(node: ast.AST) -> bool:
+    """A call to a clock, spelled any way this suite spells one."""
+    if not isinstance(node, ast.Call):
+        return False
+    try:
+        dotted = ast.unparse(node.func)
+    except Exception:  # noqa: BLE001 — an unparsable callee is simply not a clock
+        return False
+    return bool(CLOCKCALL.search(dotted + "(")) or any(
+        marker in dotted for marker in ("process_time", "thread_time", "loop.time")
+    )
+
+
+def _const_value(node: ast.AST) -> float | None:
+    """The value of an operand built ONLY from numeric literals, else ``None``.
+
+    ``0.5``, ``-1`` and ``0.4 * 1.8`` are stated numbers, so they are bounds.
+    An operand that mixes a literal with anything else — a name, a call, a
+    subscript — is not: ``budget + 0.3`` is judged by what ``budget`` is, not
+    by its slack, and ``timings[0]`` is not a "0 s ceiling". Keeping admission
+    to whole-literal operands also keeps the sweep's population what the doc
+    has always described: comparisons against a NUMBER.
+    """
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        return None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _const_value(node.operand)
+        if inner is None:
+            return None
+        return -inner if isinstance(node.op, ast.USub) else inner
+    if isinstance(node, ast.BinOp):
+        left, right = _const_value(node.left), _const_value(node.right)
+        if left is None or right is None:
+            return None
+        try:
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+        except ZeroDivisionError:
+            return None
+    return None
+
+
+#: Unit suffixes on the MEASURED side, so ``elapsed_ms < 500.0`` is judged as
+#: the 0.5 s it is rather than as a 500 s hang detector.
+UNIT_SCALE: tuple[tuple[re.Pattern[str], float], ...] = (
+    (re.compile(r"(_ms\b|\bms\b|millis)", re.I), 1e-3),
+    (re.compile(r"(_us\b|\bus\b|usec|micros)", re.I), 1e-6),
+    (re.compile(r"(_ns\b|\bns\b|nanosec)", re.I), 1e-9),
+)
+
+
+def _unit_scale(measured: ast.AST) -> float:
+    """Seconds per unit of the measured side: from its name, or ``* 1000``."""
+    for sub in ast.walk(measured):
+        if (
+            isinstance(sub, ast.BinOp)
+            and isinstance(sub.op, ast.Mult)
+            and any(
+                isinstance(side, ast.Constant) and side.value in (1000, 1000.0)
+                for side in (sub.left, sub.right)
+            )
+        ):
+            return 1e-3
+    try:
+        spelled = ast.unparse(measured)
+    except Exception:  # noqa: BLE001 — no text means no unit hint; seconds
+        return 1.0
+    for pattern, scale in UNIT_SCALE:
+        if pattern.search(spelled):
+            return scale
+    return 1.0
+
+
+def _identifiers(node: ast.AST) -> list[str]:
+    """Names and attribute names in ``node``, excluding called functions."""
+    callees = {id(sub.func) for sub in ast.walk(node) if isinstance(sub, ast.Call)}
+    out: list[str] = []
+    for sub in ast.walk(node):
+        if id(sub) in callees:
+            continue
+        if isinstance(sub, ast.Name):
+            out.append(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            out.append(sub.attr)
+    return out
+
+
+class CompareFacts(TypedDict):
+    """What :func:`describe_compare` reads off one ``ast.Compare``; see :class:`Finding`."""
+
+    ops: list[str]
+    consts: list[int | float]
+    measured: bool
+    ceiling: bool
+    bound_consts: list[int | float]
+    bound_expr: str
+    calibrated: bool
+    stamp: bool
+    cpu: bool
+
+
+def describe_compare(compare: ast.Compare, names: set[str]) -> CompareFacts | None:
+    """The AST facts ``classify`` reads, or ``None`` when ``compare`` is no bound.
+
+    Each adjacent pair of a chained comparison is normalised to ``small OP
+    large``. A pair is a CEILING when the small side is measured (a clock read,
+    or a name assigned from one) and the large side holds no fresh clock read:
+    then a stall grows the small side toward the bound. A clock on the large
+    side (``created <= time.time() + 1``) only grows under load, so that pair
+    gets truer, not falser — a lower bound on elapsed.
+
+    The bound is CALIBRATED only when the large side itself names a value
+    measured in the run: an identifier assigned from a clock read in the same
+    function, or one spelled like a floor/baseline (``CALIBRATED_NAME``).
+    """
+    operands = [compare.left, *compare.comparators]
+
+    def measured(node: ast.AST) -> bool:
+        return any(_is_clock_call(sub) for sub in ast.walk(node)) or any(
+            ident in names for ident in _identifiers(node)
+        )
+
+    ops: list[str] = []
+    ceilings: list[tuple[ast.AST, ast.AST]] = []
+    for index, op in enumerate(compare.ops):
+        spelled = ORDER_OPS.get(type(op))
+        if spelled is None:
+            continue
+        ops.append(spelled)
+        left, right = operands[index], operands[index + 1]
+        small, large = (left, right) if spelled in ("<", "<=") else (right, left)
+        if measured(small) and not any(_is_clock_call(sub) for sub in ast.walk(large)):
+            ceilings.append((small, large))
+    if not ops:
+        return None
+    consts = [
+        value for value in (_const_value(operand) for operand in operands) if value is not None
+    ]
+    if not consts:
+        return None
+
+    def text(node: ast.AST) -> str:
+        try:
+            return ast.unparse(node)
+        except Exception:  # noqa: BLE001 — an unparsable node must not drop a finding
+            return ""
+
+    smalls = " ".join(text(small) for small, _large in ceilings)
+    stamp = "time.time()" in smalls
+    bound_consts: list[int | float] = []
+    for small, large in ceilings:
+        value = _const_value(large)
+        if value is not None:
+            # A stamp check is in seconds by construction; elsewhere the
+            # measured side's unit decides (``elapsed_ms < 500`` is 0.5 s).
+            bound_consts.append(value * (1.0 if stamp else _unit_scale(small)))
+    return {
+        "ops": ops,
+        "consts": consts,
+        "measured": any(measured(operand) for operand in operands),
+        "ceiling": bool(ceilings),
+        "bound_consts": bound_consts,
+        "bound_expr": " ".join(text(large) for _small, large in ceilings),
+        "calibrated": any(
+            ident in names or bool(CALIBRATED_NAME.search(ident))
+            for _small, large in ceilings
+            for ident in _identifiers(large)
+        ),
+        "stamp": stamp,
+        "cpu": bool(CPU_NAME.search(smalls)),
+    }
 
 
 def findings(root: pathlib.Path) -> list[Finding]:
@@ -206,35 +422,30 @@ def findings(root: pathlib.Path) -> list[Finding]:
                     expr = src.seg(compare)
                     if not TIME_STRICT.search(expr):
                         continue
-                    ops = re.findall(r"<=|>=|<|>", expr)
-                    if not ops:
-                        continue
-                    consts = [
-                        operand.value
-                        for operand in [compare.left, *compare.comparators]
-                        if isinstance(operand, ast.Constant)
-                        and isinstance(operand.value, (int, float))
-                        and not isinstance(operand.value, bool)
-                    ]
-                    if not consts:
-                        continue
                     key = (str(path), compare.lineno, expr)
                     if key in seen:
                         continue
-                    seen.add(key)
                     if names is None:
                         names = clock_names(fn)
+                    facts = describe_compare(compare, names)
+                    if facts is None:
+                        continue
+                    seen.add(key)
                     rows.append(
                         {
                             "file": str(path.relative_to(root.parent)),
                             "line": compare.lineno,
                             "fn": fn.name,
                             "expr": " ".join(expr.split()),
-                            "op": ops[0],
-                            "consts": consts,
-                            "measured": bool(CLOCKCALL.search(expr))
-                            or any(re.search(rf"\b{re.escape(n)}\b", expr) for n in names),
-                            "body": src.body(fn)[:2600],
+                            "ops": facts["ops"],
+                            "consts": facts["consts"],
+                            "measured": facts["measured"],
+                            "ceiling": facts["ceiling"],
+                            "bound_consts": facts["bound_consts"],
+                            "bound_expr": facts["bound_expr"],
+                            "calibrated": facts["calibrated"],
+                            "stamp": facts["stamp"],
+                            "cpu": facts["cpu"],
                             "bucket": "",
                             "why": "",
                         }
@@ -275,15 +486,71 @@ def settle_nodes(root: pathlib.Path) -> list[SettleNode]:
     return out
 
 
-def render(rows: list[Finding], settles: list[SettleNode], base: str) -> str:
+#: The ceilings this PR replaced with the property behind them, by pytest node
+#: id: (node, the removed assertion, what it asserts now). Hand-written because
+#: it is history, not something a sweep can recover — and keyed by node id so
+#: it cannot drift onto the wrong line as the files change.
+CONVERTED: tuple[tuple[str, str, str], ...] = (
+    (
+        "tests/unit/tui/test_provider_recovery_hint.py"
+        "::test_the_sync_arm_is_cache_only_and_never_blocks",
+        "elapsed < 0.5",
+        "the sync arm called the cache-only producer exactly once, and never reached the "
+        "probing producer, a probe twin, the network or `time.sleep`",
+    ),
+    (
+        "tests/unit/tui/test_provider_recovery_hint.py"
+        "::test_a_deliberately_slow_probe_does_not_delay_the_sync_arm",
+        "elapsed < 0.5",
+        'the same provenance check with 5 s probes armed — "does not delay" derived from '
+        '"the only slow things on the path were never entered"',
+    ),
+    (
+        "tests/unit/session/test_index_prewarm.py"
+        "::test_starting_the_warm_never_blocks_and_never_raises",
+        "elapsed < 0.05",
+        "no journal had reached `start_refresh` when the synchronous starter returned, so "
+        "startup scheduled the warm rather than running it",
+    ),
+    (
+        "tests/unit/tools/test_builtin_tools.py"
+        "::test_a_stderr_with_no_signature_phrase_is_never_scanned",
+        "elapsed < 0.05",
+        "the signature regex is never ENTERED for phrase-free stderr, and entered exactly "
+        "once for input that carries the phrase (the control)",
+    ),
+    (
+        "tests/unit/team_bridge/test_inline_data.py"
+        "::test_a_one_megabyte_marker_dense_body_stays_fast",
+        "elapsed < 0.05",
+        "one marker search for a body carrying 50,000 markers, which no per-URI parser "
+        "can satisfy",
+    ),
+    (
+        "tests/unit/tui/test_subagent_stats.py::test_pricing_a_child_never_blocks_the_paint",
+        "elapsed < 0.2",
+        "the repaint resolved no model on its own thread (a 10 s listing there would be "
+        "a blocked paint)",
+    ),
+)
+
+
+def _bound(row: Finding) -> float:
+    """The number a row is judged by, in seconds: its ceiling literal, else any literal."""
+    return max(abs(value) for value in (row["bound_consts"] or row["consts"]))
+
+
+def render(rows: list[Finding], settles: list[SettleNode], label: str) -> str:
     import collections
 
     counts = collections.Counter(row["bucket"] for row in rows)
     lines: list[str] = [
         "# Time and CPU assertions in the test suite",
         "",
-        "GENERATED by `scripts/audit_time_assertions.py` against "
-        f"`{base}`. Re-run it rather than editing this file by hand.",
+        "GENERATED by `scripts/audit_time_assertions.py`, which sweeps `tests/` in"
+        " the working tree it runs in"
+        + (f" (labelled `{label}`)" if label else "")
+        + ". Re-run it rather than editing this file by hand.",
         "",
         "Every assertion in `tests/` that mixes a time or CPU quantity with a",
         "numeric literal, bucketed by whether it is DERIVED from something real",
@@ -309,52 +576,49 @@ def render(rows: list[Finding], settles: list[SettleNode], base: str) -> str:
         "Bucket C is an aggregate rather than a list because each node is one",
         "`pilot.pause()`, and the useful number is where they cluster.",
         "",
-        "The counts describe the tree AS COMMITTED WITH THIS DOCUMENT. The sweep that",
-        "opened the work found 314 comparisons with 78 in bucket B; six became derived",
-        "in the same PR (below), which is the whole difference.",
+        "The counts describe the tree this document is committed with; every",
+        "count in this file is computed by the sweep, none is typed in.",
         "",
         "## Converted in this PR",
         "",
-        "Six bucket-B ceilings were replaced by the property behind them. None had its",
-        "number raised: a wider constant moves the failure rather than removing it.",
+        f"{len(CONVERTED)} bucket-B ceilings were replaced by the property behind them.",
+        "None had its number raised: a wider constant moves the failure rather than",
+        "removing it. Nodes are cited by pytest node id, which does not drift the way",
+        "a line number does.",
         "",
         "| node | was | now asserts |",
         "| --- | --- | --- |",
-        "| `tests/unit/tui/test_provider_recovery_hint.py:113` "
-        "(`test_the_sync_arm_is_cache_only_and_never_blocks`) | `elapsed < 0.5` | the sync arm "
-        "called the cache-only producer exactly once, and never reached the probing "
-        "producer, a probe twin, the network or `time.sleep` |",
-        "| `tests/unit/tui/test_provider_recovery_hint.py:155` "
-        "(`test_a_deliberately_slow_probe_does_not_delay_the_sync_arm`) | `elapsed < 0.5` | "
-        'the same provenance check with 5 s probes armed — "does not delay" derived '
-        'from "the only slow things on the path were never entered" |',
-        "| `tests/unit/session/test_index_prewarm.py:216` | `elapsed < 0.05` | the refresh had "
-        "not begun when the starter returned (its gate was still shut), so startup "
-        "scheduled the warm rather than running it |",
-        "| `tests/unit/tools/test_builtin_tools.py:8262` | `elapsed < 0.05` | the signature "
-        "regex is never ENTERED for phrase-free stderr, and entered exactly once for "
-        "input that carries the phrase (the control) |",
-        "| `tests/unit/team_bridge/test_inline_data.py:165` | `elapsed < 0.05` | one marker "
-        "search for a body carrying 50,000 markers, which no per-URI parser can satisfy |",
-        "| `tests/unit/tui/test_subagent_stats.py:1704` | `elapsed < 0.2` | the repaint "
-        "resolved no model on its own thread (a 10 s listing there would be a blocked "
-        "paint) |",
+    ]
+    for node_id, was, now in CONVERTED:
+        lines.append(f"| `{node_id}` | `{was}` | {now} |")
+    b_rows = sorted(
+        (row for row in rows if row["bucket"] == "B"),
+        key=lambda r: (_bound(r), r["file"], r["line"]),
+    )
+    converted_ids = {node_id for node_id, _was, _now in CONVERTED}
+    still_b = sorted({f"{r['file']}::{r['fn']}" for r in b_rows} & converted_ids)
+    lines += [
         "",
         "Each conversion carries a negative control in its PR: reverting the product",
         "behaviour fails the new assertion deterministically, fast host or loaded, with",
-        "no timing involved.",
+        "no timing involved. "
+        + (
+            "None of these nodes still holds a bucket-B row."
+            if not still_b
+            else f"{len(still_b)} still hold a bucket-B row: "
+            + ", ".join(f"`{n}`" for n in still_b)
+            + "."
+        ),
         "",
         "## Still to convert",
         "",
-        "Bucket B is 72 entries after these six, tightest first in the table above.",
-        "The next five by shard cost are `test_mcp/test_manager.py:1860` (0.09 s, the",
-        "teardown-was-not-a-polling-tick claim), `test_oauth_401_detached_persist.py:330`",
-        "(0.1 s), `test_saver/test_round1_remediation.py:803` (0.1 s),",
-        "`test_session_factory_classification.py:1605` (0.2 s) and",
-        "`test_desktop_sessions.py:8352` (0.3 s). None is hard to convert; they are the",
-        "remaining calls on the plan rather than a design problem.",
+        f"Bucket B has {len(b_rows)} entries, tightest first in the table below. The",
+        "five tightest:",
         "",
     ]
+    for row in b_rows[:5]:
+        lines.append(f"- `{row['file']}:{row['line']}` ({_bound(row):g} s) — `{row['fn']}`")
+    lines.append("")
 
     lines += [
         "## Bucket B — hard-coded ceilings (the future red shards)",
@@ -365,10 +629,8 @@ def render(rows: list[Finding], settles: list[SettleNode], base: str) -> str:
         "| file:line | assertion | bound | why it can cross |",
         "| --- | --- | --- | --- |",
     ]
-    for row in sorted(rows, key=lambda r: (max(abs(v) for v in r["consts"]), r["file"], r["line"])):
-        if row["bucket"] != "B":
-            continue
-        bound = max(abs(value) for value in row["consts"])
+    for row in b_rows:
+        bound = _bound(row)
         expr = row["expr"].replace("|", "\\|")
         lines.append(f"| `{row['file']}:{row['line']}` | `{expr}` | {bound:g} s | {row['why']} |")
 
@@ -385,7 +647,7 @@ def render(rows: list[Finding], settles: list[SettleNode], base: str) -> str:
     for row in sorted(rows, key=lambda r: (r["file"], r["line"])):
         if row["bucket"] != "D":
             continue
-        bound = max(abs(value) for value in row["consts"])
+        bound = _bound(row)
         expr = row["expr"].replace("|", "\\|")
         lines.append(f"| `{row['file']}:{row['line']}` | `{expr}` | {bound:g} s | {row['why']} |")
 
@@ -435,7 +697,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default="tests", help="test tree to sweep (default: tests)")
     parser.add_argument("--out", default="", help="write the markdown here instead of stdout")
-    parser.add_argument("--base", default="origin/main", help="revision the sweep ran against")
+    # A LABEL, not a checkout: the sweep always reads the working tree under
+    # --root, so the header must not claim a revision it never read.
+    parser.add_argument("--label", default="", help="optional label for the swept tree")
     parser.add_argument("--bucket", default="", help="print only one bucket (A/B/C/D)")
     args = parser.parse_args()
 
@@ -454,7 +718,7 @@ def main() -> int:
                     print(f"{row['file']}:{row['line']}  {row['expr']}")
         return 0
 
-    text = render(rows, settles, args.base)
+    text = render(rows, settles, args.label)
     if args.out:
         out = pathlib.Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)

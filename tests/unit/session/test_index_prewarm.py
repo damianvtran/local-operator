@@ -192,18 +192,23 @@ async def test_starting_the_warm_never_blocks_and_never_raises(tmp_path, monkeyp
     root = tmp_path
     for index in range(4):
         journal(root, f"s{index}", mtime=1_000.0 + index)
-    # A refresh that takes real time: if startup waited for it, the elapsed time
-    # below would show it.
+    # A refresh that cannot finish until ``hold`` opens, so the warm stays
+    # pending while the assertion below runs.
     hold = asyncio.Event()
     real_start = prewarm.start_refresh
     began_refreshes: list[str] = []
 
     def slow_start(_root, session_id):
         # SYNCHRONOUS, because ``start_refresh`` is: it returns its task, and the
-        # task is what waits here.
+        # task is what waits here. The record is taken HERE, before the task is
+        # created, so it marks the moment the warm REACHED the refresh queue — not
+        # the moment a refresh got past the gate. Recording after ``hold`` (as an
+        # earlier revision did) could never fire before ``hold.set()`` below, so
+        # the assertion held for every implementation, inline or not.
+        began_refreshes.append(session_id)
+
         async def scan():
             await hold.wait()
-            began_refreshes.append(session_id)
             task, _started = real_start(_root, session_id)
             await task
 
@@ -212,12 +217,15 @@ async def test_starting_the_warm_never_blocks_and_never_raises(tmp_path, monkeyp
     monkeypatch.setattr(prewarm, "start_refresh", slow_start)
     task = prewarm.start_index_prewarm(root)
 
-    # The refresh is GATED on ``hold``, and the gate is still shut here, so the
-    # question this used to ask with a 50 ms wall clock — "did startup wait for
-    # the warm?" — is now asked of the work itself: the refresh had not BEGUN
-    # when the starter returned. A starter that awaited or ran the refresh inline
-    # records one here before returning and fails on any host; the wall clock
-    # instead failed whenever a loaded runner spent 50 ms on anything at all.
+    # The question this used to ask with a 50 ms wall clock — "did startup wait
+    # for the warm?" — is now asked of the work itself: no journal had reached
+    # ``start_refresh`` when the starter returned. ``start_index_prewarm`` is
+    # synchronous and only SCHEDULES ``warm_index_cache``; the loop has not run
+    # that task yet, so the queue cannot have been entered. HOW IT FAILS: a
+    # starter that drove the queue inline (called ``warm_index_cache``'s body or
+    # ``start_refresh`` itself before returning) appends a session id in
+    # ``slow_start`` before this line and fails on any host, fast or loaded; the
+    # wall clock instead failed whenever a loaded runner spent 50 ms on anything.
     assert task is not None
     assert began_refreshes == [], "start_index_prewarm ran the warm inline instead of scheduling it"
     hold.set()

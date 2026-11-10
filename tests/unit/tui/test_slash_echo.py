@@ -2297,8 +2297,10 @@ async def test_a_stopped_session_does_not_swallow_tab_and_enter() -> None:
         # single pumped batch — the race that failed this node on three
         # unrelated heads, reported as "Enter was swallowed". The wait is a
         # bounded COUNT of pumped turns, which survives contention where a
-        # wall-clock budget does not, and the assert below still reads the latch
-        # rather than the wait having made it true.
+        # wall-clock budget does not. ``settle`` raises "did not settle" when the
+        # latch never clears, so a stranded reserve still fails here; the assert
+        # that follows restates the same predicate for the reader, and the real
+        # subject is the Enter assertion after it.
         await settle(
             pilot,
             lambda: editor.picker.is_loading() is False,

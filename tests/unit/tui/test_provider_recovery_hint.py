@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -111,17 +112,16 @@ def _observed_sync_path(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     Why a spy rather than a clock: the sync arm is non-blocking BECAUSE it calls
     the cache-only producer, so that call is the property. Both producers are
     RECORDED (the probing one is legitimate for the awaited arm this test also
-    exercises, so it cannot be a tripwire), the two network entry points and
-    ``time.sleep`` raise, and the sync call's record is asserted before the
-    awaited arm runs.
+    exercises, so it cannot be a tripwire), the two network entry points raise,
+    and the sync call's record is asserted before the awaited arm runs. These
+    are attributes of ``radient_recovery`` alone, so holding them for the test's
+    lifetime touches nothing outside that module.
 
     The probe TWINS are deliberately NOT patched: each test arms them itself (a
     recording tripwire in one, five-second sleepers in the other), and this
     helper must not silently replace an arm a test set up.
 
-    ``time.sleep`` is patched on the module the product would call it through;
-    ``monkeypatch`` reverts it, and the arm is synchronous and local, so nothing
-    else in the process runs while it is in force.
+    ``time.sleep`` is NOT patched here: see :func:`_sync_call_without_sleep`.
     """
     from local_operator.providers import radient_recovery as rr
 
@@ -140,15 +140,28 @@ def _observed_sync_path(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     def network_must_not_run(*_args, **_kwargs):
         raise AssertionError("the recovery arm reached the network — the sync arm is cache-only")
 
-    def sleeping_must_not_run(*_args, **_kwargs):
-        raise AssertionError("the sync arm slept — a sync handler must never block its loop")
-
     monkeypatch.setattr(rr, "usage_limit_recovery_line_cached", spy_cached)
     monkeypatch.setattr(rr, "usage_limit_recovery_line", spy_probing)
     monkeypatch.setattr(rr, "fetch_me_verification_sync", network_must_not_run)
     monkeypatch.setattr(rr, "fetch_me_verification", network_must_not_run)
-    monkeypatch.setattr(rr.time, "sleep", sleeping_must_not_run)
     return seen
+
+
+def _sync_call_without_sleep(monkeypatch: pytest.MonkeyPatch, call: Callable[[], str]) -> str:
+    """Run one synchronous arm call with ``time.sleep`` turned into a tripwire.
+
+    ``rr.time`` IS the global ``time`` module, so this patch is process-wide:
+    any thread in the worker that sleeps while it is in force raises too. It is
+    therefore held only for the duration of ``call`` (``monkeypatch.context()``
+    reverts it on exit), never across the awaited arm or the rest of the test.
+    """
+
+    def sleeping_must_not_run(*_args, **_kwargs):
+        raise AssertionError("the sync arm slept — a sync handler must never block its loop")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(time, "sleep", sleeping_must_not_run)
+        return call()
 
 
 @pytest.mark.asyncio
@@ -169,7 +182,7 @@ async def test_the_sync_arm_is_cache_only_and_never_blocks(
     app = _app(monkeypatch, tmp_path, arm_probe=True, calls=calls)
     producers = _observed_sync_path(monkeypatch)
 
-    cold = app._with_recovery_hint(RENDERED_QUOTA)
+    cold = _sync_call_without_sleep(monkeypatch, lambda: app._with_recovery_hint(RENDERED_QUOTA))
     assert cold == RENDERED_QUOTA
     assert producers == ["cached"], (
         "the sync arm must render from the cache-only producer, exactly once — "
@@ -179,7 +192,7 @@ async def test_the_sync_arm_is_cache_only_and_never_blocks(
 
     await app._with_recovery_hint_async(RENDERED_QUOTA)  # warms the shared cache
 
-    warm = app._with_recovery_hint(RENDERED_QUOTA)
+    warm = _sync_call_without_sleep(monkeypatch, lambda: app._with_recovery_hint(RENDERED_QUOTA))
     assert "Check your inbox" in warm and "$5 in free credits" in warm
     assert calls == ["tok-1"], "the warm render must come from the cache"
 
@@ -218,7 +231,7 @@ def test_a_deliberately_slow_probe_does_not_delay_the_sync_arm(
     rr.reset_recovery_cache()
     producers = _observed_sync_path(monkeypatch)
 
-    out = app._with_recovery_hint(RENDERED_QUOTA)
+    out = _sync_call_without_sleep(monkeypatch, lambda: app._with_recovery_hint(RENDERED_QUOTA))
 
     assert out == RENDERED_QUOTA
     assert producers == ["cached"], f"the sync arm reached {producers}, not the cache"
