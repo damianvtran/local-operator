@@ -445,6 +445,9 @@ export type MessageParams = {
   "relay.transcript.label.steered": undefined;
   "relay.transcript.label.wake": undefined;
   "relay.transcript.older.failed": undefined;
+  "relay.transcript.older.load": undefined;
+  "relay.transcript.older.loading": undefined;
+  "relay.transcript.older.start": undefined;
   "relay.transcript.session.unread_refused": undefined;
   "relay.transcript.turn.actions": { "label": string; "count": number };
   "relay.transcript.turn.completed": undefined;
