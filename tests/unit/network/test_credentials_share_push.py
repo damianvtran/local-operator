@@ -426,19 +426,47 @@ def _partition(mesh: Any) -> None:
     """Neither side can reach the other: both addresses dead, every live link dropped.
 
     BOTH directions: B's own cadences redial A, and a link B opened is one A's push
-    would reuse — so a one-way partition delivered the push under load."""
-    for server, other in ((mesh.a, mesh.borrower), (mesh.b, mesh.owner)):
-        with store.mutate(mesh.network_id, server.root) as copy:
-            row = copy.member(other)
-            assert row is not None
-            row.endpoints = ["127.0.0.1:9"]
-            store.save(copy, server.root)
-    for server in (mesh.a, mesh.b):
-        for link in list(server.links.values()):
+    would reuse — so a one-way partition delivered the push under load.
+
+    "NO LIVE LINK" IS NOT "UNREACHABLE", and waiting on the former reddened this cell
+    on loaded CI shards (jobs 129062385990, 129535685754: ``pushed != offline``). Each
+    relay's ``mesh-redial`` loop may already be mid-dial when the rows are rewritten —
+    B's start-up seed comes due one tick after ``_start_b``, A's redial of the pairing
+    link it lost in setup ~1 s after that loss — having resolved the peer's REAL address
+    before the rewrite. If that handshake is starved past the no-live-link check, it
+    admits a fresh link after it, and the admission's ``_note_peer_endpoints`` writes the
+    real address back onto both rows: the share then finds a live, genuine link to a
+    running relay and delivering over it is correct product behaviour. So the cut is
+    re-applied until both sides' OWN redial loops have tried the other and failed since
+    the last loss. A redial loop dials serially on one thread, so a failure recorded
+    there proves any dial it had in flight has finished; and a dial that finished by
+    connecting left a live link, which the next pass closes (resetting that side's
+    attempts). The redial loop is the only dialer that can hold a pre-cut address
+    across the cut: every other dial starts from ``_link_for``, which found the sync
+    link live until the cut closed it, after the rows were already dead."""
+
+    def _cut_and_confirmed_unreachable() -> bool:
+        # Idempotent cut, re-applied on every poll: a late admission heals the rows.
+        for server, other in ((mesh.a, mesh.borrower), (mesh.b, mesh.owner)):
+            with store.mutate(mesh.network_id, server.root) as copy:
+                row = copy.member(other)
+                assert row is not None
+                if row.endpoints != ["127.0.0.1:9"]:
+                    row.endpoints = ["127.0.0.1:9"]
+                    store.save(copy, server.root)
+        live = [x for x in [*mesh.a.links.values(), *mesh.b.links.values()] if x.alive]
+        for link in live:
             link.close()
-    assert net_fixtures.wait_for(
-        lambda: not any(x.alive for x in [*mesh.a.links.values(), *mesh.b.links.values()])
-    )
+        if live:
+            return False
+        # ``attempts`` counts redial-loop failures since this side's last loss (only
+        # ``_redial_loop`` calls ``RedialTracker.failed``; ``connected`` clears it).
+        return (
+            int(mesh.a.redial.snapshot(mesh.borrower).get("attempts", 0)) >= 1
+            and int(mesh.b.redial.snapshot(mesh.owner).get("attempts", 0)) >= 1
+        )
+
+    assert net_fixtures.wait_for(_cut_and_confirmed_unreachable)
 
 
 def _heal(mesh: Any) -> None:
