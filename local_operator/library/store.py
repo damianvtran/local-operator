@@ -567,6 +567,88 @@ def fts_expression(q: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+#: One idle connection per library database file, held for the process life.
+#:
+#: WHY: every store call opens and closes its own connection (connections are
+#: not shared across the server's threads). When the LAST connection to a WAL
+#: database closes, SQLite checkpoints, deletes the ``-wal`` and the next open
+#: rebuilds the ``-shm`` wal-index from scratch. Measured 2026-11-10 on a clone
+#: of the operator's 178 MB index: 1,000 open/read/close cycles wrote 31.25 MiB
+#: (~32 KiB each) with nothing else holding the file, and 0.00 MiB with one idle
+#: connection held. The indexer opened ~85 connections/s under the operator's
+#: load, i.e. ~40 MiB per 15 s of pure connection churn in ``lop serve``.
+#:
+#: Constraints: the keeper never runs a transaction (a held read snapshot would
+#: pin the WAL and stop checkpoints), so it changes no locking or visibility;
+#: it is keyed by inode so a recovery swap (``_swap_in_database``) or an
+#: out-of-band replace gets a fresh keeper on the new file instead of pinning
+#: the unlinked one; it is skipped on Windows, where an open handle would block
+#: that swap's ``os.replace``; and at most ``_KEEPER_LIMIT`` files are held so a
+#: test run creating thousands of temporary indexes cannot exhaust descriptors.
+_KEEPERS: dict[str, tuple[int, sqlite3.Connection]] = {}
+_KEEPERS_LOCK: Final = threading.Lock()
+_KEEPER_LIMIT: Final = 4
+
+
+def _close_quietly(connection: sqlite3.Connection) -> None:
+    try:
+        connection.close()
+    except sqlite3.Error:
+        pass
+
+
+def _keep_open(path: Path) -> None:
+    """Make sure one idle connection holds ``path`` open (see ``_KEEPERS``)."""
+    if os.name == "nt":
+        return
+    key = str(path)
+    try:
+        inode = path.stat().st_ino
+    except OSError:
+        return
+    with _KEEPERS_LOCK:
+        held = _KEEPERS.get(key)
+        if held is not None and held[0] == inode:
+            return
+        if held is not None:
+            _close_quietly(_KEEPERS.pop(key)[1])
+        while len(_KEEPERS) >= _KEEPER_LIMIT:
+            _close_quietly(_KEEPERS.pop(next(iter(_KEEPERS)))[1])
+        try:
+            keeper = sqlite3.connect(path, timeout=5.0, check_same_thread=False)
+            # One completed statement attaches it to the wal-index; in the
+            # sqlite3 module's default mode a SELECT opens no transaction, so
+            # nothing stays pinned once it returns.
+            keeper.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+            # Held only once the file is in WAL mode: a keeper that attached
+            # while it was still a rollback-journal file (the first open,
+            # before ``_ensure_schema`` switches it) never joins the wal-index,
+            # so closes would still see themselves as the last connection.
+            # Not stored here means the next open simply tries again.
+            mode = keeper.execute("PRAGMA journal_mode").fetchone()
+            if not mode or str(mode[0]).lower() != "wal":
+                _close_quietly(keeper)
+                return
+        except sqlite3.Error:
+            return
+        _KEEPERS[key] = (inode, keeper)
+
+
+def release_keepers(path: Path | None = None) -> None:
+    """Close the held connection for ``path`` (every one when ``None``).
+
+    Called before a recovery deletes the ``-wal``/``-shm`` and swaps the file:
+    a keeper closing AFTER the swap would checkpoint and unlink the WAL by
+    NAME, which by then belongs to the new database. Tests use the bare form.
+    """
+    with _KEEPERS_LOCK:
+        keys = list(_KEEPERS) if path is None else [str(path)]
+        for key in keys:
+            held = _KEEPERS.pop(key, None)
+            if held is not None:
+                _close_quietly(held[1])
+
+
 #: ``idx_assets`` columns ``recompute_assets`` derives, in its value order:
 #: everything except the key and ``indexed_at``. Comparing exactly these is
 #: what lets an unchanged aggregate skip its write.
@@ -747,13 +829,14 @@ class LibraryStore:
             # reads). ``_ensure_schema`` sets it once, at bootstrap.
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA synchronous=NORMAL")
-            return connection
         except BaseException:
             try:
                 connection.close()
             except sqlite3.Error:
                 pass
             raise
+        _keep_open(self.path)
+        return connection
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1268,6 +1351,7 @@ class LibraryStore:
         A method of its own so the tests can prove two concurrent recoveries
         swap exactly once.
         """
+        release_keepers(self.path)
         for suffix in ("-wal", "-shm"):
             Path(f"{self.path}{suffix}").unlink(missing_ok=True)
         os.replace(temp, self.path)
@@ -2292,6 +2376,7 @@ def _asset_from_row(
 
 __all__ = [
     "DB_PATH_PARTS",
+    "release_keepers",
     "IndexUnavailable",
     "LibraryStore",
     "SCHEMA_VERSION",

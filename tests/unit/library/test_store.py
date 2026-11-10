@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from local_operator.library import identity, indexer, service
+from local_operator.library import store as store_module
 from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import LibraryStore, fts_expression, search_tokens
 from local_operator.session.attachments import cache_media
@@ -901,7 +902,6 @@ def test_a_transient_io_error_is_retried_once_and_never_recovered(
     import logging
 
     from local_operator.library import service
-    from local_operator.library import store as store_module
     from local_operator.library.store import IndexUnavailable
 
     root = config_root(monkeypatch, tmp_path)
@@ -982,7 +982,6 @@ def test_a_transient_pragma_error_closes_the_poisoned_handle_and_retries(
     tmp_path, monkeypatch
 ) -> None:
     """A pragma failure after open must close that handle before a fresh retry."""
-    from local_operator.library import store as store_module
 
     root = config_root(monkeypatch, tmp_path)
     seed(root)
@@ -1143,6 +1142,10 @@ def test_an_unreadable_authoritative_table_refuses_after_a_restart(tmp_path, mon
 
     # Repair ONLY the torn page from the byte copy: the persisted flag must
     # clear and the catalog must serve again with its metadata intact.
+    # An out-of-band repair happens with the app closed: drop this process's
+    # held idle connection (process-local state, like ``_ready_paths``) before
+    # deleting the WAL files it has mapped.
+    store_module.release_keepers()
     for suffix in ("-wal", "-shm"):
         (root / "library" / f"library.sqlite3{suffix}").unlink(missing_ok=True)
     shutil.copyfile(backup, store.path)
@@ -1245,6 +1248,10 @@ def test_a_deep_leaf_tear_keeps_refusing_across_a_restart(tmp_path, monkeypatch)
         service.get_asset(root, row["id"])
 
     # Repair the whole file from the pre-tear copy, carrying the stale flag.
+    # An out-of-band repair happens with the app closed: drop this process's
+    # held idle connection (process-local state, like ``_ready_paths``) before
+    # deleting the WAL files it has mapped.
+    store_module.release_keepers()
     for suffix in ("-wal", "-shm"):
         (root / "library" / f"library.sqlite3{suffix}").unlink(missing_ok=True)
     shutil.copyfile(backup, store.path)
@@ -1517,3 +1524,45 @@ def test_replacing_identical_occurrences_writes_nothing(tmp_path, monkeypatch) -
         ).fetchall()
     assert assets == {rows[0]["asset_id"]: 9.0, rows[1]["asset_id"]: 1.5}
     assert [int(row["touches"]) for row in occurrences] == [2]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no keeper on Windows (it would block the swap)")
+def test_an_idle_keeper_keeps_the_wal_across_store_connections(tmp_path, monkeypatch) -> None:
+    """Regression for the 2026-11-10 churn: closing the last connection is not free.
+
+    Without a held connection every store call's close checkpointed and deleted
+    the ``-wal`` and the next open rebuilt the ``-shm`` (~32 KiB written per
+    open/close, ~85 opens/s in ``lop serve``). The keeper is what makes the
+    ``-wal`` outlive a closed write; a replaced file gets a fresh keeper on the
+    new inode instead of pinning the old one, and ``release_keepers`` lets go.
+    """
+
+    root = config_root(monkeypatch, tmp_path)
+    store = LibraryStore(root)
+    store.ensure_schema()
+    with store.write() as connection:
+        connection.execute(
+            "INSERT INTO idx_state(key, value) VALUES('probe', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+    database = store.path
+    assert Path(f"{database}-wal").exists(), "the last close checkpointed and deleted the WAL"
+    assert store_module._KEEPERS[str(database)][0] == database.stat().st_ino
+
+    # An out-of-band replace (a recovery swap, a restore) moves the keeper.
+    copy = database.with_name("copy.sqlite3")
+    with store.read() as connection:
+        connection.execute("VACUUM INTO ?", (str(copy),))
+    # ``VACUUM INTO`` writes a rollback-journal file; the real swap's copy is
+    # WAL like the live index, so match it.
+    converted = sqlite3.connect(copy)
+    converted.execute("PRAGMA journal_mode=WAL")
+    converted.close()
+    store_module.release_keepers(database)
+    os.replace(copy, database)
+    with store.read() as connection:
+        assert connection.execute("SELECT value FROM idx_state WHERE key = 'probe'").fetchone()
+    assert store_module._KEEPERS[str(database)][0] == database.stat().st_ino
+
+    store_module.release_keepers()
+    assert str(database) not in store_module._KEEPERS

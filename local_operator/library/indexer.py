@@ -55,6 +55,7 @@ from local_operator.library.store import (
     STATE_SESSIONS_TOTAL,
     IndexUnavailable,
     LibraryStore,
+    release_keepers,
 )
 from local_operator.session_files import ledger
 from local_operator.session_files import service as files_service
@@ -221,6 +222,9 @@ def reset_for_tests() -> None:
         _LIVE.clear()
     for instance in targets:
         instance.stop()
+    # The held idle connections belong to the process, not an indexer; a test's
+    # temporary index must not stay open into the next test.
+    release_keepers()
 
 
 def _titles(
