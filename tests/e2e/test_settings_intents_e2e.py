@@ -38,25 +38,42 @@ from local_operator.server.app import app
 from local_operator.session.model_selection import read_model_selection
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
-from tests.e2e.harness import ScriptedStream, build_session, text_turn
+from tests.e2e.harness import ScriptedStream, build_session, last_user_text, text_turn
 
 pytestmark = pytest.mark.e2e
 
 
 class ParkedStream(ScriptedStream):
-    """A scripted model whose next call blocks until released."""
+    """A scripted model that parks the TURN asking ``park_marker`` until released.
+
+    Not "the next call": a session spends a provider call naming its
+    conversation beside the turn proper, and a next-call park could hold THAT
+    errand while the real turn ran on the script and ended — ``started`` fired
+    with ``is_streaming`` already False (CI run 42740443406, e2e ubuntu shard
+    0). The naming errand's prompt IS the user's text verbatim
+    (``naming._errand_prompt``), so content alone cannot tell the two apart;
+    the errand is tools-free by contract (``Session._errand_request`` sets
+    ``tools=[]``) while the turn carries the session's tools. Parking only a
+    tool-bearing call with the turn's words makes ``started`` the same evidence
+    ``is_streaming`` gives.
+    """
 
     def __init__(self, turns):
         super().__init__(turns)
-        self.block = False
+        #: One-shot: the user text whose call parks; cleared once parked.
+        self.park_marker: str | None = None
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
     def __call__(self, request, signal=None):
-        if not self.block:
+        if (
+            self.park_marker is None
+            or not getattr(request, "tools", None)
+            or self.park_marker not in last_user_text(request)
+        ):
             return super().__call__(request, signal)
         self.requests.append(request)
-        self.block = False
+        self.park_marker = None
 
         async def parked():
             self.started.set()
@@ -119,7 +136,7 @@ async def test_a_model_pick_on_a_busy_runtime_is_recorded_at_once_and_applied(
             (session_dir / ".session.pid").write_text(str(os.getpid()))
 
             # BUSY: a real turn parked mid-stream.
-            stream.block = True
+            stream.park_marker = "start a long turn"
             admitted = await client.post(
                 f"/v1/desktop/sessions/{sid}/messages",
                 json={"request_id": str(uuid.uuid4()), "text": "start a long turn"},

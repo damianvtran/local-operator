@@ -860,11 +860,14 @@ class SettingsApplier:
                 # runtime's or the bridge's, passed through verbatim), or the
                 # catalogued "owner unavailable" one when it had none. The UI
                 # switches on the code and composes its own chip from it.
+                # Pinned to ``en``: this text is PERSISTED in settings-intent.json
+                # and outlives the locale active when it was written (the
+                # envelope-locale ratchet's rule); the UI localises from ``code``.
                 envelope = (
                     _wd.desktop_refusal(error=outcome.message)
                     if outcome.message
                     else _wd.runtime_unreachable()
-                ).envelope(code="retry_budget_exhausted")
+                ).envelope(code="retry_budget_exhausted", locale="en")
                 slot.update(
                     state="failed",
                     next_attempt_at=None,
@@ -1263,10 +1266,16 @@ class BridgeDriver:
                 # live session on the retry path below.
                 from local_operator.i18n.keys import wire_errors_desktop as _wd
 
+                # Pinned to ``en``: the outcome message is persisted as the
+                # slot's ``error.message`` in settings-intent.json, so it must
+                # not freeze whichever locale was active at failure time
+                # (envelope-locale ratchet). Clients localise from the code.
                 return Outcome(
                     "terminal",
                     "session_unknown",
-                    _wd.requested_not_found().envelope(code="session_unknown")["text"],
+                    _wd.requested_not_found().envelope(
+                        code="session_unknown", locale="en"
+                    )["text"],
                 )
             if kind == "effort" and isinstance(error, ValueError):
                 return Outcome("terminal", "effort_unsupported", str(error))
