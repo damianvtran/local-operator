@@ -707,7 +707,7 @@ def test_last_role_header_names_the_section_the_text_ends_in():
     """
     head = "[User] first ask\n[Assistant] reply\n[User] please keep the ledger and"
     assert last_role_header(head) == "[User]"
-    assert last_role_header("[Tool result: bash] {\"ok\": 1}\nmore") == "[Tool result: bash]"
+    assert last_role_header('[Tool result: bash] {"ok": 1}\nmore') == "[Tool result: bash]"
     assert last_role_header("no header at all") is None
     mined = mine_carry(f"{last_role_header(head)}\nplease also reconcile the finance report")
     assert any("reconcile the finance report" in ask for ask in mined.asks)
