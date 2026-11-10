@@ -122,6 +122,7 @@ import re
 import urllib.parse
 from dataclasses import dataclass, replace
 from typing import (
+    Any,
     Callable,
     Iterable,
     Mapping,
@@ -4932,6 +4933,500 @@ def shape_report(hits: Sequence[ShapeHit]) -> ShapeReport:
     )
 
 
+# --- recognised credential STRUCTURES and ENCODED credentials -----------------
+#
+# WHY THIS EXISTS (2026-11, `kubectl get secret internal-jobs-sc -o yaml`): an
+# agent dumped a Kubernetes Secret and the transcript kept a Mongo Atlas DSN
+# password and a GCP service-account key. Every rule in the table above reads
+# PLAINTEXT, and a Secret's ``data:`` values are base64 — so the DSN and the key
+# went through as opaque base64 that no rule could see into. The same blind spot
+# covered a URL-encoded DSN (``mongodb%2Bsrv%3A%2F%2F`` then the userinfo with
+# ``%3A`` and ``%40``), a JSON-escaped one (``:\/\/`` for ``://``) and the 40-hex
+# ``private_key_id`` beside a service-account key's (already masked) PEM.
+#
+# THE CONSTRAINT (operator, binding): close exactly that class and nothing more.
+# So this section recognises STRUCTURES and DECODINGS, never "looks random":
+#
+# * a Kubernetes ``kind: Secret`` object's ``data``/``stringData`` VALUES — the
+#   one place where every value is a secret by the object's own declaration. Key
+#   names stay readable (they are how the agent learns what the Secret holds),
+#   and a ``ConfigMap``'s identical-looking block is never touched;
+# * a base64 / hex / %xx / JSON-escaped token that DECODES to text an existing
+#   rule already masks. The decoded text has to carry real credential evidence
+#   (a DSN's ``user:password@``, a PEM block, a docker ``auth``...) — a token that
+#   merely decodes is left alone, so digests, git SHAs, image layers and
+#   base64 of ordinary text keep their bytes;
+# * ``private_key_id`` inside service-account JSON.
+#
+# There is deliberately no entropy or keyword heuristic here (see the note on
+# :data:`CREDENTIAL_SHAPES` and docs/security/redaction-policy.md): such a rule
+# cannot tell a credential from a build id. The false-positive gate for this
+# section was measured on real session transcripts before it shipped (PR body).
+
+#: Labels for hits produced here. Only ``data:`` (base64) values become hits a
+#: session may REGISTER for exact-value masking; a ``stringData`` value is plain
+#: text (``production``, ``info``) and registering it would mask that word in
+#: every later result, so it is masked in place and never promoted.
+#: Labels for hits produced here. Spelling/structure EVIDENCE, not a name-driven
+#: guess, so they join :data:`_ARGUMENT_EVIDENCE_LABELS`.
+K8S_SECRET_DATA_LABEL = "k8s-secret-data"
+ENCODED_CREDENTIAL_LABEL = "encoded-credential"
+GCP_KEY_ID_LABEL = "gcp-service-account-key-id"
+
+#: How deep an encoded token may nest inside another (a docker config's ``auth``
+#: is base64 inside a Secret's base64 ``.dockerconfigjson``: two levels). A
+#: third level has no real-world spelling we know of and only costs time.
+_DECODE_MAX_DEPTH = 2
+#: Per-call work bounds for the decode pass, so a multi-megabyte result cannot
+#: turn the pass into a stall. Sized against the measured distribution (PR
+#: "False-positive measurement"): the largest persisted tool result in the sample
+#: carried far fewer candidates than this, so the caps bind only on pathological
+#: input — where the pass stops decoding (fails OPEN for that remainder) rather
+#: than holding the result path hostage. The structure rules are not capped.
+_DECODE_MAX_CANDIDATES = 20000
+_DECODE_MAX_BYTES = 4 * 1024 * 1024
+#: A token shorter than this cannot decode to a credential the table recognises
+#: (the shortest, ``a://u:pw@h``, is 10 bytes = 16 base64 characters).
+_DECODE_MIN_TOKEN = 16
+
+_B64_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{"
+    + str(_DECODE_MIN_TOKEN)
+    + r",}={0,2}(?![A-Za-z0-9+/_=-])"
+)
+_HEX_TOKEN_RE = re.compile(r"[0-9A-Fa-f]+")
+#: A run of URL characters carrying at least one %xx escape. ``=``, ``&``, ``?``
+#: and quotes END a run, so a query parameter's value is one run and its name and
+#: the rest of the URL stay readable.
+_PCT_RUN_RE = re.compile(r"[A-Za-z0-9._~+:/@-]*(?:%[0-9A-Fa-f]{2}[A-Za-z0-9._~+:/@-]*)+")
+#: A run of JSON string content carrying at least one ``\/`` or ``\uXXXX`` escape.
+_JSON_ESCAPED_RUN_RE = re.compile(
+    r"(?:[^\s\"'\\]|\\(?:u[0-9A-Fa-f]{4}|[\\/bfnrt]))*"
+    r"\\(?:/|u[0-9A-Fa-f]{4})"
+    r"(?:[^\s\"'\\]|\\(?:u[0-9A-Fa-f]{4}|[\\/bfnrt]))*"
+)
+
+#: ``private_key_id`` of a service-account key: 40 hex today, bounded loosely.
+#: Optional backslashes cover the same JSON carried as an escaped string.
+_SA_KEY_ID_RE = re.compile(r'(\\?"private_key_id\\?"[ \t]*:[ \t]*\\?")([0-9A-Fa-f]{16,64})(?=\\?")')
+_SA_CONTEXT_MARKERS = ("service_account", "client_email", 'private_key"', 'private_key\\"')
+
+
+def _printable_text(raw: bytes) -> Optional[str]:
+    """``raw`` as text when it IS text; ``None`` for binary (the common case)."""
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    stripped = decoded.replace("\n", "").replace("\r", "").replace("\t", "")
+    if not stripped or not stripped.isprintable():
+        return None
+    return decoded
+
+
+#: Base64 of ASCII text starts every 4-character group with a sextet below 32
+#: (the group's first byte is < 0x80), i.e. one of these characters. Checking
+#: the group leads is a slice and a set test, and it rejects a random digest or
+#: an image in a few groups. Measured on a 9,000-line sha256/sha512 listing
+#: (18,000 candidates, loaded machine): the whole decode pass took 2.55 s without
+#: this check and 0.30 s with it (~140 µs -> ~17 µs per candidate). A credential the
+#: table recognises is ASCII, so nothing this pass is for is filtered out.
+_B64_ASCII_LEADS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
+#: Hex of printable ASCII: every byte's high nibble is 2-7.
+_HEX_ASCII_LEADS = frozenset("234567")
+
+
+def _decode_b64_token(token: str) -> Optional[str]:
+    if not _B64_ASCII_LEADS.issuperset(token[::4]):
+        return None
+    body = token.rstrip("=")
+    if len(body) % 4 == 1:
+        return None  # not a length any base64 encoder emits
+    padded = body + "=" * (-len(body) % 4)
+    try:
+        if "-" in body or "_" in body:
+            if "+" in body or "/" in body:
+                return None  # mixed alphabets: not base64 of anything
+            raw = base64.urlsafe_b64decode(padded)
+        else:
+            raw = base64.b64decode(padded, validate=True)
+    except ValueError:
+        return None
+    return _printable_text(raw)
+
+
+def _decode_hex_token(token: str) -> Optional[str]:
+    if len(token) < 2 * 10 or len(token) % 2 or not _HEX_ASCII_LEADS.issuperset(token[::2]):
+        return None
+    if not _HEX_TOKEN_RE.fullmatch(token):
+        return None
+    try:
+        return _printable_text(bytes.fromhex(token))
+    except ValueError:  # pragma: no cover - fullmatch above guarantees hex
+        return None
+
+
+def _decode_json_run(run: str) -> Optional[str]:
+    try:
+        decoded = json.loads('"' + run + '"')
+    except ValueError:
+        return None
+    return decoded if isinstance(decoded, str) else None
+
+
+class _DecodeBudget:
+    """The per-call bound on the decode pass (see :data:`_DECODE_MAX_CANDIDATES`)."""
+
+    __slots__ = ("candidates", "bytes")
+
+    def __init__(self) -> None:
+        self.candidates = _DECODE_MAX_CANDIDATES
+        self.bytes = _DECODE_MAX_BYTES
+
+    def take(self, size: int) -> bool:
+        if self.candidates <= 0 or self.bytes < size:
+            return False
+        self.candidates -= 1
+        self.bytes -= size
+        return True
+
+
+def _decoded_carries_credential(
+    decoded: str,
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: _DecodeBudget,
+) -> bool:
+    """Whether ``decoded`` is masked by the full pass — i.e. holds a credential."""
+    scrubbed, _ = _scrub_all_with_hits(decoded, reject, depth + 1, budget)
+    return scrubbed != decoded
+
+
+def _scrub_encoded_credentials(
+    text: str,
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: _DecodeBudget,
+) -> str:
+    """Mask a base64/hex/%xx/JSON-escaped token whose DECODING carries a credential.
+
+    The WHOLE token goes: an encoding has no readable "user" or "host" part to
+    keep, and a half-masked base64 token decodes to a half-masked credential.
+    A %xx / JSON-escaped run whose RAW spelling the table already masks is left to
+    the table, which keeps a DSN's user and host readable; this pass only takes
+    what the table could not see.
+    """
+    if depth >= _DECODE_MAX_DEPTH:
+        return text
+
+    def _replace(
+        pattern: Pattern[str], decode: "Callable[[str], Optional[str]]", raw_check: bool
+    ) -> None:
+        nonlocal text
+        pieces: list[str] = []
+        cursor = 0
+        for match in pattern.finditer(text):
+            token = match.group(0)
+            if not budget.take(len(token)):
+                break
+            decoded = decode(token)
+            if decoded is None or decoded == token:
+                continue
+            if not _decoded_carries_credential(decoded, reject, depth, budget):
+                continue
+            if raw_check and _scrub_table_with_hits(token, reject)[0] != token:
+                continue  # the table masks this spelling itself, more precisely
+            pieces.append(text[cursor : match.start()])
+            pieces.append(REDACTION_MARKER)
+            cursor = match.end()
+            hits.append(ShapeHit(ENCODED_CREDENTIAL_LABEL, token, window=token))
+        if pieces:
+            pieces.append(text[cursor:])
+            text = "".join(pieces)
+
+    def _b64_or_hex(token: str) -> Optional[str]:
+        return _decode_b64_token(token) or _decode_hex_token(token)
+
+    _replace(_B64_TOKEN_RE, _b64_or_hex, raw_check=False)
+    if "%" in text:
+        _replace(_PCT_RUN_RE, urllib.parse.unquote, raw_check=True)
+    if "\\/" in text or "\\u" in text:
+        _replace(_JSON_ESCAPED_RUN_RE, _decode_json_run, raw_check=True)
+    return text
+
+
+def _scrub_service_account_key_id(text: str, hits: list[ShapeHit]) -> str:
+    """Mask ``private_key_id`` in service-account JSON; keep ``client_email``/``project_id``.
+
+    The PEM ``private_key`` was already masked by the table; the id beside it is
+    the handle that names WHICH key leaked to anyone holding the project, so it is
+    masked too. ``client_email`` and ``project_id`` are identifiers the agent
+    needs and stay (operator: identifiers are never redacted).
+    """
+    if "private_key_id" not in text or not any(m in text for m in _SA_CONTEXT_MARKERS):
+        return text
+
+    def _mask(match: Match[str]) -> str:
+        hits.append(ShapeHit(GCP_KEY_ID_LABEL, match.group(2), window=match.group(0)))
+        return match.group(1) + REDACTION_MARKER
+
+    return _SA_KEY_ID_RE.sub(_mask, text)
+
+
+# --- Kubernetes Secret objects ---------------------------------------------------
+
+_K8S_DATA_KEYS = frozenset({"data", "stringData"})
+_K8S_YAML_KIND_SECRET_RE = re.compile(
+    r"^[ \t]*(?:-[ \t]+)?kind:[ \t]*[\"']?Secret[\"']?[ \t]*$", re.MULTILINE
+)
+_K8S_JSON_KIND_SECRET_RE = re.compile(r'\\?"kind\\?"\s*:\s*\\?"Secret\\?"')
+#: One YAML mapping line: indent, optional list-item dash, key, optional value.
+_YAML_KEY_LINE_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<dash>-[ \t]+)?(?P<key>[^\s:#\"'][^:]*?|\"[^\"]*\"|'[^']*')"
+    r"[ \t]*:(?:[ \t]+(?P<value>.*?))?[ \t]*$"
+)
+_YAML_BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[0-9]?$")
+_JSON_TOKEN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"|[{}\[\]:,]')
+
+
+def _yaml_key(line: str) -> Optional[tuple[int, int, str, str]]:
+    """``(line_indent, key_column, key, value)`` of a YAML key line, else ``None``."""
+    body = line.rstrip("\r\n")
+    match = _YAML_KEY_LINE_RE.match(body)
+    if match is None:
+        return None
+    indent = len(match.group("indent"))
+    column = indent + len(match.group("dash") or "")
+    return indent, column, match.group("key").strip("\"'"), (match.group("value") or "")
+
+
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _yaml_mapping_is_secret(lines: list[str], header: int, column: int) -> bool:
+    """Whether the mapping that owns line ``header`` (keys at ``column``) has ``kind: Secret``."""
+
+    def _is_secret_kind(parsed: tuple[int, int, str, str]) -> bool:
+        return parsed[2] == "kind" and parsed[3].strip("\"'") == "Secret"
+
+    # The header line itself may open the item (``- data:``): then upward is a
+    # previous item and must not be read.
+    first = _yaml_key(lines[header])
+    if first is not None and first[0] < first[1]:
+        upward: range = range(0)
+    else:
+        upward = range(header - 1, -1, -1)
+    for index in upward:
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith("---"):
+            break
+        parsed = _yaml_key(line)
+        if parsed is None:
+            if _line_indent(line) < column:
+                break
+            continue
+        indent, key_column, _, _ = parsed
+        if key_column == column:
+            if _is_secret_kind(parsed):
+                return True
+            if indent < column:
+                break  # the ``- key:`` line that opens this item
+            continue
+        if indent < column:
+            break  # a parent
+    for index in range(header + 1, len(lines)):
+        line = lines[index]
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith("---"):
+            break
+        indent = _line_indent(line)
+        if indent > column:
+            continue
+        parsed = _yaml_key(line)
+        if parsed is None or parsed[1] != column or parsed[0] < column:
+            break  # a parent, a new list item, or not a mapping line
+        if _is_secret_kind(parsed):
+            return True
+    return False
+
+
+def _scrub_k8s_secret_yaml(text: str, hits: list[ShapeHit]) -> str:
+    if not _K8S_YAML_KIND_SECRET_RE.search(text):
+        return text
+    lines = text.splitlines(keepends=True)
+    changed = False
+    for header, line in enumerate(lines):
+        parsed = _yaml_key(line)
+        if parsed is None or parsed[2] not in _K8S_DATA_KEYS or parsed[3]:
+            continue
+        column = parsed[1]
+        if not _yaml_mapping_is_secret(lines, header, column):
+            continue
+        child_column: Optional[int] = None
+        in_block_scalar = False
+        for index in range(header + 1, len(lines)):
+            child = lines[index]
+            if not child.strip():
+                continue
+            indent = _line_indent(child)
+            if indent <= column:
+                break
+            ending = child[len(child.rstrip("\r\n")) :]
+            child_parsed = _yaml_key(child)
+            if child_column is None:
+                child_column = indent
+            if indent == child_column and child_parsed is not None:
+                _, _, _, value = child_parsed
+                in_block_scalar = bool(_YAML_BLOCK_SCALAR_RE.match(value))
+                if value and not in_block_scalar and value != REDACTION_MARKER:
+                    head = child.rstrip("\r\n")[: len(child.rstrip("\r\n")) - len(value)]
+                    lines[index] = head + REDACTION_MARKER + ending
+                    if parsed[2] == "data":
+                        hits.append(
+                            ShapeHit(K8S_SECRET_DATA_LABEL, value.strip("\"'"), window=value)
+                        )
+                    changed = True
+            elif indent > child_column:
+                # Continuation of a block scalar (``key: |``) or a folded value:
+                # the value's own text, so the whole line goes.
+                content = child.strip()
+                if content != REDACTION_MARKER:
+                    lines[index] = child[:indent] + REDACTION_MARKER + ending
+                    changed = True
+    return "".join(lines) if changed else text
+
+
+def _scrub_k8s_secret_json(text: str, hits: list[ShapeHit]) -> str:
+    """Mask ``data``/``stringData`` string values of every JSON object with ``"kind": "Secret"``.
+
+    A small token walk rather than :func:`json.loads`: tool output wraps the JSON in
+    other text (a ``List``, a log prefix, a YAML ``last-applied-configuration``
+    annotation), and the rewrite must keep every other byte as it was. A JSON
+    STRING that itself carries an escaped Secret (``-o json``'s annotation) is
+    decoded, walked and re-encoded.
+    """
+    if not _K8S_JSON_KIND_SECRET_RE.search(text):
+        return text
+    replacements: list[tuple[int, int, str]] = []
+    # frame: [type, key, expecting_value, is_secret, value_spans, is_data_block]
+    stack: list[list[Any]] = []
+    for match in _JSON_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        top = stack[-1] if stack else None
+        if token == "{":
+            # The data block's KEY (``data``/``stringData``), or "" for any other object.
+            is_data = (
+                top[1]
+                if top is not None and top[0] == "o" and top[2] and top[1] in _K8S_DATA_KEYS
+                else ""
+            )
+            stack.append(["o", None, False, False, [], is_data])
+        elif token == "[":
+            stack.append(["a", None, False, False, [], ""])
+        elif token in "}]":
+            if not stack:
+                continue
+            frame = stack.pop()
+            parent = stack[-1] if stack else None
+            if frame[0] == "o":
+                if frame[5] and parent is not None:
+                    parent[4].extend(frame[4])
+                elif frame[3]:
+                    replacements.extend(frame[4])
+            if parent is not None and parent[0] == "o":
+                parent[2] = False
+        elif token == ":":
+            if top is not None and top[0] == "o":
+                top[2] = True
+        elif token == ",":
+            if top is not None and top[0] == "o":
+                top[2] = False
+        else:  # a string
+            if top is not None and top[0] == "o" and not top[2]:
+                top[1] = token[1:-1]
+                continue
+            if top is not None and top[0] == "o" and top[5]:
+                value = token[1:-1]
+                if value and value != REDACTION_MARKER:
+                    top[4].append((match.start() + 1, match.end() - 1, REDACTION_MARKER))
+                    if top[5] == "data":
+                        hits.append(ShapeHit(K8S_SECRET_DATA_LABEL, value, window=value))
+            elif top is not None and top[0] == "o" and top[1] == "kind" and token == '"Secret"':
+                top[3] = True
+            elif '\\"Secret\\"' in token and "kind" in token:
+                inner = _decode_json_run(token[1:-1])
+                if inner is not None:
+                    scrubbed = _scrub_k8s_secret_json(inner, hits)
+                    if scrubbed != inner:
+                        replacements.append(
+                            (match.start(), match.end(), json.dumps(scrubbed, ensure_ascii=False))
+                        )
+    if not replacements:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, new in sorted(replacements):
+        if start < cursor:
+            continue
+        pieces.append(text[cursor:start])
+        pieces.append(new)
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _scrub_credential_structures(text: str, hits: list[ShapeHit]) -> str:
+    if "Secret" in text:
+        text = _scrub_k8s_secret_json(text, hits)
+        text = _scrub_k8s_secret_yaml(text, hits)
+    return _scrub_service_account_key_id(text, hits)
+
+
+_SECRET_DATA_HEADER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?:-[ \t]+)?\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*\r?$",
+    re.MULTILINE,
+)
+
+
+def secret_data_block_hold(text: str, cut: int) -> int:
+    """The earliest offset a live stream must hold back for a pending Secret data block.
+
+    The structure rule above can only mask a ``data:`` block once it has seen the
+    owning object's ``kind: Secret`` — and ``kubectl`` prints ``kind`` AFTER
+    ``data`` (keys are sorted). A pipe redactor that releases at every newline
+    would publish the block before the line that identifies it, so it holds from
+    the block's header line until a later sibling line at the header's own
+    indentation (or a parent's) has arrived. A ``ConfigMap`` is only DELAYED by
+    this, never masked; the redactor's cap still bounds the hold. Returns ``cut``
+    when nothing is pending. Pretty-printed YAML and JSON share the indentation
+    convention this reads.
+    """
+    if "data" not in text:
+        return cut
+    for match in _SECRET_DATA_HEADER_RE.finditer(text, 0, cut):
+        header_end = match.end()
+        column = len(match.group("indent"))
+        resolved = False
+        position = header_end + 1
+        while position < cut:
+            line_end = text.find("\n", position)
+            if line_end < 0 or line_end >= cut:
+                break  # no complete line after this point inside the cut
+            line = text[position:line_end]
+            if line.strip() and _line_indent(line) <= column:
+                resolved = True
+                break
+            position = line_end + 1
+        if not resolved:
+            return match.start()
+    return cut
+
+
 def scrub_shapes_with_hits(
     text: str, *, reject: "Callable[[str, str, Match[str]], bool] | None" = None
 ) -> tuple[str, list[ShapeHit]]:
@@ -4955,6 +5450,44 @@ def scrub_shapes_with_hits(
     separator tell them apart (:func:`_is_typed_credential_assignment`). A hook that
     sees the value alone has to choose one reading for both.
     """
+    return _scrub_all_with_hits(text, reject, 0, _DecodeBudget())
+
+
+def _scrub_all_with_hits(
+    text: str,
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: "_DecodeBudget",
+) -> tuple[str, list[ShapeHit]]:
+    """Structures, then encodings, then the table — the whole pass, at a decode depth.
+
+    The structure and decode passes run BEFORE the anchor gate because what they
+    find carries no anchor by construction: base64 of a DSN has no ``://``.
+
+    The Kubernetes Secret rule is skipped under a ``reject`` hook. That hook is a
+    caller saying "this text is CODE or a guard's probe, mask only on spelling
+    evidence" (:func:`scrub_shapes_for_arguments`, the team-bridge guard): a
+    Secret manifest an agent writes may carry a non-credential value (``info``)
+    that must not be rewritten in its own replayed program. The decode pass still
+    runs there — a token decoding to a credential IS spelling evidence — with the
+    same hook applied to the decoded text.
+    """
+    if not text:
+        return text, []
+    found: list[ShapeHit] = []
+    if reject is None:
+        text = _scrub_credential_structures(text, found)
+    else:
+        text = _scrub_service_account_key_id(text, found)
+    text = _scrub_encoded_credentials(text, found, reject, depth, budget)
+    scrubbed, hits = _scrub_table_with_hits(text, reject)
+    return scrubbed, found + hits
+
+
+def _scrub_table_with_hits(
+    text: str, reject: "Callable[[str, str, Match[str]], bool] | None"
+) -> tuple[str, list[ShapeHit]]:
+    """The shape TABLE pass of :func:`scrub_shapes_with_hits` (anchor-gated)."""
     hits: list[ShapeHit] = []
     if not text or not has_shape_anchor(text):
         # Nothing in here can match any rule — see :data:`_SHAPE_ANCHORS`.
@@ -6212,6 +6745,7 @@ _ARGUMENT_EVIDENCE_LABELS = frozenset(
         "dsn-password-plain",
         "dsn-password-truncated",
         "gcp-service-account-key",
+        "gcp-service-account-key-id",
         "gcp-service-account-value",
         "gcp-service-account-value-open",
         "github-pat",
@@ -7320,15 +7854,25 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # secret rendered as yaml/json, or a describe. The one-key jsonpath form
         # is in ``excluded`` because it is the safer form this table recommends.
         re.compile(
-            r"(?i)\bkubectl\s+(?:"
-            r"get\s+secrets?\b[^\n]*?\s-o\s*(?:yaml|json|wide)\b"
+            # Global flags may sit between ``kubectl`` and the verb
+            # (``kubectl -n jobs get secrets``, ``--context prod``).
+            r"(?i)\bkubectl(?:\s+-[^\s]+(?:\s+[^\s-][^\s]*)?)*?\s+(?:"
+            # ``-oyaml``, ``-o json``, ``--output=yaml`` and ``--output json`` are
+            # one flag to kubectl; the long spelling used to pass with no steer.
+            r"get\s+secrets?\b[^\n]*?\s(?:-o\s*|--output(?:=|\s+))(?:yaml|json|wide)\b"
             r"|get\s+secrets\b"
             r"|describe\s+secrets?\b"
             r")"
         ),
-        "select one key inside the command that needs it: "
-        "`kubectl get secret NAME -o jsonpath='{.data.KEY}' | base64 -d`",
-        excluded=re.compile(r"(?i)-o\s*(?:jsonpath|go-template|custom-columns)"),
+        # A steer, never a block (operator, 2026-11): the agent learns what a
+        # Secret holds from its KEY NAMES, and a value goes straight into the
+        # command that consumes it rather than through the transcript.
+        "list key names: `kubectl get secret NAME -o jsonpath='{.data}' | jq 'keys'`; "
+        "pipe one key into its consumer, never echo it: "
+        "`kubectl get secret NAME -o jsonpath='{.data.KEY}' | base64 -d | <consumer>`",
+        excluded=re.compile(
+            r"(?i)(?:-o\s*|--output(?:=|\s+))(?:jsonpath|go-template|custom-columns)"
+        ),
     ),
     DumpShape(
         "docker-inspect",
@@ -7479,7 +8023,7 @@ _BRIEF_ADVICE: dict[str, str] = {
     "environment-dump": "print names, not values: `env | cut -d= -f1`",
     "named-variable-dump": "use it in place: `$(lop secret get NAME)`",
     "kubectl-exec-env": "print names in the pod: `env | cut -d= -f1`",
-    "kubectl-secret-read": "select one key: `-o jsonpath='{.data.KEY}'`",
+    "kubectl-secret-read": "keys only: `-o jsonpath='{.data}' | jq keys`; never echo",
     "docker-inspect": "select a field: `--format '{{.State.Status}}'`",
     "docker-exec-env": "print names only: `env | cut -d= -f1`",
     "docker-compose-config": "read one part: `compose config --services`",

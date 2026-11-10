@@ -46,6 +46,20 @@ are masked wherever they appear on a model-visible surface:
   broker-delivered values, and values registered by a shape hit;
 * a value in a credential position that carries **value evidence** — issuer
   prefix, entropy, a key header, a DSN structure, or a known stored value.
+* every value under `data:`/`stringData:` of a Kubernetes object whose own
+  `kind` is `Secret` (YAML or JSON, `List` items, and the escaped copy in a
+  `last-applied-configuration` annotation). The object declares them secret;
+  key names, `metadata` and every other field stay readable, and a `ConfigMap`
+  is never touched by this rule;
+* an **encoded spelling** of a credential: a base64/base64url, hex, `%xx`, or
+  JSON-escaped (`\/`, `\uXXXX`) token is masked whole when its DECODING is
+  masked by the rules above (a DSN with an inline password, a PEM key,
+  service-account JSON, a docker `auth`, a vendor token…). Decoding alone is
+  not evidence: a token that decodes to ordinary text, a digest, a SHA or binary
+  keeps its bytes. Nesting is followed two levels deep (a docker config inside
+  a Secret);
+* a service-account key's `private_key_id`. Its `client_email` and
+  `project_id` are identifiers and stay readable.
 
 ### 2.2 Not a secret
 
@@ -322,6 +336,19 @@ comment.
   route refuses symlinked logs and directories and keeps the file private, so
   the record exists before content is returned; that is a policy control, not a
   MAC.
+
+* The encoded-credential pass is bounded per scrub call (20,000 candidate
+  tokens, 4 MiB decoded): past either bound the remainder is not decoded. The
+  plaintext rules still run over all of it. Base64 of non-ASCII text is not
+  decoded (the cheap pre-check reads base64 of ASCII only).
+* The live `bash` stream holds an open `data:`/`stringData:` block until a
+  sibling line resolves its object's `kind`, within the pipe redactor's
+  existing deferral cap; a block larger than that cap is published before its
+  `kind` line, and only its credential-shaped (or encoded-credential) values
+  are masked live. The settled result is masked whole.
+* The argument pass (code) and the team-bridge guard skip the Secret
+  structure rule: a manifest the agent writes may carry an ordinary value that
+  must not be rewritten in its own program. The decode pass still runs there.
 
 ## 7. Enforcement map
 

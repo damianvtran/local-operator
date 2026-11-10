@@ -170,6 +170,7 @@ from local_operator.redaction_shapes import (
     pem_end_line,
     pem_header_line_end,
     scrub_secrets_with_hits,
+    secret_data_block_hold,
     shape_report,
     straddling_form_start,
     stream_hold_window,
@@ -3363,6 +3364,11 @@ class _PipeRedactor:
                 # block the classifier accepted", because the cap can leave the block's
                 # own marker outside the release (see `_cut_past_a_split_header`).
                 block_open = True
+        # A Kubernetes Secret's ``data:`` block is only recognisable once the
+        # object's ``kind: Secret`` line has arrived, and kubectl prints ``kind``
+        # AFTER ``data``. Hold an unresolved block so the structure rule sees the
+        # whole object; the cap below still bounds the hold.
+        cut = secret_data_block_hold(text, cut)
         # The cap is applied LAST and wins over every hold above: bounded memory
         # is the property that must not depend on what the child prints, so a
         # command that opens a PEM block and never closes it cannot pin the
