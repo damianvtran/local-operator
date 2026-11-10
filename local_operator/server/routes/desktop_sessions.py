@@ -82,6 +82,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionSnapshot,
     StoredFile,
     SupplementReceipt,
+    ToolCallDiffPage,
     WarmReceipt,
     WatchReceipt,
 )
@@ -4001,6 +4002,88 @@ async def child_trajectory_release(session_id: str, child_id: str, request: Requ
     """
     async with errors(request):
         return reply(await host(request).unload_child_trajectory(session_id, child_id))
+
+
+#: Tool-call ids are provider-minted opaque strings; the bound keeps a crafted
+#: path segment from costing more than one transcript prefilter.
+_TOOL_CALL_ID_MAX = 256
+
+
+def _diff_reply(page: dict[str, Any]) -> JSONResponse:
+    """The CRUD envelope with the headers this evidence must carry.
+
+    ``no-store`` is also applied by ``managed_desktop_boundary``; stating it
+    here keeps the contract true for any host that mounts the router alone.
+    """
+    body = reply(ToolCallDiffPage.model_validate(page)).model_dump(mode="json")
+    return JSONResponse(
+        body, headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"}
+    )
+
+
+async def _diff_page_or_422(load: Any) -> dict[str, Any]:
+    from local_operator.tools.diff_archive import DiffPageRangeError
+
+    try:
+        return await load
+    except DiffPageRangeError:
+        # A start past the last row is the caller's request being wrong, not
+        # the resource being absent, so it is not folded into the uniform 404.
+        raise HTTPException(422, "Requested diff page is out of range.") from None
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def tool_call_diff(
+    session_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+):
+    """One page of a write/edit call's COMPLETE, source-redacted diff.
+
+    The inline ``details['diff']`` keeps 200 rows; ``details['diff_full']``
+    names the archive that holds the rest (``tools/diff_archive``). The client
+    sends ids only -- never a digest: membership is proved server-side from
+    this session's own transcript row for ``call_id``. Unknown session,
+    foreign call or a non-write/edit call are one 404; bad paging is 422; a
+    captured-but-unservable diff (``oversized``/``withheld``/``unavailable``/
+    ``evicted``) and an old row (``not_recorded``) are 200 answers with no rows.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).tool_call_diff(session_id, call_id, start=start, limit=limit)
+        )
+    return _diff_reply(page)
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/tool-calls/{call_id}/diff",
+    response_model=CRUDResponse[ToolCallDiffPage],
+)
+async def child_tool_call_diff(
+    session_id: str,
+    child_id: str,
+    request: Request,
+    call_id: str = Path(min_length=1, max_length=_TOOL_CALL_ID_MAX),
+    start: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+):
+    """The child reader's twin of :func:`tool_call_diff`.
+
+    Same contract; the containment proof (``_contained_child_dir``) runs
+    before the child's transcript is read, and refusals are the same 404.
+    """
+    async with errors(request):
+        page = await _diff_page_or_422(
+            host(request).child_tool_call_diff(
+                session_id, child_id, call_id, start=start, limit=limit
+            )
+        )
+    return _diff_reply(page)
 
 
 @router.get(

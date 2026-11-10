@@ -7118,6 +7118,25 @@ def _persisted_children(
     return list(roster_records(payload))
 
 
+def _diff_page(
+    session_dir: Path, session_id: str, call_id: str, start: int, limit: int, root: Path
+) -> dict[str, Any]:
+    """``diff_archive.load_page`` with its refusals mapped to the host's errors.
+
+    Not-found becomes ``KeyError`` (uniform 404 via ``errors()``); a bad page
+    request stays :class:`~local_operator.tools.diff_archive.DiffPageRangeError`
+    for the route to answer 422.
+    """
+    from local_operator.tools import diff_archive
+
+    try:
+        return diff_archive.load_page(
+            session_dir, session_id, call_id, start=start, limit=limit, config_root=root
+        )
+    except diff_archive.DiffArchiveNotFound:
+        raise KeyError("Unknown tool call") from None
+
+
 def _contained_child_dir(root: Path, session_id: str, child_id: str) -> Path:
     """The directory of ``child_id`` as a child of ``session_id``, or refuse.
 
@@ -8630,6 +8649,54 @@ class DesktopSessions:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
+
+        return await asyncio.to_thread(read)
+
+    async def tool_call_diff(
+        self, session_id: str, call_id: str, *, start: int = 0, limit: int = 200
+    ) -> dict[str, Any]:
+        """One page of a write/edit call's complete, source-redacted diff.
+
+        The durable read behind the tool card's "full diff" view: the inline
+        preview keeps 200 rows, and the rest lives in the redacted archive
+        (``tools/diff_archive``). Outside :meth:`session` for the same reason
+        as :meth:`attachment` -- reading a finished conversation's evidence
+        must not start a runtime. The id gate is the attachment route's (shape
+        first, then a USER conversation on this device), and membership is
+        then proved by ``diff_archive.load_page`` from this session's own
+        transcript: the call must be a persisted write/edit row and the
+        artifact header must name this session and call. Every refusal is a
+        ``KeyError`` so the route's 404 cannot tell an unknown session from a
+        foreign call. A peer's conversation has no local archive and refuses
+        the same way.
+        """
+
+        def read() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                raise KeyError("Unknown session")
+            return _diff_page(path, session_id, call_id, start, limit, self.root)
+
+        return await asyncio.to_thread(read)
+
+    async def child_tool_call_diff(
+        self, session_id: str, child_id: str, call_id: str, *, start: int = 0, limit: int = 200
+    ) -> dict[str, Any]:
+        """The child twin of :meth:`tool_call_diff`, behind the child containment proof.
+
+        The subagent reader is where the operator reported the missing rows,
+        so this is the primary door. ``_contained_child_dir`` refuses an
+        unknown parent, a child the parent never launched and a non-subagent
+        directory before the transcript is touched; the archive is then bound
+        to the CHILD'S own session id (its directory name, which is the id its
+        loop stamped on the artifact).
+        """
+
+        def read() -> dict[str, Any]:
+            child_dir = _contained_child_dir(self.root, session_id, child_id)
+            return _diff_page(child_dir, child_dir.name, call_id, start, limit, self.root)
 
         return await asyncio.to_thread(read)
 

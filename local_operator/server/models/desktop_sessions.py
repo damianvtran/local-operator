@@ -871,6 +871,33 @@ class HistoryPage(BaseModel):
 ChildTranscriptState = Literal["ready", "pending", "gone"]
 
 
+#: Every answer the tool-call diff pager can give (``tools/diff_archive``):
+#: ``archived`` carries rows; the rest are explicit no-rows answers, so a
+#: reader never says "not recorded" about a diff that was captured.
+ToolCallDiffState = Literal[
+    "archived", "oversized", "withheld", "unavailable", "evicted", "not_recorded", "inline"
+]
+
+
+class ToolCallDiffPage(BaseModel):
+    """One page of a write/edit call's COMPLETE, source-redacted diff.
+
+    The frozen v1 contract the desktop renderer pages through. ``rows`` are
+    unified-diff rows verbatim (the nameless ``--- ``/``+++ `` pair first), so
+    the renderer's existing green/red classifier applies unchanged.
+    ``next_start`` is ``start + len(rows)`` and ``None`` only at the end;
+    ``clipped_rows`` are ABSOLUTE indices of rows cut to fit one page.
+    """
+
+    state: ToolCallDiffState
+    start: int
+    total_rows: int
+    rows: list[str]
+    hunk_header: str | None
+    next_start: int | None
+    clipped_rows: list[int]
+
+
 class ChildTranscriptPage(BaseModel):
     """One page of a CHILD's transcript, in the parent's own envelope.
 

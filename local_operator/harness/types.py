@@ -974,6 +974,10 @@ def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bo
     return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
 
 
+#: ``(before, after, preview_rows, full)`` -- see ``ToolResult._diff_source``.
+DiffSourceCarrier = tuple[str, str, tuple[str, ...], tuple[str, ...] | str | None]
+
+
 class ToolResult(BaseModel):
     """The outcome of executing one ``ToolCall``.
 
@@ -1012,7 +1016,10 @@ class ToolResult(BaseModel):
 
     # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
     # file texts plus the raw rendered diff preview, as
-    # ``(before, after, preview_rows)``. While it is attached,
+    # ``(before, after, preview_rows, full)``. ``full`` is the COMPLETE raw
+    # diff the preview was cut from (``None`` when nothing was cut, the string
+    # ``"oversized"`` past the archive ceiling); the seam archives its
+    # source-redacted form (``tools/diff_archive``). While it is attached,
     # ``details['diff']`` holds only the withheld receipt. The native loop's
     # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
     # masks every preview row whose source line the redactor touched, then runs
@@ -1029,7 +1036,7 @@ class ToolResult(BaseModel):
     # event copy or deep-copied trajectory row would keep raw file text alive.
     # Only the ORIGINAL object carries it; a result that never reaches the
     # seam keeps the withheld receipt (fail-closed by construction).
-    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+    _diff_source: DiffSourceCarrier | None = PrivateAttr(default=None)
 
     def __copy__(self) -> "ToolResult":
         copied = super().__copy__()
@@ -1048,7 +1055,7 @@ class ToolResult(BaseModel):
             state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
         return state
 
-    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+    def take_diff_source(self) -> DiffSourceCarrier | None:
         """Return and CLEAR the raw source-evidence carrier (single consumption)."""
         source = self._diff_source
         self._diff_source = None

@@ -133,6 +133,8 @@ from local_operator.incidents import (
     REASONING_ECHO_MARKERS,
 )
 from local_operator.model.effort import real_rungs
+from local_operator.tools import diff_archive
+from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -492,7 +494,13 @@ def _mask_by_source_evidence(
     return out
 
 
-def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
+def _redact_diff_detail(
+    value: Any,
+    redact: Callable[[str], str],
+    *,
+    max_rows: int = _DIFF_DETAIL_ROWS,
+    max_bytes: int = _DIFF_DETAIL_BYTES,
+) -> Any:
     """Publish a bounded diff COPY without losing multiline credential proof.
 
     A line-at-a-time callback releases unknown PEM body rows. Joining the raw
@@ -538,22 +546,18 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
     def invoke(text: str) -> str:
         nonlocal calls, input_bytes, input_rows, output_bytes, output_rows
         calls += 1
-        input_bytes += byte_size(text, _DIFF_DETAIL_BYTES)
+        input_bytes += byte_size(text, max_bytes)
         input_rows += text.count("\n") + 1
-        if (
-            calls > 2 * _DIFF_DETAIL_ROWS
-            or input_bytes > 3 * _DIFF_DETAIL_BYTES
-            or input_rows > 3 * _DIFF_DETAIL_ROWS
-        ):
+        if calls > 2 * max_rows or input_bytes > 3 * max_bytes or input_rows > 3 * max_rows:
             raise ValueError
         result = redact(text)
         if not isinstance(result, str):
             raise ValueError
-        output_bytes += byte_size(result, 3 * _DIFF_DETAIL_BYTES - output_bytes)
+        output_bytes += byte_size(result, 3 * max_bytes - output_bytes)
         # Check population before splitting/materializing output rows. All other
         # splitlines separators are forbidden in projected nominal rows too.
         output_rows += result.count("\n") + 1
-        if output_rows > 3 * _DIFF_DETAIL_ROWS:
+        if output_rows > 3 * max_rows:
             raise ValueError
         return result
 
@@ -561,17 +565,17 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
 
     try:
         if scalar:
-            byte_size(value, _DIFF_DETAIL_BYTES)
-            if len(value.splitlines()) > _DIFF_DETAIL_ROWS:
+            byte_size(value, max_bytes)
+            if len(value.splitlines()) > max_rows:
                 raise ValueError
             return invoke(value)
-        if len(value) > _DIFF_DETAIL_ROWS:
+        if len(value) > max_rows:
             raise ValueError
         total = 0
         for item in value:
             if not isinstance(item, str):
                 raise ValueError  # a barrier cannot silently join two partial hunks
-            total += byte_size(item, _DIFF_DETAIL_BYTES - total)
+            total += byte_size(item, max_bytes - total)
             if any(char in _DIFF_ROW_BREAKS for char in item):
                 raise ValueError
         if len(value) < 3 or not value[0].startswith("--- ") or not value[1].startswith("+++ "):
@@ -624,7 +628,7 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
             if not saw_change:
                 raise ValueError
             hunks.append((old, new))
-            if len(hunks) > _DIFF_DETAIL_ROWS // 2:
+            if len(hunks) > max_rows // 2:
                 raise ValueError
         affected: set[int] = set()
         # All contextual judgements see ORIGINAL views, before a header/row mask
@@ -7789,10 +7793,15 @@ class AgentLoop:
         carried = result.take_diff_source()
         if carried is None:
             return
-        before, after, preview = carried
+        before, after, preview, full = carried
         details = dict(result.details or {})
         if redact is None:
             details["diff"] = list(preview)
+            if full is not None:
+                # No redactor means nothing proves the archive safe for a
+                # durable store that outlives this process: archive nothing,
+                # and say so rather than leave a false "not recorded".
+                details[DIFF_FULL_KEY] = diff_archive.descriptor(diff_archive.STATE_UNAVAILABLE)
             result.details = details
             return
         call_id = result.tool_call_id
@@ -7807,16 +7816,22 @@ class AgentLoop:
             verdict = context.exempt_source_verdicts.get(call_id)
         cwd = _session_cwd(context)
 
+        tool_context = context.tool_context
+        session_id = (tool_context.session_id if tool_context is not None else "") or ""
+        affected: list[tuple[set[int], set[int]]] = []
+
         def _run() -> list[str]:
             with (
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, cwd, verdict),
             ):
-                masked = _mask_by_source_evidence(
-                    preview,
-                    _source_affected_lines(before, redact),
-                    _source_affected_lines(after, redact),
-                )
+                # Each complete ORIGINAL side is redacted exactly once; the
+                # projection is reused below for the full-diff archive, so the
+                # preview and every archived page share one judgement.
+                old = _source_affected_lines(before, redact)
+                new = _source_affected_lines(after, redact)
+                affected.append((old, new))
+                masked = _mask_by_source_evidence(preview, old, new)
                 out = _redact_diff_detail(masked, redact)
             if not isinstance(out, list):
                 raise ValueError
@@ -7827,7 +7842,82 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 - no proof, no publication
             logger.warning("write/edit diff source redaction failed for %s", tool_name)
             details["diff"] = [_DIFF_DETAIL_WITHHELD]
+        if full is not None:
+            details[DIFF_FULL_KEY] = await self._archive_full_diff(
+                full,
+                affected[0] if affected else None,
+                redact,
+                tool_name=tool_name,
+                call_id=call_id,
+                session_id=session_id,
+                arguments=arguments,
+                verdict=verdict,
+                cwd=cwd,
+            )
         result.details = details
+
+    @staticmethod
+    async def _archive_full_diff(
+        full: tuple[str, ...] | str,
+        affected: tuple[set[int], set[int]] | None,
+        redact: Callable[[str], str],
+        *,
+        tool_name: str,
+        call_id: str,
+        session_id: str,
+        arguments: Mapping[str, Any],
+        verdict: bool | None,
+        cwd: str | None,
+    ) -> dict[str, Any]:
+        """Redact and store the COMPLETE diff; return its content-free descriptor.
+
+        Same evidence order as the preview (``tools/diff_archive`` step 3): the
+        whole-side projection ``affected`` (computed once by the caller from
+        the exact original sides) masks the full signed diff, then the per-hunk
+        seam runs with the archive's scaled budgets. Nothing is re-diffed, and
+        only the redacted rows are written. No source projection (the whole
+        side refused) means no proof, so nothing is stored (``withheld``); no
+        session to bind the artifact to means no reader could ever prove
+        membership, so nothing is stored either (``unavailable``).
+        """
+        if isinstance(full, str):
+            return diff_archive.descriptor(diff_archive.STATE_OVERSIZED)
+        if affected is None:
+            return diff_archive.descriptor(diff_archive.STATE_WITHHELD)
+        if not session_id:
+            return diff_archive.descriptor(diff_archive.STATE_UNAVAILABLE)
+        old, new = affected
+
+        def _run() -> dict[str, Any]:
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, cwd, verdict),
+            ):
+                masked = _mask_by_source_evidence(full, old, new)
+                out = _redact_diff_detail(
+                    masked,
+                    redact,
+                    max_rows=diff_archive.ARCHIVE_REDACT_ROWS,
+                    max_bytes=diff_archive.ARCHIVE_REDACT_BYTES,
+                )
+            # The seam's refusal is a one-row receipt; a row-count change is a
+            # shape the pager could not address exactly. Either way: no proof.
+            if (
+                not isinstance(out, list)
+                or len(out) != len(full)
+                or out[:1] == [_DIFF_DETAIL_WITHHELD]
+                or not all(isinstance(row, str) for row in out)
+            ):
+                return diff_archive.descriptor(diff_archive.STATE_WITHHELD)
+            return diff_archive.write_archive(
+                out, session_id=session_id, call_id=call_id, tool_name=tool_name
+            )
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception:  # noqa: BLE001 - never fail a tool result over its archive
+            logger.warning("write/edit full-diff archive failed for %s", tool_name)
+            return diff_archive.descriptor(diff_archive.STATE_WITHHELD)
 
     @staticmethod
     async def _redact_details(

@@ -198,6 +198,7 @@ from local_operator.scratchpad import (
 from local_operator.supplements.pins import DELIVER_DESCRIPTION, with_deliver_notice
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
+    diff_archive,
     group_reaper,
     query_budget,
     search_guard,
@@ -11122,7 +11123,8 @@ def _edit_file_result_locked(
             )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    details = _with_diff_source(_diff_details(str(path), original, current), original, current)
+    details, full = _diff_details_and_full(str(path), original, current)
+    details = _with_diff_source(details, original, current, full)
     if pad_advisory:
         # The worker thread already returns ``details``; this private, popped key
         # carries the receipt line without changing that transaction's shape.
@@ -11290,7 +11292,22 @@ def _complete_pem_blocks(lines: Sequence[str]) -> list[tuple[int, int]]:
 
 
 def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
-    """The write/edit tool-result details: line counts + a rendered unified diff.
+    """The write/edit tool-result details (see :func:`_diff_details_and_full`)."""
+    return _diff_details_and_full(path, before, after)[0]
+
+
+def _diff_details_and_full(
+    path: str, before: str, after: str
+) -> tuple[dict[str, Any], list[str] | None]:
+    """The write/edit tool-result details, plus the COMPLETE raw diff when cut.
+
+    The second value is the whole rendered diff (after the PEM widening, before
+    the preview cut) and is only returned when the preview omitted rows: it is
+    the source of the redacted full-diff archive (``tools/diff_archive``) and
+    is RAW executor bytes, so callers hand it to :func:`_with_diff_source`,
+    which moves it onto the private carrier and never into ``details``.
+
+    Line counts + a rendered unified diff.
 
     Both write and edit funnel their before/after states through a real
     sequence match, so the UI's ``+N/-N`` counters and the expanded card's
@@ -11310,7 +11327,7 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     """
     added, removed = _line_delta(before, after)
     if not added and not removed:
-        return {"path": str(path), "added": 0, "removed": 0}
+        return {"path": str(path), "added": 0, "removed": 0}, None
     before_lines = before.splitlines()
     after_lines = after.splitlines()
     # ONE matcher, addressed twice: ``unified_diff`` renders the diff, and the
@@ -11340,10 +11357,14 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
         details["diff"] = kept
     if omitted:
         details[DIFF_TRUNCATED_ROWS_KEY] = omitted
-    return details
+    # The complete diff only matters when the preview lost rows; an uncut
+    # preview IS the whole diff, so archiving it would store a duplicate.
+    return details, (diff if kept is not None and omitted else None)
 
 
-def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[str, Any]:
+def _with_diff_source(
+    details: dict[str, Any], before: str, after: str, full: list[str] | None = None
+) -> dict[str, Any]:
     """Attach the complete sides as source evidence for the loop's seam.
 
     Called by the write/edit transactions with the exact bytes they diffed.
@@ -11355,9 +11376,22 @@ def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[
     if not isinstance(details.get("diff"), list):
         return details
     if fits_source_evidence(before, after):
-        details[_DIFF_SOURCE_KEY] = (before, after)
+        # ``full`` (the complete raw diff the preview was cut from) rides the
+        # SAME private carrier, so the archive is judged against the same
+        # complete source evidence as the preview. Over the archive ceiling no
+        # prefix is kept: the loop records ``oversized`` instead.
+        carried: tuple[str, ...] | str | None = None
+        if full is not None:
+            carried = tuple(full) if diff_archive.fits_archive(full) else "oversized"
+        details[_DIFF_SOURCE_KEY] = (before, after, carried)
     else:
         details["diff"] = [DIFF_WITHHELD_TEXT]
+        if full is not None:
+            # No complete-side proof is possible, so the full diff is withheld
+            # too; the descriptor says so instead of a false "not recorded".
+            details[diff_archive.DIFF_FULL_KEY] = diff_archive.descriptor(
+                diff_archive.STATE_WITHHELD
+            )
     return details
 
 
@@ -11380,8 +11414,8 @@ def _diff_text_result(
         details["diff"] = [DIFF_WITHHELD_TEXT]
     result = _text(tool_call_id, tool_name, text, details=details)
     if source is not None and isinstance(preview, list):
-        before, after = source
-        result._diff_source = (before, after, tuple(preview))
+        before, after, full = source
+        result._diff_source = (before, after, tuple(preview), full)
     return result
 
 
@@ -12084,7 +12118,8 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    details = _with_diff_source(_diff_details(str(path), previous, content), previous, content)
+    details, full = _diff_details_and_full(str(path), previous, content)
+    details = _with_diff_source(details, previous, content, full)
     introduced = _marker_introduced(previous, content)
     if introduced:
         details[_MARKER_INTRODUCED_KEY] = introduced

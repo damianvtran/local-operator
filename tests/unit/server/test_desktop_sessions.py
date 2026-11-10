@@ -700,6 +700,14 @@ def test_route_response_models_publish_the_real_canonical_contract():
             "/v1/desktop/sessions/{session_id}/children/{child_id}/transcript",
             "get",
         ): "ChildTranscriptPage",
+        (
+            "/v1/desktop/sessions/{session_id}/tool-calls/{call_id}/diff",
+            "get",
+        ): "ToolCallDiffPage",
+        (
+            "/v1/desktop/sessions/{session_id}/children/{child_id}/tool-calls/{call_id}/diff",
+            "get",
+        ): "ToolCallDiffPage",
         ("/v1/desktop/sessions/{session_id}/history", "get"): "HistoryPage",
         ("/v1/desktop/sessions/{session_id}/messages", "post"): "MessageAdmission",
         ("/v1/desktop/sessions/{session_id}/commands", "post"): "CommandReceipt",
