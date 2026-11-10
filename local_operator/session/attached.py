@@ -90,6 +90,7 @@ from local_operator.mobile.types import (
 )
 from local_operator.profile_actions import ProfileActionReply
 from local_operator.providers.local import LOCAL_PROVIDER_IDS
+from local_operator.session import open_trace
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.cold_metadata import (
     read_cold_metadata,
@@ -1235,6 +1236,9 @@ class AttachedSession:
     #: readable on EVERY construction path or it is a trap for the next reader.
     _deferred_history: "_DeferredHistory | None" = None
 
+    # Only populated during a traced cold call; never part of frontend state.
+    _cold_open_trace: open_trace.ColdOpenTrace | None
+
     def __init__(
         self,
         *,
@@ -2079,6 +2083,7 @@ class AttachedSession:
         seed: "SessionSeed | None" = None,
         slash_consumers: Sequence[str] | None = ATTACHED_SLASH_CONSUMERS,
         deferred_history: bool = False,
+        _trace_span: str | None = None,
     ) -> "AttachedSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -2108,96 +2113,122 @@ class AttachedSession:
         or folds ``history()`` and none of them has a page reader to fall back
         on.
         """
-        self = cls(
-            config_dir=config_dir,
-            session_id=session_id,
-            takeover_factory=takeover_factory,
-            surface=surface,
-            owner=owner,
-            seed=seed,
-            slash_consumers=slash_consumers,
-        )
-        # A remote viewer passes the row's own cwd (or none) — it has no local
-        # transcript to take one from, and §3.4's seed is what keeps its first
-        # paint from reading as an empty conversation.
-        self._cwd = cwd or (seed.cwd if seed is not None else "")
-        self._can_go_cold = True
-        self._birth_model = initial_model
-        self._model_selection_override = model_selection_override
-        # A session that has never run has no transcript to read; one being
-        # reopened has its whole history here, off the loop as always.
-        # ``has_transcript``: a compressed session has a history to paint, and
-        # the plain name would open it as an empty conversation.
-        from local_operator.session import compression as _compression
+        trace = open_trace.ColdOpenTrace(session_id, _trace_span) if open_trace.enabled() else None
+        outcome = "failed"
+        self = None
+        try:
+            with trace.phase("construct") if trace else contextlib.nullcontext():
+                self = cls(
+                    config_dir=config_dir,
+                    session_id=session_id,
+                    takeover_factory=takeover_factory,
+                    surface=surface,
+                    owner=owner,
+                    seed=seed,
+                    slash_consumers=slash_consumers,
+                )
+            if trace is not None:
+                self._cold_open_trace = trace
+            # A remote viewer passes the row's own cwd (or none) — it has no local
+            # transcript to take one from, and §3.4's seed is what keeps its first
+            # paint from reading as an empty conversation.
+            self._cwd = cwd or (seed.cwd if seed is not None else "")
+            self._can_go_cold = True
+            self._birth_model = initial_model
+            self._model_selection_override = model_selection_override
+            # A session that has never run has no transcript to read; one being
+            # reopened has its whole history here, off the loop as always.
+            # ``has_transcript``: a compressed session has a history to paint, and
+            # the plain name would open it as an empty conversation.
+            from local_operator.session import compression as _compression
 
-        has_transcript = _compression.has_transcript(config_dir / "sessions" / session_id)
-        # THE DEFERRED RECORD IS READ BEFORE THE SYNTHESIS, so a HIT can hand the
-        # model resolution the journal's selection the record already proved
-        # (``ColdMetadata.selection``) instead of re-scanning the journal for it —
-        # the largest CPU cost a warm deferred open had left. Safe to move: the
-        # synthesis reads config, the wakes/monitors indexes and the selection,
-        # none of which the record restore touches, and the record restore reads
-        # nothing the synthesis writes. The eager path (every other caller) keeps
-        # today's order and reads, byte for byte.
-        if has_transcript and deferred_history:
-            self._deferred_history = await self._deferred_cold_details()
-        deferred = self._deferred_history
-        state = await self._synthesise_cold_state(
-            cwd, selection=deferred.selection if deferred is not None else None
-        )
-        if has_transcript:
-            # ``want_checkpoint`` extracts the durable status row during the
-            # SAME threaded parse the history comes from, so the restore below
-            # costs no second read of a file that is 103 MB at the top end.
-            #
-            # THE DEFERRED OPT-IN IS CHECKED FIRST, and it can only ever SKIP
-            # the read above: a valid metadata record changes nothing about the
-            # state restored below (the same four values, from the same
-            # function, computed by an earlier process), it just defers the one
-            # output that record deliberately does not carry — the message
-            # list. A record MISS may also prove those facts from a bounded
-            # tail read; if neither proof is available, the eager line below
-            # stays the exact fallback.
-            if self._deferred_history is None:
-                await self._load_history(None, want_checkpoint=True)
-            else:
-                # THE FLAG HAS TO AGREE WITH THE STATE. ``_history_hydrated`` is
-                # True from construction (a new facade's empty list is real), but
-                # on a deferral there IS no list, and code that reads the flag
-                # alone — ``materialize_history``'s early return, a future
-                # caller — must not be told a list exists. Every accessor gates
-                # on ``_deferred_history`` first; this keeps the two consistent
-                # so the next reader of the flag cannot be misled by it.
-                self._history_hydrated = False
-            # Ordered before ``_install_frontend`` so the roster, todos and
-            # title are present in the FIRST state the widgets ever see —
-            # installing twice would paint an empty panel and then repaint it,
-            # which is the visible flicker this whole change exists to remove.
-        self._cold_painted_ids = set(self._history_ids)
-        # Children can persist a roster before the parent's first transcript
-        # row. Absence of that file must not hide independently durable spend.
-        state = await self._restore_cold_details(state)
-        # THE ONE INSTALL THAT IS A RESTORE. Everything in ``state`` here was
-        # read out of the durable checkpoint, so the MCP round it carries is
-        # history: the row that renders it says "last session", and a later live
-        # round is worded and announced as news. This is provenance by
-        # construction — ``_install_frontend(restored=True)`` — because the
-        # connection state cannot tell the two apart (the owner's first live
-        # snapshot lands while the facade is still mid-bind).
-        self._cold_checkpoint = None
-        self._cold_seed_usage = None
-        # NOT cleared, unlike its two neighbours: the spend details row is ~200
-        # bytes (not a parsed transcript), and ``/session`` reads it through
-        # ``restored_spend`` for the exact micro-USD figure long after the cold
-        # open. Freeing it would trade nothing for a missing number.
-        self._cold_selection = None
-        self._install_frontend(state, restored=True)
-        self._finish_sync()
-        # Nothing is queued behind an owner that will never arrive: a cold
-        # viewer is READY, and it is _ensure_bound that supplies the runtime
-        # when one is actually needed.
-        self._runtime_ready.set()
-        return self
+            with trace.phase("transcript_exists") if trace else contextlib.nullcontext():
+                has_transcript = _compression.has_transcript(config_dir / "sessions" / session_id)
+            # THE DEFERRED RECORD IS READ BEFORE THE SYNTHESIS, so a HIT can hand the
+            # model resolution the journal's selection the record already proved
+            # (``ColdMetadata.selection``) instead of re-scanning the journal for it —
+            # the largest CPU cost a warm deferred open had left. Safe to move: the
+            # synthesis reads config, the wakes/monitors indexes and the selection,
+            # none of which the record restore touches, and the record restore reads
+            # nothing the synthesis writes. The eager path (every other caller) keeps
+            # today's order and reads, byte for byte.
+            if has_transcript and deferred_history:
+                with trace.phase("deferred_proof") if trace else contextlib.nullcontext():
+                    self._deferred_history = await self._deferred_cold_details()
+                    if trace is not None:
+                        trace.fields["proof_result"] = self._deferred_history is not None
+            deferred = self._deferred_history
+            with trace.phase("model_synthesis") if trace else contextlib.nullcontext():
+                state = await self._synthesise_cold_state(
+                    cwd, selection=deferred.selection if deferred is not None else None
+                )
+            if trace is not None:
+                trace.fields["eager_history_chosen"] = has_transcript and deferred is None
+            if has_transcript:
+                # ``want_checkpoint`` extracts the durable status row during the
+                # SAME threaded parse the history comes from, so the restore below
+                # costs no second read of a file that is 103 MB at the top end.
+                #
+                # THE DEFERRED OPT-IN IS CHECKED FIRST, and it can only ever SKIP
+                # the read above: a valid metadata record changes nothing about the
+                # state restored below (the same four values, from the same
+                # function, computed by an earlier process), it just defers the one
+                # output that record deliberately does not carry — the message
+                # list. A record MISS may also prove those facts from a bounded
+                # tail read; if neither proof is available, the eager line below
+                # stays the exact fallback.
+                if self._deferred_history is None:
+                    with trace.phase("eager_history") if trace else contextlib.nullcontext():
+                        await self._load_history(None, want_checkpoint=True)
+                else:
+                    # THE FLAG HAS TO AGREE WITH THE STATE. ``_history_hydrated`` is
+                    # True from construction (a new facade's empty list is real), but
+                    # on a deferral there IS no list, and code that reads the flag
+                    # alone — ``materialize_history``'s early return, a future
+                    # caller — must not be told a list exists. Every accessor gates
+                    # on ``_deferred_history`` first; this keeps the two consistent
+                    # so the next reader of the flag cannot be misled by it.
+                    self._history_hydrated = False
+                # Ordered before ``_install_frontend`` so the roster, todos and
+                # title are present in the FIRST state the widgets ever see —
+                # installing twice would paint an empty panel and then repaint it,
+                # which is the visible flicker this whole change exists to remove.
+            with trace.phase("restore") if trace else contextlib.nullcontext():
+                self._cold_painted_ids = set(self._history_ids)
+                # Children can persist a roster before the parent's first transcript
+                # row. Absence of that file must not hide independently durable spend.
+                state = await self._restore_cold_details(state)
+            with trace.phase("install_finalize") if trace else contextlib.nullcontext():
+                # THE ONE INSTALL THAT IS A RESTORE. Everything in ``state`` here was
+                # read out of the durable checkpoint, so the MCP round it carries is
+                # history: the row that renders it says "last session", and a later live
+                # round is worded and announced as news. This is provenance by
+                # construction — ``_install_frontend(restored=True)`` — because the
+                # connection state cannot tell the two apart (the owner's first live
+                # snapshot lands while the facade is still mid-bind).
+                self._cold_checkpoint = None
+                self._cold_seed_usage = None
+                # NOT cleared, unlike its two neighbours: the spend details row is ~200
+                # bytes (not a parsed transcript), and ``/session`` reads it through
+                # ``restored_spend`` for the exact micro-USD figure long after the cold
+                # open. Freeing it would trade nothing for a missing number.
+                self._cold_selection = None
+                self._install_frontend(state, restored=True)
+                self._finish_sync()
+                # Nothing is queued behind an owner that will never arrive: a cold
+                # viewer is READY, and it is _ensure_bound that supplies the runtime
+                # when one is actually needed.
+                self._runtime_ready.set()
+            outcome = "ok"
+            return self
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            if trace is not None:
+                if self is not None and hasattr(self, "_cold_open_trace"):
+                    del self._cold_open_trace
+                trace.finish(outcome)
 
     def _cold_team_manager(self, team_name: str) -> str:
         """The manager of ``team_name`` for a COLD frame, best-effort (#2014).
@@ -3028,9 +3059,11 @@ class AttachedSession:
             # not divide a real reading by a stale denominator. Metadata must
             # never prevent viewing saved work.
             try:
-                model = await resolve_context_metadata(
-                    self._config_dir, state.selected_model, stickiness_key=self._session_id
-                )
+                trace = getattr(self, "_cold_open_trace", None)
+                with trace.phase("account_context") if trace else contextlib.nullcontext():
+                    model = await resolve_context_metadata(
+                        self._config_dir, state.selected_model, stickiness_key=self._session_id
+                    )
                 state = state.model_copy(update={"selected_model": model, "effective_model": model})
             except Exception:  # noqa: BLE001 — metadata must not prevent viewing saved work
                 logger.debug("cold context metadata unavailable", exc_info=True)
@@ -6848,9 +6881,12 @@ class AttachedSession:
             opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
         )
         path = safe_metadata_path(self._config_dir, self._session_id)
+        trace = getattr(self, "_cold_open_trace", None)
         if witness is None or path is None:
             return None
         record = await asyncio.to_thread(read_cold_metadata, path, witness_for(witness))
+        if trace is not None:
+            trace.fields["metadata_record"] = "hit" if record is not None else "miss"
         if record is None:
             record = await asyncio.to_thread(build_cold_tail_metadata, witness, path)
         if record is None:

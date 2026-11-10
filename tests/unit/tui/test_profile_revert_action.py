@@ -23,8 +23,6 @@ from tests.unit.tui.test_app_pilot import Editor, _await_session, _factory
 stores = consent_stores
 _EVIDENCE_ROOT = os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")
 
-# Reused from PR #3652 (0285063b), the owner repair for this pre-existing CI
-# failure; keep its settle helper and failure controls together, not a new wait.
 # States a revert can settle in. "pending" is the in-flight latch and
 # "available" is the pre-press state, so neither counts as settled.
 _TERMINAL_PROFILE_ACTION_STATES = frozenset({"succeeded", "failed", "stale"})

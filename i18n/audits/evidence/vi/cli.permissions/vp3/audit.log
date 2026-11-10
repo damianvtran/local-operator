@@ -1,0 +1,43 @@
+# audit.log — actual command output, vi cli.permissions vp3 (session b03c86526f84)
+$ git rev-parse HEAD
+85fb35811f9d17fb6dfadfc2d5df3269db04bd12
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+$ .venv/bin/python scripts/i18n/check.py
+(first in-tool check.py run was killed by the 120s tool timeout under contention from concurrent auditors; re-run bounded below)
+$ env -u CMUX_SOCKET_PATH .venv/bin/python scripts/run_bounded.py --contract command-status --memory-mb 1200 --timeout 900 -- .venv/bin/python scripts/i18n/check.py  (tail)
+check.py: ok — 215 file(s) scanned, 2539 literal(s) at or below the baseline, catalogues consistent; 81 advisory finding(s) (report-only until activated)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=0526970d2ac4486fb3c5728deb4b3982 completion=/Users/damian/.local-operator/sessions/b03c86526f84/scratchpad/run-bounded-runs/0526970d2ac4486fb3c5728deb4b3982.completion.json
+exit=0
+$ .venv/bin/python parity.py.txt  (vp2 script reused unchanged)
+keys en/vi 39 39 missing [] extra []
+parity failures: 0
+exit=0
+$ .venv/bin/python apple_labels.py.txt  (vp2 script reused unchanged)
+/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable :: SCREEN_CAPTURE_HEADER :: en='Screen & System Audio Recording' :: vi='Bản ghi âm thanh hệ thống & màn hình'
+/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable :: FILE_ACCESS_COMBINED :: en='Files & Folders' :: vi='Tệp & Thư mục'
+/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable :: SCREEN_CAPTURE :: en='Screen Recording' :: vi='Ghi Màn hình'
+/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable :: SCREENANDAUDIOCAPTURE :: en='Screen & System Audio Recording' :: vi='Bản ghi âm thanh hệ thống & màn hình'
+/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable :: CFBundleDisplayName :: en='Privacy & Security' :: vi='Quyền riêng tư & Bảo mật'
+/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable :: CFBundleName :: en='Privacy & Security' :: vi='Quyền riêng tư & Bảo mật'
+/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Localizable.loctable :: Keychain Access :: en='Keychain Access' :: vi='Truy cập chuỗi khóa'
+/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Localizable.loctable :: private key :: en='private key' :: vi='khóa cá nhân'
+/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/Localizable.loctable :: Keychain :: en='Keychain' :: vi='Chuỗi khóa'
+/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/InfoPlist.loctable :: CFBundleName :: en='Keychain Access' :: vi='Truy cập chuỗi khóa'
+/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/InfoPlist.loctable :: keychain :: en='keychain' :: vi='chuỗi khóa'
+/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/InfoPlist.loctable :: CFBundleDisplayName :: en='Keychain Access' :: vi='Truy cập chuỗi khóa'
+/System/Library/ExtensionKit/Extensions/AccessibilitySettingsExtension.appex/Contents/Resources/InfoPlist.loctable :: CFBundleDisplayName :: en='Accessibility' :: vi='Trợ năng'
+/System/Library/ExtensionKit/Extensions/AccessibilitySettingsExtension.appex/Contents/Resources/InfoPlist.loctable :: NSPrefPaneIconLabel :: en='Accessibility' :: vi='Trợ năng'
+/System/Library/ExtensionKit/Extensions/AccessibilitySettingsExtension.appex/Contents/Resources/InfoPlist.loctable :: CFBundleName :: en='Accessibility' :: vi='Trợ năng'
+exit=0
+$ shasum -a 256 inputs
+58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41  local_operator/i18n/catalogues/en/cli.permissions.json
+6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2  local_operator/i18n/catalogues/en/cli.permissions.context.json
+3cdc9e61411e2caa42ca0bdbb4da94b57d763da93a841c2935d8f270daf7ea07  local_operator/i18n/catalogues/vi/cli.permissions.json
+e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888  i18n/style-guides/vi.md
+0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8  i18n/glossary.md
+$ ConfirmAccess.loctable vi/en_GB 100267/100268.title
+100267.title en_GB= 'Always Allow' vi= 'Luôn Cho phép'
+100268.title en_GB= 'Allow' vi= 'Cho phép'

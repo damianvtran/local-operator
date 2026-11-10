@@ -1,0 +1,18 @@
+"""hi cli.permissions R3 (pm3): key-set parity, and per changed/new key placeholder, backtick, verbatim-token, quote, newline and cell-width checks."""
+import json, re, subprocess
+from rich.cells import cell_len
+C = 'local_operator/i18n/catalogues/'
+en = json.load(open(C + 'en/cli.permissions.json')); hi = json.load(open(C + 'hi/cli.permissions.json'))
+print('keys en', len(en), 'hi', len(hi), 'missing', sorted(set(en) - set(hi)), 'extra', sorted(set(hi) - set(en)))
+old_hi = json.loads(subprocess.check_output(['git', 'show', '788cc399:' + C + 'hi/cli.permissions.json']))
+old_en = json.loads(subprocess.check_output(['git', 'show', '788cc399:' + C + 'en/cli.permissions.json']))
+changed = sorted(k for k in en if old_en.get(k) != en[k] or old_hi.get(k) != hi[k])
+print('changed/new keys since 788cc399:', changed)
+TOK = ['Local Operator Runtime', 'Local Operator', 'Developer ID', 'codesign', 'guide://permissions', '/update', 'Python']
+for k in changed:
+    e, h = en[k], hi[k]
+    ph = lambda s: sorted(re.findall(r'\{[^}]*\}', s)); bt = lambda s: re.findall(r'`[^`]*`', s)
+    print(f'{k}: ph {ph(e)}=={ph(h)} {ph(e)==ph(h)}; bt {bt(e)==bt(h)}; quotes en {e.count(chr(34))} hi {h.count(chr(34))}; nl {e.count(chr(10))}/{h.count(chr(10))}; '
+          f'tokens {[t for t in TOK if t in e and t not in h]} missing; zw {any(c in h for c in "\u200c\u200d")}; '
+          f'cells en {max(cell_len(l) for l in e.split(chr(10)))} hi {max(cell_len(l) for l in h.split(chr(10)))}')
+    print('   hi:', h)

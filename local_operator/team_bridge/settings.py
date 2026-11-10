@@ -197,6 +197,45 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: OFF, because a release path must never open on a value nobody wrote.
 DEFAULT_HOLD_RELEASE = False
 
+#: ``team_bridge.review_held`` — the owner-review EXIT for a cached screening
+#: ANSWER hold (``hold_release.REVIEW_HOLD_CODES``: ``model_hold``,
+#: ``model_refused``, ``reply_truncated``, ``bounce_without_category``).
+#:
+#: WHY ON BY DEFAULT (operator report 2026-11-09). Such a hold is the model's
+#: answer, cached so a re-draw cannot shop for a ``deliver``; before this it
+#: had no exit at all. All 29 held messages on the operator's machine had sat
+#: up to 9.2 days with nothing re-screening them and the sender told only
+#: "waiting to be screened". With this on, the hold raises the per-message
+#: notice with Deliver/Discard (the B4b signed-release path) the moment it is
+#: written, so every held message ends delivered or not-delivered by a person.
+#: Unlike ``hold_release`` it releases nothing on its own: the screener said
+#: "unsure", and only the receiving person's signed word moves it.
+#:
+#: Turning it OFF restores the old behaviour exactly (cached hold, count-only
+#: 60-minute alert). Only a real ``false`` turns it off; absent/garbled is ON,
+#: because the safe default for a hold is an exit a person controls. No
+#: ``/settings`` row, for the same i18n-ledger reason as ``hold_release``.
+DEFAULT_REVIEW_HELD = True
+
+#: ``team_bridge.share_typing`` — whether this person's composers tell the other
+#: members of a conversation "X is typing" (typing-indicators design §7).
+#:
+#: ON BY DEFAULT, like Slack and Discord (neither documents a user toggle);
+#: Zulip and Signal offer one, so the person can turn it off. Sender-side only,
+#: NOT symmetric: turning it off stops this machine reporting typing and never
+#: hides anyone else's indicator. The renderer reads it to skip the heartbeat,
+#: and the desktop ``PUT .../typing`` route reads it again (defence in depth)
+#: and answers ``{shared: false}`` without contacting the hub.
+#:
+#: Like ``hold_release`` it has NO ``/settings`` registry row (a row would
+#: change ``wire.settings`` copy and un-ship every locale's audited ledger
+#: row); the desktop Team Bridge settings routes read and write it, and a hand
+#: edit works. An ABSENT key reads ON; a PRESENT key shares only on a real
+#: ``true`` — a value somebody wrote that is not ``true`` (``false``, ``null``,
+#: a typo) reads OFF, because that writer was trying to change the default and
+#: a privacy switch must not reopen on a value it cannot parse.
+DEFAULT_TEAM_BRIDGE_SHARE_TYPING = True
+
 #: ``team_bridge.screening.*`` — the rolling-hour ceilings on SCREENING SPEND,
 #: now CONFIGURABLE. They were fixed class constants on ``Store`` (40/30/35/20,
 #: "the frozen §8 budget"); these are the 10x replacements and the shipped
@@ -245,6 +284,8 @@ DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
+REVIEW_HELD_PATH = ("team_bridge", "review_held")
+SHARE_TYPING_PATH = ("team_bridge", "share_typing")
 #: The SUBTREE the four screening ceilings live under. Readers take this tuple,
 #: so no consumer re-spells "where screening lives" and drifts from the writer.
 SCREENING_SUBTREE = ("team_bridge", "screening")
@@ -578,6 +619,11 @@ class TeamBridgeSettings:
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
     #: B4b owner release (``hold_release.py``); OFF unless a real ``true``.
     hold_release: bool = DEFAULT_HOLD_RELEASE
+    #: Owner review of cached answer holds (``hold_release.REVIEW_HOLD_CODES``);
+    #: ON unless the file says a real ``false``.
+    review_held: bool = DEFAULT_REVIEW_HELD
+    #: Whether this person's composers report "is typing" (sender-side only).
+    share_typing: bool = DEFAULT_TEAM_BRIDGE_SHARE_TYPING
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
     #: including a hand-edited ``null``, which reads OFF). It is what separates
     #: "the user said so" from "nobody said anything", the one distinction the
@@ -637,6 +683,8 @@ class TeamBridgeSettings:
             ),
             # ``is True``: a release path opens on an explicit boolean only.
             hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is True,
+            review_held=get(REVIEW_HELD_PATH, DEFAULT_REVIEW_HELD) is not False,
+            share_typing=_share_typing(get(SHARE_TYPING_PATH, _MISSING)),
         )
 
 
@@ -792,6 +840,25 @@ def record_local_session_if_unset(config_dir: "Path") -> bool:
             return False
         settings_io._store(manager, SESSION_PATH, chief)
         return True
+
+
+def _share_typing(raw: Any) -> bool:
+    """Absent → the shipped default (ON); present → ON only for a real ``true``."""
+
+    if raw is _MISSING:
+        return DEFAULT_TEAM_BRIDGE_SHARE_TYPING
+    return raw is True
+
+
+def record_share_typing(config_dir: "Path", value: bool) -> None:
+    """Persist the person's typing-indicator sharing choice (local only).
+
+    Always writes an explicit boolean, including ``true``: once the person has
+    touched the toggle their answer is recorded rather than left to track a
+    future default change.
+    """
+
+    _store_internal(config_dir, SHARE_TYPING_PATH, bool(value))
 
 
 def record_onboarding_seen(config_dir: "Path") -> None:

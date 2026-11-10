@@ -157,7 +157,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "Radient Team only: your organization's shared agents, teams and "
                     "skills, each marked linked / conflict (same-named unlinked local "
-                    "copy) / absent."
+                    "copy) / absent; linked rows add current / update-available."
                 ),
                 fields=("org", "kinds", "query"),
                 gated=True,
@@ -169,7 +169,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "prefix) and subscribe; re-runs never duplicate. on_conflict for a "
                     "same-named unlinked local copy: adopt-link (default: back up, link, "
                     "content unchanged, never merges) | skip | adopt (hub wins, backed up) "
-                    "| reconcile (model merge); adopt/reconcile need confirm_replace=true."
+                    "| reconcile (model merge); adopt/reconcile need confirm_replace=true. "
+                    "Also updates linked items (local edits kept; conflicts reported) and "
+                    "re-subscribes them. Without consent it asks the user itself: end the "
+                    "turn, retry on their answer. Never hand users CLI commands."
                 ),
                 fields=("org", "kinds", "name", "on_conflict"),
                 gated=True,
@@ -201,6 +204,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
+            "Account edits the owner explicitly requested apply directly. Otherwise "
+            "the change is proposed in Agents → <name>; after their agreement use "
+            "profile_proposal op=apply with the displayed proposal ID.\n"
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
             "- ``action_class``: 'proactive' lets a profile attach hidden "
@@ -272,6 +278,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
+            "Account edits the owner explicitly requested apply directly. Otherwise "
+            "the change is proposed in Agents → <name>; after their agreement use "
+            "profile_proposal op=apply with the displayed proposal ID.\n"
             "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
             "when one covers the work; otherwise create it WITH NO ``scope`` so, "
             "where this host has a conversation store, it lives in THIS "
@@ -572,7 +581,27 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="steer",
                 blurb="Change what it is doing (becomes part of its instructions).",
             ),
-            ToolDocOp(op="pause", blurb="Stop it now but keep it resumable."),
+            ToolDocOp(
+                op="pause",
+                blurb=(
+                    "Stop it now but keep it resumable. A manager's running subagents "
+                    "are paused with it and resumed when it resumes (new job ids; the "
+                    "old ids keep addressing them)."
+                ),
+            ),
+            ToolDocOp(
+                op="set_model",
+                blurb=(
+                    "Switch a RUNNING subagent at its next model call — no pause, same "
+                    "job id, subagents and tabs — and re-probe its primary. model="
+                    "'inherit' (parent's current model) or provider/id; omit model to "
+                    "only re-probe. effort= a reasoning level or lo|med|hi tier (needs "
+                    "model_choice=model); cascade=true adds "
+                    "every running descendant. Role-pinned children keep their pin "
+                    "(re-probed) unless the top session names them directly — only "
+                    "when the operator asks. The receipt names the SERVED model."
+                ),
+            ),
             ToolDocOp(op="cancel", blurb="Stop it for good."),
             ToolDocOp(
                 op="resume",

@@ -806,7 +806,22 @@ export function Composer({
 	const [sending, setSending] = useState(false);
 	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
 	const retryPending = retryEnvelope !== null;
-	const [error, setError] = useState(() => retryPending ? RETAINED_RETRY_ERROR : "");
+	/* Presentation is deliberately separate from the immutable retry envelope.
+	   Each occurrence is an object, even for identical copy: a queued close from
+	   an older render must not swallow a newer failure. Route identity also
+	   rejects old callbacks when this mounted composer changes conversations.
+	   Authentication changes reload/unmount the SPA (private-storage.ts). */
+	const [errorOccurrence, setErrorOccurrence] = useState(() => ({
+		message: retryPending ? RETAINED_RETRY_ERROR : "",
+	}));
+	const error = errorOccurrence.message;
+	const errorRoute = useRef(pid);
+	errorRoute.current = pid;
+	const setError = (message: string) => setErrorOccurrence({ message });
+	const dismissError = () => {
+		if (errorRoute.current !== pid) return;
+		setErrorOccurrence(current => current === errorOccurrence ? { message: "" } : current);
+	};
 	/* Success acknowledgement lives apart from `error` so it renders in the
 	   success token, not the danger alert (D11). */
 	const [notice, setNotice] = useState("");
@@ -1874,9 +1889,16 @@ export function Composer({
 				</div>
 			) : null}
 
-			{error ? (
-				<div className="rounded-sm bg-danger-wash px-3 py-2 text-body-sm text-danger">
-					<p role="alert" aria-live="assertive">{error}</p>
+			{error || retryPending ? (
+				<div className={cn("rounded-sm px-3 py-2 text-body-sm", error ? "bg-danger-wash text-danger" : "bg-elevated text-ink")}>
+					{error ? (
+						<div className="flex items-start gap-2">
+							<p role="alert" aria-live="assertive" className="min-w-0 flex-1 py-2">{error}</p>
+							<button type="button" onClick={dismissError}
+								aria-label={messageRuntime.t("relay.chrome.snackbar.dismiss")}
+								className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface">×</button>
+						</div>
+					) : null}
 					{retryPending ? (
 						<>
 							{retainedPreview ? (
@@ -1891,7 +1913,7 @@ export function Composer({
 							</button>
 							{/* U4: name why the primary send is dead while the retry is
 							    unresolved, so the disabled ↑ reads as intentional. */}
-							<p className="mt-2 text-meta text-danger">{RETRY_DISABLED_HINT}</p>
+							<p className="mt-2 text-meta text-ink-muted">{RETRY_DISABLED_HINT}</p>
 						</>
 					) : null}
 				</div>
