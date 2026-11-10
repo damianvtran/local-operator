@@ -1216,6 +1216,12 @@ def build_cli_parser() -> LocalizedArgumentParser:
     qwencloud_actions.add_parser("rm", help=_qc.rm().envelope(locale=help_locale)["text"])
     qwencloud_actions.add_parser("migrate", help=_qc.migrate().envelope(locale=help_locale)["text"])
 
+    # macOS privacy identity of runtimes (guide://permissions). The module is
+    # small and stdlib-plus-procname, so registering it costs startup nothing.
+    from local_operator import permissions_cli
+
+    permissions_cli.register(subparsers, help_locale)
+
     # Browser bridge command: lazy for the same reason as mobile. Ordinary CLI
     # startup must not pull Starlette/uvicorn in just to render --help.
     browser_parser = subparsers.add_parser(
@@ -18362,6 +18368,10 @@ def main() -> int:
             return pair_main(args)
         elif args.subcommand == "qwencloud-ticket":
             return qwencloud_ticket_command(args)
+        elif args.subcommand == "permissions":
+            from local_operator import permissions_cli
+
+            return permissions_cli.permissions_command(args)
         elif args.subcommand == "browser":
             return browser_command(args)
         elif args.subcommand == "send":

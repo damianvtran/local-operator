@@ -241,7 +241,30 @@ def shadow_in_other_store(registry: Any, scope: Scope, name: str, *, kind: str) 
     return None
 
 
-async def durable_write_decision(context: Any, intent: "DurableWriteIntent") -> tuple[Any, str]:
+class WriteReason(str):
+    """A seam reason that can still name the fault behind an ``error``.
+
+    ``str``, not a record: every caller keeps its ``reason == "queued"`` /
+    ``"declined"`` comparison exactly as written, and the VALUE stays the
+    contract. ``fault`` is the extra: for an unexpected internal failure the
+    refusal sentence can name WHAT broke (and the log line carries the same),
+    which is the difference tonight's incident could not show. A model told only
+    "the confirmation channel failed" cannot tell "nobody to ask" from "this
+    build broke", and it answered by asking the user to retry a file that never
+    happened.
+    """
+
+    fault: str = ""
+
+    def __new__(cls, value: str, fault: str = "") -> "WriteReason":
+        made = super().__new__(cls, value)
+        made.fault = fault
+        return made
+
+
+async def durable_write_decision(
+    context: Any, intent: "DurableWriteIntent"
+) -> tuple[Any, WriteReason]:
     """Ask the HOST to approve a write into the account's shared store.
 
     THE ONE CONSENT SEAM (LOH-9 S2). The decision is the host's: a model must not
@@ -261,23 +284,52 @@ async def durable_write_decision(context: Any, intent: "DurableWriteIntent") -> 
     """
     callback = getattr(context, "authorize_durable_write", None) if context is not None else None
     if callback is None:
-        return None, "no_seam"
+        return None, WriteReason("no_seam")
     from local_operator.harness.approval import ApprovalUnavailableError
+    from local_operator.network.types import MeshRefusal
 
     try:
         origin = await callback(intent)
     except ApprovalUnavailableError:
         # Nobody could be asked (headless, no tty, no attached surface). Named
         # apart from "error": the remedy is the user's own message, not a retry.
-        return None, "unavailable"
-    except Exception:  # noqa: BLE001 — an unavailable consent seam is a refusal
-        logger.warning("durable-write consent seam failed; refusing", exc_info=True)
-        return None, "error"
-    from local_operator.harness.types import QueuedProfileWrite
+        return None, WriteReason("unavailable")
+    except MeshRefusal as exc:
+        # A refusal whose CODE says this host has no authority to file rejects
+        # the request before it exists: no card can be presented, so "nobody to
+        # ask" is the honest class, and its remedy sentence (the user's own
+        # message) is the right one. EVERY other refusal keeps ``error`` with its
+        # code named — a refusal that names a real cause must never be silently
+        # reclassified as "no surface".
+        if exc.code == "approval_anchor_unavailable":
+            logger.info(
+                "durable-write: no operator anchor, so no request can be filed (%s)", exc.code
+            )
+            return None, WriteReason("unavailable", fault=exc.code)
+        logger.warning(
+            "durable-write consent seam refused: %s (%s); refusing",
+            type(exc).__name__,
+            exc.code,
+            exc_info=True,
+        )
+        return None, WriteReason("error", fault=f"{type(exc).__name__}({exc.code})")
+    except Exception as exc:  # noqa: BLE001 — an unavailable consent seam is a refusal
+        # The TYPE rides both the log line and the refusal sentence: an
+        # operator diagnosing this later must see WHAT broke, and the model must
+        # not read a masked fault as "this host cannot ask".
+        logger.warning(
+            "durable-write consent seam failed: %s; refusing", type(exc).__name__, exc_info=True
+        )
+        return None, WriteReason("error", fault=type(exc).__name__)
+    from local_operator.harness.types import QueuedHubPull, QueuedProfileWrite
 
     if isinstance(origin, QueuedProfileWrite):
-        return origin, "queued"
-    return (str(origin), "granted") if origin else (None, "declined")
+        return origin, WriteReason("queued")
+    if isinstance(origin, QueuedHubPull):
+        # Not a grant: the host filed ONE consent ask. The caller reports it and
+        # the model retries the same call once the person's answer arrives.
+        return origin, WriteReason("ask_queued")
+    return (str(origin), WriteReason("granted")) if origin else (None, WriteReason("declined"))
 
 
 def profile_field_label(field: str) -> str:
@@ -472,6 +524,41 @@ async def durable_write_origin(context: Any, intent: "DurableWriteIntent") -> st
     return origin
 
 
+def hub_pull_refusal(reason: str, ask_id: str = "") -> str:
+    """Model-facing outcome of an unconsented org-hub pull (English by design).
+
+    NEVER a CLI command addressed to the user: the people this reaches are often
+    non-technical, and the old text sent them to ``lop agents sync``, which does
+    not even touch skills. The remedy is always an ask or the user's own words.
+    """
+    if reason == "ask_queued":
+        return (
+            f"Asked the user to confirm this hub update (ask {ask_id}); nothing was "
+            "changed yet. End your turn now. When their answer arrives, retry the same "
+            "org_pull call: a yes lets it through, a 'Not now' means stop. Do not give "
+            "them commands to run."
+        )
+    if reason == "declined":
+        return (
+            "The user chose not to update from the hub now, so nothing was changed. "
+            "Do not retry unless they ask again."
+        )
+    if reason == "error":
+        fault = getattr(reason, "fault", "")
+        return (
+            "The confirmation step failed before the user could answer"
+            + (f" ({fault})" if fault else "")
+            + ", so nothing was changed. Tell the user it failed; do not retry unchanged."
+        )
+    return (
+        # No "say 'update my hub items'" hint any more: the owner's wording is
+        # not consent (PR #3693 review R1); only an answered host ask is.
+        "This run has no way to ask the user, so nothing was changed. Tell them you "
+        "need their confirmation and will ask for it in a conversation they can "
+        "answer. Do not give them commands to run."
+    )
+
+
 def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam") -> str:
     """Why a tool-issued account write was refused, and the ONE next action.
 
@@ -493,6 +580,8 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
     the TUI verb — so the refusal never implies the agent can do it alone.
     """
     article = "an" if intent.kind == "agent" else "a"
+    if intent.operation == "hub_pull":
+        return hub_pull_refusal(reason)
     if reason == "declined":
         return (
             f"the user declined to save this {intent.kind} for every conversation, so "
@@ -503,7 +592,37 @@ def durable_write_refusal(intent: "DurableWriteIntent", reason: str = "no_seam")
             "the confirmation channel failed before the user could answer, so nothing "
             "in their account was changed."
         )
+        fault = getattr(reason, "fault", "")
+        if fault:
+            # Named rather than masked: this is a fault in the run, NOT a host
+            # that cannot ask, and the two have different next actions. A retry
+            # of the same call is not one of them.
+            opening += (
+                f" The consent seam itself broke ({fault}), which is an internal fault "
+                "rather than a refusal to ask: tell the user it failed and do not retry "
+                "this call unchanged."
+            )
     elif reason == "unavailable":
+        fault = getattr(reason, "fault", "")
+        if fault == "approval_anchor_unavailable":
+            # AN ANCHOR FAULT IS NOT AN UNASKED REQUEST (round 1, security). Two
+            # different entry points reach ``unavailable``: the owner-prompt path
+            # below, where nobody can be asked and the owner's own message is the
+            # remedy, and a rejected filing, where the owner may well have asked
+            # and only the anchor proving THIS machine's operator authority was
+            # missing (``profile_approval.build`` → ``local_anchor_trio``). Claiming
+            # the first for both sent the model hunting for a request that already
+            # happened, so this path names the prerequisite that actually failed
+            # and returns rather than appending the manual-surface remedy: the
+            # remedy here is ONE concrete act, and it is not a retyped message.
+            return (
+                f"this run could not reach the account's operator authority, so the "
+                f"{intent.kind} change could not be filed as a request and nothing in "
+                "their account was changed. The request itself is not the problem — the "
+                "owner may well have asked for it. Ask Local Operator to set up operator "
+                "authority on this machine first; the same change can be filed once that "
+                "anchor is installed."
+            )
         # The owner-prompt path (``Session._authorize_account_profile_write``)
         # saves without a card when the user's own message names the profile;
         # that is the remedy worth naming, before the manual surfaces.

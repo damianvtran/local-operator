@@ -1,0 +1,20 @@
+# Reproduction checks for fr/cli.permissions audit frpm1 (run from repo root with .venv/bin/python).
+import json, re, hashlib
+from rich.cells import cell_len
+C = "local_operator/i18n/catalogues/"
+en = json.load(open(C + "en/cli.permissions.json")); fr = json.load(open(C + "fr/cli.permissions.json"))
+for p in ("en/cli.permissions.json", "en/cli.permissions.context.json", "fr/cli.permissions.json"):
+    print("sha256", p, hashlib.sha256(open(C + p, "rb").read()).hexdigest())
+print("keys en/fr", len(en), len(fr), "added/dropped", sorted(set(en) ^ set(fr)))
+ph = lambda s: sorted(re.findall(r"\{\w+\}", s)); code = lambda s: re.findall(r"`[^`]*`", s)
+print("placeholder parity", all(ph(en[k]) == ph(fr[k]) for k in en), "code-span parity", all(code(en[k]) == code(fr[k]) for k in en))
+print("ICU plural/select in en", any(re.search(r"\{\w+\s*,", v) for v in en.values()))
+prose = {k: re.sub(r"`[^`]*`", "", v) for k, v in fr.items()}
+apos = [k for k, v in prose.items() if "'" in v]
+sp = [k for k, v in prose.items() if re.search(r" [:;?!\u00bb]|\u00ab ", v)]
+print("U+0027 apostrophe keys", len(apos)); print("U+0020 before :;?!» or after « keys", len(sp))
+print("U+2019 count", sum(v.count("\u2019") for v in fr.values()), "U+202F count", sum(v.count("\u202f") for v in fr.values()))
+print("union typography-defect keys", len(set(apos) | set(sp)), "of", len(fr))
+print("'app de bureau' keys", sorted(k for k, v in fr.items() if "pp de bureau" in v))
+print("trailing space kept (confirm, always_allow)", fr["cli.permissions.setup.confirm"].endswith("] "), fr["cli.permissions.setup.always_allow"].endswith("] "))
+for k in en: print("cells", k, cell_len(en[k]), cell_len(fr[k]))

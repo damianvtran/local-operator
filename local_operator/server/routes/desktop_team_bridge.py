@@ -293,7 +293,10 @@ class TeamBridgeSettingsPut(_Strict):
     """
 
     tenant_id: str | None = Field(default=None, max_length=128)
-    state: Literal["active", "paused", "disabled"]
+    #: REQUIRED for every hub write. Absent ONLY on a local-preference write
+    #: (``share_typing`` alone, below): the model validator refuses any other
+    #: body without it, so "no state" can never be read as "keep the state".
+    state: Literal["active", "paused", "disabled"] | None = None
     consent_version: str | None = Field(default=None, max_length=128)
     consented_via: Literal["dialog", "settings"] | None = None
     label: str | None = Field(default=None, max_length=64)
@@ -317,6 +320,71 @@ class TeamBridgeSettingsPut(_Strict):
     #: ``account_mismatch`` before the first byte leaves; it is never sent
     #: upstream.
     expected_account_id: str = Field(min_length=1, max_length=128)
+    #: Typing indicators (design §7): whether this person's composers report
+    #: "is typing". MACHINE-LOCAL (``team_bridge.share_typing``), never sent to
+    #: the hub. It may ride a ``state`` write, or be sent ALONE — then the
+    #: route writes the local key and makes no upstream call at all, because
+    #: toggling a display preference must not re-assert consent state.
+    share_typing: bool | None = None
+
+    @model_validator(mode="after")
+    def _state_or_local_preference(self) -> "TeamBridgeSettingsPut":
+        if self.state is not None:
+            return self
+        # Without ``state`` the ONLY accepted body is the local preference plus
+        # the receipt: a stray consent/label/tenant field would otherwise be
+        # silently dropped instead of refused.
+        if self.share_typing is None:
+            raise ValueError("state is required")
+        # ``screening_model`` is refused here too although it is local: the
+        # state-less branch writes ``share_typing`` and returns before the
+        # screening write, so accepting it would drop a choice silently. A
+        # screening choice rides a ``state`` write, its only reviewed contract.
+        other_fields = (
+            self.tenant_id,
+            self.consent_version,
+            self.consented_via,
+            self.label,
+            self.screening_model,
+        )
+        if any(value is not None for value in other_fields):
+            raise ValueError("a share_typing-only write carries no other fields")
+        return self
+
+
+def _read_share_typing(config_dir: Any) -> bool:
+    """The person's ``team_bridge.share_typing``, read from the watcher snapshot.
+
+    The watcher, not a ``ConfigManager``: the typing PUT runs every ~3 s while
+    someone types, and constructing a manager on a malformed hand edit would
+    move the user's file aside from a read path (``config_watch``'s reason to
+    exist). An unreadable snapshot reads NOT shared — a privacy switch fails
+    closed, and the cost is only a missing hint.
+    """
+
+    from local_operator.config_watch import process_watcher
+    from local_operator.team_bridge.settings import TeamBridgeSettings
+
+    try:
+        watcher = process_watcher(config_dir)
+        watcher.poll_now()
+        return TeamBridgeSettings.from_values(watcher.values).share_typing
+    except Exception:  # noqa: BLE001 - fail closed, never fail the request
+        return False
+
+
+def _record_share_typing(config_dir: Any, value: bool) -> None:
+    """Persist the toggle; a failed write is a coded 500, never a stack."""
+
+    from local_operator.team_bridge.settings import record_share_typing
+
+    try:
+        record_share_typing(config_dir, value)
+    except Exception:  # noqa: BLE001 - surfaced as a coded 500
+        raise HTTPException(
+            500,
+            {"code": "share_typing_not_saved", "message": "could not save the typing preference"},
+        ) from None
 
 
 class AllowlistTargetIn(_Strict):
@@ -1083,6 +1151,9 @@ async def get_settings(
             # list and current value the status answer carries. Without it a
             # renderer could read one shape and write another.
             "screening": _screening_view(read_screening_model(config_manager.config_dir)),
+            # ADDITIVE and LOCAL: the typing-indicator sharing choice lives in
+            # this machine's config, not on the hub (typing design §7).
+            "share_typing": _read_share_typing(config_manager.config_dir),
         }
     return reply(payload)
 
@@ -1102,6 +1173,15 @@ async def put_settings(
     """
 
     _refuse_write_scope(request)
+    if body.state is None:
+        # The local-preference-only write (validator: ``share_typing`` and the
+        # receipt, nothing else). No hub call, so there is no full settings
+        # payload to answer with; the renderer refetches GET if it needs one.
+        # ``expected_account_id`` stays required for a uniform body contract,
+        # but there is no bearer to compare it with: the key is per machine.
+        assert body.share_typing is not None
+        _record_share_typing(config_manager.config_dir, body.share_typing)
+        return reply({"share_typing": _read_share_typing(config_manager.config_dir)})
     # THE ONE LOCAL FIELD ON THIS BODY. It is applied BEFORE the hub call, and
     # deliberately not forwarded: which model screens incoming mail is this
     # machine's business (the screener runs here), and the hub only shape-checks
@@ -1149,6 +1229,22 @@ async def put_settings(
         # missing consent echo for a known-to-be-required case): caller bugs, in
         # the desktop plane's validation register.
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
+    # The local preference lands only AFTER the hub accepted the state write,
+    # so a refused write changes nothing on either side.
+    if body.share_typing is not None:
+        try:
+            _record_share_typing(config_manager.config_dir, body.share_typing)
+        except HTTPException:
+            # The hub has ALREADY committed the state change (review round 1,
+            # R1): answering 500 here would tell the renderer the whole write
+            # failed and invite a retry that re-asserts consent. So the hub's
+            # payload is returned as a success, and ``share_typing`` below is
+            # READ BACK from disk rather than echoed from the body — the
+            # renderer sees the value that actually holds and can re-send the
+            # preference alone (the stateless PUT) if it still differs.
+            logging.getLogger(__name__).warning(
+                "team bridge: state saved upstream but share_typing was not saved locally"
+            )
     if isinstance(payload, dict):
         # The value ACTUALLY in force: for an ignored off-table value that is the
         # stored choice, not the one just sent, so a renderer reconciles against
@@ -1156,6 +1252,7 @@ async def put_settings(
         payload = {
             **payload,
             "screening": {"preferred": screening, "models": _screening_models()},
+            "share_typing": _read_share_typing(config_manager.config_dir),
         }
     return reply(payload)
 
@@ -3752,6 +3849,210 @@ async def conversation_react_remove(
             )
         )
     )
+
+
+# -- typing indicators (typing-indicators design §5) ---------------------------
+#
+# GET/PUT/DELETE ``/v1/desktop/team-bridge/conversations/{id}/typing``, behind
+# the ``team_bridge_typing`` capability. Ephemeral hints with a ≤9 s hub TTL,
+# so nothing here persists, retries or logs at INFO: the renderer polls GET at
+# ~3 s and heartbeats PUT at ~3 s while the person types, and a per-call INFO
+# line would drown the log. Writes are OWNER-GUARDED exactly like the reaction
+# writes (captured ``expected_account_id`` + ``tenant_id``, compared against
+# the dispatch bearer before any byte moves, ``account_mismatch`` otherwise).
+# There is no ``endpoint_id`` on this plane: v1 typing is humans only, and an
+# agent has no keystroke phase to report (design §9).
+
+#: The typing DELETE's closed query: the receipt plus the optional thread scope.
+_TYPING_DELETE_QUERY = frozenset({"expected_account_id", "tenant_id", "thread_root_id"})
+#: The typing GET's closed query. ``tenant_id`` is required (the hub addresses
+#: the conversation by tenant); the receipt is OPTIONAL on this read, so a
+#: renderer that sends it gets the bearer compare and one that does not still
+#: reads only as the signed-in account (the hub drops the caller and serves
+#: members only).
+_TYPING_GET_QUERY = frozenset({"expected_account_id", "tenant_id"})
+
+
+class ConversationTypingIn(_Strict):
+    """The typing PUT body: the REQUIRED owner receipt and an optional thread.
+
+    Stated in full rather than inherited, for the reason
+    :class:`ConversationReactIn` gives: a required field narrowed in a subclass
+    of the optional-receipt base would still advertise the optional contract.
+    ``thread_root_id`` is checked against the message-id grammar here so a bad
+    value costs no hub round trip (the hub re-checks it).
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    thread_root_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _receipt_grammar(self) -> "ConversationTypingIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
+        if self.thread_root_id is not None and _MESSAGE_ID.fullmatch(self.thread_root_id) is None:
+            raise ValueError("thread_root_id is outside the accepted grammar")
+        return self
+
+
+def _typing_thread_root(request: Request) -> str | None:
+    """The optional ``thread_root_id`` query value, at most once and well-formed."""
+
+    got = request.query_params.getlist("thread_root_id")
+    if not got:
+        return None
+    if len(got) != 1 or _MESSAGE_ID.fullmatch(got[0]) is None:
+        _raise_read("invalid_request")
+    return got[0]
+
+
+async def _typing_reply(awaitable: Any) -> Any:
+    """``_conversation_reply`` plus a ``Retry-After`` header on a throttled answer.
+
+    The typing routes are the hub's first ~3 s pollers and sit behind their
+    own rate buckets (design §4); the renderer backs off on 429 by the
+    header, so a refusal carrying ``retry_after_seconds`` also sets it here.
+    Every other refusal keeps the family's shape (``outdated_hub`` 409, a coded
+    ``conversation_not_found`` 404 and a 503 pass through ``_raise_bridge``).
+    """
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+
+    try:
+        return await awaitable
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        if exc.retry_after_seconds is not None and exc.http_status is not None:
+            # ``retry_after_ms`` as well (QA round 1, Q1): the desktop
+            # transport reads ``detail.retry_after_ms`` because the renderer's
+            # whole cadence is in ms (``poll_after_ms``/``resend_after_ms``);
+            # the seconds field and the header stay for every other reader.
+            detail = _refusal_detail(exc)
+            detail["retry_after_ms"] = int(max(0, exc.retry_after_seconds) * 1000)
+            raise HTTPException(
+                exc.http_status,
+                detail,
+                headers={"Retry-After": str(max(0, exc.retry_after_seconds))},
+            ) from None
+        _raise_bridge(exc)
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/typing",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_typing(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Who else is typing here: the hub's JSON, passed through as-is.
+
+    ``{enabled, poll_after_ms, message_seq, truncated, typers: [...]}``. Not
+    reshaped: the renderer keys expiry on ``expires_in_ms``, scope on
+    ``thread_root_id`` and its history refetch on ``message_seq``. A read, so
+    no write-scope refusal (reads stay allowed under a kill, §7).
+    """
+    _require_conversation_id(conversation_id)
+    if set(request.query_params) - _TYPING_GET_QUERY:
+        _raise_read("invalid_request")
+    tenants = request.query_params.getlist("tenant_id")
+    receipts = request.query_params.getlist("expected_account_id")
+    if len(tenants) != 1 or not tenants[0].strip() or len(tenants[0]) > 128 or len(receipts) > 1:
+        _raise_read("invalid_request")
+    if receipts and not is_account_id(receipts[0]):
+        _raise_read("invalid_request")
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _typing_reply(
+            client.conversation_typing(
+                conversation_id,
+                tenant_id=tenants[0],
+                expected_account_id=receipts[0] if receipts else None,
+            )
+        )
+    )
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/typing",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_typing_set(
+    conversation_id: str,
+    request: Request,
+    body: ConversationTypingIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Heartbeat "I am typing"; answers the hub's ``{ttl_ms, resend_after_ms}``.
+
+    ``team_bridge.share_typing`` off → ``{shared: false}`` with NO upstream
+    call. The renderer already skips the heartbeat then; this check is the
+    defence in depth that keeps an older or misbehaving renderer from
+    disclosing a draft-in-progress the person opted out of sharing. The
+    owner receipt is still compared first, so a mismatch is ``409`` either way.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    client = _conversation_client(config_manager)
+    if not _read_share_typing(config_manager.config_dir):
+        # The owner receipt is checked BEFORE the opt-out short-circuit
+        # (review round 1, R3): a body captured for another account is a 409
+        # ``account_mismatch`` whatever this machine's preference says, so the
+        # renderer's account-switch handling never depends on a display
+        # setting. Local only — still no upstream byte on this path.
+        await _typing_reply(client.check_owner(body.expected_account_id))
+        return reply({"shared": False})
+
+    return reply(
+        await _typing_reply(
+            client.conversation_typing_set(
+                conversation_id,
+                tenant_id=body.tenant_id,
+                thread_root_id=body.thread_root_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/typing",
+    status_code=204,
+)
+async def conversation_typing_clear(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Stop "I am typing"; idempotent, ``204``.
+
+    The receipt rides in the QUERY (a DELETE body is not reliably carried),
+    REQUIRED exactly as on the PUT. Deliberately NOT gated on
+    ``share_typing``: removing state is always safe, and a person who turns
+    sharing off mid-draft must still be able to clear the entry they started.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    owner = _required_owner_query(request, _TYPING_DELETE_QUERY)
+    thread_root_id = _typing_thread_root(request)
+    assert owner.tenant_id is not None  # _required_owner_query requires it
+
+    client = _conversation_client(config_manager)
+    await _typing_reply(
+        client.conversation_typing_clear(
+            conversation_id,
+            tenant_id=owner.tenant_id,
+            thread_root_id=thread_root_id,
+            expected_account_id=owner.expected_account_id,
+        )
+    )
+    return Response(status_code=204)
 
 
 @router.post(

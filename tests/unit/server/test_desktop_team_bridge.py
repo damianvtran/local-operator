@@ -1106,6 +1106,8 @@ async def test_settings_get_passes_the_payload_through(api):
     result = response.json()["result"]
     assert result["default_on"] is False
     assert result["endpoint"] is None
+    # Machine-local typing preference (default on; typing design §7).
+    assert result["share_typing"] is True
     assert result["settings"] == payload["settings"]
     # ... and that list really is the evaluated table, so the block is not
     # passing by echoing whatever it was handed.

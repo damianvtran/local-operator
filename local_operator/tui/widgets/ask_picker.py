@@ -1671,7 +1671,17 @@ class AskPickerScreen(Container):
         clips it and marks the cut, which is the card's existing discipline and
         the honest answer on a terminal with nothing left to give.
         """
-        lines = wrap_cells(self.question.question, width) or [""]
+        # A newline is a ROW BREAK here, never a character (PR #3693 design D1).
+        # ``wrap_cells`` splits on " " only, so "a\nb" was one word: a host- or
+        # model-authored multi-line question counted 4 rows the terminal painted
+        # as 7, which squeezed the options and clipped the question's tail.
+        # Wrapped per paragraph here, not in the shared wrapper, because its 38
+        # callers (and its oracle tests) pin the space-only contract.
+        lines = [
+            row
+            for paragraph in self.question.question.split("\n")
+            for row in wrap_cells(paragraph, width)
+        ] or [""]
         if reveal:
             return lines
         cap = self._question_bound(width, len(lines))

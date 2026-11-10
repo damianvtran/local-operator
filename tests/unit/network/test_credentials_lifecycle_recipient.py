@@ -436,6 +436,14 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         wire.CREDENTIAL_PLACEMENT_PUSH_V1: "net_broker",
         # The share push is a ``placement`` KIND on the same op (``share_push``).
         wire.CREDENTIAL_SHARE_PUSH_V1: "net_broker",
+        # The CONDITIONAL pull gates a KIND's answer shape on the same op: an owner
+        # advertising it serves ``kind=placement want=pull`` with ``if_digest``
+        # understood, answering ``{unchanged, digest}`` — a ~150 B status — instead of
+        # the whole document when the asker's rows already hash alike. What a peer
+        # promises by advertising this is that its broker's placement handler exists
+        # and answers that field; it adds no op and no new kind, which is why the
+        # receiver it names is the broker itself, exactly as the two push strings do.
+        wire.CREDENTIAL_PLACEMENT_DIGEST_V1: "net_broker",
         # Catalogue is a metadata kind on the installed broker, not a pure
         # handshake feature or a second unregistered peer operation.
         wire.CREDENTIAL_CATALOGUE_METADATA_V1: "net_broker",
@@ -449,6 +457,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         "mesh-update-v1": "net_update",
         wire.MESH_RESTART_V1: "net_restart",
         "peer-journal-source-v1": "net_session_history",
+        # Change pushes gate a receiving mode on the existing membership op;
+        # advertising them promises that its handler understands bound snapshots.
+        wire.MEMBER_LIST_PUSH_V1: "net_member_list",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.

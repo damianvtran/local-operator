@@ -195,6 +195,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the prune vocabulary's own prose (the upgrade path's one line per removal)",
     ),
+    # The team-signed runtime publish step of an install (``lop update``, the TUI's
+    # ``/update``, a mesh update all reach it through ``install_into_generation``). Its
+    # three string coercions -- the ``startswith("refused:")`` level test and the
+    # warning's ``_TEAM_SKIP_REASONS`` lookup key plus fallback -- select a log level
+    # or feed the module LOGGER only: the function returns ``None``, and the mesh update's
+    # reply carries the installer subprocess's captured output, never logger records.
+    # The codes are ``procname.publish_team_runtime_result``'s own local tokens, never a
+    # peer's wire value, and the warning already says them in words via that table.
+    ("local_operator/update.py", "_publish_team_runtime", "reason"): (
+        3,
+        "log-only (debug/warning); local procname codes, glossed by _TEAM_SKIP_REASONS",
+    ),
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
     ("local_operator/network/cli.py", "_cmd_service", "reason"): (1, "a payload key, not a line"),

@@ -1,0 +1,52 @@
+# audit.log — actual command output, ur/cli.permissions audit urp1, 2026-11-09, worktree HEAD 50badda034d755ebb049c4f542f3073439bf823e
+$ shasum -a 256 en/cli.permissions.json en/cli.permissions.context.json ur/cli.permissions.json
+eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f  en/cli.permissions.json
+aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce  en/cli.permissions.context.json
+589e1fa1176215d05a3f66a3f7119eedc096b89cdee65dde2e4c0f2f29be08bd  ur/cli.permissions.json
+$ .venv/bin/python -c "catalogues.catalogue_sha256(en, cli.permissions)"
+eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ parity script (placeholders, backtick spans, verbatim literals, trailing space, bidi controls, native digits, key set, cell_len)
+keys en/ur: 28 28 order_equal: True symdiff: set()
+help.permissions                 cells en= 72 ur= 95 ph=[]
+help.status                      cells en= 84 ur=108 ph=[]
+help.setup                       cells en= 94 ur= 96 ph=[]
+status.not_macos                 cells en= 56 ur= 56 ph=[]
+status.identity.team             cells en= 78 ur= 82 ph=['{identifier}']
+status.identity.adhoc            cells en= 68 ur= 72 ph=['{identifier}']
+status.identity.legacy           cells en=105 ur=108 ph=[]
+status.identity.none             cells en= 79 ur= 70 ph=[]
+status.image                     cells en= 13 ur= 12 ph=['{path}']
+status.optin.on                  cells en= 51 ur= 45 ph=['{identity}', '{team}']
+status.optin.off                 cells en= 78 ur= 85 ph=[]
+status.optin.blocked             cells en= 52 ur= 48 ph=['{reason}']
+status.app.found                 cells en= 33 ur= 33 ph=['{path}', '{team}']
+status.app.missing               cells en= 26 ur= 28 ph=[]
+status.screen.granted            cells en= 45 ur= 45 ph=[]
+status.screen.denied             cells en=126 ur=125 ph=['{row}']
+status.screen.unknown            cells en= 58 ur= 53 ph=[]
+status.guide                     cells en= 30 ur= 29 ph=[]
+setup.refused.tty                cells en= 61 ur= 60 ph=[]
+setup.refused.isolated           cells en= 89 ur= 84 ph=['{reason}']
+setup.no_app                     cells en= 88 ur= 91 ph=[]
+setup.no_identity                cells en=131 ur=136 ph=['{team}']
+setup.explain                    cells en=221 ur=251 ph=['{name}']
+setup.confirm                    cells en= 16 ur= 18 ph=[]
+setup.cancelled                  cells en= 31 ur= 41 ph=[]
+setup.failed                     cells en=113 ur=122 ph=[]
+setup.always_allow               cells en= 63 ur= 77 ph=[]
+setup.done                       cells en=130 ur=150 ph=['{identifier}']
+mechanical problems: 0
+$ grep for Latin-led ur lines (first strong char LTR)
+first-strong L: cli.permissions.help.permissions
+first-strong L: cli.permissions.setup.refused.tty
+first-strong L: cli.permissions.setup.no_app
+$ grep -n "_RLI\|isolated_status_text\|print(_t" local_operator/permissions_cli.py | head -3
+91:        print(_t(_k.status_not_macos()))
+97:        print(_t(_k.status_identity_none()))
+99:        print(_t(_k.status_identity_team(identifier=identifier or procname.APP_BUNDLE_ID)))
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale ur --namespace cli.permissions
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+$ web_fetch https://www.apple.com/macos/feature-availability/ "System Language" section (harness web_fetch tool, 2026-11-09): list = Arabic, Catalan, Chinese Simplified, Chinese Traditional (HK), Chinese Traditional (TW), Croatian, Czech, Danish, Dutch, English (9 variants), Finnish, French (CA, FR), German, Greek, Hebrew, Hindi, Hungarian, Indonesian, Italian, Japanese, Korean, Malay, Norwegian, Polish, Portuguese (BR, PT), Romanian, Russian, Slovak, Slovenian, Spanish (4 variants), Swedish, Thai, Turkish, Ukrainian, Vietnamese — Urdu absent (Urdu appears only under keyboard/QuickType input).

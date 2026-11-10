@@ -2289,7 +2289,26 @@ class MeshCredentialBroker:
                 )
         if str(frame.get("want") or "") != "pull":
             return {"kind": "ack", "key": ""}
-        return {"kind": "placement", "document": self._document().to_json()}
+        document = self._document()
+        # THE CONDITIONAL PULL (`wire.CREDENTIAL_PLACEMENT_DIGEST_V1`). The asker names the
+        # digest of the rows it already holds FROM THIS DEVICE; when our own rows hash to
+        # that same value the merge it would run changes nothing, so the answer is a
+        # status instead of a 1.3-1.4 KB document. It hides nothing: the digest is over
+        # rows the asker may pull in full, and any difference — a new share, a holder
+        # added or removed, a ``doc_rev`` bump — moves it and gets the whole document.
+        # The ``_caller`` gate above is unchanged, so this is not a cheaper
+        # authorisation, only a cheaper answer to the same question.
+        mine = placement_mod.owner_rows_digest(document, self.self_device)
+        asked = frame.get("if_digest")
+        if isinstance(asked, str) and asked and asked == mine:
+            return {"kind": "placement", "unchanged": True, "digest": mine}
+        # THE DIGEST IS *NOT* ON THE FULL ANSWER (review round 1, M2). An asker that
+        # received a document recomputes the digest from its own merged copy, so this
+        # field had no reader — and it would be ~80 B on EVERY full answer, including
+        # every answer to a peer that predates the capability (100 % of a mixed fleet),
+        # in the very message this PR exists to shrink. An unused field a later build
+        # could start trusting is worse than no field.
+        return {"kind": "placement", "document": document.to_json()}
 
     # -- refresh delegation (mesh-refresh-delegation.md §3.2/§3.3) ----------
 

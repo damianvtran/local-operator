@@ -1,0 +1,26 @@
+{
+ "audit_id": "vp3",
+ "locale": "vi",
+ "namespace": "cli.permissions",
+ "round": 3,
+ "unresolved_blocker_major_count": 0,
+ "round2_findings": [
+  {
+   "id": "v2-m1",
+   "status": "resolved",
+   "key": "cli.permissions.setup.explain"
+  },
+  {
+   "id": "v2-n1",
+   "status": "resolved",
+   "key": "cli.permissions.setup.explain"
+  }
+ ],
+ "keys_audited": [
+  "cli.permissions.setup.already_signed",
+  "cli.permissions.setup.always_allow_kept",
+  "cli.permissions.status.scope",
+  "cli.permissions.setup.explain"
+ ],
+ "findings": []
+}

@@ -2146,16 +2146,49 @@ Warnings that still hold, each of which has already cost a release:
   omits a merged PR is a defect in the release, not a cosmetic miss — it is
   the only record of what changed under a user who is about to update.
 - **Re-derive the window immediately before `gh release create`, not once when
-  you claim it.** The bump commit is not a barrier: anything merged after it
-  and before the tag still rides the release, because the tag names a SHA and
-  everything reachable from it ships. This happened in v0.51.4 — #731 merged
-  *above* the bump commit `d1ce356ac`, shipped in the tag, and was absent from
-  the notes, even though the owner had polled every peer and derived the window
-  correctly when they started. Deriving it right once does not help if the
-  derivation is stale by the time you tag. The check is one command:
+  you claim it.** The tag's **target** is the frozen boundary: everything
+  reachable from that SHA ships, and nothing above it does. So whether a PR
+  merged after the bump commit rides the release depends entirely on what you
+  pass to `--target` — v0.51.4 tagged a patch above the bump commit, and #731,
+  merged in between, shipped with no note. Deriving the window correctly once
+  does not help if the derivation is stale by the time you tag, and a `--target`
+  you did not re-read is not a boundary you know. Two checks, both run
+  immediately before `gh release create`:
 
   ```sh
-  git log --oneline <last-tag>..origin/main   # immediately before tagging
+  git log --oneline <last-tag>..<target-sha>            # enumerate the range
+  git merge-base --is-ancestor <merge-sha> <target-sha>  # 0 = inside, 1 = not, 128 = the test itself failed
+  ```
+
+  `<target-sha>` is the literal SHA you will pass to `--target` — not
+  `origin/main`, and not whatever the tip happens to be when you read this.
+  The first command answers *what is in the range*: the plain log, squash
+  commits included, per the paragraph above. The second answers a different
+  question that the log alone cannot: *is this pull's merge SHA actually inside
+  the frozen target*. Run it for every PR you intend to name, and for every PR
+  a peer hands you, rather than inferring inclusion from the shape of the
+  history or from whichever commit sits at the tip. A squash-merged PR is still
+  one SHA and still testable: `gh pr view <n> --json state,mergedAt,mergeCommit`
+  returns it as `mergeCommit.oid`. The two instruments disagree often enough to
+  matter — `--merges` shows only the merge-button PRs, a tip read shows only
+  what landed last, and a window derived from either is *partially* correct,
+  which is the shape of error that survives review.
+
+  **A `1` from the ancestry test is a lead, not a verdict.** The recorded merge
+  SHA is held by the server, and a rewrite of `main` — which this repository
+  has done — leaves it orphaned while the pull's content is still in the range.
+  On #731, this section's own precedent, `gh pr view 731 --json mergeCommit,state`
+  returns a SHA that is *not* an ancestor of `v0.51.4`; the merge commit actually
+  on the branch is. The condition tracks rewrites of `main` rather than age —
+  probes at #1000 and #2925 read this way while #3000 and #3650 read clean — so
+  a `1` is evidence about a pull's recorded history, never proof of absence.
+  Settle those by number inside the enumerated range before excluding them,
+  anchoring on the two landing shapes so a commit that merely *mentions* the
+  pull does not count as the pull landing:
+
+  ```sh
+  git log --oneline <last-tag>..<target-sha> \
+    | grep -E '\(#<n>\)$|^[0-9a-f]+ Merge pull request #<n> '
   ```
 
   The other half of this is the merger's duty, and it is stated where a merger

@@ -1,0 +1,89 @@
+{
+  "locale": "ur",
+  "namespace": "cli.permissions",
+  "audit_id": "urp2",
+  "round": 2,
+  "audit_date": "2026-11-09",
+  "key_count": 38,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "source_audit_revision": "788cc399410196b080cfc9f7e7bd558ccb713140",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "26eb57e200ee",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "Host system prompt 'Model: anthropic/claude-opus-5-5' for this session; no fallback occurred",
+    "fallback": null,
+    "independent_from_translator_session": true,
+    "independent_from_round1_auditor_session": true,
+    "independence": "Distinct agent/session from the round-2 ur i18n-translator (commit 788cc399410; translator session not disclosed to auditor) and from round-1 auditor ffe80a68ac43. Same model family: independent agent, not independent vendor."
+  },
+  "translator": {
+    "agent": "i18n-translator (PR #3691 round-2 wave, ur)",
+    "session": "not disclosed to auditor",
+    "model": "not disclosed to auditor",
+    "commit": "788cc399410196b080cfc9f7e7bd558ccb713140"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/cli.permissions.json",
+      "sha256": "d7c43d6fb49957159c23c4e3a51263744744df59301ac0d8c9d6c32f4630c50d"
+    }
+  },
+  "source_sha256_ledger": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+  "prior_round": {
+    "record": "i18n/audits/evidence/ur/cli.permissions/urp1/record.json",
+    "findings_disposition": {
+      "U1": "resolved",
+      "U2": "resolved",
+      "U3": "resolved",
+      "U4": "resolved",
+      "U5": "applied (no_app left per advice)"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp2/report.md",
+      "sha256": "edcedafa4f52542187164405b03dee349b6e0d46ed35a1161a9b9bc8dadc422e"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp2/audit.log",
+      "sha256": "f408f9ab480911ff5696594cf828411d509d8744b2f6c16a72c0b38876d5a35a"
+    },
+    "mech_check.py.txt": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp2/mech_check.py.txt",
+      "sha256": "e007e5f159515f17cbad637fd769bfc06ba0e15f2f72abb65c1ad527fe758798"
+    },
+    "apple_labels.py.txt": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp2/apple_labels.py.txt",
+      "sha256": "863356da395a0eb8d37f8398592cc65453412a5a83ba224bfd0593e3b002d5d8"
+    }
+  },
+  "audit_log_is_execution_log": true,
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log holds actual command output from this session (check.py, mech_check, Apple loctable extraction, sw_vers). *.py.txt are the exact scripts run.",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "P1",
+      "P2",
+      "P3",
+      "P4"
+    ],
+    "severities": {
+      "P1": "MINOR",
+      "P2": "NIT",
+      "P3": "NIT",
+      "P4": "NIT"
+    }
+  },
+  "mt_service_used": false,
+  "original_lost_evidence": null
+}

@@ -2007,6 +2007,26 @@ class QueuedProfileWrite:
 
 
 @dataclass(frozen=True)
+class QueuedHubPull:
+    """The host filed a hub-pull consent ask: explicitly NOT a grant or a denial.
+
+    WHY a separate outcome. An org-hub pull is most often requested from a turn
+    with nobody attached to answer a card (a Team Bridge message, a peer, a
+    wake). Refusing there told users to run CLI commands they do not know. The
+    host instead queues ONE host-authored ask carrying the exact plan; the
+    user's affirmative answer, arriving as its own turn, is what the seam later
+    grants on (single use, bound to tenant and kinds). The tool reports this as
+    "asked — end the turn, retry when the answer arrives".
+    """
+
+    ask_id: str
+    tenant: str
+    #: True when an OPEN ask for the same tenant already existed and was reused,
+    #: so the model is not told it filed a second question.
+    reused: bool = False
+
+
+@dataclass(frozen=True)
 class DurableWriteIntent:
     """One TOOL-proposed write that would change the user's ACCOUNT store.
 
@@ -2036,8 +2056,23 @@ class DurableWriteIntent:
     #: surface can authorise it, which is exactly what the seam answers.
     #: ``revert`` restores a row from the backup a granted save took; it is an
     #: account write like any other, so it goes through the same seam.
+    #: ``hub_pull`` is the org-hub pull/update class (``org_pull`` with
+    #: ``on_conflict`` adopt-link|skip): new items linked without overwriting
+    #: anything, already-linked items updated through the sync merge with no
+    #: forced conflict, and links re-subscribed. It is a separate operation so
+    #: the consent it can earn (auto policy, the owner's request, an answered
+    #: host-filed ask) can never authorise hub-wins ``adopt``/``reconcile``,
+    #: which stay ``sync`` + ``confirm_replace``.
     operation: Literal[
-        "create", "update", "delete", "install", "reset", "sync", "promote", "revert"
+        "create",
+        "update",
+        "delete",
+        "install",
+        "reset",
+        "sync",
+        "promote",
+        "revert",
+        "hub_pull",
     ]
     name: str
     #: Always ``global`` today: a conversation-scoped write never asks. Kept
@@ -2059,6 +2094,12 @@ class DurableWriteIntent:
     #: binds session/anchor/expiry when filing the signed operation request.
     proposal: dict[str, Any] | None = None
     tool_call_id: str = ""
+    #: ``hub_pull`` only: the HOST-COMPUTED plan (tenant, kinds, new items,
+    #: linked items with an available update and their revisions, links to
+    #: re-subscribe). Built by the tool from the catalogue and the sync check,
+    #: never from a model parameter; the seam renders it on the ask/card and
+    #: binds a grant to its tenant and kinds. Shape: ``hub_org.consent``.
+    plan: dict[str, Any] | None = None
 
 
 class ToolContext(BaseModel):

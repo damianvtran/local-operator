@@ -1,0 +1,58 @@
+[
+  {
+    "id": "FRPM-1",
+    "severity": "MAJOR",
+    "key": "27 of 28 keys (all except cli.permissions.setup.refused.tty)",
+    "current": "ASCII apostrophe U+0027 in 22 keys and U+0020 before : ; ? » / after « in 20 keys; zero U+2019 and zero U+202F in the namespace (e.g. \"Signature d'équipe : activée\", \"« Local Operator »\", \"Continuer ? [y/N] \")",
+    "problem": "Binding fr style guide (Punctuation & typography) requires ’ and U+202F before : ; ! ? and inside « »; the rest of the fr corpus complies (1 653 ’ / 1 007 U+202F). Systematic, not a stray site (contrast wire.settings le28r2 F3: 4 stray sites among 177, graded minor), so this whole CLI reads untypeset next to every other fr surface.",
+    "suggested": "Replace U+0027→U+2019 outside code spans and the U+0020 before :;?!» and after « with U+202F; never inside backticks, guide://permissions or [y/N]. Full corrected values in report.md §Suggested values."
+  },
+  {
+    "id": "FRPM-2",
+    "severity": "MINOR",
+    "key": "help.setup, status.identity.team, status.optin.off, status.app.found, status.app.missing, setup.no_app, setup.explain, setup.done",
+    "current": "app de bureau / App de bureau / d'app",
+    "problem": "Every other fr namespace (relay.agent_avatar, relay.session.tags, tui.team_authoring, wire.settings, wire.settings.keymap: 8 occurrences) says « application de bureau »; this namespace alone says « app de bureau ». No width budget forces the short form.",
+    "suggested": "application de bureau (Application de bureau : {path} (équipe {team}); …aucune autorisation d’application à partager.)"
+  },
+  {
+    "id": "FRPM-3",
+    "severity": "MINOR",
+    "key": "cli.permissions.setup.explain",
+    "current": "Cette étape signe le runtime … macOS peut demander une fois si codesign peut utiliser cette clé.",
+    "problem": "‘This’ is the command the user just ran, not a step; ‘peut demander … si codesign peut’ repeats pouvoir and reads as a calque of ‘may ask whether … may’.",
+    "suggested": "Cette commande signe le runtime avec « {name} » pour que les runtimes partagent les autorisations de confidentialité de l’application de bureau. macOS vous demandera peut-être une fois d’autoriser codesign à utiliser cette clé. Choisissez « Toujours autoriser » pour que les prochains `lop update` puissent signer sans demander."
+  },
+  {
+    "id": "FRPM-4",
+    "severity": "MINOR",
+    "key": "cli.permissions.setup.refused.isolated",
+    "current": "… Lancez-la depuis votre propre shell de connexion.",
+    "problem": "‘-la’ grammatically binds to « la signature d’équipe » — one does not « lancer une signature »; the English ‘it’ is the command.",
+    "suggested": "La signature d’équipe n’est pas autorisée dans ce processus ({reason}). Lancez la commande depuis votre propre shell de connexion."
+  },
+  {
+    "id": "FRPM-N1",
+    "severity": "NIT",
+    "key": "cli.permissions.help.permissions",
+    "current": "Inspecter ou configurer…",
+    "problem": "‘Inspecter’ is a calque of ‘Inspect’ for a read-only status view.",
+    "suggested": "Consulter ou configurer l’identité de confidentialité macOS qu’utilisent les runtimes Local Operator"
+  },
+  {
+    "id": "FRPM-N2",
+    "severity": "NIT",
+    "key": "cli.permissions.setup.always_allow",
+    "current": "(ou aucune boîte de dialogue n'est apparue) ?",
+    "problem": "Statement inside a question; slightly clumsy, meaning and y-polarity are preserved.",
+    "suggested": "Avez-vous choisi « Toujours autoriser » (ou aucune fenêtre ne s’est affichée) ? [y/N] "
+  },
+  {
+    "id": "FRPM-N3",
+    "severity": "NIT",
+    "key": "status.screen.granted/denied/unknown",
+    "current": "(vérification du runtime)",
+    "problem": "‘preflight’ is a check made without prompting; « vérification préalable » is closer if space allows (no budget declared).",
+    "suggested": "(vérification préalable du runtime)"
+  }
+]

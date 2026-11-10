@@ -731,6 +731,16 @@ export type MessageParams = {
   "wire.harness_import_detail.omp_missing": undefined;
   "wire.host_speed.retire_below_tps.help": undefined;
   "wire.host_speed.retire_below_tps.label": undefined;
+  "wire.hub_pull.ask.local_edits": undefined;
+  "wire.hub_pull.ask.more": { "names": string; "count": string };
+  "wire.hub_pull.ask.new": { "count": number; "names": string };
+  "wire.hub_pull.ask.option.not_now": undefined;
+  "wire.hub_pull.ask.option.not_now.description": undefined;
+  "wire.hub_pull.ask.option.update": undefined;
+  "wire.hub_pull.ask.option.update.description": undefined;
+  "wire.hub_pull.ask.resubscribe": { "count": number; "names": string };
+  "wire.hub_pull.ask.title": { "org": string };
+  "wire.hub_pull.ask.updates": { "count": number; "names": string };
   "wire.language_receipts.already": { "key": string; "tag": string; "name": string };
   "wire.language_receipts.save_failed": { "key": string; "error": string };
   "wire.language_receipts.saved": { "key": string; "tag": string; "name": string };
