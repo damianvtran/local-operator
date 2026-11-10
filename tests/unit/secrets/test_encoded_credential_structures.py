@@ -21,6 +21,7 @@ import hashlib
 import json
 import time
 import urllib.parse
+from typing import Any
 
 import pytest
 
@@ -304,6 +305,14 @@ NEGATIVE = [
 ]
 
 
+NEGATIVE.append(
+    pytest.param(
+        "dump " + 'call = handle(data, Conf.Map{"[redacted]": value})'.encode().hex(),
+        id="hex of code that already carries the marker (FP measurement)",
+    )
+)
+
+
 @pytest.mark.parametrize("text", NEGATIVE)
 def test_ordinary_text_is_byte_identical(text: str) -> None:
     assert scrub_shapes(text) == text
@@ -396,3 +405,140 @@ def test_decode_pass_stays_fast_on_a_large_token_heavy_output() -> None:
     started = time.perf_counter()
     assert _scrub_encoded_credentials(text, [], None, 0, _DecodeBudget()) == text
     assert time.perf_counter() - started < 1.0
+
+
+# --- Terraform plan JSON (second incident: TFC ``/plans/<id>/json-output``) ------
+
+TF_DB_PASSWORD = "tf-fake-" + "Sensitive9Q"
+TF_TOKEN = "tf-fake-" + "AttrSecret7Z"
+
+
+def terraform_plan() -> dict[str, Any]:
+    """A synthetic ``terraform show -json`` plan: one sensitive variable, one
+    sensitive attribute, and non-sensitive values that must survive."""
+    return {
+        "format_version": "1.2",
+        "terraform_version": "1.9.0",
+        "variables": {
+            "db_password": {"value": TF_DB_PASSWORD},
+            "region": {"value": "europe-west1"},
+        },
+        "planned_values": {
+            "root_module": {
+                "resources": [
+                    {
+                        "address": "google_sql_user.app",
+                        "type": "google_sql_user",
+                        "name": "app",
+                        "values": {"name": "app", "password": TF_DB_PASSWORD, "instance": "db-1"},
+                        "sensitive_values": {"password": True},
+                    }
+                ]
+            },
+            "outputs": {"api_token": {"sensitive": True, "value": TF_TOKEN}},
+        },
+        "resource_changes": [
+            {
+                "address": "google_sql_user.app",
+                "type": "google_sql_user",
+                "name": "app",
+                "change": {
+                    "actions": ["create"],
+                    "before": None,
+                    "after": {
+                        "name": "app",
+                        "password": TF_DB_PASSWORD,
+                        "instance": "db-1",
+                        "labels": {"token": TF_TOKEN, "team": "jobs"},
+                    },
+                    "before_sensitive": False,
+                    "after_sensitive": {"password": True, "labels": {"token": True}},
+                },
+            }
+        ],
+        "configuration": {
+            "root_module": {
+                "variables": {
+                    "db_password": {"sensitive": True},
+                    "region": {"default": "europe-west1"},
+                }
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("indent", [None, 2], ids=["compact (TFC API)", "pretty"])
+def test_terraform_plan_masks_exactly_the_paths_it_marks_sensitive(indent: int | None) -> None:
+    text = "exit code: 0\n--- stdout ---\n" + json.dumps(terraform_plan(), indent=indent) + "\n"
+    out = scrub_shapes(text)
+    assert TF_DB_PASSWORD not in out and TF_TOKEN not in out
+    plan = json.loads(out[out.index("{") :])
+    assert plan["variables"]["db_password"]["value"] == REDACTION_MARKER
+    assert plan["variables"]["region"]["value"] == "europe-west1"
+    after = plan["resource_changes"][0]["change"]["after"]
+    assert after == {
+        "name": "app",
+        "password": REDACTION_MARKER,
+        "instance": "db-1",
+        "labels": {"token": REDACTION_MARKER, "team": "jobs"},
+    }
+    assert plan["resource_changes"][0]["change"]["before"] is None
+    values = plan["planned_values"]["root_module"]["resources"][0]["values"]
+    assert values == {"name": "app", "password": REDACTION_MARKER, "instance": "db-1"}
+    assert plan["planned_values"]["outputs"]["api_token"]["value"] == REDACTION_MARKER
+    assert plan["resource_changes"][0]["address"] == "google_sql_user.app"
+
+
+def test_terraform_redacted_plan_and_truncated_plan_are_left_to_the_plain_rules() -> None:
+    redacted = terraform_plan()
+    redacted["variables"]["db_password"]["value"] = None
+    redacted["resource_changes"][0]["change"]["after"]["password"] = None
+    redacted["resource_changes"][0]["change"]["after"]["labels"]["token"] = None
+    redacted["planned_values"]["root_module"]["resources"][0]["values"]["password"] = None
+    redacted["planned_values"]["outputs"]["api_token"]["value"] = None
+    text = json.dumps(redacted)
+    assert scrub_shapes(text) == text
+    # Truncated JSON: not parsed, not guessed at — byte-identical when nothing
+    # in it is credential-shaped.
+    no_secrets = json.dumps(terraform_plan()).replace(TF_DB_PASSWORD, "x").replace(TF_TOKEN, "y")
+    assert scrub_shapes(no_secrets[:-40]) == no_secrets[:-40]
+
+
+@pytest.mark.parametrize(
+    ("command", "fires"),
+    [
+        ("curl -s https://app.terraform.io/api/v2/plans/plan-AbC123/json-output", True),
+        ("curl -s https://app.terraform.io/api/v2/plans/plan-AbC123/json-output-redacted", False),
+        ("terraform show -json tfplan", True),
+        ("terraform show tfplan", False),
+        ("aws secretsmanager get-secret-value --secret-id prod/db", True),
+        ("aws secretsmanager describe-secret --secret-id prod/db", False),
+        ("aws secretsmanager list-secrets --query 'SecretList[].Name'", False),
+    ],
+)
+def test_terraform_and_aws_secret_steers(command: str, fires: bool) -> None:
+    notice = credential_dump_notice(command)
+    assert (notice is not None) is fires
+    if notice:
+        assert "`" in notice and len(notice) <= 88
+
+
+@pytest.mark.parametrize(
+    ("command", "fires"),
+    [
+        # Real spellings from the false-positive measurement (names changed).
+        ("kubectl --context prod -n jobs get secret app-sc -o json | python3 -c 'x'", True),
+        ("kubectl --context prod -n jobs get secret app-sc -o json | jq -r '.data.BUCKET'", True),
+        (
+            "kubectl --context prod -n jobs get secret app-sc -o json 2>/dev/null"
+            " | jq -r '.data | keys[]'",
+            False,
+        ),
+        ("kubectl --context prod -n jobs get secrets 2>&1 | head -10", False),
+        ("kubectl get secrets", True),  # the flag-free listing keeps its pre-existing steer
+        ("terraform show -json tfplan 2>&1 >/dev/null | grep -E 'Warning'", False),
+        ("terraform show -json tfplan > plan.json", True),
+    ],
+)
+def test_steers_fire_on_value_dumps_and_not_on_name_listings(command: str, fires: bool) -> None:
+    assert (credential_dump_notice(command) is not None) is fires

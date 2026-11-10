@@ -60,6 +60,12 @@ are masked wherever they appear on a model-visible surface:
   a Secret);
 * a service-account key's `private_key_id`. Its `client_email` and
   `project_id` are identifiers and stay readable.
+* a value a Terraform plan JSON (`terraform show -json`, Terraform Cloud's
+  `/plans/<id>/json-output`) itself marks sensitive: `before_sensitive`/
+  `after_sensitive` leaves, `sensitive_values`, a sensitive output, and an
+  input variable whose configuration declares `sensitive: true`. Keys,
+  resource addresses, types, names and every unmarked value stay readable; a
+  plan that does not parse whole (truncated) is left to the plaintext rules.
 
 ### 2.2 Not a secret
 
@@ -346,8 +352,12 @@ comment.
   existing deferral cap; a block larger than that cap is published before its
   `kind` line, and only its credential-shaped (or encoded-credential) values
   are masked live. The settled result is masked whole.
-* The argument pass (code) and the team-bridge guard skip the Secret
-  structure rule: a manifest the agent writes may carry an ordinary value that
+* Terraform plan JSON is parsed only when it carries a plan anchor and a
+  sensitivity marker, and only up to 32 MiB; a larger or truncated plan keeps
+  only the plaintext rules. Masked plan values are not registered session-wide
+  (a sensitive attribute is often an ordinary short word).
+* The argument pass (code) and the team-bridge guard skip the Secret and
+  Terraform structure rules: a manifest the agent writes may carry an ordinary value that
   must not be rewritten in its own program. The decode pass still runs there.
 
 ## 7. Enforcement map

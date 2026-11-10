@@ -4978,11 +4978,12 @@ GCP_KEY_ID_LABEL = "gcp-service-account-key-id"
 #: third level has no real-world spelling we know of and only costs time.
 _DECODE_MAX_DEPTH = 2
 #: Per-call work bounds for the decode pass, so a multi-megabyte result cannot
-#: turn the pass into a stall. Sized against the measured distribution (PR
-#: "False-positive measurement"): the largest persisted tool result in the sample
-#: carried far fewer candidates than this, so the caps bind only on pathological
+#: turn the pass into a stall. Sized above the measured maximum: over 1,511,507
+#: unique transcript strings from the 200 most recent sessions on the author's
+#: machine (2026-11-10), the most base64 candidates in one text was 6,925, so the
+#: caps bind only on pathological
 #: input — where the pass stops decoding (fails OPEN for that remainder) rather
-#: than holding the result path hostage. The structure rules are not capped.
+#: than holding the result path hostage. The Kubernetes rules are not capped.
 _DECODE_MAX_CANDIDATES = 20000
 _DECODE_MAX_BYTES = 4 * 1024 * 1024
 #: A token shorter than this cannot decode to a credential the table recognises
@@ -4998,12 +4999,18 @@ _HEX_TOKEN_RE = re.compile(r"[0-9A-Fa-f]+")
 #: A run of URL characters carrying at least one %xx escape. ``=``, ``&``, ``?``
 #: and quotes END a run, so a query parameter's value is one run and its name and
 #: the rest of the URL stay readable.
-_PCT_RUN_RE = re.compile(r"[A-Za-z0-9._~+:/@-]*(?:%[0-9A-Fa-f]{2}[A-Za-z0-9._~+:/@-]*)+")
+#:
+#: Both run patterns start ONLY at a run boundary (the lookbehind) and never
+#: backtrack inside a run (possessive quantifiers): without that, a search
+#: restarted at every character of a long unbroken run and rescanned it, which
+#: measured 8.8 s on one 442,791-character transcript string.
+_PCT_RUN_RE = re.compile(
+    r"(?<![A-Za-z0-9._~+:/@%-])[A-Za-z0-9._~+:/@-]*+" r"(?:%[0-9A-Fa-f]{2}[A-Za-z0-9._~+:/@-]*+)++"
+)
 #: A run of JSON string content carrying at least one ``\/`` or ``\uXXXX`` escape.
 _JSON_ESCAPED_RUN_RE = re.compile(
-    r"(?:[^\s\"'\\]|\\(?:u[0-9A-Fa-f]{4}|[\\/bfnrt]))*"
-    r"\\(?:/|u[0-9A-Fa-f]{4})"
-    r"(?:[^\s\"'\\]|\\(?:u[0-9A-Fa-f]{4}|[\\/bfnrt]))*"
+    r"(?<![^\s\"'])(?=[^\s\"'\\]*+(?:\\[^/u\s][^\s\"'\\]*+)*+\\(?:/|u[0-9A-Fa-f]{4}))"
+    r"(?:[^\s\"'\\]|\\(?:u[0-9A-Fa-f]{4}|[\\/bfnrt]))*+"
 )
 
 #: ``private_key_id`` of a service-account key: 40 hex today, bounded loosely.
@@ -5097,9 +5104,15 @@ def _decoded_carries_credential(
     depth: int,
     budget: _DecodeBudget,
 ) -> bool:
-    """Whether ``decoded`` is masked by the full pass — i.e. holds a credential."""
+    """Whether the full pass MASKS something in ``decoded`` — i.e. it holds a credential.
+
+    Counted in markers rather than read as "the text changed": the table also
+    normalises an already-masked spelling (closing a partial ``[redacted``), and a
+    hex-encoded snippet of code that merely CONTAINS the marker was masked whole
+    on that difference in the false-positive measurement (session da52de3240bb).
+    """
     scrubbed, _ = _scrub_all_with_hits(decoded, reject, depth + 1, budget)
-    return scrubbed != decoded
+    return scrubbed.count(REDACTION_MARKER) > decoded.count(REDACTION_MARKER)
 
 
 def _scrub_encoded_credentials(
@@ -5380,7 +5393,164 @@ def _scrub_k8s_secret_json(text: str, hits: list[ShapeHit]) -> str:
     return "".join(pieces)
 
 
+# --- Terraform plan JSON ---------------------------------------------------------
+#
+# WHY (2026-11, second incident): an agent read Terraform Cloud's
+# ``/api/v2/plans/<id>/json-output`` — the full ``terraform show -json`` plan,
+# where values the configuration marks ``sensitive`` are printed in clear (the
+# ``json-output-redacted`` endpoint nulls them). The plan DECLARES which values
+# are sensitive (``before_sensitive``/``after_sensitive``, ``sensitive_values``,
+# a variable's ``sensitive: true``), so this masks exactly those paths and
+# nothing else: keys, resource addresses, types and names stay readable, and
+# every other value is left to the ordinary rules. A text that does not parse as
+# one whole plan object (truncated, partial) is not guessed at — the plaintext
+# rules still run over it.
+
+#: Larger texts are not parsed (memory and time); the plaintext rules still run.
+_TF_PLAN_MAX_CHARS = 32 * 1024 * 1024
+_TF_PLAN_ANCHORS = ('"resource_changes"', '"planned_values"', '"prior_state"', '"variables"')
+_TF_PLAN_MARKERS = ('"after_sensitive"', '"before_sensitive"', '"sensitive_values"', '"sensitive"')
+
+
+def _tf_mask(value: Any, mask: Any) -> tuple[Any, bool]:
+    """``value`` with every leaf ``mask`` marks ``true`` replaced by the marker.
+
+    ``mask`` mirrors ``value``'s shape (Terraform's sensitivity encoding): ``true``
+    masks the whole subtree, an object or list recurses, anything else keeps it.
+    A ``null`` value stays ``null`` — there is nothing to hide, and the marker
+    would claim there was.
+    """
+    if mask is True:
+        if value is None:
+            return value, False
+        return REDACTION_MARKER, True
+    if isinstance(mask, dict) and isinstance(value, dict):
+        changed = False
+        out = dict(value)
+        for key, sub in mask.items():
+            if key in out:
+                out[key], did = _tf_mask(out[key], sub)
+                changed = changed or did
+        return out, changed
+    if isinstance(mask, list) and isinstance(value, list):
+        changed = False
+        out_list = list(value)
+        for index, sub in enumerate(mask[: len(out_list)]):
+            out_list[index], did = _tf_mask(out_list[index], sub)
+            changed = changed or did
+        return out_list, changed
+    return value, False
+
+
+def _tf_mask_change(change: Any) -> bool:
+    if not isinstance(change, dict):
+        return False
+    changed = False
+    for side in ("before", "after"):
+        if side in change:
+            change[side], did = _tf_mask(change[side], change.get(side + "_sensitive"))
+            changed = changed or did
+    return changed
+
+
+def _tf_mask_module(module: Any) -> bool:
+    """``planned_values``/``prior_state.values`` modules: ``values`` by ``sensitive_values``."""
+    if not isinstance(module, dict):
+        return False
+    changed = False
+    for resource in module.get("resources") or ():
+        if isinstance(resource, dict) and "values" in resource:
+            resource["values"], did = _tf_mask(resource["values"], resource.get("sensitive_values"))
+            changed = changed or did
+    for child in module.get("child_modules") or ():
+        changed = _tf_mask_module(child) or changed
+    return changed
+
+
+def _tf_mask_outputs(outputs: Any) -> bool:
+    changed = False
+    if isinstance(outputs, dict):
+        for output in outputs.values():
+            if isinstance(output, dict) and output.get("sensitive") is True:
+                if output.get("value") is not None:
+                    output["value"] = REDACTION_MARKER
+                    changed = True
+    return changed
+
+
+def _tf_mask_plan(plan: dict[str, Any]) -> bool:
+    changed = False
+    for key in ("resource_changes", "resource_drift"):
+        for entry in plan.get(key) or ():
+            if isinstance(entry, dict):
+                changed = _tf_mask_change(entry.get("change")) or changed
+    output_changes = plan.get("output_changes")
+    if isinstance(output_changes, dict):
+        for change in output_changes.values():
+            changed = _tf_mask_change(change) or changed
+    planned = plan.get("planned_values")
+    if isinstance(planned, dict):
+        changed = _tf_mask_module(planned.get("root_module")) or changed
+        changed = _tf_mask_outputs(planned.get("outputs")) or changed
+    prior = plan.get("prior_state")
+    if isinstance(prior, dict) and isinstance(prior.get("values"), dict):
+        changed = _tf_mask_module(prior["values"].get("root_module")) or changed
+        changed = _tf_mask_outputs(prior["values"].get("outputs")) or changed
+    # Input variables carry no sensitivity of their own in the plan: the
+    # configuration's declaration (``sensitive = true``) is where it lives.
+    variables = plan.get("variables")
+    configuration = plan.get("configuration")
+    root = configuration.get("root_module") if isinstance(configuration, dict) else None
+    declared = root.get("variables") if isinstance(root, dict) else None
+    if isinstance(variables, dict) and isinstance(declared, dict):
+        for name, declaration in declared.items():
+            entry = variables.get(name)
+            if (
+                isinstance(declaration, dict)
+                and declaration.get("sensitive") is True
+                and isinstance(entry, dict)
+                and entry.get("value") is not None
+            ):
+                entry["value"] = REDACTION_MARKER
+                changed = True
+    return changed
+
+
+def _scrub_terraform_plan_json(text: str) -> str:
+    """Mask the values a Terraform plan JSON marks sensitive; see the section note."""
+    if len(text) > _TF_PLAN_MAX_CHARS or not any(a in text for a in _TF_PLAN_ANCHORS):
+        return text
+    if not any(m in text for m in _TF_PLAN_MARKERS):
+        return text
+    start = text.find("{")
+    while start >= 0:
+        try:
+            plan, end = json.JSONDecoder().raw_decode(text, start)
+        except ValueError:
+            plan, end = None, -1
+        if isinstance(plan, dict) and any(
+            key in plan for key in ("resource_changes", "planned_values", "prior_state")
+        ):
+            if not _tf_mask_plan(plan):
+                return text
+            span = text[start:end]
+            rendered = json.dumps(plan, ensure_ascii=False, indent=2 if "\n" in span else None)
+            return text[:start] + rendered + text[end:]
+        if end > start:
+            start = text.find("{", end)  # a whole object that is not a plan: skip it
+        else:
+            # Not parseable from here (truncated or not JSON): only a LATER
+            # top-level ``{`` can start a plan; do not guess at this one.
+            next_line = text.find("\n{", start)
+            start = next_line + 1 if next_line >= 0 else -1
+    return text
+
+
 def _scrub_credential_structures(text: str, hits: list[ShapeHit]) -> str:
+    # Terraform plan values are masked in place and never registered: a
+    # sensitive attribute is often a short ordinary word or number, and
+    # promoting it would mask that word in every later result.
+    text = _scrub_terraform_plan_json(text)
     if "Secret" in text:
         text = _scrub_k8s_secret_json(text, hits)
         text = _scrub_k8s_secret_yaml(text, hits)
@@ -5464,8 +5634,8 @@ def _scrub_all_with_hits(
     The structure and decode passes run BEFORE the anchor gate because what they
     find carries no anchor by construction: base64 of a DSN has no ``://``.
 
-    The Kubernetes Secret rule is skipped under a ``reject`` hook. That hook is a
-    caller saying "this text is CODE or a guard's probe, mask only on spelling
+    The Kubernetes Secret and Terraform plan rules are skipped under a ``reject``
+    hook. That hook is a caller saying "this text is CODE or a guard's probe, mask only on spelling
     evidence" (:func:`scrub_shapes_for_arguments`, the team-bridge guard): a
     Secret manifest an agent writes may carry a non-credential value (``info``)
     that must not be rewritten in its own replayed program. The decode pass still
@@ -7854,15 +8024,17 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # secret rendered as yaml/json, or a describe. The one-key jsonpath form
         # is in ``excluded`` because it is the safer form this table recommends.
         re.compile(
-            # Global flags may sit between ``kubectl`` and the verb
-            # (``kubectl -n jobs get secrets``, ``--context prod``).
-            r"(?i)\bkubectl(?:\s+-[^\s]+(?:\s+[^\s-][^\s]*)?)*?\s+(?:"
-            # ``-oyaml``, ``-o json``, ``--output=yaml`` and ``--output json`` are
-            # one flag to kubectl; the long spelling used to pass with no steer.
+            # Global flags may sit between ``kubectl`` and the verb of a VALUE
+            # dump (``kubectl --context prod -n jobs get secret X -o json``) —
+            # the false-positive measurement found 20 such real dumps the old
+            # spelling missed. ``-oyaml``, ``-o json``, ``--output=yaml`` and
+            # ``--output json`` are one flag to kubectl.
+            r"(?i)\bkubectl(?:\s+-[^\s]+(?:\s+[^\s-][^\s]*)?)*?\s+"
             r"get\s+secrets?\b[^\n]*?\s(?:-o\s*|--output(?:=|\s+))(?:yaml|json|wide)\b"
-            r"|get\s+secrets\b"
-            r"|describe\s+secrets?\b"
-            r")"
+            # The name-listing spellings keep their original, flag-free reach:
+            # through global flags they fired on name listings (``get secrets |
+            # head``) that print no value, measured as six steers with no dump.
+            r"|\bkubectl\s+(?:get\s+secrets\b|describe\s+secrets?\b)"
         ),
         # A steer, never a block (operator, 2026-11): the agent learns what a
         # Secret holds from its KEY NAMES, and a value goes straight into the
@@ -7894,6 +8066,17 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # ``config --services`` (and the other SELECTOR flags) print names, not
         # resolved values, and this table recommends exactly that form.
         excluded=re.compile(r"(?i)--(?:services|images|hash|volumes|profiles|networks|list)\b"),
+    ),
+    DumpShape(
+        # Ahead of ``aws-credentials-read``, which also matches it: a stored
+        # secret's VALUE is better steered to its name or to its consumer than
+        # to a temporary credential (operator, 2026-11).
+        "aws-secret-value",
+        re.compile(r"(?i)\baws\s+secretsmanager\s+get-secret-value\b"),
+        "check it exists by name: `aws secretsmanager describe-secret --secret-id NAME`; "
+        "pipe the value straight into its consumer, never echo it: "
+        "`$(aws secretsmanager get-secret-value --secret-id NAME --query SecretString "
+        "--output text)`",
     ),
     DumpShape(
         "aws-credentials-read",
@@ -7942,6 +8125,26 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         "heroku-config",
         re.compile(r"(?i)\bheroku\s+config(?::get)?\b"),
         "read one key: `heroku config:get KEY -a APP`",
+    ),
+    DumpShape(
+        # Terraform Cloud/Enterprise's full plan JSON prints values the
+        # configuration marks sensitive; ``json-output-redacted`` nulls them.
+        "terraform-plan-json",
+        re.compile(r"(?i)/plans/[^/\s'\"]+/json-output(?![-\w])"),
+        "read `/api/v2/plans/<id>/json-output-redacted`, which nulls sensitive values",
+    ),
+    DumpShape(
+        # ``terraform show -json`` prints sensitive values in clear; the human
+        # view prints ``(sensitive value)`` instead.
+        "terraform-show-json",
+        re.compile(r"(?i)\bterraform\s+show\b[^\n|;&]*?\s-json\b"),
+        "use the human view, which masks sensitive values: `terraform show PLANFILE`, "
+        "or `jq` to the key paths you need",
+        # Stdout thrown away (``>/dev/null``, checking only for warnings) prints
+        # nothing: measured as all three real fires before this exclusion.
+        excluded=re.compile(
+            r"(?i)\bterraform\s+show\b[^\n|;&]*?\s-json\b[^\n|;]*?(?<!2)1?>\s*/dev/null"
+        ),
     ),
     DumpShape(
         "terraform-output",
@@ -8027,12 +8230,15 @@ _BRIEF_ADVICE: dict[str, str] = {
     "docker-inspect": "select a field: `--format '{{.State.Status}}'`",
     "docker-exec-env": "print names only: `env | cut -d= -f1`",
     "docker-compose-config": "read one part: `compose config --services`",
+    "aws-secret-value": "name only: `describe-secret`; pipe the value, never echo",
     "aws-credentials-read": "prefer `aws sso login` and a scoped role",
     "gcloud-token": "use: `$(gcloud auth print-access-token)`",
     "github-auth-token": "use it in place: `$(gh auth token)`",
     "gitlab-auth-token": "drop `-t`: `glab auth status`",
     "vault-read": "select one field: `-field=KEY`",
     "heroku-config": "read one key: `heroku config:get KEY -a APP`",
+    "terraform-plan-json": "read `/json-output-redacted` instead",
+    "terraform-show-json": "human view masks: `terraform show PLANFILE`",
     "terraform-output": "read one output: `terraform output <name>`",
     "npm-token-list": "revoke unused tokens: `npm token revoke <id>`",
     "credential-file-read": "read one field: `grep -c .`, `jq .field`",
@@ -8052,12 +8258,15 @@ _BRIEF_LABEL: dict[str, str] = {
     "docker-inspect": "docker",
     "docker-exec-env": "docker env",
     "docker-compose-config": "compose",
+    "aws-secret-value": "aws secret",
     "aws-credentials-read": "aws",
     "gcloud-token": "gcloud",
     "github-auth-token": "gh",
     "gitlab-auth-token": "glab",
     "vault-read": "vault",
     "heroku-config": "heroku",
+    "terraform-plan-json": "tf plan",
+    "terraform-show-json": "tf plan",
     "terraform-output": "terraform",
     "npm-token-list": "npm",
     "credential-file-read": "file",
@@ -8089,6 +8298,17 @@ def credential_dump_notice(command: str) -> Optional[str]:
     return None
 
 
+#: A ``jq`` program whose LAST step is ``keys``: it prints key names, never
+#: values — the very form the kubectl steer recommends, so steering it is noise
+#: (measured: four real ``… -o json | jq -r '.data | keys[]'`` commands). An
+#: optional stderr redirect may sit before the pipe.
+_KEYS_ONLY_PIPELINE = re.compile(
+    r"^(?:\s*2>\S+)?\s*\|\s*(?:\S*/)?jq\s+(?:-[A-Za-z]+\s+)*"
+    r"(['\"])[^'\"\n]*\bkeys(?:\[\])?\s*\1(?=\s*(?:$|[|;&)\n]))"
+)
+
+
 def _is_name_only_pipeline(command: str, match: Match[str]) -> bool:
     """Whether the dump is piped straight into a names-only extractor."""
-    return bool(_NAME_ONLY_PIPELINE.match(command[match.end() :]))
+    rest = command[match.end() :]
+    return bool(_NAME_ONLY_PIPELINE.match(rest) or _KEYS_ONLY_PIPELINE.match(rest))
