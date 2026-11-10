@@ -5627,6 +5627,18 @@ async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft(
     gesture Textual scored as two singles would paint a highlight the user did
     not ask for. It only declines the interrupt rung for one press.
     """
+    from types import SimpleNamespace
+
+    from local_operator.tui.widgets import editor as editor_module
+
+    # This cell tests spatial drift, not scheduler speed. Handler dispatch on
+    # a loaded shard can exceed both the pair window and the claim lifetime;
+    # waiting for the stamp cannot put the second click back inside either.
+    # Replace only the editor's clock: patching time.monotonic itself would
+    # also freeze Textual/asyncio and the real-time diagnostic poll deadlines.
+    # Timing/expiry remain covered by the neighbouring gesture tests.
+    monkeypatch.setattr(editor_module, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+
     # Installed ONCE and reset per drift: constructing one per iteration would
     # wrap the previous trace's wrappers. Diagnostic only: it renders into the
     # failure messages below and nowhere else; monkeypatch undo restores the
