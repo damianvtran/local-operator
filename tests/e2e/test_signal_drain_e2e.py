@@ -1182,7 +1182,11 @@ def _signal_disposition(pid: int, signum: int = signal.SIGTERM) -> str:
             # zero is NOT, and the line says so rather than asserting "no".
             def cell(raw: str) -> str:
                 verdict = _decode_sigmask(raw, signum)
-                return verdict if verdict != "no" else "no (ps shows 0 even when blocked: not evidence)"
+                return (
+                    verdict
+                    if verdict != "no"
+                    else "no (ps shows 0 even when blocked: not evidence)"
+                )
 
             return (
                 f"ps masks pending={fields[1]} blocked={fields[2]}; SIGTERM: "
@@ -1193,11 +1197,14 @@ def _signal_disposition(pid: int, signum: int = signal.SIGTERM) -> str:
     else:
         try:
             lines = Path(f"/proc/{pid}/status").read_text().splitlines()
-            keys = {"SigPnd": "pending", "SigBlk": "blocked", "SigIgn": "ignored", "SigCgt": "caught"}
+            keys = {
+                "SigPnd": "pending",
+                "SigBlk": "blocked",
+                "SigIgn": "ignored",
+                "SigCgt": "caught",
+            }
             found = {
-                keys[k]: v.strip()
-                for k, _, v in (ln.partition(":") for ln in lines)
-                if k in keys
+                keys[k]: v.strip() for k, _, v in (ln.partition(":") for ln in lines) if k in keys
             }
             if len(found) == 4:
                 return f"/proc masks {found}; SIGTERM: " + ", ".join(
