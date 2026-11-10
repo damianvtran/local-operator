@@ -121,6 +121,106 @@ def test_local_capability_revoke_does_not_block_owned_metadata_updates() -> None
     assert record.member(forged["device_id"]) is None
 
 
+THIRD = "d_" + "c" * 32
+_REFUSAL = "Refused member row"
+
+
+def _admit_third(record: types.NetworkRecord) -> types.MemberRecord:
+    third = relay.admit(
+        record,
+        device_id=THIRD,
+        public_key=wire.b64u(b"c" * 32),
+        name="phone",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        added_by=SELF,
+        added_via="invite",
+        root=None,
+        persist=False,
+    )
+    third.endpoints = ["10.0.0.1:4100"]
+    return third
+
+
+def _refusals(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "local_operator.network.relay" and r.getMessage().startswith(_REFUSAL)
+    ]
+
+
+def test_a_drive_supplier_relays_only_a_known_members_endpoint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A relayed row for a known device moves its address and nothing that grants standing."""
+    record, _state = _record()
+    _admit_peer(record, role="drive")
+    third = _admit_third(record)
+    before = third.to_json()
+    forged = dict(
+        before,
+        endpoints=["10.0.0.2:4200"],
+        name="renamed-by-relay",
+        role="admin",
+        capabilities=sorted(types.capabilities_for_role("admin")),
+        public_key=wire.b64u(b"x" * 32),
+        previous_ids=[PEER],
+        added_by=PEER,
+        added_via="relay",
+    )
+    caplog.set_level("WARNING", logger="local_operator.network.relay")
+    assert relay.adopt_members(record, [forged], sender_device_id=PEER) == (True, [])
+    after = third.to_json()
+    assert after["endpoints"] == ["10.0.0.2:4200"]
+    # Everything except the address is exactly what this device held before.
+    assert {k: v for k, v in after.items() if k != "endpoints"} == {
+        k: v for k, v in before.items() if k != "endpoints"
+    }
+    supplier = record.member(PEER)
+    assert supplier is not None and supplier.active
+    assert _refusals(caplog) == []
+
+
+def test_the_receivers_own_row_from_a_drive_supplier_is_ignored_silently(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    record, _state = _record()
+    _admit_peer(record, role="drive")
+    own = record.member(SELF)
+    assert own is not None
+    before = own.to_json()
+    relayed = dict(before, endpoints=["10.9.9.9:1"], role="read", name="not-me")
+    caplog.set_level("WARNING", logger="local_operator.network.relay")
+    assert relay.adopt_members(record, [relayed], sender_device_id=PEER) == (False, [])
+    assert own.to_json() == before
+    assert _refusals(caplog) == []
+
+
+def test_an_unknown_third_row_from_a_drive_supplier_is_refused_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    record, _state = _record()
+    peer = _admit_peer(record, role="drive")
+    unknown = types.MemberRecord(
+        device_id=THIRD,
+        public_key=wire.b64u(b"c" * 32),
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+        endpoints=["10.0.0.2:4200"],
+    ).to_json()
+    caplog.set_level("WARNING", logger="local_operator.network.relay")
+    own = record.member(SELF)
+    assert own is not None
+    # A whole table, as a pull carries it: only the unknown row is a refusal.
+    rows = [own.to_json(), peer.to_json(), unknown]
+    assert relay.adopt_members(record, rows, sender_device_id=PEER) == (False, [])
+    assert record.member(THIRD) is None
+    assert _refusals(caplog) == [
+        "Refused member row: third-device assertion requires admin standing"
+    ]
+
+
 def test_joined_member_can_assert_its_own_admitted_row() -> None:
     record, _state = _record()
     peer = _admit_peer(record, role="read")

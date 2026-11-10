@@ -362,6 +362,60 @@ def test_new_rows_require_a_solicited_answer_and_supplier_standing(
         assert adopted is None
 
 
+def test_a_known_members_moved_endpoint_relays_through_a_drive_supplier(
+    devices: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Endpoint relay is how a peer learns a moved device's address.
+
+    Three members: A (receiver), C (a DRIVE supplier) and T, a third member A
+    already holds. T moves; C learns it; A pulls C's table. A must take T's new
+    endpoint (the declaring device's answer, relayed) and nothing else — and an
+    ordinary pull of a healthy table must not log a refusal for A's own row or
+    T's, because nothing was refused.
+    """
+    a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    pull = a.server._pull_members
+    # The background rescue pull must not race the one pull this test measures.
+    monkeypatch.setattr(a.server, "_pull_members", lambda link: "no_answer")
+    third = identity.mint(c.root / "third-device", name="third")
+    for root, endpoints in ((a.root, ["10.0.0.1:4100"]), (c.root, ["10.0.0.2:4200"])):
+        with store.mutate(network_id, root) as record:
+            supplier = record.member(c.device_id)
+            assert supplier is not None
+            # Both tables agree C is a drive member, so C's own row is a
+            # consistent self assertion and any refusal logged is a real one.
+            supplier.role = "drive"
+            supplier.capabilities = sorted(types.capabilities_for_role("drive"))
+            record.members.append(
+                types.MemberRecord(
+                    device_id=third.device_id,
+                    public_key=third.public_key,
+                    name="third",
+                    role="read",
+                    capabilities=sorted(types.capabilities_for_role("read")),
+                    endpoints=endpoints,
+                    added_by=c.device_id,
+                )
+            )
+            store.save(record, root)
+    caplog.set_level("WARNING", logger="local_operator.network.relay")
+    caplog.clear()
+    assert pull(link) == ""
+    adopted = store.load(network_id, a.root).member(third.device_id)
+    # Link-lifecycle warnings share this logger; only membership refusals count.
+    refusals = [
+        r
+        for r in caplog.records
+        if r.name == "local_operator.network.relay"
+        and r.getMessage().startswith("Refused member row")
+    ]
+    print("ENDPOINT_RELAY", adopted and adopted.endpoints, "relay_warnings", len(refusals))
+    assert adopted is not None
+    assert adopted.endpoints == ["10.0.0.2:4200"]
+    assert adopted.role == "read"
+    assert refusals == []
+
+
 def test_removal_and_epoch_still_reach_every_peer(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

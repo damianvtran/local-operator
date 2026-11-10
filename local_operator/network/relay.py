@@ -1578,9 +1578,13 @@ def adopt_members(
       never revived. Removal is the epoch path's decision (§8.1) and a peer's
       stale snapshot must not be able to undo it — the frame that carries a
       removal is a rotation, and it is the only one that can.
+    * The receiver's OWN row is never taken from a peer: this device is the
+      authority on itself, and every table carries that row, so it is skipped
+      silently rather than refused.
     * A row this device already holds keeps its LOCAL role, capabilities and
       public key. Authority is not something a peer gets to assert about a third
-      device; the row's own declaration is the only thing a peer can relay.
+      device; the row's own declaration (its endpoints) is the only thing a peer
+      can relay, and ANY active supplier may relay it (``_adopt_relayed_metadata``).
     * ONE EXCEPTION TO THAT, and it is a name: a row's ``name`` is applied from the
       frame only when the frame's SENDER is the device that row names. A name is
       the device's own statement about itself (design §3.1), the link's
@@ -1620,6 +1624,11 @@ def adopt_members(
         device_id = incoming.device_id
         if not device_id or device_id in record.removed_ids:
             continue
+        # THIS DEVICE IS THE AUTHORITY ON ITS OWN ROW. Every peer's table carries
+        # a row for the receiver, so this is routine, never a refusal: skip it
+        # silently, before any standing check, rather than logging one per pull.
+        if record.self_device_id and device_id == record.self_device_id:
+            continue
         existing = record.member(device_id)
         # A table is not admission evidence. In particular, copied ``added_by``
         # metadata cannot let a reader mint a third identity or promote itself.
@@ -1633,6 +1642,19 @@ def adopt_members(
             )
             own_assertion = proven and any(row is sender for row in predecessors)
             if not own_assertion:
+                # ENDPOINT RELAY SURVIVES THE STANDING CHECK for a member this
+                # device already holds: a relayed table is how a peer learns a
+                # moved device's address when it cannot reach that device itself,
+                # and in the default topology most suppliers are not admins.
+                # Taking it from a non-admin grants nothing: only the declaring
+                # device's metadata moves (never role, key, capabilities,
+                # ``previous_ids`` retirements or provenance), and a wrong relayed
+                # endpoint is harmless because every link authenticates the
+                # device's key in the handshake before anything is trusted.
+                if existing is not None:
+                    if _adopt_relayed_metadata(existing, incoming, sender_device_id):
+                        changed = True
+                    continue
                 logger.warning("Refused member row: third-device assertion requires admin standing")
                 continue
         # A peer does not learn a receiver-local capability revoke. On an
@@ -1669,21 +1691,8 @@ def adopt_members(
             added.append(device_id)
             changed = True
             continue
-        # The address list is the declaring device's OWN answer, relayed: it is
-        # the only thing a third party can pass on that this device cannot see for
-        # itself, and the row it lands on is the only place `_ensure_link` dials.
-        if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
-            existing.endpoints = list(incoming.endpoints)
+        if _adopt_relayed_metadata(existing, incoming, sender_device_id):
             changed = True
-        # RULE N1 (naming design §3.3): the name is applied only from the device the
-        # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
-        # signature or wire op is needed for a cosmetic label — and a third device,
-        # including one relaying somebody else's table, cannot rename a device here.
-        if sender_device_id and incoming.device_id == sender_device_id and incoming.name:
-            accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
-            if accepted != existing.name:
-                existing.name = accepted
-                changed = True
         # THE SAME RETIREMENT RUNS HERE, against the row this record already holds as
         # the successor: a record that learned the rotated row before it had the
         # proof (or from a build without one) still retires the row the proof covers
@@ -1693,6 +1702,37 @@ def adopt_members(
             _retire_superseded_rows(record, retired, survivor=existing)
             changed = True
     return changed, added
+
+
+def _adopt_relayed_metadata(
+    existing: MemberRecord, incoming: MemberRecord, sender_device_id: str
+) -> bool:
+    """Apply a peer row's relayable metadata to a row this device holds. Returns changed.
+
+    THE ONE METADATA PATH for an existing row, whatever the supplier's standing:
+    the supplier's own row, a row from an admin, and a known third device's row
+    relayed by a read/drive member all land here, so they cannot drift apart.
+    It moves ``endpoints`` and (rule N1) the supplier's own ``name`` and nothing
+    else — authority fields stay receiver-local (``SYNC_DIGEST_LOCAL_FIELDS``),
+    and rotation retirements are the caller's decision because they need standing.
+    """
+    changed = False
+    # The address list is the declaring device's OWN answer, relayed: it is
+    # the only thing a third party can pass on that this device cannot see for
+    # itself, and the row it lands on is the only place `_ensure_link` dials.
+    if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
+        existing.endpoints = list(incoming.endpoints)
+        changed = True
+    # RULE N1 (naming design §3.3): the name is applied only from the device the
+    # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
+    # signature or wire op is needed for a cosmetic label — and a third device,
+    # including one relaying somebody else's table, cannot rename a device here.
+    if sender_device_id and incoming.device_id == sender_device_id and incoming.name:
+        accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
+        if accepted != existing.name:
+            existing.name = accepted
+            changed = True
+    return changed
 
 
 def _own_relay_listen(root: Path | None) -> dict[str, Any]:
