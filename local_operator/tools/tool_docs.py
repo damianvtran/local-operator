@@ -572,7 +572,26 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="steer",
                 blurb="Change what it is doing (becomes part of its instructions).",
             ),
-            ToolDocOp(op="pause", blurb="Stop it now but keep it resumable."),
+            ToolDocOp(
+                op="pause",
+                blurb=(
+                    "Stop it now but keep it resumable. A manager's running subagents "
+                    "are paused with it and resumed when it resumes (new job ids; the "
+                    "old ids keep addressing them)."
+                ),
+            ),
+            ToolDocOp(
+                op="set_model",
+                blurb=(
+                    "Switch a RUNNING subagent at its next model call — no pause, same "
+                    "job id, subagents and tabs — and re-probe its primary. model="
+                    "'inherit' (parent's current model) or provider/id; omit model to "
+                    "only re-probe. effort= sets the reasoning level; cascade=true adds "
+                    "every running descendant. Role-pinned children keep their pin "
+                    "(re-probed) unless the top session names them directly. The "
+                    "receipt names the SERVED model."
+                ),
+            ),
             ToolDocOp(op="cancel", blurb="Stop it for good."),
             ToolDocOp(
                 op="resume",

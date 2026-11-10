@@ -271,7 +271,25 @@ class StopStamp:
 #: five seconds; see ``SubagentComms._transcript_on_disk`` for the measurement.
 TRANSCRIPT_PROBE_TTL_S = 5.0
 
-DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "failed"]
+DeliveryOutcome = Literal["injected", "queued", "cancelled", "paused", "switched", "failed"]
+
+#: ``model_selection_source`` values that mean the OPERATOR's role or team
+#: configuration chose a child's model (``Session._resolve_subagent_selection``).
+#: ``hub op='set_model'`` keeps these pins on cascade and on any caller below
+#: the top session: a reviewer pinned to another vendor for independence must
+#: not be collapsed onto its manager's model by a manager's ``inherit``.
+#: ``effort``/``explicit_model`` were the delegating model's own picks, so the
+#: same caller may move them.
+ROLE_PIN_SOURCES = frozenset({"role", "team", "role_inherit"})
+
+#: The instruction a paused subtree's children are resumed with when their
+#: paused parent resumes (``SubagentComms.pause`` / ``attach``). They were
+#: stopped mid-task by their parent's pause, not by anything they did, so the
+#: continuation says only that and lets the replayed transcript carry the task.
+SUBTREE_RESUME_MESSAGE = (
+    "Your parent was paused and has resumed, so you were paused and resumed with "
+    "it. Continue your task from where you left off."
+)
 
 #: Default number of transcript steps ``peek`` returns when the caller does not
 #: ask for a range. Five is "what is it doing right now" — the question the op
@@ -648,6 +666,15 @@ class _ChildRecord:
     #: Derived from disk each boot, never persisted, and surfaced only in
     #: ``ChildInfo.detail``; it changes no status (see design 2.5).
     lane_never_settled: bool = False
+    #: The job id of the PARENT whose pause paused this child (``hub
+    #: op='pause'`` on a manager pauses its running subtree deepest-first
+    #: instead of letting the manager's teardown cancel it). When that parent's
+    #: continuation attaches, :meth:`SubagentComms.attach` resumes every child
+    #: carrying its id (resolved through the attempt aliases), and each of
+    #: those does the same for its own children as IT attaches — so the tree
+    #: is restored top-down under live parents. Runtime-only: after a process
+    #: restart the children stay paused and individually resumable.
+    subtree_paused_by: str = ""
 
 
 def _spec_from_label(label: str) -> ModelSpec | None:
@@ -1572,6 +1599,20 @@ class SubagentComms:
         # a record whose buffered notes had not been flushed yet.
         if record.attached is not None:
             record.attached.set()
+        if record.attempt_aliases and any(
+            item.subtree_paused_by for item in self._records.values()
+        ):
+            # A continuation of a parent whose pause also paused its subtree:
+            # bring those children back under it. Deferred to the next loop
+            # tick because ``resume`` registers jobs, and doing that from inside
+            # the child's own build (where ``attach`` runs) re-enters the
+            # launcher mid-construction.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._resume_paused_subtree(job_id)
+            else:
+                loop.call_soon(self._resume_paused_subtree, job_id)
 
     def detach(self, job_id: str) -> None:
         """Release the live child. An unanswered question fails here rather
@@ -2543,6 +2584,229 @@ class SubagentComms:
         """Whether a resumed job inherited its REAL parent's model (D9.1), not the root's."""
         return self._resume_models.get(job_id, (False, ""))[0]
 
+    def model_reading(self, job_id: str) -> tuple[str, str]:
+        """``(served, pinned)``: the model serving a child now, and the model it
+        is pinned to when that differs (else ``""``).
+
+        Read from the LIVE child's route state when it runs \u2014 its
+        ``effective_model_label`` is the model its next call goes to, fallback
+        included \u2014 so ``hub list``/``jobs`` and a ``set_model`` receipt show
+        what is answering, not what was asked for (the stale-receipt case: a
+        resume said fable while the child served sol). ``pinned`` is the
+        child's own selected model, the one a recovered primary returns it to.
+        A settled child falls back to its job row: the last served label and
+        the launch pin's ``requested_model_label``.
+        """
+        record = self._record(job_id)
+        child = record.child if record is not None and not record.settled else None
+        served = str(getattr(child, "effective_model_label", "") or "") if child else ""
+        selected = getattr(child, "model", None) if child else None
+        if served and isinstance(selected, ModelSpec):
+            pinned = f"{selected.provider}/{selected.model_id}"
+        else:
+            served = self.last_model_label(job_id)
+            pinned = str(getattr(self.job(job_id), "requested_model_label", "") or "")
+        return served, pinned if pinned and pinned != served else ""
+
+    async def set_model(
+        self,
+        job_ids: Sequence[str],
+        *,
+        model: str | None,
+        effort: str | None,
+        cascade: bool = False,
+        scope: str | None = None,
+    ) -> list[Delivery]:
+        """Switch RUNNING children's model in place: ``hub op='set_model'``.
+
+        WHY. Before this the only lever on a child stuck on a fallback was
+        pause + resume, which cancelled a manager's children, changed every job
+        id, orphaned owned browser tabs and could fall straight back on the
+        first quota error. This applies at the child's NEXT model call through
+        ``Session.set_model`` (the same mid-turn swap ``/model`` uses) plus a
+        re-probe of its route: same job, same subagents, same tabs.
+
+        ``model`` is ``'inherit'`` (the child's real parent's current model,
+        which also drops its launch pin), ``provider/model_id``, or ``None``
+        (keep the model; re-probe its primary and/or apply ``effort``).
+        ``cascade`` adds every running descendant, switched top-down so each
+        ``inherit`` reads its parent's NEW model. A descendant is reachable only
+        through the caller's own subtree (``scope``): ``_hub_targets`` already
+        confined ``job_ids`` to it.
+
+        Role pins (``ROLE_PIN_SOURCES``) are the operator's: a pinned child
+        keeps its pinned model and is only re-probed back onto it, unless the
+        TOP session (``scope is None``) names it directly \u2014 that is the
+        override. The receipt names every kept pin rather than skipping it.
+        """
+        from local_operator.harness.subagent import model_may_choose_tier
+        from local_operator.mobile.peer_model import prepared_subagent_selections
+
+        if model is not None and model != "inherit" and not model_may_choose_tier():
+            return [
+                Delivery(
+                    job_id,
+                    self.label_of(job_id),
+                    "failed",
+                    "specific models require subagents.model_choice=model; use 'inherit'",
+                )
+                for job_id in job_ids
+            ]
+        targets: dict[str, bool] = {}
+        for job_id in job_ids:
+            record = self._record(job_id)
+            key = record.job_id if record is not None else job_id
+            targets[key] = True
+            if cascade and record is not None:
+                below = self.descendant_ids(record.job_id)
+                # Registry (launch) order so receipts are deterministic.
+                for descendant in self._records:
+                    if descendant in below:
+                        targets.setdefault(descendant, False)
+        ordered = sorted(targets, key=lambda key: len(self.ancestors(key)))
+        selectors = [model] if model is not None and model != "inherit" else []
+        out: list[Delivery] = []
+        async with prepared_subagent_selections(selectors):
+            for key in ordered:
+                direct = targets[key]
+                record = self._record(key)
+                if record is None:
+                    out.append(Delivery(key, key, "failed", f"unknown subagent {key!r}"))
+                    continue
+                if not direct and (record.child is None or record.settled):
+                    # A cascade reaches the LIVE subtree; settled descendants
+                    # pick a model up on resume and need no receipt line.
+                    continue
+                out.append(
+                    self._apply_model(record, model, effort, override=direct and scope is None)
+                )
+        return out
+
+    def _apply_model(
+        self,
+        record: _ChildRecord,
+        model: str | None,
+        effort: str | None,
+        *,
+        override: bool,
+    ) -> Delivery:
+        """One child's half of :meth:`set_model`; see there for the policy."""
+        from local_operator.harness.subagent import SubagentModelUnavailable
+        from local_operator.harness.types import EFFORT_CHOICE_UNSET
+        from local_operator.model.effort import resolve_effort_in
+
+        child = record.child
+        if child is None or record.settled:
+            if self._is_running(record) and not record.settled:
+                return Delivery(
+                    record.job_id,
+                    record.label,
+                    "failed",
+                    "it has not started yet; it launches on its resolved model",
+                )
+            return Delivery(
+                record.job_id,
+                record.label,
+                "failed",
+                "it is not running; use hub op='resume' with model= to pick a model",
+            )
+        switch = getattr(child, "set_model", None)
+        current = getattr(child, "model", None)
+        if not callable(switch) or not isinstance(current, ModelSpec):
+            return Delivery(
+                record.job_id,
+                record.label,
+                "failed",
+                "this subagent cannot switch models",
+            )
+        job = record.job_ref or self.job(record.job_id)
+        source = str(getattr(job, "model_selection_source", "") or record.model_selection_source)
+        role_pinned = source in ROLE_PIN_SOURCES
+        note: str | None = None
+        launch_pin: str | None = None
+        spec = current
+        new_source = source
+        if role_pinned and not override and (model is not None or effort is not None):
+            # Kept, not skipped: the child is still re-probed back onto its own
+            # pin, which is what a quota-stranded pinned child needs anyway.
+            note = (
+                f"kept its role pin {current.provider}/{current.model_id} and re-probed it; "
+                "only the top session can override a role pin by naming the child"
+            )
+            effort = None
+        elif model == "inherit":
+            inherited, why = self._inherited_model(record)
+            parent_model = inherited or getattr(self._session, "model", None)
+            if not isinstance(parent_model, ModelSpec):
+                return Delivery(
+                    record.job_id,
+                    record.label,
+                    "failed",
+                    "its parent's model is unknown",
+                )
+            spec, launch_pin, new_source = parent_model, "", "explicit_inherit"
+            note = why or None
+        elif model is not None:
+            role, kwargs = self._record_resolution(record)
+            resolve = getattr(self._session, "_resolve_subagent_selection", None)
+            if not callable(resolve):
+                return Delivery(
+                    record.job_id,
+                    record.label,
+                    "failed",
+                    "this session cannot resolve models",
+                )
+            try:
+                outcome = resolve(role, None, strict=True, model=model, **kwargs)
+                # ``getattr`` erases the ``(spec, source)`` pair; named as resume does.
+                resolved, new_source = cast("tuple[ModelSpec | None, str]", outcome)
+            except (SubagentModelUnavailable, ValueError) as exc:
+                return Delivery(record.job_id, record.label, "failed", str(exc))
+            if not isinstance(resolved, ModelSpec):
+                return Delivery(
+                    record.job_id,
+                    record.label,
+                    "failed",
+                    f"{model} did not resolve to a model",
+                )
+            spec = resolved
+            launch_pin = f"{spec.provider}/{spec.model_id}"
+        if effort:
+            spec = spec.model_copy(
+                update={
+                    "reasoning_effort": resolve_effort_in(
+                        spec.reasoning_efforts, spec.reasoning_default_effort, effort
+                    )
+                }
+            )
+        # ``explicit=True`` is what withdraws an active fallback even when the
+        # pair did not move (the same-model re-selection path), so a child
+        # pinned to fable and served by sol returns to fable at its next call.
+        switch(spec, explicit=True, effort_choice=effort if effort else EFFORT_CHOICE_UNSET)
+        reprobe = getattr(child, "request_route_reprobe", None)
+        if callable(reprobe):
+            reprobe(withdraw=True, launch_pin=launch_pin)
+        selector = f"{spec.provider}/{spec.model_id}"
+        if launch_pin is not None:
+            # The row's pin attribution follows the re-pin, or the pin-integrity
+            # badge would keep comparing the child against a model it was
+            # deliberately moved off (and an inherit child would read as a
+            # pinned one "fallen back" onto its parent's model).
+            record.model_selector = "inherit" if launch_pin == "" else model
+            record.model_selection_source = new_source
+            if job is not None:
+                job.model_selector = record.model_selector
+                job.model_selection_source = new_source
+                job.owns_model = launch_pin != ""
+                job.requested_model_label = launch_pin or None
+        if job is not None:
+            job.model_label = getattr(child, "effective_model_label", None) or selector
+            job.model_fallback = False
+            job.model_fallback_reason = ""
+            job.model_fallback_effort = None
+        self._notify_change()
+        return Delivery(record.job_id, record.label, "switched", note)
+
     @staticmethod
     def _record_model_label(record: _ChildRecord) -> str:
         label = getattr(record.job_ref, "model_label", None)
@@ -2818,6 +3082,15 @@ class SubagentComms:
         )
         steer_message.provider_payload = payload
         record.child.steer_message(steer_message)
+        # A steer is a new instruction, so it is also a re-probe boundary: the
+        # child's next call re-checks a quota-pinned fallback exactly as a new
+        # user message would. Without this a running child never met a
+        # boundary (its task is one message) and stayed on the fallback after
+        # the primary's quota returned. Not a withdrawal: a transport pin keeps
+        # its cooldown, as it would for a parent's next message.
+        reprobe = getattr(record.child, "request_route_reprobe", None)
+        if callable(reprobe):
+            reprobe(withdraw=False)
         return Delivery(job_id, record.label, "injected")
 
     async def _await_child(self, record: _ChildRecord, timeout_s: float) -> bool:
@@ -3105,6 +3378,14 @@ class SubagentComms:
                 "failed",
                 f"job is already {state}; use hub op='resume' to pick it back up",
             )
+        # Pause the running SUBTREE first, deepest first. Left alone, the
+        # manager's own teardown cancels its children: each then needed a
+        # manual resume under a new id and the operator had to rebuild the
+        # tree by hand. Paused here instead, each child records which parent's
+        # pause stopped it, and that parent's continuation resumes it when it
+        # attaches (see :meth:`attach`). Deepest first so no child is cancelled
+        # by its own parent's teardown before its pause lands.
+        subtree = await self._pause_subtree(record, by=by, label=record.label)
         # Set BEFORE the cancel: cancelling settles the runner, whose teardown
         # calls record_outcome synchronously on this loop. Setting the flag
         # afterwards would let the roster observe a moment where a deliberate
@@ -3121,7 +3402,77 @@ class SubagentComms:
             record.paused = False
             self.abandon_stop(stamp)
             return Delivery(job_id, record.label, "failed", "job stopped before the pause landed")
+        if subtree:
+            names = ", ".join(f"{item.label} ({item.job_id})" for item in subtree)
+            return Delivery(
+                job_id,
+                record.label,
+                "paused",
+                f"its running subtree was paused too: {names}; resuming it resumes them "
+                "(new job ids, the old ids keep addressing them)",
+            )
         return Delivery(job_id, record.label, "paused")
+
+    async def _pause_subtree(
+        self, record: _ChildRecord, *, by: str, label: str
+    ) -> list[_ChildRecord]:
+        """Pause every RUNNING descendant of ``record``, deepest first.
+
+        Returns the records actually paused. Each is stamped with its own
+        immediate parent's id in ``subtree_paused_by`` so the restore cascades
+        one level per attach, always under a LIVE parent (a grandchild resumed
+        before its parent's continuation exists would be re-homed on the root).
+        """
+        below = self.descendant_ids(record.job_id)
+        descendants = [
+            item
+            # Registry (launch) order, not set order: the receipt and the
+            # pause sequence must be deterministic.
+            for key, item in self._records.items()
+            if key in below
+            and item.session_dir is not None
+            and not item.paused
+            and self._is_running(item)
+        ]
+        descendants.sort(key=lambda item: len(self.ancestors(item.job_id)), reverse=True)
+        paused: list[_ChildRecord] = []
+        for item in descendants:
+            jobs = self._owning_jobs(item.job_id)
+            if jobs is None:
+                continue
+            item.paused = True
+            stamp = self.begin_stop(
+                item.job_id,
+                by=by,
+                reason=f"paused with its parent {label}",
+                mechanism="pause",
+            )
+            if not await jobs.cancel(item.job_id):
+                item.paused = False
+                self.abandon_stop(stamp)
+                continue
+            item.subtree_paused_by = item.parent_job_id or ""
+            paused.append(item)
+        return paused
+
+    def _resume_paused_subtree(self, parent_job_id: str) -> None:
+        """Resume the children a pause of ``parent_job_id`` (any attempt) stopped.
+
+        Called from :meth:`attach` once a continuation of that parent is live,
+        so :meth:`_launch_parent` homes each child under it. Failures are
+        logged and the child stays paused: it is still individually resumable,
+        and a half-restored tree must not abort the parent's own attach.
+        """
+        current = self._aliases.get(parent_job_id, parent_job_id)
+        for item in list(self._records.values()):
+            owner = item.subtree_paused_by
+            if not owner or self._aliases.get(owner, owner) != current:
+                continue
+            new_id, error = self.resume(item.job_id, SUBTREE_RESUME_MESSAGE)
+            if error is not None:
+                logger.warning("subtree resume of %s failed: %s", item.job_id, error)
+            else:
+                logger.info("subtree resume: %s -> %s", item.job_id, new_id)
 
     async def resume_async(
         self, job_id: str, message: str, *, model: str | None = None
@@ -3362,6 +3713,8 @@ class SubagentComms:
         # beside the running child that replaced it, and a reader would be
         # invited to "resume" a run that is already going.
         record.paused = False
+        # Resumed (by hand or by the cascade): no longer waiting on a parent.
+        record.subtree_paused_by = ""
         return new_job_id, None
 
     def _launch_parent(self, record: _ChildRecord) -> Any:

@@ -7418,6 +7418,37 @@ class Session:
         )
         return result
 
+    def request_route_reprobe(self, *, withdraw: bool = False, launch_pin: object = None) -> None:
+        """Make this session's NEXT model call a quota re-probe boundary.
+
+        The entry ``hub op='set_model'`` and ``hub op='steer'`` use on a RUNNING
+        subagent. A child's task is one user message, so the message-boundary
+        re-probe that returns a parent to its recovered primary never fires for
+        it; without this a child that fell back stayed there for the rest of its
+        task (the 2026-11 quota incident). Nothing is torn down: the child keeps
+        its job id, its own subagents and any browser tab it owns.
+
+        ``withdraw`` drops an active fallback now (the display AND the stream's
+        route), like an explicit ``/model`` re-selection. ``launch_pin`` is
+        ``None`` to leave the stream's launch pin alone, ``""`` to clear it (the
+        child now inherits), or a ``provider/model_id`` selector to re-pin it.
+        """
+        stream = self._stream_fn
+        if withdraw and self._active_fallback is not None:
+            self._drop_fallback_pin(self._model, "re-probe requested")
+        if isinstance(launch_pin, str):
+            if launch_pin:
+                mark = getattr(stream, "mark_launch_pin", None)
+                if callable(mark):
+                    mark(launch_pin)
+            else:
+                clear = getattr(stream, "clear_launch_pin", None)
+                if callable(clear):
+                    clear()
+        request = getattr(stream, "request_reprobe", None)
+        if callable(request):
+            request(withdraw=withdraw)
+
     def set_model(
         self,
         model: ModelSpec,
