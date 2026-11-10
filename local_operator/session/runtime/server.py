@@ -1736,6 +1736,39 @@ def _settings_request_kw(fn: Any, frame: dict[str, Any]) -> dict[str, Any]:
     return {"request_id": request_id}
 
 
+def _switch_reports_outcome(handle: Any, frame: dict[str, Any]) -> bool:
+    """Whether the handle method this switch frame reaches publishes its outcome.
+
+    WHY (PR #3697 review R1-M2, TUI-hosted owners). A ``defer_ok`` switch is
+    acked ``queued`` BEFORE its body runs, so the only place its refusal can
+    reach the requester is the ``settings_result(s)`` the body publishes for its
+    ``request_id``. A handle whose switch methods do not take ``request_id``
+    (the TUI host, ``mobile.tui_handle.TuiSessionHandle``, which applies a
+    switch through the app's slash commands and so cannot tell a refusal from
+    a landing; an older owner; a test double) would publish nothing, and the
+    early ack would read as a silent success. Such a switch keeps the historic
+    synchronous reply instead — slower while the owner is busy, never false.
+
+    Mirrors the method choice in ``_on_request``'s ``set_model``/``set_effort``/
+    ``slash_result`` arms; probed with the same ``_accepts_kw`` that decides
+    whether ``request_id`` is passed, so "acked queued" and "will publish" can
+    never disagree.
+    """
+    op = frame.get("op")
+    if op == "set_model":
+        if frame.get("offered_only") is True or frame.get("effort"):
+            target = getattr(handle, "set_model_effort", None) or getattr(handle, "set_model", None)
+        else:
+            target = getattr(handle, "set_model", None)
+    elif op == "set_effort":
+        target = getattr(handle, "set_effort", None)
+    elif op == "slash_result":
+        target = getattr(handle, "run_slash_authoritative", None)
+    else:
+        return False
+    return callable(target) and _accepts_kw(target, "request_id")
+
+
 def _accepts_kw(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes the keyword ``name``.
 
@@ -5385,7 +5418,7 @@ class RuntimeServer:
             finally:
                 self._release_request()
 
-        if switch and _defers_reply(frame):
+        if switch and _defers_reply(frame) and _switch_reports_outcome(self._handle, frame):
             task = asyncio.create_task(self._run_deferrable_switch(conn, frame, previous))
         else:
             task = asyncio.create_task(run())

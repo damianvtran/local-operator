@@ -7396,3 +7396,85 @@ async def test_shutdown_cancels_a_switch_still_queued() -> None:
         if writer is not None:
             writer.close()
         runtime.close()
+
+
+# ---------------------------------------------------------------------------
+# PR #3697 R1-M2, TUI-hosted owners: no ``queued`` ack without a later outcome.
+#
+# ``TuiSessionHandle`` applies a switch through the app's slash commands and
+# publishes no ``settings_result``; acking its switch ``queued`` early would
+# turn a refusal into a silent success on the phone. The runtime keeps the
+# synchronous reply for it. The handle below runs the REAL TuiSessionHandle
+# switch bodies over a stub app, so the probe sees the real signatures.
+# ---------------------------------------------------------------------------
+
+
+class _TuiBackedHandle(FakeHandle):
+    from local_operator.mobile.tui_handle import TuiSessionHandle as _Tui
+
+    set_model = _Tui.set_model
+    set_model_effort = _Tui.set_model_effort
+    set_effort = _Tui.set_effort
+    run_slash_authoritative = _Tui.run_slash_authoritative
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.commands: list[str] = []
+        self._app = type("App", (), {"_run_slash_command": self.commands.append})()
+        # FakeHandle's own SessionProjection doubles as the TUI handle's.
+        self._projection.model_label = "test/A"
+
+    async def _on_app(self, fn, **_kwargs):  # noqa: ANN001, ANN202
+        return fn()
+
+    def _refresh_state(self, *, roster: bool = True) -> None:
+        return None
+
+
+def test_only_outcome_publishing_handles_are_deferred() -> None:
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.runtime import server as server_mod
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    tui = object.__new__(TuiSessionHandle)
+    serving = object.__new__(ServingSessionHandle)
+    frames = [
+        {"op": "set_model", "provider": "p", "model_id": "m"},
+        {"op": "set_model", "provider": "p", "model_id": "m", "effort": "high"},
+        {"op": "set_effort", "effort": "high"},
+        {"op": "slash_result", "command": "model", "args": "p/m"},
+    ]
+    for frame in frames:
+        assert server_mod._switch_reports_outcome(tui, frame) is False, frame
+        assert server_mod._switch_reports_outcome(serving, frame) is True, frame
+
+
+@pytest.mark.asyncio
+async def test_a_tui_hosted_owner_answers_a_deferred_switch_on_landing() -> None:
+    handle = _TuiBackedHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        await _send(
+            writer,
+            {
+                "op": "set_model",
+                "req": 4,
+                "provider": "test",
+                "model_id": "A",
+                "defer_ok": True,
+                "request_id": "rid-tui",
+            },
+        )
+        replies = await _replies_for(reader, 4, 2.0)
+        assert len(replies) == 1, replies
+        assert replies[0]["op"] == "ack"
+        assert replies[0].get("queued") is not True and replies[0]["detail"] != "queued"
+        assert handle.commands == ["/model test/A"], "the switch ran before the reply"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
