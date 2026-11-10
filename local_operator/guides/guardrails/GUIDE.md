@@ -68,10 +68,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `.venv`, `__pycache__`, `build`, `dist` …) and no repository nested inside
   that output, and HEAD on a branch or in some
   ref — AND it is idle: no running session other than yours owns it (created
-  it, or has its cwd inside) and its branch has no open PR on the repo's GitHub
-  remote. An open PR is refused outright, at any state and even with an earlier
-  answered ask: finish or close the PR first. A running owner, or a PR state
-  nobody could read (no GitHub remote, `gh` failed or timed out), goes to the
+  it, or has its cwd inside) and its branch has no open PR (GitHub) or MR (GitLab) on the
+  repo's remote. An open PR or MR is refused outright, at any state and even with an earlier
+  answered ask: finish or close it first. A running owner, or a PR state
+  nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed or timed out), goes to the
   judge with those facts. An interrupted delete can leave a half-removed tree
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the

@@ -953,11 +953,20 @@ def worktree_state(path: str) -> str:
 #: Bound on the ONE ``gh pr list`` that :func:`worktree_activity` runs: the
 #: manager's allocation for this lookup (~8 s). Measured 2026-11-09 on this
 #: machine, n=5 against damianvtran/local-operator: 1.29–1.81 s. A timeout is
-#: "PR state unknown", which never ranks LOW.
+#: "PR state unknown", which never ranks LOW. The ``glab mr list`` lookup shares
+#: it: measured 2026-11-09, n=3 against minervaai/go-protos, 1.12–1.32 s.
 _GH_TIMEOUT_S = 8.0
 _GITHUB_URL_RE = re.compile(
     r"^(?:https?://(?:[^@/]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+#: A GitLab remote: gitlab.com or a self-hosted host named ``gitlab…``. The
+#: project path may nest groups (``group/sub/project``). WHY GitLab at all:
+#: the disk lane's positive controls are Minerva (GitLab) worktrees, and with
+#: GitHub alone every one of them read "PR state unknown" and went to the judge.
+_GITLAB_URL_RE = re.compile(
+    r"^(?:https?://(?:[^@/]+@)?|(?:ssh://)?git@)(?P<host>[^/:@]*gitlab[^/:]*)[:/]"
+    r"(?P<path>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)/?$"
 )
 
 
@@ -979,7 +988,9 @@ class WorktreeActivity:
     #: ``open`` / ``none`` / ``unknown``.
     pr_state: str
     pr_number: int | None = None
-    #: Why the PR state is unknown (no GitHub remote, gh failed, timeout).
+    #: How the forge names it: ``PR #`` (GitHub) or ``MR !`` (GitLab).
+    pr_label: str = "PR #"
+    #: Why the PR state is unknown (no GitHub/GitLab remote, lookup failed, timeout).
     pr_detail: str = ""
     #: Running sessions other than the caller that own the tree.
     owners_running: tuple[str, ...] = ()
@@ -987,9 +998,9 @@ class WorktreeActivity:
     def facts(self) -> str:
         branch = self.branch or "(detached HEAD)"
         if self.pr_state == "open":
-            pr = f"open PR #{self.pr_number}"
+            pr = f"open {self.pr_ref}"
         elif self.pr_state == "none":
-            pr = "no open PR"
+            pr = "no open PR" if self.pr_label == "PR #" else "no open MR"
         else:
             pr = f"PR state unknown ({self.pr_detail})"
         owner = (
@@ -999,20 +1010,41 @@ class WorktreeActivity:
         )
         return f"branch {branch}; {pr}; {owner}"
 
+    @property
+    def pr_ref(self) -> str:
+        return f"{self.pr_label}{self.pr_number}"
+
+
+def _remote_urls(real: str) -> list[str]:
+    """The worktree's remote URLs, ``origin`` first."""
+    out = _git(["config", "--get-regexp", r"^remote\..*\.url$"], real)
+    urls: list[tuple[bool, str]] = []
+    for line in (out or "").splitlines():
+        key, _, url = line.partition(" ")
+        urls.append((key != "remote.origin.url", url.strip()))
+    return [url for _, url in sorted(urls)]
+
 
 def _github_repo(real: str) -> str | None:
     """``owner/name`` of the worktree's GitHub remote (``origin`` first)."""
-    out = _git(["config", "--get-regexp", r"^remote\..*\.url$"], real)
-    if not out:
-        return None
-    urls: list[tuple[bool, str]] = []
-    for line in out.splitlines():
-        key, _, url = line.partition(" ")
-        urls.append((key != "remote.origin.url", url.strip()))
-    for _, url in sorted(urls):
+    for url in _remote_urls(real):
         m = _GITHUB_URL_RE.match(url)
         if m:
             return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def _gitlab_repo(real: str) -> str | None:
+    """The worktree's GitLab project as ``glab --repo`` takes it, or ``None``.
+
+    ``group/sub/project`` on gitlab.com; ``https://<host>/<path>`` on a
+    self-hosted host, so glab resolves the right instance.
+    """
+    for url in _remote_urls(real):
+        m = _GITLAB_URL_RE.match(url)
+        if m:
+            host, path = m.group("host"), m.group("path").removesuffix(".git")
+            return path if host == "gitlab.com" else f"https://{host}/{path}"
     return None
 
 
@@ -1041,6 +1073,35 @@ def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
         rows = json.loads(proc.stdout or "[]")
         return [int(r["number"]) for r in rows]
     except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _glab_open_mrs(repo: str, branch: str) -> list[int] | None:
+    """Open MR iids whose source is ``branch`` on ``repo``; ``None`` if unknown.
+
+    The GitLab twin of :func:`_gh_open_prs` (tests replace it). ``glab mr
+    list`` lists OPEN MRs by default; glab 1.91 has no ``--state`` flag, and an
+    unknown flag would exit non-zero and read as "unknown" on every call.
+    ``GLAB_NO_PROMPT`` keeps glab from prompting inside a guard check.
+    """
+    env = dict(os.environ, GLAB_NO_PROMPT="1")
+    try:
+        proc = subprocess.run(
+            ["glab", "mr", "list", "--repo", repo, "--source-branch", branch, "-F", "json"],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT_S,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+        return [int(r["iid"]) for r in rows if r.get("state", "opened") == "opened"]
+    except (ValueError, TypeError, KeyError, AttributeError):
         return None
 
 
@@ -1097,19 +1158,25 @@ def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
         # Detached: no branch, so no PR can be headed by it.
         return WorktreeActivity(None, "none", owners_running=owners)
     repo = _github_repo(real)
+    tool, label, lookup = "gh", "PR #", _gh_open_prs
+    if repo is None:
+        repo = _gitlab_repo(real)
+        tool, label, lookup = "glab", "MR !", _glab_open_mrs
     if repo is None:
         return WorktreeActivity(
-            branch, "unknown", pr_detail="no GitHub remote", owners_running=owners
+            branch, "unknown", pr_detail="no GitHub or GitLab remote", owners_running=owners
         )
-    prs = _gh_open_prs(repo, branch)
+    prs = lookup(repo, branch)
     if prs is None:
         return WorktreeActivity(
-            branch, "unknown", pr_detail=f"gh lookup on {repo} failed or timed out",
-            owners_running=owners,
+            branch, "unknown", pr_label=label,
+            pr_detail=f"{tool} lookup on {repo} failed or timed out", owners_running=owners,
         )
     if prs:
-        return WorktreeActivity(branch, "open", pr_number=min(prs), owners_running=owners)
-    return WorktreeActivity(branch, "none", owners_running=owners)
+        return WorktreeActivity(
+            branch, "open", pr_number=min(prs), pr_label=label, owners_running=owners
+        )
+    return WorktreeActivity(branch, "none", pr_label=label, owners_running=owners)
 
 
 def _ignored_unregenerable(real: str) -> bool:

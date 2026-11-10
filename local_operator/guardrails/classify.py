@@ -904,7 +904,7 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
                 return RankedTarget(
                     target,
                     Risk.CRITICAL,
-                    f"branch {activity.branch} has open PR #{activity.pr_number}; "
+                    f"branch {activity.branch} has open {activity.pr_ref}; "
                     f"finish or close it first ({facts})",
                 )
             idle = activity.pr_state == "none" and not activity.owners_running
@@ -919,7 +919,7 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             if not idle:
                 # Straight to the judge, past the ledger-ownership LOW below:
                 # someone else is in the tree, or nobody could say whether a
-                # PR is open (no GitHub remote, gh failed or timed out).
+                # PR/MR is open (no GitHub/GitLab remote, gh/glab failed or timed out).
                 return RankedTarget(
                     target,
                     Risk.HIGH,

@@ -453,7 +453,10 @@ def test_open_pr_refusal_is_not_lifted_by_an_answered_ask(
 
 @pytest.mark.parametrize(
     ("repo_name", "prs", "detail"),
-    [(None, [], "no GitHub remote"), ("o/r", None, "gh lookup on o/r failed or timed out")],
+    [
+        (None, [], "no GitHub or GitLab remote"),
+        ("o/r", None, "gh lookup on o/r failed or timed out"),
+    ],
 )
 def test_unknown_pr_state_goes_to_the_judge(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, repo_name, prs, detail
@@ -565,3 +568,62 @@ def test_sort_output_into_session_state_is_still_refused(home: Path) -> None:
 def test_refusal_text_says_another_route_is_the_same_action() -> None:
     """Review m2: the anti-reroute clause is in the text read at refusal time."""
     assert "by another route is still the same action" in REFUSAL_SCOPE
+
+
+# -- GitLab (Minerva) worktrees: the disk lane's positive controls --------------------
+
+
+@pytest.mark.parametrize(
+    ("mrs", "risk"), [([42], Risk.CRITICAL), ([], Risk.LOW), (None, Risk.HIGH)]
+)
+def test_gitlab_open_mr_refuses_and_no_mr_stays_low(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, mrs, risk: Risk
+) -> None:
+    monkeypatch.setattr(prov, "_github_repo", _REAL_GITHUB_REPO)  # real remote parsing
+    seen: list[tuple[str, str]] = []
+
+    def lookup(project: str, branch: str):
+        seen.append((project, branch))
+        return mrs
+
+    monkeypatch.setattr(prov, "_glab_open_mrs", lookup)
+    _git("remote", "add", "origin", "git@gitlab.com:minervaai/sub/core.git", cwd=repo)
+    wt = _add(repo, repo / ".worktrees" / "gl", "feat/gl")
+    verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is risk
+    assert seen == [("minervaai/sub/core", "feat/gl")]
+    reason = verdict.targets[0].reason
+    if mrs:
+        assert "branch feat/gl has open MR !42; finish or close it first" in reason
+    elif mrs == []:
+        assert "no open MR" in reason
+    else:
+        assert "PR state unknown (glab lookup on minervaai/sub/core failed" in reason
+
+
+def test_glab_lookup_parses_remotes_and_never_prompts(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git("remote", "add", "origin", "https://gitlab.example.com/grp/proj.git", cwd=repo)
+    assert prov._gitlab_repo(str(repo)) == "https://gitlab.example.com/grp/proj"
+    _git("remote", "set-url", "origin", "https://gitlab.com/minervaai/go-protos", cwd=repo)
+    assert prov._gitlab_repo(str(repo)) == "minervaai/go-protos"
+    assert _REAL_GITHUB_REPO(str(repo)) is None
+    seen: dict = {}
+
+    def run(argv, **kwargs):
+        seen.update(argv=argv, timeout=kwargs["timeout"], prompt=kwargs["env"]["GLAB_NO_PROMPT"])
+        return subprocess.CompletedProcess(argv, 0, '[{"iid": 7, "state": "opened"}]', "")
+
+    monkeypatch.setattr(prov.subprocess, "run", run)
+    assert prov._glab_open_mrs("g/p", "feat/x") == [7]
+    assert seen["argv"] == [
+        "glab", "mr", "list", "--repo", "g/p", "--source-branch", "feat/x", "-F", "json"
+    ]
+    assert seen["timeout"] == prov._GH_TIMEOUT_S and seen["prompt"] == "1"
+
+    def fail(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "unknown flag")
+
+    monkeypatch.setattr(prov.subprocess, "run", fail)
+    assert prov._glab_open_mrs("g/p", "feat/x") is None
