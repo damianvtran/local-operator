@@ -123,7 +123,11 @@ def stores(tmp_path: Path, monkeypatch) -> dict[str, Any]:
     account.set_agent_system_prompt(seeded.id, SEED_INSTRUCTIONS)
     session_dir = tmp_path / "session"
     agents = scope_agent_registry(account, session_dir)
-    team_account = TeamRegistry(tmp_path / "teams")
+    # ONE config root for agents and teams, as in a real profile: proposals
+    # live in ``<config>/profile-proposals`` and the ``profile_proposal`` tool
+    # reads them from the session's registry root, so split roots made team
+    # proposals unreachable from the tool in tests only.
+    team_account = TeamRegistry(account.config_dir)
     team_account.create_team(
         TeamEditFields(
             name="lopdev", description="Dev team", manager="manager", instructions="Ship."
@@ -147,8 +151,7 @@ def stores(tmp_path: Path, monkeypatch) -> dict[str, Any]:
             exists=False,
         ),
     )
-    for root in (account.config_dir, team_account.config_dir):
-        _make_key(root)
+    _make_key(account.config_dir)
     monkeypatch.setattr(desktop_approval, "assurance", lambda: ("presence", "synthetic-presence"))
     return {"agents": agents, "teams": teams, "account": account, "session_dir": session_dir}
 
@@ -181,6 +184,7 @@ def _context(session: Session, stores) -> ToolContext:
 def _start_run(session: Session, *inputs: Any) -> None:
     """Reset the run flags as the pipeline head does, then fold the inputs."""
     session._run_owner_texts = []
+    session._run_owner_text_bindings = []
     session._run_owner_consent = False
     session._run_untrusted_input = False
     session._run_typed_user = False
@@ -204,7 +208,9 @@ def _assert_proposed(result, gate):
 def _proposal_record(stores, result, *, root=None):
     from local_operator import profile_proposals as P
 
-    return P.get(root or stores["account"].config_dir, result.details["proposal_id"])
+    record = P.get(root or stores["account"].config_dir, result.details["proposal_id"])
+    assert record is not None, result.details["proposal_id"]
+    return record
 
 
 def _snapshot(stores) -> str:
@@ -635,7 +641,12 @@ async def test_remote_prompt_naming_profile_never_authorizes(stores):
             _context(session, stores), op="update", name="reviewer", instructions="Remote edit."
         )
         _assert_proposed(result, gate)
-        assert "do not retry" in _text(result)
+        # The receipt points at the Agents review surface (never Mesh) and
+        # says nothing was written, so the model neither retries nor claims
+        # the edit landed.
+        assert "nothing changed yet" in _text(result)
+        assert "Agents → reviewer" in _text(result)
+        assert "Mesh" not in _text(result)
         assert "TUI" not in _text(result)
     finally:
         await session.dispose()

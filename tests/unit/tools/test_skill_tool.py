@@ -50,6 +50,16 @@ def _builtin_name() -> str:
     )[0]
 
 
+async def _owner_grant(_intent: Any) -> str:
+    """The host seam answering as an owner's explicit request would.
+
+    Shared by every context these tests build (the ``env`` fixture and the
+    moved-profile case), so each skill write passes the same consent seam a
+    real owner conversation does rather than a context with no seam at all.
+    """
+    return "owner-prompt:synthetic-skill-test"
+
+
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """An isolated HOME + profile, and the tool built as a session builds it."""
@@ -61,11 +71,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
     monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
 
-    async def owner_grant(_intent):
-        return "owner-prompt:synthetic-skill-test"
-
     context = ToolContext(
-        cwd=str(config_dir), memory_config_dir=str(config_dir), authorize_durable_write=owner_grant
+        cwd=str(config_dir), memory_config_dir=str(config_dir), authorize_durable_write=_owner_grant
     )
     tools = create_tools(context, ["skill"])
     assert [tool.name for tool in tools] == ["skill"]
@@ -916,7 +923,7 @@ async def test_list_and_create_agree_on_a_moved_profile(
     context = ToolContext(
         cwd=str(config_dir),
         memory_config_dir=str(config_dir),
-        authorize_durable_write=env.context.authorize_durable_write,
+        authorize_durable_write=_owner_grant,
     )
     moved = SimpleNamespace(
         home=home, config_dir=config_dir, context=context, tool=create_tools(context, ["skill"])[0]

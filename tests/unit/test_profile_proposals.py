@@ -8,6 +8,8 @@ records are byte-identical to what an older runtime files.
 from __future__ import annotations
 
 import json
+import time
+from typing import Any
 
 import pytest
 
@@ -68,7 +70,7 @@ def test_newer_proposal_supersedes_older_for_same_target(root):
     _row, before = _agent(root)
     old = _file(root, before, instructions="One.")
     new = _file(root, before, instructions="Two.")
-    assert PP.get(root, old["id"])["state"] == PP.STATE_SUPERSEDED
+    assert _must_get(root, old["id"])["state"] == PP.STATE_SUPERSEDED
     assert [p["id"] for p in PP.list_proposals(root)] == [new["id"]]
 
 
@@ -151,13 +153,13 @@ def test_stale_base_refuses_even_disjoint_changes(root):
     row, before = _agent(root)
     record = _file(root, before, instructions="After.")
     AgentRegistry(root).update_agent(row.id, _edit_fields(description="moved meanwhile"))
-    assert PP.get(root, record["id"])["stale"] is True
+    assert _must_get(root, record["id"])["stale"] is True
     with pytest.raises(PP.ProposalError) as stale:
         PP.apply(root, record["id"], actor="desktop")
     assert stale.value.code == "profile_proposal_stale"
     assert _prompt(root, row.id) == "Before."
     # Refreshing status cannot reset the base or make Accept safe.
-    assert PP.get(root, record["id"])["base_commitment"] == record["base_commitment"]
+    assert _must_get(root, record["id"])["base_commitment"] == record["base_commitment"]
     assert PP.reject(root, record["id"], actor="desktop")["state"] == "rejected"
 
 
@@ -168,6 +170,7 @@ def test_team_proposal_accept(root):
     registry = TeamRegistry(root)
     team = registry.create_team(TeamEditFields(name="lopdev", instructions="Old team brief."))
     before = snapshot(root, "team", str(team.id))
+    assert before is not None
     record = PP.file(
         root,
         profile_kind="team",
@@ -178,7 +181,7 @@ def test_team_proposal_accept(root):
         after=dict(before, instructions="New team brief."),
         session_id="sess-t",
     )
-    detail = PP.detail(root, PP.get(root, record["id"]))
+    detail = PP.detail(root, _must_get(root, record["id"]))
     assert detail["changes"][0]["before_text"] == "Old team brief."
     assert detail["changes"][0]["after_text"] == "New team brief."
     PP.apply(root, record["id"], actor="desktop")
@@ -186,6 +189,13 @@ def test_team_proposal_accept(root):
 
 
 # --- legacy mesh records ----------------------------------------------------
+
+
+def _must_get(root, proposal_id: str) -> dict[str, Any]:
+    """``PP.get`` for a record the test filed: absent is a test failure."""
+    record = PP.get(root, proposal_id)
+    assert record is not None, proposal_id
+    return record
 
 
 def _legacy(root, instructions, session_id="legacy-session"):
@@ -198,6 +208,7 @@ def _legacy(root, instructions, session_id="legacy-session"):
         existing = registry.create_agent(_edit_fields(name="legacy", tags=["role"]))
         registry.set_agent_system_prompt(existing.id, "Old.")
     before = P.snapshot(root, "agent", existing.id)
+    assert before is not None
     data = P.build(
         root,
         profile_kind="agent",
@@ -258,3 +269,20 @@ def test_mesh_listing_hides_profile_kind(root):
     assert approval_rows(root) == [] or all(
         row.get("kind") != A.KIND_PROFILE_SAVE for row in approval_rows(root)
     )
+
+
+def test_legacy_import_skips_lapsed_request_stored_as_requested(root):
+    """F1: mesh expiry is folded on READ, so a lapsed request's stored state is
+    still ``requested``. Importing from the raw field resurrected it as a
+    pending Agents proposal; it must stay an expired outcome."""
+    lapsed = _legacy(root, "lapsed text", session_id="s-lapsed")
+    path = A.approvals_dir(root) / f"{lapsed['approval_id']}.json"
+    raw = json.loads(path.read_text())
+    raw["expires_at"] = time.time() - 25 * 3600  # past the 24 h mesh window
+    path.write_text(json.dumps(raw))
+    assert json.loads(path.read_text())["state"] == "requested"  # stored, unfolded
+    assert A.presented(raw)["state"] == "expired"
+
+    assert PP.import_legacy(root) == 0
+    assert PP.list_proposals(root) == []
+    assert PP.list_proposals(root, state=None) == []

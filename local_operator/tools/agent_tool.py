@@ -2047,12 +2047,23 @@ def _proposed_profile_receipt(tool_call_id: str, tool_name: str, proposed: Any) 
 
     fields = ", ".join(proposed.changes) or "no fields"
     pid = proposed.proposal_id
-    text = (
-        f"Proposed {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) as "
-        f"{pid}; nothing changed yet. Tell the user to review it in Agents → "
-        f"{proposed.profile_name}, or ask them and call profile_proposal op=apply id={pid} "
-        "after they agree."
-    )
+    state = getattr(proposed, "state", "pending")
+    if state == "pending":
+        text = (
+            f"Proposed {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) as "
+            f"{pid}; nothing changed yet. Tell the user to review it in Agents → "
+            f"{proposed.profile_name}, or ask them and call profile_proposal op=apply id={pid} "
+            "after they agree."
+        )
+    else:
+        # An identical idea that was already decided (or lapsed) is reported
+        # as such: it is never revived, and claiming "proposed" would send the
+        # user to an Agents entry that is not pending.
+        text = (
+            f"This exact {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) "
+            f"was already proposed as {pid} and is {state}; nothing changed and it was not "
+            "re-opened. Ask the user before proposing it again with different content."
+        )
     if proposed.diff:
         text += "\n" + profile_diff_summary("\n".join(proposed.diff))
     return _text(
@@ -2060,7 +2071,7 @@ def _proposed_profile_receipt(tool_call_id: str, tool_name: str, proposed: Any) 
         tool_name,
         text,
         details={
-            "status": "proposed",
+            "status": "proposed" if state == "pending" else state,
             "proposal_id": pid,
             "profile_kind": proposed.profile_kind,
             "profile_name": proposed.profile_name,
@@ -3096,9 +3107,6 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
             "Reusable agent profiles: delegation roles (reviewer, coder, "
             "architect, manager, designer, scout) and specialists with their "
             "own instruction sets; launch a role with task(agent='<name>')."
-            " Account edits the user explicitly requested apply directly; otherwise "
-            "review the proposed change in Agents → <name>, or use profile_proposal "
-            "after the user agrees."
         ),
         parameters=parameters,
         # Writes land in the user's own configuration directory, never in the

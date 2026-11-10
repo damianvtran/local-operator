@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
@@ -42,7 +42,7 @@ def root(request: Request) -> Path:
     return Path(request.app.state.config_manager.config_dir)
 
 
-def refusal(exc: P.ProposalError, request: Request, proposal_id: str):
+def refusal(exc: P.ProposalError, request: Request, proposal_id: str) -> NoReturn:
     status = (
         404
         if exc.code == "profile_proposal_not_found"
@@ -77,7 +77,7 @@ async def proposal(proposal_id: str, request: Request):
 
 @router.post("/v1/desktop/profile-proposals/{proposal_id}/accept")
 async def accept(proposal_id: str, body: Accept, request: Request):
-    def mutate():
+    def mutate() -> dict[str, Any]:
         try:
             result = P.apply(root(request), proposal_id, actor="desktop", edited_after=body.after)
             record = result["proposal"]
@@ -108,7 +108,7 @@ async def accept(proposal_id: str, body: Accept, request: Request):
 
 @router.post("/v1/desktop/profile-proposals/{proposal_id}/reject")
 async def reject(proposal_id: str, body: Reject, request: Request):
-    def mutate():
+    def mutate() -> dict[str, Any]:
         try:
             record = P.reject(root(request), proposal_id, actor="desktop", note=body.note)
             return {"proposal": P.detail(root(request), record)}

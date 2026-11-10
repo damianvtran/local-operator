@@ -11,6 +11,7 @@ from local_operator.redaction_shapes import REDACTION_MARKER, scrub_secrets
 async def test_profile_summary_is_not_withheld_as_malformed_hunk(tool):
     rows = ["instructions (replaced; new text):", "Sell carefully.", "Retain public guidance."]
     result = await AgentLoop._redact_details({"diff": rows}, scrub_secrets, tool, {})
+    assert result is not None
     assert result["diff"] == rows
 
 
@@ -31,6 +32,7 @@ async def test_profile_summary_masks_only_secret_spans():
         "team",
         {},
     )
+    assert result is not None
     assert secret not in "\n".join(result["diff"])
     assert "Public before." in result["diff"]
     assert "Public after." in result["diff"]
@@ -53,6 +55,7 @@ async def test_profile_full_new_body_redacts_multiline_credentials_together():
         "agent",
         {},
     )
+    assert result is not None
     assert "body-one" not in result["diff"] and "body-two" not in result["diff"]
     assert result["diff"] == [
         "instructions (replaced; new text):",

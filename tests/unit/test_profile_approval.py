@@ -656,6 +656,7 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
     from local_operator.harness.types import TextContent, ToolResult
 
     proposed = PP.get(root, queued.details["proposal_id"])
+    assert proposed is not None
     legacy = P.build(
         root,
         profile_kind=kind,
@@ -681,7 +682,7 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
             "scope": "global",
         },
     )
-    assert queued.details["status"] == "queued"
+    assert queued.details is not None and queued.details["status"] == "queued"
     # The ordinary harness native persistence boundary, using the ACTUAL call/result.
     call = Message.assistant(
         tool_calls=[ToolCall(id=queued.tool_call_id, name=queued.tool_name, arguments=args)]

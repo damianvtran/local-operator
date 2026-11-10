@@ -31,10 +31,13 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
         params = ProfileProposalParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "profile_proposal", exc)
-    registry = context.agent_registry or context.team_registry if context else None
-    if registry is None:
+    registry = (context.agent_registry or context.team_registry) if context else None
+    if context is None or registry is None:
         return _error(tool_call_id, "profile_proposal", "No profile store is attached.")
     root = Path(registry.config_dir)
+    # Named in errors raised after the record is read ("Agents → marketer"):
+    # apply/reject carry only an id, so ``params.name`` is usually empty.
+    target_name = params.name or "the profile"
     try:
         if params.op == "list":
             rows = P.list_proposals(root, name=params.name)
@@ -54,6 +57,7 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
         proposal = P.get(root, params.id)
         if proposal is None:
             return _error(tool_call_id, "profile_proposal", "Proposal not found.")
+        target_name = str(proposal.get("name") or target_name)
         if params.op == "show":
             if context.decide_profile_proposal:
                 await context.decide_profile_proposal(params.id, "show")
@@ -125,7 +129,7 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
         return _error(
             tool_call_id,
             "profile_proposal",
-            f"Not applied: {exc}. Review in Agents → {params.name or 'the profile'}.",
+            f"Not applied: {str(exc).rstrip('. ')}. Review in Agents → {target_name}.",
         )
 
 

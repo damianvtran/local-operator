@@ -3796,6 +3796,11 @@ class Session:
         #: card (``_authorize_account_profile_write``). Reset at the pipeline head.
         self._run_owner_texts: list[str] = []
         self._last_displayed_profile_proposal: str | None = None
+        # Parallel to ``_run_owner_texts``: the proposal that was displayed when
+        # each owner text ARRIVED. A contextual "yes" binds only to that, so a
+        # ``profile_proposal op=show`` the model runs after the owner spoke can
+        # never rebind the owner's earlier words to a different proposal.
+        self._run_owner_text_bindings: list[str | None] = []
         self._run_owner_consent = False
         self._run_untrusted_input = False
         self._run_last_trigger: str | None = None
@@ -4403,9 +4408,10 @@ class Session:
         self._request_approval = request_approval
         self._authorize_durable_write = authorize_durable_write
         if authorize_durable_write is None and owner_prompt_consent:
-            # TOP-LEVEL ONLY: a subagent's opening prompt is its parent's text,
-            # never the person's, so a child never gets the owner-prompt seam
-            # (and the callback re-checks the parent id at call time anyway).
+            # Installed for every session; children are refused at call time:
+            # ``_profile_owner_consent`` requires no parent session, because a
+            # subagent's opening prompt is its parent's text, never the person's.
+            # A child's writes are therefore filed as proposals, never granted.
             self._authorize_durable_write = self._authorize_account_profile_write
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
@@ -14790,8 +14796,14 @@ class Session:
                 trigger=self._run_last_trigger or "internal",
                 **intent.proposal,
             )
-            self._last_displayed_profile_proposal = record["id"]
+            if record["state"] == profile_proposals.STATE_PENDING:
+                # The receipt tells the model to show this proposal to the user,
+                # so it is what a LATER owner "yes" may refer to (see
+                # ``_note_run_input``, which binds each owner text to the
+                # proposal displayed before it arrived).
+                self._last_displayed_profile_proposal = record["id"]
             return ProposedProfileWrite(
+                state=str(record["state"]),
                 proposal_id=record["id"],
                 profile_kind=record["kind"],
                 profile_name=record["name"],
@@ -14828,6 +14840,7 @@ class Session:
         """Host-only decision: model parameters cannot manufacture owner consent."""
         from local_operator import profile_proposals as P
         from local_operator.harness.approval import ACCOUNT_PROFILE_GATE, ask_approval
+        from local_operator.profile_scope import owner_text_assents
 
         if self._parent_session_id or action not in {"apply", "reject", "show"}:
             return "refused"
@@ -14840,26 +14853,25 @@ class Session:
         if action == "show":
             self._last_displayed_profile_proposal = proposal_id
             return "shown"
-        # A generic owner input is not approval. A contextual yes binds only to
-        # the last proposal actually displayed by this host, or an explicit
-        # apply/reject instruction names this exact proposal ID.
+        # A generic owner input is not approval. A contextual assent binds only
+        # to the proposal that was displayed BEFORE that owner text arrived
+        # (snapshotted per text in ``_note_run_input``), and an explicit
+        # apply/reject instruction must name this exact proposal ID. Model
+        # parameters and model-run ``show`` calls never manufacture consent.
         explicit = any(
-            (
-                re.fullmatch(
-                    r"\s*(?:yes|yep|yeah|sure|approved?|go ahead|apply it|do it)"
-                    r"(?:[,! .]+(?:please|apply it|go ahead|do it))*[.! ]*",
-                    text,
-                    re.I,
-                )
-                and self._last_displayed_profile_proposal == proposal_id
-            )
+            (binding == proposal_id and owner_text_assents(text))
             or (
                 proposal_id in text
                 and re.match(r"^\s*(?:please\s+)?(?:apply|accept|approve|reject)\b", text, re.I)
             )
-            for text in self._run_owner_texts
+            for text, binding in zip(
+                self._run_owner_texts, self._run_owner_text_bindings, strict=False
+            )
         )
-        consent = self._profile_owner_consent() and (explicit or self._run_owner_consent)
+        # FAIL CLOSED on ask answers: ``_run_owner_consent`` (a person answered
+        # an ask) is not bound to any proposal, so it never grants one here;
+        # the exact-proposal card below remains the route for that case.
+        consent = self._profile_owner_consent() and explicit
         if action == "reject":
             return "granted" if consent else "refused"
         if consent and proposal["origin"]["trust"] != "untrusted":
@@ -16738,6 +16750,7 @@ class Session:
                 # here. Full text, untruncated: the name match must see it all.
                 if not _is_remote_prompt(message):
                     self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
+                    self._run_owner_text_bindings.append(self._last_displayed_profile_proposal)
 
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
@@ -19322,6 +19335,7 @@ class Session:
         self._run_aida_checkin = False
         self._run_typed_user = False
         self._run_owner_texts = []
+        self._run_owner_text_bindings = []
         self._run_owner_consent = False
         self._run_untrusted_input = False
         self._run_last_trigger = None

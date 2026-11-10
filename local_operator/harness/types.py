@@ -2007,6 +2007,10 @@ class ProposedProfileWrite:
     profile_name: str
     changes: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    #: The record's real state. ``pending`` for a fresh filing; an identical
+    #: re-filing of an already-decided or expired proposal reports that state
+    #: so the receipt never claims a pending proposal that does not exist.
+    state: str = "pending"
 
 
 #: Kept for one release so out-of-tree imports of the old name keep resolving;

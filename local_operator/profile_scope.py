@@ -399,22 +399,46 @@ def owner_text_requests_profile_edit(
     return False
 
 
+#: Leading clauses that do not change who is asking: interjections, politeness
+#: and "let's"/"I'd like you to" framings, any number of them in a row
+#: ("Hey, could you please …"). Anchored at the start of the owner's own text,
+#: so a quoted, reported or questioned phrasing ("tell me how to create …",
+#: '"create a team" he said') still does not match. The SAFETY of a direct
+#: write is the host's input witness (clean, top-level, owner-typed run), not
+#: this grammar; the grammar only separates "do it" from "talk about it".
+_OWNER_LEAD = (
+    r"^\s*(?:(?:hey|hi|hello|ok|okay|so|alright|right|now|please|kindly|"
+    r"can you|could you|would you|will you|can we|could we|"
+    r"let'?s|let us|go ahead and|"
+    r"i want you to|i'?d like you to|i would like you to|i need you to)"
+    r"[\s,!.:-]+)*"
+)
+
+
+def _normalize_owner_text(text: str) -> str:
+    # Typographic apostrophes ("Let’s") come from macOS/phone keyboards.
+    return text.replace("\u2019", "'").replace("\u2018", "'")
+
+
 def owner_text_requests_profile_change(text: str, names: Iterable[str]) -> bool:
     """An actual edit imperative naming the target, not a mere name mention.
 
-    Unlike the legacy field-specific grammar this accepts natural requests such
-    as “make lopdev's manager more concise”, and covers policy fields. Anchoring
-    at the imperative excludes “tell me how to change reviewer” and negations.
+    Accepts natural requests such as “make lopdev's manager more concise” or
+    “Can you please make marketer more concise?”, and covers policy fields.
+    Anchoring at the (optionally introduced) imperative excludes “tell me how to
+    change reviewer”, quotations and negations.
     """
     import re
 
     prefix = (
-        r"^\s*(?:(?:please|can you|could you|would you|I want you to)\s+)?"
-        r"(?:update|change|edit|make|set|add|remove|rewrite|replace|create|revert|restore|"
-        r"shorten|expand|revise)\s+"
-        r"(?:(?:the|that|this|a|an|your)\s+)?"
+        _OWNER_LEAD
+        + r"(?:update|change|edit|make|set|add|remove|rewrite|replace|create|revert|restore|"
+        r"shorten|expand|revise|tighten|simplify|improve|tweak|adjust|refine|fix|rename|"
+        r"set\s+up|tune)\s+"
+        r"(?:(?:the|that|this|a|an|your|my|our)\s+)?"
         r"(?:(?:agent|team|skill|role|profile)\s+)?"
     )
+    text = _normalize_owner_text(text)
     return any(
         re.match(prefix + re.escape(str(name)) + r"(?![\w-])", text, re.IGNORECASE)
         for name in names
@@ -425,19 +449,53 @@ def owner_text_requests_profile_change(text: str, names: Iterable[str]) -> bool:
 def owner_text_requests_profile_creation(text: str, kind: str) -> bool:
     """Explicit creation may let the model choose a new name, never an update.
 
-    This is limited to a creation imperative naming the kind. An unrelated
-    profile name mention, or a request about how to create one, cannot grant.
+    Limited to a creation request naming the kind (“Set up a team for
+    launches”, “I need a new team marketing”, “Hey, make me a launch team”).
+    An unrelated profile name mention, or a request about HOW to create one,
+    cannot grant.
     """
     import re
 
     noun = {"agent": "(?:agent|role|specialist)", "team": "team", "skill": "skill"}[kind]
     return bool(
         re.match(
-            r"^\s*(?:(?:please|can you|could you|would you|I want you to)\s+)?"
-            r"(?:create|make|build|add)\s+(?:(?:me|a|an|new|reusable)\s+)*"
+            _OWNER_LEAD + r"(?:create|make|build|add|set\s*up|spin\s+up|stand\s+up|put\s+together|"
+            r"(?:i|we)\s+(?:need|want|'d like|would like))\s+"
+            r"(?:(?:me|us|a|an|new|another|reusable|fresh)\s+)*"
             + r"(?:[\w-]+\s+){0,3}"
             + noun
             + r"\b",
+            _normalize_owner_text(text),
+            re.IGNORECASE,
+        )
+    )
+
+
+def owner_text_assents(text: str) -> bool:
+    """Whether an owner's short reply is plain assent ("ok", "lgtm, apply it").
+
+    Used ONLY together with a binding to the proposal that was displayed before
+    the text arrived (``Session.decide_profile_proposal``): assent alone names
+    nothing. Hedges, negations, questions and counter-instructions are not
+    assent, so "yes but change the tone" or "no, don't apply" never apply.
+    """
+    import re
+
+    text = _normalize_owner_text(text).strip()
+    if not text or len(text) > 120 or "?" in text:
+        return False
+    if re.search(
+        r"\b(?:no|nope|not|don'?t|do not|never|wait|hold|stop|cancel|reject|but|however|"
+        r"instead|except|without|rather|later)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return False
+    return bool(
+        re.match(
+            r"^(?:yes|yep|yeah|yup|sure|ok|okay|k|approved?|accept(?:ed)?|confirm(?:ed)?|"
+            r"go ahead|go for it|apply|do it|ship it|lgtm|looks good|sounds good|"
+            r"perfect|great|please apply|please do)\b",
             text,
             re.IGNORECASE,
         )
@@ -1175,6 +1233,14 @@ class ScopedTeamRegistry:
         return "session" if self._session_row(getattr(team, "id", "")) is not None else "global"
 
     # -- reads ----------------------------------------------------------------
+    def refresh(self, *, recovery_wait: float | None = None) -> None:
+        """Re-read both stores now, ignoring the snapshot interval (see
+        :meth:`local_operator.teams.TeamRegistry.refresh`)."""
+        for registry in (self.global_registry, self.session_registry):
+            refresh = getattr(registry, "refresh", None)
+            if callable(refresh):
+                refresh(recovery_wait=recovery_wait)
+
     def list_teams(self, *, recovery_wait: float | None = None) -> list[Any]:
         return list(self.session_registry.list_teams(recovery_wait=recovery_wait)) + list(
             self.global_registry.list_teams(recovery_wait=recovery_wait)

@@ -27,9 +27,9 @@ working from the filing conversation) and an append-only audit line.
 CONSTRAINTS.
 * Filing is idempotent: the id is derived from the content tuple.
 * ``stale`` is computed on read (current image ≠ base), never stored, so a
-  proposal never silently lands on a row that moved; ``rebase`` re-applies only
-  the proposal's changed fields onto the current row and refuses when a field
-  moved on both sides.
+  proposal never silently lands on a row that moved. There is no rebase: a
+  stale proposal is refused (409 / "nothing was applied") and the originating
+  conversation is asked for a fresh one.
 * Only ``accept``/``reject``/``supersede`` write state; ``expired`` is folded on
   read (30 days) like ``network.approvals.presented``.
 * Same-uid code can write these files: like the signed path before it, this is
@@ -183,6 +183,11 @@ def file(
     session, so a retried tool call answers the same record. A NEW pending
     proposal for the same target supersedes older pending ones — the person
     reviews the agent's latest idea, not a queue of drafts.
+
+    An identical re-filing of a record that is already decided (rejected,
+    superseded, accepted) or expired returns THAT record with its real state —
+    never revived to pending — so the caller's receipt can say what actually
+    happened instead of claiming a fresh proposal exists.
     """
     if operation not in {"create", "update", "revert"}:
         raise ProposalError("profile_proposal_invalid", f"cannot propose {operation!r}")
@@ -203,7 +208,10 @@ def file(
         path = _path(root, proposal_id)
         existing = _read(path)
         if existing is not None:
-            return existing
+            shown = dict(existing)
+            if shown.get("state") == STATE_PENDING and now >= float(shown.get("expires_at") or 0):
+                shown["state"] = STATE_EXPIRED
+            return shown
         record = {
             "schema": SCHEMA,
             "id": proposal_id,
@@ -610,8 +618,10 @@ def import_legacy(root: Path) -> int:
 
     Lazy (runs on every list/get) and idempotent, with no one-shot marker on
     purpose: a runtime from the previous generation keeps filing into the mesh
-    store until it restarts. Only ``requested`` records are imported, ignoring
-    their 24 h window (the stale-base check protects a late accept); denied,
+    store until it restarts. Only records still ``requested`` AS A READER SEES
+    THEM are imported: mesh expiry is folded on read (``A.presented``), so the
+    stored field of a lapsed request still says ``requested`` and reading it raw
+    would resurrect an expired request as pending; denied,
     expired, connected and withdrawn records are explicit outcomes and are NEVER
     revived. The mesh record itself is not touched — the mesh listing hides
     the kind (``network.approvals.NON_MESH_KINDS``) and retention prunes it.
@@ -629,7 +639,7 @@ def import_legacy(root: Path) -> int:
             continue
         if not isinstance(raw, dict) or raw.get("kind") != A.KIND_PROFILE_SAVE:
             continue
-        if raw.get("state") != A.STATE_REQUESTED:
+        if A.presented(raw)["state"] != A.STATE_REQUESTED:
             continue
         try:
             what = raw["what"][A.KIND_PROFILE_SAVE]

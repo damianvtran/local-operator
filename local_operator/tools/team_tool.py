@@ -481,6 +481,13 @@ async def _op_write(
         )
     name = (params.name or "").strip()
     try:
+        # Read disk, not the interval-cached snapshot: the before-image below
+        # becomes a proposal's CAS base, and a row another writer changed in
+        # the last few seconds (an Agents Accept, a verbal apply) would make
+        # that proposal stale at birth.
+        refresh = getattr(registry, "refresh", None)
+        if callable(refresh):
+            refresh()
         existing = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
@@ -1154,9 +1161,6 @@ def build_team_tool(context: ToolContext) -> AgentTool | None:
             "top of each member's own instructions. Find or author one; use "
             "team_delete for irreversible removal. The user launches it with "
             "/team <name> <request>."
-            " Account edits the user explicitly requested apply directly; otherwise "
-            "review the proposed change in Agents → <name>, or use profile_proposal "
-            "after the user agrees."
         ),
         parameters=TeamParams.model_json_schema(),
         approval_tier="read",
