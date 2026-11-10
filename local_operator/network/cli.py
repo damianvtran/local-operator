@@ -3767,8 +3767,8 @@ def _unconfirmed_copies(network_id: str, device: str) -> int:
         state = SyncState.load(network_id)
     except Exception:  # noqa: BLE001 — an unreadable ledger confirms nothing
         return 0
-    rows = state.acks.get(device) or {}
-    return sum(1 for row in rows.values() if isinstance(row, dict) and not row.get("wiped"))
+    # Sent-but-unacknowledged copies are open too (``SyncState.dispatched``).
+    return len(state.open_copies(device))
 
 
 def _canonical_credential_key(raw: str) -> str:
@@ -4254,6 +4254,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             copies=int(live.get("copies") or 0),
             wiped=int(live.get("wiped") or 0),
             timed_out=int(live.get("timed_out") or 0),
+            unacknowledged=int(live.get("unacknowledged") or 0),
         )
         return _emit(
             args,

@@ -13368,7 +13368,7 @@ class RelayServer:
         endings = (
             engine.deliver_removal_endings(device_id)
             if engine is not None
-            else {"copies": 0, "wiped": 0, "timed_out": 0}
+            else {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         )
         with store.mutate(resolved.network_id, self.root) as record:
             outcome = remove_member(
@@ -13398,6 +13398,7 @@ class RelayServer:
             "copies": int(endings.get("copies") or 0),
             "wiped": int(endings.get("wiped") or 0),
             "timed_out": int(endings.get("timed_out") or 0),
+            "unacknowledged": int(endings.get("unacknowledged") or 0),
         }
 
     def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:
