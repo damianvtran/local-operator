@@ -63,6 +63,8 @@ from .mine import (
     CARRY_TOKEN_BUDGET,
     INJECTED_HEADER,
     carry_digest_lines,
+    is_role_header,
+    last_role_header,
     merge_carry,
     mine_carry,
     parse_carry,
@@ -133,6 +135,8 @@ __all__ = [
     "DEFAULT_MAX_FRAMES",
     "FRAME_TOKEN_ESTIMATE",
     "HQ_EDGE_FRAMES",
+    "EDGE_THRESHOLD_FRACTION",
+    "ARCHIVE_THRESHOLD_FRACTION",
     "FRAME_DATA_BYTES_BUDGET",
     "Shape",
     "Archive",
@@ -254,46 +258,92 @@ def frame_token_estimate_for(provider: str, model_id: str) -> int:
     return -(-(patches * 105) // 100)  # ceil(patches * 1.05)
 
 
-#: Fraction of the context window the archive's two VERBATIM text edges may
-#: occupy together. The edges are the one part of a replayed archive the token
-#: budget cannot trim (it only drops imaged pages), so an unbounded edge is a
-#: floor that scales with the frame SHAPE instead of the window: for the
-#: default ``HQ_EDGE_FRAMES * capacity`` the pair is ~31.5k tokens for the
-#: Anthropic 1932px reader (capacity 21000) and ~35.7k for the Gemini reader
-#: (capacity 23808), whether the window is 1M or 64k. Capping the pair at 15%
-#: keeps them a minority of the post-compaction context — the imaged middle
-#: carries the bulk, at ~4x the density per token — while still preserving
-#: enough exact head/tail text for the model to anchor the oldest and newest
-#: turns. Chosen to sit under the default 0.5*window archive budget with room
-#: for frames beside the edges.
+#: Fraction of the EFFECTIVE compaction threshold (``T_eff``, from
+#: :func:`~local_operator.compaction.thresholds.resolve_threshold_tokens`) the
+#: archive's two VERBATIM text edges may occupy together. The edges are the
+#: one part of a replayed archive the token budget cannot trim (it only drops
+#: imaged pages), so an unbounded edge is a floor that scales with the frame
+#: SHAPE instead of the budget: for the default ``HQ_EDGE_FRAMES * capacity``
+#: the pair is ~31.5k tokens for the Anthropic 1932px reader (capacity 21000)
+#: and ~35.7k for the Gemini reader (capacity 23808), whatever the window.
+#: Capping the pair at 15% keeps them a minority of the post-compaction
+#: context — the imaged middle carries the bulk, at ~4x the density per token
+#: — while still preserving enough exact head/tail text for the model to
+#: anchor the oldest and newest turns. Chosen to sit under the 0.5*T_eff
+#: archive budget with room for frames beside the edges.
 #:
-#: The cap binds — i.e. trims below the shape default — whenever the default
-#: pair exceeds 15% of the window, which is ``default_pair_chars / 0.6`` in
-#: window tokens. For the 1932px reader (pair 126000 chars → 31.5k tokens)
-#: that threshold is ~210k, so its NATIVE 200k window is trimmed slightly
-#: (63000→60000 chars/edge, a deliberate 15.75%→15% haircut); the Gemini
-#: reader (238k threshold) is likewise trimmed at 200k, and every shape is
-#: trimmed at 96k/128k. Only windows above the shape's threshold (e.g. any
-#: window for the Sonnet/OpenAI 13916-capacity readers up to 139k, or ≥210k
-#: for the 1932px reader) keep full-default edges. This is the intended
-#: behaviour, not an accident: the whole point is that the edges follow the
-#: window, so a reader whose default already exceeds its 15% share gives a
-#: little verbatim text back to the imaged middle.
-EDGE_WINDOW_FRACTION = 0.15
+#: WHY the threshold and not the raw window (PR "snapcompact floor
+#: tightening"): the post-compaction context has to land under ``T_eff``, not
+#: under the window — a pass that leaves the context above the trigger re-fires
+#: on the next turn. ``T_eff = min(0.80 x window, 400k)`` by default, so the
+#: window over-states the room by 1.25x on a 200k model and by 2.5x on a 1M
+#: model. Sizing against the window let a 1M-window archive budget reach 500k
+#: — ABOVE the 400k trigger it exists to get under — and measured
+#: post-compaction contexts sat at ~188k (architect read of 25 real markers:
+#: fixed head 33-59k + archive 35-47k + carry ~5k + preserved ~5k + kept tail
+#: 25-150k).
+#:
+#: The cap binds — trims below the shape default — whenever the default pair
+#: exceeds 15% of ``T_eff``, i.e. ``T_eff < default_pair_tokens / 0.15``: for
+#: the 1932px reader (31.5k pair) below ~210k. A 200k window (``T_eff`` 160k)
+#: is therefore trimmed 63000→48000 chars/edge; a 1M window (``T_eff`` 400k)
+#: keeps full-default edges. Callers that do not pass a threshold (legacy and
+#: test call sites) fall back to the window, preserving the old numbers.
+#:
+#: Measured effect (replay of n=7 real compactions across sessions
+#: 7005ed0781b8, cbf005342ec1, 439818272d84, cut held at the committed one):
+#: at their real 1M windows the re-basing is a no-op — the archive is bounded
+#: by ``DEFAULT_MAX_FRAMES`` at 33.6k-54.9k tokens, far under either budget —
+#: so the dominant post-compaction cost there is the kept tail, not this. It
+#: binds on smaller windows: same spans sized for 128k save 2.9k-13.6k archive
+#: tokens (median 9.2k), and for the 1932px reader at 200k median 7.1k (max
+#: 11.4k), with every genuine user message still present in tail, preserved
+#: turns, archive or carry. The 0.15 and 0.5 factors are unchanged; only their
+#: basis moved.
+EDGE_THRESHOLD_FRACTION = 0.15
+
+#: Share of ``T_eff`` the whole replayed archive (edges + imaged pages) may
+#: occupy, before the carry reservation. Half leaves the other half for the
+#: fixed head (system prompt + tool schemas, measured 33-59k) and the kept
+#: tail (25-150k) so the committed context lands under the trigger. This is
+#: the pre-existing 0.5 factor, only re-based from window to threshold.
+ARCHIVE_THRESHOLD_FRACTION = 0.5
 
 
-def _edge_chars_for(shape: Shape, context_window: int | None) -> int:
-    """Chars kept VERBATIM at each archive edge, bounded by the window.
+def _budget_basis(context_window: int | None, threshold_tokens: int | None) -> int | None:
+    """The token figure the archive is sized against: ``T_eff`` when known.
+
+    ``threshold_tokens`` is the resolved compaction trigger and is always
+    below the window (``resolve_threshold_tokens`` clamps to ``window - 1``),
+    so preferring it can only shrink the archive. ``min`` with the window is
+    defensive: a caller handing a threshold above the window (a test double,
+    a mis-resolved setting) must never INFLATE the budget past the old bound.
+    """
+    if threshold_tokens and threshold_tokens > 0:
+        if context_window and context_window > 0:
+            return min(threshold_tokens, context_window)
+        return threshold_tokens
+    if context_window and context_window > 0:
+        return context_window
+    return None
+
+
+def _edge_chars_for(
+    shape: Shape, context_window: int | None, threshold_tokens: int | None = None
+) -> int:
+    """Chars kept VERBATIM at each archive edge, bounded by ``T_eff``.
 
     Defaults to ``HQ_EDGE_FRAMES * shape.capacity`` — enough source text to
     fill the high-quality edge frames replay renders — but never lets the two
-    edges together exceed :data:`EDGE_WINDOW_FRACTION` of ``context_window``.
-    Without the cap the edges are a fixed, un-trimmable floor set by the frame
-    shape, not the window (see :data:`EDGE_WINDOW_FRACTION`): on a small window
-    the two edges alone can outrun the whole archive budget, so the frame loop
-    drops every page and the pass STILL commits a context above its own
-    target. Bounding here moves the excess oldest-edge text into the imaged
-    region, where the budget can actually act on it.
+    edges together exceed :data:`EDGE_THRESHOLD_FRACTION` of the budget basis
+    (``threshold_tokens`` when given, else ``context_window``; see
+    :func:`_budget_basis`). Without the cap the edges are a fixed,
+    un-trimmable floor set by the frame shape: on a small window the two edges
+    alone can outrun the whole archive budget, so the frame loop drops every
+    page and the pass STILL commits a context above its own target. Bounding
+    here moves the excess oldest-edge text into the imaged region, where the
+    budget can actually act on it — trimmed edge text is not lost, it is
+    imaged, or mined into the carry if its page is dropped.
 
     Priced in the estimator's fallback char density (``chars ≈ 4 × tokens``,
     :data:`~local_operator.compaction.tokens._CHARS_PER_TOKEN_FALLBACK`) so the
@@ -309,16 +359,17 @@ def _edge_chars_for(shape: Shape, context_window: int | None) -> int:
     Returns at least one page's worth (``shape.capacity``) so a tiny window
     never collapses the edges to nothing — an archive with no verbatim anchor
     is worse than a small one. Below that floor the archive can still exceed
-    ``0.5 * window`` (one page per edge is ~5k tokens, above a 24k window's 12k
-    budget): the floor RAISES the window at which the pass fits its budget, it
-    does not make it fit universally, and the frame budget remains the ultimate
-    bound on total archive size.
+    its budget (one page per edge is ~5k tokens, above a 24k window's budget):
+    the floor RAISES the window at which the pass fits its budget, it does not
+    make it fit universally, and the frame budget remains the ultimate bound
+    on total archive size.
     """
     default = HQ_EDGE_FRAMES * shape.capacity
-    if not context_window or context_window <= 0:
+    basis = _budget_basis(context_window, threshold_tokens)
+    if basis is None:
         return default
     # Half the pair's token allowance, converted to chars, is the per-edge cap.
-    pair_token_budget = int(context_window * EDGE_WINDOW_FRACTION)
+    pair_token_budget = int(basis * EDGE_THRESHOLD_FRACTION)
     per_edge_chars = (pair_token_budget // 2) * _CHARS_PER_TOKEN_FALLBACK
     # Never below one page: some verbatim anchor always beats none.
     return max(shape.capacity, min(default, per_edge_chars))
@@ -877,6 +928,7 @@ def compact_to_archive(
     max_frames: int = DEFAULT_MAX_FRAMES,
     context_window: int | None = None,
     previous_carry: str | None = None,
+    threshold_tokens: int | None = None,
 ) -> Archive:
     """Run one snapcompact pass over discarded ``messages``.
 
@@ -899,6 +951,13 @@ def compact_to_archive(
     the archive text with an explicit ``[... N chars of oldest history
     dropped]`` marker, and the un-imaged source is what ``Archive.text``
     carries forward for the next pass.
+
+    ``threshold_tokens`` is the resolved compaction trigger (``T_eff``). When
+    given, the archive budget and the verbatim-edge cap are sized against it
+    instead of the raw window (see :data:`EDGE_THRESHOLD_FRACTION` for why):
+    the committed context must land under the trigger, and on a 1M window the
+    window-based budget (500k) sat above the 400k trigger itself. ``None``
+    keeps the legacy window-based sizing.
     """
     shape = resolve_shape(provider, model_id)
     max_frames = max(1, min(max_frames, MAX_FRAMES))
@@ -919,11 +978,11 @@ def compact_to_archive(
     # a 32k budget against a ~31.5k edge-only replay). That is the same "a pass
     # meant to get under the line ends up above it" failure the frame budget
     # exists to prevent, one layer down. So bound the per-edge char count to a
-    # window-proportional share BEFORE slicing (see EDGE_WINDOW_FRACTION for
+    # threshold-proportional share BEFORE slicing (see EDGE_THRESHOLD_FRACTION for
     # which windows this trims): the trimmed-away oldest edge content is not
     # lost, it flows into image_text and is imaged (or dropped with the
     # standard marker) like any other middle history.
-    edge_chars = _edge_chars_for(shape, context_window)
+    edge_chars = _edge_chars_for(shape, context_window, threshold_tokens)
     if len(archive_text) <= 2 * edge_chars:
         return Archive(
             frames=[],
@@ -967,10 +1026,14 @@ def compact_to_archive(
     carry_reserve = estimate_tokens(Message.assistant(prior_carry_text)) if prior_carry_text else 0
     if pages:
         carry_reserve += CARRY_FRESH_TOKEN_ALLOWANCE
-    if pages and context_window and context_window > 0:
+    basis = _budget_basis(context_window, threshold_tokens)
+    if pages and basis is not None:
         # Budget floored at one frame, as before the reservation existed: a pass
         # must still be able to try to get under the line on a small window.
-        budget = max(per_frame, int(context_window * 0.5) - carry_reserve)
+        # Dropped pages are not discarded material: they are mined into the
+        # carry below, so a tighter budget trades imaged prose for the carry's
+        # tier-ranked asks/decisions rather than deleting them.
+        budget = max(per_frame, int(basis * ARCHIVE_THRESHOLD_FRACTION) - carry_reserve)
         edge_tokens = estimate_archive_tokens(
             Archive(frames=[], text_head=text_head, text_tail=text_tail)
         )
@@ -1013,6 +1076,16 @@ def compact_to_archive(
     # entered the carry as 2-3 mid-word fragments that then used up capture slots
     # (QA round 3, Q11: 19 of a real carry's 60 asks were continuations).
     dropped_text = _unwrapped_prefix(image_text, dropped_pages, shape.chars_per_line)
+    # Re-open the section the head edge cut through (see ``last_role_header``):
+    # without it the continuation of a long operator ask straddling the head
+    # boundary is mined as role-less text and kept nowhere. The span starts at
+    # ``image_text[0]`` only when the OLDEST page is among those dropped, which
+    # the drop loops guarantee (they always take from the front).
+    first_line = dropped_text.lstrip().split("\n", 1)[0] if dropped_text else ""
+    if dropped_text and not is_role_header(first_line):
+        continuing = last_role_header(text_head)
+        if continuing:
+            dropped_text = f"{continuing}\n{dropped_text}"
     fresh = mine_carry(dropped_text) if dropped_text else mine_carry("")
     # ``parse_carry`` reads the archive's own ``render_carry`` form (plain
     # headings); the caller always hands this function the archive's exact

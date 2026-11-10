@@ -24,6 +24,7 @@ from local_operator.compaction.mine import (
     Carry,
     carry_digest_lines,
     carry_is_empty,
+    last_role_header,
     merge_carry,
     mine_carry,
     parse_carry,
@@ -696,3 +697,17 @@ def test_digest_lines_are_bounded_and_tier_labelled():
     assert any(line.startswith("- Decisions:") for line in lines)
     assert any(line.startswith("- Identifiers:") for line in lines)
     assert len("\n".join(lines)) <= 1000
+
+
+def test_last_role_header_names_the_section_the_text_ends_in():
+    """Only the bare header comes back, never its same-line remainder.
+
+    snapcompact prefixes it to the dropped span so a long operator ask that
+    straddles the verbatim head edge is still mined as ``[User]`` text.
+    """
+    head = "[User] first ask\n[Assistant] reply\n[User] please keep the ledger and"
+    assert last_role_header(head) == "[User]"
+    assert last_role_header("[Tool result: bash] {\"ok\": 1}\nmore") == "[Tool result: bash]"
+    assert last_role_header("no header at all") is None
+    mined = mine_carry(f"{last_role_header(head)}\nplease also reconcile the finance report")
+    assert any("reconcile the finance report" in ask for ask in mined.asks)

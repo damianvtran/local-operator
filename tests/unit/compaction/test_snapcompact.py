@@ -14,7 +14,7 @@ from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_C
 from local_operator.compaction.snapcompact import (
     CROSS_RULER_SLOPE_MARGIN,
     DEFAULT_MAX_FRAMES,
-    EDGE_WINDOW_FRACTION,
+    EDGE_THRESHOLD_FRACTION,
     FRAME_DATA_BYTES_BUDGET,
     FRAME_TOKEN_ESTIMATE,
     HQ_EDGE_FRAMES,
@@ -360,7 +360,7 @@ def test_edges_default_to_frame_shape_without_a_window():
 
 
 def test_small_window_caps_verbatim_edges_to_its_share():
-    """A tight window shrinks the verbatim edges to ``EDGE_WINDOW_FRACTION``.
+    """A tight window shrinks the verbatim edges to ``EDGE_THRESHOLD_FRACTION``.
 
     The regression this locks down: the edges are the archive's un-trimmable
     floor (the frame-budget loop can only drop imaged pages), and at the
@@ -388,7 +388,7 @@ def test_small_window_caps_verbatim_edges_to_its_share():
     # raw window-share slice.
     assert len(archive.text_head) < default_edge
     assert len(archive.text_tail) < default_edge
-    per_edge_char_budget = (int(window * EDGE_WINDOW_FRACTION) // 2) * 4
+    per_edge_char_budget = (int(window * EDGE_THRESHOLD_FRACTION) // 2) * 4
     assert len(archive.text_tail) <= per_edge_char_budget
     # And it really is the window share, not the floor: strictly more than one
     # page, so this exercises the cap rather than the min() safety net.
@@ -455,6 +455,114 @@ def test_native_200k_window_trims_the_high_res_opus_edges():
     # A wider window ABOVE the ~210k threshold keeps the full default edge.
     wide = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=400_000)
     assert len(wide.text_tail) == default_edge
+
+
+def test_threshold_sizes_edges_below_the_window_share():
+    """``threshold_tokens`` re-bases the edge cap from the window to ``T_eff``.
+
+    The committed context must land under the compaction TRIGGER, not the
+    window. On a 200k window the default trigger is 160k (0.80 x 200k), so the
+    1932px reader's per-edge cap is ``(160000 * 0.15 // 2) * 4 = 48000`` chars
+    — below the 60000 the window-based cap allowed. On 1M (trigger 400k) the
+    edges keep their full shape default: the cap only binds below ~210k.
+    """
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    default_edge = HQ_EDGE_FRAMES * shape.capacity
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(80)]
+    tight = compact_to_archive(
+        messages,
+        "anthropic",
+        "claude-opus-4-8",
+        context_window=200_000,
+        threshold_tokens=160_000,
+    )
+    assert len(tight.text_tail) == 48_000
+    wide = compact_to_archive(
+        messages,
+        "anthropic",
+        "claude-opus-4-8",
+        context_window=1_000_000,
+        threshold_tokens=400_000,
+    )
+    assert len(wide.text_tail) == default_edge
+    # 64k / T_eff 51.2k: the share is below one page, so the floor holds.
+    floor = compact_to_archive(
+        messages, "anthropic", "claude-opus-4-8", context_window=64_000, threshold_tokens=51_200
+    )
+    assert len(floor.text_tail) == shape.capacity
+
+
+def test_threshold_bounds_archive_budget_on_a_1m_window():
+    """A 1M window's archive fits ``0.5 * T_eff`` (200k), not ``0.5 * window``.
+
+    Before, the budget was 500k — above the 400k trigger itself — so a large
+    archive could commit a context that re-fired compaction on the next turn.
+    ``max_frames`` is lifted so the token budget, not the frame cap, binds.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(160)]
+    legacy = compact_to_archive(
+        messages, provider, model_id, max_frames=MAX_FRAMES, context_window=1_000_000
+    )
+    bounded = compact_to_archive(
+        messages,
+        provider,
+        model_id,
+        max_frames=MAX_FRAMES,
+        context_window=1_000_000,
+        threshold_tokens=400_000,
+    )
+    assert estimate_archive_tokens(bounded) <= 200_000
+    assert estimate_archive_tokens(legacy) > 200_000
+    assert len(bounded.frames) < len(legacy.frames)
+
+
+def test_threshold_above_window_never_inflates_the_budget():
+    """A threshold above the window is clamped to the window (defensive)."""
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(80)]
+    legacy = compact_to_archive(messages, provider, model_id, context_window=128_000)
+    clamped = compact_to_archive(
+        messages, provider, model_id, context_window=128_000, threshold_tokens=10_000_000
+    )
+    assert clamped.text_tail == legacy.text_tail
+    assert len(clamped.frames) == len(legacy.frames)
+
+
+def test_long_operator_ask_trimmed_from_head_survives_in_pages_or_carry():
+    """Tighter edges move head text into pages; a long ask must not vanish.
+
+    Material-information guard for the threshold re-basing: the oldest user
+    ask sits in the verbatim head under the window-based cap and is pushed
+    partly past it by the tighter ``T_eff`` cap. Whatever the head no longer
+    holds must be in the imaged pages' source (``Archive.text`` middle) or,
+    when its page is dropped by the budget, in the mined carry.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    ask = (
+        "please migrate the billing ledger to the new schema and keep the "
+        "reconciliation report for finance before the quarterly close " * 400
+    )
+    messages = [Message.user(ask)]
+    for i in range(80):
+        messages.append(Message.assistant(f"step {i} " + "w" * shape.capacity))
+    archive = compact_to_archive(
+        messages,
+        provider,
+        model_id,
+        context_window=200_000,
+        threshold_tokens=160_000,
+    )
+    assert len(archive.text_head) < len(ask)
+    marker = "please migrate the billing ledger"
+    in_head = marker in archive.text_head
+    middle = archive.text[len(archive.text_head) : len(archive.text) - len(archive.text_tail)]
+    in_pages = marker in middle and bool(archive.frames)
+    in_carry = marker in (archive.carry or "")
+    assert in_head and (in_pages or in_carry)
 
 
 def test_edge_cap_keeps_at_least_one_page_of_verbatim_text():

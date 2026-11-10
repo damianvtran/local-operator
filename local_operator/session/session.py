@@ -26445,6 +26445,7 @@ class Session:
             plan.compaction_api,
             [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
+            settings=plan.settings,
         )
 
     def _carried_tier_live_state(
@@ -26532,7 +26533,9 @@ class Session:
             summary, preserve_data = (
                 summarized
                 if summarized is not None
-                else await self._produce_summary(compaction_api, to_summarize, plan.strategy)
+                else await self._produce_summary(
+                    compaction_api, to_summarize, plan.strategy, settings=plan.settings
+                )
             )
             # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
             # merged once, after either strategy produced its payload, exactly
@@ -27361,8 +27364,37 @@ class Session:
         except ImportError:
             return "context-full"
 
+    @staticmethod
+    def _snapcompact_threshold_tokens(
+        compaction_api: Any, window: int | None, settings: Any
+    ) -> int | None:
+        """``T_eff`` for sizing a snapcompact archive, or ``None`` (legacy sizing).
+
+        The archive and its verbatim edges are sized against the trigger the
+        committed context must land under (see
+        ``snapcompact.EDGE_THRESHOLD_FRACTION``); on a 1M window the old
+        window-based budget (500k) sat above the 400k trigger itself. Resolved
+        through the ONE rule (``resolve_threshold_tokens``) rather than
+        re-derived here. ``None`` — no settings (a test double calling the
+        pre-threshold shape), no window, or an API without the resolver —
+        keeps the legacy window sizing, so this can only shrink the archive.
+        """
+        resolver = getattr(compaction_api, "resolve_threshold_tokens", None)
+        if settings is None or not window or resolver is None:
+            return None
+        try:
+            return int(resolver(window, settings))
+        except Exception:
+            logger.debug("threshold resolve failed; legacy archive sizing", exc_info=True)
+            return None
+
     async def _produce_summary(
-        self, compaction_api: Any, to_summarize: list[Message], strategy: str
+        self,
+        compaction_api: Any,
+        to_summarize: list[Message],
+        strategy: str,
+        *,
+        settings: Any = None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
 
@@ -27415,6 +27447,9 @@ class Session:
                     self._previous_archive_text(),
                     context_window=effective.context_window,
                     previous_carry=self._previous_archive_carry(),
+                    threshold_tokens=self._snapcompact_threshold_tokens(
+                        compaction_api, effective.context_window, settings
+                    ),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id

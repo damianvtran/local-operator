@@ -71,6 +71,7 @@ __all__ = [
     "carry_digest_lines",
     "carry_is_empty",
     "is_role_header",
+    "last_role_header",
     "merge_carry",
     "mine_carry",
     "parse_carry",
@@ -194,6 +195,31 @@ def is_role_header(line: str) -> bool:
     exactly the way the anchor did.
     """
     return bool(_ROLE_HEADER.match(line.strip()))
+
+
+def last_role_header(text: str) -> str | None:
+    """The bare ``[Role]`` header of the section ``text`` ENDS inside, if any.
+
+    Why it exists: snapcompact mines only the pages it drops, and those pages
+    start exactly where the verbatim head edge stops — usually mid-section.
+    :func:`mine_carry` deliberately treats text before the first header as
+    ``other`` (QA round 3, Q12: a head ending mid tool-result mined JSON as
+    decisions). That is right for an unknown span but wrong when the head
+    PROVES the speaker: a long operator ask straddling the head boundary had
+    its continuation dropped with no ``[User]`` header, so the miner kept
+    nothing of it and the ask's later sentences vanished from every surface.
+    Tightening the head to the compaction threshold makes that straddle more
+    common, so the pass now re-opens the continuing section with this header.
+
+    Returns only the bracketed header (``[User]``, ``[Tool result: bash]``),
+    never its same-line remainder, so prefixing it adds no content of its own.
+    Scans from the end so a 60k-char head costs one reversed line walk.
+    """
+    for raw in reversed(text.splitlines()):
+        header = _ROLE_HEADER.match(raw.strip())
+        if header:
+            return header.group(0)
+    return None
 
 
 #: Longest prefix of any single line the locator scan examines. A tool result
