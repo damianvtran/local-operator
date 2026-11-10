@@ -1109,6 +1109,74 @@ def _receipt(directory: Path) -> dict[str, Any] | None:
     return registry.read_signal_receipt(directory)
 
 
+# pid -> (monotonic at which the run record was seen, monotonic at which SIGTERM was
+# sent). Written by ``_send_sigterm_noted`` and read ONLY by the timeout evidence: it
+# answers "was the signal sent in a boot window right after the record appeared?"
+# without touching any assertion. Keyed by pid because the evidence formatter already
+# receives the child.
+_SIGTERM_TIMING: dict[int, tuple[float, float]] = {}
+
+
+def _send_sigterm_noted(child: subprocess.Popen[bytes], record_seen_at: float) -> None:
+    """``os.kill(child.pid, SIGTERM)`` plus a monotonic note for the evidence."""
+    _SIGTERM_TIMING[child.pid] = (record_seen_at, time.monotonic())
+    os.kill(child.pid, signal.SIGTERM)
+
+
+def _decode_sigmask(raw: str, signum: int) -> str:
+    """yes/no for ``signum`` in a hex signal mask as printed by ps or /proc."""
+    try:
+        return "yes" if (int(raw.strip(), 16) >> (signum - 1)) & 1 else "no"
+    except ValueError:
+        return f"unparseable({raw!r})"
+
+
+def _signal_disposition(pid: int, signum: int = signal.SIGTERM) -> str:
+    """The child's pending/blocked/ignored/caught state for ``signum``; never raises.
+
+    macOS ``ps`` has the four keywords; Linux procps spells them differently, so on a
+    failed/empty ps the /proc status lines (SigPnd/SigBlk/SigIgn/SigCgt) are read.
+    Each probe is bounded to 3 s. Anything else yields ``unavailable: <reason>``.
+    """
+    reasons: list[str] = []
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=,pending=,blocked=,ignored=,caught=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        fields = out.stdout.split()
+        if out.returncode == 0 and len(fields) >= 5:
+            names = ("pending", "blocked", "ignored", "caught")
+            masks = dict(zip(names, fields[1:5]))
+            return (
+                f"ps masks {masks}; SIGTERM: "
+                + ", ".join(f"{n}={_decode_sigmask(masks[n], signum)}" for n in names)
+            )
+        reasons.append(
+            f"ps rc={out.returncode} out={out.stdout.strip()!r} err={out.stderr.strip()!r}"
+        )
+    except Exception as error:  # noqa: BLE001 - diagnostics must never mask the timeout
+        reasons.append(f"ps failed: {error!r}")
+    try:
+        lines = Path(f"/proc/{pid}/status").read_text().splitlines()
+        keys = {"SigPnd": "pending", "SigBlk": "blocked", "SigIgn": "ignored", "SigCgt": "caught"}
+        found = {
+            keys[k]: v.strip()
+            for k, _, v in (ln.partition(":") for ln in lines)
+            if k in keys
+        }
+        if len(found) == 4:
+            return f"/proc masks {found}; SIGTERM: " + ", ".join(
+                f"{n}={_decode_sigmask(found[n], signum)}" for n in keys.values()
+            )
+        reasons.append(f"/proc/{pid}/status lacked Sig* lines")
+    except Exception as error:  # noqa: BLE001
+        reasons.append(f"/proc failed: {error!r}")
+    return "unavailable: " + "; ".join(reasons)
+
+
 def _receipt_timeout_evidence(
     what: str,
     directory: Path,
@@ -1167,6 +1235,19 @@ def _receipt_timeout_evidence(
             else:
                 state = f"exited returncode={code} (left on its own without a record)"
             sections.append(f"child pid={child.pid}: {state}")
+            if code is None:
+                sections.append(f"signal disposition: {_signal_disposition(child.pid)}")
+            # Stdio is DEVNULL for every rig child (see ``_spawn``), so there is no
+            # child stderr/stdout to tail; runtime.log below is the only log.
+            sections.append("child stdout/stderr: not captured (DEVNULL); see runtime.log tail")
+            timing = _SIGTERM_TIMING.get(child.pid)
+            if timing is None:
+                sections.append("signal timing: not recorded for this child")
+            else:
+                sections.append(
+                    f"signal timing: SIGTERM sent {timing[1] - timing[0]:.3f}s after the "
+                    f"run record was seen; {time.monotonic() - timing[1]:.3f}s ago"
+                )
     except Exception as error:  # noqa: BLE001 - diagnostics must never mask the timeout
         sections.append(f"child state unavailable: {error!r}")
     try:
@@ -1250,7 +1331,7 @@ async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
         with bounded(90, "signal receipt: idle SIGTERM"):
             directory = rig.seed_and_spawn("rcptidle01")
             record = await _wait_record(config, "rcptidle01")
-            os.kill(rig.children["rcptidle01"].pid, signal.SIGTERM)
+            _send_sigterm_noted(rig.children["rcptidle01"], time.monotonic())
             refusal_doc = await _wait_refusals(
                 directory, child=rig.children["rcptidle01"], config=config
             )
@@ -1405,7 +1486,7 @@ async def test_sigkill_still_ends_a_runtime_that_refused_a_sigterm(
             directory = rig.seed_and_spawn("hardkill01")
             await _wait_record(config, "hardkill01")
 
-            os.kill(rig.children["hardkill01"].pid, signal.SIGTERM)
+            _send_sigterm_noted(rig.children["hardkill01"], time.monotonic())
             refusals = await _wait_refusals(
                 directory, child=rig.children["hardkill01"], config=config
             )
@@ -1508,3 +1589,50 @@ async def test_reclaims_sigterm_is_honoured_by_a_runtime_that_booted_slowly(
     finally:
         if child.poll() is None:
             _reap(child, config)
+
+
+def test_receipt_timeout_evidence_renders_every_diagnostic_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timeout evidence names disposition, stdio status and send timing.
+
+    No real runtime: a fake child and a faked ``ps`` prove each line renders, and
+    that a failing probe degrades to ``unavailable`` instead of raising.
+    """
+    directory = tmp_path / "session"
+    directory.mkdir()
+
+    class FakeChild:
+        pid = 424242
+
+        def poll(self) -> None:
+            return None
+
+    child: Any = FakeChild()
+    now = time.monotonic()
+    _SIGTERM_TIMING[child.pid] = (now - 0.25, now)
+    # SIGTERM is signal 15 -> bit 14 -> 0x4000: caught only.
+    ps_out = "424242 0000000000000000 0000000000000000 0000000000000000 0000000000004000\n"
+
+    def fake_run(*args: Any, **kwargs: Any) -> Any:
+        return subprocess.CompletedProcess(args[0], 0, stdout=ps_out, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    text = _receipt_timeout_evidence("refusal wait", directory, child, tmp_path)
+    assert "alive (stayed up and wrote no record)" in text
+    assert "SIGTERM: pending=no, blocked=no, ignored=no, caught=yes" in text
+    assert "child stdout/stderr: not captured (DEVNULL)" in text
+    assert "SIGTERM sent 0.250s after the run record was seen" in text
+
+    def failing_run(*args: Any, **kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(args[0], 3)
+
+    monkeypatch.setattr(subprocess, "run", failing_run)
+
+    def failing_read(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise OSError("nope")
+
+    monkeypatch.setattr(Path, "read_text", failing_read)
+    degraded = _receipt_timeout_evidence("refusal wait", directory, child, None)
+    assert "signal disposition: unavailable: ps failed" in degraded
+    _SIGTERM_TIMING.pop(child.pid, None)
