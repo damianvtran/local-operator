@@ -335,6 +335,10 @@ def session_not_found(*, session_id: str) -> Msg:
     return Msg("wire.errors.desktop.session_not_found", {"session_id": session_id})
 
 
+def settings_intent_generation_moved() -> Msg:
+    return Msg("wire.errors.desktop.settings_intent_generation_moved", {})
+
+
 def skill_alias_occupied() -> Msg:
     return Msg("wire.errors.desktop.skill_alias_occupied", {})
 

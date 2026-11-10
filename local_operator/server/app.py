@@ -72,6 +72,7 @@ from local_operator.server.routes import (
     desktop_runtimes,
     desktop_session_files,
     desktop_sessions,
+    desktop_settings_intents,
     desktop_team_bridge,
     desktop_tunnel,
     desktop_tunnel_setup,
@@ -592,8 +593,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:  # noqa: BLE001 — failed publication never authorizes reload
             logger.warning("rolling reload capability could not be published", exc_info=True)
 
+    # DURABLE SETTINGS INTENTS RESUME AT BOOT. A model/effort/fast/cwd pick is
+    # written to ``sessions/<id>/settings-intent.json`` and applied in the
+    # background; the desktop's self-spawned backend does not outlive an app
+    # quit, so a pick still applying when the app closed is re-armed here. In
+    # the background: startup must not wait on a glob, and the apply itself
+    # needs nothing that is not already up.
+    settings_intents_resume: asyncio.Task[int] | None = None
+    try:
+        settings_intents_resume = asyncio.create_task(
+            desktop_settings_intents.ensure_applier(app).resume(),
+            name="settings-intents-resume",
+        )
+    except Exception:  # noqa: BLE001 — a resume failure must never fail startup
+        logger.warning("settings intents could not be resumed", exc_info=True)
+
     yield
     try:
+        # Stop the settings-intent workers before the session pool closes under
+        # them; an in-flight move is shielded and finishes on its own.
+        if settings_intents_resume is not None:
+            settings_intents_resume.cancel()
+            await asyncio.gather(settings_intents_resume, return_exceptions=True)
+        applier = getattr(app.state, "settings_applier", None)
+        if applier is not None:
+            await applier.close()
+            app.state.settings_applier = None
         # The boot warms are optional work nobody waits on: stop them first, so a
         # model warm parked in a provider read cannot keep issuing requests while
         # the server drains (PR #2992 review MINOR-1). Never raises.
@@ -946,6 +971,7 @@ app.include_router(desktop_claim.router)
 app.include_router(auth.router)
 app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
+app.include_router(desktop_settings_intents.router)
 app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
 app.include_router(desktop_imports.router)

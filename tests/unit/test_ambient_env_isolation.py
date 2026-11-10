@@ -150,6 +150,10 @@ _HARMLESS: dict[str, str] = {
     "LOP_LANG": "language override in the resolved-language chain; picks a catalogue",
     "LOP_I18N": "per-run i18n escape hatch; picks a catalogue",
     "LOP_SESSION_GRACE_S": "runtime residency grace; a duration",
+    "LOP_SETTINGS_INTENT_BUDGET_S": (
+        "QA override of the settings-intent retry budget; a duration, and the "
+        "settings-intents tests delete it themselves"
+    ),
     "LOP_BUILD_SETTLE_S": "runtime self-refresh settle; a duration",
     "LOP_BUILD_STAGGER_S": "runtime self-refresh stagger; a duration",
     "LOP_RUNTIME_DEBUG_STACKS": "debug dump switch; on by default, 0 disables it",

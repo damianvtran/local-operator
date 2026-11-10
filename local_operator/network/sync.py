@@ -405,6 +405,16 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # as the owner of its copy, which is how a viewer refuses to open a session
     # that is not running there.
     ".session.pid": "the source process's liveness marker",
+    # Desktop settings intents (``server/utils/settings_intents.INTENT_FILE``):
+    # picks the SOURCE desktop's applier is still landing on the SOURCE runtime,
+    # with its retry deadlines and owned-predecessor bookkeeping. The
+    # destination's selection is the journal row a landed pick already wrote,
+    # which does travel; a copied intent would make the destination's applier
+    # re-apply a pick the user made against another device's runtime. Left
+    # unlisted, a session with a pending pick refused to move as unlisted content.
+    "settings-intent.json": (
+        "the source desktop's pending settings picks, applied by that device only"
+    ),
     # The latest run's identity (``journal.RUN_RECORD_NAME``): what the listing
     # compares an exit record against to tell "the last run exited here" from "a
     # later run died". It names a pid on THIS device, so a copy would either be
