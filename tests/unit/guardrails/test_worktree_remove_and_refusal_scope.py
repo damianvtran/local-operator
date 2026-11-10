@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -538,7 +539,9 @@ def test_running_owner_session_goes_to_the_judge(
     prov.write_records(
         [(real, "worktree")], owners=[other], creator=other, command="git worktree add"
     )
-    live: list = [(SimpleNamespace(session_id=other, cwd=str(home)), "live")]
+    live: list[tuple[SimpleNamespace, str]] = [
+        (SimpleNamespace(session_id=other, cwd=str(home)), "live")
+    ]
     monkeypatch.setattr(registry, "scan", lambda *a, **k: live)
     verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
     assert verdict.risk is Risk.HIGH
@@ -565,7 +568,7 @@ def test_pr_lookup_reads_the_github_remote_and_never_prompts(
     assert _REAL_GITHUB_REPO(str(repo)) == "someone/fork"
     _git("remote", "remove", "fork", cwd=repo)
     assert _REAL_GITHUB_REPO(str(repo)) is None
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
     def run(argv, **kwargs):
         prompt = kwargs["env"]["GH_PROMPT_DISABLED"]
@@ -715,7 +718,7 @@ def test_glab_lookup_parses_remotes_and_never_prompts(
     _git("remote", "set-url", "origin", "https://gitlab.com/minervaai/go-protos", cwd=repo)
     assert prov._gitlab_repo(str(repo)) == "minervaai/go-protos"
     assert _REAL_GITHUB_REPO(str(repo)) is None
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
     def run(argv, **kwargs):
         seen.update(argv=argv, timeout=kwargs["timeout"], prompt=kwargs["env"]["GLAB_NO_PROMPT"])
