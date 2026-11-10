@@ -54,6 +54,10 @@ SAFE_DEFAULTS = {
     ("supplements/candidates.py", "prefilter"): "home-relative candidate discovery",
     ("supplements/denylist.py", "is_sensitive"): "sensitive-path classification only",
     ("tools/builtin.py", "_sessions_move_destination_label"): "approval path rendering only",
+    ("server/routes/desktop_settings_intents.py", "resolve"): (
+        "anchors an explicitly REQUESTED relative cwd-intent target for validation; "
+        "only runs when the user named a target, so it never supplies a cwd for omission"
+    ),
     ("library/service.py", "list_assets"): "library index metadata roots",
     ("library/service.py", "get_asset"): "library index metadata roots",
     ("library/index.py", "build_catalog"): "library index metadata roots",

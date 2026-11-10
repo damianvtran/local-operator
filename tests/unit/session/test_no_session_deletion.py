@@ -737,6 +737,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # Desktop settings intents: sessions/<id>/settings-intent.json is written
+    # tmp + fsync + replace in the session directory, like desktop.json.
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.replace",
+        "Publishes this call's mkstemp .settings-intent.*.tmp FILE onto the "
+        "settings-intent.json FILE; replace rejects a directory target and the "
+        "session directory itself is never a source or target",
+    ),
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.unlink",
+        "Removes only this call's own mkstemp temporary FILE after a failed write; "
+        "unlink rejects directories",
+    ),
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher.close",
         "<path>.unlink",

@@ -829,7 +829,12 @@ jobs:
     # the 1200s budget at 21. A ceiling is not a reservation -- it is only
     # paid by a leg that is genuinely stuck -- and the e2e tree grows, so the
     # extra minute is cheaper here than a cancellation.
-    timeout-minutes: 22
+    # 22 -> 23 on 2026-11-10 (settings intents, PR #3705): the tree grew to a
+    # heaviest leg of 1264.919s with tests/e2e/test_settings_intents_e2e.py
+    # weighed at its measured 22.714s, so the guard's minimum is
+    # ceil((1264.919 + 60)/60) = 23 minutes, leaving +55.081s. Still below
+    # the unit shard's projection, so the freeze guard keeps landing first.
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v7
       - name: Set Up Python 3.12
