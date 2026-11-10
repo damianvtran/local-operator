@@ -1605,6 +1605,191 @@
         }
       }
     },
+    "/v1/desktop/sessions/{session_id}/tool-calls/{call_id}/diff": {
+      "get": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "Tool Call Diff",
+        "description": "One page of a write/edit call's COMPLETE, source-redacted diff.\n\nThe inline ``details['diff']`` keeps 200 rows; ``details['diff_full']``\nnames the archive that holds the rest (``tools/diff_archive``). The client\nsends ids only -- never a digest: membership is proved server-side from\nthis session's own transcript row for ``call_id``. Unknown session,\nforeign call or a non-write/edit call are one 404; bad paging is 422; a\ncaptured-but-unservable diff (``oversized``/``withheld``/``unavailable``/\n``evicted``) and an old row (``not_recorded``) are 200 answers with no rows;\nso is a call id that two distinct persisted rows share (``unavailable``:\nserving either could be the wrong capture). ``offset`` is the opaque,\nserver-issued continuation into one row too large for a page (see\n``ToolCallDiffPage``); a client echoes ``next_offset`` and never computes it.",
+        "operationId": "tool_call_diff_v1_desktop_sessions__session_id__tool_calls__call_id__diff_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "call_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "title": "Call Id"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Start"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ToolCallDiffPage_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/sessions/{session_id}/children/{child_id}/tool-calls/{call_id}/diff": {
+      "get": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "Child Tool Call Diff",
+        "description": "The child reader's twin of :func:`tool_call_diff`.\n\nSame contract; the containment proof (``_contained_child_dir``) runs\nbefore the child's transcript is read, and refusals are the same 404.",
+        "operationId": "child_tool_call_diff_v1_desktop_sessions__session_id__children__child_id__tool_calls__call_id__diff_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "child_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Child Id"
+            }
+          },
+          {
+            "name": "call_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "title": "Call Id"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Start"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ToolCallDiffPage_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/desktop/sessions/{session_id}/children/{child_id}/attachments/{digest}": {
       "get": {
         "tags": [
@@ -14039,6 +14224,34 @@
         ],
         "title": "CRUDResponse[SystemPromptResponse]"
       },
+      "CRUDResponse_ToolCallDiffPage_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolCallDiffPage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ToolCallDiffPage]"
+      },
       "CRUDResponse_TransferReceipt_": {
         "properties": {
           "status": {
@@ -22871,6 +23084,96 @@
         ],
         "title": "ToolCall",
         "description": "One requested tool invocation as emitted by the model."
+      },
+      "ToolCallDiffPage": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "archived",
+              "oversized",
+              "withheld",
+              "unavailable",
+              "evicted",
+              "not_recorded",
+              "inline"
+            ],
+            "title": "State"
+          },
+          "start": {
+            "type": "integer",
+            "title": "Start"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          },
+          "total_rows": {
+            "type": "integer",
+            "title": "Total Rows"
+          },
+          "rows": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Rows"
+          },
+          "hunk_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hunk Header"
+          },
+          "next_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Start"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "clipped_rows": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Clipped Rows"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state",
+          "start",
+          "offset",
+          "total_rows",
+          "rows",
+          "hunk_header",
+          "next_start",
+          "next_offset",
+          "clipped_rows"
+        ],
+        "title": "ToolCallDiffPage",
+        "description": "One page of a write/edit call's COMPLETE, source-redacted diff.\n\nThe frozen v1 contract the desktop renderer pages through. ``rows`` are\nunified-diff rows verbatim (the nameless ``--- ``/``+++ `` pair first), so\nthe renderer's existing green/red classifier applies unchanged.\nA row too large for one page continues on the next through the\nserver-issued ``(next_start, next_offset)`` cursor: ``offset`` is a\ncode-point offset into the row's body (after its diff marker), every\nfragment starts with the row's original marker, and the client joins\nfragments of one row (``start + i``) by appending later fragments minus\ntheir marker. ``next_offset`` > 0 means the last fragment is partial; both\ncursors are ``None`` only at the end. ``clipped_rows`` is kept for wire\ncompatibility and is always ``[]`` (nothing is ever cut away)."
       },
       "TranscriptEntryEnvelope": {
         "properties": {
