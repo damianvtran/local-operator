@@ -3938,7 +3938,7 @@ def test_the_merge_gate_ritual_prints_the_run_it_armed(tmp_path: Path) -> None:
     ],
 )
 def test_the_merge_gate_ritual_refuses_without_arming(
-    tmp_path: Path, scenario: str, stub: dict[str, str], expected: str, arms: bool
+    tmp_path: Path, scenario: str, stub: dict[str, Any], expected: str, arms: bool
 ) -> None:
     """Every refusal is non-zero, actionable, and happens BEFORE the add.
 
