@@ -1,0 +1,23 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": "agent_name et agent_id s’excluent mutuellement",
+  "wire.errors.sdk_spec.approval_callback_gate_required": "ApprovalPolicy.callback() exige un contrôle d’approbation appelable",
+  "wire.errors.sdk_spec.approval_declared_tools_empty": "ApprovalPolicy.declared() doit nommer au moins un outil ; pour une session liée sans outil déclaré, utilisez ApprovalPolicy.refuse()",
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": "ApprovalPolicy.handler n’a de sens que pour le mode ''callback'', pas pour {mode}",
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": "ApprovalPolicy.tools n’a de sens que pour le mode ''declared'', pas pour {mode}",
+  "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' ouvre un lecteur sur spec.resume ; il ne rattache ni équipes, ni profils, ni outils, ni noms, ni objectifs, ni politiques d’approbation — cela relève du propriétaire de la session. Définissez uniquement resume dans ce spec (ou utilisez mode=''own''). Champs en cause : {fields}.",
+  "wire.errors.sdk_spec.attach_output_unsupported": "une contrainte de sortie ne peut pas être définie sur une session rattachée ; le runtime propriétaire en décide",
+  "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' exige spec.resume : un lecteur se rattache à un identifiant",
+  "wire.errors.sdk_spec.mode_invalid": "mode doit valoir ''own'' ou ''attach'', pas {mode}",
+  "wire.errors.sdk_spec.output_format_invalid": "output_format doit être l’une des valeurs suivantes : {formats}",
+  "wire.errors.sdk_spec.output_retries_range": "output_retries doit être compris entre 0 et 5",
+  "wire.errors.sdk_spec.output_retries_requires_format": "output_retries exige output_format",
+  "wire.errors.sdk_spec.output_schema_requires_format": "output_schema exige output_format",
+  "wire.errors.sdk_spec.resume_empty": "resume doit être un identifiant de session ou « @latest », pas une chaîne vide",
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "birth_effort d’une nouvelle session lancée voyage avec l’échantillon de création et exige le couple hosting/model à ses côtés ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle.",
+  "wire.errors.sdk_spec.spawn_fields_unsupported": "spawn_session() ne peut pas transmettre un état postérieur à l’ouverture à un nouveau processus enfant du runtime ; champs non pris en charge dans ce spec : {fields}. Ouvrez la session dans le processus courant (open_session), attachez ce dont vous avez besoin, libérez-la (dispose), puis relancez le même identifiant avec spawn_session() — resume restaure ce qui a été attaché ; ou lancez sans ces champs.",
+  "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() transmet hosting/model à un NOUVEAU runtime comme un seul échantillon de création ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+  "wire.errors.sdk_spec.spawn_output_unsupported": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis mettez-la ensuite au travail",
+  "wire.errors.sdk_spec.tools_empty": "tools doit nommer au moins un outil ; laissez None pour ne rien restreindre",
+  "wire.errors.sdk_spec.world_root_empty": "world_root doit être un chemin non vide lorsqu’il est défini",
+  "wire.errors.sdk_spec.yolo_approval_unreachable": "yolo=True rend le contrôle ApprovalPolicy.{approval_mode}() inatteignable ; utilisez plutôt ApprovalPolicy.auto() (ou retirez yolo)"
+}
