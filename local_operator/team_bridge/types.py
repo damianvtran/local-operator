@@ -986,16 +986,16 @@ class ConversationFeedRef:
         return encoded
 
 
-#: The most ``/``-separated parts a conversation feed ref may carry: the
-#: 4 fixed locator parts, the optional positional sender kind, the old
-#: three-positional name/label/kind layout, and every known tag the
-#: encoder can emit (``legacy_alias``, ``thread_root``, ``addressed``,
-#: ``relation``) — i.e. 4 + 3 + 4 slots minus the combinations the tag
-#: rules below already refuse. The old fixed set ``(4, 5, 6, 7)`` capped
-#: the TOTAL, so a threaded reply carrying sender_kind + thread_root +
-#: addressed + relation (8 parts, all producible by ``encode``) parsed
-#: as malformed; the positional slots are bounded separately, so the
-#: total only needs to stop a ref from growing without limit.
+#: The most ``/``-separated parts a conversation feed ref may carry. The
+#: longest shape the grammar can produce is the 4 fixed locator parts, the
+#: optional positional sender kind, and the four known tags
+#: (``legacy_alias``, ``thread_root``, ``addressed``, ``relation``) —
+#: 4 + 1 + 4 = 9. ``encode`` emits at most 8, because its own rules refuse
+#: the alias-plus-routing combinations the grammar states separately.
+#: 11 is deliberate slack above both: each unknown future tag costs one
+#: part and is ignored by the existing rule, so two of them still parse.
+#: The total only needs to stop a ref from growing without limit; the
+#: positional slots are bounded separately.
 _MAX_CONVERSATION_REF_PARTS = 11
 
 

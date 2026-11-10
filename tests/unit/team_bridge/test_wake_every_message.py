@@ -248,7 +248,8 @@ def test_old_refs_parse_unchanged_and_re_encode_byte_identically(value: str) -> 
     [
         # An UNKNOWN tag is ignored, exactly as the previous release ignores it —
         # that tolerance is what lets a tag be added at all. The part bound is
-        # the old one, so a shape this release never writes is still refused.
+        # a sane upper limit on the total, so a ref that grows without limit
+        # is still refused.
         f"{CONV}/bcmsg_m1/4/0/agent/thread_follower=1",
         f"{CONV}/bcmsg_m1/4/0/agent/agent_run=3",
     ],
@@ -265,6 +266,16 @@ def test_a_ref_beyond_the_sane_upper_bound_is_refused() -> None:
     # a sane upper limit on the total; a ref past it is still malformed.
     too_long = f"{CONV}/bcmsg_m1/4/0/agent/a=1/b=2/c=3/d=4/e=5/f=6/g=7"
     assert parse_conversation_ref_value(too_long) is None
+
+
+def test_a_ref_at_the_upper_bound_is_accepted() -> None:
+    # The bound is 11 parts: 4 fixed + sender kind + 6 unknown tags. Unknown
+    # tags are ignored by the existing rule, so an 11-part ref parses; a
+    # bound one lower would refuse it.
+    at_bound = f"{CONV}/bcmsg_m1/4/0/agent/a=1/b=2/c=3/d=4/e=5/f=6"
+    assert len(at_bound.split("/")) == 11
+    ref = parse_conversation_ref_value(at_bound)
+    assert ref is not None and ref.thread_root_id is None
 
 
 def test_the_feed_projection_carries_the_thread_root_and_nothing_else() -> None:

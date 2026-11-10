@@ -57,21 +57,26 @@ def _ref_value(**kwargs) -> str:
     return full[len(PREFIX) :]
 
 
-@pytest.mark.parametrize("sender_kind", [None, "human", "agent"])
-@pytest.mark.parametrize("thread_root_id", [None, THREAD_ROOT])
-@pytest.mark.parametrize("addressed", [None, *sorted(FEED_ADDRESSED_VALUES)])
-@pytest.mark.parametrize("sender_relation", [None, *sorted(FEED_RELATION_VALUES)])
-def test_encode_parse_round_trip(sender_kind, thread_root_id, addressed, sender_relation):
-    """Every encoder shape parses back byte-identically.
+# The thread-root-without-sender-kind combination is filtered out at
+# collection time: ``project_events_batch`` drops it before encoding, and the
+# parser refuses a directly-constructed ref carrying it, so it would only
+# ever skip.
+_ROUND_TRIP_CASES = [
+    (sender_kind, thread_root_id, addressed, sender_relation)
+    for sender_kind in [None, "human", "agent"]
+    for thread_root_id in [None, THREAD_ROOT]
+    for addressed in [None, *sorted(FEED_ADDRESSED_VALUES)]
+    for sender_relation in [None, *sorted(FEED_RELATION_VALUES)]
+    if not (thread_root_id is not None and sender_kind is None)
+]
 
-    ``project_events_batch`` drops a ``thread_root_id`` without a
-    sender kind, so that combination never reaches the encoder from
-    the wire; a directly-constructed ref carrying it is not validated
-    away, but the parser's own rule (thread root needs sender kind)
-    keeps refusing it, so it is excluded here.
-    """
-    if thread_root_id is not None and sender_kind is None:
-        pytest.skip("thread root without sender kind is refused by the grammar")
+
+@pytest.mark.parametrize(
+    "sender_kind,thread_root_id,addressed,sender_relation",
+    _ROUND_TRIP_CASES,
+)
+def test_encode_parse_round_trip(sender_kind, thread_root_id, addressed, sender_relation):
+    """Every encoder shape parses back byte-identically."""
     value = _ref_value(
         sender_kind=sender_kind,
         thread_root_id=thread_root_id,

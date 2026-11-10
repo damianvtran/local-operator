@@ -54,11 +54,16 @@ def _run_forever_with_failure(tmp_path: Path, failure: Exception) -> tuple[Any, 
 
     handler = _Capture()
     logger.addHandler(handler)
+    previous_level = logger.level
     logger.setLevel(logging.WARNING)
     try:
         result = asyncio.run(drive())
     finally:
         logger.removeHandler(handler)
+        # Restore the level: leaving it at WARNING would drop INFO records
+        # from every later test that logs through this logger (the rearm
+        # test expects an INFO `stage=rearm` line from it).
+        logger.setLevel(previous_level)
     return result, "\n".join(str(r.getMessage()) for r in records)
 
 
