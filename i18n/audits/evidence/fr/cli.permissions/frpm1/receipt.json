@@ -1,0 +1,13 @@
+{
+  "record": "i18n/audits/evidence/fr/cli.permissions/frpm1/record.json",
+  "audit_id": "frpm1",
+  "auditor_session": "144ca81a304c",
+  "model": "anthropic/claude-opus-5-5",
+  "companions": {
+    "record.json": "c2e41cd852e9f5526044ec392c3fcf41162b8d4d2811240b8cc29539f67860f3",
+    "audit_checks.py.txt": "dead0818838ba7ec6b9d065c5c89bf8efeb93ff2d25488113678f0729954e708",
+    "audit.log": "3aa583ab067ae60f0cd915932d3d66770f5e8edb807d5e8389c252791793137e",
+    "findings.json": "4a40c787afbb59938ff0f8082b175802ad03439bacde440d5c546f29e6f4c457",
+    "report.md": "0ff1d2c8ed22087c20b1d3790037aeda69b125434705e773b0fad13e26c9bf34"
+  }
+}

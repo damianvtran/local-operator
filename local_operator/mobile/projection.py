@@ -679,8 +679,17 @@ def _tool_row_details(
         details["output"] = output[-TOOL_OUTPUT_TAIL_CHARS:]
     if result_details:
         # Diff payloads ride through whole — the expanded row renders the
-        # coloured unified diff from them.
-        for key in ("diff", "added", "removed", "lines_added", "lines_removed"):
+        # coloured unified diff from them. ``diff_truncated_rows`` is the
+        # producer's count of rows the stored diff omits (``_diff_details``'s
+        # caps), so a renderer can say the record is partial.
+        for key in (
+            "diff",
+            "diff_truncated_rows",
+            "added",
+            "removed",
+            "lines_added",
+            "lines_removed",
+        ):
             if key in result_details:
                 details[key] = result_details[key]
         # THE SETTLE PATH CARRIES THE CANONICAL BAG TOO (review round 1, F1).
@@ -1576,6 +1585,11 @@ def fold_messages_to_entries(
     bang_pending = False
     for message in history:
         if isinstance(message, CustomMessage):
+            # Session-state snapshots are agent context, not conversation. Drop
+            # the typed metadata before row budgets/grouping; never match text,
+            # since users and peers can legitimately quote its marker.
+            if message.custom_type == "session_state":
+                continue
             if message.custom_type == HUB_MESSAGE_TYPE:
                 # The parent's own words (``body``), never the model-facing
                 # envelope in ``details["text"]``. Reading the envelope here
@@ -2402,11 +2416,16 @@ class ProjectionFold:
             self._bump()
 
     def fold_event(self, event: AgentEvent) -> None:
+        from local_operator.harness.types import PeerMessageDeliveredEvent, ToolResult
+
+        # Typed context metadata is invisible, including to the peer grouping
+        # state machine. In particular it must not reset a pending peer cycle.
+        if isinstance(event, PeerMessageDeliveredEvent) and event.custom_type == "session_state":
+            return
         self._fold_event(event)
         if self.projection.peer_cycles != 1:
             return
         from local_operator.harness.peer_cycles import remember_peer_cycle_certificate
-        from local_operator.harness.types import PeerMessageDeliveredEvent, ToolResult
 
         if isinstance(event, ToolExecutionEndEvent) and (
             not isinstance(event.result, ToolResult)
@@ -3074,7 +3093,9 @@ class ProjectionFold:
         decision is made by the caller BEFORE this method is reached (§ the
         ``PeerMessageDeliveredEvent`` arm). The phone tolerates detail keys it
         does not read, so this stays additive on the wire."""
-        if cross_session_hidden():
+        # Match the history fold: context snapshots must not become optimistic
+        # delivery rows, consume the tail budget, or emit a changed frame.
+        if custom_type == "session_state" or cross_session_hidden():
             return
         if message_id and any(row.id == message_id for row in self.projection.transcript):
             return

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "audit_id": "sdkes2",
+  "locale": "es",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "f990c30424edb03801b1ba2325f27092572c3a27",
+  "catalogue_sha256": "d3c6426e7842ae43906e674e6fe65d0cd1dc4475460195620d8dde8ce219ad44",
+  "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "findings": [],
+  "report_comment": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6756790373"
+}

@@ -5394,6 +5394,160 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    # -- typing indicators (agent-server §18; lop design §5) -------------------
+    #
+    # Ephemeral, never persisted: the hub holds a ≤9 s Redis entry per typist
+    # and the renderer polls ``GET .../typing`` at the hub-served
+    # ``poll_after_ms`` (3 s) only while a conversation is open and focused, so
+    # these three paths are the hottest Team Bridge traffic this client makes.
+    # That is why nothing here logs at INFO: 20 calls/min per viewer would
+    # drown the log. A refusal still travels as a coded ``BridgeRefusal``.
+    #
+    # Hub-version skew: a hub that predates the routes answers with echo's own
+    # UNCODED 404 (route absent) or 405 (path exists for another method), which
+    # ``_refusal`` reads as ``bridge_error``; that is re-coded ``outdated_hub``
+    # so the renderer stops polling for the session instead of retrying a
+    # route that will never exist. A CODED 404 (``conversation_not_found``) is
+    # the hub speaking about the caller's membership and passes through, and so
+    # does every 503 (dark hub, limiter down): the renderer hides the line and
+    # backs off on its own.
+
+    async def conversation_typing(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Who else is typing in one conversation (``GET .../typing``).
+
+        Answers the hub's view verbatim: ``{enabled, poll_after_ms,
+        message_seq, truncated, typers: [{account_id, kind, thread_root_id,
+        expires_in_ms}]}``. The hub already drops the caller and caps the list;
+        nothing is reshaped here, because the renderer keys its expiry and its
+        history refetch on exactly those fields.
+        """
+
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        return await self._typing_request(
+            "GET",
+            conversation_id,
+            params=params,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_typing_set(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        thread_root_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Heartbeat "I am typing" (``PUT .../typing``); the hub answers the cadence.
+
+        ``{ttl_ms, resend_after_ms}`` comes back so ops can retune the cadence
+        without a client release. ``thread_root_id`` scopes the entry to one
+        thread (absent = the main composer). A hub with typing switched off
+        acknowledges without writing and may answer ``204``; that is surfaced as
+        ``{}`` (the renderer keeps its built-in cadence), never as a 502.
+        """
+
+        body: dict[str, Any] = {"tenant_id": tenant_id}
+        if thread_root_id:
+            body["thread_root_id"] = thread_root_id
+        return await self._typing_request(
+            "PUT",
+            conversation_id,
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_typing_clear(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        thread_root_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Stop "I am typing" (``DELETE .../typing``); idempotent, ``204`` → ``{}``.
+
+        Fields ride in the QUERY, like the reaction DELETE, because a DELETE
+        body is not reliably forwarded by every proxy between here and the hub.
+        """
+
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if thread_root_id:
+            params["thread_root_id"] = thread_root_id
+        return await self._typing_request(
+            "DELETE",
+            conversation_id,
+            params=params,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def check_owner(self, expected_account_id: str | None) -> None:
+        """Refuse ``account_mismatch`` (409) without sending anything upstream.
+
+        For a route that answers locally yet must keep the owner contract of
+        the call it stands in for: the typing PUT's ``share_typing``-off
+        short-circuit still refuses a body captured for another account, so
+        the renderer's account-switch handling never depends on a display
+        preference. Same comparison as every guarded write
+        (:meth:`_guarded_access`); a signed-out machine is
+        ``BridgeSignInRequired``, exactly as the forwarded call would be.
+        """
+
+        await self._guarded_access(expected_account_id)
+
+    async def _typing_request(
+        self,
+        method: str,
+        conversation_id: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """One typing call: owner-guarded dispatch, ``outdated_hub`` re-coding.
+
+        Built on ``_authorized`` rather than ``_send`` because the write verbs
+        may legitimately answer ``204`` with no ``{msg, result}`` envelope, which
+        ``_send`` would turn into ``bridge_invalid_response``. The response is
+        bounded to the error-body cap: no typing answer is larger than a few
+        hundred bytes (≤10 typers), so a larger one is a protocol violation, not
+        data worth reading whole.
+        """
+
+        response = await self._authorized(
+            method,
+            f"/messaging/conversations/{conversation_id}/typing",
+            params=params,
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+            max_response_bytes=MAX_ERROR_BODY_BYTES,
+            accept="application/json",
+            oversize_code="bridge_invalid_response",
+            oversize_sentence="Radient returned an invalid response.",  # i18n: ignore, no code
+        )
+        if response.status_code >= 400:
+            refusal = _refusal(response)
+            if refusal.http_status in (404, 405) and refusal.code == "bridge_error":
+                raise _outdated_hub(refusal) from refusal
+            raise refusal
+        if method != "GET" and (response.status_code == 204 or not response.content):
+            return {}
+        return _envelope_result(response)
+
     async def conversation_read(
         self,
         conversation_id: str,

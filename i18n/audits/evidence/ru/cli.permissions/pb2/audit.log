@@ -1,0 +1,90 @@
+# audit.log — ru/cli.permissions pb2 — actual command output, 2026-11-09T19:40:53Z, worktree HEAD 788cc399410196b080cfc9f7e7bd558ccb713140
+
+$ sha256sum (inputs)
+d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186  local_operator/i18n/catalogues/en/cli.permissions.json
+f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099  local_operator/i18n/catalogues/en/cli.permissions.context.json
+1a4457218f5aa881cfd858ae5282516548b2fd5c699562842fd6dd1bac8c7ef5  local_operator/i18n/catalogues/ru/cli.permissions.json
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+
+$ .venv/bin/python parity.py.txt (keys/order, placeholders, backticks, trailing space, newlines, bullets, verbatim tokens)
+keys en 38 ru 38 same order True missing set() extra set()
+keys with problems: 0
+
+$ sw_vers
+ProductName:		macOS
+ProductVersion:		27.2
+BuildVersion:		26B123
+
+$ python3 apple_labels.py.txt  (SecurityAgent ConfirmAccess + System Settings/SecurityPrivacyExtension/TCC tables; en|ru)
+== SecurityAgent ConfirmAccess.loctable (en_GB | ru)
+100267.title | Always Allow | Разрешать всегда
+100266.title | Deny | Отказать
+hJd-hz-GzF.title | Password: | Пароль:
+Q2F-4n-rKX.title | Username: | Имя пользователя:
+100268.title | Allow | Разрешить
+== search over 13 tables
+Applications/System Settings.app/Contents/Resources/InfoPlist.loctable | 'CFBundleDisplayName' | System Settings | Системные настройки
+Applications/System Settings.app/Contents/Resources/InfoPlist.loctable | 'CFBundleName' | System Settings | Системные настройки
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | 'System Settings Error' | System Settings Error | Ошибка Системных настроек
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | 'You must quit and reopen System Settings to use the newly installed version.' | You must quit and reopen System Settings to use the newly installed version. | Чтобы использовать новую установленную версию, завершите и снова откройте Системные настройки.
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | 'Privacy & Security' | Privacy & Security | Конфиденциальность и безопасность
+Applications/System Settings.app/Contents/Resources/Localizable.loctable | 'Accessibility' | Accessibility | Универсальный доступ
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable | 'CFBundleDisplayName' | Privacy & Security | Конфиденциальность и безопасность
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/InfoPlist.loctable | 'CFBundleName' | Privacy & Security | Конфиденциальность и безопасность
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'SCREEN_CAPTURE_HEADER' | Screen & System Audio Recording | Запись экрана и системного звука
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'FILE_ACCESS_COMBINED' | Files & Folders | Файлы и папки
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'Require an administrator password to unlock each System Settings pane' | Require an administrator password to unlock each System Settings pane | Запрашивать пароль администратора для снятия защиты с каждой панели Системных настроек
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'Allow' | Allow | Разрешить
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'SCREEN_CAPTURE' | Screen Recording | Запись экрана
+Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/Localizable.loctable | 'SCREENANDAUDIOCAPTURE' | Screen & System Audio Recording | Запись экрана и системного звука
+Library/PrivateFrameworks/TCC.framework/Resources/Localizable.loctable | 'NOTIFY_SERVICE_kTCCServiceSystemPolicyAppDataDetailed' | “%@” tried to access your data from other apps and was blocked. You can manage this at any time in Files & Folders settings. | Приложение «%@» пыталось получить доступ к Вашим данным из других приложений и было заблокировано. Вы можете управлять этим в настройках раздела «Файлы и папки» в любое время.
+Library/PrivateFrameworks/TCC.framework/Resources/Localizable.loctable | 'REQUEST_ACCESS_ALLOW' | Allow | Разрешить
+Library/PrivateFrameworks/TCC.framework/Resources/Localizable.loctable | 'REQUEST_ACCESS_ADD_kTCCServiceCalendar_ADD' | Allow | Разрешить
+Library/PrivateFrameworks/TCC.framework/Resources/Localizable.loctable | 'REQUEST_ACCESS_ALLOW_kTCCServiceFocusStatus' | Allow | Разрешить
+Library/PrivateFrameworks/TCC.framework/Resources/Localizable.loctable | 'REQUEST_ACCESS_ALLOW_kTCCServiceGameCenterFriends' | Allow | Разрешить
+Library/PrivateFrameworks/TCC.framework/Resources/Localizable.loctable | 'REQUEST_ACCESS_SESSION_PID' | Allow | Разрешить
+
+$ python3 ka_labels.py.txt  (/System/Library/CoreServices/Applications/Keychain Access.app tables; en_GB|ru)
+CertificatePrefEditor.loctable | '256.label' | Attributes | Атрибуты
+CertificatePrefEditor.loctable | '257.label' | Access Control | Доступ
+InfoPlist.loctable | 'CFBundleName' | Keychain Access | Связка ключей
+InfoPlist.loctable | 'CFBundleDisplayName' | Keychain Access | Связка ключей
+KCAPreferences.loctable | '6.title' | Keychain Access Settings | Настройки Связки ключей
+KeyEditor.loctable | '301.label' | Attributes | Атрибуты
+KeyEditor.loctable | '302.label' | Access Control | Доступ
+Localizable.loctable | 'Keychain Access is unable to import “%@”.\n\nError: %ld' | Keychain Access is unable to import “%1$@”.
+
+
+Localizable.loctable | 'Keychain Access' | Keychain Access | Связка ключей
+Localizable.loctable | 'Warning! One or more selected items is a private key. If a private key is deleted, certificates associated with that key can no longer be used. This may prevent you from reading encrypted messages
+Localizable.loctable | 'Warning! If a private key is deleted, certificates associated with that key can no longer be used. This may prevent you from reading encrypted messages or making secure connections. Proceed only i
+Localizable.loctable | 'Keychain Access - Unexpected Error' | Keychain Access — Unexpected Error | Связка ключей — неожиданная ошибка
+Localizable.loctable | 'Keychain Access is trying to access information saved in your keychains.' | Keychain Access is trying to access information saved in your keychains. | Приложение «Связка ключей» пытается получить 
+Localizable.loctable | 'private key' | private key | Закрытый ключ
+Localizable.loctable | 'Delete' | Delete | Удалить
+Localizable.loctable | 'Keychain Access is unable to import the certificate.\n\nError: %ld' | Keychain Access is unable to import the certificate.
+
+
+MainMenu.loctable | '681.title' | Delete | Удалить
+MainMenu.loctable | '57.title' | Keychain Access | Связка ключей
+MainMenu.loctable | '56.title' | Keychain Access | Связка ключей
+MainMenu.loctable | '111.title' | Keychain Access Help | Справка Связки ключей
+MasterView.loctable | '21.title' | Keychain Access | Связка ключей
+NoteEditor.loctable | '294.label' | Attributes | Атрибуты
+NoteEditor.loctable | '295.label' | Access Control | Доступ
+PasswordEditor.loctable | '256.label' | Attributes | Атрибуты
+PasswordEditor.loctable | '257.label' | Access Control | Доступ
+
+$ grep ru catalogue for macOS labels
+   3 «Всегда разрешать»
+   1 «Запись экрана и системного звука»
+   1 «Контроль доступа»
+   1 «Конфиденциальность и безопасность»
+   1 «Разрешить»
+   1 «Связка ключей»
+   1 «Системные настройки»
+   1 «Универсальный доступ»
+   1 «Файлы и папки»

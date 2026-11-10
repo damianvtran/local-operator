@@ -1,0 +1,122 @@
+{
+  "locale": "zh-CN",
+  "namespace": "cli.permissions",
+  "audit_id": "zhp2",
+  "audit_round": 2,
+  "audit_date": "2026-11-09",
+  "key_count": 38,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "source_audit_revision": "788cc399410196b080cfc9f7e7bd558ccb713140",
+  "previous_round_record": "i18n/audits/evidence/zh-CN/cli.permissions/zhp1/record.json",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "bb7ced26a175",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "Host system prompt 'Model: anthropic/claude-opus-5-5' for this session; no fallback occurred",
+    "fallback": null,
+    "independent_from_translator_session": true,
+    "independence": "Distinct session from round-2 translator (session not recorded), translator job ad99821ab9e1 and round-1 auditor 6b7e2046be3d; did not author or edit the namespace. Same model family: independent agent, not independent vendor."
+  },
+  "translator": {
+    "agent": "i18n-translator (PR #3691 round-2 wave, commit 788cc399)",
+    "session": "unrecorded (not in repo or brief)",
+    "model": "unrecorded",
+    "date": "2026-11-09"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/cli.permissions.json",
+      "sha256": "2b018162dcb4e58b61b9d5c783a855438a09127460ea6a873bb4f461191b6d3c"
+    }
+  },
+  "apple_label_source": "Installed macOS 27.2 (26B123) .loctable resources read with plistlib; table/key per label in report.md and audit.log",
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp2/report.md",
+      "sha256": "00c3fcfe27f9ab2df14a8cf0811f288bb0582afb367f1ded0dd8147623ec2f66"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/zh-CN/cli.permissions/zhp2/audit.log",
+      "sha256": "2bb1526ffdf9832134acab84fcda06fcca1719fdeb0e86270c8a24f4b34807bc"
+    }
+  },
+  "audit_log_is_execution_log": true,
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log holds actual command output from session bb7ced26a175 (check.py, shasum, sw_vers, own parity script, Apple .loctable lookups).",
+  "round1_resolution": {
+    "Z1": "resolved",
+    "Z2": "resolved",
+    "Z3": "resolved",
+    "Z4": "resolved",
+    "Z5": "resolved",
+    "Z6": "resolved",
+    "Z7": "resolved"
+  },
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "Z8",
+      "Z9",
+      "Z10",
+      "Z11"
+    ],
+    "severities": {
+      "Z8": "MAJOR",
+      "Z9": "MINOR",
+      "Z10": "NIT",
+      "Z11": "NIT"
+    }
+  },
+  "findings": [
+    {
+      "id": "Z8",
+      "severity": "MAJOR",
+      "keys": [
+        "cli.permissions.status.screen.denied"
+      ],
+      "current": "…在“系统设置”>“隐私与安全性”>“录屏与系统录音”中打开“{row}”。",
+      "suggested": "…在“系统设置”>“隐私与安全”>“录屏与系统录音”中打开“{row}”。",
+      "evidence": "System Settings.app Localizable.loctable 'Privacy & Security' and SecurityPrivacyExtension.appex InfoPlist.loctable CFBundleDisplayName zh_CN = 隐私与安全 (macOS 27.2 26B123)"
+    },
+    {
+      "id": "Z9",
+      "severity": "MINOR",
+      "keys": [
+        "cli.permissions.status.scope"
+      ],
+      "current": "“辅助功能”",
+      "suggested": "“无障碍” (System Settings Localizable.loctable 'Accessibility'); source note: SecurityPrivacyExtension ACCESSIBILITY = 'Device Control and Data Access' / 设备控制和数据访问 on 27.2"
+    },
+    {
+      "id": "Z10",
+      "severity": "NIT",
+      "keys": [
+        "cli.permissions.help.status",
+        "cli.permissions.status.screen.granted",
+        "cli.permissions.status.screen.denied",
+        "cli.permissions.status.screen.unknown",
+        "cli.permissions.status.screen.no_image",
+        "cli.permissions.status.scope"
+      ],
+      "current": "屏幕录制",
+      "suggested": "录屏 (SecurityPrivacyExtension SCREEN_CAPTURE zh_CN)"
+    },
+    {
+      "id": "Z11",
+      "severity": "NIT",
+      "keys": [
+        "cli.permissions.setup.done_allow_once"
+      ],
+      "current": "在你于终端中运行…之前",
+      "suggested": "在终端中运行`lop update`或`lop permissions setup`之前，这些构建的运行时将使用…"
+    }
+  ]
+}

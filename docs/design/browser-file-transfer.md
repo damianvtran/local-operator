@@ -441,8 +441,8 @@ three rules that follow from keying on it are the whole of the contract:
   refusals are the ones that carry it, on a different result payload.
 * **An unrecognised non-empty `reason` is RELAYED, never replaced.** On the armed
   path, with nothing landed and a reason that is not the refusal shape — the app
-  host's own no-op sentence ("no download started within 120s; if the page needs a
-  click first, pass a selector, or `click` it and retry") is one of these — the
+  host's own no-op sentence ("no download started within 120s", followed by
+  arm-before-click and provider-side-effect guidance) is one of these — the
   model gets the host's sentence in the host's own words, audited as
   `armed_reason`. That is the false-negative half of keying on copy, and the
   answer is to make it visible to both readers rather than to widen the parse: the
@@ -626,7 +626,7 @@ told to use the browser and was not told why reached for playwright anyway
 |---|---|
 | host predates the feature | typed `capability_unsupported` + version + "update the extension / the app" |
 | host is current but wedged | the existing wedge copy, naming the extension toggle (`guide://browser`) |
-| no download started | "no download started within N s; if the page needs a click first, `click` it and retry, or the file may be behind a login" |
+| no download started | "no download started within N s"; use `download(selector=<final confirm button>)` to arm before clicking. Without a selector, capture waits only for a future event and cannot recover an already dispatched or cancelled download. A timeout does not prove the handler failed or a server mutation did not happen; check the provider-side effect before repeating a Generate key, create or export operation. |
 | the host ARMED, then refused (the shape the app host uses, §6.2) | the host's own refusal, under the mark the design composes refusals with: "refused: …", the prefix once |
 | the host armed, nothing landed, and its `reason` is not a refusal (§6.2) | the host's own sentence, RELAYED verbatim, never the "no download started …" remedy above; the audit row reads `armed_reason` |
 | cancelled by the name policy | "refused and deleted — `<name>` is an executable/script type (`<why>`); nothing was saved" |

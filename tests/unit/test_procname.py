@@ -44,6 +44,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _recorded(image: Path) -> tuple[int, int]:
+    """``(size, mtime_ns)`` a bundle image's ``image`` sidecar recorded at publish."""
+    fields = (procname._image_home(image) / procname._IMAGE_SIDECAR).read_text().split()
+    return int(fields[0]), int(fields[1])
+
+
 def _fake_venv(tmp_path: Path) -> Path:
     """A venv-shaped tree that BELIEVES it is a venv.
 
@@ -614,8 +620,9 @@ class TestStaleness:
         image = Path(os.readlink(branded))
         real = procname.real_interpreter()
         assert real is not None
-        assert image.parent.parent.name == procname._build_key(
-            real
+        assert (
+            procname._image_home(image).name
+            == f"{procname._build_key(real)}-{procname.FLAVOR_ADHOC}"
         ), "the repair must name the image for THIS interpreter build"
         assert image.stat().st_ino != os.stat(os.path.realpath(sys.executable)).st_ino
         assert argv0 == "Local Operator [eval] session=deadbeef"
@@ -630,12 +637,12 @@ class TestStaleness:
         no-dylib refusal the hardlink rung carries.
         """
         image = Path(os.readlink(branded))
-        (image.parent.parent / "lib").unlink()
-        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
+        (procname._image_home(image) / "lib").unlink()
+        os.symlink("/nonexistent/lib", procname._image_home(image) / "lib")
 
         # A path INSIDE a venv is resolved through that venv's pyvenv.cfg, so
         # only the image itself (no pyvenv.cfg beside it) is asked the question.
-        assert not (image.parent.parent / "pyvenv.cfg").exists()
+        assert not (procname._image_home(image) / "pyvenv.cfg").exists()
         assert procname._executable_image(image) is None
 
     def test_a_corrupt_published_image_is_rebuilt(self, branded):
@@ -648,8 +655,8 @@ class TestStaleness:
         fallback rung for the life of the install.
         """
         image = Path(os.readlink(branded))
-        (image.parent.parent / "lib").unlink()
-        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
+        (procname._image_home(image) / "lib").unlink()
+        os.symlink("/nonexistent/lib", procname._image_home(image) / "lib")
 
         assert procname.ensure_branded_interpreter() == branded
         assert procname._executable_image(branded) is not None
@@ -1808,13 +1815,17 @@ class TestStableRuntimeImage:
 
         assert image_stat.st_nlink == 1, "the image must not share uv's inode"
         assert image_stat.st_ino != real_stat.st_ino
-        assert (image_stat.st_size, image_stat.st_mtime_ns) == (
-            real_stat.st_size,
-            real_stat.st_mtime_ns,
-        ), "a clone keeps the bytes AND the timestamps"
-        assert (image.parent.parent / "lib").is_symlink()
-        assert (image.parent.parent / "lib").resolve() == (real.parent.parent / "lib").resolve()
-        assert (image.parent.parent / "include").is_symlink()
+        # A bundle image is RE-SIGNED, so its bytes are no longer the
+        # interpreter's; the sidecar records the signed image's own stat.
+        assert procname._is_bundle_image(image)
+        assert (image_stat.st_size, image_stat.st_mtime_ns) == _recorded(
+            image
+        ), "the sidecar records the published image's bytes AND timestamp"
+        assert (procname._image_home(image) / "lib").is_symlink()
+        assert (procname._image_home(image) / "lib").resolve() == (
+            real.parent.parent / "lib"
+        ).resolve()
+        assert (procname._image_home(image) / "include").is_symlink()
         assert os.readlink(branded) == str(image)
         assert branded.parent.name == "bin" and image.name == procname.BRAND
 
@@ -1882,9 +1893,9 @@ class TestStableRuntimeImage:
         second = procname._plant_runtime(real, root)
 
         assert second is not None and second != first
-        assert first.parent.parent.is_dir(), "a published image is never collected"
+        assert procname._image_home(first).is_dir(), "a published image is never collected"
         after = {p.name: p.stat().st_mtime_ns for p in root.iterdir() if p.is_dir()}
-        assert set(after) == set(before) | {second.parent.parent.name}
+        assert set(after) == set(before) | {procname._image_home(second).name}
         for name, mtime in before.items():
             assert after[name] == mtime, "the published directory is immutable"
 
@@ -1937,8 +1948,8 @@ class TestStableRuntimeImage:
         # the shim must exec the sibling interpreter instead of that image, and
         # the fallback is a script so a pass here cannot be the image running.
         bin_dir = tmp_path / "stable" / "generations" / "g1" / "tools" / "local-operator" / "bin"
-        (image.parent.parent / "lib").unlink()
-        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
+        (procname._image_home(image) / "lib").unlink()
+        os.symlink("/nonexistent/lib", procname._image_home(image) / "lib")
         (bin_dir / "python3").unlink()
         (bin_dir / "python3").write_text("#!/bin/sh\necho fallback\n")
         (bin_dir / "python3").chmod(0o755)
@@ -2053,7 +2064,9 @@ class TestStableRuntimeImage:
 
             assert all(result is not None for result in results), results
             assert {str(result) for result in results} == {str(image)}
-            assert [p.name for p in root.iterdir() if p.is_dir()] == [image.parent.parent.name]
+            assert [p.name for p in root.iterdir() if p.is_dir()] == [
+                procname._image_home(image).name
+            ]
             assert procname._healthy_image(image, real)
             assert not list(root.glob("*.tmp.*")), "a staging tree was leaked"
             assert not list(root.glob("*.dead.*")), "a moved-aside tree was leaked"
@@ -2077,7 +2090,7 @@ class TestStableRuntimeImage:
         root = tmp_path / "runtime"
         image = procname._plant_runtime(real, root)
         assert image is not None
-        published = image.parent.parent
+        published = procname._image_home(image)
         with open(image, "r+b") as handle:
             handle.truncate(12)
 
@@ -2150,7 +2163,9 @@ class TestStableRuntimeImage:
         refused, which is the pair of facts that reaches the guard.
         """
         image = Path(os.readlink(branded))
-        moved = image.parent.parent.parent / "a-key-nothing-published" / "bin" / procname.BRAND
+        moved = (
+            procname._image_home(image).parent / "a-key-nothing-published" / "bin" / procname.BRAND
+        )
         monkeypatch.setattr(procname, "runtime_image", lambda real: moved)
         monkeypatch.setattr(procname, "_plant_runtime", lambda real, root: None)
 
@@ -2187,7 +2202,7 @@ class TestStableRuntimeImage:
         repaired = procname._plant_runtime(real, root)
 
         assert repaired == image, "repaired in place, under the same key"
-        assert image.stat().st_size == real.stat().st_size
+        assert image.stat().st_size == _recorded(image)[0]
         assert procname._healthy_image(image, real)
         assert procname._executable_image(link, real) == link
 
@@ -2209,7 +2224,7 @@ class TestStableRuntimeImage:
         with open(image, "r+b") as handle:
             handle.write(b"\0" * 64)
 
-        assert image.stat().st_size == real.stat().st_size, "precondition: same size"
+        assert image.stat().st_size == _recorded(image)[0], "precondition: same size"
         assert not procname._healthy_image(image, real)
         assert procname._needs_replant(link, real, image)
         assert procname._executable_image(link, real) is None
@@ -2244,7 +2259,7 @@ class TestStableRuntimeImage:
         real = procname.real_interpreter()
         assert real is not None
         old = Path(os.readlink(branded))
-        moved = old.parent.parent.parent / "cpython-moved-key" / "bin" / procname.BRAND
+        moved = procname._image_home(old).parent / "cpython-moved-key" / "bin" / procname.BRAND
         assert procname._healthy_image(old, real), "precondition: the old image is healthy"
         assert not procname._needs_replant(branded, real, old), "precondition: steady state"
 
@@ -2302,7 +2317,7 @@ class TestStableRuntimeImage:
         monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
         image = procname._plant_runtime(real, root)
         assert image is not None
-        marker = image.parent.parent / procname._SOURCE_MARKER
+        marker = procname._image_home(image) / procname._SOURCE_MARKER
         assert marker.read_text(encoding="utf-8").strip() == os.path.realpath(real)
 
         rebuilt = tmp_path / "rebuilt"
@@ -2336,7 +2351,7 @@ class TestStableRuntimeImage:
         monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
         image = procname._plant_runtime(real, root)
         assert image is not None
-        (image.parent.parent / procname._SOURCE_MARKER).unlink()
+        (procname._image_home(image) / procname._SOURCE_MARKER).unlink()
         rebuilt = tmp_path / "rebuilt"
         (rebuilt / "bin").mkdir(parents=True)
         (rebuilt / "pyvenv.cfg").write_text(
@@ -2349,7 +2364,9 @@ class TestStableRuntimeImage:
 
         assert procname.real_interpreter() is None
         assert procname._real_interpreter_for(rebuilt / "bin" / "python") is None
-        assert [p.name for p in root.iterdir()] == [image.parent.parent.name], "no second key"
+        assert [p.name for p in root.iterdir()] == [
+            procname._image_home(image).name
+        ], "no second key"
 
     def test_real_interpreter_reads_pyvenv_cfg_not_the_executable(self, tmp_path, monkeypatch):
         """Mutation (b): skipping ``pyvenv.cfg`` must answer the wrong build.
@@ -2389,7 +2406,9 @@ class TestStableRuntimeImage:
         inside = root / "stray" / "bin" / "python3.12"
         inside.parent.mkdir(parents=True)
         shutil.copy2(real, inside)
-        (image.parent.parent / procname._SOURCE_MARKER).write_text(f"{inside}\n", encoding="utf-8")
+        (procname._image_home(image) / procname._SOURCE_MARKER).write_text(
+            f"{inside}\n", encoding="utf-8"
+        )
 
         assert procname._source_for_image(image) is None
 
@@ -2408,7 +2427,7 @@ class TestStableRuntimeImage:
         monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(root))
         image = procname._plant_runtime(real, root)
         assert image is not None
-        marker = image.parent.parent / procname._SOURCE_MARKER
+        marker = procname._image_home(image) / procname._SOURCE_MARKER
 
         marker.write_text("/bin/ls\n", encoding="utf-8")
         assert procname._source_for_image(image) is None, "a foreign binary is not a source"
@@ -2471,8 +2490,8 @@ class TestStableRuntimeImage:
         (venv / "pyvenv.cfg").write_text(f"home = {image.parent}\n", encoding="utf-8")
         link = venv / "bin" / procname.BRAND
         os.symlink(image, link)
-        (image.parent.parent / "lib").unlink()
-        os.symlink("/nonexistent/lib", image.parent.parent / "lib")
+        (procname._image_home(image) / "lib").unlink()
+        os.symlink("/nonexistent/lib", procname._image_home(image) / "lib")
 
         assert (link.parent.parent / "pyvenv.cfg").is_file(), "precondition: this venv shape"
         assert procname._executable_image(image) is None
