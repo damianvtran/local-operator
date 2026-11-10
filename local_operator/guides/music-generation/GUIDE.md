@@ -9,18 +9,27 @@ Use `generate_music` for compositions, `modify_music` for a new composition that
 keeps owned ranges, and `music_status` to inspect the durable local job or request
 cancellation. These are music tools, not sound-effect synthesis.
 
-## Availability and commercial gate
+## Availability, provider and price
+
+Music is a paid Radient service: the public model is `radient/music`, backed by
+ElevenLabs Music (`music_v2_5`) on the server, with attribution "Powered by
+ElevenLabs Music" carried in the server's capability and completion details.
+The estimate is $0.15 per requested minute, per variation ($0.0025 per second;
+a 30 s track is about $0.075, two 30 s variations about $0.15). That figure is
+an estimate for the user; the server's `cost` object is the only authority, and
+`music_status(action="models")` reports the live tariff.
 
 A persisted Radient login plus the session's background-job manager and durable
-journal make the tools discoverable without network access. Before registering a
-purchase, the tool reads `/tools/music/models`; a disabled capability returns its
-actual reason and no generation job is started. A login is not proof of a music
-reseller agreement or provider readiness. Paid production activation remains off
-unless Radient has verified written authorization and approved attribution.
+journal make the tools discoverable without network access. Core has no local
+on/off switch: the SERVER owns activation (its commercial gate and attribution).
+Before registering a purchase, the tool reads `/tools/music/models`; a disabled
+capability returns its actual `disabled_reason` and no generation job is started.
+`generate_music` and `modify_music` spend money, so they need the usual
+write-tier approval; `music_status` is read-tier.
 
 Uploaded references, stem separation and other unpriced operations are not
-available. Do not send a normal Suno subscription token or route through a
-third-party Suno proxy. No upstream vendor key belongs in a music tool argument.
+available. No upstream vendor key (ElevenLabs, Suno or other) belongs in a music
+tool argument, and a stored BYOK ElevenLabs key does not route music.
 
 ## Compose and modify
 
