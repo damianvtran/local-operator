@@ -32,6 +32,7 @@ import uuid
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar, cast
 
 from pydantic import SecretStr, TypeAdapter, ValidationError
@@ -55,6 +56,7 @@ from local_operator.harness.intent import (
     sanitize_intent,
     scan_streaming_intent,
 )
+from local_operator.harness.provider_empty import is_provider_empty
 from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
@@ -621,6 +623,32 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: allowance per turn would re-buy the same diagnosis. Each re-ask is one
 #: extra model call.
 MAX_WORDLESS_STOP_RECOVERIES = 1
+
+#: How many times the SAME request is re-issued after a PROVIDER-EMPTY response:
+#: a clean ``stop`` on which the provider sent no content of any kind -- no text,
+#: no call, no reasoning, no output tokens (``provider_empty.is_provider_empty``). The
+#: wordless-stop re-ask above cannot tell that from a model that thought and
+#: said nothing, and its prompt ("your last message arrived with no text") asks
+#: a model to account for a message it never wrote; the remedy for a provider
+#: that sent nothing is to ask the provider again, unchanged.
+#:
+#: ONE, and CONSECUTIVE: a second provider-empty response on the re-issued
+#: request ends the turn as a named failure (model and time) rather than falling
+#: through to the re-ask. Unlike the run-scoped budgets around it the count
+#: resets on any turn that is not provider-empty -- a healthy turn between two
+#: blips proves the provider recovered, so each blip earns its own single retry
+#: and a long run is not failed by its second unrelated one. The cost is bounded
+#: by that: every retry is one extra call, and it is only ever followed by real
+#: progress or by the end of the turn. Not a ``RetrySettings`` knob: those govern
+#: transport errors (``providers.failover``), and this response was a success.
+MAX_EMPTY_PROVIDER_RETRIES = 1
+
+#: The one notice on the first retry. Names the cause (the PROVIDER sent nothing)
+#: so it cannot be read as the wordless re-ask's "the model's reply arrived empty".
+EMPTY_PROVIDER_RETRY_NOTICE_TEXT = (
+    "the provider sent an empty response (no text, no tool calls, no reasoning) — "
+    "re-sending the same request once"
+)
 
 
 #: How many times ONE run re-asks a model whose turn was cut off at the output
@@ -2295,6 +2323,9 @@ class AgentLoop:
         # Run-scoped and topped up by nothing, like the truncation budget
         # above: a fresh allowance per turn would re-buy the same diagnosis.
         wordless_stop_recoveries = 0
+        # CONSECUTIVE provider-empty responses already re-issued -- see
+        # ``MAX_EMPTY_PROVIDER_RETRIES`` for why this one resets on a healthy turn.
+        empty_provider_retries = 0
         # The output contract's budget for THIS run (== per turn: a ``--loop``
         # iteration re-enters ``_run`` fresh). Counted only on the terminal
         # seam, so every non-clean exit -- abort, stream error, continuation
@@ -3324,6 +3355,14 @@ class AgentLoop:
                             has_more_tool_calls = True
                             continue
 
+                    # Whether the provider sent nothing at all this turn. Settled
+                    # once, here, so the consecutive count below resets on EVERY
+                    # other outcome (text, calls, a ``length`` cut, a reasoning-
+                    # only stop) and the wordless arm further down reads it.
+                    turn_provider_empty = stop_reason == "stop" and is_provider_empty(assistant)
+                    if not turn_provider_empty:
+                        empty_provider_retries = 0
+
                     tool_results: list[ToolResult] = []
                     if stop_reason == "length":
                         # Whitespace-only prose counts as NOTHING, which is how
@@ -3654,6 +3693,7 @@ class AgentLoop:
                         and stop_reason == "stop"
                         and not (assistant.text or "").strip()
                     ):
+                        wordless_graceful = _graceful_cancel_requested(config)
                         # A WORDLESS STOP: a clean ``stop`` arrived with no
                         # text and no tool calls, and no arm above claimed it
                         # (not a ``length`` cut-off, not the nameless-call
@@ -3683,7 +3723,52 @@ class AgentLoop:
                         # stop outranks the re-ask (the nameless rule): falling
                         # through ends the turn as it did before this arm
                         # existed.
-                        wordless_graceful = _graceful_cancel_requested(config)
+                        if turn_provider_empty and not wordless_graceful:
+                            # The provider sent NOTHING (see
+                            # ``MAX_EMPTY_PROVIDER_RETRIES``), which is not the
+                            # model's silence: re-issue the same request, add
+                            # no prompt, and do not spend the wordless re-ask.
+                            # Either way the empty row leaves the history, for
+                            # the re-ask's reasons: it is illegal on the
+                            # Anthropic wire and would poison the next request.
+                            if context.messages and context.messages[-1] is assistant:
+                                context.messages.pop()
+                            if new_messages and new_messages[-1] is assistant:
+                                new_messages.pop()
+                            if empty_provider_retries < MAX_EMPTY_PROVIDER_RETRIES:
+                                empty_provider_retries += 1
+                                # Raw English, like the nameless-call notice: a new
+                                # catalogue key would stale every shipped locale's
+                                # ``tui.notices`` (eligibility is hash-bound) until
+                                # each is re-translated and independently audited.
+                                yield NoticeEvent(
+                                    text=EMPTY_PROVIDER_RETRY_NOTICE_TEXT, kind="warning"
+                                )
+                                # No TurnEndEvent, for the wordless re-ask's
+                                # reason: nothing was shown for this turn.
+                                has_more_tool_calls = True
+                                continue
+                            # The re-issued request came back empty too: STOP.
+                            # Not the old re-prompt -- a provider that twice
+                            # sent nothing is not helped by being asked why.
+                            failed_spec = turn_model or self._current_model(config)
+                            failing_model = f"{failed_spec.provider}/{failed_spec.model_id}"
+                            yield AgentEndEvent(
+                                messages=new_messages,
+                                error=(
+                                    f"Empty provider response: {failing_model} returned no "
+                                    "content at all (no text, no tool calls, no reasoning) "
+                                    f"on {empty_provider_retries + 1} consecutive attempts, "
+                                    "the last at "
+                                    f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}. "
+                                    "The harness re-issued the request once and stopped; "
+                                    "retry, or switch models."
+                                ),
+                                failing_model=failing_model,
+                                generation=generation,
+                            )
+                            self._discard_pending_custom(pending)
+                            return
                         if (
                             wordless_stop_recoveries < MAX_WORDLESS_STOP_RECOVERIES
                             and not wordless_graceful
