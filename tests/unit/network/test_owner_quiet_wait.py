@@ -46,9 +46,11 @@ from local_operator.network import credentials as credentials_pkg
 from local_operator.network.credentials import effective
 from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.store import MeshAwareAuthStore
-from local_operator.network.credentials.types import Grant
+from local_operator.network.credentials.types import BrokerError, Grant
 from local_operator.providers.failover import (
     PREWIRE_REFUSAL_ATTR,
+    FailoverRouteState,
+    FallbackTarget,
     ProviderError,
     stream_with_failover,
 )
@@ -90,6 +92,34 @@ class _Provider:
         )
 
 
+class _KeylessLimitedOnce(_Provider):
+    """As :class:`_Provider`, but the first KEYLESS request gets 429 ``retry-after``."""
+
+    def __init__(self, retry_after_s: int) -> None:
+        super().__init__()
+        self.retry_after_s = retry_after_s
+        self.served_at: list[tuple[float, str]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+        if not bearer and not any(not seen for seen in self.seen):
+            self.seen.append(bearer)
+            return httpx.Response(
+                429,
+                headers={"retry-after": str(self.retry_after_s)},
+                json={"error": {"message": "rate limited (stub)", "type": "rate_limit_error"}},
+            )
+        self.served_at.append((time.monotonic(), bearer))
+        return super().__call__(request)
+
+
+class _OpenAIKey(_NoLocalLogins):
+    """A local login for ``openai`` only; every other provider is borrowed or absent."""
+
+    async def get_api_key(self, *args: Any, **_k: Any) -> Any:
+        return "local-fallback-key" if args and args[0] == "openai" else None
+
+
 async def _turn(
     auth: Any,
     provider: _Provider,
@@ -97,10 +127,14 @@ async def _turn(
     signal: AbortSignal | None = None,
     settings: dict[str, Any] | None = None,
     model: ModelSpec | None = None,
+    route_state: FailoverRouteState | None = None,
+    isolated: bool = False,
 ) -> list[Any]:
     from local_operator.providers.clients import OpenAICompatClient
 
-    request = ChatRequest(model=model or ModelSpec(provider=STUB_PROVIDER, model_id=MODEL))
+    request = ChatRequest(
+        model=model or ModelSpec(provider=STUB_PROVIDER, model_id=MODEL), isolated=isolated
+    )
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
 
         async def client_for(spec: ModelSpec) -> Any:
@@ -115,6 +149,7 @@ async def _turn(
                 client_for,
                 session_id=SESSION,
                 signal=signal,
+                route_state=route_state,
             )
         ]
 
@@ -377,6 +412,167 @@ def test_hint_is_the_owners_link_admission(
         owner.stop()
 
 
+@pytest.mark.asyncio
+async def test_an_abort_during_a_poll_is_a_stop_even_if_the_owner_returned(
+    mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Review R1-4: a stop that lands while a poll runs ends the turn as a stop.
+
+    The poll reports ``returned`` AFTER the stop fired; the sweep must not ask.
+    """
+    from local_operator.network.credentials import store as store_mod
+
+    client, store, _grant = _lapsed(mesh)
+    _bound(monkeypatch, 30.0)
+    asks = _Asks(client, monkeypatch)
+    signal = AbortSignal()
+
+    def stop_then_return(self: Any) -> str:
+        signal.abort("user stop")
+        return "returned"
+
+    monkeypatch.setattr(store_mod._OwnerWait, "poll", stop_then_return, raising=False)
+    with pytest.raises(ProviderError) as stopped:
+        await asyncio.wait_for(_turn(store, _Provider(), signal=signal), timeout=10.0)
+    assert stopped.value.kind == "aborted", stopped.value
+    walked = len(asks.at)
+    assert walked and walked % 2 == 0 and walked == 2, f"asked after the stop: {asks.at}"
+
+
+def test_the_waited_time_is_never_overstated() -> None:
+    """NIT: the default bound reads as what it is, 7 min 30 s, floored everywhere."""
+    from local_operator.network.credentials import messages
+
+    render = getattr(messages, "render_waited")
+    assert render(1.5) == "1 s"
+    assert render(59.9) == "59 s"
+    assert render(120.0) == "2 min"
+    assert render(450.0) == "7 min 30 s"
+    assert render(449.9) == "7 min 29 s"
+
+
+# ---------------------------------------------------------------------------
+# Review R1-1: the wait holds back ONLY the absent owner's own targets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_fallback_is_retried_on_its_own_clock_not_the_owners(
+    mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """R1-1 shape 1 (QA row 7, ``r7b``): the fallback's ``retry-after`` decides the sweep.
+
+    The primary is the borrowed key (owner away, lease over). The configured fallback
+    is a keyless provider answering 429 ``retry-after: 3`` once. The loop-back must
+    sleep its 3 s and serve through the fallback, not wait the owner's 30 s bound.
+    """
+    from local_operator.providers import registry
+
+    monkeypatch.setitem(
+        registry._BY_ID,  # noqa: SLF001 — the seam the repo's stub_provider fixture uses
+        "keylessfb",
+        registry.ProviderDefinition(id="keylessfb", name="Keyless", allows_missing_api_key=True),
+    )
+    _client, store, _grant = _lapsed(mesh)
+    _bound(monkeypatch, 30.0)
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            "fallbackChains": {
+                f"{STUB_PROVIDER}/{MODEL}": [{"provider": "keylessfb", "model": "fb-1"}]
+            },
+        }
+    }
+    provider = _KeylessLimitedOnce(retry_after_s=3)
+    started = time.monotonic()
+    events = await asyncio.wait_for(_turn(store, provider, settings=settings), timeout=60.0)
+    assert _ended(events), events
+    served_at = provider.served_at[0][0] - started
+    assert 2.5 <= served_at < 3.0 + 2.0, f"served at {served_at:.2f}s, not on the fallback's 3 s"
+    assert [bearer for _at, bearer in provider.served_at] == [""], provider.served_at
+
+
+@pytest.mark.asyncio
+async def test_a_pin_excluded_primary_is_not_held_behind_the_absent_owner(
+    mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """R1-1 shape 2 (QA row 7', ``r7_pinned``): an unwalked target is asked at once.
+
+    The session is pinned to the borrowed fallback, so the walk skips the primary (a
+    local key that would serve). The borrowed target is owner-away; the sweep must
+    still reach the primary on today's backoff, not after the owner's bound.
+    """
+    _client, _store, _grant = _lapsed(mesh)
+    client = MeshCredentialClient.for_this_device(mesh.b.root)
+    assert client is not None
+    store = MeshAwareAuthStore(_OpenAIKey(), mesh=client, config_dir=mesh.b.root)
+    _bound(monkeypatch, 30.0)
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            "fallbackChains": {"openai/gpt-5": [{"provider": STUB_PROVIDER, "model": MODEL}]},
+        }
+    }
+    route = FailoverRouteState(
+        active=FallbackTarget(f"{STUB_PROVIDER}/{MODEL}"),
+        primary_retry_at_ms=int(time.time() * 1000) + 600_000,
+    )
+    provider = _Provider()
+    started = time.monotonic()
+    events = await asyncio.wait_for(
+        _turn(
+            store,
+            provider,
+            settings=settings,
+            model=ModelSpec(provider="openai", model_id="gpt-5"),
+            route_state=route,
+        ),
+        timeout=60.0,
+    )
+    assert _ended(events), events
+    assert time.monotonic() - started < 3.0, "the primary waited for another device's owner"
+    assert provider.seen == ["local-fallback-key"], provider.seen
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_revisit_still_serves_an_owner_that_came_back(
+    mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """R1-1 guard: the mixed case keeps the owner-return path. The owner comes back
+    during the fallback's own backoff, and the sweep (primary first) is served ONCE
+    by the owner's fresh grant."""
+    from local_operator.providers import registry
+
+    monkeypatch.setitem(
+        registry._BY_ID,  # noqa: SLF001 — the seam the repo's stub_provider fixture uses
+        "keyless",
+        registry.ProviderDefinition(id="keyless", name="Keyless", allows_missing_api_key=True),
+    )
+    client, store, grant = _lapsed(mesh)
+    _bound(monkeypatch, 30.0)
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            "fallbackChains": {f"{STUB_PROVIDER}/{MODEL}": [{"provider": "keyless", "model": "k"}]},
+        }
+    }
+    provider = _KeylessLimitedOnce(retry_after_s=3)
+    task = asyncio.create_task(_turn(store, provider, settings=settings))
+    await asyncio.sleep(0.5)
+    owner = _restart_owner(mesh, monkeypatch)
+    try:
+        events = await asyncio.wait_for(task, timeout=30.0)
+        assert _ended(events), events
+        fresh = client.grants.peek(STUB_PROVIDER, SESSION)
+        assert fresh is not None and fresh.granted_at > grant.granted_at
+        assert [bearer for _at, bearer in provider.served_at] == [fresh.access_token]
+    finally:
+        owner.stop()
+
+
 # ---------------------------------------------------------------------------
 # N: over-reach guards (pass on both trees)
 # ---------------------------------------------------------------------------
@@ -448,18 +644,38 @@ async def test_held_inside_the_lease_is_served_without_waiting(
 async def test_families_and_isolated_calls_never_wait(
     mesh: Any, monkeypatch: pytest.MonkeyPatch  # noqa: F811
 ) -> None:
-    """N4: MCP, GitHub and device-bound keys never wait; neither does a no-retry call."""
-    _client, store, _grant = _lapsed(mesh)
+    """N4 (review R1-2): device-bound, GitHub and MCP keys never wait; nor does isolation.
+
+    Each family key is given EVERY other condition the real lapsed provider key
+    meets: a heard ``owner_offline`` (T1), the same holder answer and the same
+    lapsed ``owner_unavailable`` receipt (T3-T5). T2 is then the only condition that
+    can refuse, so this cell fails if T2 is removed. The real key is the control.
+    """
+    client, store, _grant = _lapsed(mesh)
     _bound(monkeypatch, 30.0)
+    owner = client.owner_of(STUB_PROVIDER)
+    # The silence is HEARD once (as a turn's first ask would), which is what turns
+    # the lapsed borrow receipt into ``owner_unavailable`` with an expired lease.
+    heard = client.request_grant_sync(STUB_PROVIDER, session_id=SESSION)
+    assert isinstance(heard, BrokerError) and heard.code == "owner_offline", heard
+    lapsed = effective.effective_access(STUB_PROVIDER, root=mesh.b.root, mesh=client)
+    assert (lapsed.state, lapsed.owner) == ("owner_unavailable", owner), lapsed
+    family = ("kimi", "github", "mcp:https://mcp.example.test/sse")
+    for key in (STUB_PROVIDER, *family):
+        store._refusals[key] = BrokerError(code="owner_offline", key=key, owner_device=owner)
+    monkeypatch.setattr(client, "should_borrow", lambda key: True)
+    monkeypatch.setattr(effective, "effective_access", lambda *a, **k: lapsed)
     hint = getattr(store, "owner_wait_hint", None)
     if hint is not None:
-        for provider in ("github", "mcp:https://mcp.example.test/sse", "ollama"):
-            assert hint(provider) is None, provider
+        assert hint(STUB_PROVIDER) is not None, "control: the forced conditions must admit"
+        for key in family:
+            assert hint(key) is None, key
+    monkeypatch.undo()
+    _bound(monkeypatch, 30.0)
+    # Isolation (decorative calls: naming, summaries) disables retry, so no wait.
     started = time.monotonic()
     with pytest.raises(ProviderError):
-        await asyncio.wait_for(
-            _turn(store, _Provider(), settings={"retry": {"enabled": False}}), timeout=10.0
-        )
+        await asyncio.wait_for(_turn(store, _Provider(), isolated=True), timeout=10.0)
     assert time.monotonic() - started < 2.0
 
 

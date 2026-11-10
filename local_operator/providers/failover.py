@@ -5510,14 +5510,24 @@ async def _stream_with_failover_events(
             delay_ms = min(shortest_retry_after_ms, LOOPBACK_MAX_WAIT_MS)
         else:
             delay_ms = backoff_delay_ms(retry.base_delay_ms, 1, rng=rng)
-        if owner_waits:
-            # PR-D (Root 0): the owner of a revisited target is away and this
-            # device's lease from it has ended. Wait for it HERE, after every
-            # configured fallback was already walked (none is delayed or added) and
-            # before anything was sent. The wait replaces the backoff and makes no
-            # asks, so the sweep below is the same single re-ask as before, only
-            # later: served once if the owner came back, the real answer otherwise.
-            # Not C5: no grant is served, refreshed or extended while it runs.
+        if owner_waits and all(
+            (candidate.selector, candidate.effort) in owner_waits for candidate in revisit
+        ):
+            # PR-D (Root 0): EVERY revisited target is owner-away with its lease from
+            # that owner ended, so nothing else could serve sooner. Wait for the owner
+            # HERE, after every configured fallback was already walked and before
+            # anything was sent. The wait replaces the backoff and makes no asks, so
+            # the sweep below is the same single re-ask as before, only later: served
+            # once if the owner came back, the real answer otherwise. Not C5: no grant
+            # is served, refreshed or extended while it runs.
+            #
+            # ONLY when every one is (#3722 review R1-1): ``revisit`` also carries
+            # targets the walk could not finish for their own reasons (a fallback's
+            # 429 with its own retry-after, a primary the route pin excluded). Waiting
+            # for an absent owner in front of those delayed a turn they would have
+            # served in seconds by up to the whole bound. A mixed revisit keeps
+            # today's backoff, and ``owner_waited_s`` stays ``None``, so its sweep
+            # reports a still-absent owner with today's plain sentence.
             owner_waited_s = await _await_owner_return(list(owner_waits.values()), signal)
         else:
             await _abortable_sleep(delay_ms, signal)

@@ -102,16 +102,18 @@ def render_retry_after(ms: float | int | None) -> str:
 
 
 def render_waited(seconds: float) -> str:
-    """``1 s`` / ``7 min``: how long a turn ACTUALLY waited, never rounded up.
+    """``1 s`` / ``7 min 30 s``: how long a turn ACTUALLY waited, never rounded up.
 
     The forward twin (:func:`render_retry_after`) rounds to the nearest 5 s with a
     5 s floor, which is right for a hint and wrong for a past fact: a 1.5 s wait
-    must not read as five seconds, and a 7.5 min one not as eight minutes.
+    must not read as five seconds. Minutes keep their seconds (floored) so the
+    default 450 s bound reads as itself, not as "7 min".
     """
-    seconds = max(0.0, float(seconds))
-    if seconds < 60:
-        return f"{max(1, int(seconds))} s"
-    return f"{int(seconds // 60)} min"
+    whole = max(1, int(max(0.0, float(seconds))))
+    if whole < 60:
+        return f"{whole} s"
+    minutes, rest = divmod(whole, 60)
+    return f"{minutes} min {rest} s" if rest else f"{minutes} min"
 
 
 def render_owner_wait_expired(
