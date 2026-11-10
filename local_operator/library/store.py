@@ -829,6 +829,15 @@ class LibraryStore:
             # reads). ``_ensure_schema`` sets it once, at bootstrap.
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA synchronous=NORMAL")
+            # Statement journals and sorter spills go to RAM, not ``etilqs_*``
+            # temp files. Every multi-row write here runs inside BEGIN
+            # IMMEDIATE with FTS/facet triggers, so SQLite opens a statement
+            # journal per statement; on disk that was the largest remaining
+            # write source in ``lop serve`` (2026-11-10 rig: ~110 -> ~18 MiB
+            # per 15 s with only this pragma changed). Temp data is never
+            # durable, so nothing is lost; the RAM it takes is bounded by one
+            # statement's undo or one sort, a few MB at the 50k-asset catalog.
+            connection.execute("PRAGMA temp_store=MEMORY")
         except BaseException:
             try:
                 connection.close()

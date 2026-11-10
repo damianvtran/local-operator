@@ -1566,3 +1566,21 @@ def test_an_idle_keeper_keeps_the_wal_across_store_connections(tmp_path, monkeyp
 
     store_module.release_keepers()
     assert str(database) not in store_module._KEEPERS
+
+
+def test_store_connections_keep_temp_structures_in_memory(tmp_path, monkeypatch) -> None:
+    """Regression for the 2026-11-10 churn: statement journals must not hit disk.
+
+    Each trigger-carrying write inside ``BEGIN IMMEDIATE`` opens a statement
+    journal; with SQLite's default ``temp_store`` those were ``etilqs_*`` files
+    and the biggest write source left in ``lop serve``. Both the index store and
+    the metadata store share the file, so both must set it.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    store = LibraryStore(root)
+    store.ensure_schema()
+    with store.read() as connection:
+        assert connection.execute("PRAGMA temp_store").fetchone()[0] == 2
+    metadata = MetadataStore(root)
+    with metadata._connect() as connection:
+        assert connection.execute("PRAGMA temp_store").fetchone()[0] == 2
