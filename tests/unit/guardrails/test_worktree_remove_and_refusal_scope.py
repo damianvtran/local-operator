@@ -115,6 +115,59 @@ def test_sibling_worktree_outside_repo_with_git_dash_c_ranks_low(home: Path, rep
     assert _verdict(home, f"git -C {repo} worktree remove {repo}").risk is Risk.HIGH  # primary
 
 
+def _pad(home: Path) -> Path:
+    return home / ".local-operator" / "sessions" / SID / "scratchpad"
+
+
+def _pad_verdict(home: Path, command: str):
+    """Classify with the session's own scratchpad known.
+
+    Inside its own pad ``_high_reason`` names no repo-root reason, so a linked
+    worktree there reaches the final ordinary-path LOW — the Q3-OBS shape.
+    """
+    return classify_bash(
+        command, cwd=str(home), env=_env(home), scratchpad=str(_pad(home)), session_id=SID
+    )
+
+
+@pytest.mark.parametrize(
+    "flags", ["", "--force ", "-f -f "], ids=["plain", "force", "double-force"]
+)
+def test_dirty_sibling_worktree_without_pr_ranks_high(home: Path, repo: Path, flags: str) -> None:
+    """QA round 3 (Q3-OBS): a dirty sibling with no open PR used to rank LOW.
+
+    The dirty note was appended and then discarded by the ordinary-path LOW;
+    with ``--force`` git deletes the uncommitted work.
+    """
+    sib = _add(repo, _pad(home) / "lo-dirty", "feat/dirty")
+    (sib / "wip.txt").write_text("uncommitted")
+    assert prov.worktree_state(str(sib)) == "dirty"
+    ranked = _pad_verdict(home, f"git -C {repo} worktree remove {flags}{sib}")
+    assert ranked.risk is Risk.HIGH
+    assert ranked.targets[0].reason.startswith(
+        "a git repository root; linked worktree state: dirty; branch feat/dirty;"
+    )
+
+
+def test_locked_sibling_worktree_without_pr_ranks_high(home: Path, repo: Path) -> None:
+    """A non-initializing lock outside any repo root is HIGH with the state named."""
+    sib = _add(repo, _pad(home) / "lo-locked", "feat/locked")
+    _git("-C", str(repo), "worktree", "lock", "--reason", "on a usb disk", str(sib), cwd=repo)
+    assert prov.worktree_state(str(sib)) == "locked"
+    for flags in ("", "-f -f "):
+        ranked = _pad_verdict(home, f"git -C {repo} worktree remove {flags}{sib}")
+        assert ranked.risk is Risk.HIGH, flags
+        assert "linked worktree state: locked" in ranked.targets[0].reason
+
+
+def test_clean_sibling_worktree_without_pr_stays_low(home: Path, repo: Path) -> None:
+    """Control for Q3-OBS: the fix must not lift a clean, PR-less sibling."""
+    sib = _add(repo, _pad(home) / "lo-clean", "feat/clean")
+    ranked = _pad_verdict(home, f"git -C {repo} worktree remove {sib}")
+    assert ranked.risk is Risk.LOW
+    assert ranked.targets[0].reason.startswith("a clean linked git worktree (branch feat/clean;")
+
+
 def test_regenerable_ignored_output_keeps_a_worktree_clean(home: Path, repo: Path) -> None:
     """The entries that made the operator's real clean worktrees "dirty"."""
     wt = _add(repo, repo / ".worktrees" / "wt", "wt")
@@ -578,11 +631,18 @@ def test_sort_output_into_session_state_is_still_refused(home: Path) -> None:
         ("sort --out={other} /dev/null", Risk.CRITICAL),
         ("sort --outp {other} /dev/null", Risk.CRITICAL),
         ("sort --o={other} /dev/null", Risk.CRITICAL),
+        ("sort --ou={other} /dev/null", Risk.CRITICAL),
         ("sort --compress-prog=sh {other}", Risk.HIGH),
         # m4: ``-T``/``--temp*`` only writes sort's own temp files — HIGH, not CRITICAL.
         ("sort --temp={cwd} {other}", Risk.HIGH),
         ("sort -T {cwd} {other}", Risk.HIGH),
         ("file --comp -m {other}", Risk.HIGH),
+        # Review nit N2: shorter prefixes of ``--compile`` (``--c`` is also
+        # ambiguous with ``--checking-printout``) and sort's ambiguous ``--c``
+        # (``--check``/``--compress-program``) must not read as read-only.
+        ("file --c -m {other}", Risk.HIGH),
+        ("file --com -m {other}", Risk.HIGH),
+        ("sort --c {other}", Risk.HIGH),
         # An unknown long option fails closed rather than reading as LOW.
         ("sort --no-such-option {other}", Risk.HIGH),
     ],
