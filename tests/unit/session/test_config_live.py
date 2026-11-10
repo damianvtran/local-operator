@@ -526,7 +526,6 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         45_000,
         lambda s, w: compaction_of(s).idle_min_growth_tokens,
     ),
-    "compaction.idle_advisor": (False, lambda s, w: compaction_of(s).idle_advisor),
     # The two BYTE knobs. LIVE for the same reason as their neighbours — the
     # session re-coerces CompactionSettings on every config change — and it
     # matters more here: an operator raising the budget is usually reacting to

@@ -478,22 +478,6 @@ def compaction_enabled_label() -> Msg:
     return Msg("wire.settings.compaction_enabled.label", {})
 
 
-def compaction_idle_advisor_choice_false_description() -> Msg:
-    return Msg("wire.settings.compaction_idle_advisor.choice.false.description", {})
-
-
-def compaction_idle_advisor_choice_true_description() -> Msg:
-    return Msg("wire.settings.compaction_idle_advisor.choice.true.description", {})
-
-
-def compaction_idle_advisor_help() -> Msg:
-    return Msg("wire.settings.compaction_idle_advisor.help", {})
-
-
-def compaction_idle_advisor_label() -> Msg:
-    return Msg("wire.settings.compaction_idle_advisor.label", {})
-
-
 def compaction_idle_enabled_choice_false_description() -> Msg:
     return Msg("wire.settings.compaction_idle_enabled.choice.false.description", {})
 

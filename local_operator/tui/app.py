@@ -63794,6 +63794,13 @@ class OperatorApp(App[None]):
             # The event carries the figures, so this is the one place that can
             # serve both.
             self._settle_context_reading(message.tokens_before, message.tokens_after)
+        elif message.reason == "idle":
+            # An IDLE pass the user never asked for, in a session nobody is
+            # working in, whose history is untouched by the failure: a red
+            # error would alarm about nothing actionable (PR #3753 design D5).
+            # One quiet line still closes the "compacting context…" notice the
+            # start handler printed, so the start is never left dangling.
+            self._append_block(NoticeBlock(_t(_x.compaction_idle_skipped()), "info"))
         elif message.reason != "manual":
             # AUTOMATIC only. A manual pass is narrated by `_compact_worker`,
             # which holds the outcome and therefore the reason it failed;
@@ -64893,15 +64900,25 @@ def compaction_receipt(message: CompactionEnded) -> str:
     note = getattr(message, "detail", None) or ""
     before, after = message.tokens_before, message.tokens_after
     if before <= 0 or after <= 0 or after >= before:
-        return f"context compacted · {note}" if note else "context compacted"
-    saved = f"{(1 - after / before) * 100:.0f}% smaller"
-    detail = f"{format_context_tokens(before)} → {format_context_tokens(after)} tokens ({saved})"
-    label = _STRATEGY_LABELS.get(message.strategy, message.strategy)
-    if label:
-        detail += f", via {label}"
-    if note:
-        detail += f" · {note}"
-    return f"context compacted · {detail}"
+        detail = note
+    else:
+        saved = f"{(1 - after / before) * 100:.0f}% smaller"
+        detail = (
+            f"{format_context_tokens(before)} → {format_context_tokens(after)} tokens ({saved})"
+        )
+        label = _STRATEGY_LABELS.get(message.strategy, message.strategy)
+        if label:
+            detail += f", via {label}"
+        if note:
+            detail += f" · {note}"
+    if getattr(message, "reason", None) == "idle":
+        # A pass the session ran ON ITS OWN while nobody was working, below
+        # the threshold the user set, reads as a misfire unless the receipt
+        # says why it happened (PR #3753 design D4 / UX U4).
+        if detail:
+            return _t(_x.compaction_idle_receipt(detail=detail))
+        return _t(_x.compaction_idle_receipt_bare())
+    return f"context compacted · {detail}" if detail else "context compacted"
 
 
 def mode_word(auto: bool) -> str:

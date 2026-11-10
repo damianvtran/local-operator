@@ -35,7 +35,6 @@ def due(**overrides: Any) -> idle.IdleDecision:
     window = overrides.pop("window", 1_000_000)
     base: dict[str, Any] = dict(
         enabled=True,
-        advisor_enabled=True,
         strategy="auto",
         is_subagent=False,
         context_tokens=260_000,
@@ -103,7 +102,6 @@ def test_predicate_table(window, context, baseline, declined, reason):
     [
         ({"enabled": False}, "disabled"),
         ({"strategy": "off"}, "disabled"),
-        ({"advisor_enabled": False}, "advisor_off"),
         ({"is_subagent": True}, "subagent"),
     ],
 )
@@ -213,7 +211,11 @@ def test_parked_requires_compact_now_and_high_confidence():
     assert _validate(history, {**base, "confidence": 0.7}, parked=False, keep_recent=1) is not None
 
 
-def test_parked_still_respects_keep_recent():
+def test_parked_narrower_than_keep_recent_is_widened_not_rejected():
+    """QA Q2: a confident parked "compact now" anchored inside the recency
+    floor is CLAMPED to ``keep_recent_tokens`` (the plan widens the cut to
+    it), never rejected; rejecting journaled a decline on exactly the
+    finished session that deserved a pass. Unparked hints keep widen-only."""
     history = _history()
     payload = {
         "preserve_from": history[-1].id,
@@ -221,4 +223,8 @@ def test_parked_still_respects_keep_recent():
         "confidence": 0.9,
         "reason": "x",
     }
-    assert _validate(history, payload, parked=True, keep_recent=10**6) is None
+    hint = _validate(history, payload, parked=True, keep_recent=10**6)
+    assert hint is not None
+    assert hint.preserve_from_id == history[-1].id
+    assert hint.preserve_tokens == 10**6
+    assert _validate(history, payload, parked=False, keep_recent=10**6) is None

@@ -44,5 +44,8 @@
   "tui.app.providers.stale_all": "lista obsoleta: todos los proveedores",
   "tui.app.providers.stale_named": "lista obsoleta: {names}",
   "tui.app.providers.stale_all_error": "lista obsoleta: todos los proveedores — {error}",
-  "tui.app.providers.no_live_list": "sin lista en vivo: {names}"
+  "tui.app.providers.no_live_list": "sin lista en vivo: {names}",
+  "tui.app.compaction.idle_receipt": "contexto compactado en reposo · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "contexto compactado en reposo",
+  "tui.app.compaction.idle_skipped": "compactación en reposo omitida · nada cambió"
 }

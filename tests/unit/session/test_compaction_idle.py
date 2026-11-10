@@ -131,6 +131,8 @@ class Provider:
         self.turn_requests: list[Any] = []
         self.advisor_gate: asyncio.Event | None = None
         self.summary_gate: asyncio.Event | None = None
+        #: Make the summarizer call fail (UX U2: a failed idle pass).
+        self.summary_error = False
         #: Growth comes from ASSISTANT output, as in real sessions: user turns
         #: survive a pass verbatim, so user-borne growth could never be folded.
         self.reply = "finished history " * 1500
@@ -150,6 +152,8 @@ class Provider:
                 self.summaries += 1
                 if self.summary_gate is not None:
                     await self.summary_gate.wait()
+                if self.summary_error:
+                    raise RuntimeError("summarizer provider is down")
                 yield StreamTextDelta(delta="Summary: earlier work is complete.")
                 yield StreamEndEvent(stop_reason="stop")
                 return
@@ -414,10 +418,6 @@ async def test_subagent_and_disabled_sessions_never_arm(tmp_path):
     await grow_to(session, IDLE_THRESHOLD + 1)
     assert session._idle_timer is None
     await session.dispose()
-    off = make_session(tmp_path / "b", Provider(), idle_advisor=False)
-    await grow_to(off, IDLE_THRESHOLD + 1)
-    assert off._idle_timer is None
-    await off.dispose()
     child = Session(
         model=BIG_MODEL,
         stream_fn=Provider(),
@@ -463,6 +463,193 @@ async def test_parked_hint_replaces_the_task_floor_only_when_parked(tmp_path, mo
     assert kept >= 3_000, kept
     assert parked.advisor_hint is hint
     await session.dispose()
+
+
+# --- PR #3753 round-1 remediation regressions --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_sent_on_the_end_event_is_accepted_not_refused(tmp_path):
+    """QA Q1 / UX U1: the TUI holds a prompt typed during the pass and sends it
+    from its ``compaction_end`` handler. Every yielding write of the idle pass
+    must land BEFORE that event, so the lock is free by the time the held
+    prompt reaches ``Session.prompt``. Before the fix the ``compaction_idle_pass``
+    receipt was awaited between the event and the release and the prompt got
+    ``TurnInFlight``.
+    """
+    from local_operator.harness.types import CompactionEndEvent
+
+    directory = tmp_path / "s"
+    provider = Provider()
+    session = make_session(directory, provider)
+    await grow_to(session, IDLE_THRESHOLD + 1)
+    provider.reply = WAKE_TOKENS_TEXT
+    sent: list[asyncio.Task[Any]] = []
+
+    def on_event(event: Any) -> None:
+        # Dispatch the way a host does: scheduled, not awaited inside _emit.
+        if isinstance(event, CompactionEndEvent) and event.reason == "idle":
+            sent.append(asyncio.ensure_future(session.prompt("typed during commit")))
+
+    session.subscribe(on_event)
+    before = len(provider.turn_requests)
+    assert await fire(session)
+    assert sent, "no idle compaction_end was emitted"
+    await asyncio.wait_for(sent[0], 10)  # raises TurnInFlight on the old ordering
+    assert len(provider.turn_requests) == before + 1
+    # The receipt was still written, before the event.
+    assert custom_rows(directory, COMPACTION_IDLE_PASS_TYPE)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_idle_pass_journals_a_decline_and_is_not_retried(tmp_path):
+    """UX U2: a summarizer that fails must not be re-asked at every small wake."""
+    from local_operator.harness.types import CompactionEndEvent
+
+    directory = tmp_path / "s"
+    provider = Provider()
+    session = make_session(directory, provider)
+    await grow_to(session, IDLE_THRESHOLD + 1)
+    provider.reply = WAKE_TOKENS_TEXT
+    provider.summary_error = True
+    ends: list[Any] = []
+    session.subscribe(lambda e: ends.append(e) if isinstance(e, CompactionEndEvent) else None)
+    # Provider-reported size (this scripted wire reports no output tokens).
+    gate = reported(session)
+    assert not await fire(session)
+    assert [(e.reason, e.success) for e in ends] == [("idle", False)]
+    (row,) = custom_rows(directory, COMPACTION_IDLE_DECLINED_TYPE)
+    assert row["why"] == "pass_failed"
+    # Review R2: the decline stores the same figure the arm check compares.
+    assert row["context_tokens"] == gate
+    assert provider.advisor_calls == 1
+    # Next small wake (+~800 tokens, far below G): no arm, no advisor call.
+    await session.prompt("small wake")
+    assert session._idle_timer is None
+    assert provider.advisor_calls == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_confident_anchor_at_the_newest_turn_is_widened_not_declined(tmp_path):
+    """QA Q2: a finished session's parked advisor anchors at the newest turn,
+    whose tail is narrower than ``keep_recent_tokens``. That is clamped to the
+    recency floor and the pass runs; it used to be journaled as a decline."""
+    from local_operator.compaction.tokens import estimate_tokens
+
+    directory = tmp_path / "s"
+    provider = Provider()  # accept_latest_user: anchors at the newest user turn
+    session = make_session(directory, provider, keep_recent_tokens=5_000)
+    await grow_to(session, IDLE_THRESHOLD + 1)
+    history = list(session._context.messages)
+    newest_user = max(i for i, m in enumerate(history) if getattr(m, "role", "") == "user")
+    tail = sum(estimate_tokens(m) for m in history[newest_user:] if isinstance(m, Message))
+    assert tail < 5_000, f"fixture must anchor narrower than keep_recent ({tail})"
+    provider.reply = WAKE_TOKENS_TEXT
+    assert await fire(session)
+    assert not custom_rows(directory, COMPACTION_IDLE_DECLINED_TYPE)
+    kept = [m for m in session._context.messages if isinstance(m, Message)]
+    assert sum(estimate_tokens(m) for m in kept) >= 5_000
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_real_timer_callback_runs_the_pass(tmp_path, monkeypatch):
+    """Review R4: drive ``loop.call_later`` -> ``_on_idle_timer`` ->
+    ``_spawn_background`` end to end, not the ``fire()`` shortcut."""
+    import time
+
+    # Fire ~0.3 s after each arm instead of ~4 minutes: same arithmetic path,
+    # a real ``TimerHandle`` the loop fires on its own.
+    monkeypatch.setattr(
+        compaction_api, "idle_fire_at_ms", lambda expiry, timeout: int(time.time() * 1000) + 300
+    )
+    directory = tmp_path / "s"
+    provider = Provider()
+    session = make_session(directory, provider)
+    await grow_to(session, IDLE_THRESHOLD + 1)
+    provider.reply = WAKE_TOKENS_TEXT
+    assert session._idle_timer is not None
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if markers(directory):
+            break
+    task = session._idle_task
+    if task is not None:
+        await asyncio.wait_for(task, 10)
+    assert len(markers(directory)) == 1
+    assert markers(directory)[0].payload.get("trigger") == "idle"
+    assert provider.advisor_calls == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_timer_from_an_older_generation_or_a_disabled_setting_does_nothing(
+    tmp_path, monkeypatch
+):
+    """Review R4: the callback's generation guard, and ``idle_enabled`` turned
+    off live while a timer is armed."""
+    directory = tmp_path / "s"
+    provider = Provider()
+    session = make_session(directory, provider)
+    await grow_to(session, IDLE_THRESHOLD + 1)
+    armed = session._generation
+    session._cancel_idle_compaction()
+    session._generation += 1  # a turn started after the arm
+    session._on_idle_timer(armed)
+    assert session._idle_task is None
+    # Live toggle: the fire-time predicate sees the new settings.
+    session._compaction_settings = settings(idle_enabled=False)
+    await session._run_idle_compaction(session._generation)
+    assert provider.advisor_calls == 0
+    assert not markers(directory)
+    assert not custom_rows(directory, COMPACTION_IDLE_DECLINED_TYPE)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_model_switch_cancels_the_timer_and_forgets_the_cache_clock(tmp_path):
+    """Review R1: the new model's cache is cold; firing would buy a full write."""
+    session = make_session(tmp_path / "s", Provider())
+    await grow_to(session, IDLE_THRESHOLD + 1)
+    assert session._idle_timer is not None
+    assert session._idle_cache_ttl_s == 300.0 and session._idle_cache_anchor_ms
+    session.set_model(BIG_MODEL.model_copy(update={"model_id": "other-model"}), explicit=True)
+    assert session._idle_timer is None
+    assert session._idle_cache_ttl_s is None and session._idle_cache_anchor_ms == 0
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_baseline_after_a_non_idle_marker_is_the_first_usage_after_it(tmp_path):
+    """Review R4: after an ordinary (non-idle) pass there is no idle receipt; the
+    baseline is the first provider usage on the compacted context."""
+    from local_operator.session.session import _idle_growth_baseline
+
+    directory = tmp_path / "s"
+    provider = Provider()
+    session = make_session(directory, provider)
+    await grow_to(session, IDLE_THRESHOLD + 1)
+    assert (await session.compact_now()).ran
+    provider.reply = WAKE_TOKENS_TEXT
+    await session.prompt("first turn on the compacted context")
+    first_after = reported(session)
+    await session.prompt("second turn")
+    baseline, declined, marker_id = _idle_growth_baseline(session._transcript)
+    assert baseline == first_after and declined is None
+    assert marker_id == markers(directory)[-1].id
+    assert not custom_rows(directory, COMPACTION_IDLE_PASS_TYPE)
+    await session.dispose()
+
+
+def test_the_gate_figure_includes_the_last_visible_reply(tmp_path):
+    """QA Q4: the reply is part of the next request; reasoning is not."""
+    session = make_session(tmp_path / "s", Provider())
+    session._last_usage = Usage(context_tokens=100_000, output_tokens=7_000, reasoning_tokens=2_000)
+    assert session._idle_gate_tokens() == 105_000
+    session._last_usage = Usage(context_tokens=None, output_tokens=7_000)
+    assert session._idle_gate_tokens() is None
 
 
 @pytest.fixture(autouse=True)

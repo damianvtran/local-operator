@@ -32,7 +32,6 @@ __all__ = [
     "DEFAULT_THRESHOLD_TOKENS",
     "DEFAULT_WIRE_BYTES_BUDGET",
     "DEFAULT_WIRE_BYTES_TRIGGER",
-    "DEFAULT_IDLE_ADVISOR",
     "DEFAULT_IDLE_ENABLED",
     "DEFAULT_IDLE_MIN_GROWTH_TOKENS",
     "DEFAULT_IDLE_THRESHOLD_TOKENS",
@@ -102,7 +101,7 @@ DEFAULT_WIRE_BYTES_TRIGGER = 16_000_000
 # is; ``tests/unit/test_settings_io.py::_consumer_defaults`` pins the pairs.
 
 #: Idle passes are on by default. They cannot fire without the parked
-#: advisor's explicit "compact now" (``DEFAULT_IDLE_ADVISOR``), and only while
+#: advisor's explicit "compact now", and only while
 #: the prompt cache is still warm, so the default cost of being on is one
 #: cache-READ advisor call per qualifying idle gap.
 DEFAULT_IDLE_ENABLED = True
@@ -126,12 +125,6 @@ DEFAULT_IDLE_THRESHOLD_TOKENS = 200_000
 #: shortened prefix (1.25x input price on a 5m write, 2x on 1h) against an
 #: advisor cost of ~0.1x C (a cache read of the warm prefix).
 DEFAULT_IDLE_MIN_GROWTH_TOKENS = 60_000
-
-#: The parked advisor gates every idle pass. Off means NO idle passes at all:
-#: compacting a session nobody is watching, without a model judging whether
-#: the moment is safe and what must survive verbatim, is exactly the "lose
-#: material information" risk the feature was asked not to take.
-DEFAULT_IDLE_ADVISOR = True
 
 
 class CompactionSettings(BaseModel):
@@ -365,12 +358,22 @@ class CompactionSettings(BaseModel):
     # a reduced context instead. Independent of the beta ``advisor_enabled``
     # switch: the parked advisor is a different call asking a different
     # question ("is it safe to fold now that nobody is working?").
+    #
+    # There is deliberately NO switch for the parked advisor (an
+    # ``idle_advisor`` key was removed in PR #3753 review round 1, D2/U5): an
+    # idle pass ALWAYS requires its explicit "compact now". Compacting a
+    # session nobody is watching, without a model judging whether the moment
+    # is safe and what must survive verbatim, is the "lose material
+    # information" risk the feature was asked not to take, and a second
+    # "advisor off" row only duplicated ``idle_enabled=false`` under a label
+    # that read as "idle passes without the advisor". ``idle_enabled`` is the
+    # one off switch.
     idle_enabled: bool = Field(
         default=DEFAULT_IDLE_ENABLED,
         description=(
             "Compact an idle session shortly before its prompt cache expires,"
-            " so the next wake or message starts on a smaller context. Needs"
-            " idle_advisor; never runs for subagents."
+            " so the next wake or message starts on a smaller context. Every"
+            " pass needs the parked advisor's yes; never runs for subagents."
         ),
     )
     idle_threshold_tokens: int = Field(
@@ -386,13 +389,6 @@ class CompactionSettings(BaseModel):
             "New context required since the last compaction or idle decline"
             " before another idle pass (capped at 25% of the effective"
             " threshold). The anti-thrash rule."
-        ),
-    )
-    idle_advisor: bool = Field(
-        default=DEFAULT_IDLE_ADVISOR,
-        description=(
-            "Ask the model, as a cache read, whether an idle pass is safe and"
-            " what must stay verbatim. Off disables idle passes entirely."
         ),
     )
 

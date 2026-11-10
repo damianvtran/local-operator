@@ -206,7 +206,6 @@ def idle_fire_at_ms(cache_expiry_ms: int, advisor_timeout_s: float) -> int:
 def idle_compaction_due(
     *,
     enabled: bool,
-    advisor_enabled: bool,
     strategy: str,
     is_subagent: bool,
     context_tokens: int,
@@ -222,10 +221,11 @@ def idle_compaction_due(
 ) -> IdleDecision:
     """Whether an idle pass should be attempted now. Gates, in order:
 
-    1. ``enabled`` (compaction on AND idle on), ``advisor_enabled``,
-       ``strategy != "off"``, not a subagent — a child's context dies with its
-       job, and its parent's turn is what is waiting on it, so it is never
-       idle in the sense that matters.
+    1. ``enabled`` (compaction on AND idle on), ``strategy != "off"``, not a
+       subagent — a child's context dies with its job, and its parent's turn
+       is what is waiting on it, so it is never idle in the sense that
+       matters. There is no advisor switch: every pass needs the parked
+       advisor's explicit "compact now" (``thresholds.py``, idle section).
     2. ``C >= min(idle_threshold_tokens, 0.6 * T_eff)``.
     3. ``C - max(A_M, D) >= G``: growth since the last pass's after-size
        (``baseline_after_tokens``; ``0`` when the session never compacted,
@@ -251,8 +251,6 @@ def idle_compaction_due(
 
     if not enabled or strategy == "off":
         return verdict("disabled")
-    if not advisor_enabled:
-        return verdict("advisor_off")
     if is_subagent:
         return verdict("subagent")
     threshold = idle_threshold_for(t_eff, idle_threshold_tokens)

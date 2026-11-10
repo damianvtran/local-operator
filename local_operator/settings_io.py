@@ -4507,19 +4507,6 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.compaction_idle_min_growth_tokens_help()),
         minimum=1,
     ),
-    Setting(
-        key="compaction.idle_advisor",
-        path=("compaction", "idle_advisor"),
-        section="compaction",
-        label=_t(_ws.compaction_idle_advisor_label()),
-        kind=Kind.BOOL,
-        default=True,
-        help=_t(_ws.compaction_idle_advisor_help()),
-        choices=_bool_choices(
-            _t(_ws.compaction_idle_advisor_choice_true_description()),
-            _t(_ws.compaction_idle_advisor_choice_false_description()),
-        ),
-    ),
     # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
     # ``compaction/thresholds.py``. The help text must keep saying that earlier
     # operator turns stop surviving verbatim in card mode, and that switching

@@ -390,6 +390,21 @@ def validate_hint(
             task_boundary_floor(messages, genuine_user_ids, cap=floor_cap),
         )
     )
+    if parked and preserve_tokens < local_floor:
+        # CLAMP, never reject, on the parked path (PR #3753 QA round 1, Q2).
+        # A finished session's honest answer is "compact now, keep only the
+        # wrap-up tail", which anchors narrower than ``keep_recent_tokens``.
+        # Rejecting it journaled a decline and suppressed the session that
+        # most deserved a pass for G more growth. The floor is still kept:
+        # ``_plan_compaction(parked_hint=...)`` widens the cut to at least
+        # ``keep_recent_tokens`` (``max(keep_recent, ...)``), and the window is
+        # reported widened here too, so every reader sees the window that runs.
+        logger.debug(
+            "compaction advisor: parked hint widened to the recency floor (%d < %d tokens)",
+            preserve_tokens,
+            local_floor,
+        )
+        preserve_tokens = local_floor
     if preserve_tokens < local_floor:
         # WIDEN-ONLY. A hint that would keep LESS than the local rules already
         # keep is not advice, it is damage — and it is the only way a bad hint
