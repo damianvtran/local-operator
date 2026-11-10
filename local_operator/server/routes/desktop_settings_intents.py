@@ -42,6 +42,7 @@ from local_operator.server.utils.settings_intents import (
     ACTIVE_STATES,
     BridgeDriver,
     Current,
+    RequestReplaced,
     SettingsApplier,
     valid_session_id,
 )
@@ -83,6 +84,12 @@ def ensure_applier(app: Any) -> SettingsApplier:
 
 def _unknown_session() -> HTTPException:
     return HTTPException(404, _wd.requested_not_found().envelope(code="session_unknown"))
+
+
+def _generation_moved() -> HTTPException:
+    return HTTPException(
+        409, _wd.settings_intent_generation_moved().envelope(code="generation_moved")
+    )
 
 
 async def _validate_model(provider_model: str, effort: str | None) -> None:
@@ -153,6 +160,41 @@ async def _validate_model(provider_model: str, effort: str | None) -> None:
     await asyncio.to_thread(validate)
 
 
+async def _validate_fast(provider_model: str) -> None:
+    """Refuse ``fast: true`` for a target model whose route cannot serve fast.
+
+    WHY AT POST (QA Q1): the runtime answers an unsupported ``/fast on`` with an
+    ``info`` notice, not an error, so without this the pick sat in "applies at
+    the next step" for the whole retry budget and then failed as "owner
+    unavailable" — wrong on both counts. The authority is the one the draft
+    boundary (``desktop_sessions._draft_model_spec``) and the runtime's own
+    ``/fast`` use: ``ModelSpec.supports_fast_mode``, seeded by
+    ``build_model_spec`` from the static route+model table in ``model.speed``
+    (no network: ``resolve_model_info_paint`` is the cache-only metadata read).
+    The code and sentence are that boundary's existing ``fast_mode_unsupported``
+    — no new copy. A race this cannot see (a model pick that lands between this
+    check and the fast apply) is caught by the applier classifying the runtime's
+    refusal as terminal, see ``settings_intents._slash_outcome``.
+    """
+    from local_operator.model.configure import (
+        build_model_spec,
+        resolve_model_info_paint,
+    )
+
+    def validate() -> None:
+        provider, sep, model_id = provider_model.partition("/")
+        if not sep or not provider or not model_id:
+            return  # no identity to judge; the runtime remains the authority
+        info, _ = resolve_model_info_paint(provider, model_id)
+        if not build_model_spec(provider, model_id, info=info).supports_fast_mode:
+            raise HTTPException(
+                422,
+                _wd.fast_mode_unsupported(model=model_id).envelope(code="fast_mode_unsupported"),
+            )
+
+    await asyncio.to_thread(validate)
+
+
 async def _validate_cwd(target: str, base: str | None) -> str:
     from local_operator.tui.move_targets import expand_path, validate_target
 
@@ -187,6 +229,13 @@ async def submit_settings_intent(session_id: str, body: SettingsIntentRequest, r
         raise _unknown_session()
     existing = (await applier.snapshot(session_id)).get(session_id, {})
     replay = existing.get(body.kind)
+    if replay is None or replay["request_id"] != body.request_id:
+        # Review m3: a request_id this session already accepted whose slot a
+        # NEWER pick has since replaced must not be re-recorded — an HTTP-level
+        # retry of the old POST would otherwise take a new generation and
+        # re-apply the stale value over the user's latest choice.
+        if await applier.seen_request(session_id, body.request_id):
+            raise _generation_moved()
     if replay and replay["request_id"] == body.request_id:
         # Replay precedes catalogue/target validation: a cached row can disappear
         # after the original durable admission without invalidating its receipt.
@@ -208,31 +257,39 @@ async def submit_settings_intent(session_id: str, body: SettingsIntentRequest, r
         current = Current()
 
     value: Any = body.value
+    # The model that matters for effort and fast is the EFFECTIVE target: a
+    # model pick still in flight wins over the journal's current one.
+    model_slot = existing.get("model")
+    target = (
+        str(model_slot["value"])
+        if model_slot and model_slot.get("state") in ACTIVE_STATES
+        else current.model
+    )
     if body.kind == "model":
         await _validate_model(str(value), body.effort)
     elif body.kind == "effort":
-        # The ladder that matters is the EFFECTIVE target model's: a model pick
-        # still in flight wins over the journal's current one.
-        existing = (await applier.snapshot(session_id)).get(session_id, {})
-        model_slot = existing.get("model")
-        target = (
-            str(model_slot["value"])
-            if model_slot and model_slot.get("state") in ACTIVE_STATES
-            else current.model
-        )
         if target:
             await _validate_model(target, str(value))
+    elif body.kind == "fast" and value is True:
+        # Only ON is gated: turning fast off is always possible.
+        if target:
+            await _validate_fast(target)
     elif body.kind == "cwd":
         value = await _validate_cwd(str(value), current.cwd)
 
-    created, slot, slots = await applier.submit(
-        session_id,
-        kind=body.kind,
-        value=value,
-        effort=body.effort if body.kind == "model" else None,
-        request_id=body.request_id,
-        base=current.of(body.kind),
-    )
+    try:
+        created, slot, slots = await applier.submit(
+            session_id,
+            kind=body.kind,
+            value=value,
+            effort=body.effort if body.kind == "model" else None,
+            request_id=body.request_id,
+            base=current.of(body.kind),
+        )
+    except RequestReplaced:
+        # The same check as above, re-run under the session lock: a newer pick
+        # may have replaced this request's slot while we validated.
+        raise _generation_moved() from None
     payload = CRUDResponse(
         status=202 if created else 200,
         message="Desktop session result.",
@@ -279,10 +336,12 @@ async def dismiss_settings_intent(
     if not applier.store.exists(session_id):
         raise _unknown_session()
     outcome = await applier.dismiss(session_id, kind, generation)
-    if outcome is None:
-        raise _unknown_session()
+    # ``None`` — the session exists but has no slot of this kind (already
+    # pruned, or dismissed by another window). The caller's goal, "no slot",
+    # already holds, so this is the idempotent 204 (QA Q2): answering
+    # ``session_unknown`` made a Dismiss/Cancel after a prune race claim the
+    # whole conversation was gone. Generation protection is unaffected: a slot
+    # that EXISTS under a newer generation is still the 409 below.
     if outcome is False:
-        raise HTTPException(
-            409, _wd.settings_intent_generation_moved().envelope(code="generation_moved")
-        )
+        raise _generation_moved()
     return Response(status_code=204)

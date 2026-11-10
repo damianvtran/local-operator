@@ -9,7 +9,8 @@ What this pins that the unit tests cannot:
 * the POST answers 202 while the owner is busy, without waiting on it (the
   route never touches the runtime) — the wall time is printed as evidence;
 * the background applier drives the switch through the real bridge
-  (``pool.session`` → ``bind_runtime`` → ``route_shared_slash``), and the
+  (``pool.session`` → ``bind_runtime`` → the attach client's ``set_model``
+  frame, which carries a paired effort atomically), and the
   session's own journal selection — the applier's confirmation source — moves
   to the target;
 * the slot reaches ``applied`` and GET reports it, and the session still

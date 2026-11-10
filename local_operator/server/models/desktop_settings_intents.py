@@ -89,6 +89,16 @@ class SettingsIntentSlot(BaseModel):
     deadline_at: str | None = None
     error: SettingsIntentError | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _public(cls, data: Any) -> Any:
+        # ``extra="allow"`` keeps forward-compatible fields, but the store's
+        # ``_``-prefixed bookkeeping (``_predecessors``, ``_paired_generation``)
+        # is the applier's private memory, never wire (review n1).
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if not str(key).startswith("_")}
+        return data
+
 
 class SettingsIntentReceipt(BaseModel):
     """``POST``'s answer: the slot just written and every slot of the session."""

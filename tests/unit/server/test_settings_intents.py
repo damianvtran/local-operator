@@ -296,8 +296,19 @@ async def test_delete_cancels_and_a_stale_generation_is_409(api) -> None:
     assert stale.json()["detail"]["text"]
     ok = await client.delete(f"{url}/cwd", params={"generation": generation})
     assert ok.status_code == 204
+    # QA Q2: the session exists and the slot is already gone (pruned, or
+    # dismissed elsewhere) — the caller's goal holds, so this is the idempotent
+    # 204, never ``session_unknown``.
     gone = await client.delete(f"{url}/cwd", params={"generation": generation})
-    assert gone.status_code == 404
+    assert gone.status_code == 204, gone.text
+    never = await client.delete(f"{url}/model", params={"generation": 1})
+    assert never.status_code == 204, never.text
+    # A session that does not exist is still the 404.
+    missing = await client.delete(
+        "/v1/desktop/sessions/ffffffffffff/settings-intents/cwd", params={"generation": 1}
+    )
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["code"] == "session_unknown"
 
 
 def test_the_capability_is_advertised() -> None:
@@ -703,3 +714,258 @@ async def test_post_validation_never_uses_network_metadata_enrichment(monkeypatc
     monkeypatch.setattr(configure, "resolve_model_info", forbidden)
     monkeypatch.setattr(shared_catalogue, "prepare_selection_sync", forbidden)
     await desktop_settings_intents._validate_model("test/offline", None)
+
+
+# -- round-1 remediation: Q1, m1-m5, n1 ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_post_refuses_fast_on_for_a_target_model_without_fast_mode(api) -> None:
+    """QA Q1: refused at once with the draft boundary's existing code/copy."""
+    client, _, driver = api
+    url = f"/v1/desktop/sessions/{SID}/settings-intents"
+    # Control: the session's own model (openai/gpt-6) has a fast tier.
+    supported = await client.post(url, json={"request_id": "f0", "kind": "fast", "value": True})
+    assert supported.status_code == 202, supported.text
+    # A model pick still in flight is the EFFECTIVE target: test/mock-model has
+    # no fast tier, so fast on is refused against it, not the journal's model.
+    picked = await client.post(
+        url, json={"request_id": "m1", "kind": "model", "value": "test/mock-model"}
+    )
+    assert picked.status_code == 202, picked.text
+    refused = await client.post(url, json={"request_id": "f1", "kind": "fast", "value": True})
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    assert detail["code"] == "fast_mode_unsupported"
+    assert "mock-model" in detail["text"]
+    # Turning fast OFF is never refused.
+    off = await client.post(url, json={"request_id": "f2", "kind": "fast", "value": False})
+    assert off.status_code == 202, off.text
+
+
+def test_the_runtime_fast_refusal_is_terminal_not_applied() -> None:
+    from local_operator.server.utils.settings_intents import _slash_outcome
+
+    refusal = {"kind": "notice", "style": "info", "text": "fast mode: not available on test/x"}
+    outcome = _slash_outcome("fast", refusal, requested=True)
+    assert (outcome.status, outcome.code) == ("terminal", "fast_mode_unsupported")
+    assert outcome.message == refusal["text"]  # the runtime's own sentence
+    tagged = {
+        "kind": "notice",
+        "style": "info",
+        "text": "x",
+        "data": {"code": "fast_mode_unsupported"},
+    }
+    assert _slash_outcome("fast", tagged, requested=True).status == "terminal"
+    confirmed = {"kind": "notice", "style": "info", "text": "fast mode: on for test/x"}
+    assert _slash_outcome("fast", confirmed, requested=True).status == "applied"
+    assert (
+        _slash_outcome("fast", {"style": "info", "text": "fast mode: off"}, requested=False).status
+        == "applied"
+    )
+
+
+def _bridge(client: Any, *, admission: Any = None, root: Path | None = None, raises: Any = None):
+    import contextlib
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.settings_intents import BridgeDriver
+
+    async def bound():
+        pass
+
+    class Pool:
+        def __init__(self) -> None:
+            self.root = root
+
+        @contextlib.asynccontextmanager
+        async def session(self, sid):
+            if raises is not None:
+                raise raises
+            yield SimpleNamespace(
+                remote=SimpleNamespace(
+                    _client=client,
+                    bind_runtime=bound,
+                    _require_routed_model_admission=admission or (lambda target: None),
+                    route_shared_slash=None,
+                )
+            )
+
+    return BridgeDriver(Pool)
+
+
+@pytest.mark.asyncio
+async def test_a_race_into_a_non_fast_model_fails_fast_promptly(tmp_path) -> None:
+    """QA Q1 race: fast passed POST, a model switch landed first; the owner's
+    ``info`` refusal must fail the slot at once, never ``queued_next_step``."""
+
+    class Client:
+        async def slash_result(self, name, args, *, defer_ok=False, request_id=None):
+            return {"kind": "notice", "style": "info", "text": "fast mode: not available on t/m"}
+
+    bridge = _bridge(Client())
+    outcome = await bridge.apply(SID, "fast", True, None, request_id="r")
+    assert (outcome.status, outcome.code) == ("terminal", "fast_mode_unsupported")
+
+    _session(tmp_path)
+    driver = FakeDriver({"fast": [outcome]})
+    applier = _applier(tmp_path, driver, FakeClock())
+    await _submit(applier, "fast", True, "f")
+    await _until(lambda: any(i and i["state"] == "failed" for _, _, i in applier.frames))
+    states = [i["state"] for _, k, i in applier.frames if k == "fast" and i]
+    assert "queued_next_step" not in states, states
+    failed = (await applier.snapshot(SID))[SID]["fast"]
+    assert failed["error"] == {
+        "code": "fast_mode_unsupported",
+        "message": "fast mode: not available on t/m",
+        "retryable": False,
+    }
+    assert failed["attempts"] == 1
+    await applier.close()
+
+
+@pytest.mark.asyncio
+async def test_a_local_unsynchronized_error_retries_but_an_owner_error_is_terminal() -> None:
+    """Review m1."""
+
+    class Client:
+        async def set_model(self, provider, model_id, effort=None):
+            raise RuntimeError("owner says no")
+
+    def unsynced(target):
+        raise RuntimeError("frontend state has not synchronized")
+
+    local = await _bridge(Client(), admission=unsynced).apply(
+        SID, "model", "a/b", None, request_id="r"
+    )
+    assert (local.status, local.code) == ("retry", "runtime_busy")
+    owner = await _bridge(Client()).apply(SID, "model", "a/b", None, request_id="r")
+    assert (owner.status, owner.code, owner.message) == ("terminal", "refused", "owner says no")
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_session_fails_at_once_instead_of_retrying(tmp_path) -> None:
+    """Review m4: ``pool.session`` raises KeyError for a session removed after POST."""
+    gone = await _bridge(None, root=tmp_path, raises=KeyError("Unknown session")).apply(
+        SID, "model", "a/b", None, request_id="r"
+    )
+    assert (gone.status, gone.code) == ("terminal", "session_unknown")
+    assert gone.message
+    _session(tmp_path)  # the directory exists: an unrelated KeyError stays transient
+    live = await _bridge(None, root=tmp_path, raises=KeyError("x")).apply(
+        SID, "model", "a/b", None, request_id="r"
+    )
+    assert live.status == "retry"
+
+
+@pytest.mark.asyncio
+async def test_a_newer_model_with_effort_beats_an_older_effort_pick(tmp_path) -> None:
+    """Review m2: cross-kind last-wins. The older effort slot is dropped."""
+    _session(tmp_path)
+    driver = FakeDriver()
+    driver.gate = asyncio.Event()
+    applier = _applier(tmp_path, driver, FakeClock())
+    await _submit(applier, "model", "a/one", "m1")
+    await _until(lambda: driver.calls)
+    await _submit(applier, "effort", "high", "e2")
+    await _submit(applier, "model", "a/two", "m3", effort="low")
+    assert "effort" not in (await applier.snapshot(SID))[SID]
+    assert (SID, "effort", None) in applier.frames
+    driver.gate.set()
+    await _settle(applier)
+    assert driver.reading.model == "a/two" and driver.reading.effort == "low", driver.calls
+    assert not [call for call in driver.calls if call[1] == "effort"]
+    await applier.close()
+
+
+@pytest.mark.asyncio
+async def test_replaying_a_replaced_request_id_never_reapplies_it(api, tmp_path) -> None:
+    """Review m3: 409 ``generation_moved``; the newer pick stays."""
+    client, _, _ = api
+    url = f"/v1/desktop/sessions/{SID}/settings-intents"
+    first = {"request_id": "r1", "kind": "model", "value": "a/one"}
+    assert (await client.post(url, json=first)).status_code == 202
+    newer = await client.post(url, json={"request_id": "r2", "kind": "model", "value": "a/two"})
+    assert newer.status_code == 202
+    replay = await client.post(url, json=first)
+    assert replay.status_code == 409, replay.text
+    assert replay.json()["detail"]["code"] == "generation_moved"
+    slot = (await client.get("/v1/desktop/settings-intents")).json()["result"]["intents"][SID]
+    assert slot["model"]["request_id"] == "r2" and slot["model"]["generation"] == 2
+    # The record lives as long as the slots: with every slot gone the store
+    # returns to {schema, generation, slots} and keeps no request history.
+    gen = slot["model"]["generation"]
+    assert (await client.delete(f"{url}/model", params={"generation": gen})).status_code == 204
+    stored = json.loads((tmp_path / "sessions" / SID / INTENT_FILE).read_text())
+    assert stored == {"schema": 1, "generation": 2, "slots": {}}
+
+
+@pytest.mark.asyncio
+async def test_a_clamped_paired_level_confirms_the_model_and_leaves_effort_to_its_owner(
+    tmp_path,
+) -> None:
+    """Review m5: the owner clamps onto the new ladder; never poll 600 s for it."""
+
+    class ClampingDriver(FakeDriver):
+        async def apply(self, session_id, kind, value, effort, *, request_id):
+            outcome = await super().apply(session_id, kind, value, effort, request_id=request_id)
+            if kind == "model" and effort == "xhigh":
+                self.reading = Current(**{**self.reading.__dict__, "effort": "high"})
+            return outcome
+
+    _session(tmp_path)
+    driver = ClampingDriver({"effort": [Outcome("terminal", "effort_unsupported", "no xhigh")]})
+    driver.gate = asyncio.Event()
+    applier = _applier(tmp_path, driver, FakeClock())
+    await _submit(applier, "model", "a/new", "m")
+    await _submit(applier, "effort", "xhigh", "e")
+    driver.gate.set()
+    await _until(
+        lambda: any(k == "effort" and i and i["state"] == "failed" for _, k, i in applier.frames)
+    )
+    model_states = [i["state"] for _, k, i in applier.frames if k == "model" and i]
+    assert "applied" in model_states and "queued_next_step" not in model_states, model_states
+    effort_states = [i["state"] for _, k, i in applier.frames if k == "effort" and i]
+    assert "applied" not in effort_states, effort_states
+    assert [c[1] for c in driver.calls] == ["model", "effort"]
+    await applier.close()
+
+
+@pytest.mark.asyncio
+async def test_a_model_slot_with_its_own_clamped_level_is_applied(tmp_path) -> None:
+    """Review m5, the queued path: confirmed once the model moved off ``base``."""
+    _session(tmp_path)
+    driver = FakeDriver()
+    applier = _applier(tmp_path, driver, FakeClock())
+    applier._closed = True
+    _, slot, _ = await _submit(applier, "model", "a/new", "r", effort="xhigh")
+    await applier._settle(SID, "model", slot["generation"], Outcome("queued"))
+    driver.reading = Current(model="a/new", effort="high", fast=False, cwd="/old")
+    await applier._confirm(SID, "model", (await applier.snapshot(SID))[SID]["model"])
+    assert (await applier.snapshot(SID))[SID]["model"]["state"] == "applied"
+    # Same model as base: the old row proves nothing, the exact level is required.
+    driver.reading = Current(model="a/new", effort="medium", fast=False, cwd="/old")
+    _, same, _ = await _submit(applier, "model", "a/new", "r2", effort="xhigh", base="a/new")
+    await applier._settle(SID, "model", same["generation"], Outcome("queued"))
+    await applier._confirm(SID, "model", (await applier.snapshot(SID))[SID]["model"])
+    assert (await applier.snapshot(SID))[SID]["model"]["state"] == "queued_next_step"
+
+
+@pytest.mark.asyncio
+async def test_private_bookkeeping_never_reaches_clients(api, tmp_path) -> None:
+    """Review n1: ``_predecessors``/``_paired_generation`` stay in the file."""
+    client, app, _ = api
+    url = f"/v1/desktop/sessions/{SID}/settings-intents"
+    for rid, value in (("a", "a/one"), ("b", "a/two"), ("c", "a/one"), ("d", "a/two")):
+        response = await client.post(url, json={"request_id": rid, "kind": "model", "value": value})
+        assert response.status_code == 202
+        assert not [k for k in response.json()["result"]["intent"] if k.startswith("_")]
+    stored = json.loads((tmp_path / "sessions" / SID / INTENT_FILE).read_text())
+    # Deduplicated: four alternating picks keep one entry per distinct value.
+    assert sorted(map(str, stored["slots"]["model"]["_predecessors"])) == sorted(
+        ["a/one", "a/two", "openai/gpt-6"]
+    )
+    listed = (await client.get("/v1/desktop/settings-intents")).json()["result"]["intents"]
+    assert not [k for k in listed[SID]["model"] if k.startswith("_")]
+    frames = app.state.settings_applier.frames
+    assert frames and not [k for _, _, i in frames if i for k in i if k.startswith("_")]

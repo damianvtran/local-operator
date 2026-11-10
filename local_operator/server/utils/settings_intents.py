@@ -185,9 +185,9 @@ class IntentStore:
             raw = self.path(session_id).read_text(encoding="utf-8")
             payload = json.loads(raw)
         except (OSError, ValueError):
-            return {"schema": SCHEMA, "generation": 0, "slots": {}}
+            return {"schema": SCHEMA, "generation": 0, "slots": {}, "seen": {}}
         if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
-            return {"schema": SCHEMA, "generation": 0, "slots": {}}
+            return {"schema": SCHEMA, "generation": 0, "slots": {}, "seen": {}}
         slots = payload.get("slots")
         payload["slots"] = {
             kind: slot
@@ -195,6 +195,12 @@ class IntentStore:
             if kind in KINDS and isinstance(slot, dict)
         }
         payload["generation"] = int(payload.get("generation") or 0)
+        seen = payload.get("seen")
+        payload["seen"] = {
+            str(rid): str(kind)
+            for rid, kind in (seen.items() if isinstance(seen, dict) else ())
+            if kind in KINDS
+        }
         return payload
 
     def save(self, session_id: str, document: Mapping[str, Any]) -> None:
@@ -203,6 +209,7 @@ class IntentStore:
         if not document.get("slots"):
             # Nothing left to apply or show, but keep the GENERATION counter: a
             # later POST must not reuse a number an in-flight attempt carries.
+            # ``seen`` goes with the slots: see ``SettingsApplier.submit``.
             document = {"schema": SCHEMA, "generation": document.get("generation", 0), "slots": {}}
         data = json.dumps(document, sort_keys=True, indent=1).encode("utf-8")
         fd, tmp = tempfile.mkstemp(prefix=".settings-intent.", suffix=".tmp", dir=directory)
@@ -249,6 +256,19 @@ class Current:
 
     def of(self, kind: str) -> Any:
         return getattr(self, kind, None)
+
+
+class RequestReplaced(Exception):
+    """A replayed ``request_id`` whose slot a newer pick has already replaced."""
+
+
+def public_slot(slot: Mapping[str, Any]) -> dict[str, Any]:
+    """The slot as clients see it: ``_``-prefixed bookkeeping stays server-side.
+
+    ``_predecessors`` / ``_paired_generation`` are the applier's own memory
+    (review n1); a client that started switching on them would pin internals.
+    """
+    return {key: value for key, value in slot.items() if not str(key).startswith("_")}
 
 
 @dataclass(frozen=True)
@@ -401,6 +421,18 @@ class SettingsApplier:
 
         ``created=False`` is the idempotent replay: the ``request_id`` equals the
         slot's current one, so the stored slot is answered unchanged (200).
+        Raises :class:`RequestReplaced` for a ``request_id`` this session already
+        accepted whose slot a newer pick has since replaced (review m3).
+
+        SEEN REQUEST IDS. ``document["seen"]`` maps every accepted
+        ``request_id`` to its kind for exactly as long as the document holds any
+        slot — the store drops it with the last slot (``IntentStore.save``), so
+        it shares the intents' own lifetime instead of adding a count or age
+        cap. Its size is therefore the number of picks made while some slot of
+        this session was still pending or showing, i.e. human picking speed over
+        at most the retry budget plus the 60 s applied display. A replay that
+        arrives after everything was pruned is accepted as a new pick, which is
+        the same answer it got before this record existed.
         """
         state = self._state(session_id)
         async with state.lock:
@@ -409,6 +441,9 @@ class SettingsApplier:
             existing = slots.get(kind)
             if existing is not None and existing.get("request_id") == request_id:
                 return False, existing, slots
+            if request_id in document["seen"]:
+                raise RequestReplaced(request_id)
+            document["seen"][request_id] = kind
             document["generation"] = int(document.get("generation", 0)) + 1
             now = self.clock()
             slot = new_slot(
@@ -425,13 +460,38 @@ class SettingsApplier:
                 # Our own earlier generation may still land after this POST.
                 # Retain that target as an owned predecessor across restart so
                 # the supersede rule cannot mistake it for an external change.
-                slot["_predecessors"] = [
+                # Deduplicated (review n1): A→B→A picks must not grow it by two
+                # entries each time; membership is all the supersede rule reads.
+                owned: list[Any] = []
+                for item in (
                     *existing.get("_predecessors", []),
                     existing["value"],
                     existing.get("base"),
-                ]
+                ):
+                    if item not in owned:
+                        owned.append(item)
+                slot["_predecessors"] = owned
             slots[kind] = slot
+            dropped: list[str] = []
+            older_effort = slots.get("effort")
+            if (
+                kind == "model"
+                and effort is not None
+                and older_effort is not None
+                and older_effort.get("state") in ACTIVE_STATES
+            ):
+                # Review m2: a model pick that NAMES its effort is the user's
+                # newest effort choice too. Left in place, the older effort slot
+                # would be re-based after the model lands and then applied over
+                # it. Same-kind last-wins replaces silently; so does this. An
+                # effort attempt already in flight runs before the model's
+                # (one serial worker per session) and its result is discarded
+                # because the slot is gone.
+                del slots["effort"]
+                dropped.append("effort")
             await self._save(session_id, document)
+        for gone in dropped:
+            self._emit(session_id, gone, None)
         self._emit(session_id, kind, slot)
         self._kick(session_id)
         return True, slot, slots
@@ -454,6 +514,10 @@ class SettingsApplier:
             await self._save(session_id, document)
         self._emit(session_id, kind, None)
         return True
+
+    async def seen_request(self, session_id: str, request_id: str) -> bool:
+        """Whether ``request_id`` was accepted while this session's slots lived."""
+        return request_id in (await self._load(session_id))["seen"]
 
     async def snapshot(self, session_id: str | None = None) -> dict[str, dict[str, Any]]:
         if session_id is not None:
@@ -513,7 +577,7 @@ class SettingsApplier:
         if self._publish is None:
             return
         try:
-            self._publish(session_id, kind, dict(slot) if slot is not None else None)
+            self._publish(session_id, kind, public_slot(slot) if slot is not None else None)
         except Exception:  # noqa: BLE001 — a frame is advisory; GET is the baseline
             logger.debug("settings_intent frame not published", exc_info=True)
 
@@ -638,7 +702,18 @@ class SettingsApplier:
             if str(reading).lower() != str(slot["value"]).lower():
                 return False
             wanted = slot.get("effort")
-            return not wanted or current.effort == wanted
+            if not wanted or current.effort == wanted:
+                return True
+            # Review m5: the owner CLAMPS a paired level onto the new model's
+            # ladder (``serving.set_model_effort`` → ``resolve_effort_in``), so an
+            # exact match can be impossible and the slot would poll out the whole
+            # budget. The model and its level travel in ONE ``set_model`` frame
+            # and are journalled in one row, so once the reading has moved off
+            # ``base`` onto our model, the level beside it IS the admitted
+            # outcome. With the model unchanged (base == value) the old row
+            # proves nothing, so the exact level is still required there.
+            base = slot.get("base")
+            return base is not None and str(base).lower() != str(slot["value"]).lower()
         return reading == slot["value"]
 
     async def _attempt(self, session_id: str, kind: str, slot: dict[str, Any]) -> None:
@@ -697,6 +772,16 @@ class SettingsApplier:
             )
             if not self._confirmed(kind, target, after) and not confirmed_result:
                 outcome = Outcome("queued")
+            elif (
+                pending_effort is not None
+                and after.effort is not None
+                and after.effort != pending_effort[1]
+            ):
+                # The paired level was clamped (m5): the model landed, but the
+                # separate effort slot did NOT get what it asked for. Leave it
+                # active so its own attempt reaches the owner and is either
+                # applied or refused there — never marked applied by proxy.
+                pending_effort = None
         await self._settle(
             session_id,
             kind,
@@ -897,6 +982,9 @@ class SettingsApplier:
                     paired is not None
                     and paired[1] == slot.get("effort")
                     and paired[0] == slot.get("_paired_generation")
+                    # A clamped level (m5) leaves the effort slot to its own
+                    # attempt rather than claiming it applied by proxy.
+                    and (current.effort is None or current.effort == paired[1])
                 ):
                     await self._update(
                         session_id, "effort", paired[0], lambda s: s.update(state="applied")
@@ -929,7 +1017,16 @@ class SettingsApplier:
 # -- the production driver ----------------------------------------------------
 
 
-def _slash_outcome(kind: str, payload: Any) -> Outcome:
+#: The runtime's own refusal sentence for ``/fast on`` on a model whose route
+#: has no fast tier: ``serving._fast_slash`` and the TUI's ``/fast`` both start
+#: with it (and, unlike every other refusal, style it ``info``). Matching the
+#: runtime's own words is the only signal a released runtime gives; a
+#: ``data.code`` of ``fast_mode_unsupported`` is honoured too, so a runtime that
+#: starts tagging the refusal needs no change here.
+FAST_UNSUPPORTED_PREFIX = "fast mode: not available"
+
+
+def _slash_outcome(kind: str, payload: Any, *, requested: Any = None) -> Outcome:
     """Classify a routed slash's typed result (``SlashResult`` dict).
 
     ``queued`` is the deferred ack a runtime with ``defer_ok`` support answers
@@ -948,6 +1045,19 @@ def _slash_outcome(kind: str, payload: Any) -> Outcome:
         return Outcome("queued")
     style = str(data.get("style") or "")
     text = str(data.get("text") or "")
+    if (
+        kind == "fast"
+        and requested is not False
+        and (
+            inner.get("code") == "fast_mode_unsupported"
+            or text.strip().lower().startswith(FAST_UNSUPPORTED_PREFIX)
+        )
+    ):
+        # QA Q1: an ``info`` notice, but a refusal. Read as "applied" it fell to
+        # the journal confirmation, which never sees fast on, and failed only at
+        # the end of the budget as "owner unavailable". Terminal with the
+        # runtime's own sentence and the draft boundary's existing code.
+        return Outcome("terminal", "fast_mode_unsupported", text)
     if data.get("kind") == "error" or style == "error":
         return Outcome("terminal", "model_unknown" if kind == "model" else "refused", text)
     if style == "warning":
@@ -1078,8 +1188,16 @@ class BridgeDriver:
     async def apply(
         self, session_id: str, kind: str, value: Any, effort: str | None, *, request_id: str
     ) -> Outcome:
+        # Review m1: an owner's explicit error FRAME reaches us as a bare
+        # ``RuntimeError`` from the client call, and that is a refusal. The same
+        # class is raised LOCALLY before any frame is sent (``frontend state has
+        # not synchronized`` from the admission read on a fresh attach), which
+        # is transient. Only errors raised once the owner call has started are
+        # read as the owner's answer.
+        owner_call = False
+        pool = self._pool_of()
         try:
-            async with self._pool_of().session(session_id) as bridge:
+            async with pool.session(session_id) as bridge:
                 if kind == "cwd":
                     return await self._move(bridge, str(value))
                 remote = bridge.remote
@@ -1098,22 +1216,25 @@ class BridgeDriver:
                     kwargs = self._deferred(client.set_model, request_id)
                     if effort is not None:
                         kwargs["effort"] = effort
+                    owner_call = True
                     detail = await client.set_model(provider, model_id, **kwargs)
                     return Outcome("queued" if detail == "queued" else "applied")
                 if kind == "effort":
+                    owner_call = True
                     detail = await client.set_effort(
                         str(value), **self._deferred(client.set_effort, request_id)
                     )
                     return Outcome("queued" if detail == "queued" else "applied")
                 if kind == "fast":
                     kwargs = self._deferred(client.slash_result, request_id)
+                    owner_call = True
                     if kwargs:
                         payload = await client.slash_result(
                             "fast", "on" if value else "off", **kwargs
                         )
                     else:
                         payload = await remote.route_shared_slash("fast", "on" if value else "off")
-                    return _slash_outcome("fast", payload)
+                    return _slash_outcome("fast", payload, requested=value)
                 return Outcome("terminal", "unknown_kind", kind)
         except asyncio.CancelledError:
             raise
@@ -1125,10 +1246,28 @@ class BridgeDriver:
             # typed retirement as retryable; never resend an unknown-model or
             # invalid-effort refusal until the user makes a new request.
             if isinstance(error, RuntimeError) and not isinstance(error, RuntimeRetiring):
-                code = {"model": "model_unknown", "effort": "effort_unsupported"}.get(
-                    kind, "refused"
-                )
+                if not owner_call:
+                    return Outcome("retry", "runtime_busy", str(error))
+                # Unrecognised owner text is a ``refused``, not a claim that the
+                # model does not exist (``ModelSelectionRefused`` owns that code).
+                code = "effort_unsupported" if kind == "effort" else "refused"
                 return Outcome("terminal", code, str(error))
+            if (
+                isinstance(error, KeyError)
+                and not (Path(pool.root) / "sessions" / session_id).is_dir()
+            ):
+                # Review m4: ``pool.session`` raises ``KeyError("Unknown
+                # session")`` for a session deleted after the POST. Retrying
+                # cannot bring it back, so fail now instead of spending the
+                # budget. The directory check keeps an unrelated KeyError on a
+                # live session on the retry path below.
+                from local_operator.i18n.keys import wire_errors_desktop as _wd
+
+                return Outcome(
+                    "terminal",
+                    "session_unknown",
+                    _wd.requested_not_found().envelope(code="session_unknown")["text"],
+                )
             if kind == "effort" and isinstance(error, ValueError):
                 return Outcome("terminal", "effort_unsupported", str(error))
             return classify_exception(error)
