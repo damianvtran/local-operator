@@ -11352,13 +11352,14 @@ class RelayServer:
                     "model_id": str(model.get("model_id")),
                     **({"effort": level} if level else {}),
                     "offered_only": True,
-                    # ``defer_ok``: a runtime whose session loop is mid-step
-                    # answers ``queued`` within its inline window instead of
-                    # holding this hop for the whole step (the operator's
-                    # "settings never wait on turn work"). The switch then lands
-                    # at the next step; an older runtime ignores both keys.
-                    "defer_ok": True,
-                    "request_id": uuid.uuid4().hex,
+                    # DELIBERATELY NO ``defer_ok`` (PR #3697 review R1-M1). A
+                    # runtime acks every ``defer_ok`` switch ``queued`` BEFORE
+                    # the switch body runs, so the ``offered_only`` admission
+                    # below (``model_unknown``, a provider with no credential)
+                    # would be decided after this receipt was written and the
+                    # create would report a model it never got. A just-created
+                    # session is idle, so the synchronous answer costs nothing
+                    # and is the only one that can carry the refusal.
                 },
                 timeout_s=self.settings.op_wait_s,
             )
@@ -11392,15 +11393,6 @@ class RelayServer:
                     f"\na newer id than that list: /model {provider}/<id> in lop there takes it"
                 )
             return {"applied": False, "detail": _model_not_applied(model, reason)}
-        if reply.get("queued") is True:
-            # Accepted: the switch body is already queued on the session loop
-            # and applies before the next provider call reads the model
-            # (``LoopConfig.get_model``). A fresh create's session is idle, so
-            # this is the rare case where its loop was busy past the inline
-            # window. The residual: an ``offered_only`` refusal decided after
-            # the ack is not on this reply; it is published as the session's
-            # ``settings_result`` instead, and the receipt says nothing false.
-            return {"applied": True, "detail": "", "queued": True}
         return {"applied": True, "detail": ""}
 
     def _prompt_on(

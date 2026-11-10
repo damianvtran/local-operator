@@ -839,9 +839,9 @@ def _settings_refusal_code(error: BaseException) -> str:
 def _records_settings_result(method: _F) -> _F:
     """Publish the switch's outcome as ``settings_result`` when it was identified.
 
-    WHY A WRAPPER. A switch sent with ``defer_ok`` can be acked ``queued`` by
-    the runtime's control lane before this body has even started (see
-    ``server.py``'s ``SETTINGS_INLINE_ACK_S``), and that ack suppresses the
+    WHY A WRAPPER. A switch sent with ``defer_ok`` is acked ``queued`` by the
+    runtime's control lane before this body has even started (see
+    ``server.py``'s ``_run_deferrable_switch``), and that ack suppresses the
     body's own reply \u2014 so the outcome needs a channel that is not the reply.
     It goes on the session's state (``FrontendSessionState.settings_result``),
     which every attached viewer already receives. Written by a decorator so the
@@ -859,6 +859,11 @@ def _records_settings_result(method: _F) -> _F:
     older owner \u2014 keeps the narrow call.
     """
 
+    # The per-kind slot (``settings_results``) a body writes: ``set_effort``
+    # moves only the level; the model bodies (with or without a level) are a
+    # model switch, which is what the user picked.
+    kind = "effort" if method.__name__ == "set_effort" else "model"
+
     @functools.wraps(method)
     async def recorded(
         self: "ServingSessionHandle", *args: Any, request_id: str | None = None, **kwargs: Any
@@ -869,10 +874,16 @@ def _records_settings_result(method: _F) -> _F:
             receipt = await method(self, *args, **kwargs)
         except Exception as exc:
             self._publish_settings_result(
-                request_id, ok=False, code=_settings_refusal_code(exc), message=str(exc)
+                request_id,
+                kind=kind,
+                ok=False,
+                code=_settings_refusal_code(exc),
+                message=str(exc),
             )
             raise
-        self._publish_settings_result(request_id, ok=True, code="applied", message=str(receipt))
+        self._publish_settings_result(
+            request_id, kind=kind, ok=True, code="applied", message=str(receipt)
+        )
         return receipt
 
     return cast(_F, recorded)
@@ -8252,7 +8263,7 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("could not publish the pending gate", exc_info=True)
 
     def _publish_settings_result(
-        self, request_id: str, *, ok: bool, code: str, message: str
+        self, request_id: str, *, kind: str, ok: bool, code: str, message: str
     ) -> None:
         """Write one switch outcome onto the session state (see ``_records_settings_result``).
 
@@ -8261,18 +8272,28 @@ class ServingSessionHandle(SessionHandle):
         a reported failure. ``store.mutate`` is the same publication path
         ``pending_gate`` uses, so the field rides the next state push.
         """
+        result = {"request_id": request_id, "ok": ok, "code": code, "message": message}
+        # Two independent publications, each guarded on its own so a hiccup on
+        # one cannot hide the outcome from the other's viewers: the phone reads
+        # the projection (R1-M2), the TUI and desktop read the state store.
+        try:
+            self._fold.set_settings_result(kind, result)
+            self._notify()
+        except Exception:  # noqa: BLE001 — the outcome is advisory; the switch stands
+            logger.debug("could not project the settings result", exc_info=True)
         try:
             store = getattr(self._session, "_frontend_state_store", None)
             if store is None:
                 return
-            store.mutate(
-                settings_result={
-                    "request_id": request_id,
-                    "ok": ok,
-                    "code": code,
-                    "message": message,
-                }
+            # The handle keeps the per-kind map itself rather than reading it
+            # back: ``store.state`` deep-copies the whole session per call and
+            # the field is not on ``read_field``'s copy-free list. ``setdefault``
+            # because test doubles build this handle with ``__new__``.
+            per_kind: dict[str, dict[str, Any]] = self.__dict__.setdefault(
+                "_settings_results_by_kind", {}
             )
+            per_kind[kind] = result
+            store.mutate(settings_result=result, settings_results=dict(per_kind))
         except Exception:  # noqa: BLE001 — the outcome is advisory; the switch stands
             logger.debug("could not publish the settings result", exc_info=True)
 
@@ -8707,10 +8728,15 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.session.frontend_state import SlashResult
 
         settings_request: str | None = None
-        if request_id:
+        settings_kind = ""
+        # Only a slash WITH arguments is a switch: bare ``/model`` or
+        # ``/effort`` answers a listing, and publishing that as ``applied``
+        # would tell a viewer a change landed that nobody made (R1-m3).
+        if request_id and args.strip():
             from local_operator.slash_commands import primary_slash_name
 
-            if primary_slash_name(command.strip().lower()) in _SETTINGS_SLASH_COMMANDS:
+            settings_kind = primary_slash_name(command.strip().lower())
+            if settings_kind in _SETTINGS_SLASH_COMMANDS:
                 settings_request = request_id
         try:
             result = await self._slash_result(
@@ -8720,6 +8746,7 @@ class ServingSessionHandle(SessionHandle):
             if settings_request is not None:
                 self._publish_settings_result(
                     settings_request,
+                    kind=settings_kind,
                     ok=False,
                     code=_settings_refusal_code(exc),
                     message=str(exc),
@@ -8730,6 +8757,7 @@ class ServingSessionHandle(SessionHandle):
             data_code = result.data.get("code") if isinstance(result.data, dict) else None
             self._publish_settings_result(
                 settings_request,
+                kind=settings_kind,
                 ok=ok,
                 code=("applied" if ok else (str(data_code) if data_code else "failed")),
                 message=str(result.text or ""),

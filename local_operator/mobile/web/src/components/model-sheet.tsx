@@ -1,10 +1,11 @@
 /**
  * Model sheet: the server's ranked /api/models, filtered, current model marked.
  * Choosing POSTs set_model; the next projection repaint shows the truth, so
- * there is no local optimistic state. The ONE exception is a `queued` answer
- * (the session is mid-step and applies the change at the next one): the sheet
- * stays open and says so, because the repaint will not show the new model until
- * it lands and a silent close read as "nothing happened".
+ * there is no local optimistic state. A `queued` answer (a current runtime
+ * acks every deferred pick that way, before the switch runs) closes the sheet
+ * too, and hands the pick to `lib/settings-defer`'s per-session store: the
+ * composer shows "queued" while a turn runs and the refusal if the session
+ * later rejects it — after this sheet is gone (PR #3697 review R1-M2).
  *
  * ONE FLAT LIST, IN THE SERVER'S ORDER. This used to group by provider, which
  * silently re-sorted the payload: the daemon ranks direct-connected providers
@@ -15,7 +16,12 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { getModels, sendCommand } from "../api";
-import { QUEUED_DETAIL, deferredSettingsFields } from "../lib/settings-defer";
+import {
+	QUEUED_DETAIL,
+	deferredSettingsFields,
+	settleSettingsPick,
+	trackSettingsPick,
+} from "../lib/settings-defer";
 import { cn } from "../lib/cn";
 import { filterModels } from "../lib/model-filter";
 import { messageRuntime } from "../store";
@@ -56,7 +62,6 @@ export function ModelSheet({
 	const filter = query ?? ownFilter;
 	const setFilter = onQuery ?? setOwnFilter;
 	const [error, setError] = useState("");
-	const [queued, setQueued] = useState(false);
 
 	useEffect(() => {
 		if (!open) return;
@@ -69,7 +74,6 @@ export function ModelSheet({
 		   that has never been opened does not inherit a stale query. */
 		if (!onQuery) setFilter("");
 		setError("");
-		setQueued(false);
 		/* Back to unresolved on every open, because this sheet REFETCHES per open:
 		   keeping the previous list would paint a stale catalogue as though it were
 		   the answer to the request now in flight. */
@@ -99,19 +103,27 @@ export function ModelSheet({
 	);
 
 	const choose = async (m: ModelEntry) => {
+		const fields = deferredSettingsFields();
+		/* Tracked BEFORE sending: the outcome can ride a repaint that lands
+		   before this await resumes, and an untracked id would be ignored. */
+		trackSettingsPick(pid, {
+			requestId: fields.request_id,
+			kind: "model",
+			label: `${m.provider}/${m.model_id}`,
+		});
 		try {
 			const receipt = await sendCommand(pid, {
 				op: "set_model",
 				provider: m.provider,
 				model_id: m.model_id,
-				...deferredSettingsFields(),
+				...fields,
 			});
-			if (receipt.detail === QUEUED_DETAIL) {
-				setQueued(true);
-				return;
-			}
+			/* Anything but `queued` is an older runtime answering on landing:
+			   its reply WAS the outcome, so nothing is left to wait for. */
+			if (receipt.detail !== QUEUED_DETAIL) settleSettingsPick(pid, fields.request_id);
 			onClose();
 		} catch (e) {
+			settleSettingsPick(pid, fields.request_id);
 			setError(String((e as Error).message ?? e));
 		}
 	};
@@ -152,11 +164,6 @@ export function ModelSheet({
 				    Reversing any of this re-creates a lie, which is why the order is
 				    stated here rather than left to the reader of three sibling
 				    conditionals. */}
-				{queued && !error ? (
-					<p role="status" className="px-3 py-1 text-body-sm text-ink-dim">
-						{messageRuntime.t("relay.session.model.queued")}
-					</p>
-				) : null}
 				{error ? (
 					<p className="px-3 py-1 text-body-sm text-danger">
 						{error}

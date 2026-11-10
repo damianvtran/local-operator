@@ -324,6 +324,7 @@ export type MessageParams = {
   "relay.session.model.filter_placeholder": undefined;
   "relay.session.model.loading": undefined;
   "relay.session.model.queued": undefined;
+  "relay.session.model.refused": { "model": string; "reason": string };
   "relay.session.model.sheet_title": undefined;
   "relay.session.past.back": undefined;
   "relay.session.past.heading": undefined;

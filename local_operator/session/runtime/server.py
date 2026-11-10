@@ -1341,12 +1341,14 @@ _SWITCH_OPS = frozenset({"set_model", "set_effort"})
 #: among themselves, which is the lane's first guarantee.
 _SWITCH_SLASH_COMMANDS = frozenset({"model", "effort", "fast"})
 
-#: Legacy inline-window constant retained for import compatibility only.
-#: Deferred settings are now accepted immediately, before a session-loop hop:
-#: measured busy medians of 528–796 ms with a 1.5 s inline window failed the
-#: operator's instant-acceptance requirement. Application and outcome delivery
-#: stay ordered; no timer or application wait sits on the receipt path.
-SETTINGS_INLINE_ACK_S = 1.5
+#: DEFERRED SETTINGS ARE ACCEPTED IMMEDIATELY. A ``defer_ok`` switch is acked
+#: ``queued`` before any session-loop hop (``_run_deferrable_switch``), idle or
+#: busy: an earlier 1.5 s inline window, measured at busy medians of 528–796 ms,
+#: failed the operator's instant-acceptance requirement. Application and
+#: outcome delivery stay ordered on the switch lane; the outcome travels as
+#: ``settings_result``/``settings_results`` state, never on the reply. A caller
+#: that must carry a refusal on its reply (the relay's remote create) simply
+#: does not send ``defer_ok``.
 
 
 @dataclass
@@ -3111,7 +3113,7 @@ class RuntimeServer:
         #: a queued switch is a promise made to the user, and the desktop drops
         #: and redials its socket freely, so the socket closing must not unpick
         #: it. Drained by cancellation in ``_shutdown_impl`` only. See
-        #: :data:`SETTINGS_INLINE_ACK_S`.
+        #: ``_run_deferrable_switch``.
         self._deferred_switches: set[asyncio.Task[None]] = set()
         self._switch_revision = 0
         self._heartbeat_task: asyncio.Task[None] | None = None

@@ -29,6 +29,6 @@
   "tui.notices.model_default_changed_headline": "ماڈل تبدیل نہیں ہوا",
   "tui.notices.effort_default_changed": "نئے سیشنز کے لیے استدلال کی شدت کا ڈیفالٹ بدل گیا ({effort})؛ /model saved اسے یہاں اپنا لیتا ہے",
   "tui.notices.effort_default_changed_headline": "استدلال کی شدت کا ڈیفالٹ بدل گیا",
-  "tui.notices.model_switch_queued": "{model} منتخب — سیشن مصروف ہے، تبدیلی اگلے مرحلے میں لاگو ہوگی",
+  "tui.notices.model_switch_queued": "{model} پر تبدیلی قطار میں — اگلے مرحلے میں لاگو ہوگی",
   "tui.notices.model_switch_refused": "{model} لاگو نہیں ہوا: {reason}"
 }

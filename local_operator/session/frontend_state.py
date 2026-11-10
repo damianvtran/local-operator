@@ -1722,10 +1722,10 @@ class McpServerState(BaseModel):
 class SettingsResultState(BaseModel):
     """The landed outcome of ONE identified settings switch (model/effort/fast).
 
-    WHY IT EXISTS. A switch frame sent with ``defer_ok`` may be answered
-    ``queued`` before it lands: the runtime's control lane acks within
-    ``SETTINGS_INLINE_ACK_S`` even while the session loop is busy with a turn
-    step, so the reply can no longer carry the outcome. This field is where the
+    WHY IT EXISTS. A switch frame sent with ``defer_ok`` is ALWAYS answered
+    ``queued`` before it lands: the runtime's control lane acks before the
+    switch body runs, idle or busy (``server._run_deferrable_switch``), so the
+    reply can never carry the outcome. This field is where the
     outcome goes instead, on the ordinary state push, so every viewer (desktop,
     TUI, phone) learns the same result whether or not the socket that asked is
     still open.
@@ -3938,6 +3938,15 @@ class FrontendSessionState(BaseModel):
     #: :class:`SettingsResultState`. ``None`` until a switch with a
     #: ``request_id`` lands; a viewer that predates it ignores the field.
     settings_result: SettingsResultState | None = None
+    #: The latest identified outcome PER KIND (``model``/``effort``/``fast``).
+    #: ``settings_result`` alone is last-writer-wins across kinds, so a viewer
+    #: that redials (or misses a push) after a model refusal and an effort
+    #: success saw only the effort and lost the refusal (PR #3697 review
+    #: R1-m2). Per kind is the natural bound: settings are last-wins, so an
+    #: older outcome of the same kind is moot once a newer one lands. Kept
+    #: BESIDE ``settings_result`` (not replacing it) because the desktop's
+    #: durable-intent bridge already reads that field.
+    settings_results: dict[str, SettingsResultState] = Field(default_factory=dict)
     #: The session's queued asks, newest first with the OPEN ones in front, and
     #: how many of them are still OUTSTANDING — ``open`` asks, the ones still
     #: waiting on the user (the rule lives in ``asks.store.OUTSTANDING_STATUSES``).

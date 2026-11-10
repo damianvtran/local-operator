@@ -29,6 +29,6 @@
   "tui.notices.model_default_changed_headline": "मॉडल अपरिवर्तित",
   "tui.notices.effort_default_changed": "नए सत्रों के लिए रीज़निंग प्रयास का डिफ़ॉल्ट बदल गया है ({effort}); /model saved इसे यहाँ अपना लेता है",
   "tui.notices.effort_default_changed_headline": "प्रयास डिफ़ॉल्ट बदला",
-  "tui.notices.model_switch_queued": "{model} चुना गया — सत्र व्यस्त है, बदलाव अगले चरण में लागू होगा",
+  "tui.notices.model_switch_queued": "{model} पर बदलाव कतार में — अगले चरण में लागू होगा",
   "tui.notices.model_switch_refused": "{model} लागू नहीं हुआ: {reason}"
 }

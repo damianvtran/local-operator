@@ -269,15 +269,14 @@ async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_bl
     A REAL ``ServingSessionHandle`` whose session loop is held by a synchronous
     ``time.sleep`` (a tool step or an eval holding the loop). Without
     ``defer_ok`` the reply could only come after the sleep, because the switch
-    body hops onto that loop. With it the runtime answers ``queued`` within
-    ``SETTINGS_INLINE_ACK_S``; the body then lands FIFO behind the blocking
+    body hops onto that loop. With it the runtime answers ``queued`` at once,
+    before any session-loop hop; the body then lands FIFO behind the blocking
     step and BEFORE the next thing the loop runs \u2014 which is where the agent
     loop's next ``_current_model`` read would be \u2014 and the outcome is
     published as ``settings_result`` for the ``request_id`` sent.
     """
     import time
 
-    from local_operator.session.runtime.server import SETTINGS_INLINE_ACK_S
     from tests.unit.session.runtime.test_serving import _AccessSession
 
     session_loop = asyncio.new_event_loop()
@@ -296,7 +295,9 @@ async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_bl
     runtime = RuntimeServer(Host(), kind="tui")
     runtime.start()
     writer = None
-    block_s = SETTINGS_INLINE_ACK_S + 1.5
+    # Long enough that an ack which waited on the loop could not pass the
+    # 0.5 s acceptance bound below; no inline window exists any more.
+    block_s = 3.0
     try:
         record = await _wait_record()
         reader, writer = await _dial(record, client="daemon")
@@ -340,6 +341,10 @@ async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_bl
         result = session._frontend_state_store.state.settings_result
         assert result is not None
         assert (result.request_id, result.ok, result.code) == ("rid-1", True, "applied")
+        # The per-kind copies a redialled viewer and the phone read (R1-m2/M2).
+        per_kind = session._frontend_state_store.state.settings_results
+        assert per_kind["effort"].request_id == "rid-1" and per_kind["effort"].ok
+        assert handle._fold.projection.settings_results["effort"]["request_id"] == "rid-1"
     finally:
         if writer is not None:
             writer.close()
@@ -361,8 +366,72 @@ async def test_a_refused_identified_switch_publishes_its_refusal() -> None:
     assert result is not None
     assert (result.request_id, result.ok, result.code) == ("rid-2", False, "invalid")
     assert result.message == "model has no reasoning-effort levels; drop --effort"
+    # The phone's correlated copy rides the projection (R1-M2), keyed by kind.
+    projected = handle._fold.projection.settings_results["effort"]
+    assert projected == {
+        "request_id": "rid-2",
+        "ok": False,
+        "code": "invalid",
+        "message": "model has no reasoning-effort levels; drop --effort",
+    }
+    assert handle._fold.projection.to_json()["settings_results"]["effort"]["ok"] is False
     # Unidentified switches publish nothing (the pre-``defer_ok`` contract).
     session._frontend_state_store.mutate(settings_result=None)
     with pytest.raises(ValueError):
         await handle.set_effort("turbo")
     assert session._frontend_state_store.state.settings_result is None
+
+
+def test_a_projection_without_switches_omits_settings_results() -> None:
+    """Sparse on the wire: frames with no identified switch stay byte-identical."""
+    from local_operator.mobile.types import SessionProjection
+
+    assert "settings_results" not in SessionProjection(session_id="s", pid=1).to_json()
+
+
+@pytest.mark.asyncio
+async def test_a_model_refusal_survives_a_later_effort_success_per_kind() -> None:
+    """R1-m2: the single ``settings_result`` slot is overwritten across kinds.
+
+    A viewer that redials after a model refusal and an effort success reads the
+    full snapshot; ``settings_results`` must still carry the model refusal.
+    """
+    from tests.unit.session.runtime.test_serving import _AccessSession
+
+    session = _AccessSession("test/model")
+    session.model = ModelSpec(provider="test", model_id="model", reasoning_efforts=("low", "high"))
+    handle = serving.ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    handle._publish_settings_result(
+        "rid-model", kind="model", ok=False, code="model_unknown", message="not offered"
+    )
+    await handle.set_effort("high", request_id="rid-effort")
+    state = session._frontend_state_store.state
+    assert state.settings_result is not None and state.settings_result.request_id == "rid-effort"
+    assert state.settings_results["model"].request_id == "rid-model"
+    assert state.settings_results["model"].ok is False
+    assert state.settings_results["effort"].ok is True
+
+
+@pytest.mark.asyncio
+async def test_a_bare_settings_slash_listing_is_not_published_as_applied() -> None:
+    """R1-m3: ``/model`` with no arguments is a listing, not a switch."""
+    from local_operator.session.frontend_state import SlashResult
+    from tests.unit.session.runtime.test_serving import _AccessSession
+
+    session = _AccessSession("test/model")
+    handle = serving.ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+
+    async def listing(*_args: Any, **_kwargs: Any) -> SlashResult:
+        return SlashResult(kind="notice", text="models: test/model")
+
+    async def passthrough(result: Any, *_args: Any) -> Any:
+        return result
+
+    handle._slash_result = listing  # type: ignore[method-assign]
+    handle._complete_unconsumed_action = passthrough  # type: ignore[method-assign]
+    await handle.run_slash_authoritative("model", "", request_id="rid-list")
+    assert session._frontend_state_store.state.settings_result is None
+    assert handle._fold.projection.settings_results == {}
+    await handle.run_slash_authoritative("model", "test/other", request_id="rid-switch")
+    published = session._frontend_state_store.state.settings_results["model"]
+    assert (published.request_id, published.ok) == ("rid-switch", True)

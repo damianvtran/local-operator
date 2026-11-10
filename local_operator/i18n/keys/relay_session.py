@@ -50,6 +50,10 @@ def model_queued() -> Msg:
     return Msg("relay.session.model.queued", {})
 
 
+def model_refused(*, model: str, reason: str) -> Msg:
+    return Msg("relay.session.model.refused", {"model": model, "reason": reason})
+
+
 def model_sheet_title() -> Msg:
     return Msg("relay.session.model.sheet_title", {})
 

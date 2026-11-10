@@ -29,6 +29,6 @@
   "tui.notices.model_default_changed_headline": "Model unchanged",
   "tui.notices.effort_default_changed": "reasoning effort default changed for new sessions ({effort}); /model saved adopts it here",
   "tui.notices.effort_default_changed_headline": "Effort default changed",
-  "tui.notices.model_switch_queued": "{model} selected — the session is busy, so it applies at the next step",
+  "tui.notices.model_switch_queued": "switch to {model} queued — applies at the next step",
   "tui.notices.model_switch_refused": "{model} was not applied: {reason}"
 }

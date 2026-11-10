@@ -4392,5 +4392,16 @@ class ProjectionFold:
             key=lambda row: (row.status != "running", row.job_id),
         )
 
+    def set_settings_result(self, kind: str, result: dict[str, Any]) -> None:
+        """Record the latest settings outcome of ``kind`` for the phone (R1-M2).
+
+        See ``SessionProjection.settings_results``: one slot per kind, the
+        newest outcome replacing the older one because settings are last-wins.
+        """
+        if self.projection.settings_results.get(kind) == result:
+            return
+        self.projection.settings_results = {**self.projection.settings_results, kind: result}
+        self._bump()
+
     def _bump(self) -> None:
         self.projection.version += 1

@@ -613,15 +613,20 @@ def test_effort_rides_the_model_choice_so_a_team_only_create_keeps_it(
     assert recorder.calls[1]["model"] == {"provider": "test", "model_id": "claude-opus-5"}
 
 
-def test_the_set_model_hop_asks_for_a_deferred_ack_and_counts_queued_as_applied(
+def test_the_create_set_model_hop_stays_synchronous_so_a_refusal_reaches_the_receipt(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A busy owner answers ``queued`` instead of holding the hop for a whole step.
+    """Regression for PR #3697 review R1-M1: no ``defer_ok`` on the create hop.
 
-    The relay opts in with ``defer_ok`` + a ``request_id``; a ``queued`` ack is
-    an accepted switch (it applies before the next provider call), so the
-    create reports it applied rather than failing or waiting out the turn.
+    A current runtime acks every ``defer_ok`` switch ``queued`` before its body
+    (and so the ``offered_only`` admission) runs. The frame this hop sends is
+    fed to the runtime's OWN predicate (``server._defers_reply``) rather than
+    asserted against a literal, so the test follows the real reply contract:
+    if the relay ever opts back in, the runtime would answer ``queued`` and the
+    ``model_unknown`` refusal below could never reach the create receipt.
     """
+    from local_operator.session.runtime import server as runtime_server
+
     identity.mint(root, name="cloud-node-1")
     server = _warmed_server(root)
     frames: list[dict[str, Any]] = []
@@ -629,7 +634,14 @@ def test_the_set_model_hop_asks_for_a_deferred_ack_and_counts_queued_as_applied(
     class _Dial:
         def exchange(self, frame: dict[str, Any], *, timeout_s: float) -> dict[str, Any]:
             frames.append(frame)
-            return {"op": "ack", "detail": "queued", "queued": True}
+            # What the runtime answers a NON-deferred offered_only switch to a
+            # model this device does not offer: the synchronous error reply.
+            return {
+                "op": "error",
+                "req": frame["req"],
+                "message": "deepseek/not-offered is not offered here",
+                "model_refusal": "model_unknown",
+            }
 
         def close(self) -> None:
             pass
@@ -637,10 +649,12 @@ def test_the_set_model_hop_asks_for_a_deferred_ack_and_counts_queued_as_applied(
     monkeypatch.setattr(server, "_dial_owned", lambda *args, **kwargs: _Dial())
 
     result = server._set_model_on(  # noqa: SLF001
-        SESSION, {"provider": "deepseek", "model_id": "deepseek-flash"}
+        SESSION, {"provider": "deepseek", "model_id": "not-offered"}
     )
 
-    assert result == {"applied": True, "detail": "", "queued": True}
-    assert frames[0]["defer_ok"] is True
-    assert isinstance(frames[0]["request_id"], str) and frames[0]["request_id"]
+    assert runtime_server._defers_reply(frames[0]) is False  # noqa: SLF001
+    assert "defer_ok" not in frames[0] and "request_id" not in frames[0]
     assert frames[0]["offered_only"] is True
+    assert result["applied"] is False
+    assert "not offered here" in result["detail"]
+    assert "run /model in lop there" in result["detail"]

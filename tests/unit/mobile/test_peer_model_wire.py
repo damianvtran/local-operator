@@ -511,9 +511,7 @@ async def test_a_busy_owner_answers_the_attach_client_queued(monkeypatch) -> Non
     import threading
 
     from local_operator.mobile.attach_client import QUEUED_DETAIL, AttachClient
-    from local_operator.session.runtime import server as server_mod
 
-    monkeypatch.setattr(server_mod, "SETTINGS_INLINE_ACK_S", 0.3)
     release = threading.Event()
     landed: list[tuple[str, str | None]] = []
 

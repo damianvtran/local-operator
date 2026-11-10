@@ -29,6 +29,6 @@
   "tui.notices.model_default_changed_headline": "Modelo sin cambios",
   "tui.notices.effort_default_changed": "el esfuerzo de razonamiento por defecto cambió para las sesiones nuevas ({effort}); /model saved lo adopta aquí",
   "tui.notices.effort_default_changed_headline": "Esfuerzo por defecto cambiado",
-  "tui.notices.model_switch_queued": "{model} seleccionado — la sesión está ocupada; se aplicará en el siguiente paso",
+  "tui.notices.model_switch_queued": "cambio a {model} en cola — se aplicará en el siguiente paso",
   "tui.notices.model_switch_refused": "No se aplicó {model}: {reason}"
 }

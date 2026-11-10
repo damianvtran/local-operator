@@ -16,5 +16,6 @@
   "relay.session.model.sheet_title": "modelo",
   "relay.session.model.filter_placeholder": "filtrar modelos",
   "relay.session.model.loading": "cargando…",
-  "relay.session.model.queued": "seleccionado — se aplicará en el siguiente paso"
+  "relay.session.model.queued": "cambio en cola — se aplicará en el siguiente paso",
+  "relay.session.model.refused": "No se aplicó {model}: {reason}"
 }

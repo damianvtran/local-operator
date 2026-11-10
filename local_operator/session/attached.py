@@ -7597,7 +7597,11 @@ class AttachedSession:
         """
         self._streaming = state.streaming
         self._generation = state.generation
-        if changed_fields is None or "settings_result" in changed_fields:
+        if (
+            changed_fields is None
+            or "settings_result" in changed_fields
+            or "settings_results" in changed_fields
+        ):
             self._consume_settings_result(state)
         self._model = state.selected_model
         # Keep the concrete primary seen at birth OR on an attached owner. A
@@ -10019,21 +10023,51 @@ class AttachedSession:
             self._switch_on_owner(client, model, announce=True)
 
     def _consume_settings_result(self, state: FrontendSessionState) -> None:
-        """Render our outcomes once; ignore other viewers and snapshot replays."""
-        result = state.settings_result
-        pending = self.__dict__.get("_settings_pending", {})
-        if result is None or result.request_id not in pending:
+        """Render OUR switch outcomes once: a refusal as an error, success silently.
+
+        SUCCESS IS SILENT (PR #3697 review R1-M3). The ``selected_model`` repaint
+        already shows a landed switch, and the owner's receipt (``model: X``)
+        printed beside it was a second line saying the same thing. A refusal is
+        the one outcome nothing else shows, so it is the one notice.
+
+        Reads the per-kind ``settings_results`` as well as ``settings_result``:
+        the latter is last-writer-wins across kinds, so after a redial (a full
+        snapshot) a model refusal followed by an effort success would otherwise
+        be lost (R1-m2). Entries another viewer sent, and replays of one already
+        consumed, are ignored because only ids still in our pending map match.
+        """
+        pending: dict[str, tuple[str, str]] = self.__dict__.get("_settings_pending", {})
+        if not pending:
             return
-        label = pending.pop(result.request_id)
-        if not result.ok:
-            self._deliver(
-                _settings_notice(
-                    _nt.model_switch_refused(model=label, reason=result.message), kind="error"
+        results = list(state.settings_results.values())
+        if state.settings_result is not None:
+            results.append(state.settings_result)
+        for result in results:
+            entry = pending.pop(result.request_id, None)
+            if entry is None:
+                continue
+            label, _kind = entry
+            if not result.ok:
+                self._deliver(
+                    _settings_notice(
+                        _nt.model_switch_refused(model=label, reason=result.message), kind="error"
+                    )
                 )
-            )
-        elif result.message:
-            # Owner-originated receipt, not newly authored UI copy.
-            self._deliver(NoticeEvent(text=result.message, kind="info"))
+
+    def _track_settings_request(self, request_id: str, label: str, kind: str) -> None:
+        """Remember an identified switch BEFORE sending it (outcomes can race the ack).
+
+        LAST-WINS PRUNING keeps the map bounded by the number of setting kinds,
+        without a tuned cap: a newer pick of the same kind replaces the older
+        one, so the older outcome is moot (its refusal would describe a choice
+        the user already changed) and is dropped here rather than left to leak
+        when its result is overwritten on the single-slot wire field.
+        """
+        pending: dict[str, tuple[str, str]] = self.__dict__.setdefault("_settings_pending", {})
+        for older_id, (_label, older_kind) in list(pending.items()):
+            if older_kind == kind:
+                pending.pop(older_id, None)
+        pending[request_id] = (label, kind)
 
     def _switch_on_owner(
         self, client: AttachClient, model: ModelSpec, *, effort: str | None = None, announce: bool
@@ -10044,26 +10078,36 @@ class AttachedSession:
         picker repaints at once), so the owner request was always fire-and-
         forget — but the owner's answer still waited for its session loop, so
         a switch made mid-tool or mid-eval sat unanswered for the whole step,
-        and a refusal was swallowed with the task. The runtime now acks
-        ``queued`` immediately instead, and this tells the
-        user what happened: "applies at the next step" when queued (the owner
-        re-reads the model before every provider call), the owner's sentence
-        when refused. ``request_id`` correlates the owner's later
-        ``settings_result``.
+        and a refusal was swallowed with the task. A current runtime acks EVERY
+        ``defer_ok`` switch ``queued`` before running it, idle or busy, and
+        publishes the outcome later as ``settings_result`` keyed by
+        ``request_id``; :meth:`_consume_settings_result` shows a refusal.
+
+        THE QUEUED LINE IS SHOWN ONLY WHILE THE OWNER IS STREAMING (R1-M3). The
+        ack says nothing about busyness, so announcing every ack claimed a busy
+        session on idle switches too. The viewer's own last state says whether
+        a turn is running: then the switch genuinely waits for the next step and
+        the neutral "queued" line is true; idle, it lands at once and the
+        repaint is the only feedback needed. Never shown after the outcome has
+        already been consumed (a state push can overtake the ack's resumption).
 
         ``announce`` is False for a level carried with no user decision (an
-        adoption, a failover carry): those are not the user's change, so a
-        "queued" line would describe something they never asked for. A refusal
-        is reported either way.
+        adoption, a failover carry): no "queued" line for a change the user
+        never asked for. A refusal is still reported, so it is still tracked.
 
         A lost connection stays silent, as before: the attach layer already
         reports the owner going away, and a second line here would duplicate it.
         """
         request_id = uuid.uuid4().hex
         label = f"{model.provider}/{model.model_id}"
-        # Track before sending: outcome pushes can race ahead of the receipt.
-        if announce:
-            self.__dict__.setdefault("_settings_pending", {})[request_id] = label
+        if effort:
+            # Name the level the user picked (R1-n2): an effort-only change
+            # otherwise read as a re-selection of the same model.
+            label = f"{label} · {effort}"
+        self._track_settings_request(request_id, label, "model")
+
+        def pending() -> dict[str, tuple[str, str]]:
+            return cast(dict[str, tuple[str, str]], self.__dict__.get("_settings_pending", {}))
 
         async def run() -> None:
             try:
@@ -10075,11 +10119,12 @@ class AttachedSession:
                     request_id=request_id,
                 )
             except (ConnectionError, TimeoutError):
-                self.__dict__.get("_settings_pending", {}).pop(request_id, None)
+                pending().pop(request_id, None)
                 logger.debug("attach: model switch to %s not answered", label, exc_info=True)
                 return
             except Exception as exc:  # noqa: BLE001 — the refusal IS the notice
-                self.__dict__.get("_settings_pending", {}).pop(request_id, None)
+                if pending().pop(request_id, None) is None:
+                    return  # the outcome push already reported it
                 self._deliver(
                     _settings_notice(
                         _nt.model_switch_refused(model=label, reason=str(exc)), kind="error"
@@ -10087,8 +10132,10 @@ class AttachedSession:
                 )
                 return
             if detail != QUEUED_DETAIL:
-                self.__dict__.get("_settings_pending", {}).pop(request_id, None)
-            if announce and detail == QUEUED_DETAIL:
+                # An older owner answered on landing: the reply IS the outcome.
+                pending().pop(request_id, None)
+                return
+            if announce and request_id in pending() and getattr(self, "_streaming", False):
                 self._deliver(_settings_notice(_nt.model_switch_queued(model=label), kind="info"))
 
         task = asyncio.create_task(run())
@@ -10579,7 +10626,7 @@ class AttachedSession:
         # An opted-in switch's result may race the receipt; identify it first
         # so the ordinary state hook can show its later applied/refused outcome.
         if defer_ok and request_id:
-            self.__dict__.setdefault("_settings_pending", {})[request_id] = args or command
+            self._track_settings_request(request_id, args or command, command)
         settings_kwargs: dict[str, Any] = {}
         if defer_ok:
             settings_kwargs["defer_ok"] = True

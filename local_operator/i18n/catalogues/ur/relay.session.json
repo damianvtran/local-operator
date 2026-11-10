@@ -16,5 +16,6 @@
   "relay.session.model.sheet_title": "ماڈل",
   "relay.session.model.filter_placeholder": "ماڈلز فلٹر کریں",
   "relay.session.model.loading": "لوڈ ہو رہا ہے…",
-  "relay.session.model.queued": "منتخب — اگلے مرحلے میں لاگو ہوگا"
+  "relay.session.model.queued": "تبدیلی قطار میں — اگلے مرحلے میں لاگو ہوگی",
+  "relay.session.model.refused": "{model} لاگو نہیں ہوا: {reason}"
 }

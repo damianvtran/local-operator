@@ -16,5 +16,6 @@
   "relay.session.model.sheet_title": "модель",
   "relay.session.model.filter_placeholder": "фильтр моделей",
   "relay.session.model.loading": "загрузка…",
-  "relay.session.model.queued": "выбрано — вступит в силу на следующем шаге"
+  "relay.session.model.queued": "изменение в очереди — вступит в силу на следующем шаге",
+  "relay.session.model.refused": "{model} не применён: {reason}"
 }

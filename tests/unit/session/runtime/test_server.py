@@ -7171,19 +7171,8 @@ async def _replies_for(
             seen.append(frame)
 
 
-@pytest.fixture
-def _short_inline_window(monkeypatch: pytest.MonkeyPatch) -> float:
-    """A 0.3 s window so a test proves the shape without spending 1.5 s per ack."""
-    from local_operator.session.runtime import server as server_mod
-
-    monkeypatch.setattr(server_mod, "SETTINGS_INLINE_ACK_S", 0.3)
-    return 0.3
-
-
 @pytest.mark.asyncio
-async def test_a_deferred_switch_is_acked_queued_and_never_answered_twice(
-    _short_inline_window: float,
-) -> None:
+async def test_a_deferred_switch_is_acked_queued_and_never_answered_twice() -> None:
     handle = _HeldSwitchHandle()
     runtime = RuntimeServer(handle, kind="tui")
     runtime.start()
@@ -7207,7 +7196,9 @@ async def test_a_deferred_switch_is_acked_queued_and_never_answered_twice(
         elapsed = time.monotonic() - started
         assert ack["detail"] == "queued" and ack["queued"] is True
         assert ack["request_id"] == "rid-A"
-        assert elapsed < _short_inline_window + 1.0, elapsed
+        # Acceptance waits on nothing: the body is still parked on the held
+        # loop. 1 s is the loopback round trip on a loaded CI host, not a window.
+        assert elapsed < 1.0, elapsed
         assert handle.landed == [], "the ack must not wait for the switch to land"
 
         handle.release.set()
@@ -7229,9 +7220,7 @@ async def _until_landed(handle: _HeldSwitchHandle, n: int, timeout: float = 5.0)
 
 
 @pytest.mark.asyncio
-async def test_a_deferred_switch_is_accepted_before_even_an_idle_owner_runs(
-    _short_inline_window: float,
-) -> None:
+async def test_a_deferred_switch_is_accepted_before_even_an_idle_owner_runs() -> None:
     """Even an idle owner gets acceptance before application, with one reply."""
     handle = _HeldSwitchHandle()
     handle.release.set()
@@ -7252,7 +7241,7 @@ async def test_a_deferred_switch_is_accepted_before_even_an_idle_owner_runs(
                 "request_id": "r1",
             },
         )
-        replies = await _replies_for(reader, 1, _short_inline_window + 0.7)
+        replies = await _replies_for(reader, 1, 1.0)
         assert len(replies) == 1, replies
         assert replies[0]["op"] == "ack" and replies[0]["detail"] == "queued"
         assert replies[0]["queued"] is True
@@ -7263,9 +7252,7 @@ async def test_a_deferred_switch_is_accepted_before_even_an_idle_owner_runs(
 
 
 @pytest.mark.asyncio
-async def test_a_switch_without_defer_ok_still_waits_for_its_outcome(
-    _short_inline_window: float,
-) -> None:
+async def test_a_switch_without_defer_ok_still_waits_for_its_outcome() -> None:
     """The historic contract is untouched: no ``defer_ok``, no ``queued`` ack."""
     handle = _HeldSwitchHandle()
     runtime = RuntimeServer(handle, kind="tui")
@@ -7275,7 +7262,7 @@ async def test_a_switch_without_defer_ok_still_waits_for_its_outcome(
         record = await _wait_record()
         reader, writer = await _dial(record, client="daemon")
         await _send(writer, {"op": "set_model", "req": 3, "provider": "test", "model_id": "A"})
-        assert await _replies_for(reader, 3, _short_inline_window + 0.5) == []
+        assert await _replies_for(reader, 3, 1.0) == []
         handle.release.set()
         ack = await asyncio.wait_for(_until(reader, "ack", 3), timeout=5)
         assert ack["detail"] != "queued" and "queued" not in ack
@@ -7289,9 +7276,7 @@ async def test_a_switch_without_defer_ok_still_waits_for_its_outcome(
 
 
 @pytest.mark.asyncio
-async def test_queued_switches_keep_send_order_and_each_acks_promptly(
-    _short_inline_window: float,
-) -> None:
+async def test_queued_switches_keep_send_order_and_each_acks_promptly() -> None:
     """A then B: both acked within the window while A is held; A lands first."""
     handle = _HeldSwitchHandle()
     runtime = RuntimeServer(handle, kind="tui")
@@ -7318,7 +7303,16 @@ async def test_queued_switches_keep_send_order_and_each_acks_promptly(
         elapsed = time.monotonic() - started
         assert first["detail"] == second["detail"] == "queued"
         # B's clock starts at ITS admission, not when A lands: A is still held.
-        assert elapsed < _short_inline_window + 1.0, elapsed
+        # Acceptance waits on nothing: the body is still parked on the held
+        # loop. 1 s is the loopback round trip on a loaded CI host, not a window.
+        assert elapsed < 1.0, elapsed
+        # A's body starts AFTER its ack (receipt first), so wait for it to
+        # enter before asserting B has not: asserting at once raced the body.
+        deadline = time.monotonic() + 5
+        while not handle.entered:
+            assert time.monotonic() < deadline, "A never started"
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
         assert handle.entered == ["A"], "B must not start before A has landed"
         handle.release.set()
         await _until_landed(handle, 2)
@@ -7333,9 +7327,7 @@ async def test_queued_switches_keep_send_order_and_each_acks_promptly(
 
 
 @pytest.mark.asyncio
-async def test_a_queued_switch_survives_its_connection_dropping(
-    _short_inline_window: float,
-) -> None:
+async def test_a_queued_switch_survives_its_connection_dropping() -> None:
     """The desktop redials freely; a queued switch is a promise, not a socket's."""
     handle = _HeldSwitchHandle()
     runtime = RuntimeServer(handle, kind="tui")
@@ -7372,7 +7364,7 @@ async def test_a_queued_switch_survives_its_connection_dropping(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_cancels_a_switch_still_queued(_short_inline_window: float) -> None:
+async def test_shutdown_cancels_a_switch_still_queued() -> None:
     """Shutdown cannot wait out a turn step: the queued body is cancelled, not leaked."""
     handle = _HeldSwitchHandle()
     runtime = RuntimeServer(handle, kind="tui")

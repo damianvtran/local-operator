@@ -16,5 +16,6 @@
   "relay.session.model.sheet_title": "模型",
   "relay.session.model.filter_placeholder": "筛选模型",
   "relay.session.model.loading": "正在加载……",
-  "relay.session.model.queued": "已选择 — 将在下一步生效"
+  "relay.session.model.queued": "更改已排队——将在下一步生效",
+  "relay.session.model.refused": "未能应用 {model}：{reason}"
 }
