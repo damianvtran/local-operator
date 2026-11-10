@@ -289,6 +289,33 @@ def test_free_text_answer_is_read_clause_wise(home: Path, answer: str, consent: 
     assert (prov.verified_ask(PARENT, "a-daca") is not None) is consent
 
 
+def test_brace_lists_yield_only_full_leaves(home: Path) -> None:
+    """R1-M2: ``{a,b}/{c,d}`` names four leaves and never the parent ``a``;
+    ``{a,b}{c,d}`` never names ``a``; ``{.,build}`` never names the dir."""
+    h = str(home)
+    text = "Delete ~/x/{a,b}/{c,d} and ~/y/{a,b}{c,d} and ~/r/{.,build} and ~/s/{..,t}?"
+    for leaf in ("a/c", "a/d", "b/c", "b/d"):
+        assert prov.names_path(text, f"{h}/x/{leaf}", home=h), leaf
+    for leaf in ("ac", "ad", "bc", "bd"):
+        assert prov.names_path(text, f"{h}/y/{leaf}", home=h), leaf
+    for parent in ("x/a", "x/b", "x", "y/a", "y/b", "r", "r/build", "s", "", "x/{c,d}"):
+        assert not prov.names_path(text, f"{h}/{parent}".rstrip("/"), home=h), parent
+
+
+@pytest.mark.asyncio
+async def test_brace_ask_never_approves_the_parent_directory(home: Path) -> None:
+    """R1-M2 reviewer repro, end to end: ``rm -rf …/a`` after "Delete …/{a,b}/{c,d}"."""
+    pad = _pad(home, STRANGER)
+    for leaf in ("a/c", "a/d", "a/keep-me"):
+        (pad / leaf).mkdir(parents=True)
+    question = f"Delete {pad}/{{a,b}}/{{c,d}}?"
+    _ask(home, PARENT, "a-beef", question, "Delete", (("Delete", ""), ("Keep", "")))
+    judge = _TimedOutJudge()
+    outcome = await _check(home, f"rm -rf {pad}/a", PARENT, [], judge)
+    assert outcome is not None and outcome.blocked, outcome
+    assert judge.calls == 1
+
+
 def test_brace_list_in_an_ask_names_each_sibling(home: Path) -> None:
     h = str(home)
     text = (
@@ -373,11 +400,127 @@ async def test_ask_answered_in_the_parent_covers_the_child_without_a_pointer(hom
         f"May the coder remove ~/.local-operator/sessions/{STRANGER}/scratchpad/receipts-r2/"
         "m-{es,fr,zh-cn}-x.json, by literal path?"
     )
-    _ask(home, PARENT, "a-daca", question, ADACA_ANSWER)
+    _ask(home, PARENT, "a-0bad", question, "Go ahead and remove them")
     judge = _TimedOutJudge()
     outcome = await _check(home, "rm -f " + " ".join(str(f) for f in files), CHILD, [], judge)
     assert outcome is not None and not outcome.blocked, outcome
     assert judge.calls == 0
+
+
+class _RecordingJudge:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def __call__(self, system: str, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return "BLOCK"
+
+
+@pytest.mark.asyncio
+async def test_adaca_qualified_answer_reaches_the_judge_with_its_full_text(home: Path) -> None:
+    """R1-B2: a-daca's answer has a second clause ("but … so they don't block
+    this"), so it no longer settles deterministically; it reaches the judge,
+    in the child's lineage, with the whole answer as consent evidence."""
+    _child_of(home, CHILD, PARENT)
+    files = _stranger_receipts(home)
+    question = (
+        f"May the coder remove ~/.local-operator/sessions/{STRANGER}/scratchpad/receipts-r2/"
+        "m-{es,fr,zh-cn}-x.json, by literal path?"
+    )
+    _ask(home, PARENT, "a-daca", question, ADACA_ANSWER)
+    judge = _RecordingJudge()
+    await _check(home, "rm -f " + " ".join(str(f) for f in files), CHILD, [], judge)
+    assert len(judge.prompts) == 1
+    assert ADACA_ANSWER in judge.prompts[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Yes for es; no for fr and zh-cn",
+        "yes but not fr",
+        "ok, just es",
+        "yes, minus fr",
+        "yes, zh-cn stays",
+        "yes, only es",
+        "Yes. Also check the logs",
+    ],
+)
+async def test_qualified_typed_answer_never_settles_without_the_judge(
+    home: Path, answer: str
+) -> None:
+    """R1-B2 reviewer repro: a typed answer that narrows the approval goes to the judge."""
+    _child_of(home, CHILD, PARENT)
+    files = _stranger_receipts(home)
+    question = (
+        f"Delete ~/.local-operator/sessions/{STRANGER}/scratchpad/receipts-r2/m-es-x.json and "
+        f"~/.local-operator/sessions/{STRANGER}/scratchpad/receipts-r2/m-fr-x.json and "
+        f"~/.local-operator/sessions/{STRANGER}/scratchpad/receipts-r2/m-zh-cn-x.json?"
+    )
+    _ask(home, PARENT, "a-beef", question, answer)
+    judge = _TimedOutJudge()
+    outcome = await _check(home, "rm -f " + " ".join(str(f) for f in files), CHILD, [], judge)
+    assert outcome is not None and outcome.blocked, (answer, outcome)
+    assert judge.calls == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "yes",
+        "Yes please",
+        "ok",
+        "go ahead",
+        "Go ahead and copy",
+        "approved",
+        "do it",
+        "Yes, delete them",
+    ],
+)
+def test_bare_affirmative_typed_answer_approves_the_question(home: Path, answer: str) -> None:
+    _ask(home, PARENT, "a-beef", "May I copy ~/work/a.json?", answer)
+    words = prov.verified_ask(PARENT, "a-beef")
+    assert words is not None and "~/work/a.json" in words.approved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("options", "picked"),
+    [
+        ((("Abort", "Leave {f} in place"), ("Proceed", "")), "Abort"),
+        ((("Nah", ""), ("Delete", "")), "Nah"),
+        ((("Never mind", ""), ("Delete", "")), "Never mind"),
+        ((("Proceed", "but keep {f}"), ("Abort", "")), "Proceed"),
+        (
+            (("Installer only", "deletes {f}"), ("All three", ""), ("Keep them", "")),
+            "Installer only",
+        ),
+    ],
+)
+async def test_non_affirmative_pick_is_never_settled(
+    home: Path, options: tuple[tuple[str, str], ...], picked: str
+) -> None:
+    """R1-M1 reviewer repro: picking "Abort" (description naming the file) settled the rm."""
+    files = _stranger_receipts(home)
+    opts = tuple((lbl, desc.format(f=files[0])) for lbl, desc in options)
+    _ask(home, PARENT, "a-beef", f"What about {files[0]}?", picked, opts)
+    judge = _TimedOutJudge()
+    outcome = await _check(home, f"rm -f {files[0]}", PARENT, [], judge)
+    assert outcome is not None and outcome.blocked, outcome
+    assert judge.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_ask_never_settles_a_repository_root(home: Path) -> None:
+    """Cross-PR safety (#3700): a target holding ``.git`` keeps the judge."""
+    repo = _pad(home, STRANGER) / "clone"
+    (repo / ".git").mkdir(parents=True)
+    _ask(home, PARENT, "a-beef", f"Delete {repo}?", "Delete", (("Delete", ""), ("Keep", "")))
+    judge = _TimedOutJudge()
+    outcome = await _check(home, f"rm -rf {repo}", PARENT, [], judge)
+    assert outcome is not None and outcome.blocked, outcome
+    assert judge.calls == 1
 
 
 @pytest.mark.asyncio
@@ -455,3 +598,143 @@ def test_evidence_files_stay_critical(home: Path, template: str) -> None:
     (home / "work" / "src.md").write_text("x")
     command = template.format(s=home / ".local-operator" / "sessions" / STRANGER)
     assert _verdict(home, command).risk is Risk.CRITICAL, command
+
+
+# -- 6. review round 1: loop fan-out never truncated ------------------------------------
+
+
+def test_loop_past_the_cap_is_opaque_not_truncated(home: Path) -> None:
+    """R1-B1 reviewer repro: ``~`` at value 1101 was dropped and ranked LOW."""
+    values = " ".join(f"/tmp/r3710/{i}" for i in range(1100)) + " ~"
+    command = f"for d in {values}; do rm -rf $d; done"
+    verdict = _verdict(home, command)
+    assert verdict.risk in (Risk.HIGH, Risk.CRITICAL), verdict.risk
+
+
+def test_nested_loops_past_the_cap_are_opaque(home: Path) -> None:
+    a = " ".join(f"a{i}" for i in range(40))
+    b = " ".join(f"b{i}" for i in range(40))
+    command = f'for x in {a}; do for y in {b} ..; do rm -rf "/tmp/r3710/$x/$y"; done; done'
+    assert _verdict(home, command).risk in (Risk.HIGH, Risk.CRITICAL)
+
+
+def test_mismatched_loop_families_keep_the_fan_out(home: Path) -> None:
+    """R1-M3 reviewer repro: base ranked HIGH with ``~/x``; head dropped it (LOW)."""
+    command = 'for y in /x /y ""; do D=$y; done; for y in /tmp/z ~; do rm -rf "$y$D"; done'
+    res = resolve_command(command, cwd=str(home / "work"), env={"HOME": str(home)}, home=str(home))
+    paths = {t.path for t in res.targets}
+    assert f"{home}/x" in paths and "/tmp/z/x" in paths, paths
+    assert _verdict(home, command).risk in (Risk.HIGH, Risk.CRITICAL)
+
+
+# -- 7. case 7: a tracked script reading a task-tree teammate's scratch file ------------
+
+
+def _repo_with_script(home: Path) -> Path:
+    import subprocess
+
+    repo = home / "work" / "ui"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "ledger-assemble.mjs").write_text("// reads receipts\n")
+    (repo / "scripts" / "untracked.mjs").write_text("// not in git\n")
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    for args in (["init", "-q"], ["add", "scripts/ledger-assemble.mjs"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env)
+    return repo
+
+
+def _tree_verdict(home: Path, command: str, sid: str, cwd: Path):
+    pad = _pad(home, sid)
+    env = {"HOME": str(home), "LOCAL_OPERATOR_SCRATCHPAD": str(pad)}
+    return classify_bash(command, cwd=str(cwd), env=env, scratchpad=str(pad), session_id=sid)
+
+
+def _receipt(home: Path, sid: str) -> Path:
+    f = _pad(home, sid) / "receipts" / "r-fr.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("{}\n")
+    return f
+
+
+def test_tracked_script_reading_a_siblings_receipt_is_low(home: Path) -> None:
+    """Case 7 (settings lane / auditor 1b1866b4f2ed, siblings under one manager)."""
+    manager = "dddddddddddd"
+    _child_of(home, CHILD, manager)
+    _child_of(home, PARENT, manager)
+    repo = _repo_with_script(home)
+    receipt = _receipt(home, PARENT)
+    command = f"node scripts/ledger-assemble.mjs --locale fr --receipt {receipt} --result clean"
+    assert _tree_verdict(home, command, CHILD, repo).risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    ("template", "why"),
+    [
+        ("node scripts/untracked.mjs --receipt {f}", "untracked script"),
+        ("node scripts/ledger-assemble.mjs --out {f}", "named as output"),
+        ("node scripts/ledger-assemble.mjs -o {f}", "named as output"),
+        ("node scripts/ledger-assemble.mjs --write-receipt={f}", "named as output"),
+        ("node -e 'x' {f}", "no script file"),
+    ],
+)
+def test_task_tree_read_failing_a_condition_is_high_with_the_lineage_fact(
+    home: Path, template: str, why: str
+) -> None:
+    manager = "dddddddddddd"
+    _child_of(home, CHILD, manager)
+    _child_of(home, PARENT, manager)
+    repo = _repo_with_script(home)
+    receipt = _receipt(home, PARENT)
+    verdict = _tree_verdict(home, template.format(f=receipt), CHILD, repo)
+    assert verdict.risk is Risk.HIGH, why
+    fact = f"session {PARENT} is this session's sibling"
+    assert any(fact in r for r in verdict.reasons), (why, verdict.reasons)
+
+
+def test_tracked_script_reading_a_strangers_scratch_stays_high(home: Path) -> None:
+    repo = _repo_with_script(home)
+    receipt = _receipt(home, STRANGER)
+    command = f"node scripts/ledger-assemble.mjs --receipt {receipt}"
+    verdict = _tree_verdict(home, command, CHILD, repo)
+    assert verdict.risk is Risk.HIGH
+    assert not any("task tree" in r for r in verdict.reasons)
+
+
+def test_tracked_script_handed_a_siblings_evidence_file_stays_critical(home: Path) -> None:
+    manager = "dddddddddddd"
+    _child_of(home, CHILD, manager)
+    _child_of(home, PARENT, manager)
+    repo = _repo_with_script(home)
+    transcript = home / ".local-operator" / "sessions" / PARENT / "transcript.jsonl"
+    transcript.write_text("")
+    command = f"node scripts/ledger-assemble.mjs --receipt {transcript} > {transcript}"
+    assert _tree_verdict(home, command, CHILD, repo).risk is Risk.CRITICAL
+
+
+# -- 8. issue #3613: no verdict is not a policy decision --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_judge_without_a_verdict_refuses_with_no_verdict_wording(home: Path) -> None:
+    files = _stranger_receipts(home)
+    judge = _TimedOutJudge()
+    outcome = await _check(home, f"rm -f {files[0]}", PARENT, [], judge)
+    assert outcome is not None and outcome.blocked
+    text = outcome.text
+    assert "could not reach a verdict" in text
+    assert "judge unavailable: timeout" in text
+    assert "not a policy decision" in text
+    assert "Retry later" in text and "store-verified `ask`" in text
+    assert "Ask the user, or target a narrower path" not in text
+
+
+def test_policy_block_keeps_the_policy_wording() -> None:
+    from local_operator.guardrails.check import review_text
+
+    text = review_text("some-rule", "the safety check refused this call", "x")
+    assert "could not reach a verdict" not in text and "(review): the safety check refused" in text

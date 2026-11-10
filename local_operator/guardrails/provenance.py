@@ -52,8 +52,10 @@ from __future__ import annotations
 
 import fnmatch
 import glob as _glob
+import itertools
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -103,7 +105,7 @@ TRUSTED_ASK_SURFACES = frozenset({"terminal", "tui", "desktop", "mirror"})
 #: Words that make an ask answer a refusal ("Leave them", "No, keep it").
 _DECLINE_RE = re.compile(
     r"(?i)\b(no|nope|keep|cancel|don'?t|do not|stop|leave|not now|not yet|hold off"
-    r"|skip|later|wait|no thanks)\b"
+    r"|skip|later|wait|no thanks|abort|nah|negative|never ?mind|reject|deny|decline)\b"
 )
 _ASK_ID_RE = re.compile(r"(?<![\w-])(a-[0-9a-f]{4,12})(?![\w-])")
 #: Where a free-text answer's first clause ends ("Go ahead and copy | but …").
@@ -116,10 +118,24 @@ _CARVE_OUT_RE = re.compile(
     r"(?:delete|remove|copy|overwrite|touch|move|rm|run|do|change)\b"
     r"|\bnot\s+(?:the|that|those|this|these|any|all)\b"
 )
-#: A typed answer that plainly says yes.
-_AFFIRM_RE = re.compile(
-    r"(?i)^\W*(?:yes|yep|yeah|ok|okay|sure|go ahead|go for it|approved?|proceed|do it|please do"
-    r"|confirm(?:ed)?|sounds good|lgtm)\b"
+#: A typed answer that is a BARE yes, matched against the WHOLE answer
+#: (review R1-B2, PR #3710): "Go ahead and copy", "yes please", "ok, delete
+#: them". Anything more — a second clause, "but", "not", "just", "only",
+#: "minus", "stays" — is not settled here; the judge reads its text. A prefix
+#: match let "Yes for es; no for fr" approve all three files.
+_BARE_AFFIRM_RE = re.compile(
+    r"(?i)\W*(?:yes|yep|yeah|ok|okay|sure|go ahead|go for it|approved?|proceed|do it|please do"
+    r"|confirm(?:ed)?|sounds good|lgtm)"
+    r"(?:[\s,]+(?:and\s+)?(?:copy|delete|remove|move|proceed|do it|go ahead)"
+    r"(?:\s+(?:it|them|those|these|all|all of them|everything|the files))?)?"
+    r"(?:[\s,]+please)?\W*"
+)
+#: A PICKED option label that says yes to the question (review R1-M1): only
+#: such a pick settles without the judge; "Abort", "Installer only", "Nah"
+#: never do, whatever their description names.
+_AFFIRM_OPTION_RE = re.compile(
+    r"(?i)^\W*(?:yes|ok|okay|sure|approve[ds]?|go ahead|proceed|confirm|do it"
+    r"|delete|remove|copy|move|overwrite|replace|clean ?up)\b"
 )
 #: Pointer-less ask lookup in the lineage (``lineage_asks``): recent only.
 _LINEAGE_ASK_WINDOW_MS = 24 * 3600 * 1000
@@ -1581,19 +1597,36 @@ def _approved_text(
     Settled deterministically only when the answer can mean one thing:
     * the question itself, when it is a yes/no ask — every option but the one
       picked declines (a-a382: "Remove all 57" vs "Keep them") — or the
-      operator typed an affirmative answer ("Go ahead and copy");
-    * otherwise only the PICKED options' own label and description: picking
-      "Installer only" approves the installer it names, not every path the
-      question listed.
+      operator typed a BARE affirmative ("Go ahead and copy", whole answer);
+    * otherwise only the PICKED options' own label and description, and only
+      when each picked label says yes and nothing in it declines.
+    Anything else approves nothing here: a qualified typed answer ("yes but
+    not fr", a-daca's "… but also send this to Aida …") or a pick like
+    "Installer only" / "Abort" still reaches the judge as the operator's
+    words (``OperatorWords.text``), unless ``_answer_declines`` vetoed it.
     """
     out: list[str] = []
     picked = [o for o in opts if str(o.get("label") or "") in chosen]
-    for o in picked:
+    typed = [v for v in chosen if v not in labels]
+    # A pick approves only when its label says yes and nothing in label or
+    # description declines (review R1-M1: "Abort" / "Leave … in place").
+    affirmed = [
+        o
+        for o in picked
+        if _AFFIRM_OPTION_RE.match(str(o.get("label") or ""))
+        and not _DECLINE_RE.search(f"{o.get('label') or ''} {o.get('description') or ''}")
+    ]
+    if len(affirmed) != len(picked):
+        return []
+    for o in affirmed:
         out.append(f"{o.get('label') or ''}: {o.get('description') or ''}")
     others = [lbl for lbl in labels if lbl not in chosen]
     yes_no = bool(picked) and bool(others) and all(_DECLINE_RE.search(lbl) for lbl in others)
-    typed = [v for v in chosen if v not in labels]
-    if (yes_no and not typed) or (typed and all(_AFFIRM_RE.match(v) for v in typed)):
+    if typed and not all(_BARE_AFFIRM_RE.fullmatch(v) for v in typed):
+        # A qualified typed answer is the judge's to read (R1-B2); the
+        # question text is never approved by it, nor are picks beside it.
+        return []
+    if (yes_no and not typed) or typed:
         out.append(str(q.get("question") or ""))
     return out
 
@@ -1740,6 +1773,58 @@ def session_lineage(
     return lineage, operator_opened
 
 
+def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
+    """The top of ``session_id``'s SUBAGENT tree: ``parent`` links only.
+
+    WHY parent-only (case 7, 2026-11-09): sibling lanes under one manager
+    (``a13e8dbc573f``'s auditor and settings lane) are one owner, but an
+    agent-opened workstream (``opened_by``) is a separate task, so every
+    workstream an assistant ever opened never becomes one tree. The registry
+    row is read first (``read_lineage``), then ``origin.json``.
+    """
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    registry = read_lineage(root)
+    valid = re.compile(r"[A-Za-z0-9_-]{1,64}")
+    seen: list[str] = []
+    sid = session_id
+    while sid and valid.fullmatch(sid) and sid not in seen and len(seen) < 32:
+        seen.append(sid)
+        row = registry.get(sid) or {}
+        parent = row.get("parent") or (read_origin(root, sid) or {}).get("parent")
+        if not isinstance(parent, str) or not parent:
+            break
+        sid = parent
+    return seen[-1] if seen else session_id
+
+
+def same_task_tree(a: str, b: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
+    """How ``b`` relates to ``a`` in one subagent tree, or ``""`` if it does not.
+
+    ``"ancestor"``, ``"descendant"`` or ``"sibling"`` (same root, neither above
+    the other). Shown to the judge verbatim as the lineage fact.
+    """
+    if not a or not b or a == b:
+        return ""
+    root_a = task_tree_root(a, state_root=state_root)
+    if root_a != task_tree_root(b, state_root=state_root):
+        return ""
+    lineage_a, _ = session_lineage(a, state_root=state_root)
+    if b in lineage_a:
+        return "ancestor"
+    lineage_b, _ = session_lineage(b, state_root=state_root)
+    return "descendant" if a in lineage_b else "sibling"
+
+
+def tracked_script(path: str | None) -> bool:
+    """Is ``path`` a regular file git tracks in a repository working tree?"""
+    if not path or os.path.islink(path) or not os.path.isfile(path):
+        return False
+    directory, name = os.path.split(path)
+    return _git(["ls-files", "--error-unmatch", "--", name], directory) is not None
+
+
 def operator_brief(
     messages: Any,
     *,
@@ -1857,33 +1942,58 @@ def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
 _PROSE_END = frozenset("?!:]}")
 
 
-#: A path with ONE brace list in it, as asks write a set of siblings:
-#: ``~/x/merge-{es,fr,zh-cn}-909a.json`` or ``~/r/.worktrees/{a, b (QA
-#: scratch), c}``. The list may hold spaces and parenthetical notes.
-_BRACE_PATH_RE = re.compile(r"((?:~|/)[^\s`'\"{}]*)\{([^{}]{1,4000})\}([^\s`'\",;){}]*)")
+#: A path word holding brace lists, as asks write a set of siblings:
+#: ``~/x/merge-{es,fr,zh-cn}-909a.json``, ``~/r/.worktrees/{a, b (QA
+#: scratch), c}`` or ``~/x/{a,b}/{c,d}``. A list may hold spaces and
+#: parenthetical notes. The lookbehind anchors the word at its start, so no
+#: tail of a word (``/{c,d}``) is ever read as a path of its own.
+_BRACE_PATH_RE = re.compile(
+    r"(?<![^\s`'\"(\[])((?:~|/)(?:[^\s`'\",;(){}]|\{[^{}]{1,4000}\})*\{[^{}]{1,4000}\}"
+    r"(?:[^\s`'\",;(){}]|\{[^{}]{1,4000}\})*)"
+)
+_BRACE_LIST_RE = re.compile(r"\{([^{}]*)\}")
 _MAX_PROSE_BRACE_ITEMS = 256
 
 
 def _expand_prose_braces(text: str) -> str:
-    """Spell out brace lists in path words, so each sibling is named literally.
+    """Spell out brace lists in path words, so each leaf is named literally.
 
     WHY (incident 2026-11-09, ask a-daca): the operator approved "…/onboarding-
     value-merge-{es,fr,hi,ru,ur,vi,zh-cn}-909a2c50a0bd.json"; ``_PATHISH``
     stopped at the first comma, so no receipt was "named". Each item must be
     one path piece (no whitespace once its ``(note)`` is dropped, no wildcard
-    added) or the whole list is left as written — never guess a name.
+    added) or the whole word is left as written — never guess a name.
+
+    Review R1-M2 (PR #3710): a word yields ONLY its fully expanded leaves
+    (``~/x/{a,b}/{c,d}`` → four paths, every list expanded), never a
+    half-expanded word whose first piece is a PARENT of what the operator
+    named. ``.``/``..``/empty items are refused: ``~/r/{.,build}`` would
+    name ``~/r`` itself, approving a recursive delete of the whole tree.
     """
 
     def spell(match: re.Match[str]) -> str:
-        prefix, body, suffix = match.groups()
-        items = [re.sub(r"\([^()]*\)", "", item).strip() for item in body.split(",")]
-        if (
-            len(items) < 2
-            or len(items) > _MAX_PROSE_BRACE_ITEMS
-            or any(not item or re.search(r"[\s*?\[]", item) for item in items)
-        ):
-            return match.group(0)  # not a sibling list: left exactly as written
-        return " ".join(prefix + item + suffix for item in items)
+        word = match.group(1)
+        pieces = _BRACE_LIST_RE.split(word)  # literal, items, literal, items, …
+        lists: list[list[str]] = []
+        for body in pieces[1::2]:
+            items = [re.sub(r"\([^()]*\)", "", item).strip() for item in body.split(",")]
+            if len(items) < 2 or any(
+                not item
+                or re.search(r"[\s*?\[{}]", item)
+                or any(part in ("", ".", "..") for part in item.split("/"))
+                for item in items
+            ):
+                return word  # not a sibling list: left exactly as written
+            lists.append(items)
+        if math.prod(len(items) for items in lists) > _MAX_PROSE_BRACE_ITEMS:
+            return word
+        leaves = []
+        for combo in itertools.product(*lists):
+            leaf = pieces[0]
+            for item, literal in zip(combo, pieces[2::2], strict=True):
+                leaf += item + literal
+            leaves.append(leaf)
+        return " ".join(leaves)
 
     return _BRACE_PATH_RE.sub(spell, text)
 

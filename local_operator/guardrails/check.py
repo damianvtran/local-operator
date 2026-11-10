@@ -257,7 +257,25 @@ def _critical_text(verdict: Verdict) -> str:
     )
 
 
+#: ``judge.run_judge``/``parse_answer`` prefix every no-verdict reason with this.
+JUDGE_UNAVAILABLE = "judge unavailable"
+
+
 def review_text(rule: str, reason: str, targets: str) -> str:
+    if reason.startswith(JUDGE_UNAVAILABLE):
+        # Issue #3613: a timeout, an exception, a host with no judge model or
+        # an off-contract answer is NO verdict. The call still fails closed,
+        # but the agent must not read it as a policy refusal and "adapt" by
+        # rewording or duplicating files; it should retry later or get the
+        # operator's answer. The ``judge unavailable: <cause>`` phrase stays
+        # verbatim so the TUI notice and log matching keep working.
+        return (
+            f"{BLOCK_MARKER} {rule} (review): the safety check could not reach a verdict "
+            f"({reason}). This is not a policy decision: nothing judged this call unsafe, "
+            f"but a call that cannot be checked is not run. Targets: {targets}. Nothing was "
+            "run. Retry later, or settle it with a store-verified `ask` answer or an "
+            "explicit operator instruction naming these paths."
+        )
     tail = (
         SUPPORTED_DELETE_PATHS
         if rule == DANGEROUS_DELETE_RULE
@@ -417,6 +435,11 @@ class DeleteCase:
             # verified answer whose deterministic approval names the path
             # (``OperatorWords.approved``) is the operator's decision; the
             # judge could only agree or override them.
+            if os.path.lexists(os.path.join(path, ".git")):
+                # A repository or worktree root is never settled by an ask
+                # alone: its ``git:`` facts (open PR, running owner — PR
+                # #3700) are the judge's to weigh against the answer.
+                return ""
             words = next(
                 (
                     w
@@ -466,6 +489,11 @@ class DeleteCase:
             if path in by_evidence and path not in self.operator_only:
                 basis.append(f"{path} created by {by_evidence[path]}")
                 continue
+            if os.path.lexists(os.path.join(path, ".git")):
+                # A repository or worktree root is never settled by an ask
+                # alone: its ``git:`` facts (open PR, running owner — PR
+                # #3700) are the judge's to weigh against the answer.
+                return ""
             words = next(
                 (
                     w

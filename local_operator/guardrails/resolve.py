@@ -898,6 +898,15 @@ class Target:
     forced: bool = False
     #: Double force is narrowly allowed for a verified stale git initialization lock.
     force_count: int = 0
+    #: A ``touch`` handed to an interpreter (``node``/``python``) running a
+    #: script FILE: that script's absolute path. ``classify`` lets a read of a
+    #: same-task-tree session's scratch file rank LOW only when the script is
+    #: git-tracked (case 7, 2026-11-09: ``node scripts/i18n/ledger-assemble.mjs
+    #: --receipt <auditor pad>/…json`` from a sibling lane).
+    script: str | None = None
+    #: The mention sits in a word the command names as an OUTPUT (``-o``,
+    #: ``--out*``, ``--write*``, glued or as the next word): never a read.
+    as_output: bool = False
 
 
 @dataclass(frozen=True)
@@ -1095,6 +1104,43 @@ class Resolution:
     #: the raw text; see ``_RECURSIVE_GLOB_RE``). Only then does ``**`` match
     #: any depth (bash's default treats it as ``*``; review round 8, MAJOR-1).
     globstar: bool = False
+
+
+#: Interpreters whose first positional word is a script FILE they run.
+_INTERPRETER_RE = re.compile(r"(?:node|python(?:3(?:\.\d+)?)?)")
+#: An option naming an output: ``-o``, ``--out``, ``--output``, ``--outfile``,
+#: ``--write``, ``--write-to``… alone (value in the next word) or glued.
+_OUTPUT_FLAG_RE = re.compile(r"(?:-o|--out[\w-]*|--write[\w-]*)")
+_OUTPUT_GLUED_RE = re.compile(r"(?:-o.|--out[\w-]*=|--write[\w-]*=)")
+
+
+def _interpreter_script(name: str, words: list[Expanded], cwd: str | None) -> str | None:
+    """The script ``node``/``python`` runs, as an absolute path, else ``None``.
+
+    Only the plain shape ``<interpreter> <script> …``: any option before the
+    script (``-m``, ``-c``, ``-e``, ``--require x``) gives ``None``, so the
+    caller keeps the conservative ranking rather than guess which word runs.
+    """
+    if not _INTERPRETER_RE.fullmatch(name) or cwd is None:
+        return None
+    idx = next((i for i, w in enumerate(words) if os.path.basename(w.text) == name), None)
+    if idx is None or idx + 1 >= len(words):
+        return None
+    word = words[idx + 1]
+    if word.opaque or word.pattern is not None or not word.text or word.text.startswith("-"):
+        return None
+    return os.path.normpath(os.path.join(cwd, os.path.expanduser(word.text)))
+
+
+def _output_word_ids(words: list[Expanded]) -> set[int]:
+    """``id()`` of each word the command names as an output (see ``Target.as_output``)."""
+    out: set[int] = set()
+    for i, w in enumerate(words):
+        if _OUTPUT_GLUED_RE.match(w.text):
+            out.add(id(w))
+        if _OUTPUT_FLAG_RE.fullmatch(w.text) and i + 1 < len(words):
+            out.add(id(words[i + 1]))
+    return out
 
 
 def _operands(
@@ -2196,6 +2242,15 @@ class _Walker:
                 CREDENTIAL_MARK if any(CREDENTIAL_MARK in v.text for v in values) else OPAQUE_MARK
             )
             return
+        if len(values) > _MAX_FOR_COMBINATIONS:
+            # Review R1-B1 (PR #3710): a list too long to enumerate is
+            # unknowable, exactly as ``MAX_BRACE_RESULTS`` treats a brace
+            # list. Truncating it instead hid ``~`` at position 1101 and
+            # ranked ``rm -rf $d`` LOW.
+            st.env[var] = (
+                CREDENTIAL_MARK if any(CREDENTIAL_MARK in v.text for v in values) else OPAQUE_MARK
+            )
+            return
         # The body runs once per value; the walker sees it once, so the variable
         # carries EVERY value and ``_add`` fans a target out per value.
         st.env[var] = values[0].text
@@ -2374,9 +2429,13 @@ class _Walker:
         A misparse can therefore cost a judge call, never a LOW.
         """
         st = self.state
+        script = _interpreter_script(name, args, st.cwd)
+        outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]
-        texts = [w.text for w in words] + [a.split("=", 1)[1] for a in assigns if "=" in a]
-        for text in texts:
+        texts = [(w.text, id(w) in outputs) for w in words] + [
+            (a.split("=", 1)[1], False) for a in assigns if "=" in a
+        ]
+        for text, as_output in texts:
             for raw in _MENTION_RE.findall(text):
                 if OPAQUE_MARK in raw or TEMP_MARK in raw:
                     continue  # an opaque part: the word itself is added below
@@ -2396,7 +2455,13 @@ class _Walker:
                     )
                 else:
                     self.result.touched.append(
-                        Target(path=path, op="touch", program=name or "a program")
+                        Target(
+                            path=path,
+                            op="touch",
+                            program=name or "a program",
+                            script=script,
+                            as_output=as_output,
+                        )
                     )
             if st.cwd is None:
                 for part in re.split(r"[\s/'\"=]+", text):
@@ -2520,33 +2585,49 @@ class _Walker:
         # Only the spans the word's own ``$VAR`` references filled are
         # rewritten (``Expanded.refs``); a target that never names the loop
         # variable is recorded once, as written.
-        for _roots, values in self._iterations(exp):
+        iterations = self._iterations(exp)
+        if iterations is None:
+            # Too many combinations to enumerate: the word is unknowable,
+            # never truncated (review R1-B1).
+            target.opaque = True
+            target.opaque_contained = False
+            return
+        for _roots, values in iterations:
             extra = _target(_fan_out(exp, values), op, program, self.state)
             extra.selected = selected
             self.result.targets.append(extra)
 
-    def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]]:
-        """``(loop vars, {ref name: value})`` for every iteration after the first."""
+    def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
+        """``(loop vars, {ref name: value})`` for every iteration after the first.
+
+        ``None`` when the combinations exceed :data:`_MAX_FOR_COMBINATIONS`:
+        the caller marks the word opaque. Never a truncated list (review
+        R1-B1: values past the cap were silently dropped, hiding ``~``).
+        """
         names = {r[0] for r in exp.refs if r[0] in self.for_lists}
-        families: dict[str, list[str]] = {}
+        # Variables move in step only when they share a loop AND a list length.
+        # A stale binding from an earlier loop of a different length (review
+        # R1-M3: ``D=$y`` from a 3-value loop, ``$y`` rebound by a 2-value
+        # one) is its own family, so the word takes the cartesian product —
+        # a superset of what bash runs, never a dropped value.
+        families: dict[tuple[str, int], list[str]] = {}
         for n in sorted(names):
-            families.setdefault(self.for_roots[n], []).append(n)
-        families = {
-            root: family
-            for root, family in families.items()
-            if all(len(self.for_lists[n]) == len(self.for_lists[root]) for n in family)
-        }
+            families.setdefault((self.for_roots[n], len(self.for_lists[n])), []).append(n)
         if not families:
             return []
+        total = 1
+        for _, length in families:
+            total *= length
+        if total > _MAX_FOR_COMBINATIONS:
+            return None
         # Nested loops run every combination, so the word does too.
-        ranges = [range(len(self.for_lists[root])) for root in families]
+        ranges = [range(length) for _, length in families]
         out: list[tuple[tuple[str, ...], dict[str, str]]] = []
-        for combo in itertools.islice(itertools.product(*ranges), 1, _MAX_FOR_COMBINATIONS):
+        for combo in itertools.islice(itertools.product(*ranges), 1, None):
             values: dict[str, str] = {}
-            for (root, family), i in zip(families.items(), combo, strict=True):
-                del root
+            for family, i in zip(families.values(), combo, strict=True):
                 values.update({n: self.for_lists[n][i] for n in family})
-            out.append((tuple(families), values))
+            out.append((tuple(root for root, _ in families), values))
         return out
 
     def _assign_word(self, word: Expanded) -> None:
@@ -2562,6 +2643,10 @@ class _Walker:
         if "=" not in word.text or not word.refs:
             return
         iterations = self._iterations(word)
+        if iterations is None:
+            # Unenumerable: the variable is unknowable (review R1-B1).
+            self.state.env[name] = OPAQUE_MARK
+            return
         if not iterations:
             return
         # One loop: the variable moves in step with it. Several (nested): it

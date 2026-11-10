@@ -387,6 +387,43 @@ def _in_session_scratchpad(path: str, sessions: str, *, pattern: bool = False) -
 OTHER_SCRATCHPAD = "another session's files"
 
 
+def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
+    """Case 7 (2026-11-09): a read of a TASK-TREE session's scratch file.
+
+    The settings lane ran ``node scripts/i18n/ledger-assemble.mjs --receipt
+    <auditor pad>/….json``; the auditor was its sibling under one manager,
+    and the backstop refused it as another session's files. ``None`` = LOW:
+    the file exists, its session is in the caller's subagent tree
+    (``provenance.same_task_tree``), the interpreter runs a git-tracked script
+    (``Target.script``) and no output flag names the file. Otherwise the
+    suffix shown with the HIGH: the lineage fact when there is one, so the
+    judge sees it; ``""`` for a stranger's pad (unchanged). Evidence files
+    never reach here (``_touch_reason`` returns another reason for them).
+    """
+    from local_operator.guardrails import provenance
+
+    path = target.path
+    if not path or not session_id or target.pattern is not None or target.opaque:
+        return ""
+    for state in prot.state_roots:
+        sessions = os.path.join(state, _SESSIONS_DIRNAME) + os.sep
+        if not path.startswith(sessions):
+            continue
+        owner = path[len(sessions) :].split(os.sep, 1)[0]
+        relation = provenance.same_task_tree(session_id, owner, state_root=state)
+        if not relation:
+            return ""
+        if (
+            os.path.isfile(path)
+            and not os.path.islink(path)
+            and not target.as_output
+            and provenance.tracked_script(target.script)
+        ):
+            return None
+        return f" (session {owner} is this session's {relation} in one task tree)"
+    return ""
+
+
 def _hardlinked_file(path: str | None) -> bool:
     """Is ``path`` a regular file with more than one name? ``realpath`` cannot
     see a hardlink, so ``<pad>/h`` linked to a ``transcript.jsonl`` looks like
@@ -1098,10 +1135,15 @@ def classify_targets(
             if t.op != "touch" or t.path in critical:
                 continue
             reason = _touch_reason(t, prot, globstar=globstar)
-            if reason is not None:
-                evidence_hits.append(
-                    RankedTarget(t, Risk.HIGH, f"{reason}, handed to {t.program or 'a program'}")
-                )
+            if reason is None:
+                continue
+            shown = f"{reason}, handed to {t.program or 'a program'}"
+            if reason == OTHER_SCRATCHPAD:
+                tree = _tree_read(t, prot, session_id)
+                if tree is None:
+                    continue  # LOW: a tracked script reading a teammate's file
+                shown += tree
+            evidence_hits.append(RankedTarget(t, Risk.HIGH, shown))
     for name in dict.fromkeys(blind):
         evidence_hits.append(
             RankedTarget(
