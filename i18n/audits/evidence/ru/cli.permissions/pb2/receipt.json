@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "record": "i18n/audits/evidence/ru/cli.permissions/pb2/record.json",
+  "companions": {
+    "i18n/audits/evidence/ru/cli.permissions/pb2/report.md": "80f91b10604b7a38dbb29d78d85054f289158a537f9d4082e6212b80c1184ffb",
+    "i18n/audits/evidence/ru/cli.permissions/pb2/audit.log": "ef95db851b67fdd4e720eb2395730460e66550d368215c85acdcea827830e43b",
+    "i18n/audits/evidence/ru/cli.permissions/pb2/apple_labels.py.txt": "d58ea67b45ad3cfd52c78ee25fef94ee6bf0a4303b7848be4484d4071f2a0abb",
+    "i18n/audits/evidence/ru/cli.permissions/pb2/ka_labels.py.txt": "fb3cc3dcca89391bcdc1bd998a84c5e745fd4c1e71f53f79c6b69114bdaabe52",
+    "i18n/audits/evidence/ru/cli.permissions/pb2/parity.py.txt": "a8141186c1a23e7d7a46d8b95c03a086064b32e5fc67a24bb6ff3bae33d82639"
+  }
+}
