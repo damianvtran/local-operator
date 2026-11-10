@@ -391,9 +391,15 @@ def test_re_enrollment_replaces_the_cached_answer(tmp_path) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_fallback_hops_answer_is_never_cached_under_the_primary(tmp_path) -> None:
-    """A route failure must not become a permanent answer via the fallback."""
+def test_a_fallback_hops_answer_is_never_cached_under_the_primary(tmp_path, monkeypatch) -> None:
+    """A route failure must not become a permanent answer via the fallback.
 
+    Owner review is off so only the content-keyed cache is exercised: with it on,
+    the fallback's hold gets its own PER-MESSAGE review row and waits for the person
+    (QA round 1 Q2, ``test_review_held``), which is the terminal state by design.
+    """
+
+    monkeypatch.setattr(hold_release, "review_enabled", lambda _config_dir: False)
     _store, owner = _setup(tmp_path)
     body, mid = "fallback body", "bmsg_fb"
     policy = Policy(approved_serving_identities=("qa/default-model", "qa/fallback-model"))
@@ -459,6 +465,11 @@ def test_engine_version_bump_clears_a_cached_code_artefact(tmp_path, monkeypatch
     out = _run(owner, tmp_path, redraw, item=_item(body, mid))
     assert len(redraw.calls) == 1
     assert out.disposition == "deliver"  # the NEW answer, not the old one
+    # QA round 1 Q3: the read that found the old engine's row dropped it, so an
+    # engine bump leaves no inert rows behind.
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        engines = [r[0] for r in conn.execute("SELECT engine_version FROM screening_answer_holds")]
+    assert engines == []
 
 
 # --------------------------------------------------------------------------

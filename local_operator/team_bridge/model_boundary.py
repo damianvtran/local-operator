@@ -1576,6 +1576,15 @@ class ScreenChainRunner:
         self.reply_usable: Callable[[str], bool] | None = None
         #: Unusable draws on the last :meth:`acall` (diagnostics and tests).
         self.unusable_replies = 0
+        #: Whether HOP 0 itself ANSWERED (unusably) on the last :meth:`acall`.
+        #: The pipeline keys the answer cache by hop 0's model, and caches only
+        #: hop 0's answers so a ROUTE failover never parks a message under the
+        #: primary's identity. When hop 0 answered off-grammar, though, the
+        #: primary is up and the advance was the reply's doing -- which a sender
+        #: can provoke -- so the fallback's parseable hold is the message's
+        #: answer and must be cached, or every backoff pass re-draws it until it
+        #: says deliver (code review round 1, R1).
+        self.primary_answered_unusably = False
 
     @property
     def answered_preferred(self) -> bool:
@@ -1654,6 +1663,7 @@ class ScreenChainRunner:
         unusable: tuple[str, str | None] | None = None
         unusable_hop: tuple[int, DefaultSelection] | None = None
         self.unusable_replies = 0
+        self.primary_answered_unusably = False
         for index, hop in enumerate(self._hops):
             for draw in range(_UNUSABLE_REPLY_DRAWS_PER_HOP):
                 runner = self._build(hop)
@@ -1710,6 +1720,8 @@ class ScreenChainRunner:
                 # real ``hold``/``bounce`` is usable and returned above, so this
                 # can never shop for a ``deliver`` among parseable verdicts.
                 self.unusable_replies += 1
+                if index == 0:
+                    self.primary_answered_unusably = True
                 unusable = (reply, actual)
                 unusable_hop = (index, hop)
                 logger.info(

@@ -181,12 +181,14 @@ def test_v5_offered_renders_the_routing_lines(rig, prompts) -> None:  # noqa: F8
         config_dir,
         owner,
         Runner(DELIVER),
-        item=_routed("direct", relation="owner"),
+        # ``member``: a stated ``owner`` renders only for the owner as a person, who is
+        # [redacted] before any prompt (code review round 1 R2, pinned in test_review_held).
+        item=_routed("direct", relation="member"),
         policy=V5Policy(),
     )
     assert out.disposition == "deliver"
     assert len(prompts) == 1
-    assert "Routing (server facts):\nRelation: owner\nAddressed: direct\n" in prompts[0]
+    assert "Routing (server facts):\nRelation: member\nAddressed: direct\n" in prompts[0]
     expected = screening.render_prompt(
         body_text=BODY,
         sender="Victor",
@@ -195,7 +197,7 @@ def test_v5_offered_renders_the_routing_lines(rig, prompts) -> None:  # noqa: F8
         nonce=_nonce(prompts[0]),
         version=SCREENING_VERSION_V5,
         addressed="direct",
-        relation="owner",
+        relation="member",
     )
     assert prompts[0] == expected.private_text()
     # The outcome names the prompt that judged it; the LOCAL receipt keeps the
@@ -368,3 +370,74 @@ def test_a_v5_screen_tells_the_hub_which_prompt_judged_it() -> None:
     )
     assert _text_admit_template(v2) is None
     assert _text_admit_template(SimpleNamespace()) is None
+
+
+@pytest.mark.asyncio
+async def test_a_v5_text_allow_reaches_the_hub_through_the_real_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QA round 1 Q1: the v5 hash must leave the machine on a text-only admit.
+
+    ``conversation_admit`` used to raise "a grant and template_sha256 travel together"
+    for it, so every v5-screened allow was held ``conversation_failed``. The body is
+    the shape agent-server #352's ``admitAttachmentGrant`` accepts: no grant, the
+    template naming v5.
+    """
+
+    import json
+
+    import httpx
+
+    from local_operator.team_bridge.client import SCREENING_TEMPLATE_V3_SHA256
+    from tests.unit.team_bridge.test_client import _make_client, _ok
+
+    # The stub hub is not the Radient cloud API; the client's own tests open it the same way.
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, json.loads(request.content)))
+        return _ok({"verdict": "allow"})
+
+    client = _make_client(handler)
+    await client.conversation_admit(
+        "bcv_qabusy01",
+        "bcmsg_qa6a0001",
+        verdict="allow",
+        body_hash="0" * 64,
+        tenant_id="tnt_qa1",
+        endpoint_id="bep_qarecv",
+        template_sha256=SCREENING_TEMPLATE_V5_PIN,
+    )
+    path, body = seen[-1]
+    assert path.endswith("/messaging/conversations/bcv_qabusy01/messages/bcmsg_qa6a0001/admit")
+    assert body == {
+        "verdict": "allow",
+        "body_hash": "0" * 64,
+        "template_sha256": SERVER_V5_SHA256,
+        "tenant_id": "tnt_qa1",
+    }
+    # Unchanged: the pre-v5 text allow omits the template entirely.
+    await client.conversation_admit(
+        "bcv_qabusy01", "bcmsg_qa6a0001", verdict="allow", body_hash="h"
+    )
+    assert "template_sha256" not in seen[-1][1]
+    # The grant bindings still hold: a v3/v4 hash names an image/file grant, so it
+    # never rides a text-only admit, and the v5 hash never rides a reject.
+    with pytest.raises(ValueError):
+        await client.conversation_admit(
+            "bcv_qabusy01",
+            "bcmsg_qa6a0001",
+            verdict="allow",
+            body_hash="h",
+            template_sha256=SCREENING_TEMPLATE_V3_SHA256,
+        )
+    with pytest.raises(ValueError):
+        await client.conversation_admit(
+            "bcv_qabusy01",
+            "bcmsg_qa6a0001",
+            verdict="reject",
+            body_hash="h",
+            template_sha256=SCREENING_TEMPLATE_V5_PIN,
+        )
+    assert len(seen) == 2

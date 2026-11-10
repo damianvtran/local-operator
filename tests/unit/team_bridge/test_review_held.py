@@ -283,8 +283,22 @@ def test_review_held_off_restores_the_old_hold(rig) -> None:  # noqa: F811 — i
     assert refused.value.code == "hold_release_off"
 
 
-def test_a_fallback_hops_hold_gets_no_review_row(rig) -> None:  # noqa: F811 — imported fixture
-    """Mirrors the answer cache's primary-only rule: the recovered primary is asked again."""
+def _off(config_dir) -> None:
+    (config_dir / "config.yml").write_text(
+        json.dumps({"values": {"team_bridge": {"enabled": True, "review_held": False}}}),
+        encoding="utf-8",
+    )
+
+
+def test_a_fallback_hops_hold_gets_a_review_row_and_is_never_redrawn(
+    rig,  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
+    """QA round 1 Q2: a hold from ANY hop has the Deliver/Discard exit.
+
+    In production hop 0 is the Radient preferred screener, so a 402/429/5xx advance
+    used to leave a fallback's hold with no row, no notice and a re-draw on every
+    backoff pass, forever.
+    """
 
     config_dir, store, owner = rig
     policy = Policy()
@@ -297,7 +311,173 @@ def test_a_fallback_hops_hold_gets_no_review_row(rig) -> None:  # noqa: F811 —
         runner=Runner(DOUBT, model="claude-opus-5-5"),
     )
     assert out.hold_code == "model_hold"
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "model_hold" and decision["eligible"]
+    # The row names the hop that ANSWERED, never the primary.
+    assert decision["screener_model"] == "claude-opus-5-5"
+    again = Runner(DELIVER, model="claude-opus-5-5")
+    replay = screening.screen_message(
+        owner, _item(), config_dir=config_dir, policy=policy, runner=again
+    )
+    assert replay.hold_code == "model_hold" and again.calls == 0
+
+
+class _Scripted:
+    """One hop that replays a script; the last entry repeats once it runs out."""
+
+    def __init__(self, replies: list[str], model: str, log: list[str]) -> None:
+        self.replies, self.model, self.log = list(replies), model, log
+
+    async def acall(self, prompt: str, *, default_model: str, **_: Any) -> Any:
+        self.log.append(self.model)
+        reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        return reply, self.model
+
+
+def _two_hop_chain(policy, primary: list[str], fallback: list[str], log: list[str] | None = None):
+    """A real two-hop ``ScreenChainRunner``; returns ``(make_chain, log)``.
+
+    ``make_chain()`` builds a fresh chain per pass (as the connector does) over the
+    SAME scripted hops, so a script advances across passes like a live model would.
+    """
+
+    from local_operator.model.configure import build_model_spec
+    from local_operator.team_bridge.model_boundary import (
+        DefaultSelection,
+        ScreenChainRunner,
+    )
+
+    log = [] if log is None else log
+    models = (policy.default_model, "claude-opus-5-5")
+    setattr(policy, "approved_serving_identities", models)
+    hops = [
+        DefaultSelection(policy.provider, m, build_model_spec(policy.provider, m)) for m in models
+    ]
+    scripts = {
+        models[0]: _Scripted(primary, models[0], log),
+        models[1]: _Scripted(fallback, models[1], log),
+    }
+    return (lambda: ScreenChainRunner(hops, lambda hop: scripts[hop.model_id])), log
+
+
+@pytest.mark.parametrize("review_on", [True, False], ids=["review-on", "review-off"])
+def test_an_off_grammar_primary_cannot_shop_the_fallback_for_deliver(
+    rig, review_on  # noqa: F811 — imported fixture
+) -> None:
+    """Code review round 1 R1: the reviewer's repro, through the real chain.
+
+    The primary is up but answers off-grammar (a sender can provoke that), so the
+    chain fails over and the fallback holds. That hold is the message's answer:
+    cached under the primary's key and (with review on) given its review row, so
+    later passes replay it instead of re-drawing until the fallback says deliver.
+    Before the fix: ``[model_hold, model_hold, deliver]``.
+    """
+
+    config_dir, store, owner = rig
+    if not review_on:
+        _off(config_dir)
+    policy = Policy()
+    outcomes = []
+    make_chain, log = _two_hop_chain(policy, ["I cannot comply"], [DOUBT, DOUBT, DELIVER])
+    for _ in range(3):
+        out = screening.screen_message(
+            owner, _item(), config_dir=config_dir, policy=policy, runner=make_chain()
+        )
+        outcomes.append((out.disposition, out.hold_code))
+    assert outcomes == [("hold", "model_hold")] * 3
+    # One pass of draws (2 off-grammar on the primary, 1 hold on the fallback), then replays.
+    assert log == [policy.default_model, policy.default_model, "claude-opus-5-5"]
+    assert (store.work_scope_decision(owner, MESSAGE_ID) is not None) is review_on
+
+
+def test_a_route_failover_hold_still_is_not_cached_under_the_primary(
+    rig,  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
+    """The R1 exception is narrow: a fallback that answered because the primary was
+    DOWN (not off-grammar) is never remembered under the primary's key."""
+
+    config_dir, _store, owner = rig
+    _off(config_dir)  # isolate the answer cache from the review row
+    policy = Policy()
+    setattr(policy, "approved_serving_identities", (policy.default_model, "claude-opus-5-5"))
+    first = Runner(DOUBT, model="claude-opus-5-5")
+    assert (
+        screening.screen_message(
+            owner, _item(), config_dir=config_dir, policy=policy, runner=first
+        ).hold_code
+        == "model_hold"
+    )
+    assert _count(config_dir, "screening_answer_holds") == 0
+    recovered = Runner(DELIVER)
+    out = screening.screen_message(
+        owner, _item(), config_dir=config_dir, policy=policy, runner=recovered
+    )
+    assert recovered.calls == 1 and out.disposition == "deliver"
+
+
+def test_blank_on_every_hop_becomes_a_review_hold_after_the_bound(
+    rig,  # noqa: F811 — imported fixture
+) -> None:  # noqa: F811 — imported fixture
+    """Code review round 1 R4: unusable passes are bounded, then a person decides."""
+
+    config_dir, store, owner = rig
+    policy = Policy()
+    codes, calls = [], []
+    make_chain, log = _two_hop_chain(policy, [""], [""])
+    for _ in range(screening.UNUSABLE_PASSES_BEFORE_REVIEW + 1):
+        before = len(log)
+        out = screening.screen_message(
+            owner, _item(), config_dir=config_dir, policy=policy, runner=make_chain()
+        )
+        codes.append(out.hold_code)
+        calls.append(len(log) - before)
+    bound = screening.UNUSABLE_PASSES_BEFORE_REVIEW
+    assert codes == ["empty_reply"] * (bound - 1) + ["model_hold", "model_hold"]
+    # 2 draws x 2 hops on every real pass; the pass after conversion draws nothing.
+    assert calls == [4] * bound + [0]
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["hold_code"] == "model_hold" and decision["eligible"]
+    assert delivery_hold_class("model_hold") == "awaiting_review"
+    # Not an answer: an identical body from another message still gets its own draws.
+    assert _count(config_dir, "screening_answer_holds") == 0
+    # The exit works: the person's Deliver admits with no further draw.
+    _decide(config_dir, owner, "deliver")
+    before = len(log)
+    out = screening.screen_message(
+        owner, _item(), config_dir=config_dir, policy=policy, runner=make_chain()
+    )
+    assert out.disposition == "deliver" and len(log) == before
+
+
+def test_blank_passes_keep_retrying_with_review_off(rig) -> None:  # noqa: F811 — imported fixture
+    config_dir, store, owner = rig
+    _off(config_dir)
+    policy = Policy()
+    make_chain, _log = _two_hop_chain(policy, [""], [""])
+    for _ in range(screening.UNUSABLE_PASSES_BEFORE_REVIEW + 1):
+        out = screening.screen_message(
+            owner, _item(), config_dir=config_dir, policy=policy, runner=make_chain()
+        )
+        assert out.hold_code == "empty_reply"
     assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+@pytest.mark.parametrize(
+    ("account", "kind", "rendered"),
+    [("acc_recv", "human", "owner"), ("acc_recv", "agent", "member"), ("acc_recv", "", "member")],
+    ids=["owner-person", "owner-other-agent", "owner-account-no-kind"],
+)
+def test_an_owner_relation_renders_only_for_the_owner_as_a_person(
+    rig, account, kind, rendered  # noqa: F811 — imported fixture
+) -> None:
+    """Code review round 1 R2: v5's ``owner`` means "the recipient sent it"."""
+
+    _config_dir, _store, owner = rig
+    item = _from(account, kind)
+    item.update({"relation": "owner", "addressed": "direct", "routing_stated": True})
+    envelope, code = screening.validate_envelope(owner, item)
+    assert code is None and envelope is not None
+    assert envelope.relation == rendered
 
 
 # --- A4: addressed context ---------------------------------------------------------

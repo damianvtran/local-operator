@@ -3445,6 +3445,56 @@ class Store:
         if "approved_serving" not in columns:
             conn.execute("ALTER TABLE screening_policy ADD COLUMN approved_serving TEXT")
 
+    def note_unusable_screening_pass(self, owner: OwnerSnapshot, message_id: str) -> int:
+        """Count one more pass on which EVERY hop answered unusably; return the total.
+
+        WHY (code review round 1, R4). ``empty_reply``/``parse_failed`` are not
+        answers, so they are not cached and the backoff re-screens them — but a
+        body that reliably blanks every hop used to be re-drawn (2 draws x hops a
+        pass) for as long as the retry ladder ran, with the sender told
+        "temporarily unavailable" throughout. The pipeline turns the hold into a
+        person's review once this count reaches its bound, which needs a count
+        that survives a connector restart (the loop's ``_RETRY_ATTEMPTS`` is
+        in-memory).
+
+        Lives on the message's own ``screening_holds`` row (just written by the
+        caller), so a delivered message's receipt commit deletes it with the row.
+        ADDITIVE AND NULLABLE, the :meth:`_ensure_hold_failure_class_column` rule:
+        an older binary never names the column. ``0`` when no row matched (the
+        hold write itself was refused), which never converts anything.
+        """
+
+        keys = [message_id]
+        try:
+            canonical = _contentless_delivery_key(message_id)
+        except Exception:  # noqa: BLE001 — a malformed ref keeps the raw key only
+            canonical = message_id
+        if canonical != message_id:
+            keys.append(canonical)
+        owner_key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+            if "unusable_passes" not in columns:
+                conn.execute("ALTER TABLE screening_holds ADD COLUMN unusable_passes INTEGER")
+            total = 0
+            for key in keys:
+                conn.execute(
+                    "UPDATE screening_holds SET unusable_passes = COALESCE(unusable_passes, 0) + 1 "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, key),
+                )
+                row = conn.execute(
+                    "SELECT unusable_passes FROM screening_holds "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, key),
+                ).fetchone()
+                if row is not None:
+                    total = max(total, int(row[0] or 0))
+            return total
+
     @staticmethod
     def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
         """Add ``failure_class`` to a ``screening_holds`` that predates it.
@@ -6566,6 +6616,26 @@ class Store:
                     (key, body_sha256, template_sha256, model, admission_revision, envelope_digest),
                 ).fetchone()
                 if row is None:
+                    return None
+                if row["engine_version"] != engine_version:
+                    # Another engine's answer can never be replayed by this build
+                    # (QA round 1 Q3): drop THIS exact row on the read that finds
+                    # it, so an engine bump leaves no inert rows behind. Narrow on
+                    # purpose -- one keyed row, inside this write transaction --
+                    # and the only cost to a downgraded build is one re-screen.
+                    conn.execute(
+                        "DELETE FROM screening_answer_holds WHERE owner_key = ? "
+                        "AND body_sha256 = ? AND template_sha256 = ? AND model = ? "
+                        "AND admission_revision = ? AND envelope_digest = ?",
+                        (
+                            key,
+                            body_sha256,
+                            template_sha256,
+                            model,
+                            admission_revision,
+                            envelope_digest,
+                        ),
+                    )
                     return None
                 if (
                     policy["template_sha256"] != template_sha256

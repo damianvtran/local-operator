@@ -63,7 +63,7 @@ from local_operator.team_bridge.client import (
     SCREENING_VERSION_V5,
     screening_template_sha256,
 )
-from local_operator.team_bridge.store import Store, StoreRefused
+from local_operator.team_bridge.store import Store, StoreRefused, is_owner_principal
 from local_operator.team_bridge.types import (
     DELIVERY_STATES,
     FEED_ADDRESSED_VALUES,
@@ -745,6 +745,14 @@ def validate_envelope(
         if isinstance(item.get("relation"), str) and item["relation"] in RELATION_VALUES
         else ""
     )
+    if relation == "owner" and not is_owner_principal(owner, sender_account, sender_kind):
+        # CLAMPED (code review round 1, R2). v5 tells the screener ``owner`` means
+        # "the recipient sent it", which switches off the scope categories. A hub
+        # that states ``owner`` per ACCOUNT also says it for the owner's OTHER
+        # agent -- which can relay a stranger's words -- or a classless sender.
+        # The owner-as-person is admitted before any model call (A1), so every
+        # screened ``owner`` claim is one of those: render it as ``member``.
+        relation = "member"
     routing_stated = bool(addressed) and item.get("routing_stated") is True
     digest_payload = json.dumps(
         {
@@ -2145,7 +2153,9 @@ async def _screen_spend(
                     # The hop that ANSWERED owns the answer: the chain tags its
                     # refusal with the serving model (never a fallback's hold
                     # cached under the primary's key).
-                    answered_model=getattr(failure, "serving_model", None),
+                    answered_model=_answer_key_model(
+                        runner, getattr(failure, "serving_model", None), snapshot
+                    ),
                     failure_class=screening_failure_class(failure),
                 )
                 serving = getattr(failure, "serving_model", None)
@@ -2230,6 +2240,9 @@ async def _screen_spend(
         code = unusable_reply_code(reply)
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
         logger.info("bridge: screening reply unusable on every hop code=%s", code)
+        review = _unusable_review_hold(store, owner, prepared, runner, actual_model)
+        if review is not None:
+            return review
         return ScreenResult("hold", hold_code=code)
     return _conclude_parsed(
         store,
@@ -2249,7 +2262,89 @@ async def _screen_spend(
         served_hop=_served_hop(runner, actual_model, prepared),
         screener_preferred=_answered_preferred(runner, actual_model),
         observation=_answered_observation(runner, actual_model),
+        answer_model=_answer_key_model(runner, actual_model, snapshot),
     )
+
+
+#: Passes on which EVERY hop answered unusably before the hold becomes a person's
+#: review (code review round 1, R4). Measured before capping: ``parse_failed`` was
+#: ~2.2% of ~721 screens/week on the operator's receiver (~16 messages/week; figure
+#: from the operator's 2026-11-09 report as briefed, not re-measured here), and
+#: until this PR each of those was ONE blank draw cached as final. With the
+#: re-draw + failover, a pass that still ends unusable has already spent 2 draws on
+#: every hop, so a third such pass is no longer a transient blip. The connector's
+#: retry ladder (``connector/loop.py``: ``RETRY_BASE_S`` 60 s doubling, capped at
+#: ``RETRY_MAX_S`` 3600 s) puts pass 3 at ~+180 s (60 + 120) after the first: a
+#: provider hiccup still gets two fresh chances, while a body that blanks every
+#: hop reaches Deliver/Discard within minutes instead of riding the ladder for
+#: hours at 2 x hops draws a pass.
+UNUSABLE_PASSES_BEFORE_REVIEW = 3
+
+
+def _unusable_review_hold(
+    store: Store,
+    owner: OwnerSnapshot,
+    prepared: "_Prepared",
+    runner: Any,
+    actual_model: str | None,
+) -> ScreenResult | None:
+    """Turn the Nth all-unusable pass into a review hold, or ``None`` to keep retrying.
+
+    The review hold is ``model_hold`` -- a REVIEW_HOLD_CODES member the holds list,
+    notice, wire class (``awaiting_review``) and Deliver/Discard path already know --
+    recorded with a per-message decision row, which ``_replay_work_scope_decision``
+    replays with no model call. It is deliberately NOT written to the answer cache:
+    no model answered, so an identical later message still gets its own draws.
+    With ``review_held`` off, nothing changes (the hold keeps retrying, as before).
+    """
+
+    from local_operator.team_bridge import hold_release as hr
+
+    if actual_model is None or not hr.review_enabled(store.config_dir):
+        return None
+    message_id = prepared.envelope.message_id
+    try:
+        passes = store.note_unusable_screening_pass(owner, message_id)
+    except StoreRefused:
+        return None
+    if passes < UNUSABLE_PASSES_BEFORE_REVIEW:
+        return None
+    code = "model_hold"
+    _persist_hold(store, owner, message_id, code)
+    _record_review_decision(
+        store,
+        owner,
+        prepared,
+        code,
+        actual_model=actual_model,
+        served_provider=_served_provider(runner, actual_model, prepared),
+        served_hop=_served_hop(runner, actual_model, prepared),
+        screener_preferred=False,
+        screener_verdict="hold",
+    )
+    logger.info("bridge: screening unusable passes=%d converted code=%s", passes, code)
+    return ScreenResult("hold", hold_code=code)
+
+
+def _answer_key_model(
+    runner: Any, actual_model: str | None, snapshot: "PolicySnapshot"
+) -> str | None:
+    """The model a hold this pass produced is CACHED under (code review round 1, R1).
+
+    Normally the model that answered, so ``_remember_answer_hold``'s primary-only
+    rule drops a fallback's answer: a ROUTE failover must not park the message
+    under the primary's key once the primary recovers. The exception is a pass on
+    which hop 0 itself ANSWERED, just unusably (empty or off-grammar). The primary
+    was up; the chain advanced because of the reply, which a sender can provoke
+    with injected text. Leaving the fallback's parseable hold uncached then made
+    every backoff pass re-draw it until one said ``deliver`` -- verdict shopping,
+    and never terminal. That hold is the message's answer, so it is cached under
+    the primary's key exactly as hop 0's own hold would be.
+    """
+
+    if getattr(runner, "primary_answered_unusably", False) is True and actual_model is not None:
+        return snapshot.default_model
+    return actual_model
 
 
 def _answered_preferred(runner: Any, actual_model: str | None) -> bool:
@@ -2302,8 +2397,13 @@ def _conclude_parsed(
     served_hop: int | None = None,
     screener_preferred: bool = False,
     observation: ScreeningObservation | None = None,
+    answer_model: str | None = None,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
+
+    ``answer_model`` is the model a cacheable hold is REMEMBERED under
+    (:func:`_answer_key_model`); ``None`` means ``actual_model``, the
+    primary-only rule every batch verdict keeps.
 
     Shared by the single-message spend and the batch, so a batch verdict
     meets exactly the hold/bounce/quarantine/turn/receipt fences a single
@@ -2323,6 +2423,7 @@ def _conclude_parsed(
     envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
     message_id = envelope.message_id
     disposition, categories, reason, _verdict = parsed
+    cache_model = actual_model if answer_model is None else answer_model
     if disposition == "hold" and _work_scope_hold_conversion(
         store,
         snapshot,
@@ -2350,11 +2451,12 @@ def _conclude_parsed(
             served_hop=served_hop,
             screener_preferred=screener_preferred,
             screener_verdict="hold",
+            answer_model=cache_model,
         ).set_private_reason(reason)
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
         _remember_answer_hold(
-            store, owner, envelope, snapshot, "model_hold", epoch, answered_model=actual_model
+            store, owner, envelope, snapshot, "model_hold", epoch, answered_model=cache_model
         )
         _record_review_decision(
             store,
@@ -2382,7 +2484,7 @@ def _conclude_parsed(
             snapshot,
             "bounce_without_category",
             epoch,
-            answered_model=actual_model,
+            answered_model=cache_model,
         )
         _record_review_decision(
             store,
@@ -2430,6 +2532,7 @@ def _conclude_parsed(
                 served_hop=served_hop,
                 screener_preferred=screener_preferred,
                 screener_verdict="bounce",
+                answer_model=cache_model,
             ).set_private_reason(reason)
     # 12b. Final admission fence (R6/Q15): the receipt may only be admitted
     #      while THIS call still owns the account turn — a successor that
@@ -2576,13 +2679,23 @@ def _admit_owner_principal(
     so every downstream fence treats it as a verdict of this policy moment.
     Its template is a fixed sentinel no cache lookup can select, so it never
     becomes a cached decision for any other sender.
+
+    HUB-SIDE PROVENANCE IS KNOWINGLY APPROXIMATE (code review round 1, R3). The
+    LOCAL receipt says ``owner_principal``; the hub's admit carries no such
+    marker -- its admit body has no field for one -- so the connector presents
+    the template it would for a screened message (none for text, which the hub
+    reads as its ``screening`` slot's; v3/v4 for an image/file grant). The hub's
+    admission row therefore names a prompt no model actually ran for this message.
+    Accepted: the bytes are the owner's own, posted as a person, and the grant
+    binds the exact hashes the hub stored, so nothing is admitted that the owner did not send.
+    Carrying a real marker (the ``owner_released`` shape) needs an agent-server
+    field first.
     """
 
     from local_operator.team_bridge.store import (
         OWNER_PRINCIPAL_MODEL,
         OWNER_PRINCIPAL_PROMPT_VERSION,
         OWNER_PRINCIPAL_SHA256,
-        is_owner_principal,
     )
 
     if not is_owner_principal(owner, envelope.sender_account, envelope.sender_kind):
@@ -2943,12 +3056,19 @@ def _record_review_decision(
     if code not in hr.REVIEW_HOLD_CODES or not hr.review_enabled(store.config_dir):
         return
     envelope, snapshot = prepared.envelope, prepared.snapshot
-    if actual_model is None or actual_model != snapshot.default_model:
-        # PRIMARY ONLY, mirroring ``_remember_answer_hold``: a fallback hop's
-        # hold is not cached, so the retry asks the recovered primary again; a
-        # review row here would park it under a screener that only answered
-        # because the primary was down.
+    if actual_model is None:
+        # No evidenced screener: nothing answered that a person could review.
         return
+    # ANY HOP (QA round 1 Q2 / code review R1). This used to be primary-only,
+    # mirroring the answer cache, so a fallback's hold had no row, no notice and
+    # no Deliver/Discard -- and in production hop 0 is the Radient preferred
+    # screener, so every 402/429/5xx advance turned a hold into a message re-drawn
+    # on the backoff forever (the "stuck" symptom). The row is PER MESSAGE and
+    # records the hop that actually answered (``screener_model``/``screener_hop``),
+    # so it parks nothing under the primary's identity; the content-keyed answer
+    # cache stays primary-only for exactly that reason. While the row waits,
+    # ``_replay_work_scope_decision`` replays its hold with no model call, so the
+    # fallback's hold is terminal and is never re-drawn hoping for ``deliver``.
     try:
         store.record_work_scope_decision(
             owner,
@@ -3106,8 +3226,11 @@ def _commit_work_scope_hold(
     served_hop: int | None,
     screener_preferred: bool,
     screener_verdict: str,
+    answer_model: str | None = None,
 ) -> ScreenResult:
     """Record the converted hold, its answer-cache row and its decision row.
+
+    ``answer_model`` keys the answer-cache row (see :func:`_conclude_parsed`).
 
     The decision row is the release's authority source (D4/D7): the answering
     hop's identity, the template and the real categories, written NOW. Its
@@ -3125,7 +3248,13 @@ def _commit_work_scope_hold(
     if attempt_id is not None:
         _commit_hold(store, owner, envelope.message_id, attempt_id, fingerprint, epoch, code)
         _remember_answer_hold(
-            store, owner, envelope, snapshot, code, epoch, answered_model=actual_model
+            store,
+            owner,
+            envelope,
+            snapshot,
+            code,
+            epoch,
+            answered_model=actual_model if answer_model is None else answer_model,
         )
     else:
         _persist_hold(store, owner, envelope.message_id, code)

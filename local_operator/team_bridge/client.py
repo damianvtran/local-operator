@@ -4503,13 +4503,25 @@ class TeamBridgeClient:
         resent once without it (``_send_observed``) instead of becoming a hold.
         """
 
-        if (attachments_hash is not None or files_hash is not None) != (
-            template_sha256 is not None
-        ):
+        has_grant = attachments_hash is not None or files_hash is not None
+        # A TEXT-ONLY admission may name its template only when that template is the
+        # pinned bridge-screen-v5: v5 is a text-only prompt, and the hub's admission
+        # row must record which prompt judged the message (agent-server
+        # ``admitAttachmentGrant`` accepts a known template with no grant). Any other
+        # template without a grant is still a caller bug: v3/v4 hashes exist to bind
+        # image/file grants, and presenting one with no grant would claim a vision
+        # screen nobody can check. (QA round 1 Q1: this used to raise for every v5
+        # text allow, so none could ever be admitted.)
+        text_only_v5 = not has_grant and template_sha256 == SCREENING_TEMPLATE_V5_PIN
+        if has_grant != (template_sha256 is not None) and not text_only_v5:
             # ONE template presented whatever content was screened, so either grant and
             # the template travel together. A file-only admission is therefore legal:
             # v4 keeps the image slot, and a message may carry files and no images.
             raise ValueError("a grant and template_sha256 travel together")
+        if text_only_v5 and verdict != "allow":
+            # The template rides only the allow the v5 screen produced; a reject
+            # carries its refusal_class instead, exactly as before v5.
+            raise ValueError("only an allow names a text-only template")
         if attachments_hash is not None and verdict != "allow":
             raise ValueError("only an allow binds an attachments_hash")
         if files_hash is not None:
@@ -4531,7 +4543,7 @@ class TeamBridgeClient:
             body["attachments_hash"] = attachments_hash
         if files_hash is not None:
             body["files_hash"] = files_hash
-        if attachments_hash is not None or files_hash is not None:
+        if template_sha256 is not None:
             body["template_sha256"] = template_sha256
         if tenant_id:
             body["tenant_id"] = tenant_id
