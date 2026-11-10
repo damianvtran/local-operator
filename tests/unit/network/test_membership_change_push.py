@@ -171,6 +171,13 @@ def test_push_converges_without_a_pull_and_does_not_forge_answer_age(
     # A disabled pull is the negative control: neither a timer nor the listing
     # below can rescue a missing push, and receiving it must not invent an answer.
     monkeypatch.setattr(a.server, "_pull_members", lambda link: "no_answer")
+    # The independent membership pass may already be inside a real pull that
+    # resolved `_pull_members` before the patch; c can answer it after the
+    # rename, stamping the link and clearing the push's verification need just
+    # before refresh. Refuse every answer applied from here, in flight or new.
+    monkeypatch.setattr(
+        a.server, "_apply_member_answer", lambda link, reply, conditional, own_view: "no_answer"
+    )
     stamp = link.member_pulled_at
     _rename_own_row(c, network_id, "changed-by-push")
     c.server._publish_member_changes()
