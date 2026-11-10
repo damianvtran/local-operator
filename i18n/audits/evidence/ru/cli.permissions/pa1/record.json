@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "audit_id": "pa1",
+  "locale": "ru",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "key_count": 28,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "audited_revision": "50badda034d755ebb049c4f542f3073439bf823e",
+  "translator": {
+    "agent": "coder agent of PR #3691",
+    "session": "ad99821ab9e1",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "741233d88cd4",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "actual_model_source": "auditor session system prompt 'Model:' line; no fallback observed",
+    "independence_note": "Different session, same model family as translator (disclosed). No native-speaker or rendered-frame certification."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.permissions.json",
+      "sha256": "3427f15bff763d194fc139d561c64bb02c606dbadffade520b01bdbc98d91d92"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pa1/report.md",
+      "sha256": "f069b9d513c36d1da23cd1b4c6042c544a82a19921e234b341663d06a280db79"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pa1/audit.log",
+      "sha256": "6c19136ee163a4963d43ac64fd33180ba3f952edf706a92cc4d1adac5c77db80"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pa1/receipt.json",
+      "sha256": "8707e9e25f2214c18839b9a87222d8749537c0b88678330041da393e4db49d43"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning; audit.log holds actual command output.",
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 2,
+    "finding_ids": [
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "R5",
+      "R6",
+      "R7",
+      "R8",
+      "R9"
+    ],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 2,
+      "MINOR": 5,
+      "NIT": 2
+    }
+  }
+}

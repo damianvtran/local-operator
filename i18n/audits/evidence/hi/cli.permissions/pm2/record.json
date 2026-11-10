@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "audit_id": "pm2",
+  "round": 2,
+  "locale": "hi",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "key_count": 38,
+  "source_revision": "788cc399410196b080cfc9f7e7bd558ccb713140",
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "previous_round_record": "i18n/audits/evidence/hi/cli.permissions/pm1/record.json",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "d9395b58854d",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independent_from_round1_auditor_session": "d94d672abfb8",
+    "actual_model_source": "session system context (Model: anthropic/claude-opus-5-5); no provider fallback observed",
+    "note": "round-2 translator session not identified to this auditor; this auditor did not translate. Same model family as round-1 translator (disclosed)."
+  },
+  "translator": {
+    "agent": "i18n-translator (round-2 wave, commit 788cc399410)",
+    "session": null,
+    "model": null
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099"
+    },
+    "hi": {
+      "path": "local_operator/i18n/catalogues/hi/cli.permissions.json",
+      "sha256": "94cb61e796a304270031af2e60b7c1d93354adba0106f3cd0b8cf391a80231c1"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "apple_label_sources": "installed macOS 27.2 (26B123) .loctable resources; tables/keys cited in report.md and audit.log",
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/hi/cli.permissions/pm2/report.md",
+      "sha256": "d4dfe6334d81b3002af27bdb0ce744f42383635b852ffc7f3c55f24759bfa221"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/hi/cli.permissions/pm2/audit.log",
+      "sha256": "6f3e75c528ca79cfcf6306b6c05d4143186ec02f34fe71c3004c1e6b2cb8f80b"
+    },
+    "apple_labels.py.txt": {
+      "path": "i18n/audits/evidence/hi/cli.permissions/pm2/apple_labels.py.txt",
+      "sha256": "01bcb4924b84b95c8608c25d6a7d39a021c6118ca65206ce76f1e70c7941e802"
+    },
+    "parity.py.txt": {
+      "path": "i18n/audits/evidence/hi/cli.permissions/pm2/parity.py.txt",
+      "sha256": "97af5525cc7e9b08a0f5d78c684c6220a946e72a3d62be79accc2cffd0e7e08a"
+    }
+  },
+  "audit_notes_not_execution_log": "report.md holds reasoning and findings; audit.log holds actual command output captured this session; *.py.txt are the scripts that produced it.",
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 2,
+    "finding_ids": [
+      "P1",
+      "P2",
+      "P3",
+      "P4"
+    ],
+    "counts": {
+      "blocker": 0,
+      "major": 2,
+      "minor": 1,
+      "nit": 1
+    },
+    "round1_resolution": {
+      "H1": "fixed",
+      "H2": "not applied; stands as P1 (MAJOR)",
+      "H3": "fixed",
+      "H4": "kept, justified",
+      "H5": "resolved by source rewrite"
+    }
+  },
+  "second_pass": "this is the independent round-2 pass",
+  "ledger_receipt": {
+    "path": "i18n/audit-history/hi/cli.permissions.json",
+    "history_sha256_before_append": "e80243d4528ffed128b2b26e9d14bfadb1587e253b0076c3af1b4ea8488348e1",
+    "history_sha256_after_append": "5a2243a757a31d24dac7407058bde3ad6cba03917ed3046dcece77a3279e18ee"
+  }
+}

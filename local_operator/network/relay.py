@@ -252,7 +252,8 @@ HEARTBEAT_S = float(HEARTBEAT_INTERVAL_S)
 #: admitted anywhere in a mesh is visible everywhere inside one watch of a listing.
 MEMBERSHIP_PULL_MIN_INTERVAL_S = 15.0
 
-#: The CEILING a settled link's pull interval backs off TO (#3608's follow-up).
+#: The LEGACY ceiling a settled pull-only link backs off TO (#3608's follow-up).
+#: Negotiated change-push links use MEMBERSHIP_PUSH_PULL_INTERVAL_S instead.
 #:
 #: WHAT IS LEFT TO SAVE IS RATE, NOT SIZE. After #3608 a settled pull is answered
 #: ``unchanged`` in 297 B on the wire (152 B ask + 145 B answer), so the bytes are
@@ -287,6 +288,14 @@ MEMBERSHIP_PULL_MIN_INTERVAL_S = 15.0
 #: (``net_epoch``/``removed_ids`` push it; measured at 1.2-1.3 s), which is why the
 #: rename is the case the ceiling is chosen for.
 MEMBERSHIP_PULL_MAX_INTERVAL_S = 30.0
+
+#: Anti-entropy only for links negotiating MEMBER_LIST_PUSH_V1 in both directions.
+#: The old 30-second ceiling is unchanged for every other link. A dedicated change
+#: publisher scans at MEMBERSHIP_PULL_PASS_S independently of serial pull timeouts;
+#: notifications carry the full mergeable table, so a wedged peer ahead in a pull
+#: pass cannot delay adoption on a healthy link. Five minutes is the requested
+#: repair clock for a missed notification, NOT the normal convergence clock.
+MEMBERSHIP_PUSH_PULL_INTERVAL_S = 300.0
 
 #: How often the relay walks its live links looking for a table refresh that is due.
 #:
@@ -4694,6 +4703,16 @@ class PeerLink:
         #: an older peer, a peer with no such capability and a link whose views keep
         #: disagreeing all keep asking at exactly the rate they do today.
         self.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+        #: Only an actual pull answers a freshness query. An unsolicited table may
+        #: converge rows immediately, but must force verification rather than make
+        #: the old answer appear fresh until the five-minute repair clock expires.
+        self.member_push_unverified = False
+        self.member_push_digest = ""
+        #: Sender-local persisted record sequences order BOTH pushes and answers.
+        #: Compared only on this authenticated peer/network link, never across
+        #: peers: store.save serializes and increments each local network record.
+        self.member_snapshot_sequence = -1
+        self.member_table_lock = threading.Lock()
         #: The device ids the last table pull ADDED, so a refresh pass can report
         #: what it learned rather than only that it asked.
         self.member_pull_added: list[str] = []
@@ -5759,6 +5778,9 @@ class RelayServer:
             # member, and a healthy pair holds its link open forever, so there is no
             # "next contact" to hang the refresh on (Q-R2-1, QA round 3).
             (self._membership_loop, "mesh-membership"),
+            # Keep change publication off the SERIAL pull loop: a wedged peer may
+            # cost that loop four seconds per link, never delay pushes to others.
+            (self._membership_changes_loop, "mesh-member-changes"),
             # LOST LINKS ARE RETRIED ON THEIR OWN SCHEDULE (``network.redial``),
             # not at the UI's poll rate, and each member is dialled once at start
             # so a node whose public address moved re-announces itself by dialling
@@ -6457,6 +6479,16 @@ class RelayServer:
             own_view = member_sync_digest(listed, sender_device_id=link.device_id)
             frame["if_digest"] = own_view
         reply = link.request(frame, timeout=MEMBERSHIP_PULL_TIMEOUT_S)
+        # Never hold this lock while waiting: a push uses the SAME reader that
+        # delivers our reply. One persisted snapshot sequence orders both paths,
+        # including a delayed push delivered AFTER a newer completed pull.
+        with link.member_table_lock:
+            return self._apply_member_answer(link, reply, conditional, own_view)
+
+    def _apply_member_answer(
+        self, link: PeerLink, reply: dict[str, Any] | None, conditional: bool, own_view: str
+    ) -> str:
+        """Apply an answer atomically with respect to unsolicited member tables."""
         if reply is None:
             # EVERY UNHAPPY OUTCOME PUTS THE LINK BACK ON THE FLOOR. A timeout, a
             # refusal and a malformed answer are each a state in which this device
@@ -6469,6 +6501,15 @@ class RelayServer:
             link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
             return str(reply.get("code") or reply.get("op") or "refused")
         detail = reply.get("detail")
+        sequence = None
+        if self._member_push_enabled(link):
+            sequence = detail.get("sequence") if isinstance(detail, dict) else None
+            if type(sequence) is not int or sequence < 0:
+                link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+                return "bad_answer"
+            if sequence < link.member_snapshot_sequence:
+                link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+                return "stale_answer"
         if (
             conditional
             and isinstance(detail, dict)
@@ -6480,11 +6521,14 @@ class RelayServer:
             # The echoed digest must be the one we sent (review R1-m2): an
             # "unchanged" for some other table is not believed, and falls through
             # to the full-table checks below, which refuse it as a bad answer.
+            if sequence is not None:
+                link.member_snapshot_sequence = sequence
             link.member_pulled_at = time.time()
+            link.member_push_unverified = False
             link.member_pull_added = []
             # THE ONE BRANCH THAT MAY BACK THIS LINK OFF: the peer's answer hashed to
             # the digest this device asked about, so the next read is worth less than
-            # the full rate. At the shipped constants this is ONE STEP, not a ramp —
+            # the full rate. For LEGACY links this is ONE STEP, not a ramp —
             # ``MEMBERSHIP_PULL_MIN_INTERVAL_S * 2 == MEMBERSHIP_PULL_MAX_INTERVAL_S``,
             # so a link that settles once is already at the ceiling and a change it
             # misses pays the whole interval (the bound in
@@ -6492,10 +6536,15 @@ class RelayServer:
             # still written as a doubling because a build that sets a ceiling more
             # than twice the floor (the tests' compressed clocks do) gets a ramp out
             # of it rather than a jump, and neither shape needs a second constant.
-            link.member_pull_interval_s = min(
-                getattr(link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S) * 2,
-                MEMBERSHIP_PULL_MAX_INTERVAL_S,
-            )
+            if self._member_push_enabled(link):
+                # A confirmed equal table can take the repair ceiling immediately:
+                # the separately scheduled push owns convergence on these links.
+                link.member_pull_interval_s = MEMBERSHIP_PUSH_PULL_INTERVAL_S
+            else:
+                link.member_pull_interval_s = min(
+                    getattr(link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S) * 2,
+                    MEMBERSHIP_PULL_MAX_INTERVAL_S,
+                )
             return ""
         if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
             link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
@@ -6505,6 +6554,7 @@ class RelayServer:
         # the stamp is evidence that this peer's TABLE answered, not that its table
         # differed, and the reporting surfaces read it as exactly that.
         link.member_pulled_at = time.time()
+        link.member_push_unverified = False
         # A FULL TABLE IS NOT SETTLEMENT, whether or not it changed anything: it means
         # the peer's table differed from ours (or could not be compared at all), and
         # that is the state in which the next read is worth the full rate. A full pull
@@ -6513,16 +6563,23 @@ class RelayServer:
         # until something else moves (see the full-pull states in the docstring of
         # ``_learn_members_from``).
         link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+        self._adopt_member_rows(link, rows)
+        if sequence is not None:
+            link.member_snapshot_sequence = sequence
+        return ""
+
+    def _adopt_member_rows(self, link: PeerLink, rows: list[Any]) -> bool:
+        """Use the SAME authority-preserving merge for answers and change pushes."""
         # THE MERGE IS A READ-MODIFY-WRITE of the member table, so it reads inside
         # the lock: ``adopt_members`` merges INTO the record it is handed, so a
         # rotation applied between the pull's answer arriving and this write would
         # be merged away — reverted on disk, with the higher sequence ``save``
         # stamps hiding it.
-        with store.mutate(listed.network_id, self.root) as record:
+        with store.mutate(link.network_id, self.root) as record:
             changed, added = adopt_members(record, rows, sender_device_id=link.device_id)
             link.member_pull_added = list(added)
             if not changed:
-                return ""
+                return False
             store.save(record, self.root)
         self.audit.record(
             AuditEvent(
@@ -6540,7 +6597,7 @@ class RelayServer:
                 },
             )
         )
-        return ""
+        return True
 
     def refresh_membership(self, *, budget_s: float | None = None) -> dict[str, MembershipReport]:
         """Re-pull the member table from every LIVE link whose pull is DUE.
@@ -6590,7 +6647,7 @@ class RelayServer:
                 # ``PeerLink.member_pull_interval_s``), so a link is never slow to
                 # re-read a table that is known to differ.
                 interval = getattr(link, "member_pull_interval_s", MEMBERSHIP_PULL_MIN_INTERVAL_S)
-                if age < interval:
+                if age < interval and not getattr(link, "member_push_unverified", False):
                     # AN ANSWER INSIDE THE CADENCE IS STILL EVIDENCE. Skipping the ask
                     # must not turn into "no peer answered": a `show` one second after
                     # a refresh would otherwise claim the table was never checked
@@ -6808,6 +6865,46 @@ class RelayServer:
         else:
             host, port = self.settings.listen_address, int(self.settings.port or 0)
         return _dialable_candidates(member, int(port), str(host))
+
+    @staticmethod
+    def _member_push_enabled(link: PeerLink) -> bool:
+        """Both transcripts must promise pushes before either side slows its pull."""
+        needed = {wire.MEMBER_LIST_DIGEST_V1, wire.MEMBER_LIST_PUSH_V1}
+        return needed <= link.capabilities and needed <= link.local_capabilities
+
+    def _publish_member_changes(self) -> None:
+        """Send only changed mergeable tables, never periodic unchanged digests.
+
+        The digest deliberately excludes local authority and liveness fields, just
+        like conditional pulls: a heartbeat must not turn this into another poll.
+        Mark a digest sent only after the reliable queue accepts it; reconnects
+        create new PeerLinks and therefore always publish their initial view.
+        """
+        for record in store.list_networks(self.root):
+            digest = member_sync_digest(record, sender_device_id=record.self_device_id)
+            for member in record.active_members():
+                link = self._link_for(member.device_id, network_id=record.network_id)
+                if link is None or not link.alive or not self._member_push_enabled(link):
+                    continue
+                if link.member_push_digest == digest:
+                    continue
+                if link.send(
+                    {
+                        "op": "net_member_list",
+                        "network_id": record.network_id,
+                        "sequence": record.sequence,
+                        "changed_members": [row.to_json() for row in record.members],
+                    }
+                ):
+                    link.member_push_digest = digest
+
+    def _membership_changes_loop(self) -> None:
+        """The change clock must never wait behind a membership pull timeout."""
+        while not self._stop.wait(MEMBERSHIP_PULL_PASS_S):
+            try:
+                self._publish_member_changes()
+            except Exception:  # noqa: BLE001 — the next scan retries unsent views
+                continue
 
     def _membership_loop(self) -> None:
         """The scheduled half of membership convergence, with no surface involved.
@@ -7805,7 +7902,17 @@ class RelayServer:
         if deadline_s is not None:
             return self._dispatch_slow(link, frame, handler, granted, deadline_s)
         with _serving_link(link.link_id):
-            return self._run_handler(link, frame, handler, granted)
+            reply = self._run_handler(link, frame, handler, granted)
+        if (
+            carrier == "net_member_list"
+            and "changed_members" in frame
+            and frame.get("req") is None
+            and reply.get("op") == "ack"
+        ):
+            # A negotiated change notification has no waiter. Keep the normal
+            # authorization/error audit path, but do not manufacture a stray ack.
+            return None
+        return reply
 
     def _run_handler(
         self,
@@ -8784,10 +8891,41 @@ class RelayServer:
             )
         return rows
 
-    def _op_member_list(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+    def _op_member_list(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
         record = self.store_view.network(link.network_id)
         if record is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
+        if "changed_members" in frame:
+            rows = frame["changed_members"]
+            if not self._member_push_enabled(link) or not isinstance(rows, list):
+                raise MeshRefusal("bad_frame", "member-table push was not negotiated or is invalid")
+            # The authenticated link, not an embedded member row, owns the target
+            # network. Keep this check even though publication is network-scoped:
+            # an incorrectly constructed frame must never cross that boundary.
+            if frame.get("network_id") != link.network_id:
+                raise MeshRefusal(
+                    "bad_frame", "member-table push does not match the link's network"
+                )
+            sequence = frame.get("sequence")
+            if type(sequence) is not int or sequence < 0:
+                raise MeshRefusal("bad_frame", "member-table push has no valid snapshot sequence")
+            # This is a TABLE, not an invalidation: adoption happens on the healthy
+            # link's reader immediately, independent of other peers' pull timeouts.
+            # No req / ack: unsolicited delivery is not a freshly answered pull.
+            with link.member_table_lock:
+                if sequence <= link.member_snapshot_sequence:
+                    return None  # Already applied, or overtaken by a newer pull/push.
+                changed = self._adopt_member_rows(link, rows)
+                link.member_snapshot_sequence = sequence
+                # Record revisions also advance for liveness/metadata. A late
+                # snapshot that changes no mergeable row must not undo an equal
+                # pull's settlement or manufacture a new verification need.
+                if changed:
+                    link.member_push_unverified = True
+                    link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+            if changed:
+                self._membership_wake.set()
+            return None
         # The conditional half of ``wire.MEMBER_LIST_DIGEST_V1``: answer without the
         # rows only when the asker's table hashes exactly like ours. Any difference
         # — a member either side lacks, a moved endpoint, a rename — gets the full
@@ -8804,6 +8942,9 @@ class RelayServer:
         # THE REPLY IS BARE ON PURPOSE (QA round 1, Q2): the asker reads only the flag
         # and the echoed digest, and only a peer that negotiated the capability can
         # ever receive this shape — an older asker never sends ``if_digest``.
+        # The same persisted record sequence accompanies full and conditional
+        # answers on push-capable links. Old peers retain their EXACT wire shape.
+        snapshot = {"sequence": record.sequence} if self._member_push_enabled(link) else {}
         asked = frame.get("if_digest")
         if isinstance(asked, str) and asked:
             mine = member_sync_digest(record, sender_device_id=record.self_device_id)
@@ -8811,7 +8952,7 @@ class RelayServer:
                 return {
                     "op": "ack",
                     "req": frame.get("req"),
-                    "detail": {"unchanged": True, "digest": mine},
+                    "detail": {"unchanged": True, "digest": mine, **snapshot},
                 }
         return {
             "op": "ack",
@@ -8821,6 +8962,7 @@ class RelayServer:
                 "epoch": record.epoch,
                 "members": [member.to_json() for member in record.members],
                 "members_digest": members_digest_of(record),
+                **snapshot,
             },
         }
 
@@ -12596,8 +12738,11 @@ class RelayServer:
                     if link.send(frame):
                         store.drop_frame(path)
 
-    def _link_for(self, device_id: str) -> PeerLink | None:
+    def _link_for(self, device_id: str, *, network_id: str | None = None) -> PeerLink | None:
         """A link anything NEW may go over — never one that has begun closing.
+
+        Membership publication must specify ``network_id``: the same device can
+        share several networks, but each authenticated link belongs to only one.
 
         ``alive`` IS NOT THE QUESTION ASKED HERE, and asking it was the defect this
         method's callers paid for: a link inside ``PeerLink.close``'s flush window is
@@ -12610,7 +12755,12 @@ class RelayServer:
         dialled fresh and finished in 70 ms.
         """
         for link in self.links.values():
-            if link.device_id == device_id and link.alive and not link.closing:
+            if (
+                link.device_id == device_id
+                and (network_id is None or link.network_id == network_id)
+                and link.alive
+                and not link.closing
+            ):
                 return link
         return None
 

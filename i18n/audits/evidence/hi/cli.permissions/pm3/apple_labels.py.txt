@@ -1,0 +1,21 @@
+"""hi cli.permissions R3 (pm3): en -> hi pairs for the macOS labels named in changed keys, read from Apple's installed .loctable resources."""
+import plistlib, os
+def get(d, loc):
+    r = dict(d.get(loc, {})); r.update(d.get(loc + '~mac', {})); return r
+def show(path, keys=(), values=()):
+    d = plistlib.load(open(path, 'rb'))
+    en = get(d, 'en') or get(d, 'en_GB') or get(d, 'Base'); hi = get(d, 'hi'); n = 0
+    for k, v in en.items():
+        if isinstance(v, str) and (k in keys or v.strip() in values):
+            print(f"{path.split('/Contents/')[0].rsplit('/',1)[-1]}/{os.path.basename(path)} [{k}] en={v!r} hi={hi.get(k)!r}"); n += 1
+    if not n: print(path, 'no hits')
+os.system('sw_vers')
+show('/System/Applications/System Settings.app/Contents/Resources/InfoPlist.loctable', keys=('CFBundleDisplayName',))
+SP = '/System/Library/ExtensionKit/Extensions/SecurityPrivacyExtension.appex/Contents/Resources/'
+show(SP + 'InfoPlist.loctable', keys=('CFBundleDisplayName',))
+show(SP + 'Localizable.loctable', keys=('SCREEN_CAPTURE_HEADER', 'SCREENANDAUDIOCAPTURE', 'FILE_ACCESS_COMBINED'))
+show('/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/Resources/ConfirmAccess.loctable', values=('Allow', 'Always Allow'))
+KA = '/System/Library/CoreServices/Applications/Keychain Access.app/Contents/Resources/'
+show(KA + 'InfoPlist.loctable', keys=('CFBundleDisplayName',))
+show(KA + 'KeyEditor.loctable', values=('Access Control',))
+show(KA + 'Localizable.loctable', keys=('private key',))

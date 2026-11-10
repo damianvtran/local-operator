@@ -184,6 +184,9 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-journal-source-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
+    # Change-only member tables permit a long anti-entropy interval, without
+    # sending optional fields to builds that still rely on the 30-second pull.
+    "member-list-push-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
@@ -253,6 +256,9 @@ ZLIB_RECORDS_V1 = "zlib-records-v1"
 #: sends ``if_digest`` and keeps getting full tables, and a peer without it is
 #: never sent one, so a mixed mesh pulls exactly as before.
 MEMBER_LIST_DIGEST_V1 = "member-list-digest-v1"
+#: Full member-table notifications on the existing membership read opcode.
+#: They share its authorization and merge rules; removals still use net_epoch.
+MEMBER_LIST_PUSH_V1 = "member-list-push-v1"
 
 
 # ---------------------------------------------------------------------------

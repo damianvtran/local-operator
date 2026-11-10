@@ -1,0 +1,22 @@
+import json,re
+from rich.cells import cell_len
+D='local_operator/i18n/catalogues'
+def flat(d,p=''):
+    o={}
+    for k,v in d.items():
+        if isinstance(v,dict): o.update(flat(v,p+k+'.'))
+        else:o[p+k]=v
+    return o
+en=flat(json.load(open(f'{D}/en/cli.permissions.json')));hi=flat(json.load(open(f'{D}/hi/cli.permissions.json')))
+print('keys en',len(en),'hi',len(hi),'symdiff',sorted(set(en)^set(hi)))
+TOK=['Local Operator Runtime','Local Operator','Developer ID Application','Developer ID','codesign','guide://permissions','/update','[y/N] ','HOME','LOCAL_OPERATOR_RUNTIME_ROOT','LOCAL_OPERATOR_CONFIG_DIR','~/.local-operator','Python','macOS']
+for k in en:
+    p=[]
+    f=lambda s:sorted(re.findall(r'\{(\w+)\}',s)); b=lambda s:re.findall(r'`[^`]*`',s); t=lambda s:[x for x in TOK if x in s]
+    if f(en[k])!=f(hi[k]): p.append(('placeholders',f(en[k]),f(hi[k])))
+    if b(en[k])!=b(hi[k]): p.append('backticks')
+    if t(en[k])!=t(hi[k]): p.append(('verbatim',t(en[k]),t(hi[k])))
+    if en[k].endswith(' ')!=hi[k].endswith(' '): p.append('trailing space')
+    if en[k].count('\n')!=hi[k].count('\n'): p.append('newlines')
+    if '\u200c' in hi[k] or '\u200d' in hi[k]: p.append('zwj/zwnj')
+    print(k, max(cell_len(l) for l in en[k].split('\n')), max(cell_len(l) for l in hi[k].split('\n')), p)

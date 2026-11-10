@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "audit_id": "pc3",
+  "round": 3,
+  "locale": "ru",
+  "namespace": "cli.permissions",
+  "audit_date": "2026-11-09",
+  "key_count": 39,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "audited_revision": "85fb35811f9d17fb6dfadfc2d5df3269db04bd12",
+  "previous_round_record": "i18n/audits/evidence/ru/cli.permissions/pb2/record.json",
+  "scope": "Round 2+: pb2 findings P1-P4 plus keys changed in 788cc399..85fb3581 (status.scope, setup.already_signed, setup.always_allow_kept [new], setup.explain, setup.always_allow). Unchanged pb2-approved keys not re-audited.",
+  "translator": {
+    "agent": "i18n-translator (ru, PR #3691 round-3 wave; commit 85fb35811f9)",
+    "session": null,
+    "model": null,
+    "provenance_note": "Translator session/model not provided to the auditor and not in the commit; left null rather than invented."
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "7b05bb0e2f09",
+    "model": "anthropic/claude-opus-5-5",
+    "independent_from_translator_session": true,
+    "independent_from_prior_auditor_sessions": [
+      "741233d88cd4",
+      "a6f580403f3a"
+    ],
+    "actual_model_source": "auditor session system prompt 'Model:' line; no fallback observed",
+    "independence_note": "Did not translate or audit earlier rounds. Same model family as other wave agents may apply (translator model undisclosed). No native-speaker or rendered-frame certification."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "6f8427bf5dd20f8fa252d0163387d59f4e53a30fe07cc9db4c5a5f55048fb1d2"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/cli.permissions.json",
+      "sha256": "217cb8cd505af80574782f52e8341a992fd11fc3fd06663d1d5ede790f1263b4"
+    }
+  },
+  "macos_label_sources": "Apple ru .loctable resources on macOS 27.2 (26B123): ConfirmAccess 100267/100268, Keychain Access KeyEditor 302.label, SecurityPrivacyExtension SCREEN_CAPTURE/FILE_ACCESS_COMBINED/ACCESSIBILITY; raw output in audit.log",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pc3/report.md",
+      "sha256": "c5be38c33a78e6bc769881ba9d274c02439298e5e918a2227b76c5cb7318476f"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pc3/audit.log",
+      "sha256": "df2125e18bcc8f33b2f2b5adb663a5e3a8506b34c41089b1b36cc0bf55066f3f"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pc3/parity.py.txt",
+      "sha256": "a8141186c1a23e7d7a46d8b95c03a086064b32e5fc67a24bb6ff3bae33d82639"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pc3/labels.py.txt",
+      "sha256": "9f5adea1bedca0942f25d02ce756c434e367d2226b66d8440dddb0e5f5835dd9"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/cli.permissions/pc3/receipt.json",
+      "sha256": "5491cb563a5f271eba08fe26f561924326de2f0b8bf1f3c47238605050c81f47"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is reasoning; audit.log holds actual command output; *.py.txt are the reproduction scripts it ran.",
+  "round2_findings_resolution": {
+    "P1": "fixed",
+    "P2": "fixed",
+    "P3": "fixed",
+    "P4": "fixed"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  }
+}

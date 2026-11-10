@@ -1,0 +1,15 @@
+{
+  "record": "i18n/audits/evidence/ur/cli.permissions/urp3/record.json",
+  "bundle": {
+    "record.json": "ccf279e7cda94afa9ccdf0976345741e3bd57d6d402abefd8424882ef0fde050",
+    "report.md": "db5f3b0e5da24380e02b09142c10cdc949fbfb7a8415fd387618a3298bcbfd08",
+    "audit.log": "afc374b7125eea3899bc27f6d41f78f72289cbfa4ee516577cc71360676a3bce",
+    "mech_check.py.txt": "c533bdad9ed2cde4d3c8fa4e2a7556e3fbf4571aae8b24024f9dde8e03016fb5",
+    "apple_labels.py.txt": "ac391b29bdcb641a9621a6425f801d84a9daa97260b6913fe6fb327961815f6c",
+    "keychain_labels.py.txt": "6d38d4388b1167a500b6cea534e87e4633b06db7876b8be260f56802adff6f14"
+  },
+  "auditor": "i18n-auditor (lopdev team subagent)",
+  "session": "df1f78befebc",
+  "model": "anthropic/claude-opus-5-5",
+  "date": "2026-11-09"
+}
