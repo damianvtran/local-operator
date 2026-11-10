@@ -567,6 +567,48 @@ async def test_ask_never_settles_a_repository_root(home: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("inner", [".git", ".git/objects"])
+async def test_ask_never_settles_a_git_directory(home: Path, inner: str) -> None:
+    """``<repo>/.git`` holds no ``.git`` below it, yet deleting it (or part of
+    it) destroys the root's history: the judge keeps it (rebase onto #3700)."""
+    repo = _pad(home, STRANGER) / "clone"
+    (repo / ".git" / "objects").mkdir(parents=True)
+    target = repo / inner
+    _ask(home, PARENT, "a-beef", f"Delete {target}?", "Delete", (("Delete", ""), ("Keep", "")))
+    judge = _TimedOutJudge()
+    outcome = await _check(home, f"rm -rf {target}", PARENT, [], judge)
+    assert outcome is not None and outcome.blocked, outcome
+    assert judge.calls == 1
+
+
+class _AnswerJudge:
+    """A judge that answers at once with a fixed first line."""
+
+    def __init__(self, answer: str) -> None:
+        self.answer = answer
+        self.calls = 0
+
+    async def __call__(self, system: str, prompt: str) -> str:
+        self.calls += 1
+        return self.answer
+
+
+@pytest.mark.asyncio
+async def test_judge_allow_citing_an_ask_on_a_repository_root_runs(home: Path) -> None:
+    """Once the judge has weighed a root's ``git:`` facts and ALLOWs citing a
+    verified ask, the call runs. Regression: ``DeleteCase.verify`` returned a
+    bare ``""`` for a root, which the caller's tuple unpack turned into a
+    guard error ("the safety check failed") on every judged root delete."""
+    repo = _pad(home, STRANGER) / "clone"
+    (repo / ".git").mkdir(parents=True)
+    _ask(home, PARENT, "a-beef", f"Delete {repo}?", "Delete", (("Delete", ""), ("Keep", "")))
+    judge = _AnswerJudge("ALLOW ask=a-beef")
+    outcome = await _check(home, f"rm -rf {repo}", PARENT, [], judge)
+    assert judge.calls == 1
+    assert outcome is not None and not outcome.blocked, outcome
+
+
+@pytest.mark.asyncio
 async def test_unsettled_asks_still_go_to_the_judge(home: Path) -> None:
     """Negative controls for the ask route: a stranger's ask, a pick that
     approves only part of a list, a declined answer and an old answer."""

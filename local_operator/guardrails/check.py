@@ -361,6 +361,17 @@ def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
     return BUILTIN_JUDGE
 
 
+def _git_bearing(path: str) -> bool:
+    """Is ``path`` a repository/worktree root, a ``.git`` entry or inside one?
+
+    WHY: the pre-judge ask settlement (``DeleteCase.settled``) must never
+    decide these alone (PR #3710 x #3700): a root carries ``git:`` facts the
+    judge weighs, and ``<repo>/.git`` or ``<repo>/.git/objects`` destroys the
+    history of the root above it even though no ``.git`` sits *below* it.
+    """
+    return ".git" in Path(path).parts or os.path.lexists(os.path.join(path, ".git"))
+
+
 @dataclass(frozen=True)
 class _Approved:
     """An ask's deterministic approval, shaped for ``DeleteCase._named_by``."""
@@ -444,10 +455,11 @@ class DeleteCase:
             # verified answer whose deterministic approval names the path
             # (``OperatorWords.approved``) is the operator's decision; the
             # judge could only agree or override them.
-            if os.path.lexists(os.path.join(path, ".git")):
-                # A repository or worktree root is never settled by an ask
-                # alone: its ``git:`` facts (open PR, running owner — PR
-                # #3700) are the judge's to weigh against the answer.
+            if _git_bearing(path):
+                # A repository or worktree root, or a ``.git`` directory or
+                # anything inside one, is never settled by an ask alone: its
+                # ``git:`` facts (open PR, running owner — PR #3700) are the
+                # judge's to weigh against the answer.
                 return ""
             words = next(
                 (
@@ -498,11 +510,6 @@ class DeleteCase:
             if path in by_evidence and path not in self.operator_only:
                 basis.append(f"{path} created by {by_evidence[path]}")
                 continue
-            if os.path.lexists(os.path.join(path, ".git")):
-                # A repository or worktree root is never settled by an ask
-                # alone: its ``git:`` facts (open PR, running owner — PR
-                # #3700) are the judge's to weigh against the answer.
-                return ""
             words = next(
                 (
                     w
