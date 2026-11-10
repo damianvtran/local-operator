@@ -3983,13 +3983,19 @@ class SyncWatcher(threading.Thread):
         self._server = server
         self._settings = settings or SyncSettings.from_config(server.root)
         self._seen: dict[str, _Watched] = {}
-        self._stop = threading.Event()
+        # ``_halt``, NOT ``_stop``: ``threading.Thread`` has a private ``_stop()``
+        # METHOD that CPython 3.12's ``join()``/``is_alive()`` call once the thread
+        # has ended (``_wait_for_tstate_lock``). An Event under that name made both
+        # raise ``TypeError: 'Event' object is not callable`` for a finished
+        # thread, so no stop could ever be joined or confirmed (3.14 no longer
+        # calls it; 3.12 is the floor and CI's interpreter).
+        self._halt = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._stop.wait(self._settings.tick_s):
+        while not self._halt.wait(self._settings.tick_s):
             try:
                 self.tick(now=time.time())
             except Exception:  # noqa: BLE001 — a watcher must never kill the relay
@@ -4143,10 +4149,12 @@ class ReplicaRefresher(threading.Thread):
         self._marked: dict[str, str] = {}
         self._running: set[str] = set()
         self._again: set[str] = set()
-        self._stop = threading.Event()
+        # ``_halt``, NOT ``_stop``: it would shadow ``threading.Thread._stop()``,
+        # which 3.12's ``join()``/``is_alive()`` call (see :class:`SyncWatcher`).
+        self._halt = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def mark(self, session_id: str, reason: str) -> None:
         """Note that this device's copy of ``session_id`` is behind."""
@@ -4157,7 +4165,7 @@ class ReplicaRefresher(threading.Thread):
                 self._marked[session_id] = reason
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._stop.wait(self._settings.tick_s):
+        while not self._halt.wait(self._settings.tick_s):
             try:
                 self.tick()
             except Exception:  # noqa: BLE001 — a refresher must never kill the relay
@@ -4228,6 +4236,12 @@ def ensure_refresher(server: "RelayServer") -> ReplicaRefresher:
     would mean a thread per relay in a suite that builds hundreds it never starts.
     """
     with _refresher_lock:
+        if _relay_stopped(server):
+            # A push or pull already in flight when ``stop()`` ran its hooks must
+            # not start a fresh thread afterwards: that thread would be the leak
+            # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
+            # instance keeps the caller's ``.mark()`` harmless and holds nothing.
+            return ReplicaRefresher(server)
         existing = _refreshers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4253,6 +4267,12 @@ def ensure_watcher(server: "RelayServer") -> SyncWatcher:
     relay in a test suite that builds hundreds of relays it never starts.
     """
     with _watcher_lock:
+        if _relay_stopped(server):
+            # A push or pull already in flight when ``stop()`` ran its hooks must
+            # not start a fresh thread afterwards: that thread would be the leak
+            # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
+            # instance keeps the caller's ``.mark()`` harmless and holds nothing.
+            return SyncWatcher(server)
         existing = _watchers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4260,6 +4280,74 @@ def ensure_watcher(server: "RelayServer") -> SyncWatcher:
         _watchers[id(server)] = watcher
         watcher.start()
         return watcher
+
+
+#: Bounded join for :func:`stop_threads`: the bound ``rollouts.stop_driver`` and
+#: ``definitions.stop_syncer`` already use, for their reason. Between ticks both
+#: threads wait on an Event, so a stop is seen at once; only a tick already in
+#: flight can delay it, and a tick may be mid-dial (the watcher's ``available``
+#: push, the refresher's ``sync_from``). ``stop()`` must not inherit a peer's
+#: latency, and the threads are daemons, so this bounds promptness, not a leak.
+SYNC_THREAD_STOP_JOIN_S = 5.0
+
+#: A survivor is named in ONE warning per episode, keyed like the registries.
+_survivor_warned: dict[tuple[str, int], threading.Thread] = {}
+
+
+def _relay_stopped(server: "RelayServer") -> bool:
+    stopped = getattr(server, "_stop", None)
+    return bool(stopped is not None and stopped.is_set())
+
+
+def stop_threads(server: "RelayServer", *, timeout: float = SYNC_THREAD_STOP_JOIN_S) -> None:
+    """Stop and reap this relay's watcher and refresher, if it started them.
+
+    Wired into ``RelayServer.stop()`` through this slice's ``on_stop`` hook. WHY:
+    both threads hold their relay, and the registries below hold both threads, so
+    without it they kept ticking after ``stop()`` and a stopped relay stayed pinned
+    for the life of the process (a slow leak on a long-running ``lop network
+    serve``; a cross-test isolation source in CI). A stopped relay must be
+    collectable.
+
+    Both are signalled before either is joined, so the worst case is one bound,
+    not two. THE REGISTRY ENTRY IS REMOVED ONLY ONCE THE THREAD IS KNOWN STOPPED,
+    identity-checked (the rule ``stop_driver``/``stop_syncer`` follow): popping
+    first would leave a still-running thread no caller could reach. A survivor is
+    reported once per episode and its entry is KEPT, so a later stop retries it.
+    """
+    key = id(server)
+    tables = (
+        ("watcher", _watcher_lock, _watchers),
+        ("refresher", _refresher_lock, _refreshers),
+    )
+    running: list[tuple[str, threading.Lock, dict[int, Any], Any]] = []
+    for kind, lock, table in tables:
+        with lock:
+            thread = table.get(key)
+        if thread is not None:
+            thread.stop()
+            running.append((kind, lock, table, thread))
+    deadline = time.monotonic() + timeout
+    for kind, lock, table, thread in running:
+        thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if thread.is_alive():
+            with lock:
+                warned = _survivor_warned.get((kind, key)) is thread
+                _survivor_warned[(kind, key)] = thread
+            if not warned:
+                logger.warning(
+                    "sync: %s for %s did not stop within the %.1fs timeout and is "
+                    "still running; it was not killed and its entry is kept so a "
+                    "later stop can retry it",
+                    kind,
+                    getattr(server, "root", "<unknown>"),
+                    timeout,
+                )
+            continue
+        with lock:
+            if table.get(key) is thread:
+                del table[key]
+            _survivor_warned.pop((kind, key), None)
 
 
 # ---------------------------------------------------------------------------
@@ -4544,4 +4632,7 @@ def install(server: RelayServer) -> None:
         {"net_sync": make_handler(server)},
         local_handlers={"session_sync": local_sync_handler(server)},
         slow={"net_sync": SYNC_OP_DEADLINE_S},
+        # The lazily started threads must not outlive the relay (see
+        # :func:`stop_threads`). A no-op for a relay that never pushed or pulled.
+        on_stop={"mesh-sync": lambda: stop_threads(server)},
     )
