@@ -1720,9 +1720,9 @@ async def test_pricing_a_child_never_blocks_the_paint(monkeypatch) -> None:
         panel.sync(session)
         panel._tick()
         on_loop = [row for row in resolved[repaints_from:] if row[2] == loop_name]
-        assert on_loop == [], (
-            f"the repaint resolved a model on its own thread (a 10 s listing there): {on_loop}"
-        )
+        assert (
+            on_loop == []
+        ), f"the repaint resolved a model on its own thread (a 10 s listing there): {on_loop}"
         assert "docs sweep" in str(getattr(panel._rows["j1"], "content", ""))
 
 

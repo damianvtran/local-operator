@@ -40,6 +40,35 @@ import ast
 import pathlib
 import re
 import sys
+from typing import TypedDict
+
+
+class Finding(TypedDict):
+    """One time/CPU assertion. ``bucket``/``why`` start empty and are filled by
+    ``classify`` once the row exists, because classification reads the other
+    fields; keeping them required (not ``NotRequired``) lets the renderers index
+    them without a presence check."""
+
+    file: str
+    line: int
+    fn: str
+    expr: str
+    op: str
+    consts: list[int | float]
+    measured: bool
+    body: str
+    bucket: str
+    why: str
+
+
+class SettleNode(TypedDict):
+    """A fixed wait whose very next statement is an assertion (bucket C)."""
+
+    file: str
+    line: int
+    fn: str
+    wait: str
+
 
 #: What a time/CPU quantity is spelled like in this suite.
 TIME_STRICT = re.compile(
@@ -96,6 +125,7 @@ def clock_names(fn: ast.AST) -> set[str]:
     "perf_counter" made the sweep quadratic-ish and slow enough to be unusable,
     and the AST already says exactly which calls are clocks.
     """
+
     def is_clock(node: ast.AST) -> bool:
         if not isinstance(node, ast.Call):
             return False
@@ -130,7 +160,7 @@ def clock_names(fn: ast.AST) -> set[str]:
     return names
 
 
-def classify(row: dict) -> tuple[str, str]:
+def classify(row: Finding) -> tuple[str, str]:
     """Bucket one finding. Rules are ordered; the first match wins."""
     if not row["measured"]:
         return "A", "no clock read — code constants / policy values; load cannot move it"
@@ -155,8 +185,8 @@ def classify(row: dict) -> tuple[str, str]:
     return "B", f"hard-coded {literal:g} s wall-clock ceiling — a loaded runner crosses it"
 
 
-def findings(root: pathlib.Path) -> list[dict]:
-    rows: list[dict] = []
+def findings(root: pathlib.Path) -> list[Finding]:
+    rows: list[Finding] = []
     seen: set[tuple[str, int, str]] = set()
     for path in sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts):
         try:
@@ -205,6 +235,8 @@ def findings(root: pathlib.Path) -> list[dict]:
                             "measured": bool(CLOCKCALL.search(expr))
                             or any(re.search(rf"\b{re.escape(n)}\b", expr) for n in names),
                             "body": src.body(fn)[:2600],
+                            "bucket": "",
+                            "why": "",
                         }
                     )
     for row in rows:
@@ -212,9 +244,9 @@ def findings(root: pathlib.Path) -> list[dict]:
     return rows
 
 
-def settle_nodes(root: pathlib.Path) -> list[dict]:
+def settle_nodes(root: pathlib.Path) -> list[SettleNode]:
     """Fixed waits whose very next statement is an assertion (bucket C)."""
-    out: list[dict] = []
+    out: list[SettleNode] = []
     for path in sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts):
         try:
             src_text = path.read_text(encoding="utf-8")
@@ -235,15 +267,15 @@ def settle_nodes(root: pathlib.Path) -> list[dict]:
                             "file": str(path.relative_to(root.parent)),
                             "line": stmt.lineno,
                             "fn": fn.name,
-                            "wait": "pilot.pause()"
-                            if ".pause()" in src.body(stmt)
-                            else "sleep(...)",
+                            "wait": (
+                                "pilot.pause()" if ".pause()" in src.body(stmt) else "sleep(...)"
+                            ),
                         }
                     )
     return out
 
 
-def render(rows: list[dict], settles: list[dict], base: str) -> str:
+def render(rows: list[Finding], settles: list[SettleNode], base: str) -> str:
     import collections
 
     counts = collections.Counter(row["bucket"] for row in rows)
@@ -272,7 +304,7 @@ def render(rows: list[dict], settles: list[dict], base: str) -> str:
         "slow down (653 ms of loop CPU against a 530 ms calibrated ceiling; a 0.99 s",
         "sync call against a 0.5 s ceiling). Sub-second and low-single-digit-second",
         "bounds are inside that noise; a 3 s-plus ceiling is already the failure mode",
-        "\"this hung\".",
+        '"this hung".',
         "",
         "Bucket C is an aggregate rather than a list because each node is one",
         "`pilot.pause()`, and the useful number is where they cluster.",
@@ -294,8 +326,8 @@ def render(rows: list[dict], settles: list[dict], base: str) -> str:
         "producer, a probe twin, the network or `time.sleep` |",
         "| `tests/unit/tui/test_provider_recovery_hint.py:155` "
         "(`test_a_deliberately_slow_probe_does_not_delay_the_sync_arm`) | `elapsed < 0.5` | "
-        "the same provenance check with 5 s probes armed — \"does not delay\" derived "
-        "from \"the only slow things on the path were never entered\" |",
+        'the same provenance check with 5 s probes armed — "does not delay" derived '
+        'from "the only slow things on the path were never entered" |',
         "| `tests/unit/session/test_index_prewarm.py:216` | `elapsed < 0.05` | the refresh had "
         "not begun when the starter returned (its gate was still shut), so startup "
         "scheduled the warm rather than running it |",
@@ -324,11 +356,15 @@ def render(rows: list[dict], settles: list[dict], base: str) -> str:
         "",
     ]
 
-    lines += ["## Bucket B — hard-coded ceilings (the future red shards)", "",
-              "Sorted by the ceiling, tightest first: the tighter the number, the less",
-              "the host has to stall for the assertion to fail.", "",
-              "| file:line | assertion | bound | why it can cross |",
-              "| --- | --- | --- | --- |"]
+    lines += [
+        "## Bucket B — hard-coded ceilings (the future red shards)",
+        "",
+        "Sorted by the ceiling, tightest first: the tighter the number, the less",
+        "the host has to stall for the assertion to fail.",
+        "",
+        "| file:line | assertion | bound | why it can cross |",
+        "| --- | --- | --- | --- |",
+    ]
     for row in sorted(rows, key=lambda r: (max(abs(v) for v in r["consts"]), r["file"], r["line"])):
         if row["bucket"] != "B":
             continue
@@ -336,11 +372,16 @@ def render(rows: list[dict], settles: list[dict], base: str) -> str:
         expr = row["expr"].replace("|", "\\|")
         lines.append(f"| `{row['file']}:{row['line']}` | `{expr}` | {bound:g} s | {row['why']} |")
 
-    lines += ["", "## Bucket D — hang detectors", "",
-              "A ceiling of 3 s or more, where a real regression is a HANG rather than",
-              "a slowdown, so the number only has to be safely larger than the work.", "",
-              "| file:line | assertion | bound | why it is D and not B |",
-              "| --- | --- | --- | --- |"]
+    lines += [
+        "",
+        "## Bucket D — hang detectors",
+        "",
+        "A ceiling of 3 s or more, where a real regression is a HANG rather than",
+        "a slowdown, so the number only has to be safely larger than the work.",
+        "",
+        "| file:line | assertion | bound | why it is D and not B |",
+        "| --- | --- | --- | --- |",
+    ]
     for row in sorted(rows, key=lambda r: (r["file"], r["line"])):
         if row["bucket"] != "D":
             continue
@@ -348,20 +389,30 @@ def render(rows: list[dict], settles: list[dict], base: str) -> str:
         expr = row["expr"].replace("|", "\\|")
         lines.append(f"| `{row['file']}:{row['line']}` | `{expr}` | {bound:g} s | {row['why']} |")
 
-    lines += ["", "## Bucket A — derived or load-independent", "",
-              "| file:line | assertion | why it is safe |",
-              "| --- | --- | --- |"]
+    lines += [
+        "",
+        "## Bucket A — derived or load-independent",
+        "",
+        "| file:line | assertion | why it is safe |",
+        "| --- | --- | --- |",
+    ]
     for row in sorted(rows, key=lambda r: (r["file"], r["line"])):
         if row["bucket"] != "A":
             continue
         expr = row["expr"].replace("|", "\\|")
         lines.append(f"| `{row['file']}:{row['line']}` | `{expr}` | {row['why']} |")
 
-    lines += ["", "## Bucket C — sleep-then-assert", "",
-              f"{len(settles)} spots where a fixed wait is the very next statement before an",
-              "assertion. They cluster hard, which is what makes them one shared helper's",
-              "job rather than a hundred edits:", "",
-              "| file | count |", "| --- | --- |"]
+    lines += [
+        "",
+        "## Bucket C — sleep-then-assert",
+        "",
+        f"{len(settles)} spots where a fixed wait is the very next statement before an",
+        "assertion. They cluster hard, which is what makes them one shared helper's",
+        "job rather than a hundred edits:",
+        "",
+        "| file | count |",
+        "| --- | --- |",
+    ]
     per_file = collections.Counter(node["file"] for node in settles)
     for path, count in per_file.most_common(25):
         lines.append(f"| `{path}` | {count} |")
@@ -369,10 +420,14 @@ def render(rows: list[dict], settles: list[dict], base: str) -> str:
     lines += ["", "| wait | count |", "| --- | --- |"]
     for wait, count in waits.most_common():
         lines.append(f"| `{wait}` | {count} |")
-    lines += ["", "`tests/unit/tui/_settle.py` is the shared helper: it pumps a bounded COUNT of",
-              "event-loop turns until the product's own condition holds. A turn count survives",
-              "contention where a wall-clock budget does not — a loaded host inflates how long",
-              "each turn takes, not how many turns the app needs.", ""]
+    lines += [
+        "",
+        "`tests/unit/tui/_settle.py` is the shared helper: it pumps a bounded COUNT of",
+        "event-loop turns until the product's own condition holds. A turn count survives",
+        "contention where a wall-clock budget does not — a loaded host inflates how long",
+        "each turn takes, not how many turns the app needs.",
+        "",
+    ]
     return "\n".join(lines) + "\n"
 
 

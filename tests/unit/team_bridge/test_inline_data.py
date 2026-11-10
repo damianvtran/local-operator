@@ -29,8 +29,8 @@ from local_operator.harness.message_types import (
 from local_operator.harness.types import ToolContext
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
-from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge import inline_data
+from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.inline_data import (
     MAX_PREFIX_CHARS,
     bound_inline_data_payload,
@@ -193,9 +193,9 @@ def test_a_one_megabyte_marker_dense_body_stays_fast(monkeypatch: pytest.MonkeyP
     searched = _count_marker_searches(monkeypatch)
     bounded = bound_inline_data_uris(body)
     assert "inline base64 data withheld:" in bounded
-    assert searched == [len(body)], (
-        f"the body was searched {len(searched)} times for 50_000 markers"
-    )
+    assert searched == [
+        len(body)
+    ], f"the body was searched {len(searched)} times for 50_000 markers"
 
 
 def test_the_payload_walker_passes_an_unaffected_page_through_by_identity() -> None:
