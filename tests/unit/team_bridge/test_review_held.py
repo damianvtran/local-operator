@@ -8,9 +8,11 @@ Pins the four fixes of the "message stuck for 30 minutes" report:
 * A2 — an empty/unparsable reply is re-drawn once and then fails over; a real
   verdict is never re-drawn (no verdict shopping); blank on every hop is the
   NON-cached ``empty_reply`` hold.
-* A3 — a cached ANSWER hold (``model_hold`` & co.) raises the per-message owner
-  notice at once and can be Delivered or Discarded (``team_bridge.review_held``,
-  default on); off restores the old behaviour.
+* A3 — a cached ANSWER hold (``model_hold`` & co.) can be Delivered or Discarded
+  (``team_bridge.review_held``, default on); off restores the old behaviour. It
+  raises NO inbox item (operator report 2026-11-10: one row per held message
+  flooded the inbox); the holds list / sidebar badge is its only surface, and the
+  rows earlier builds wrote are retired by ``hold_release.retire_review_notices``.
 * A4 — the screener can be told whether THIS agent was addressed, from server
   facts only, through a template slot that current templates ignore (bridge-screen-v5
   itself is pinned in ``test_screening_addressed_v5.py``).
@@ -24,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.team_bridge import hold_release as hr
 from local_operator.team_bridge import screening
 from local_operator.team_bridge.store import (
     OWNER_PRINCIPAL_MODEL,
@@ -36,6 +39,7 @@ from tests.unit.team_bridge.test_hold_release import (  # noqa: F401 — ``rig``
     DELIVER,
     DOUBT,
     MESSAGE_ID,
+    NEW_WORK,
     Policy,
     Runner,
     _count,
@@ -218,7 +222,7 @@ def test_sender_visible_classes_are_truthful() -> None:
 # --- A3: the review exit ---------------------------------------------------------
 
 
-def test_model_hold_raises_the_notice_at_once_and_deliver_admits(
+def test_model_hold_raises_no_notice_and_deliver_admits(
     rig, monkeypatch  # noqa: F811 — imported fixture
 ) -> None:  # noqa: F811 — imported fixture
     config_dir, store, owner = rig
@@ -227,10 +231,11 @@ def test_model_hold_raises_the_notice_at_once_and_deliver_admits(
     assert held["action"] == "hold" and held["code"] == "model_hold"
     decision = store.work_scope_decision(owner, MESSAGE_ID)
     assert decision is not None and decision["hold_code"] == "model_hold" and decision["eligible"]
-    notices = _notices(config_dir)
-    assert len(notices) == 1 and "new work" not in json.dumps(notices[0])
-    assert decision is not None
-    assert store.work_scope_decision(owner, MESSAGE_ID)["notified_at"] is not None
+    # Operator report 2026-11-10: no inbox row at all for a review hold, and the
+    # hold stays in the ONE keyed long-hold count (``notified_at`` NULL).
+    assert _all_notifications(config_dir) == []
+    assert decision["notified_at"] is None
+    assert store.long_holds_readonly(owner, older_than_s=0.0, now=10**12)["count"] == 1
 
     from local_operator.server.utils import desktop_team_bridge_holds as holds
 
@@ -668,3 +673,268 @@ def test_the_envelope_carries_only_a_closed_addressed_value(
     plain, _ = screening.validate_envelope(owner, _item())
     assert plain is not None
     assert forged.envelope_digest == envelope.envelope_digest == plain.envelope_digest
+
+
+# --- no inbox flood from review holds (operator report 2026-11-10) -----------
+#
+# #3714 (a79c82fb) sent every review hold through the per-message notice: ~28
+# "Agent messages: a message is waiting for your review" rows in minutes, the
+# first per sender at ``high``, plus the overflow row past the cap. The holds
+# list (the sidebar badge) already shows them, so review holds write NOTHING to
+# the inbox, and the rows earlier builds wrote are retired (dismissed, never
+# deleted) by exactly their producer's keys.
+
+#: More than ``STANDING_NOTICE_CAP``, so the old code also wrote the overflow row.
+BURST = hr.STANDING_NOTICE_CAP + 2
+
+
+def _all_notifications(config_dir) -> list[dict[str, Any]]:
+    import sqlite3
+
+    from local_operator.notifications.store import store_path
+
+    path = store_path(config_dir)
+    if not path.exists():
+        return []
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, key, priority, title, dismissed_at, dismissed_via FROM items"
+            )
+        ]
+
+
+def _burst_id(i: int) -> str:
+    return f"bcmsg_burst{i:04d}"
+
+
+def _review_burst(config_dir, store, owner) -> None:
+    """``BURST`` review holds through the screener and the connector's notice hook."""
+
+    from local_operator.team_bridge.connector import conversation as conv
+
+    for i in range(BURST):
+        mid = _burst_id(i)
+        item = _item(message_id=mid, body=f"ask {i}")
+        held = _screen(config_dir, owner, Runner(DOUBT), item=item)
+        assert held.hold_code == "model_hold"
+        asyncio.run(
+            conv._notify_work_scope_hold(store, owner, config_dir, "s1", mid, code="model_hold")
+        )
+
+
+def test_a_review_hold_burst_writes_no_inbox_row_and_keeps_every_review(
+    rig,  # noqa: F811 — imported fixture
+) -> None:
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    config_dir, store, owner = rig
+    _review_burst(config_dir, store, owner)
+    assert _all_notifications(config_dir) == []  # no per-message, overflow or high row
+    decisions = store.work_scope_decisions(owner)
+    assert len(decisions) == BURST and all(d["notified_at"] is None for d in decisions)
+    listed = {i["message_id"]: i for i in holds.list_holds(config_dir, owner)["items"]}
+    assert all(listed[_burst_id(i)]["can_deliver"] for i in range(BURST))
+    # A re-drive of the hook is still a no-op, never a late row.
+    assert (
+        hr.raise_notice(
+            store, owner, config_dir=config_dir, session_id="s1", message_id=_burst_id(0)
+        )
+        == "badge_only"
+    )
+    assert _all_notifications(config_dir) == []
+
+
+def test_a_work_scope_hold_still_raises_its_notice(
+    rig, monkeypatch  # noqa: F811 — imported fixture
+) -> None:
+    """The neighbour class keeps its per-message notice: only review holds went quiet."""
+
+    config_dir, store, owner = rig
+    _server, _wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    assert len(_notices(config_dir)) == 1
+    assert store.work_scope_decision(owner, MESSAGE_ID)["notified_at"] is not None
+
+
+def _legacy_review_notice(config_dir, store, owner, message_id: str, *, priority: str) -> None:
+    """What the pre-fix ``raise_notice`` left behind for one review hold."""
+
+    from local_operator.notifications.store import NotificationStore
+
+    NotificationStore(config_dir).notify(
+        "s1",
+        title="Agent messages: a message is waiting for your review",
+        body_md="1 more held message is waiting for your review.",
+        priority=priority,
+        key=hr.notice_key(owner.endpoint_id, message_id),
+    )
+    store.mark_work_scope_notified(owner, message_id, now=1.0)
+
+
+def test_retire_dismisses_only_the_legacy_review_rows_and_is_idempotent(
+    rig, monkeypatch  # noqa: F811 — imported fixture
+) -> None:
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    config_dir, store, owner = rig
+    notifications = NotificationStore(config_dir)
+    # A real work-scope hold with its live notice: same key shape, must survive.
+    _server, _wakes, run = _spine(monkeypatch, config_dir, owner, Runner(NEW_WORK))
+    assert run()["code"] == hr.WORK_SCOPE_HOLD
+    # The flood the old build wrote: one row per review hold (first one high),
+    # one the operator already dismissed, and the overflow row.
+    _review_burst(config_dir, store, owner)
+    for i in range(BURST):
+        _legacy_review_notice(
+            config_dir, store, owner, _burst_id(i), priority="high" if i == 0 else "normal"
+        )
+    notifications.notify(
+        "s1",
+        title="more",
+        body_md="2 more",
+        priority="normal",
+        key=hr.overflow_key(owner.endpoint_id),
+    )
+    mine = notifications.find_by_key(hr.notice_key(owner.endpoint_id, _burst_id(1)))[0]
+    notifications.apply("dismiss", ids=[(mine["id"], mine["revision"])], via="explicit")
+    notifications.notify("s1", title="unrelated", body_md="keep", priority="high", key="other:1")
+    notifications.notify("s1", title="unkeyed", body_md="keep", priority="normal")
+    before = {r["id"]: r for r in _all_notifications(config_dir)}
+
+    counts = hr.retire_review_notices(store, owner, config_dir=config_dir)
+    assert counts == {"dismissed": BURST - 1, "overflow": 1, "cleared": BURST}
+    after = {r["id"]: r for r in _all_notifications(config_dir)}
+    assert after.keys() == before.keys()  # dismissed, never deleted
+    review_keys = {hr.notice_key(owner.endpoint_id, _burst_id(i)) for i in range(BURST)}
+    for row in after.values():
+        if row["key"] in review_keys and row["id"] != mine["id"]:
+            assert row["dismissed_via"] == hr.REVIEW_NOTICE_RETIRED_VIA
+        elif row["key"] == hr.overflow_key(owner.endpoint_id):
+            assert row["dismissed_via"] == hr.REVIEW_NOTICE_RETIRED_VIA
+        else:
+            # The operator's own dismissal, the work-scope notice and every
+            # unrelated row are byte-for-byte as they were.
+            assert row == before[row["id"]]
+    assert after[mine["id"]]["dismissed_via"] == "explicit"
+    assert len([r for r in _notices(config_dir) if r["dismissed_at"] is None]) == 1
+
+    # Idempotent: nothing live is left to retire and no decision is uncleared.
+    assert hr.retire_review_notices(store, owner, config_dir=config_dir) == {
+        "dismissed": 0,
+        "overflow": 0,
+        "cleared": 0,
+    }
+    assert {r["id"]: r for r in _all_notifications(config_dir)} == after
+
+    # The reviews themselves still stand and still release.
+    listed = {i["message_id"]: i for i in holds.list_holds(config_dir, owner)["items"]}
+    assert all(listed[_burst_id(i)]["can_deliver"] for i in range(BURST))
+    _decide(config_dir, owner, "discard", body="ask 2", message_id=_burst_id(2))
+    assert store.owner_release(owner, _burst_id(2))["word"] == "discard"
+    # Discard's keyed ``low`` update lands on the retired row and leaves it retired.
+    row = notifications.find_by_key(hr.notice_key(owner.endpoint_id, _burst_id(2)))[0]
+    assert row["dismissed"]
+
+
+def test_retire_keeps_the_overflow_row_while_work_scope_notices_fill_the_cap(
+    rig, monkeypatch  # noqa: F811 — imported fixture
+) -> None:
+    """The overflow key is shared: retire it only once its "N more" is no longer true."""
+
+    from local_operator.notifications.store import NotificationStore
+
+    config_dir, store, owner = rig
+    notifications = NotificationStore(config_dir)
+    notifications.notify(
+        "s1",
+        title="more",
+        body_md="2 more",
+        priority="normal",
+        key=hr.overflow_key(owner.endpoint_id),
+    )
+    # A cap of 0 makes every standing count "at the cap" (work-scope notices full).
+    monkeypatch.setattr(hr, "STANDING_NOTICE_CAP", 0)
+    assert hr.retire_review_notices(store, owner, config_dir=config_dir)["overflow"] == 0
+    assert not notifications.find_by_key(hr.overflow_key(owner.endpoint_id))[0]["dismissed"]
+
+
+def test_retire_once_runs_per_endpoint_and_never_raises(
+    rig, monkeypatch  # noqa: F811 — imported fixture
+) -> None:
+    config_dir, _store, owner = rig
+    monkeypatch.setattr(hr, "_retired_endpoints", set())
+    calls: list[str] = []
+    real = hr.retire_review_notices
+
+    def counting(*a, **k):
+        calls.append("x")
+        return real(*a, **k)
+
+    monkeypatch.setattr(hr, "retire_review_notices", counting)
+    assert hr.retire_review_notices_once(owner, config_dir) == "ok"
+    assert hr.retire_review_notices_once(owner, config_dir) == "done"
+    assert calls == ["x"]
+
+    def boom(*a, **k):
+        raise RuntimeError("store busy")
+
+    monkeypatch.setattr(hr, "_retired_endpoints", set())
+    monkeypatch.setattr(hr, "retire_review_notices", boom)
+    assert hr.retire_review_notices_once(owner, config_dir) == "failed"
+    assert hr._retired_endpoints == set()  # retried on the next pass
+
+
+def test_the_connector_loop_retires_on_start_and_survives_a_failure(tmp_path, monkeypatch) -> None:
+    """Pre-upgrade rows clear with no new hold: the loop calls the retire pass itself."""
+
+    import time
+
+    from local_operator.team_bridge import hold_alert
+    from local_operator.team_bridge.connector import loop as loop_mod
+    from tests.unit.team_bridge.test_hold_alert import _enrolled
+    from tests.unit.team_bridge.test_hold_alert import _owner as _alert_owner
+
+    store = _enrolled(tmp_path)
+    owner = _alert_owner()
+    calls: list[tuple[str, Any]] = []
+    polls: list[float] = []
+    stop = asyncio.Event()
+
+    async def quiet_tick(*_: Any, **__: Any) -> str:
+        return "none_held"
+
+    def exploding_retire(owner_: Any, config_dir: Any) -> str:
+        calls.append((owner_.endpoint_id, config_dir))
+        raise RuntimeError("store busy")
+
+    async def iteration(owner_: Any, **__: Any) -> dict[str, Any]:
+        polls.append(time.monotonic())
+        stop.set()
+        return {"events": 0, "reissued": False, "resync": False, "handled": []}
+
+    async def access_provider() -> Any:
+        return object()
+
+    monkeypatch.setattr(hold_alert, "tick", quiet_tick)
+    monkeypatch.setattr(hr, "retire_review_notices_once", exploding_retire)
+    monkeypatch.setattr(loop_mod, "run_iteration", iteration)
+
+    async def drive() -> Any:
+        return await asyncio.wait_for(
+            loop_mod.run_forever(
+                owner,
+                config_dir=tmp_path,
+                auth_store=None,
+                access_provider=access_provider,
+                owner_source=store.active_owner,
+                stop=stop,
+            ),
+            10,
+        )
+
+    assert asyncio.run(drive()) is None
+    assert calls == [(owner.endpoint_id, tmp_path)] and len(polls) == 1

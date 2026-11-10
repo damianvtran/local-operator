@@ -292,12 +292,12 @@ Every hold ends in one of two ways; none waits forever:
   screener's own answer said hold — `model_hold` (unsure), `model_refused` (its
   safety refusal), `reply_truncated`, `bounce_without_category`. The answer is
   cached, so a retry never re-draws it hoping for "deliver". With
-  `team_bridge.review_held` on (the default), the hold raises a per-message
-  notification in the designated session at once, and the desktop Agent
-  messages holds list offers **Deliver** (the agent gets it, marked as released
-  by its owner) or **Discard** (the sender sees "not delivered"). Set
-  `review_held: false` under `values:` > `team_bridge:` to go back to holds
-  that only the long-hold alert counts.
+  `team_bridge.review_held` on (the default), the desktop Agent messages holds
+  list (and its sidebar badge) offers **Deliver** (the agent gets it, marked as
+  released by its owner) or **Discard** (the sender sees "not delivered"). A
+  review hold writes no per-message notification; the one keyed long-hold
+  alert still counts it. Set `review_held: false` under `values:` >
+  `team_bridge:` to go back to holds with no Deliver/Discard.
 
 The owner's own posts are never screened by their own agent: a message whose
 server-recorded sender is the owner's account, posting as a person, is
