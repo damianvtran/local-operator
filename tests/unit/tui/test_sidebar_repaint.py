@@ -15,6 +15,7 @@ from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_catalog import CatalogEntry
 from local_operator.tui.widgets.session_sidebar import _ROW_MARK_COLUMN
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.waiting import settle
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +42,14 @@ async def prepare(app, pilot, entries):
     sidebar.set_entries(entries)
     sidebar._timer.stop()
     sidebar._timer = None
-    await pilot.pause()
+    # Every test here measures repaints FROM a painted frame. Until render() has
+    # run for these entries, the spinner tick takes its full-refresh branch and
+    # the counts are off by one; a pause can return before that paint lands.
+    await settle(
+        pilot,
+        lambda: sidebar._painted_lines_valid and sidebar._painted_state == sidebar._paint_state(),
+        what="the sidebar painted the fixture rows",
+    )
     return sidebar
 
 
