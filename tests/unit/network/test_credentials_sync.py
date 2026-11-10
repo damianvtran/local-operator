@@ -822,6 +822,10 @@ def test_a_removed_member_is_not_announced_to_and_is_refused(sync_mesh: Any) -> 
     """
     mesh = sync_mesh
     _run_exchange(mesh)
+    # The ending is derived from A's ack ledger, not B's applied sidecar.
+    # Expiring B before its initial ack arrives refuses that ack and leaves
+    # this one-tick ending assertion without the ledger row it exercises.
+    _wait_for_owner_ack(mesh, VALUE_1)
     before = SyncState.load(mesh.network_id, mesh.b.root).applied_for(KEY)
     assert before is not None
 
@@ -862,6 +866,44 @@ def test_a_removed_member_is_not_announced_to_and_is_refused(sync_mesh: Any) -> 
     }
     detail = sync.owner_copy(broker, link, frame)
     assert detail.get("code") == "member_not_active", detail
+
+
+def test_removed_member_expiry_waits_for_the_initial_owner_ack(
+    sync_mesh: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the real removal test correct when apply wins the ack round trip.
+
+    Hold only this member engine's initial ack after its durable apply. The
+    removal test must reach its owner-ledger wait while membership is still
+    active; that boundary releases the ack and the real exchange/wipe/refusal
+    assertions run unchanged. Removing the wait leaves the ack held until the
+    unchanged network backstop fails instead of relying on a scheduling sleep.
+    """
+    mesh = sync_mesh
+    ack_entered = threading.Event()
+    release_ack = threading.Event()
+    send_ack = mesh.engine_b._send_ack
+    wait_for_ack = _wait_for_owner_ack
+
+    def held_ack(*args: Any, **kwargs: Any) -> None:
+        ack_entered.set()
+        assert release_ack.wait(net_fixtures.NET_WAIT_BUDGET_S), "initial ack was never released"
+        send_ack(*args, **kwargs)
+
+    def release_then_wait(current_mesh: Any, value: str) -> None:
+        assert ack_entered.wait(net_fixtures.NET_WAIT_BUDGET_S), "initial ack seam was not reached"
+        member = store.load(mesh.network_id, mesh.a.root).member(mesh.member)
+        assert member is not None and member.active, "membership expired before the initial ack"
+        assert SyncState.load(mesh.network_id, mesh.a.root).ack_for(mesh.member, KEY) is None
+        release_ack.set()
+        wait_for_ack(current_mesh, value)
+
+    monkeypatch.setattr(mesh.engine_b, "_send_ack", held_ack)
+    monkeypatch.setattr(__name__ + "._wait_for_owner_ack", release_then_wait)
+    try:
+        test_a_removed_member_is_not_announced_to_and_is_refused(mesh)
+    finally:
+        release_ack.set()
 
 
 def test_the_sync_step_rides_the_definitions_seam(

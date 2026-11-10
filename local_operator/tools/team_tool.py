@@ -481,6 +481,13 @@ async def _op_write(
         )
     name = (params.name or "").strip()
     try:
+        # Read disk, not the interval-cached snapshot: the before-image below
+        # becomes a proposal's CAS base, and a row another writer changed in
+        # the last few seconds (an Agents Accept, a verbal apply) would make
+        # that proposal stale at birth.
+        refresh = getattr(registry, "refresh", None)
+        if callable(refresh):
+            refresh()
         existing = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
@@ -609,10 +616,10 @@ async def _op_write(
             tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
-        if reason == "queued":
-            from local_operator.tools.agent_tool import _queued_profile_receipt
+        if reason == "proposed":
+            from local_operator.tools.agent_tool import _proposed_profile_receipt
 
-            return _queued_profile_receipt(tool_call_id, "team", authorized_by)
+            return _proposed_profile_receipt(tool_call_id, "team", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
         if existing is not None:
@@ -924,10 +931,10 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
-    if reason == "queued":
-        from local_operator.tools.agent_tool import _queued_profile_receipt
+    if reason == "proposed":
+        from local_operator.tools.agent_tool import _proposed_profile_receipt
 
-        return _queued_profile_receipt(tool_call_id, "team", authorized_by)
+        return _proposed_profile_receipt(tool_call_id, "team", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
     from pathlib import Path
