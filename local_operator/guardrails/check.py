@@ -334,6 +334,13 @@ def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
     return BUILTIN_JUDGE
 
 
+@dataclass(frozen=True)
+class _Approved:
+    """An ask's deterministic approval, shaped for ``DeleteCase._named_by``."""
+
+    text: str
+
+
 @dataclass
 class DeleteCase:
     """Everything the judge is told about a HIGH delete, and how its ALLOW is checked.
@@ -388,14 +395,42 @@ class DeleteCase:
         if self.unverifiable or self.operator_only or not self.paths:
             return ""
         listed = list(getattr(self.evidence, "listed", {}) or {})
-        if not listed:
-            return ""
         # ``alone``: resolver-pinned coverage only, and no git repository
         # below a target the clone check did not vouch for (PR #3614 review
         # R1-MAJOR-1 / R1-MINOR-1); anything weaker goes to the judge with
         # its evidence listed.
-        basis, missing = self.verify("ALLOW evidence=" + ",".join(listed), alone=True)
-        return "" if missing else basis
+        by_evidence: dict[str, str] = {}
+        if listed:
+            from local_operator.guardrails.evidence import verify as verify_evidence
+
+            by_evidence = verify_evidence(
+                listed, self.paths, self.evidence, env=self.env, stop=self.stop, alone=True
+            )
+        basis: list[str] = []
+        for path in self.paths:
+            if path in by_evidence:
+                basis.append(f"{path} created by {by_evidence[path]}")
+                continue
+            # ASK SETTLED BEFORE THE JUDGE (incident 2026-11-09, a-a382): the
+            # operator answered "Remove all 57" to a yes/no ask naming each
+            # path, and a judge that timed out refused 55 of them. A store-
+            # verified answer whose deterministic approval names the path
+            # (``OperatorWords.approved``) is the operator's decision; the
+            # judge could only agree or override them.
+            words = next(
+                (
+                    w
+                    for w in self.operator.words
+                    if w.ask_id and w.approved and self._named_by(path, _Approved(w.approved))
+                ),
+                None,
+            )
+            if words is None:
+                return ""
+            basis.append(f"{path} named by ask {words.ask_id}")
+        if len(basis) > 6:
+            basis = [*basis[:6], f"… and {len(basis) - 6} more"]
+        return "; ".join(basis)
 
     def verify(self, answer: str, *, alone: bool = False) -> tuple[str, str]:
         """``(basis, missing)``: what verified each path, and what did not verify.
@@ -515,6 +550,18 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         operator = prov.OperatorBrief()
         if ctx.user_request:
             operator.words.append(prov.OperatorWords("operator, direct", ctx.user_request))
+    if ctx.session_id and paths:
+        # One task tree, one owner: an ask the operator answered higher in
+        # this session's lineage counts even when no brief carried its id.
+        # Read here (HIGH calls only), not in the per-call brief; a new brief
+        # so the caller's object is never mutated.
+        extra = prov.lineage_asks(
+            ctx.session_id, known=[(w.ask_id, w.session_id) for w in operator.words if w.ask_id]
+        )
+        if extra:
+            operator = prov.OperatorBrief(
+                words=[*operator.words, *extra], excluded=dict(operator.excluded)
+            )
     evidence = ev_mod.gather(
         paths, session_id=ctx.session_id, env=ctx.env, stop=stop, messages=ctx.messages
     )

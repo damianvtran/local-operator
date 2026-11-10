@@ -60,7 +60,7 @@ import sqlite3
 import subprocess
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +106,24 @@ _DECLINE_RE = re.compile(
     r"|skip|later|wait|no thanks)\b"
 )
 _ASK_ID_RE = re.compile(r"(?<![\w-])(a-[0-9a-f]{4,12})(?![\w-])")
+#: Where a free-text answer's first clause ends ("Go ahead and copy | but …").
+_CLAUSE_BREAK_RE = re.compile(r"(?i)\s*(?:\bbut\b|\bhowever\b|;|\.(?:\s|$)|\s[—–-]\s)\s*")
+#: Words AFTER the first clause that narrow or delay the approval.
+_CARVE_OUT_RE = re.compile(
+    r"(?i)\b(except|excluding|keep|leave|skip|only|cancel|stop|wait|hold off|not yet|not now"
+    r"|later|instead)\b"
+    r"|\b(?:don'?t|do not|never|no)\s+"
+    r"(?:delete|remove|copy|overwrite|touch|move|rm|run|do|change)\b"
+    r"|\bnot\s+(?:the|that|those|this|these|any|all)\b"
+)
+#: A typed answer that plainly says yes.
+_AFFIRM_RE = re.compile(
+    r"(?i)^\W*(?:yes|yep|yeah|ok|okay|sure|go ahead|go for it|approved?|proceed|do it|please do"
+    r"|confirm(?:ed)?|sounds good|lgtm)\b"
+)
+#: Pointer-less ask lookup in the lineage (``lineage_asks``): recent only.
+_LINEAGE_ASK_WINDOW_MS = 24 * 3600 * 1000
+_LINEAGE_ASKS_PER_SESSION = 8
 
 
 # -- ledger -------------------------------------------------------------------
@@ -1423,6 +1441,10 @@ class OperatorWords:
     #: path naming is checked against what the OPERATOR saw.
     ask_id: str = ""
     session_id: str = ""
+    #: The part of an ask answer that approves with no judge reading it
+    #: (``_approved_text``): the yes/no question the operator said yes to, or
+    #: the picked options. ``DeleteCase.evidence_basis`` settles on it.
+    approved: str = ""
 
 
 @dataclass
@@ -1483,7 +1505,33 @@ def verified_ask(
         logger.debug("guardrail: ask store unreadable", exc_info=True)
         return None
     record = next((r for r in records if str(r.get("ask_id")) == ask_id), None)
-    if record is None or str(record.get("status") or "") not in ("answered", "late"):
+    return _ask_words(record, session_id) if record is not None else None
+
+
+def _answer_declines(answer: str, labels: Sequence[str]) -> bool:
+    """Does one chosen answer refuse (or carve out) what the ask proposed?
+
+    An option the operator PICKED is judged by its label ("Keep them", "No,
+    re-audit instead"). A free-text answer is read clause-wise (incident
+    2026-11-09, ask a-daca): "Go ahead and copy but also send this to Aida to
+    tune the guardrails so they don't block this" approves — its ``don't``
+    is about the guard, not the copy — while "Yes, but keep the third one"
+    and "Don't delete them" still refuse. The first clause may not decline at
+    all, and no clause may carve anything out (``except``, ``keep``, ``don't
+    delete``…). When in doubt it declines: the judge never sees a veto.
+    """
+    if answer in labels:
+        return bool(_DECLINE_RE.search(answer))
+    # The first clause may not decline; no clause may carve anything out
+    # ("Go ahead, except the last one").
+    head = _CLAUSE_BREAK_RE.split(answer, maxsplit=1)[0]
+    return bool(_DECLINE_RE.search(head)) or bool(_CARVE_OUT_RE.search(answer))
+
+
+def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | None:
+    """One folded ask record as consent (see :func:`verified_ask` for the bar)."""
+    ask_id = str(record.get("ask_id") or "")
+    if str(record.get("status") or "") not in ("answered", "late"):
         return None
     surface = str((record.get("answered_by") or {}).get("surface") or "")
     if surface not in TRUSTED_ASK_SURFACES:
@@ -1493,22 +1541,24 @@ def verified_ask(
         return None
     answers = record.get("answers") or {}
     parts: list[str] = []
+    approved: list[str] = []
     for q in questions:
         if q.get("secret"):
             continue
         chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
-        if not chosen or any(_DECLINE_RE.search(v) for v in chosen):
+        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
+        labels = [str(o.get("label") or "") for o in opts]
+        if not chosen or any(_answer_declines(v, labels) for v in chosen):
             # Deterministic veto (review R1-MINOR-3): a declining answer is
             # never consent, whatever a judge that read the history concludes.
             continue
-        options = "; ".join(
-            str(o.get("label") or "") for o in (q.get("options") or []) if isinstance(o, Mapping)
-        )
+        options = "; ".join(labels)
         parts.append(
             f"Q: {q.get('question') or ''}"
             + (f" [options: {options}]" if options else "")
             + f" -> operator answered: {', '.join(chosen)}"
         )
+        approved.extend(_approved_text(q, opts, labels, chosen))
     if not parts:
         return None
     return OperatorWords(
@@ -1516,7 +1566,92 @@ def verified_ask(
         text="\n".join(parts),
         ask_id=ask_id,
         session_id=session_id,
+        approved="\n".join(approved),
     )
+
+
+def _approved_text(
+    q: Mapping[str, Any],
+    opts: Sequence[Mapping[str, Any]],
+    labels: Sequence[str],
+    chosen: list[str],
+) -> list[str]:
+    """What this answer approves WITHOUT a judge reading it (``OperatorWords.approved``).
+
+    Settled deterministically only when the answer can mean one thing:
+    * the question itself, when it is a yes/no ask — every option but the one
+      picked declines (a-a382: "Remove all 57" vs "Keep them") — or the
+      operator typed an affirmative answer ("Go ahead and copy");
+    * otherwise only the PICKED options' own label and description: picking
+      "Installer only" approves the installer it names, not every path the
+      question listed.
+    """
+    out: list[str] = []
+    picked = [o for o in opts if str(o.get("label") or "") in chosen]
+    for o in picked:
+        out.append(f"{o.get('label') or ''}: {o.get('description') or ''}")
+    others = [lbl for lbl in labels if lbl not in chosen]
+    yes_no = bool(picked) and bool(others) and all(_DECLINE_RE.search(lbl) for lbl in others)
+    typed = [v for v in chosen if v not in labels]
+    if (yes_no and not typed) or (typed and all(_AFFIRM_RE.match(v) for v in typed)):
+        out.append(str(q.get("question") or ""))
+    return out
+
+
+def lineage_asks(
+    session_id: str,
+    *,
+    known: Iterable[tuple[str, str]] = (),
+    state_root: str | os.PathLike[str] | None = None,
+    now_ms: int | None = None,
+) -> list[OperatorWords]:
+    """Recent answered asks in ``session_id``'s lineage, no pointer needed.
+
+    WHY. A task tree is one owner: the operator answers an ask in the parent
+    and a subagent runs the approved command (incident 2026-11-09, a-daca was
+    answered in 9ad475b6f5d9 while the copy ran lower in its tree). A pointer
+    (``a-xxxx`` in the brief) was the only way to reach that ask; a brief that
+    forgot it left the guard blind to consent it could verify. Bounded: only
+    the lineage (ancestors, never siblings or strangers), only asks answered
+    in the last :data:`_LINEAGE_ASK_WINDOW_MS`, at most
+    :data:`_LINEAGE_ASKS_PER_SESSION` per session, every one through the same
+    store checks as a pointer (:func:`_ask_words`). ``known`` = ``(ask_id,
+    session_id)`` pairs already in the brief.
+    """
+    try:
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        root = Path(state_root) if state_root is not None else config_dir()
+        lineage, _ = session_lineage(session_id, state_root=root)
+        now = now_ms if now_ms is not None else store.now_ms()
+    except Exception:  # noqa: BLE001 — no lineage, no extra consent
+        logger.debug("guardrail: lineage asks unreadable", exc_info=True)
+        return []
+    seen = set(known)
+    out: list[OperatorWords] = []
+    for sid in lineage:
+        try:
+            directory = store.session_dir(root, sid)
+            if not directory.is_dir():
+                continue
+            records = store.fold(store.read_events(directory), now)
+        except Exception:  # noqa: BLE001 — an unreadable store is no consent
+            continue
+        recent = [
+            r
+            for r in records
+            if now - int(r.get("answered_at") or 0) <= _LINEAGE_ASK_WINDOW_MS
+            and (str(r.get("ask_id") or ""), sid) not in seen
+        ]
+        recent.sort(key=lambda r: int(r.get("answered_at") or 0), reverse=True)
+        for record in recent[:_LINEAGE_ASKS_PER_SESSION]:
+            words = _ask_words(record, sid)
+            if words is None:
+                continue
+            label = words.label + (f" (session {sid})" if sid != session_id else "")
+            out.append(replace(words, label=label))
+    return out
 
 
 def _text_of(message: Any) -> str:
@@ -1693,9 +1828,7 @@ def operator_brief(
             label = found.label + (f" (relayed by {relayed_by})" if relayed_by else "")
             if sid != session_id:
                 label += f" (session {sid})"
-            brief.words.append(
-                OperatorWords(label=label, text=found.text, ask_id=ask_id, session_id=sid)
-            )
+            brief.words.append(replace(found, label=label, session_id=sid))
             asks += 1
     return brief
 
@@ -1724,6 +1857,37 @@ def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
 _PROSE_END = frozenset("?!:]}")
 
 
+#: A path with ONE brace list in it, as asks write a set of siblings:
+#: ``~/x/merge-{es,fr,zh-cn}-909a.json`` or ``~/r/.worktrees/{a, b (QA
+#: scratch), c}``. The list may hold spaces and parenthetical notes.
+_BRACE_PATH_RE = re.compile(r"((?:~|/)[^\s`'\"{}]*)\{([^{}]{1,4000})\}([^\s`'\",;){}]*)")
+_MAX_PROSE_BRACE_ITEMS = 256
+
+
+def _expand_prose_braces(text: str) -> str:
+    """Spell out brace lists in path words, so each sibling is named literally.
+
+    WHY (incident 2026-11-09, ask a-daca): the operator approved "…/onboarding-
+    value-merge-{es,fr,hi,ru,ur,vi,zh-cn}-909a2c50a0bd.json"; ``_PATHISH``
+    stopped at the first comma, so no receipt was "named". Each item must be
+    one path piece (no whitespace once its ``(note)`` is dropped, no wildcard
+    added) or the whole list is left as written — never guess a name.
+    """
+
+    def spell(match: re.Match[str]) -> str:
+        prefix, body, suffix = match.groups()
+        items = [re.sub(r"\([^()]*\)", "", item).strip() for item in body.split(",")]
+        if (
+            len(items) < 2
+            or len(items) > _MAX_PROSE_BRACE_ITEMS
+            or any(not item or re.search(r"[\s*?\[]", item) for item in items)
+        ):
+            return match.group(0)  # not a sibling list: left exactly as written
+        return " ".join(prefix + item + suffix for item in items)
+
+    return _BRACE_PATH_RE.sub(spell, text)
+
+
 def _path_readings(text: str) -> list[tuple[str, bool]]:
     """``(word, may_be_a_glob)`` readings of every path-looking word in ``text``.
 
@@ -1734,7 +1898,7 @@ def _path_readings(text: str) -> list[tuple[str, bool]]:
     never names ``or.env`` (review round 4, MINOR-2).
     """
     out: list[tuple[str, bool]] = []
-    for match in _PATHISH.finditer(text):
+    for match in _PATHISH.finditer(_expand_prose_braces(text)):
         raw = match.group(1)
         out.append((raw.rstrip("/.:"), True))
         stripped = raw[:-1].rstrip("/.:") if raw[-1:] in _PROSE_END else ""

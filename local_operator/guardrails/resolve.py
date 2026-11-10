@@ -34,6 +34,7 @@ scrutiny (opaque, empty, unknown cwd), never less.
 from __future__ import annotations
 
 import fnmatch
+import itertools
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -433,6 +434,12 @@ class Expanded:
     vanished: bool = False
     #: The opaque part is a ``$(mktemp …)`` path: a fresh temp entry (R6).
     temp: bool = False
+    #: Where each ``$NAME``/``${NAME}`` value landed in ``text`` (and in
+    #: ``pattern``): ``(name, text_start, text_end, pattern_start, pattern_end,
+    #: quoted)``. A ``for`` list fans a target out by rewriting exactly these
+    #: spans — never by searching the text for the variable's VALUE, which
+    #: once turned ``$l`` = ``es`` into ``s<fr>sions`` (incident 2026-11-09).
+    refs: list[tuple[str, int, int, int, int, bool]] = field(default_factory=list)
 
 
 def _glob_escape(text: str) -> str:
@@ -442,6 +449,8 @@ def _glob_escape(text: str) -> str:
 #: Upper bound on the words one brace expression may produce. Past it the word
 #: is opaque: ``{1..100000}`` is not something to enumerate per bash call.
 MAX_BRACE_RESULTS = 1024
+#: Same bound for the combinations nested literal ``for`` lists fan one word into.
+_MAX_FOR_COMBINATIONS = MAX_BRACE_RESULTS
 _BRACE_RANGE_RE = re.compile(r"^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$")
 
 
@@ -666,6 +675,9 @@ def expand_one(
     globbed = False
     literal_seen = False
     for index, part in enumerate(parts):
+        ref = _param_ref(part.text, env) if part.kind in ("pbare", "pdq") else None
+        text_at = sum(map(len, text_parts)) if ref is not None else 0
+        pattern_at = sum(map(len, pattern_parts)) if ref is not None else 0
         if part.kind in ("sub", "proc"):
             body = part.text.strip()
             out.substitutions.append(part.text)
@@ -703,6 +715,17 @@ def expand_one(
                     globbed = True
                 text_parts.append(value)
                 pattern_parts.append(value)
+            if ref is not None and value:
+                out.refs.append(
+                    (
+                        ref,
+                        text_at,
+                        sum(map(len, text_parts)),
+                        pattern_at,
+                        sum(map(len, pattern_parts)),
+                        part.kind == "pdq",
+                    )
+                )
             continue
         raw = part.text
         if part.kind == "bare" and index == 0:
@@ -727,6 +750,48 @@ def expand_one(
         out.opaque_contained = False
     out.vanished = not out.text and not literal_seen and not broken
     return out
+
+
+def _param_ref(form: str, env: Mapping[str, str]) -> str | None:
+    """The variable whose value ``form`` expands to verbatim, else ``None``.
+
+    ``$NAME``/``${NAME}``, and ``${NAME:-word}`` while NAME is set (its value
+    is used, not the default). Anything else (a default word, ``${#x}``) is
+    not a plain reference, so a ``for`` list never rewrites it.
+    """
+    inner = form[2:-1] if form.startswith("${") else form[1:]
+    if _NAME_RE.fullmatch(inner):
+        return inner
+    dm = _BRACE_DEFAULT_RE.match(inner)
+    if dm is not None:
+        current = env.get(dm.group(1))
+        if current is not None and not (dm.group(2).startswith(":") and current == ""):
+            return dm.group(1)
+    return None
+
+
+def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
+    """``exp`` with every recorded ref to a name in ``values`` rewritten."""
+    text, pattern = exp.text, exp.pattern
+    # Right to left, so earlier offsets stay valid.
+    for name, ts, te, ps, pe, quoted in sorted(exp.refs, key=lambda r: r[1], reverse=True):
+        if name not in values:
+            continue
+        text = text[:ts] + values[name] + text[te:]
+        if pattern is not None:
+            pattern = (
+                pattern[:ps]
+                + (_glob_escape(values[name]) if quoted else values[name])
+                + pattern[pe:]
+            )
+    return Expanded(
+        text=text,
+        pattern=pattern,
+        empty=list(exp.empty),
+        opaque=exp.opaque,
+        opaque_contained=exp.opaque_contained,
+        temp=exp.temp,
+    )
 
 
 def expand_all(word: _RawWord, env: Mapping[str, str], home: str) -> list[Expanded]:
@@ -1433,6 +1498,10 @@ class _Walker:
         self.linked: set[str] = set()
         #: ``for VAR in a b c`` literal lists: a target using $VAR fans out.
         self.for_lists: dict[str, list[str]] = {}
+        #: The loop variable each ``for_lists`` entry derives from (itself for
+        #: the loop variable; ``VAR`` for ``D=…/$VAR`` inside the body), so one
+        #: iteration rewrites every related reference together.
+        self.for_roots: dict[str, str] = {}
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -1601,16 +1670,21 @@ class _Walker:
         while words and words[0].text in _PREFIX_WORDS and not words[0].opaque:
             words = words[1:]
         raw_assigns: list[str] = []
+        assign_words: list[Expanded] = []
         while words and _ASSIGN_RE.match(words[0].text):
             text_value = words[0].text
             if words[0].temp and text_value.count(OPAQUE_MARK) == 1:
                 text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
             raw_assigns.append(text_value)
+            # Same length (one marker char for another): the refs still line up.
+            assign_words.append(
+                Expanded(text=text_value, refs=list(words[0].refs), pattern=words[0].pattern)
+            )
             words = words[1:]
         if not words:
             # A bare assignment segment sets a shell variable for what follows.
-            for a in raw_assigns:
-                self._assign(a)
+            for w in assign_words:
+                self._assign_word(w)
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
@@ -1661,7 +1735,7 @@ class _Walker:
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
         if not read_only_argv(name, [w.text for w in args], assigned=assigned):
-            exempt = self._touch(name, args)
+            exempt = self._touch(name, args) | _read_inputs(name, args)
             # The program word too: after ``env``/``xargs`` peeling a path can
             # BE the program (``xargs -Q <path>``).
             self._backstop(name, unpeeled, raw_assigns, exempt)
@@ -1722,9 +1796,17 @@ class _Walker:
             self._mv(args, stdin_fed)
             return
         if name in ("cp", "gcp", "install"):
-            operands, _ = _operands(args, _MV_VALUE_FLAGS)
+            operands, flags = _operands(args, _MV_VALUE_FLAGS)
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], name, operands[:-1])
+                dest = operands[-1]
+                if name != "install" and _no_clobber_new(dest, flags, self.state.cwd):
+                    # ``cp -n src <new path>`` replaces nothing: it CREATES the
+                    # destination (an append, ranked only where creation itself
+                    # matters — evidence, another session's pad). The sources
+                    # are reads either way.
+                    self._add(dest, "append", name)
+                else:
+                    self._add_overwrite_dest(dest, name, operands[:-1])
             return
         if name == "rsync":
             self._rsync(args)
@@ -2118,6 +2200,7 @@ class _Walker:
         # carries EVERY value and ``_add`` fans a target out per value.
         st.env[var] = values[0].text
         self.for_lists[var] = [v.text for v in values]
+        self.for_roots[var] = var
 
     def _ln(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, frozenset({"-t", "--target-directory"}))
@@ -2434,23 +2517,62 @@ class _Walker:
                 target.opaque_contained = False
         self.result.targets.append(target)
         # R6: a literal ``for`` list binds its variable to each value in turn.
-        for var, values in self.for_lists.items():
-            first = values[0]
-            if not first or first not in exp.text or exp.text.count(first) != 1:
-                continue
-            for other in values[1:]:
-                alt = Expanded(
-                    text=exp.text.replace(first, other),
-                    pattern=exp.pattern.replace(first, other) if exp.pattern else None,
-                    empty=list(exp.empty),
-                    opaque=exp.opaque,
-                    opaque_contained=exp.opaque_contained,
-                    temp=exp.temp,
-                )
-                extra = _target(alt, op, program, self.state)
-                extra.selected = selected
-                self.result.targets.append(extra)
-            del var
+        # Only the spans the word's own ``$VAR`` references filled are
+        # rewritten (``Expanded.refs``); a target that never names the loop
+        # variable is recorded once, as written.
+        for _roots, values in self._iterations(exp):
+            extra = _target(_fan_out(exp, values), op, program, self.state)
+            extra.selected = selected
+            self.result.targets.append(extra)
+
+    def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]]:
+        """``(loop vars, {ref name: value})`` for every iteration after the first."""
+        names = {r[0] for r in exp.refs if r[0] in self.for_lists}
+        families: dict[str, list[str]] = {}
+        for n in sorted(names):
+            families.setdefault(self.for_roots[n], []).append(n)
+        families = {
+            root: family
+            for root, family in families.items()
+            if all(len(self.for_lists[n]) == len(self.for_lists[root]) for n in family)
+        }
+        if not families:
+            return []
+        # Nested loops run every combination, so the word does too.
+        ranges = [range(len(self.for_lists[root])) for root in families]
+        out: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        for combo in itertools.islice(itertools.product(*ranges), 1, _MAX_FOR_COMBINATIONS):
+            values: dict[str, str] = {}
+            for (root, family), i in zip(families.items(), combo, strict=True):
+                del root
+                values.update({n: self.for_lists[n][i] for n in family})
+            out.append((tuple(families), values))
+        return out
+
+    def _assign_word(self, word: Expanded) -> None:
+        """Bind an assignment word, carrying any ``for`` fan-out it inherits.
+
+        ``D=$S/x-$l`` inside a loop body binds D once per iteration, so a
+        later ``$D`` target fans out with the loop like a direct ``$l`` one.
+        """
+        self._assign(word.text)
+        name = word.text.partition("=")[0]
+        self.for_lists.pop(name, None)
+        self.for_roots.pop(name, None)
+        if "=" not in word.text or not word.refs:
+            return
+        iterations = self._iterations(word)
+        if not iterations:
+            return
+        # One loop: the variable moves in step with it. Several (nested): it
+        # carries every combination as its own list, so a later ``$NAME``
+        # still fans out over all of them.
+        roots = iterations[0][0]
+        self.for_roots[name] = roots[0] if len(roots) == 1 else name
+        self.for_lists[name] = [self.state.env.get(name, "")] + [
+            _tilde_value(_fan_out(word, values).text.partition("=")[2], self.state.home)
+            for _, values in iterations
+        ]
 
     def _add_overwrite_dest(
         self, exp: Expanded, program: str, sources: list[Expanded] | None = None
@@ -2658,12 +2780,79 @@ def _guarded_reader_read_only(name: str, argv: list[str]) -> bool:
     return True  # shasum/md5/*sum
 
 
+#: Programs that only READ their path operands and print a digest or a
+#: description (incident 2026-11-09: ``shasum`` of a subagent's receipts, kept
+#: apart from ``READ_ONLY_PROGRAMS`` so a sibling edit there never conflicts).
+#: None of them has a flag that writes a file. ``shasum``/``md5``/``*sum``
+#: also sit in :data:`_GUARDED_READERS` (PR #3700); this set is checked
+#: first in :func:`read_only_argv`, so the overlap is harmless.
+_DIGEST_READERS = frozenset(
+    {"shasum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "b2sum"}
+    | {"md5", "md5sum", "cksum", "sum", "cmp", "diff"}
+)
+#: ImageMagick ``-write`` and coder-prefixed inputs (``msl:script``, a script
+#: format that can write files) make ``identify`` more than a read.
+_MAGICK_CODER_RE = re.compile(r"^[A-Za-z0-9]{2,}:")
+
+
+#: ``gh`` subcommands whose ``-F``/``--body-file``/``--notes-file`` value is a
+#: file gh READS and posts (incident 2026-11-09: ``gh pr comment -F <child's
+#: scratch file>`` was ranked as a write to another session's files).
+_GH_BODY_FILE_COMMANDS = frozenset(
+    {
+        ("pr", "comment"),
+        ("pr", "create"),
+        ("pr", "edit"),
+        ("pr", "review"),
+        ("pr", "merge"),
+        ("issue", "comment"),
+        ("issue", "create"),
+        ("issue", "edit"),
+        ("release", "create"),
+        ("release", "edit"),
+    }
+)
+_GH_BODY_FILE_FLAGS = ("-F", "--body-file", "--notes-file")
+
+
+def _read_inputs(name: str, args: list[Expanded]) -> set[int]:
+    """Ids of words a non-read-only program provably only READS.
+
+    The backstop skips them, exactly like the identified sources of a fully
+    modelled copy. Deliberately narrow: today only ``gh``'s body/notes file;
+    every other word of the call (``--repo``, a positional path) still meets
+    the backstop, and a glued ``--body-file=<p>`` is a read too.
+    """
+    if name != "gh":
+        return set()
+    positional = [w.text for w in args if not w.text.startswith("-")][:2]
+    if tuple(positional) not in _GH_BODY_FILE_COMMANDS:
+        return set()
+    out: set[int] = set()
+    for i, w in enumerate(args):
+        if w.text in _GH_BODY_FILE_FLAGS and i + 1 < len(args):
+            out.add(id(args[i + 1]))
+        elif w.text.startswith(("--body-file=", "--notes-file=")):
+            out.add(id(w))
+        elif w.text.startswith("-F") and len(w.text) > 2 and not w.text.startswith("--"):
+            out.add(id(w))
+    return out
+
+
+def _identify_read_only(argv: list[str]) -> bool:
+    return not any(a.lstrip("+-").startswith("write") or _MAGICK_CODER_RE.match(a) for a in argv)
+
+
 def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) -> bool:
     """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
-    if name in READ_ONLY_PROGRAMS:
+    if name in READ_ONLY_PROGRAMS or name in _DIGEST_READERS:
         return True
     if name in _GUARDED_READERS:
         return _guarded_reader_read_only(name, argv)
+    if name == "identify":
+        return _identify_read_only(argv)
+    if name == "magick":
+        return bool(argv) and argv[0] == "identify" and _identify_read_only(argv[1:])
     if name == "find":
         return not any(a in _FIND_WRITES for a in argv)
     if name == "git":
@@ -3171,6 +3360,32 @@ def _cluster_value(args: list[Expanded], letter: str, long: str) -> list[Expande
         elif k + 1 < len(args):
             out.append(args[k + 1])
     return out
+
+
+def _no_clobber_new(dest: Expanded, flags: list[str], cwd: str | None) -> bool:
+    """``cp -n``/``--no-clobber``/``--update=none`` onto a path that does not exist.
+
+    Only then is the destination a pure creation. Any flag that can force a
+    replacement (``-f``, ``-i`` — which may be answered yes —, ``--remove-
+    destination``, another ``--update``) keeps it an overwrite, and so does an
+    existing entry (a dangling symlink included), a directory (``cp`` writes
+    INTO it), an opaque or globbed word, or an unknown cwd.
+    """
+    no_clobber = False
+    for flag in flags:
+        if flag in ("--no-clobber", "--update=none"):
+            no_clobber = True
+        elif flag.startswith("--"):
+            if flag.startswith(("--force", "--remove-destination", "--update", "--interactive")):
+                return False
+        elif any(c in flag[1:] for c in "fi"):
+            return False
+        elif _short_has(flag, "n", _CP_FLAGS):
+            no_clobber = True
+    if not no_clobber or dest.opaque or dest.pattern is not None or not dest.text:
+        return False
+    path, _ = _absolute(dest.text, cwd)
+    return path is not None and not os.path.lexists(path) and not dest.text.endswith("/")
 
 
 def _short_has(text: str, letter: str, spec: _Flags) -> bool:
