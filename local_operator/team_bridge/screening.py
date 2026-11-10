@@ -60,11 +60,14 @@ from local_operator.team_bridge.client import (
     SCREENING_VERSION_V1,
     SCREENING_VERSION_V3,
     SCREENING_VERSION_V4,
+    SCREENING_VERSION_V5,
     screening_template_sha256,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import (
     DELIVERY_STATES,
+    FEED_ADDRESSED_VALUES,
+    FEED_RELATION_VALUES,
     SCREENING_CATEGORIES,
     OwnerSnapshot,
     ScreeningObservation,
@@ -181,11 +184,11 @@ _REASON_LINE = re.compile(r"^REASON: (\S.*)$")
 #: an unknown placeholder in a future template stays literal text — which the screener
 #: would read as content someone controls. The renderer asserts none survives.
 _PLACEHOLDER = re.compile(
-    r"\{\{(nonce|body|sender|organization|type|attachments|files|addressed)\}\}"
+    r"\{\{(nonce|body|sender|organization|type|attachments|files|addressed|relation)\}\}"
 )
 #: Any other ``{{name}}`` in a template is a slot nothing fills.
 _UNKNOWN_PLACEHOLDER = re.compile(
-    r"\{\{(?!(?:nonce|body|sender|organization|type|attachments|files|addressed)\}\})"
+    r"\{\{(?!(?:nonce|body|sender|organization|type|attachments|files|addressed|relation)\}\})"
     r"[a-z_]+\}\}"
 )
 #: The hub's per-message image bound; a carrier claiming more is malformed.
@@ -234,6 +237,12 @@ class PolicySnapshot:
     #: snapshot so the job mint never re-resolves a second, later config
     #: (R7/Q3: one capture certifies the dispatch).
     provider: str = ""
+    #: The addressed-aware template the hub OFFERS beside the policy template
+    #: (``client.screening_addressed_version``: ``bridge-screen-v5`` or ``""``).
+    #: A per-message RENDER option, never the policy: the published row, the
+    #: local receipt and every store fence keep ``screening_version``. Part of
+    #: the snapshot so ``matches_live`` refuses a run whose offer changed mid-flight.
+    addressed_version: str = ""
 
     @classmethod
     def capture(cls, policy: ScreeningPolicy) -> "PolicySnapshot":
@@ -246,6 +255,7 @@ class PolicySnapshot:
             admission_revision=str(getattr(policy, "admission_revision", "")),
             approved_serving_identities=frozenset(str(i) for i in identities),
             provider=provider,
+            addressed_version=str(getattr(policy, "addressed_version", "") or ""),
         )
 
     def matches_live(self, policy: ScreeningPolicy) -> bool:
@@ -473,15 +483,19 @@ class Envelope:
     #: residual). Empty is unknown provenance — an account with no stated kind
     #: is not attributable, and must never be charged as one.
     sender_kind: str = ""
-    #: How the message reached this agent (``mention``/``dm``/``thread``/
-    #: ``ambient``; ``""`` = not stated): a closed value the CONNECTOR derives
-    #: from server fields (``connector.conversation.screening_addressed``),
-    #: never from the body. Rendered only into a template with an
-    #: ``{{addressed}}`` slot. Deliberately NOT in the envelope digest: adding
-    #: it would move every existing digest (and the read path recomputes the
-    #: digest from an item that does not carry it), and the mention bit is
-    #: itself derived server-side from the body the digest already binds.
+    #: How the message reached this agent, in the hub's v5 vocabulary
+    #: (``direct``/``thread``/``everyone``/``ambient``; ``""`` = not stated): the
+    #: hub's ``events[].ids.addressed`` when it sent one, else a value the
+    #: CONNECTOR derived from server fields
+    #: (``connector.conversation.screening_addressed``) — never from the body.
+    #: Rendered only into a template with an ``{{addressed}}`` slot (v5).
     addressed: str = ""
+    #: The sender's relation to the recipient (``owner``/``member``; ``""`` =
+    #: not stated, rendered as ``member``, the hub's default). Hub-stated only.
+    relation: str = ""
+    #: Whether the HUB stated the routing (vs. the connector deriving it). Only a
+    #: stated routing joins the envelope digest — see ``validate_envelope``.
+    routing_stated: bool = False
 
     def private_images(self) -> ScreeningAttachments | None:
         """The image set for the single dispatch, or ``None`` (text-only)."""
@@ -719,6 +733,19 @@ def validate_envelope(
             return None, "envelope_malformed"
         files = raw_files
 
+    # Routing (bridge-screen-v5): closed values only; anything else reads as
+    # "not stated", so the message falls back to the policy template.
+    addressed = (
+        item["addressed"]
+        if isinstance(item.get("addressed"), str) and item["addressed"] in ADDRESSED_VALUES
+        else ""
+    )
+    relation = (
+        item["relation"]
+        if isinstance(item.get("relation"), str) and item["relation"] in RELATION_VALUES
+        else ""
+    )
+    routing_stated = bool(addressed) and item.get("routing_stated") is True
     digest_payload = json.dumps(
         {
             "sender": sender_account,
@@ -747,6 +774,20 @@ def validate_envelope(
             # itself is not hashed here — ``files_hash`` already covers every byte of
             # every file through the hub's own commitment.
             **({"files_hash": files.files_hash} if files is not None else {}),
+            # HUB-STATED routing only (bridge-screen-v5). The digest keys the
+            # content-addressed verdict and answer caches, and v5's verdict
+            # depends on who was asked: a byte-identical "can you build X?" may
+            # be room context when ambient and new_work_request when direct, so
+            # the two must never share a cached answer. Present ONLY when the hub
+            # stated it, so every digest from an older hub — and every row queued
+            # before this build — stays byte-identical (no re-screen, no orphaned
+            # owner release). A connector-DERIVED routing stays out on purpose:
+            # it exists only for those older rows.
+            **(
+                {"routing": {"addressed": addressed, "relation": relation or "member"}}
+                if routing_stated
+                else {}
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -764,11 +805,9 @@ def validate_envelope(
         attachments_hash=attachments.attachments_hash if attachments is not None else None,
         files_hash=files.files_hash if files is not None else None,
         sender_kind=sender_kind,
-        addressed=(
-            item["addressed"]
-            if isinstance(item.get("addressed"), str) and item["addressed"] in ADDRESSED_VALUES
-            else ""
-        ),
+        addressed=addressed,
+        relation=relation,
+        routing_stated=routing_stated,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
@@ -790,6 +829,7 @@ def render_prompt(
     attachments: str | None = None,
     files: str | None = None,
     addressed: str = "",
+    relation: str = "",
 ) -> RenderedPrompt:
     """Single-pass substitution over an EMBEDDED template — the ONLY renderer.
 
@@ -833,6 +873,7 @@ def render_prompt(
         attachments=attachments,
         files=files,
         addressed=addressed,
+        relation=relation,
     )
 
 
@@ -848,6 +889,7 @@ def _render_with_template(
     attachments: str | None,
     files: str | None = None,
     addressed: str = "",
+    relation: str = "",
 ) -> RenderedPrompt:
     """The substitution and nonce rules behind :func:`render_prompt`.
 
@@ -879,12 +921,14 @@ def _render_with_template(
         "type",
         *(("attachments",) if attachments is not None else ()),
         *(("files",) if files is not None else ()),
-        # OPTIONAL by design, unlike the attachment slots: a template without
-        # it (v1-v4) ignores the value, and a template with it (v5+) always
-        # gets a closed value, ``unknown`` when the connector stated none. So a
-        # client works against the current server template AND v5, whichever
-        # the hub serves, with no renderer change at the switch.
-        "addressed",
+        # The v5 routing slots. A template without them (v1-v4) ignores the
+        # values. ``{{addressed}}`` needs one of the hub's closed tokens: the
+        # template DEFINES what each means, so an invented "unknown" would be
+        # a fact nobody stated — no value is a refused render, and the
+        # pipeline only selects v5 when it has one. ``{{relation}}`` always
+        # has a value: absent is the hub's documented default, ``member``.
+        *(("addressed",) if addressed in ADDRESSED_VALUES else ()),
+        "relation",
     }
     if unexpected:
         raise ValueError("embedded template slot without a supplied value")
@@ -905,7 +949,13 @@ def _render_with_template(
     if "{{addressed}}" in template:
         if template.count("{{addressed}}") != 1:
             raise ValueError("embedded template delimiter contract changed")
-        values["addressed"] = addressed if addressed in ADDRESSED_VALUES else "unknown"
+        values["addressed"] = addressed
+    if "{{relation}}" in template:
+        if template.count("{{relation}}") != 1:
+            raise ValueError("embedded template delimiter contract changed")
+        if relation and relation not in RELATION_VALUES:
+            raise ValueError("relation outside the closed vocabulary")
+        values["relation"] = relation or "member"
     if attachments is not None:
         if template.count("{{attachments}}") != 1:
             raise ValueError("embedded template delimiter contract changed")
@@ -947,8 +997,39 @@ def _render_with_template(
     return rendered
 
 
-#: The closed ``{{addressed}}`` vocabulary (see ``Envelope.addressed``).
-ADDRESSED_VALUES = frozenset({"mention", "dm", "thread", "ambient"})
+#: The closed ``{{addressed}}`` / ``{{relation}}`` vocabularies: the hub's own
+#: (agent-server ``bridge.ScreenAddressed*`` / ``bridge.ScreenRelation*``),
+#: shared with the feed-ref parser so the two can never drift.
+ADDRESSED_VALUES = FEED_ADDRESSED_VALUES
+RELATION_VALUES = FEED_RELATION_VALUES
+
+
+def text_screening_version(
+    snapshot: "PolicySnapshot", envelope: "Envelope", *, images: Any, files: Any
+) -> str:
+    """The ONE template a screen renders under: v4 files, v3 images, v5 or policy text.
+
+    A FILE envelope ALWAYS renders under v4 — the only embedded template whose
+    wrapper tells the screener that the file text which follows is submission
+    data, and the only one the hub accepts a files_hash under. An image-only
+    envelope renders under v3. A TEXT-ONLY envelope renders under the
+    addressed-aware v5 when the hub offers it with bytes this client embeds
+    (``snapshot.addressed_version``) AND the envelope carries a routing value;
+    otherwise under the served policy template (v1/v2), byte-for-byte as before.
+    v5 covers no attachments, so an image/file message never reaches it. Used by
+    the render AND by the outcome's ``rendered_version`` so the two cannot differ.
+    """
+
+    if files is not None:
+        return SCREENING_VERSION_V4
+    if images is not None:
+        return SCREENING_VERSION_V3
+    if (
+        snapshot.addressed_version == SCREENING_VERSION_V5
+        and envelope.addressed in ADDRESSED_VALUES
+    ):
+        return SCREENING_VERSION_V5
+    return snapshot.screening_version
 
 
 def unusable_reply_code(reply: Any) -> str:
@@ -1926,6 +2007,7 @@ async def _screen_spend(
     images = envelope.private_images()
     files = envelope.private_files()
     rendered: RenderedPrompt | None = None
+    text_version = text_screening_version(snapshot, envelope, images=images, files=files)
     for _ in range(8):
         try:
             rendered = render_prompt(
@@ -1934,18 +2016,11 @@ async def _screen_spend(
                 organization=envelope.organization,
                 msg_type=envelope.type_label,
                 nonce=nonce,
-                # A FILE envelope ALWAYS renders under v4 — the only embedded template
-                # whose wrapper tells the screener that the file text which follows is
-                # submission data, and the only one the hub accepts a files_hash under.
-                # An image-only envelope still renders under v3. The served policy
-                # (v1/v2) governs the text-only path and the local policy/receipt
-                # binding; the attachment sets are bound by the envelope digest instead
-                # (see validate_envelope).
-                version=(
-                    SCREENING_VERSION_V4
-                    if files is not None
-                    else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
-                ),
+                # The template choice (v4 files, v3 images, v5 addressed text, else
+                # the policy's) lives in ``text_screening_version``. The attachment
+                # sets are bound by the envelope digest, and v5's routing is bound
+                # there too when the hub stated it (see validate_envelope).
+                version=text_version,
                 attachments=(
                     images.listing()
                     if images is not None
@@ -1957,6 +2032,7 @@ async def _screen_spend(
                 ),
                 files=files.private_listing() if files is not None else None,
                 addressed=envelope.addressed,
+                relation=envelope.relation,
             )
             break
         except ValueError:
@@ -2166,11 +2242,7 @@ async def _screen_spend(
         policy=policy,
         turn=turn,
         screened_bytes=rendered.screened_bytes,
-        rendered_version=(
-            SCREENING_VERSION_V4
-            if files is not None
-            else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
-        ),
+        rendered_version=text_version,
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,
         served_provider=_served_provider(runner, actual_model, prepared),
@@ -2374,9 +2446,11 @@ def _conclude_parsed(
         # fences receipts, jobs and cache hits on policy == receipt template).
         # For an image envelope the rendered template is v3 by construction
         # and the image set is bound through the envelope digest; the v3 hash
-        # the hub requires is added by the connector at admit time. Text-only
-        # envelopes render the policy template, so this equals
-        # ``rendered.template_sha256`` exactly as before.
+        # the hub requires is added by the connector at admit time. A text-only
+        # envelope rendered under the addressed-aware v5 is the same case: the
+        # receipt keeps the policy template, ``rendered_template_sha256`` and the
+        # outcome's ``rendered_version`` record v5, and the connector's admit
+        # carries the v5 hash (``conversation._text_admit_template``).
         template_sha256=snapshot.template_sha256,
         body_sha256=envelope.body_sha256,
         categories=categories,

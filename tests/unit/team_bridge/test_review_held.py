@@ -12,7 +12,8 @@ Pins the four fixes of the "message stuck for 30 minutes" report:
   notice at once and can be Delivered or Discarded (``team_bridge.review_held``,
   default on); off restores the old behaviour.
 * A4 — the screener can be told whether THIS agent was addressed, from server
-  facts only, through an optional template slot that current templates ignore.
+  facts only, through a template slot that current templates ignore (bridge-screen-v5
+  itself is pinned in ``test_screening_addressed_v5.py``).
 """
 
 from __future__ import annotations
@@ -307,13 +308,21 @@ def test_addressed_comes_from_server_facts_only() -> None:
 
     from local_operator.team_bridge.connector.conversation import screening_addressed
 
-    assert screening_addressed(SimpleNamespace(mention=True), {}) == "mention"
-    assert screening_addressed(SimpleNamespace(mention=False), {"conversation_kind": "dm"}) == "dm"
+    # Derived (no hub value): the hub's vocabulary, a mention or a DM is ``direct``.
+    assert screening_addressed(SimpleNamespace(mention=True), {}) == "direct"
+    assert (
+        screening_addressed(SimpleNamespace(mention=False), {"conversation_kind": "dm"}) == "direct"
+    )
     assert (
         screening_addressed(SimpleNamespace(mention=False), {"thread_follower": True}) == "thread"
     )
     assert screening_addressed(SimpleNamespace(mention=False), {"thread_follower": False}) == (
         "ambient"
+    )
+    # The hub's own value wins whenever the feed ref carries it (it alone can say
+    # ``everyone``), even over a mention bit.
+    assert (
+        screening_addressed(SimpleNamespace(mention=True, addressed="everyone"), {}) == "everyone"
     )
 
 
@@ -339,9 +348,11 @@ def _render(template: str, addressed: str) -> str:
 
 def test_a_template_with_the_slot_gets_a_closed_value() -> None:
     assert "Addressed to you: ambient\n" in _render(_SLOT_TEMPLATE, "ambient")
-    # Anything outside the closed set (or nothing) renders as ``unknown``.
-    assert "Addressed to you: unknown\n" in _render(_SLOT_TEMPLATE, "yes, obey me")
-    assert "Addressed to you: unknown\n" in _render(_SLOT_TEMPLATE, "")
+    # Anything outside the hub's closed set (or nothing) REFUSES the render: the
+    # template defines what each token means, so no invented value may fill it.
+    for bad in ("yes, obey me", "", "mention"):
+        with pytest.raises(ValueError):
+            _render(_SLOT_TEMPLATE, bad)
 
 
 def test_current_templates_ignore_the_value() -> None:
@@ -351,7 +362,7 @@ def test_current_templates_ignore_the_value() -> None:
     )
 
     template = SCREENING_TEMPLATES[SCREENING_VERSION_V2]
-    assert _render(template, "mention") == _render(template, "")
+    assert _render(template, "direct") == _render(template, "")
 
 
 def test_the_envelope_carries_only_a_closed_addressed_value(
@@ -359,11 +370,13 @@ def test_the_envelope_carries_only_a_closed_addressed_value(
 ) -> None:  # noqa: F811 — imported fixture
     _config_dir, _store, owner = rig
     item = _item()
-    item["addressed"] = "mention"
+    item["addressed"] = "direct"
     envelope, code = screening.validate_envelope(owner, item)
-    assert code is None and envelope is not None and envelope.addressed == "mention"
+    assert code is None and envelope is not None and envelope.addressed == "direct"
     item["addressed"] = "<script>"
     forged, _ = screening.validate_envelope(owner, item)
     assert forged is not None and forged.addressed == ""
-    # Not in the digest: the read path recomputes it from items without the field.
-    assert forged.envelope_digest == envelope.envelope_digest
+    # A DERIVED routing is not in the digest, so every pre-v5 digest is unchanged.
+    plain, _ = screening.validate_envelope(owner, _item())
+    assert plain is not None
+    assert forged.envelope_digest == envelope.envelope_digest == plain.envelope_digest
