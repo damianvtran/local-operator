@@ -69,7 +69,7 @@ from ..client import (
     agent_file_reads_capability,
     screening_template_v4_usable,
 )
-from ..hold_release import WORK_SCOPE_HOLD
+from ..hold_release import REVIEW_HOLD_CODES, WORK_SCOPE_HOLD
 from ..types import ConversationFeedRef
 from .batch_screen import (
     allocation_for,
@@ -399,6 +399,30 @@ def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def screening_addressed(ref: Any, display: Mapping[str, Any] | None) -> str:
+    """How THIS message reached this agent, for the screener: a closed value.
+
+    ``mention`` | ``dm`` | ``thread`` | ``ambient``, derived ONLY from
+    server-provided facts — the feed ref's mention bit, the body read's
+    ``conversation_kind`` and its ``thread_follower`` bit — never parsed from
+    the body, so a sender cannot forge "you were asked" by writing "@you".
+    WHY (operator report 2026-11-09, R4): non-addressee agents held or refused
+    a channel post that asked SOMEONE ELSE's agent for work, because the
+    screener could not tell whether this agent was the one asked. Same
+    precedence as :func:`card_directed` (a mention always wins; only an
+    explicit ``thread_follower is True`` counts as a followed thread).
+    """
+
+    display = display or {}
+    if bool(getattr(ref, "mention", False)):
+        return "mention"
+    if display.get("conversation_kind") == "dm":
+        return "dm"
+    if display.get("thread_follower") is True:
+        return "thread"
+    return "ambient"
+
+
 def _screening_item(
     *,
     owner: Any,
@@ -407,6 +431,7 @@ def _screening_item(
     body: str,
     body_hash: str,
     sender: Mapping[str, Any],
+    addressed: str = "",
 ) -> dict[str, Any]:
     """The H3 envelope for a conversation message.
 
@@ -442,6 +467,9 @@ def _screening_item(
             "name": str(sender.get("display_label") or ""),
         },
         "thread": {"id": conversation_id, "tenant_id": owner.tenant_id},
+        # Closed value from :func:`screening_addressed`; rendered only into a
+        # template that carries the ``{{addressed}}`` slot (prompt v5+).
+        **({"addressed": addressed} if addressed else {}),
     }
 
 
@@ -1310,7 +1338,13 @@ def _owner_released(receipt: Any) -> bool:
 
 
 async def _notify_work_scope_hold(
-    store: Any, owner: Any, config_dir: Path, session_id: str, message_id: str
+    store: Any,
+    owner: Any,
+    config_dir: Path,
+    session_id: str,
+    message_id: str,
+    *,
+    code: str = "work_scope_hold",
 ) -> None:
     """The per-message B4b notice (``hold_release.raise_notice``); never fails the hold."""
 
@@ -1318,7 +1352,7 @@ async def _notify_work_scope_hold(
 
     from .. import hold_release
 
-    if not hold_release.enabled(config_dir):
+    if not hold_release.enabled_for(config_dir, code):
         return
     try:
         await asyncio.to_thread(
@@ -1678,6 +1712,7 @@ async def handle_conversation_available(
             body=body_text,
             body_hash=body_hash,
             sender=sender,
+            addressed=screening_addressed(ref, display),
         )
         if screened_images is not None:
             item["attachments"] = screened_images
@@ -1715,11 +1750,16 @@ async def handle_conversation_available(
                 await _notify_budget_exhausted(store, owner, config_dir, designation)
             else:
                 await notify_screening_infra_hold(owner, config_dir, designation, code)
-            if code == WORK_SCOPE_HOLD:
+            if code == WORK_SCOPE_HOLD or code in REVIEW_HOLD_CODES:
                 # B4b DESIGN §2.1: raised HERE so fresh screens, batch results
                 # and answer-cache re-drives all reach it; the per-message key
-                # makes every re-drive an ``unchanged`` no-op.
-                await _notify_work_scope_hold(store, owner, config_dir, designation, message_id)
+                # makes every re-drive an ``unchanged`` no-op. Review holds
+                # (``model_hold`` & co., operator report 2026-11-09) raise the
+                # same per-message notice in the designated session's inbox the
+                # moment they are written, not after the 60-minute count alert.
+                await _notify_work_scope_hold(
+                    store, owner, config_dir, designation, message_id, code=code
+                )
             return outcome
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":

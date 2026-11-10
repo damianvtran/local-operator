@@ -483,7 +483,14 @@ SCREENING_TEMPLATE_V4_PIN = "60149145c7422eca3a6bd0873ced1fa6cf19f9253b98f23b01e
 #: forever. Bumping this is a data decision, not cosmetic: every cached answer
 #: hold is re-drawn once after the bump, which is the intended cost of fixing a
 #: coder artefact rather than an admission rule.
-SCREENING_ENGINE_VERSION = "bridge-screen-engine-1"
+#:
+#: engine-2 (operator report 2026-11-09): an empty or unparsable reply is no
+#: longer an answer (the chain re-draws and fails over; ``parse_failed`` is no
+#: longer cached), and a cached ANSWER hold now gets an owner-review exit. The
+#: bump makes ``Store.consume_screening_answer_hold`` miss on every engine-1 row
+#: (its ``engine_version`` equality), so each parked message is re-screened ONCE
+#: under the new engine — a fresh hold then carries its review decision.
+SCREENING_ENGINE_VERSION = "bridge-screen-engine-2"
 
 #: version -> embedded template. The served version SELECTS bytes; it never supplies them.
 SCREENING_TEMPLATES = {

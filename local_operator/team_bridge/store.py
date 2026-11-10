@@ -1137,14 +1137,57 @@ def _owner_release_sha256() -> str:
     return OWNER_RELEASE_SHA256
 
 
+#: OWNER-PRINCIPAL provenance (operator report 2026-11-09). The receiver's own
+#: owner, posting as a HUMAN under the SAME account this endpoint is enrolled
+#: for, is the principal the screener protects — not a stranger to screen. The
+#: hub fans a member's own post out to their own agent (it skips a recipient
+#: only when account AND endpoint match, and a human sender has no endpoint),
+#: so before this the owner's own channel post was screened by their own CoS,
+#: and a cached ``model_hold`` on it never cleared (``bcmsg_15f004fa``, held
+#: 17:48:07 on the owner's own receiver). Such a message is admitted with no
+#: model call and no budget charge, under a receipt whose template is the
+#: sha256 of a fixed domain string: no published screening template can equal
+#: it, and every cache lookup filters on the policy template, so the receipt
+#: can never be replayed as a verdict for another sender's identical body.
+OWNER_PRINCIPAL_MODEL = "owner_principal"
+OWNER_PRINCIPAL_PROMPT_VERSION = "owner-principal-v1"
+OWNER_PRINCIPAL_SHA256 = hashlib.sha256(
+    b"local-operator team-bridge owner-principal v1"
+).hexdigest()
+
+
+def is_owner_principal(owner: OwnerSnapshot, sender_account: str, sender_kind: str) -> bool:
+    """Is this HUB-STORED sender the receiver's own owner, posting as a person?
+
+    Both values must come from the server's stored participant identity
+    (``validate_envelope``'s participant block, filled from the classification
+    read's ``sender_account_id``/``sender_kind``) — never a display name, which
+    any member can copy. ``kind == "human"`` is required: an AGENT under the same
+    account (another endpoint of the owner's, or a pre-#327 server that states
+    no class) is still screened, because an agent can relay a stranger's words.
+    """
+
+    return bool(
+        sender_account
+        and isinstance(owner.account_id, str)
+        and sender_account == owner.account_id
+        and sender_kind == "human"
+    )
+
+
 def receipt_authority(
     owner: OwnerSnapshot,
     policy: Mapping[str, Any],
     receipt: Mapping[str, Any],
     *,
     release: Mapping[str, Any] | None = None,
+    principal: tuple[str, str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
+
+    ``principal`` is the validated envelope's ``(sender_account, sender_kind)``;
+    only an :data:`OWNER_PRINCIPAL_SHA256` receipt reads it (see
+    :func:`is_owner_principal`).
 
     WHY THIS IS ONE FUNCTION, called from two sides of the store: the WRITE-side
     consumption point (:meth:`Store.consume_screening_receipt`, which must refuse
@@ -1187,7 +1230,23 @@ def receipt_authority(
     never rendered to a caller: the machine-readable half stays the closed code.
     """
 
-    if receipt.get("template_sha256") == _owner_release_sha256():
+    if receipt.get("template_sha256") == OWNER_PRINCIPAL_SHA256:
+        # The ONLY authority for an owner-principal receipt is that the message's
+        # hub-stored sender IS this owner, as a person — re-derived by the caller
+        # from the validated envelope (``principal``), never read from the row.
+        # A caller that cannot supply it (the write-side cache consumers, which
+        # filter on the policy template and so never select this row) gets
+        # DAMAGE, the fail-closed answer, exactly like an unverified release.
+        if not (
+            isinstance(principal, tuple)
+            and len(principal) == 2
+            and is_owner_principal(owner, str(principal[0]), str(principal[1]))
+            and receipt.get("verdict") == "allow"
+        ):
+            return None, RECEIPT_CORRUPT, "owner-principal receipt for a non-owner sender"
+        if policy.get("revision") != receipt.get("admission_revision"):
+            return None, RECEIPT_STALE, ""
+    elif receipt.get("template_sha256") == _owner_release_sha256():
         word = "deliver" if receipt.get("verdict") == "allow" else "discard"
         if not (
             isinstance(release, Mapping)
@@ -1513,16 +1572,15 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         "busy",
         "budget_exhausted",
         "screening_unavailable",
-        # The provider ANSWERED but the reply cannot admit (#3200, #3195): the
-        # screening model's own safety refusal, or a reply cut off at the
-        # output ceiling. Neither is the sender's fault and neither is
-        # terminal — the message is re-screened on the next drain exactly like
-        # a provider error — so the sender is told screening is temporarily
-        # unavailable, never that their message was judged and held for review.
-        # Named EXPLICITLY rather than left to the fallback: the conservative
-        # class would claim a human is reviewing it, which is not what happens.
-        "model_refused",
-        "reply_truncated",
+        # Every hop answered BLANK even after the re-draw and failover: like
+        # ``parse_failed`` it is NOT cached and is re-screened on the backoff
+        # (operator report 2026-11-09), so it is genuinely transient.
+        "empty_reply",
+        # ``model_refused``/``reply_truncated`` are deliberately NOT here any
+        # more (operator report 2026-11-09): both are cached ANSWERS that are
+        # never re-screened, so telling the sender "temporarily unavailable"
+        # promised a retry that never came. They are owner-review holds now
+        # (``hold_release.REVIEW_HOLD_CODES``) and publish ``awaiting_review``.
         # PR #3400: a batch that could not conclude the message; it is
         # re-screened alone at once, so screening is only briefly pending.
         "batch_unresolved",
@@ -7876,8 +7934,13 @@ class Store:
         screener_verdict: str = "",
         screener_hop: int = -1,
         screener_preferred: bool = False,
+        hold_code: str = "",
     ) -> dict[str, Any]:
         """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
+
+        ``hold_code`` defaults to the work-scope class; a review code
+        (``hold_release.REVIEW_HOLD_CODES``) is always eligible — see there for
+        why it needs neither a preferred screener nor the sender budget.
 
         Eligibility is computed HERE, in the same write transaction as the
         per-sender budget count, so two passes cannot both spend the last unit.
@@ -7897,8 +7960,13 @@ class Store:
             ).fetchone()
             if existing is not None:
                 return dict(existing)
+            code = hold_code or hr.WORK_SCOPE_HOLD
+            if code not in hr.RELEASABLE_HOLD_CODES:
+                raise StoreRefused("invalid_decision", "hold code is not releasable")
             reason: str | None = None
-            if not screener_preferred:
+            if code in hr.REVIEW_HOLD_CODES:
+                pass
+            elif not screener_preferred:
                 # Amendment 2: only trusted PREFERRED-stage provenance is releasable;
                 # a later preferred Opus qualifies, an ordinary cascade Opus does not.
                 reason = hr.INELIGIBLE_SCREENER
@@ -7924,7 +7992,7 @@ class Store:
                     conversation_id,
                     body_sha256,
                     envelope_digest,
-                    hr.WORK_SCOPE_HOLD,
+                    code,
                     screener_provider,
                     screener_model,
                     template_sha256,
