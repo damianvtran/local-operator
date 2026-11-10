@@ -4465,6 +4465,13 @@ async def _stream_with_failover_events(
         ]
     walked: set[tuple[str, str | None]] = set()
     recoverable: set[tuple[str, str | None]] = set()
+    # PR-D (Root 0): targets whose credential owner was SILENT after this device's
+    # lease from it ran out, each with the store's keyless waiter. Non-empty, the
+    # loop-back below waits for the owner (bounded, abortable, no dials) instead of
+    # sweeping at once; ``owner_waited_s`` is how long it waited, for the sentence a
+    # still-absent owner's revisit reports. See ``_await_owner_return``.
+    owner_waits: dict[tuple[str, str | None], Any] = {}
+    owner_waited_s: float | None = None
     # Server-fault spend per target, carried ACROSS the sweeps: the per-turn
     # ceiling is about what one provider receives, and a loop-back that reset
     # the counter would quietly double it.
@@ -4745,6 +4752,16 @@ async def _stream_with_failover_events(
                     # already had -- the reported `No API key configured for
                     # provider 'openai'` on an account signed in via OAuth.
                     missing = _no_credential_error(auth, provider)
+                    waiter = owner_waits.get(route_key)
+                    if (
+                        waiter is not None
+                        and owner_waited_s is not None
+                        and _owner_wait_hint(auth, provider) is not None
+                    ):
+                        # The sweep after a wait found the owner STILL away: say so,
+                        # with how long this turn waited (PR-D). Same class and the
+                        # same pre-wire stamp as the sentence it replaces.
+                        missing = _owner_wait_expired_error(waiter, owner_waited_s) or missing
                     record(missing, primary=is_primary, target=target)
                     if missing.retryable:
                         # Retryable means blocked-not-absent: backoffs expire on
@@ -4753,6 +4770,10 @@ async def _stream_with_failover_events(
                         # serviceable again. A genuinely unconfigured provider
                         # is not retryable and gets no second visit.
                         recoverable.add(route_key)
+                        if retry.enabled and not looped_back:
+                            hint = _owner_wait_hint(auth, provider)
+                            if hint is not None:
+                                owner_waits[route_key] = hint
                     break
                 error = None
             retry_same_key = False
@@ -5489,7 +5510,17 @@ async def _stream_with_failover_events(
             delay_ms = min(shortest_retry_after_ms, LOOPBACK_MAX_WAIT_MS)
         else:
             delay_ms = backoff_delay_ms(retry.base_delay_ms, 1, rng=rng)
-        await _abortable_sleep(delay_ms, signal)
+        if owner_waits:
+            # PR-D (Root 0): the owner of a revisited target is away and this
+            # device's lease from it has ended. Wait for it HERE, after every
+            # configured fallback was already walked (none is delayed or added) and
+            # before anything was sent. The wait replaces the backoff and makes no
+            # asks, so the sweep below is the same single re-ask as before, only
+            # later: served once if the owner came back, the real answer otherwise.
+            # Not C5: no grant is served, refreshed or extended while it runs.
+            owner_waited_s = await _await_owner_return(list(owner_waits.values()), signal)
+        else:
+            await _abortable_sleep(delay_ms, signal)
         pending = revisit
 
     if pinned and pin_selector is not None:
@@ -6053,6 +6084,58 @@ def _borrowed_refresh_refusal(auth: FailoverAuthStore, provider: str) -> Provide
     refused = ProviderError(None, reason, retryable=False, kind="auth")
     setattr(refused, VERBATIM_MESSAGE_ATTR, True)
     return refused
+
+
+def _owner_wait_hint(auth: FailoverAuthStore, provider: str) -> Any | None:
+    """The mesh-aware store's waiter for an absent credential owner, or ``None``.
+
+    Duck-typed for the reason :func:`_no_credential_error` states: this module must
+    not import the network package, and every other store lacks the method.
+    """
+    hint_for = getattr(auth, "owner_wait_hint", None)
+    if not callable(hint_for):
+        return None
+    try:
+        hint = hint_for(provider)
+    except Exception:  # noqa: BLE001 - a hint that fails is no hint; fail fast as before
+        return None
+    return hint if callable(getattr(hint, "poll", None)) else None
+
+
+async def _await_owner_return(hints: list[Any], signal: AbortSignal | None) -> float:
+    """Wait for an absent owner, bounded and abortable; return the seconds waited.
+
+    Ends at the first waiter that is no longer ``waiting`` (the owner's link was
+    admitted again, or the share/membership/policy changed, so the sweep must ask
+    now), at the bound, or on abort (``ProviderError(kind="aborted")``). Each poll is
+    the waiter's file reads, off the event loop; nothing here dials, so N waiting
+    turns cost N reads per poll interval and no storm. WALL TIME, not monotonic:
+    the bound is stated against the owner's lease clock, and this module may not
+    import the network package's clock helpers.
+    """
+    started = time.time()
+    deadline = started + max(float(getattr(hint, "bound_s", 0.0)) for hint in hints)
+    interval_s = min(float(getattr(hint, "poll_s", 1.0)) for hint in hints)
+    while True:
+        states = await asyncio.to_thread(lambda: [hint.poll() for hint in hints])
+        if any(state != "waiting" for state in states):
+            break
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        await _abortable_sleep(max(1, int(min(interval_s, remaining) * 1000)), signal)
+    return time.time() - started
+
+
+def _owner_wait_expired_error(waiter: Any, waited_s: float) -> ProviderError | None:
+    """The still-away owner's sentence, naming the wait, classed like the one it replaces."""
+    try:
+        reason = waiter.expired_reason(waited_s)
+    except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+        return None
+    if not isinstance(reason, str) or not reason:
+        return None
+    return _mark_prewire_refusal(ProviderError(None, reason, retryable=True, kind="unknown"))
 
 
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
