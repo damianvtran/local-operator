@@ -441,11 +441,43 @@ def _partition(mesh: Any) -> None:
     the last loss. A redial loop dials serially on one thread, so a failure recorded
     there proves any dial it had in flight has finished; and a dial that finished by
     connecting left a live link, which the next pass closes (resetting that side's
-    attempts). The redial loop is the only dialer that can hold a pre-cut address
-    across the cut: every other dial starts from ``_link_for``, which found the sync
-    link live until the cut closed it, after the rows were already dead."""
+    attempts).
+
+    THE ACCEPTING SIDE IS A SECOND WRITER, and neither redial tracker sees it (review
+    R1-1, reproduced by holding the acceptor's write until this wait first passed). An
+    inbound connection completes on the acceptor's own ``mesh-handshake`` thread:
+    ``send_welcome`` -> ``register_link`` -> ``_note_peer_endpoints`` /
+    ``_note_observed_endpoint``, and that last step writes the dialer's REAL address
+    onto the acceptor's row — after the dialer already holds its welcome, so after its
+    redial loop may have moved on and recorded a failure. So the cut also waits until
+    neither relay has an inbound handshake in flight. ``reload_blocker()`` reads that
+    count from the real bracket: incremented on the accept thread BEFORE the
+    handshake thread starts, decremented in ``_handshake_inbound``'s ``finally`` after
+    the endpoint write (and after the pairing listener's ``contact_peers``, which runs
+    on that same thread). ORDER MATTERS within a poll: attempts, then the in-flight
+    count, then the cut. A dial the redial loop has finished either got its welcome
+    (so its acceptor thread was already counted) or never will; a handshake counted
+    as idle and finished before the cut is visible to the cut (a healed row is
+    rewritten, a live link closed and the poll fails).
+
+    No other dialer can hold a pre-cut address across the cut. Every other dial
+    starts from ``_link_for``, which found the sync link live until the cut closed it,
+    after the rows were already dead; ``contact_peers`` dials only from the listing
+    surfaces (never invoked here) and the pairing listener, whose run is inside the
+    counted handshake above. ``peer_status`` also calls ``RedialTracker.failed`` (via
+    ``lop network peers``), but it dials from the rows too and is never invoked here,
+    so every failure counted below is the redial loop's."""
 
     def _cut_and_confirmed_unreachable() -> bool:
+        # Read BEFORE the cut (see the docstring's ordering): ``attempts`` counts
+        # redial failures since this side's last loss (``connected`` clears it; of
+        # its other caller, ``peer_status``, see the docstring) ...
+        dialers_failed = (
+            int(mesh.a.redial.snapshot(mesh.borrower).get("attempts", 0)) >= 1
+            and int(mesh.b.redial.snapshot(mesh.owner).get("attempts", 0)) >= 1
+        )
+        # ... and no acceptor is still between ``send_welcome`` and its endpoint write.
+        acceptors_idle = mesh.a.reload_blocker() is None and mesh.b.reload_blocker() is None
         # Idempotent cut, re-applied on every poll: a late admission heals the rows.
         for server, other in ((mesh.a, mesh.borrower), (mesh.b, mesh.owner)):
             with store.mutate(mesh.network_id, server.root) as copy:
@@ -459,12 +491,7 @@ def _partition(mesh: Any) -> None:
             link.close()
         if live:
             return False
-        # ``attempts`` counts redial-loop failures since this side's last loss (only
-        # ``_redial_loop`` calls ``RedialTracker.failed``; ``connected`` clears it).
-        return (
-            int(mesh.a.redial.snapshot(mesh.borrower).get("attempts", 0)) >= 1
-            and int(mesh.b.redial.snapshot(mesh.owner).get("attempts", 0)) >= 1
-        )
+        return dialers_failed and acceptors_idle
 
     assert net_fixtures.wait_for(_cut_and_confirmed_unreachable)
 
