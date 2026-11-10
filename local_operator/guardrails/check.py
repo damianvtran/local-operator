@@ -218,7 +218,10 @@ class CallContext:
 REFUSAL_SCOPE = (
     "This refusal is final for THIS action: the same effect on the same targets, by any "
     "spelling or path, is a reroute. A new artifact from your own fresh work, written to "
-    "your own worktree's mandated location, is a different action and needs no approval."
+    "your own worktree's mandated location, is a different action and needs no approval. "
+    # Review m2 (PR #3700): the anti-reroute clause lived only in the guide,
+    # but this text is what the agent reads at the moment of refusal.
+    "Copying or importing the blocked material in by another route is still the same action."
 )
 
 

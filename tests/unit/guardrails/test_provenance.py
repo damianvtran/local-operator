@@ -53,6 +53,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Synthetic trees are never live process cwd; dedicated worktree-removal
     # controls cover live/unknown inventory without depending on fleet latency.
     monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    # Nor do they have a GitHub remote: stub "GitHub, no open PR" so the clean
+    # worktree path is reachable. The PR-state controls live in
+    # ``test_worktree_remove_and_refusal_scope.py``.
+    monkeypatch.setattr(prov, "_github_repo", lambda _: "o/r")
+    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
     for key in [k for k in os.environ if k.startswith(("CMUX_", "GIT_"))]:
@@ -1009,9 +1014,11 @@ _READS = [
     # Round 6: sed/sqlite3 are not strict read-only; a session mention is HIGH.
     (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     (f"awk 'NR==1' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
-    (f"sort ~/.local-operator/sessions/{CHILD}/transcript.jsonl | uniq -c", Risk.HIGH),
+    # Plain sort/uniq/shasum only read (operator, 2026-11-09: "Read-only
+    # commands are never dangerous-delete"); ``sort -o`` stays a write.
+    (f"sort ~/.local-operator/sessions/{CHILD}/transcript.jsonl | uniq -c", Risk.LOW),
     (f"xxd ~/.local-operator/sessions/{CHILD}/transcript.jsonl | head", Risk.HIGH),
-    (f"shasum ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    (f"shasum ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.LOW),
     (f"python3 -m json.tool ~/.local-operator/sessions/{CHILD}/origin.json", Risk.HIGH),
     (f"cp ~/.local-operator/sessions/{CHILD}/transcript.jsonl ~/work/t.jsonl", Risk.LOW),
     (f"rsync -a ~/.local-operator/sessions/{CHILD}/ ~/work/bk/", Risk.LOW),

@@ -701,15 +701,39 @@ def _regenerable(name: str) -> bool:
     return name in _REGENERABLE or any(fnmatch.fnmatchcase(name, g) for g in _REGENERABLE_GLOBS)
 
 
-def _live_cwd_inside(real: str) -> bool | None:
-    """Whether a live process uses this tree; unknown never grants an exemption.
+#: Bound on ONE process-cwd inventory (``lsof -a -u <uid> -d cwd -Fn -w``).
+#: Measured on this machine under ~25 concurrent sessions: QA round 1 of
+#: PR #3700, n=28, 1.6–5.54 s with 11/28 censored at the old 5 s bound; the
+#: manager's lane measured 3–10 s; a 2026-11-09 re-run here, n=7, 1.30–3.95 s.
+#: 20 s sits above the observed max (10 s). A timeout still returns ``None``,
+#: which ``worktree_state`` reads as ``busy`` — fail closed.
+_CWD_INVENTORY_TIMEOUT_S = 20.0
+#: How long one successful inventory is reused within this process. WHY: a
+#: ``git worktree remove`` call is checked, previewed and often retried within
+#: seconds, and each inventory costs seconds under load (QA Q-1: every removal
+#: walked it, a preview doubled it). INVARIANT and its price: a process that
+#: ``cd``s into the tree less than 30 s after an inventory is not seen; that is
+#: the same window a process starting right after the probe always had, and
+#: the owning-session check (``worktree_activity``) reads the session
+#: registry fresh on every call. Failures are never cached.
+_CWD_INVENTORY_TTL_S = 30.0
+_cwd_inventory_cache: tuple[float, tuple[str, ...]] | None = None
 
-    The manager-allocated 5 s inventory budget fails closed under host load.
+
+def _cwd_inventory() -> tuple[str, ...] | None:
+    """Realpaths of every cwd this uid's processes hold, or ``None`` if unknown.
+
     lsof's cwd inventory is read-only and avoids probing process command lines
     (which may carry secrets). Linux exposes the same data under /proc. A
-    disappearing process no longer owns a cwd; other inspection errors fail
-    closed. This protects ordinary clean removals as well as abandoned adds.
+    disappearing process no longer owns a cwd; other inspection errors give
+    ``None``. A success is cached for :data:`_CWD_INVENTORY_TTL_S`.
     """
+    global _cwd_inventory_cache
+    now = time.monotonic()
+    cached = _cwd_inventory_cache
+    if cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
+        return cached[1]
+    paths: list[str] = []
     if os.path.isdir("/proc/self"):
         try:
             for entry in os.scandir("/proc"):
@@ -718,27 +742,43 @@ def _live_cwd_inside(real: str) -> bool | None:
                 try:
                     if entry.stat().st_uid != os.getuid():
                         continue
-                    cwd = os.readlink(os.path.join(entry.path, "cwd"))
+                    paths.append(os.readlink(os.path.join(entry.path, "cwd")))
                 except FileNotFoundError:
                     continue
-                if (os.path.realpath(cwd) == real or os.path.realpath(cwd).startswith(real + os.sep)):
-                    return True
-            return False
         except OSError:
             return None
-    try:
-        proc = subprocess.run(
-            ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn", "-w"],
-            capture_output=True, text=True, timeout=5.0, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+    else:
+        try:
+            proc = subprocess.run(
+                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn", "-w"],
+                capture_output=True,
+                text=True,
+                timeout=_CWD_INVENTORY_TIMEOUT_S,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            return None
+        paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
+        if not paths:
+            return None  # this process alone holds a cwd: an empty list is a failed read
+    inventory = tuple(os.path.realpath(p) for p in paths)
+    _cwd_inventory_cache = (now, inventory)
+    return inventory
+
+
+def _live_cwd_inside(real: str) -> bool | None:
+    """Whether a live process uses this tree; unknown never grants an exemption.
+
+    Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
+    timeout or an unreadable inventory — fails closed in ``worktree_state``.
+    This protects ordinary clean removals as well as abandoned adds.
+    """
+    inventory = _cwd_inventory()
+    if inventory is None:
         return None
-    if proc.returncode != 0:
-        return None
-    paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
-    if not paths:
-        return None
-    return any((os.path.realpath(cwd) == real or os.path.realpath(cwd).startswith(real + os.sep)) for cwd in paths)
+    return any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory)
 
 
 def _only_regenerable(directory: str) -> bool:
@@ -747,10 +787,16 @@ def _only_regenerable(directory: str) -> bool:
     WHY. ``git status --ignored`` collapses a directory whose content is ALL
     ignored into the directory itself: ``scripts/`` holding only throwaway
     ``_*.bundle.mjs`` files reports as ``!! scripts/``, and that basename says
-    nothing about its content. A regenerable subdirectory (``.cache``) is
-    accepted whole, as it would be at the top level. Not a directory, a
-    symlink, an unreadable tree or more than :data:`_WALK_ENTRIES` entries all
-    count as NOT regenerable — fail closed.
+    nothing about its content. So the walk judges content, not names: a FILE
+    passes by :func:`_regenerable`, but a nested DIRECTORY named like build
+    output (``work/build/``, ``data/.cache/``) is walked like any other —
+    under an arbitrarily named ignored parent its name proves nothing (review
+    m1, PR #3700: ``work/build/thesis.md`` read as clean). Only a directory
+    matching a pattern in :data:`_REGENERABLE_GLOBS` (``*.egg-info``) is
+    accepted whole; the ignored ROOT itself is accepted by name in
+    ``worktree_state``. Not a directory, a symlink, an unreadable tree or more
+    than :data:`_WALK_ENTRIES` entries all count as NOT regenerable — fail
+    closed.
     """
     if not os.path.isdir(directory) or os.path.islink(directory):
         return False
@@ -765,17 +811,22 @@ def _only_regenerable(directory: str) -> bool:
         if seen > _WALK_ENTRIES:
             return False
         for entry in entries:
-            if _regenerable(entry.name):
-                continue
             if entry.is_dir(follow_symlinks=False):
+                if any(fnmatch.fnmatchcase(entry.name, g) for g in _REGENERABLE_GLOBS):
+                    continue
                 stack.append(entry.path)
-            else:
+            elif not _regenerable(entry.name):
                 return False
     return True
 
 
 def worktree_state(path: str) -> str:
-    """``clean`` / ``dirty`` / ``locked`` / ``not-linked`` / ``unknown`` for a worktree path.
+    """The removal-relevant state of a worktree path.
+
+    One of ``clean``, ``dirty``, ``locked``, ``stale-initializing`` (locked
+    "initializing" for over an hour, otherwise clean), ``busy`` (a live process
+    cwd is inside it, or the inventory could not be read), ``not-linked`` or
+    ``unknown``.
 
     Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
     and sits in ``<common>/worktrees/<name>``, and that registration's
@@ -801,7 +852,8 @@ def worktree_state(path: str) -> str:
     COST. Under heavy disk pressure each git probe here measured up to 34 s
     (see :data:`_WORKTREE_STATUS_TIMEOUT_S`), so this makes the fewest probes
     that answer the question: one ``rev-parse``, file reads for registration
-    and lock, ONE ``git status --porcelain --ignored`` for tracked, untracked
+    and lock, ONE ``git status --porcelain --ignored --untracked-files=normal``
+    for tracked, untracked
     (``??``) and ignored (``!!``) entries alike, and ``symbolic-ref``. A
     timeout is still ``unknown`` — never ``clean``.
     """
@@ -839,7 +891,8 @@ def worktree_state(path: str) -> str:
             reason = fh.read().strip()
         # One hour is the operator's explicit stale-add policy, not a measured
         # probe timeout. Never unlock or mutate this record from the guard.
-        stale_initializing = reason == "initializing" and time.time() - os.stat(lock).st_mtime > 3600
+        age = time.time() - os.stat(lock).st_mtime
+        stale_initializing = reason == "initializing" and age > 3600
         if not stale_initializing:
             return "locked"
     except FileNotFoundError:
@@ -855,8 +908,13 @@ def worktree_state(path: str) -> str:
     # directory: under a name not on the list it is dirty outright, and under
     # an allowlisted name (``build/keep/.git``) the bounded walk below finds
     # it (review R2-MINOR-1).
+    # ``--untracked-files=normal`` is explicit (review M1, PR #3700): with
+    # ``status.showUntrackedFiles=no`` in repo or user config a bare status
+    # hides ``??`` entries, the tree reads clean, and ``git worktree remove``
+    # (which reads the same config) deletes them. ``normal`` overrides the
+    # config and keeps the collapsed ``!! dir/`` shape the walk expects.
     ignored = _git(
-        ["status", "--porcelain", "--ignored"],
+        ["status", "--porcelain", "--ignored", "--untracked-files=normal"],
         real,
         timeout=_WORKTREE_STATUS_TIMEOUT_S,
     )
@@ -890,6 +948,168 @@ def worktree_state(path: str) -> str:
         if not (refs or "").strip():
             return "dirty"
     return "stale-initializing" if stale_initializing else "clean"
+
+
+#: Bound on the ONE ``gh pr list`` that :func:`worktree_activity` runs: the
+#: manager's allocation for this lookup (~8 s). Measured 2026-11-09 on this
+#: machine, n=5 against damianvtran/local-operator: 1.29–1.81 s. A timeout is
+#: "PR state unknown", which never ranks LOW.
+_GH_TIMEOUT_S = 8.0
+_GITHUB_URL_RE = re.compile(
+    r"^(?:https?://(?:[^@/]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+
+
+@dataclass(frozen=True)
+class WorktreeActivity:
+    """Is anyone still working in a linked worktree? Facts for the guard.
+
+    WHY (operator incident, 2026-11-09). A disk-pressure lane removed
+    ``local-operator-ui/.worktrees/profile-proposals``: clean, no live cwd,
+    head already an ancestor of main — every ``worktree_state`` test passed —
+    yet its branch carried an OPEN PR under QA, and the removal deleted 34
+    tracked files from under that PR and broke Storybook. "Clean" says nothing
+    is LOST; it does not say nothing is IN USE. These are the two in-use
+    signals the guard can read cheaply: an open PR for the branch, and a
+    running session that owns the tree.
+    """
+
+    branch: str | None
+    #: ``open`` / ``none`` / ``unknown``.
+    pr_state: str
+    pr_number: int | None = None
+    #: Why the PR state is unknown (no GitHub remote, gh failed, timeout).
+    pr_detail: str = ""
+    #: Running sessions other than the caller that own the tree.
+    owners_running: tuple[str, ...] = ()
+
+    def facts(self) -> str:
+        branch = self.branch or "(detached HEAD)"
+        if self.pr_state == "open":
+            pr = f"open PR #{self.pr_number}"
+        elif self.pr_state == "none":
+            pr = "no open PR"
+        else:
+            pr = f"PR state unknown ({self.pr_detail})"
+        owner = (
+            "owning session running: " + ", ".join(self.owners_running)
+            if self.owners_running
+            else "no other running session owns it"
+        )
+        return f"branch {branch}; {pr}; {owner}"
+
+
+def _github_repo(real: str) -> str | None:
+    """``owner/name`` of the worktree's GitHub remote (``origin`` first)."""
+    out = _git(["config", "--get-regexp", r"^remote\..*\.url$"], real)
+    if not out:
+        return None
+    urls: list[tuple[bool, str]] = []
+    for line in out.splitlines():
+        key, _, url = line.partition(" ")
+        urls.append((key != "remote.origin.url", url.strip()))
+    for _, url in sorted(urls):
+        m = _GITHUB_URL_RE.match(url)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
+    """Open PR numbers whose head is ``branch`` on ``repo``; ``None`` if unknown.
+
+    The injection point tests replace. ``GH_PROMPT_DISABLED`` keeps gh from
+    ever prompting inside a guard check.
+    """
+    env = dict(os.environ, GH_PROMPT_DISABLED="1")
+    try:
+        proc = subprocess.run(
+            ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+             "--json", "number"],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT_S,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+        return [int(r["number"]) for r in rows]
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _running_owners(real: str, session_id: str) -> tuple[str, ...]:
+    """Running sessions (not the caller) that own the worktree at ``real``.
+
+    Owner = the session the creation ledger attributes the ``git worktree
+    add`` to (``kind='worktree'`` row for this exact path), or any live/wedged
+    session whose recorded cwd is inside the tree. The CALLER is excluded: a
+    session removing its own worktree is the owner acting, not a conflict.
+    Read fresh on every call (no cache). Unreadable ledger or registry → no
+    owner known from that source; the other in-use checks still apply.
+    """
+    creators: set[str] = set()
+    try:
+        conn = _connect(ledger_path(), create=False)
+        if conn is not None:
+            try:
+                creators = {
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT DISTINCT creator FROM created WHERE path=? AND kind='worktree'",
+                        (real,),
+                    )
+                }
+            finally:
+                conn.close()
+    except (sqlite3.Error, OSError):
+        logger.debug("guardrail ledger unreadable", exc_info=True)
+    running: list[str] = []
+    try:
+        from local_operator.session.runtime import registry
+
+        # reap=False: a guard check must never move another session's record.
+        for rec, state in registry.scan(None, reap=False):
+            sid = str(getattr(rec, "session_id", "") or "")
+            if state not in ("live", "wedged") or not sid or sid == session_id:
+                continue
+            cwd = os.path.realpath(str(getattr(rec, "cwd", "") or "/nonexistent-cwd"))
+            if sid in creators or cwd == real or cwd.startswith(real + os.sep):
+                running.append(sid)
+    except Exception:  # noqa: BLE001 — an unreadable registry names no owner
+        logger.debug("session registry unreadable", exc_info=True)
+    return tuple(dict.fromkeys(running))
+
+
+def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
+    """Open-PR and owning-session facts for a linked worktree (see the class)."""
+    real = os.path.realpath(path)
+    owners = _running_owners(real, session_id)
+    branch = _git(["symbolic-ref", "--quiet", "--short", "HEAD"], real)
+    branch = (branch or "").strip() or None
+    if branch is None:
+        # Detached: no branch, so no PR can be headed by it.
+        return WorktreeActivity(None, "none", owners_running=owners)
+    repo = _github_repo(real)
+    if repo is None:
+        return WorktreeActivity(
+            branch, "unknown", pr_detail="no GitHub remote", owners_running=owners
+        )
+    prs = _gh_open_prs(repo, branch)
+    if prs is None:
+        return WorktreeActivity(
+            branch, "unknown", pr_detail=f"gh lookup on {repo} failed or timed out",
+            owners_running=owners,
+        )
+    if prs:
+        return WorktreeActivity(branch, "open", pr_number=min(prs), owners_running=owners)
+    return WorktreeActivity(branch, "none", owners_running=owners)
 
 
 def _ignored_unregenerable(real: str) -> bool:

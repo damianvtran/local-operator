@@ -37,6 +37,9 @@ from local_operator.guardrails.preview import preview_tool_call
 from local_operator.guardrails.rules import Rule
 
 SID = "bbbbbbbbbbbb"
+# The real PR-lookup helpers, kept before the ``home`` fixture stubs them.
+_REAL_GITHUB_REPO = prov._github_repo
+_REAL_GH_OPEN_PRS = prov._gh_open_prs
 
 
 @pytest.fixture
@@ -48,6 +51,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Synthetic repos have no live cwd; process inventory has dedicated controls
     # below and must not make git regressions depend on fleet lsof latency.
     monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    # Synthetic repos have no GitHub remote either: by default every worktree is
+    # on GitHub with no open PR. The PR lookup has its own tests below.
+    monkeypatch.setattr(prov, "_github_repo", lambda _: "o/r")
+    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
     for key in [k for k in os.environ if k.startswith(("CMUX_", "GIT_"))]:
@@ -101,7 +109,7 @@ def test_sibling_worktree_outside_repo_with_git_dash_c_ranks_low(home: Path, rep
     assert prov.worktree_state(str(sib)) == "clean"
     ranked = _verdict(home, f"git -C {repo} worktree remove {sib}")
     assert ranked.risk is Risk.LOW
-    assert "a clean linked git worktree" in [t.reason for t in ranked.targets]
+    assert ranked.targets[0].reason.startswith("a clean linked git worktree (branch feat/sib;")
     # Negative controls on the same tree: rm -rf is not ``git worktree remove``.
     assert _verdict(home, f"rm -rf {sib}").risk is Risk.HIGH
     assert _verdict(home, f"git -C {repo} worktree remove {repo}").risk is Risk.HIGH  # primary
@@ -142,6 +150,10 @@ def test_collapsed_ignored_directory_is_judged_by_its_content(home: Path, repo: 
     (wt / "scripts" / "_a.bundle.mjs").write_text("b")
     (wt / "scripts" / ".cache").mkdir()
     (wt / "scripts" / ".cache" / "anything").write_text("c")
+    # Review m1: a build-named dir INSIDE a collapsed dir is walked, not trusted.
+    assert prov.worktree_state(str(wt)) == "dirty"
+    (wt / "scripts" / ".cache" / "anything").unlink()
+    (wt / "scripts" / ".cache" / "x.pyc").write_text("c")
     assert prov.worktree_state(str(wt)) == "clean"
     (wt / "scripts" / "._keep").write_text("appledouble")
     assert prov.worktree_state(str(wt)) == "clean"
@@ -326,11 +338,230 @@ def test_live_or_unknown_process_cwd_blocks_a_clean_worktree(
 
 
 def test_process_inventory_timeout_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
+
     def timeout(*args, **kwargs):
-        assert kwargs["timeout"] == 5.0
-        raise subprocess.TimeoutExpired(args[0], 5)
+        assert kwargs["timeout"] == prov._CWD_INVENTORY_TIMEOUT_S == 20.0
+        raise subprocess.TimeoutExpired(args[0], 20)
     monkeypatch.setattr(prov.subprocess, "run", timeout)
     # Exercise macOS branch independently of the CI runner's /proc.
     real_isdir = os.path.isdir
-    monkeypatch.setattr(prov.os.path, "isdir", lambda p: False if p == "/proc/self" else real_isdir(p))
+    monkeypatch.setattr(
+        prov.os.path, "isdir", lambda p: False if p == "/proc/self" else real_isdir(p)
+    )
     assert prov._live_cwd_inside("/synthetic/tree") is None
+
+
+# -- round-1 remediation (PR #3700) -------------------------------------------------
+
+
+def test_untracked_files_show_despite_show_untracked_files_no(home: Path, repo: Path) -> None:
+    """Review M1: ``status.showUntrackedFiles=no`` must not hide work from the probe."""
+    wt = _add(repo, repo / ".worktrees" / "cfg", "cfg")
+    _git("config", "status.showUntrackedFiles", "no", cwd=repo)
+    assert prov.worktree_state(str(wt)) == "clean"  # control: nothing there yet
+    (wt / "notes.txt").write_text("only copy")
+    assert prov.worktree_state(str(wt)) == "dirty"
+    assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.HIGH
+    (wt / "notes.txt").unlink()
+    (wt / ".env").write_text("SECRET=1")  # ignored, not regenerable
+    assert prov.worktree_state(str(wt)) == "dirty"
+
+
+def test_build_named_dir_under_arbitrary_ignored_parent_is_walked(home: Path, repo: Path) -> None:
+    """Review m1: ``work/build/thesis.md`` under an ignored ``work/`` is real work."""
+    wt = _add(repo, repo / ".worktrees" / "m1", "m1")
+    with (wt / ".gitignore").open("a") as fh:
+        fh.write("work/\n")
+    _git("commit", "-qam", "ignore work", cwd=wt)
+    (wt / "work" / "build").mkdir(parents=True)
+    (wt / "work" / "build" / "thesis.md").write_text("only copy")
+    assert prov.worktree_state(str(wt)) == "dirty"
+    (wt / "work" / "build" / "thesis.md").unlink()
+    (wt / "work" / "pkg.egg-info").mkdir()  # a glob-matched dir is accepted whole
+    (wt / "work" / "pkg.egg-info" / "PKG-INFO").write_text("meta")
+    assert prov.worktree_state(str(wt)) == "clean"
+
+
+def test_cwd_inventory_is_bounded_and_cached_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QA Q-1: one inventory serves 30 s; a failure is never cached."""
+    monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
+    real_isdir = os.path.isdir
+    monkeypatch.setattr(
+        prov.os.path, "isdir", lambda p: False if p == "/proc/self" else real_isdir(p)
+    )
+    calls: list[float] = []
+    outcome = {"fail": True}
+
+    def run(*args, **kwargs):
+        calls.append(kwargs["timeout"])
+        if outcome["fail"]:
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+        return subprocess.CompletedProcess(args[0], 0, "p1\nn/synthetic/tree/sub\n", "")
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(prov.subprocess, "run", run)
+    monkeypatch.setattr(prov.time, "monotonic", lambda: clock["t"])
+    assert prov._live_cwd_inside("/synthetic/tree") is None  # timeout: fail closed
+    outcome["fail"] = False
+    assert prov._live_cwd_inside("/synthetic/tree") is True  # failure was not cached
+    assert prov._live_cwd_inside("/synthetic/other") is False
+    clock["t"] += prov._CWD_INVENTORY_TTL_S - 1
+    assert prov._live_cwd_inside("/synthetic/tree") is True
+    assert calls == [20.0, 20.0]  # two probes for four questions
+    clock["t"] += 2
+    prov._live_cwd_inside("/synthetic/tree")
+    assert len(calls) == 3  # expired: re-read
+
+
+def test_open_pr_refuses_any_linked_worktree_outright(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Operator incident: a clean worktree whose branch had an open PR was removed."""
+    seen: list[tuple[str, str]] = []
+
+    def lookup(repo_name: str, branch: str) -> list[int]:
+        seen.append((repo_name, branch))
+        return [1828]
+
+    monkeypatch.setattr(prov, "_gh_open_prs", lookup)
+    wt = _add(repo, repo / ".worktrees" / "pp", "feat/profile-proposals-agents")
+    assert prov.worktree_state(str(wt)) == "clean"
+    verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is Risk.CRITICAL
+    assert seen == [("o/r", "feat/profile-proposals-agents")]
+    text = _critical_text(verdict)
+    assert (
+        "branch feat/profile-proposals-agents has open PR #1828; finish or close it first" in text
+    )
+    assert "no other running session owns it" in text  # owner state shown too
+    (wt / "notes.txt").write_text("dirty")  # still refused outright when dirty
+    assert _verdict(home, f"git -C {repo} worktree remove --force {wt}").risk is Risk.CRITICAL
+
+
+def test_open_pr_refusal_is_not_lifted_by_an_answered_ask(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CRITICAL never reaches the ask/judge route: an earlier approval cannot cover it."""
+    from local_operator.guardrails.check import BUILTIN_REFUSE_CRITICAL, builtin_branch
+
+    monkeypatch.setattr(prov, "_gh_open_prs", lambda r, b: [7])
+    wt = _add(repo, repo / ".worktrees" / "asked", "asked")
+    verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
+    assert builtin_branch(verdict, critical_override=False) == BUILTIN_REFUSE_CRITICAL
+
+
+@pytest.mark.parametrize(
+    ("repo_name", "prs", "detail"),
+    [(None, [], "no GitHub remote"), ("o/r", None, "gh lookup on o/r failed or timed out")],
+)
+def test_unknown_pr_state_goes_to_the_judge(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, repo_name, prs, detail
+) -> None:
+    monkeypatch.setattr(prov, "_github_repo", lambda _: repo_name)
+    monkeypatch.setattr(prov, "_gh_open_prs", lambda r, b: prs)
+    wt = _add(repo, repo / ".worktrees" / "unk", "unk")
+    verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is Risk.HIGH
+    assert f"PR state unknown ({detail})" in verdict.targets[0].reason
+
+
+def test_running_owner_session_goes_to_the_judge(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner = ledger creator of the ``worktree add`` or a live session cwd inside."""
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import registry
+
+    wt = _add(repo, repo / ".worktrees" / "own", "own")
+    real = os.path.realpath(wt)
+    other = "cccccccccccc"
+    prov.write_records(
+        [(real, "worktree")], owners=[other], creator=other, command="git worktree add"
+    )
+    live: list = [(SimpleNamespace(session_id=other, cwd=str(home)), "live")]
+    monkeypatch.setattr(registry, "scan", lambda *a, **k: live)
+    verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is Risk.HIGH
+    assert f"owning session running: {other}" in verdict.targets[0].reason
+    # Not running any more → idle again (other checks pass) → LOW.
+    live[:] = [(SimpleNamespace(session_id=other, cwd=str(home)), "stale")]
+    assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.LOW
+    # A live session whose recorded cwd is inside the tree also owns it...
+    live[:] = [(SimpleNamespace(session_id="dddddddddddd", cwd=str(wt / "src")), "wedged")]
+    assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.HIGH
+    # ...but the caller itself is never its own conflict.
+    live[:] = [(SimpleNamespace(session_id=SID, cwd=real), "live")]
+    assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.LOW
+
+
+def test_pr_lookup_reads_the_github_remote_and_never_prompts(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git("remote", "add", "fork", "git@github.com:someone/fork.git", cwd=repo)
+    origin = "https://github.com/damianvtran/local-operator-ui.git"
+    _git("remote", "add", "origin", origin, cwd=repo)
+    assert _REAL_GITHUB_REPO(str(repo)) == "damianvtran/local-operator-ui"  # origin first
+    _git("remote", "set-url", "origin", "git@gitlab.com:minerva/core.git", cwd=repo)
+    assert _REAL_GITHUB_REPO(str(repo)) == "someone/fork"
+    _git("remote", "remove", "fork", cwd=repo)
+    assert _REAL_GITHUB_REPO(str(repo)) is None
+    seen: dict = {}
+
+    def run(argv, **kwargs):
+        prompt = kwargs["env"]["GH_PROMPT_DISABLED"]
+        seen.update(argv=argv, timeout=kwargs["timeout"], prompt=prompt)
+        return subprocess.CompletedProcess(argv, 0, '[{"number": 1828}]', "")
+
+    monkeypatch.setattr(prov.subprocess, "run", run)
+    assert _REAL_GH_OPEN_PRS("o/r", "feat/x") == [1828]
+    assert seen["argv"][:3] == ["gh", "pr", "list"] and "--head" in seen["argv"]
+    assert seen["timeout"] == prov._GH_TIMEOUT_S == 8.0 and seen["prompt"] == "1"
+
+    def timeout(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(prov.subprocess, "run", timeout)
+    assert _REAL_GH_OPEN_PRS("o/r", "feat/x") is None
+
+
+def _session_dir(home: Path) -> str:
+    return str(home / ".local-operator" / "sessions")
+
+
+def test_readers_over_session_state_are_not_destructive(home: Path) -> None:
+    """Operator case (A): the exact loop, cwd under the sessions directory."""
+    (home / ".local-operator" / "sessions" / "cccccccccccc").mkdir()
+    cwd = _session_dir(home)
+    loop = 'for s in */; do [ -d "$s" ] && echo "$s"; done | sort | uniq'
+    other = f"{cwd}/cccccccccccc/x"
+    for command in (
+        loop,
+        f"cat {other} | sort | uniq -c | head -3",
+        f"shasum {other}; md5 -q {other}; file {other}; stat {other}; wc -l {other}; ls {cwd}",
+        f"sort -u {other} | tail -2 | grep a",
+    ):
+        verdict = classify_bash(command, cwd=cwd, env=_env(home), scratchpad=None, session_id=SID)
+        assert verdict.risk is Risk.LOW, (command, [t.reason for t in verdict.targets])
+
+
+def test_sort_output_into_session_state_is_still_refused(home: Path) -> None:
+    (home / ".local-operator" / "sessions" / "cccccccccccc").mkdir()
+    cwd = _session_dir(home)
+    other = f"{cwd}/cccccccccccc/x"
+    for command in (f"sort -o {other} {other}", f"sort --output={other} /dev/null"):
+        verdict = classify_bash(
+            command, cwd=str(home), env=_env(home), scratchpad=None, session_id=SID
+        )
+        assert verdict.risk is Risk.CRITICAL, command
+    for command in (f"uniq {other} {other}.2", f"file -C -m {other}", f"sort -T {cwd} {other}"):
+        verdict = classify_bash(
+            command, cwd=str(home), env=_env(home), scratchpad=None, session_id=SID
+        )
+        assert verdict.risk is Risk.HIGH, command
+
+
+def test_refusal_text_says_another_route_is_the_same_action() -> None:
+    """Review m2: the anti-reroute clause is in the text read at refusal time."""
+    assert "by another route is still the same action" in REFUSAL_SCOPE

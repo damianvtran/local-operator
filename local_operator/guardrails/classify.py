@@ -887,15 +887,45 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         # locked, unknown, not linked) takes the ordinary ranking below, which
         # then names that state: the refusal otherwise says only "a git
         # repository root" and hides the one fact the agent can act on.
-        from local_operator.guardrails.provenance import worktree_state
+        from local_operator.guardrails.provenance import worktree_activity, worktree_state
 
         state = worktree_state(path)
-        if state == "clean" and not target.forced:
-            return RankedTarget(target, Risk.LOW, "a clean linked git worktree")
-        if state == "stale-initializing" and target.force_count == 2:
-            return RankedTarget(target, Risk.LOW, "a clean linked git worktree with a stale initializing lock")
         if state != "not-linked":
-            notes.append(f"linked worktree state: {state}")
+            # Clean is not idle (operator incident 2026-11-09: a clean worktree
+            # whose branch had an OPEN PR under QA was removed, deleting 34
+            # tracked files from under it). An open PR is an unliftable refusal
+            # at ANY state: an earlier answered ask naming the path was given
+            # before that fact was on the table, so it cannot cover it. A
+            # running owner or an unknown PR state only withholds the LOW, so
+            # the judge sees those facts. ``worktree_activity`` explains both.
+            activity = worktree_activity(path, session_id)
+            facts = activity.facts()
+            if activity.pr_state == "open":
+                return RankedTarget(
+                    target,
+                    Risk.CRITICAL,
+                    f"branch {activity.branch} has open PR #{activity.pr_number}; "
+                    f"finish or close it first ({facts})",
+                )
+            idle = activity.pr_state == "none" and not activity.owners_running
+            if idle and state == "clean" and not target.forced:
+                return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
+            if idle and state == "stale-initializing" and target.force_count == 2:
+                return RankedTarget(
+                    target,
+                    Risk.LOW,
+                    f"a clean linked git worktree with a stale initializing lock ({facts})",
+                )
+            if not idle:
+                # Straight to the judge, past the ledger-ownership LOW below:
+                # someone else is in the tree, or nobody could say whether a
+                # PR is open (no GitHub remote, gh failed or timed out).
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    f"a git repository root; linked worktree state: {state}; {facts}",
+                )
+            notes.append(f"linked worktree state: {state}; {facts}")
     for spelling in _spellings(path):
         reason = _high_reason(spelling, target, prot)
         if reason is not None:

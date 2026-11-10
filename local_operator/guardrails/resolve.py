@@ -2575,10 +2575,53 @@ _FIND_WRITES = frozenset(
 )
 
 
+#: Readers that are read-only EXCEPT for one known writing switch or shape,
+#: so they cannot sit in :data:`READ_ONLY_PROGRAMS` (which admits no flag
+#: inspection). WHY (operator case, 2026-11-09): ``for s in …; done | sort |
+#: uniq`` with the cwd under ``<state>/sessions`` was refused as "session
+#: state handed to sort/uniq" — reading stdin or a file is not a delete.
+#: Writing shapes stay on the backstop:
+#:
+#: * ``sort -o FILE`` / ``--output`` writes (also a modelled write target in
+#:   ``_write_surface``, so a write into evidence is CRITICAL);
+#:   ``--compress-program`` runs a program; ``-T``/``--temporary-directory``
+#:   writes temp files there.
+#: * ``uniq IN OUT`` writes its second operand.
+#: * ``file -C`` / ``--compile`` writes a ``.mgc`` (review R6).
+#: * ``shasum``/``md5``/``*sum`` have no writing switch (``-c`` reads).
+_GUARDED_READERS = frozenset(
+    {"sort", "uniq", "file", "shasum", "md5", "md5sum", "sha1sum", "sha256sum", "sha512sum"}
+)
+
+
+def _guarded_reader_read_only(name: str, argv: list[str]) -> bool:
+    shorts = [a[1:] for a in argv if a.startswith("-") and not a.startswith("--") and a != "-"]
+    longs = [a.split("=", 1)[0] for a in argv if a.startswith("--")]
+    if name == "sort":
+        # Fail closed on any cluster holding o/T, even as another flag's value
+        # (``-to``): a misread costs a judge call, never a LOW write.
+        if any("o" in c or "T" in c for c in shorts):
+            return False
+        return not any(
+            k.startswith(("--output", "--compress-program", "--temporary-directory"))
+            for k in longs
+        )
+    if name == "uniq":
+        # A second operand is the output file. ``-f N``/``-s N`` values count
+        # as operands here — fail closed, never an unseen write.
+        operands = [a for a in argv if not a.startswith("-") or a == "-"]
+        return len(operands) <= 1
+    if name == "file":
+        return not any("C" in c for c in shorts) and "--compile" not in longs
+    return True  # shasum/md5/*sum
+
+
 def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) -> bool:
     """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
     if name in READ_ONLY_PROGRAMS:
         return True
+    if name in _GUARDED_READERS:
+        return _guarded_reader_read_only(name, argv)
     if name == "find":
         return not any(a in _FIND_WRITES for a in argv)
     if name == "git":
@@ -2965,6 +3008,10 @@ def _write_surface(
         return _copy_dest(args, _MV_FLAGS), _flags_known(args, _MV_FLAGS)
     if name in ("tee",):
         return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
+    if name == "sort":
+        # ``sort -o FILE`` writes FILE (it may also be an input: ``sort -o x x``).
+        # Never fully modelled, so its other path words reach the backstop too.
+        return _cluster_value(args, "o", "--output"), False
     if name in ("mkdir", "gmkdir"):
         return [], _flags_known(args, _MKDIR_FLAGS)  # resolver creations
     if name in ("chmod", "chown", "chgrp", "xattr"):
