@@ -211,16 +211,36 @@ def _install_successor_spies(app: Any, viewer: Any, events: list[str], t0: list[
     Each target is looked up dynamically by its caller (``_go_cold`` reads
     ``self._refresh_callback`` / ``self._went_cold_callback`` at call time; the
     app calls ``self._start_runtime_engage`` and ``getattr(session,
-    "_ensure_bound")``), so an instance attribute wrapping the original sees
-    every call. ``t0`` is filled at the flip so offsets read from there.
+    "_ensure_bound")``; the attach client's ``on_disconnected`` closure calls
+    ``self._on_disconnected(reason)`` and that method schedules
+    ``self._recover_runtime()``), so an instance attribute wrapping the
+    original sees every call. ``t0`` is filled at the flip so offsets read
+    from there; install events land before it and read from their own clock.
+
+    Every spy does its pre-call reads inside a ``try`` so a raising property
+    can never skip the real call, and preserves the original's sync/async
+    kind, arguments, return value and exception exactly. Each successful
+    install records one ``installed`` event, so a hop that never shows up can
+    be told apart from a spy that was overwritten or never installed.
     """
 
-    def note(text: str) -> None:
+    def note(text: Any) -> None:
+        # ``text`` may be a zero-arg callable so a post-call message (which
+        # formats the error or result) is built inside this guard too: after
+        # the real call nothing may replace its return value or exception.
         try:
             base = t0[0] if t0 else time.monotonic()
-            events.append(f"+{time.monotonic() - base:.2f}s {text}")
+            events.append(f"+{time.monotonic() - base:.2f}s {text() if callable(text) else text}")
         except BaseException:  # noqa: BLE001
             pass
+
+    def peek(obj: Any, name: str) -> Any:
+        # ``getattr``'s default covers AttributeError only; a property that
+        # raises anything else must not turn an observed call into a failure.
+        try:
+            return getattr(obj, name, "?")
+        except BaseException as error:  # noqa: BLE001
+            return f"<unreadable: {type(error).__name__}>"
 
     def wrap_callback(name: str) -> None:
         try:
@@ -230,10 +250,14 @@ def _install_successor_spies(app: Any, viewer: Any, events: list[str], t0: list[
                 return
 
             def spy(*args: Any, **kwargs: Any) -> Any:
-                note(f"viewer.{name} fired; is_cold={getattr(viewer, 'is_cold', '?')}")
+                try:
+                    note(f"viewer.{name} fired; is_cold={peek(viewer, 'is_cold')}")
+                except BaseException:  # noqa: BLE001
+                    pass
                 return original(*args, **kwargs)
 
             setattr(viewer, name, spy)
+            note(f"installed spy on viewer.{name}")
         except BaseException as error:  # noqa: BLE001
             note(f"spy on {name} not installed: {error!r}")
 
@@ -244,14 +268,18 @@ def _install_successor_spies(app: Any, viewer: Any, events: list[str], t0: list[
         engage = app._start_runtime_engage
 
         def engage_spy(*args: Any, **kwargs: Any) -> Any:
-            note(
-                f"app._start_runtime_engage({kwargs.get('reason', args)!r}) entered; "
-                f"latch={getattr(app, '_warm_engage_started', '?')} "
-                f"is_cold={getattr(viewer, 'is_cold', '?')}"
-            )
+            try:
+                note(
+                    f"app._start_runtime_engage({kwargs.get('reason', args)!r}) entered; "
+                    f"latch={peek(app, '_warm_engage_started')} "
+                    f"is_cold={peek(viewer, 'is_cold')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
             return engage(*args, **kwargs)
 
         app._start_runtime_engage = engage_spy
+        note("installed spy on app._start_runtime_engage")
     except BaseException as error:  # noqa: BLE001
         note(f"spy on _start_runtime_engage not installed: {error!r}")
 
@@ -259,23 +287,92 @@ def _install_successor_spies(app: Any, viewer: Any, events: list[str], t0: list[
         ensure = viewer._ensure_bound
 
         async def ensure_spy(*args: Any, **kwargs: Any) -> Any:
-            note(
-                f"viewer._ensure_bound({kwargs!r}) entered; recovering="
-                f"{getattr(viewer, '_recovering', '?')} can_go_cold="
-                f"{getattr(viewer, '_can_go_cold', '?')} disposed="
-                f"{getattr(viewer, '_disposed', '?')} is_cold={getattr(viewer, 'is_cold', '?')}"
-            )
+            try:
+                note(
+                    f"viewer._ensure_bound({kwargs!r}) entered; recovering="
+                    f"{peek(viewer, '_recovering')} can_go_cold="
+                    f"{peek(viewer, '_can_go_cold')} disposed="
+                    f"{peek(viewer, '_disposed')} is_cold={peek(viewer, 'is_cold')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
             try:
                 result = await ensure(*args, **kwargs)
             except BaseException as error:
-                note(f"viewer._ensure_bound raised {type(error).__name__}: {error}")
+                note(lambda e=error: f"viewer._ensure_bound raised {type(e).__name__}: {e}")
                 raise
-            note(f"viewer._ensure_bound returned; is_cold={getattr(viewer, 'is_cold', '?')}")
+            note(lambda: f"viewer._ensure_bound returned; is_cold={peek(viewer, 'is_cold')}")
             return result
 
         viewer._ensure_bound = ensure_spy
+        note("installed spy on viewer._ensure_bound")
     except BaseException as error:  # noqa: BLE001
         note(f"spy on _ensure_bound not installed: {error!r}")
+
+    # Candidate 3: which ``_on_disconnected`` branch ran is decided by the
+    # reason string alone, and the product keeps none of it, so record the
+    # RECEIVED reason and how it compares with each branch constant.
+    try:
+        disconnected = viewer._on_disconnected
+
+        def disconnected_spy(reason: str) -> Any:
+            try:
+                from local_operator.mobile.attach_client import (
+                    MOVED_REASON,
+                    RETIRING_REASON,
+                    STOPPED_REASON,
+                )
+
+                note(
+                    f"viewer._on_disconnected(reason={reason!r}) entered; "
+                    f"== RETIRING_REASON={reason == RETIRING_REASON} "
+                    f"(RETIRING_REASON={RETIRING_REASON!r}) "
+                    f"== MOVED_REASON={reason == MOVED_REASON} "
+                    f"== STOPPED_REASON={reason == STOPPED_REASON} "
+                    f"disposed={peek(viewer, '_disposed')} "
+                    f"recovering={peek(viewer, '_recovering')} "
+                    f"deliberate_stop={peek(viewer, '_deliberate_stop')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+            return disconnected(reason)
+
+        viewer._on_disconnected = disconnected_spy
+        note("installed spy on viewer._on_disconnected")
+    except BaseException as error:  # noqa: BLE001
+        note(f"spy on _on_disconnected not installed: {error!r}")
+
+    # The owner-lost branch's outcome: ``_recover_runtime`` is a coroutine
+    # function wrapped in ``asyncio.create_task``, so the spy stays ``async``
+    # and records cancellation (a BaseException) as well as errors.
+    try:
+        recover = viewer._recover_runtime
+
+        async def recover_spy(*args: Any, **kwargs: Any) -> Any:
+            try:
+                note(
+                    f"viewer._recover_runtime entered; deliberate_stop="
+                    f"{peek(viewer, '_deliberate_stop')} "
+                    f"is_cold={peek(viewer, 'is_cold')}"
+                )
+            except BaseException:  # noqa: BLE001
+                pass
+            try:
+                result = await recover(*args, **kwargs)
+            except BaseException as error:
+                note(lambda e=error: f"viewer._recover_runtime raised {type(e).__name__}: {e}")
+                raise
+            note(
+                lambda: f"viewer._recover_runtime returned {result!r}; "
+                f"is_cold={peek(viewer, 'is_cold')} "
+                f"runtime_pid={peek(viewer, '_runtime_pid')}"
+            )
+            return result
+
+        viewer._recover_runtime = recover_spy
+        note("installed spy on viewer._recover_runtime")
+    except BaseException as error:  # noqa: BLE001
+        note(f"spy on _recover_runtime not installed: {error!r}")
 
 
 def _dump_successor_diagnostics(
@@ -312,11 +409,14 @@ def _dump_successor_diagnostics(
             ("viewer._pending_frame_cwd", lambda: viewer._pending_frame_cwd),
         ):
             lines.append(_diag_read(label, read))
-        # The disconnect reason itself is not retained by AttachedSession; the
-        # refresh-vs-went-cold callback spies below are the proxy for which
-        # ``_on_disconnected`` branch ran. No EngageOutcome is retained either
-        # (it is local to ``_ensure_bound``); its spy records return/raise.
-        lines.append("last_disconnect_reason=<not retained by product code; see callback spies>")
+        # The disconnect reason is not retained by AttachedSession; the
+        # ``_on_disconnected`` spy records the reason it RECEIVED (and the
+        # ``_recover_runtime`` spy the owner-lost branch's outcome). No
+        # EngageOutcome is retained either (it is local to ``_ensure_bound``);
+        # its spy records return/raise.
+        lines.append(
+            "last_disconnect_reason=<not retained by product code; see _on_disconnected spy>"
+        )
         lines.append("last_engage_outcome=<not retained by product code; see _ensure_bound spy>")
         # Gate 2: the app's latch and startability.
         for label, read in (
