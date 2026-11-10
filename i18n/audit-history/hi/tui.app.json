@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "tui.app",
-  "history_sha256": "fe6fea4ee7bd01d43051913971b1d1082a278a13d090b6f9b20a430e82fb9f37",
+  "history_sha256": "ffd07dfa06c06fab5419978adb279419df74a51b8edb523998be9453d77e2e9d",
   "entries": [
     {
       "locale": "hi",
@@ -22,7 +22,8 @@
         "unresolved_blocker_major": 0
       },
       "status": "passed",
-      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi."
+      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi. Evidence: i18n/audits/evidence/hi/tui.app/idle-r2/record.json",
+      "evidence": "i18n/audits/evidence/hi/tui.app/idle-r2/record.json"
     }
   ]
 }

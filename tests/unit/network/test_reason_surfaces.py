@@ -664,6 +664,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "Session._republish_journalled_outcome",
         "reason",
     ): (1, "the attention marker's own field, written to the store, never rendered"),
+    # Idle compaction's decline journal: ``planned.reason`` is the session's OWN
+    # compaction refusal token (a ``CompactionOutcome`` from ``_plan_compaction``),
+    # prefixed ``refused:`` into the ``why`` of a COMPACTION_IDLE_DECLINED_TYPE
+    # transcript record. That record is anti-thrash bookkeeping no surface reads
+    # back or renders, and the token never came from a peer.
+    ("local_operator/session/session.py", "Session._run_idle_compaction", "reason"): (
+        1,
+        "the session's own compaction refusal token, journalled as bookkeeping, never rendered",
+    ),
     # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
     # sentence, copied into the receipt payload a front end reads — the same
     # class as the ack's payload key above. Nothing renders it into a line in

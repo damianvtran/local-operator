@@ -447,6 +447,9 @@ async def test_parked_hint_replaces_the_task_floor_only_when_parked(tmp_path, mo
     ordinary = await session._plan_compaction(respect_threshold=False)
     history = list(session._context.messages)
     last = history[-1]
+    # The history is ``AgentMessage``; the hint's token count is for a model
+    # message, so narrow rather than ignore (the grown tail ends on one).
+    assert isinstance(last, Message), type(last)
     hint = CompactionHint(
         preserve_from_id=last.id,
         preserve_tokens=estimate_tokens(last),
