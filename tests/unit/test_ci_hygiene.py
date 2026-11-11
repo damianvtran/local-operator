@@ -31,6 +31,7 @@ against the defect it claims to catch.
 from __future__ import annotations
 
 import ast
+import copy
 import itertools
 import json
 import os
@@ -4252,8 +4253,81 @@ def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
 
 def test_full_suite_changes_job_matches_ci() -> None:
     """`_ci_jobs` takes ci.yml's `changes`; that is only honest if they agree."""
-    full = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]["changes"]
+    full = copy.deepcopy(yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]["changes"])
+    # The ONE allowed difference: full-suite's merge-base resolve/apply steps
+    # and their `gate_base` output. A labeled-event gate checks out a cached
+    # `refs/pull/<n>/merge` that can be dozens of commits behind main (see
+    # scripts/gate_merge_base.py); ci.yml runs on the push that recomputes
+    # that ref, so it needs neither. Strip exactly those and demand the rest
+    # stays byte-for-byte ci.yml's, classifier step included.
+    assert full["outputs"].pop("gate_base") == "${{ steps.gate_base.outputs.gate_base }}"
+    gate_steps = [s for s in full["steps"] if "scripts/gate_merge_base.py" in str(s.get("run"))]
+    assert [s["run"] for s in gate_steps] == [
+        "python3 scripts/gate_merge_base.py resolve",
+        "python3 scripts/gate_merge_base.py apply",
+    ]
+    full["steps"] = [s for s in full["steps"] if s not in gate_steps]
     assert full == _pr_jobs()["changes"]
+
+
+#: Every full-suite job that checks out code. A new one must join this set,
+#: and so inherit the fresh-merge step below, or the pin goes red.
+GATE_MERGE_JOBS = {
+    "changes": "steps.gate_base.outputs.gate_base",
+    "test": "needs.changes.outputs.gate_base",
+    "coverage-report": "needs.test.outputs.gate_base",
+    "tui-e2e": "needs.changes.outputs.gate_base",
+}
+
+
+def test_every_full_suite_checkout_is_rebuilt_on_the_run_main_tip() -> None:
+    """A labeled-event gate must test the PR against TODAY's main, once per run.
+
+    WHY: `actions/checkout` on `pull_request: labeled` checks out the cached
+    `refs/pull/<n>/merge`, which GitHub recomputes only on a push to the PR.
+    On 2026-11-10 three re-armed gates (#3723, #3720, #3732) tested merges
+    22-38 commits behind main and one re-failed a test main had fixed. The
+    fix resolves the tip ONCE in `changes` and every checking-out job merges
+    the PR head into exactly that SHA right after its checkout. This pins:
+    every checkout job runs `apply` immediately after the checkout (step 2,
+    so the `test` checkout stays the bare first step gen_test_durations.py
+    binds to), each reads the SAME run-wide base through job outputs (never
+    its own `ls-remote`, which would let shards drift), and the head is the
+    event's PR head SHA.
+    """
+    jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
+    checkout_jobs = {
+        job_id
+        for job_id, job in jobs.items()
+        if any("actions/checkout" in str(step.get("uses")) for step in job.get("steps", []))
+    }
+    assert checkout_jobs == set(GATE_MERGE_JOBS), checkout_jobs
+    for job_id, base_expr in GATE_MERGE_JOBS.items():
+        steps = jobs[job_id]["steps"]
+        assert steps[0]["uses"] == "actions/checkout@v7", job_id
+        apply = [s for s in steps if s.get("run") == "python3 scripts/gate_merge_base.py apply"]
+        assert len(apply) == 1, f"{job_id}: expected exactly one apply step"
+        index = steps.index(apply[0])
+        # `changes` resolves first (step 2) then applies (step 3); every other
+        # job applies straight after its checkout.
+        assert index == (2 if job_id == "changes" else 1), (job_id, index)
+        assert apply[0]["env"] == {
+            "GATE_BASE": "${{ " + base_expr + " }}",
+            "GATE_HEAD": "${{ github.event.pull_request.head.sha }}",
+        }, job_id
+        assert "if" not in apply[0], f"{job_id}: the apply step must not be skippable"
+    assert jobs["changes"]["steps"][1] == {
+        "name": "Resolve the main tip this run tests against",
+        "id": "gate_base",
+        "run": "python3 scripts/gate_merge_base.py resolve",
+    }
+    assert jobs["test"]["outputs"] == {"gate_base": "${{ needs.changes.outputs.gate_base }}"}
+    # The greppable per-job line the requester asked for, and the comment
+    # that tells a log reader how to check it.
+    from scripts import gate_merge_base
+
+    assert gate_merge_base.LOG_PREFIX == "full-suite tested-base="
+    assert "full-suite tested-base=<base> head=<head> tree=<tree>" in FULL_SUITE_YML.read_text()
 
 
 def test_guards_job_reads_the_one_guard_list() -> None:
