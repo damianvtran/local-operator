@@ -782,21 +782,27 @@ RESTORED_COST_PREFIX = LOWER_BOUND_MARK
 QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
 SENT_STEER_NOTICE = "sent — the agent has it now"
 #: The post-send receipts for the two non-urgent delivery modes (``queue``
-#: and ``both``). ONE string for both, because from the reader's side they are
-#: one fact while both wait: the tools are NOT interrupted. `both` differs
-#: only in what happens AFTER the wait runs long, and naming that would push
-#: the row past the height budget below (measured: the honest escalation
-#: wording wraps at widths where the classic notice does not, pulling every
-#: row under it up when the settle restates it).
+#: and ``both``). One string per mode, both in the same family: from the
+#: reader's side both are one fact while the message waits — the tools are
+#: NOT interrupted. What differs is what the wait promises: ``queue``
+#: promises it forever, ``both`` promises it may interrupt if the wait runs
+#: long, and each notice says which.
 #:
-#: Height-matched to `QUEUED_STEER_NOTICE` at every width 20-90 (measured on
-#: a mounted `NoticeBlock` through `App.run_test`, the same protocol as the
-#: cross-turn height test): the swap from the classic notice to this one
-#: happens at submit time, before the user has scrolled, so a height change
-#: there would still be a visible jump in the transcript the user is
-#: watching. "queued" leads because the row's job is to say the message is
-#: waiting, so it must read as the same family as the notice it replaces
-#: rather than a different kind of row.
+#: Height-matched to `QUEUED_STEER_NOTICE` at every width from 40 up except
+#: 44-47 (measured on a mounted `NoticeBlock` through `App.run_test`, the
+#: same protocol as the cross-turn height test, and pinned by
+#: `tests/unit/tui/test_busy_delivery.py`, which asserts the 44-47
+#: difference as measured rather than hiding it): at 44-47 columns both
+#: wait notices render one row SHORTER than the classic. The swap from the
+#: classic notice to this one happens at submit time, before the user has
+#: scrolled, so a height change there would still be a visible jump in the
+#: transcript the user is watching. Below 40 columns the strings are NOT
+#: matched — the designer measured the ``both`` wording one row taller at
+#: several narrow widths and the ``queue`` wording shorter at one — and the
+#: app supports widths from 40 up, so only that range is pinned. "queued"
+#: leads because the row's job is to say the message is waiting, so it must
+#: read as the same family as the notice it replaces rather than a
+#: different kind of row.
 QUEUED_WAIT_NOTICE = _t_busy(_busy_keys.queue_notice())
 #: Same height as `QUEUED_WAIT_NOTICE`, for the same reason: a `both` send
 #: that escalates settles through the same `SENT_STEER_NOTICE` on delivery,
@@ -35543,8 +35549,37 @@ class OperatorApp(App[None]):
             # The delivery mode: only `queue`/`both` ride the keyword, and only
             # when this session's handle takes it. `steer` keeps the legacy call
             # shape so a pre-feature session sees byte-identical calls.
+            #
+            # A mode the handle cannot honour is REFUSED, never downgraded:
+            # falling through to the legacy call would queue the message as an
+            # URGENT steer while the row below reads "queued — waits", the
+            # silent downgrade the modes exist to prevent (the server's
+            # `_takes_delivery` exists for the same reason one layer down).
+            # The refusal keeps the user row and parks the payload on a
+            # failure record (``_mark_send_failed``), so `edit` returns the
+            # text to the composer — the same posture as the no-session arm
+            # above, which is why this arm reuses it.
             mode = self._busy_delivery_mode()
-            if mode != "steer" and OperatorApp._steer_takes_delivery(session):
+            if mode != "steer" and not OperatorApp._steer_takes_delivery(session):
+                from local_operator.session.runtime.types import (
+                    BUSY_DELIVERY_UNSUPPORTED,
+                )
+
+                self._mark_send_failed(
+                    self._interaction,
+                    blocks=(user_block, image_blocks),
+                    text=text,
+                    sent=sent,
+                    typed=typed,
+                    images=images,
+                    accepted=self._interaction.turn.submitted_draft,
+                    failure_class="busy-delivery-unsupported",
+                    sentence=BUSY_DELIVERY_UNSUPPORTED,
+                    kind="warning",
+                    can_send_again=True,
+                )
+                return
+            if mode != "steer":
                 OperatorApp._steer_message_with_delivery(session, steer_message, mode)
             else:
                 session.steer_message(steer_message)

@@ -582,7 +582,21 @@ class TuiSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | None = None,
         command_id: str | None = None,
+        delivery: str | None = None,
     ) -> str:
+        # ``delivery`` is the busy-send mode (``steer``/``queue``/``both``).
+        # An IDLE prompt opens its own turn and the mode is ignored there.
+        # This handle has NO busy fallback — a prompt to a busy TUI session
+        # fails after admission (see ServingSessionHandle.prompt's docstring
+        # for the seam) — so there is no path here for the mode to downgrade
+        # along, and the parameter exists to keep the record's
+        # ``busy-delivery-v1`` claim honest (``_takes_delivery`` probes both
+        # ops): the client refused ``queue``/``both`` before dispatching
+        # them, and the dispatch passes the keyword only because it is a
+        # literal parameter. Accepting and ignoring an idle prompt is the
+        # honest reading; refusing it would turn a delivery mode into an
+        # admission error on the common case.
+        _ = delivery
         if not command_id:
             raise ValueError("command_id is required")
         image_blocks = await _image_blocks_async(images)

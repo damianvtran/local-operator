@@ -1357,6 +1357,19 @@ class Prompt(Input):
     # Absent/null = the classic server-transcription path.
     input_path: str | None = None
 
+    @model_serializer(mode="wrap")
+    def _omit_absent_delivery(self, handler: Any, info: Any) -> Any:
+        # The receipt journal fingerprints ``model_dump()`` bytes, so a
+        # same-id retry claimed BEFORE the delivery field existed must not
+        # read as a changed body after an upgrade. ``None`` is the absent
+        # reading, so it leaves the dump exactly as the pre-field build
+        # wrote it (the wrap-serializer pattern ``PromptImage.
+        # _omit_absent_origin`` already uses for the same reason).
+        data = handler(self)
+        if isinstance(data, dict) and data.get("delivery") is None:
+            data.pop("delivery", None)
+        return data
+
     @model_validator(mode="after")
     def nonempty(self):
         if not self.text.strip() and not self.images and not self.audio and not self.files:
@@ -2085,8 +2098,22 @@ async def _queue_or_refuse(
       delivery nothing is going to make;
     * the message carries attachments: an inbox row is text
       (``inbox.InboxLine``), and dropping the pictures or files to queue the
-      words would answer a question the user did not ask.
+      words would answer a question the user did not ask;
+    * the send pinned a delivery mode the spool cannot carry
+      (``body.delivery`` is ``queue``/``both``): the row below writes
+      ``InboxLine(mode='steer'|...)`` with NO delivery field, so the live
+      drain would deliver it as an URGENT steer (``process._run_owner_prompt``
+      joins it to the turn in flight) — a silent downgrade of the mode the
+      composer watched the user pick. The busy refusal is the honest answer
+      here: the renderer's resend applies, and a resend after the turn moves
+      admits normally.
     """
+    if body.delivery in ("queue", "both"):
+        # See the third arm above: the spool vehicle is text
+        # (``InboxLine.mode``) and carries no delivery mode, so accepting
+        # this send would answer "queued" for a message delivered urgently.
+        # Refuse, never downgrade.
+        raise error
     if body.images or body.files or body.audio:
         raise error
     from local_operator.session.runtime.inbox import (

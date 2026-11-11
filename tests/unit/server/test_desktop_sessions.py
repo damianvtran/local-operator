@@ -546,6 +546,39 @@ def test_prompt_delivery_enum_validates_at_the_wire() -> None:
         )
 
 
+def test_prompt_without_delivery_dumps_byte_identically_to_before() -> None:
+    """The receipt fingerprint must not move for a body without delivery.
+
+    ``desktop_receipts`` hashes ``body.model_dump()`` bytes, so a same-id
+    retry claimed before the field existed reads as "different input" the
+    moment the field starts dumping ``"delivery": None``. The wrap
+    serializer omits the key when it is ``None``; this pins it with a REAL
+    ``Prompt`` (not a hand-built dict), because the property is the model's
+    own dump, not the receipts layer's.
+    """
+    import json
+
+    body = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi")
+    dump = body.model_dump()
+    assert "delivery" not in dump, dump
+    assert json.dumps(body.model_dump()) == json.dumps(
+        {
+            "request_id": "12345678-1234-4678-9234-567812345678",
+            "text": "hi",
+            "images": [],
+            "files": [],
+            "audio": [],
+            "mode": "prompt",
+            "input_mode": None,
+            "input_path": None,
+        }
+    )
+    # A pinned mode DOES ride, so the hash still distinguishes it.
+    pinned = Prompt(request_id="12345678-1234-4678-9234-567812345678", text="hi", delivery="queue")
+    assert pinned.model_dump()["delivery"] == "queue"
+    assert json.dumps(pinned.model_dump()) != json.dumps(dump)
+
+
 @pytest.mark.asyncio
 async def test_a_pinned_delivery_is_part_of_receipt_identity(tmp_path):
     """Same-id replay: the pinned delivery hashes; a changed delivery conflicts."""

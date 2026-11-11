@@ -177,3 +177,53 @@ async def test_a_steer_to_a_busy_owner_is_queued_as_a_steer(tmp_path: Path) -> N
         finally:
             park.set()
             await owner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["queue", "both"])
+async def test_a_queued_mode_to_a_busy_owner_is_refused_not_downgraded(
+    tmp_path: Path, delivery: str
+) -> None:
+    """A ``queue``/``both`` send to a busy owner keeps the busy refusal.
+
+    The spool row (``InboxLine(mode='steer'|...)``) carries no delivery mode,
+    so queueing here would deliver the message as an URGENT steer while the
+    receipt says "queued" — the silent downgrade the delivery modes exist to
+    prevent. The honest answer is the capability refusal (409, from the
+    desktop admit path's own gate — the owner never advertised the token);
+    the renderer's resend applies.
+    """
+    park = asyncio.Event()
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(
+            harness.session_id,
+            tmp_path,
+            sync_on_connect=True,
+            answer_prompts=True,
+            park_prompts=park,
+        )
+        await owner.start()
+        _publish(tmp_path, owner, harness.session_id, live_inbox=True)
+        try:
+            assert harness.client is not None
+            response = await asyncio.wait_for(
+                harness.client.post(
+                    f"/v1/desktop/sessions/{harness.session_id}/messages",
+                    json={
+                        "request_id": str(uuid.uuid4()),
+                        "text": "hold this, do not interrupt",
+                        "delivery": delivery,
+                    },
+                ),
+                DEADLOCK_GUARD_S,
+            )
+            assert response.status_code == 409, response.text
+            assert response.json()["detail"] == (
+                "this session's runtime predates delivery modes (queue/both); "
+                "send it as a steer, or update the runtime"
+            )
+            rows = peek_inbox(tmp_path / "sessions" / harness.session_id)
+            assert rows == [], "a refused delivery must not be spooled"
+        finally:
+            park.set()
+            await owner.stop()

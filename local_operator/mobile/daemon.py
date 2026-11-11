@@ -138,6 +138,8 @@ except ImportError:  # pragma: no cover — only on a pre-carriage tree
 from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
     ASK_ATTACHMENTS_UNSUPPORTED,
+    BUSY_DELIVERY_CAPABILITY,
+    BUSY_DELIVERY_UNSUPPORTED,
 )
 from local_operator.session.store_failures import store_failure
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
@@ -5294,6 +5296,21 @@ class MobileDaemon:
         from local_operator.mobile.attach_client import fit_request_frame
 
         frame: dict[str, Any] = {"op": op, "req": req, **fields}
+        if (
+            op in ("prompt", "steer")
+            and (delivery := frame.get("delivery"))
+            and delivery not in ("steer", "")
+            and BUSY_DELIVERY_CAPABILITY not in entry.record.capabilities
+        ):
+            # REFUSE, NEVER STRIP — the relay's half of the gate the attach
+            # client enforces on its own connections (``AttachClient.
+            # _delivery_fields``). A ``queue``/``both`` mode is a promise
+            # about WHEN the owner's running tool may be cancelled; an owner
+            # without ``busy-delivery-v1`` would silently drop the key and
+            # deliver an urgent steer the user explicitly did not ask for.
+            # Raised before a future is registered, as a ``ValueError`` the
+            # HTTP layer already renders as a 422 carrying this sentence.
+            raise ValueError(BUSY_DELIVERY_UNSUPPORTED)
         if (
             op == "ask_respond"
             and frame.get("images")

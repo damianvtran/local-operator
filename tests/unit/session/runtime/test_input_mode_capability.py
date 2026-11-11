@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.server import RuntimeServer, _takes_delivery
 from local_operator.session.runtime.types import (
     BUSY_DELIVERY_CAPABILITY,
     INPUT_MODE_CAPABILITY,
@@ -146,3 +146,42 @@ async def test_delivery_token_absent_on_kwargs_only_handle() -> None:
 @pytest.mark.asyncio
 async def test_delivery_token_needs_both_ops() -> None:
     assert BUSY_DELIVERY_CAPABILITY not in _delivery_capabilities(DeliveryHalfCarryingHandle())
+
+
+def test_the_real_handles_take_delivery() -> None:
+    """QA round 1's repro: the production classes, not the doubles above.
+
+    The token is gated on ``_takes_delivery(handle)``, which probes each op's
+    literal parameters. The doubles in this file can carry the keyword while
+    the REAL handles do not — and that is exactly what shipped: only ``steer``
+    was widened, so ``_takes_delivery(ServingSessionHandle)`` answered False
+    and no real runtime ever advertised ``busy-delivery-v1``. Pin the classes
+    the runtime actually serves, unbound, so a signature narrowing on either
+    one fails here instead of silently withdrawing the capability.
+    """
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    assert _takes_delivery(
+        ServingSessionHandle
+    ), "ServingSessionHandle.prompt/steer must both take delivery"
+    assert _takes_delivery(
+        TuiSessionHandle
+    ), "TuiSessionHandle.prompt/steer must both take delivery"
+
+
+def test_delivery_faker_matches_the_real_handles() -> None:
+    """``DeliveryCarryingHandle`` must tell the truth about the real ones.
+
+    The double above takes ``delivery`` on both ops; the line it stands for
+    — "the production shape" — is only true while the real classes do too.
+    If either real handle narrows, this fails beside the test above, naming
+    the double that still claims otherwise.
+    """
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    double = _takes_delivery(DeliveryCarryingHandle)
+    assert double is True
+    assert _takes_delivery(ServingSessionHandle) is True
+    assert _takes_delivery(TuiSessionHandle) is True

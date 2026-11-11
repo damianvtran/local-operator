@@ -4005,6 +4005,7 @@ class ServingSessionHandle(SessionHandle):
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
         files: list[dict[str, Any]] | None = None,
+        delivery: str | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
@@ -4038,6 +4039,15 @@ class ServingSessionHandle(SessionHandle):
         a detached failure. A session whose ``prompt`` predates the
         ``documents`` keyword is refused (``DocumentCarriageUnsupported``),
         never forwarded without its files.
+
+        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``). An
+        IDLE prompt opens its own turn, so the mode is ignored there; it is
+        taken only on the path where this prompt can become a steer — the
+        spool row a retiring runtime hands its successor (``process.
+        _run_owner_prompt``'s steer fallback joins the turn in flight). The
+        wire client already refused ``queue``/``both`` against an owner whose
+        record lacked ``busy-delivery-v1`` (``_takes_delivery``), so reaching
+        here with a mode is the claim that the prompt arm honours it.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
