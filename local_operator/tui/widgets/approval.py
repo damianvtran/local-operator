@@ -1020,12 +1020,13 @@ def approval_question(
         # older desktop shows it too); lift it out rather than print it twice.
         detail = " ".join(detail.replace(clean_notice, "", 1).split())
         question = f"Allow {strip_control_sequences(tool_name)}? {detail}".rstrip()
-    if clean_notice:
-        # The host-owned Team Bridge line (S-46), ahead of the question so it
-        # is read before the target, never clipped behind a long one.
-        question = f"{clean_notice} {question}"
+    # The notice is NOT part of the question: the question row stays exactly
+    # what a clean card shows, so the target owns row 1 at every size (design
+    # D1: as a prefix, the notice alone filled the one row the question is
+    # granted, and the address never showed at 100x30 or 80x24). The card
+    # paints the notice in its own rows instead (``ApprovalPrompt``).
     # ``person_only`` (host-computed: a profile save, or any card in a
-    # Team-Bridge-latched session -- memo §4.2) drops the "Allow all" row. The
+    # Team-Bridge-latched session -- team-bridge-egress.md: "Cards") drops the "Allow all" row. The
     # formatting branch above keys on the profile save alone (S-59): a latched
     # card keeps ordinary single-paragraph formatting.
     two_choice = profile_save or person_only
@@ -1218,10 +1219,19 @@ class ApprovalPrompt(AskPickerScreen):
         #: session. ``A``, ``S`` and ``G`` are inert on such a card and only
         #: Allow/Deny are offered: a fatigued one-press loosening on a reply
         #: card is exactly how a pre-latch-style grant would come back
-        #: (memo §4.2, S-50).
+        #: (team-bridge-egress.md: "Cards", S-50).
         self._person_only = self._profile_save or bool(person_only)
         if self._person_only:
             self._ANSWER_KEYS = frozenset({"y", "n"})
+        #: The Team Bridge notice and the "why no Allow all" line, painted in
+        #: the slot the approvals-policy chrome uses on a clean card (design
+        #: D1, D2, D5). Empty for every card that is not latched.
+        self._latched_notice = (
+            " ".join(strip_control_sequences(notice).split())
+            if notice and person_only and not self._profile_save
+            else ""
+        )
+        self._latched_take = 0
         super().__init__(
             [approval_question(tool_name, description, person_only=person_only, notice=notice)],
             self._answered,
@@ -1452,8 +1462,30 @@ class ApprovalPrompt(AskPickerScreen):
         if self._person_only:
             # No session-auto chrome or compact three-answer rail: this is a
             # two-choice, always-human permission, regardless of tool policy.
-            self._chrome_off = True
             self._shape = (False, False, False)
+            if self._latched_notice:
+                # The latched notice takes the policy chrome's rows, paid the
+                # same way (the spacers first, then body rows the two answers
+                # do not need), and never at the cost of an answer label.
+                rows = len(self._latched_rows(plan.width))
+                spacers = int(plan.space_above) + int(plan.space_below)
+                take = min(rows, max(0, plan.body_line_budget + spacers - self.row_count))
+                if take > 0:
+                    self._chrome_off = False
+                    self._latched_take = take
+                    budget = max(0, plan.body_line_budget + spacers - take)
+                    narrowed = replace(
+                        plan, space_above=False, space_below=False, body_line_budget=budget
+                    )
+                    if budget < self.row_count + sum((plan.description_rows or {}).values()):
+                        # The base plan granted description rows against the
+                        # budget BEFORE the notice took its share; keeping them
+                        # pushed Deny below the viewport. Both answer labels
+                        # outrank the consequence lines.
+                        narrowed = replace(narrowed, description_rows={}, show_descriptions=False)
+                    return narrowed
+            self._chrome_off = True
+            self._latched_take = 0
             return plan
         width = plan.width
         budget = getattr(self, "_last_body_budget", plan.body_line_budget + 3)
@@ -1686,10 +1718,46 @@ class ApprovalPrompt(AskPickerScreen):
             row.append(text, style=state if kind == "state" else handle)
         return row
 
+    def _latched_rows(self, width: int) -> list[Text]:
+        """The latched notice, word-wrapped to ``width``, then the options line.
+
+        The notice wears ``warning`` (the ink this card already gives a
+        hazard), the explanation ``muted`` (the policy line's ink, kept above
+        the 4.5:1 floor). Wrapped, not ellipsised: the notice is the one line
+        the reader must be able to finish. Cached per width, because the plan
+        is recomputed on every paint and hit-test.
+        """
+        cache = getattr(self, "_latched_rows_cache", None)
+        if cache is not None and cache[0] == width:
+            return cache[1]
+        from rich.console import Console
+
+        from local_operator.harness.bridge_egress import card_options_off_notice
+
+        console = Console(width=max(1, width), legacy_windows=False, color_system=None)
+        rows: list[Text] = []
+        for text, ink in (
+            (self._latched_notice, "warning"),
+            (" ".join(card_options_off_notice().split()), "muted"),
+        ):
+            ink_style = Style(color=theme_mod.semantic_color(ink))
+            for line in Text(text).wrap(console, max(1, width)):
+                # The ink is a SPAN, not the line's base style: the card is
+                # spliced with ``append_text`` and painted under the card's own
+                # base ink, which a base style on the row does not survive.
+                row = Text(line.plain.rstrip(), no_wrap=True, overflow="ellipsis")
+                row.stylize(ink_style)
+                rows.append(row)
+        self._latched_rows_cache = (width, rows)
+        return rows
+
     def _callout_rows(
         self, width: int, *, two_row: bool
     ) -> tuple[list[Text], list[tuple[int, int, int, str]]]:
         """The callout as painted rows plus their hit spans."""
+        if self._latched_notice:
+            # No hit spans: nothing on a latched card loosens the gate.
+            return self._latched_rows(width)[: self._latched_take], []
         state = self._state_text(width)
         if two_row:
             parts, spans = self._handles(width)

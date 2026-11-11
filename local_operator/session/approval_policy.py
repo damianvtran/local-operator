@@ -127,7 +127,7 @@ def read_override(session_dir: Path) -> tuple[str | None, str | None]:
     return str(override), None
 
 
-#: Additive key (Team Bridge taint, memo §4.2.1): True only for an ``auto``
+#: Additive key (Team Bridge taint, team-bridge-egress.md: "Grants"): True only for an ``auto``
 #: chosen while the conversation ALREADY held Team Bridge content. A record
 #: without it, or with anything but a literal ``true``, reads False -- so every
 #: pre-existing record and every pre-latch grant is void once the session

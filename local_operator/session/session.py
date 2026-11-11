@@ -3573,7 +3573,7 @@ class Session:
         system_blocks_provider: Callable[..., list[str]] | Callable[..., Awaitable[list[str]]],
         # A ``task`` child spawned from a Team-Bridge-latched parent starts
         # latched and writes its own latch row, so a resumed child stays
-        # latched (memo §3.2). Tighten-only.
+        # latched (team-bridge-egress.md: "Propagation between sessions"). Tighten-only.
         inherited_bridge_taint: bool = False,
     ) -> None:
         self._model = model
@@ -15162,7 +15162,7 @@ class Session:
             if tool_name in declared:
                 # A declared unattended inventory approves by declaration even
                 # in a Team-Bridge-latched session: the S-51 carve-out, left
-                # as is under Option C (accepted risk outside ask mode).
+                # as is (accepted risk outside ask mode).
                 return True
             # Forwarded through the shared arity resolver rather than called
             # directly: the base gate may take two arguments or three, and which

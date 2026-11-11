@@ -9197,7 +9197,8 @@ class RuntimeServer:
                 # cannot accept the set is left at the flat behaviour it had.
                 kwargs["capabilities"] = capabilities
             if frame.get("bridge_ack") is True and _accepts_kw(run, "bridge_ack"):
-                # Team Bridge capability marker (memo §4.2.2), forwarded only
+                # Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"), forwarded
+                # only
                 # when literally ``true``. Absent means "not acknowledged",
                 # which refuses a loosening for a latched conversation.
                 kwargs["bridge_ack"] = True

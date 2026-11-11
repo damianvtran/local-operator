@@ -1,4 +1,7 @@
-"""The Team Bridge latch row through a REAL transcript (memo §3.1, §3.5).
+"""The Team Bridge latch row through a REAL transcript.
+
+Rules: docs/security/team-bridge-egress.md, "Latch" and "Propagation between
+sessions".
 
 What this pins, against ``Transcript`` and the ``Session`` latch wiring:
 

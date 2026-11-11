@@ -1027,8 +1027,8 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
         ) -> bool:
             # The Team Bridge flags are accepted and deliberately NOT honoured
             # here: --yolo in a latched session is the operator's recorded
-            # accepted risk (memo §7, Option C). S-38 is closed for ask mode
-            # only; accepted risk in auto/yolo.
+            # accepted risk (team-bridge-egress.md: "Status"). S-38 is closed for
+            # ask mode only; accepted risk in auto/yolo.
             # --yolo approves tool calls, never an account profile save: that
             # card must reach a person (``never_auto_approved``), so it takes
             # the interactive path — a y/N on a tty, a typed refusal without.

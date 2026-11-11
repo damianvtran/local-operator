@@ -7857,7 +7857,7 @@ class AttachedSession:
         # An account profile save is never answered by the background
         # auto-approve: with gates detached it stays parked for a person
         # (``bridge_egress.requires_person``: a profile save, or any card in a
-        # Team-Bridge-latched session -- memo §4.2).
+        # Team-Bridge-latched session -- team-bridge-egress.md: "Cards").
         background = (
             self._gates_detached
             and self._background_approval
@@ -10448,7 +10448,8 @@ class AttachedSession:
     ) -> Any:
         """Run a conversation-mutating slash command on the authoritative host.
 
-        ``bridge_ack`` is the Team Bridge capability marker (memo §4.2.2): it
+        ``bridge_ack`` is the Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"):
+        it
         rides the frame only when True, so a frame from a caller that never
         set it is byte-identical to before.
 
@@ -11492,7 +11493,7 @@ def _pending_request(state: Any) -> PendingRequest | None:
         approval_mode=str(getattr(state, "approval_mode", "") or ""),
         approval_provenance=str(getattr(state, "approval_provenance", "") or ""),
         approval_global_mode=str(getattr(state, "approval_global_mode", "") or ""),
-        # Team Bridge flags (memo §4.3). Enumerated here for the same reason as
+        # Team Bridge flags (team-bridge-egress.md: "Cards"). Enumerated here for the same reason as
         # the policy keys: an un-named extra is dropped by this rebuild, and a
         # dropped ``bridge_latched`` would let the viewer offer allow-all or
         # background-approve a card that must reach a person. ``bool`` of the

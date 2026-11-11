@@ -184,6 +184,7 @@ class SessionDraftStore:
             # would restore every grant at its default scope.
             "approve_scope": draft.approve_scope,
             "approve_granted_while_latched": draft.approve_granted_while_latched,
+            "approve_global_issued_here": draft.approve_global_issued_here,
             "recoveries": [self._encode_draft(item) for item in draft.recoveries],
             "notices": draft.notices,
         }
@@ -277,6 +278,7 @@ class SessionDraftStore:
             # session grant; anything but a literal True is unstamped.
             approve_scope="global" if data.get("approve_scope") == "global" else "session",
             approve_granted_while_latched=data.get("approve_granted_while_latched") is True,
+            approve_global_issued_here=data.get("approve_global_issued_here") is True,
             recoveries=[self._decode_draft(item) for item in data.get("recoveries", [])],
             notices=notices,
         )

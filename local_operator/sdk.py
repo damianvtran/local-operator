@@ -524,7 +524,7 @@ async def _auto_approve_gate(
 
     Accepts the Team Bridge flags so a latched session keeps the auto posture
     the embedder chose: closed for ask mode; accepted risk in auto/yolo
-    (memo §7, Option C).
+    (docs/security/team-bridge-egress.md, "Status").
     """
     return True
 

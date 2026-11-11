@@ -1218,7 +1218,8 @@ class TuiSessionHandle(SessionHandle):
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
 
-        ``bridge_ack`` (memo §4.2.2): a routed loosening ``approvals auto`` for
+        ``bridge_ack`` (team-bridge-egress.md: "bridge_ack"): a routed loosening ``approvals auto``
+        for
         a Team-Bridge-latched conversation is refused here unless the frame
         carried the capability marker -- the TUI-hosted twin of the runtime's
         rule, so an older desktop build's card escape cannot re-loosen a
@@ -1597,12 +1598,24 @@ class TuiSessionHandle(SessionHandle):
         """
         request_id = secrets.token_hex(8)
         setattr(card, "_mobile_request_id", request_id)
+        # The Team Bridge flags and notice, exactly as a runtime-owned gate
+        # projects them (``serving.py`` push_pending; review S-62). The TUI
+        # paints its notice as a widget row, not in the description, so the
+        # follower detail gains the prefix here.
+        latched = getattr(card, "bridge_latched", False) is True
+        description = str(getattr(card, "description", "") or "")
+        if latched:
+            from local_operator.harness.bridge_egress import bridge_card_notice
+
+            description = f"{bridge_card_notice()}\n{description}"
         self._publish_pending_gate(
             PendingRequest(
                 request_id=request_id,
                 kind="approval",
                 title=str(getattr(card, "tool_name", "") or "tool approval"),
-                detail=str(getattr(card, "description", "") or ""),
+                detail=description,
+                taint_raised=getattr(card, "taint_raised", False) is True,
+                bridge_latched=latched,
             )
         )
 

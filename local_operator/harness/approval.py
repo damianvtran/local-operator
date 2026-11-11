@@ -165,8 +165,8 @@ async def ask_approval(
     positional parameters, so every existing two/three-argument host keeps
     working while neither flag is set. When either IS set and the gate cannot
     receive them, the call is refused with :class:`ApprovalUnavailableError`
-    (memo §3.6): a gate that cannot see the flag might auto-answer a card that
-    must reach a person.
+    (team-bridge-egress.md: "Fail-closed"): a gate that cannot see the flag
+    might auto-answer a card that must reach a person.
     """
     flags: dict[str, bool] = {}
     if taint_raised or bridge_latched:

@@ -9,16 +9,15 @@ Screening (``team_bridge/client.py``) is a probabilistic first layer. When an
 injected instruction gets through it, the cheapest exfiltration route was the
 read-tier web tools: ``web_fetch``, ``read https://…``, ``web_search`` and
 ``web_read`` never reached the approval gate, so in ``ask`` mode a model could
-put a secret into a URL with nobody asked. Design memo:
-``cos-read-tier-egress-design-2026-11-11.md`` (three security rounds; round 3
-terminal), operator decision Option C.
+put a secret into a URL with nobody asked. The rules, threat model and
+accepted risks are written down in ``docs/security/team-bridge-egress.md``.
 
 STATUS, IN THE ONLY WORDS ALLOWED: closed for ask mode; accepted risk in
 auto/yolo. A session running ``tool_approval_mode: auto`` (machine default) or
 ``--yolo``, or one whose host declared an unattended ``--tools`` inventory
-naming the tool, still runs these calls unattended. That is the operator's
-recorded decision (ask a-432c), not an oversight; do not describe this module
-as closing S-38 outright.
+naming the tool, still runs these calls unattended. That is a recorded
+product decision, not an oversight; do not describe this module as closing
+S-38 outright.
 
 WHAT IT DOES
 ------------
@@ -26,7 +25,7 @@ WHAT IT DOES
   any bridge content reaches it, and never unlatches: only ``/new`` or a fresh
   session starts clean. Taint has no epoch shorter than the session, because
   the hostile text survives the turn, compaction, pruning, the assistant's
-  restatement of it and anything fetched while tainted (memo §3.1, §3.5). The
+  restatement of it and anything fetched while tainted. The
   state is persisted as one host bookkeeping row
   (:data:`BRIDGE_TAINT_LATCH_TYPE`) in the append-only transcript, so it rides
   resume, fork and ``/move`` with no new sidecar. Custom bookkeeping entries
@@ -39,9 +38,24 @@ WHAT IT DOES
 * **The card rules** (:func:`requires_person`, :func:`session_grant_covers`).
   Every card raised in a latched session is Allow/Deny only, no mode change
   answers a parked one, and a session-scoped auto granted BEFORE the latch no
-  longer covers calls after it (memo §4.2, §4.2.1).
+  longer covers calls after it.
+* **Propagation between sessions.** The latch follows bridge text wherever it
+  is carried, in both directions:
 
-FAIL-CLOSED INVARIANT (memo §3.6). Nothing on this path catches an exception
+  - PUSH: a ``hub`` send/steer/ask from a latched session stamps the child
+    message (:data:`BRIDGE_TAINT_DETAILS_KEY`), and a live parent/child pair is
+    linked so whichever latches first latches the other (:func:`link_latches`)
+    -- a child's report always flows to its parent, and a parent can write
+    anything into a running child.
+  - PULL: any tool result that carries ANOTHER session's transcript content
+    (``sessions`` peek in every mode, a mesh peek or mesh reply, ``read``/
+    ``grep`` of a file under another session's directory) is a source when
+    that session is latched -- or when its state cannot be determined, which
+    is every mesh peer today, because no peer reports it (fail closed).
+    The stamp is :data:`BRIDGE_TAINT_DETAILS_KEY` in the result's
+    ``details``; it feeds the same latch, it is not a second gate.
+
+FAIL-CLOSED INVARIANT. Nothing on this path catches an exception
 and carries on as "clean". An error deriving taint means tainted; an error
 classifying a call means ``write``; an unparseable target means egress. The
 codebase's habitual ``except Exception: logger.debug(...)`` wrapper is
@@ -75,6 +89,12 @@ TEAM_BRIDGE_MESSAGE_TYPE = "team_bridge_message"
 #: thread state. Over-approximating costs nothing.
 BRIDGE_TOOL_NAME = "bridge"
 
+#: The ``details`` key that marks a message (a tool result, or a host card
+#: such as a ``hub_message``) as carrying another latched session's content.
+#: Only ever written as ``True``: a clean result carries no key, so untainted
+#: rows stay byte-identical.
+BRIDGE_TAINT_DETAILS_KEY = "bridge_taint"
+
 Tier = Literal["read", "write", "exec"]
 
 #: Search providers whose wire shape is a plain index lookup (verified in
@@ -91,7 +111,7 @@ INDEX_ONLY_PROVIDERS: frozenset[str] = frozenset({"brave", "serpapi", "duckduckg
 #: project description or an agent profile is read later by a clean session.
 #: An allowlist so a new op starts gated. ``team`` is deliberately absent: its
 #: account-scope writes already pass ``_authorize_account_profile_write``,
-#: which is stricter (memo §2.2) -- adding it here would be a second gate.
+#: which is stricter (team-bridge-egress.md: "Seam") -- adding it here would be a second gate.
 DURABLE_WRITER_READ_OPS: Mapping[str, frozenset[str]] = {
     "project": frozenset({"list", "show"}),
     "library": frozenset({"stats", "list", "get", "conventions"}),
@@ -105,7 +125,8 @@ DURABLE_WRITER_READ_OPS: Mapping[str, frozenset[str]] = {
 #: or an empty filtered chain is refused with no card. Model-facing text.
 SEARCH_PROVIDER_REFUSAL = (  # i18n: ignore model-facing tool refusal
     "answer-engine and live-crawl search providers are unavailable while this "
-    "conversation holds Team Bridge content; configure an index-only provider "
+    "conversation holds a message from a teammate's agent (Agent messages); "
+    "configure an index-only provider "
     "(brave, serpapi, duckduckgo, or a private searxng) or start a new session"
 )
 
@@ -115,25 +136,82 @@ _LOCAL_READ_SCHEMES = frozenset(
     {"skill", "spill", "tool", "guide", "mcp", "scratchpad", "file", "artifact", "library"}
 )
 
-#: A host-shaped token: two or more dot-separated labels ending in an
-#: alphabetic TLD-like label. Deliberately broad -- ``Next.js`` and
-#: ``README.md`` match, which is a counted false positive (memo §2.1), because
-#: a DNS-exfil host (``<canary>.atk.test``) must never slip through.
-_HOST_TOKEN = re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.[A-Za-z][A-Za-z0-9-]*")
+#: A host-shaped token, three alternatives:
+#:
+#: * two or more dot-separated labels ending in a letter-led TLD-like label,
+#:   Unicode labels included (``\w`` is Unicode-aware on ``str`` patterns, so an
+#:   IDNA host typed in its native script matches as well as its ``xn--`` form);
+#: * an IPv4 literal (``93.184.216.34``), whose last label is all digits;
+#: * an IPv6-looking run of at least two colons (``2001:db8::1``).
+#:
+#: Deliberately broad -- ``Next.js``, ``README.md`` and a ``10:30:00`` clock
+#: time match, which are counted false positives, because a DNS-exfil host
+#: (``<canary>.atk.test``) must never slip through.
+_HOST_TOKEN = re.compile(
+    r"[\w-]+(?:\.[\w-]+)*\.[^\W\d_][\w-]*"
+    r"|\b\d{1,3}(?:\.\d{1,3}){3}\b"
+    r"|[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}"
+)
 
 
 # -- sources -------------------------------------------------------------------
 
 
-def message_is_taint_source(message: Any) -> bool:
-    """Whether one live message carries Team Bridge content into context."""
-    custom_type = getattr(message, "custom_type", None)
-    if custom_type == TEAM_BRIDGE_MESSAGE_TYPE:
-        return True
-    return (
-        getattr(message, "role", None) == "tool"
-        and getattr(message, "tool_name", None) == BRIDGE_TOOL_NAME
+def details_stamped(details: Any) -> bool:
+    """Whether a ``details`` mapping carries the cross-session taint stamp."""
+    return isinstance(details, Mapping) and details.get(BRIDGE_TAINT_DETAILS_KEY) is True
+
+
+def stamp_details(details: dict[str, Any] | None, latched: bool) -> dict[str, Any] | None:
+    """Add the taint stamp to a result's ``details`` when ``latched``.
+
+    Never writes ``False``: a clean result keeps exactly the details it had.
+    """
+    if not latched:
+        return details
+    stamped = dict(details or {})
+    stamped[BRIDGE_TAINT_DETAILS_KEY] = True
+    return stamped
+
+
+def _tool_payload_stamped(provider_payload: Any) -> bool:
+    # ``Message.from_tool_result`` keeps a result's details under
+    # ``provider_payload["details"]`` (harness bookkeeping, never sent to a
+    # provider), so that is where the stamp lands on a live tool message.
+    return isinstance(provider_payload, Mapping) and details_stamped(
+        provider_payload.get("details")
     )
+
+
+def message_is_taint_source(message: Any) -> bool:
+    """Whether one live message carries Team Bridge content into context.
+
+    Dispatches on the concrete type FIRST. This runs over every live message
+    on every tool call of a clean session, and a ``getattr`` miss on a
+    pydantic ``Message`` (it has no ``custom_type``) goes through pydantic's
+    ``__getattr__`` and raises internally -- about 5 µs per message, which put
+    tens of milliseconds on each call of a long session (review R2). Unknown
+    shapes still take the duck-typed path so they are judged, never skipped.
+    """
+    from local_operator.harness.types import CustomMessage, Message
+
+    if isinstance(message, Message):
+        if message.role != "tool":
+            return False
+        if message.tool_name == BRIDGE_TOOL_NAME:
+            return True
+        return _tool_payload_stamped(message.provider_payload)
+    if isinstance(message, CustomMessage):
+        return message.custom_type == TEAM_BRIDGE_MESSAGE_TYPE or details_stamped(message.details)
+    if getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE:
+        return True
+    if details_stamped(getattr(message, "details", None)):
+        return True
+    if getattr(message, "role", None) != "tool":
+        return False
+    if getattr(message, "tool_name", None) == BRIDGE_TOOL_NAME:
+        return True
+    return _tool_payload_stamped(getattr(message, "provider_payload", None))
 
 
 def entry_is_taint_source(entry_type: str, payload: Mapping[str, Any]) -> bool:
@@ -144,7 +222,13 @@ def entry_is_taint_source(entry_type: str, payload: Mapping[str, Any]) -> bool:
         return False
     if payload.get("custom_type") == TEAM_BRIDGE_MESSAGE_TYPE:
         return True
-    return payload.get("role") == "tool" and payload.get("tool_name") == BRIDGE_TOOL_NAME
+    if details_stamped(payload.get("details")):
+        return True
+    if payload.get("role") != "tool":
+        return False
+    if payload.get("tool_name") == BRIDGE_TOOL_NAME:
+        return True
+    return _tool_payload_stamped(payload.get("provider_payload"))
 
 
 class BridgeTaintLatch:
@@ -248,6 +332,155 @@ class BridgeTaintLatch:
 
     def latch_row_details(self) -> dict[str, Any]:
         return {"version": 1, "inherited": self.inherited}
+
+
+def link_latches(parent: BridgeTaintLatch, child: BridgeTaintLatch) -> Callable[[], None]:
+    """Make a live parent/child pair latch together; returns the unlink.
+
+    A child spawned before its parent latched otherwise stays clean for life
+    while the latched parent can still write bridge-derived text into it
+    (``hub`` send/steer are read-tier; review R1, S-67). And everything a
+    latched child produces -- its report, a ``hub`` reply, a ``wait`` or
+    ``jobs peek`` result -- reaches the parent. Linking both ways closes every
+    such channel at once instead of stamping each result. ``mark`` is
+    idempotent and monotonic, so the mutual subscription cannot recurse.
+    Each latch writes its own row on its next commit.
+    """
+    if parent.latched:
+        child.mark()
+    elif child.latched:
+        parent.mark()
+    parent_cb = child.mark
+    child_cb = parent.mark
+    parent.on_latched.append(parent_cb)
+    child.on_latched.append(child_cb)
+
+    def unlink() -> None:
+        for latch, callback in ((parent, parent_cb), (child, child_cb)):
+            try:
+                latch.on_latched.remove(callback)
+            except ValueError:
+                pass
+
+    return unlink
+
+
+#: Bytes that a source row must contain (compact JSON as the journal writes
+#: it, with a tolerated space after the colon). Used only as a prefilter so a
+#: clean target costs one regex pass over the file; every hit is parsed and
+#: judged by :func:`entry_is_taint_source`, so a mention of these words in
+#: ordinary text is not a source.
+_SOURCE_NEEDLES = re.compile(rb"team_bridge_message|bridge_taint|\"tool_name\":\s*\"bridge\"")
+
+
+def session_directory_latched(directory: Any) -> bool:
+    """Whether the session stored at ``directory`` holds bridge content.
+
+    For a PULL from another session (``sessions`` peek, ``read``/``grep`` of
+    its files). The WHOLE journal is judged, not the peeked window: the
+    window can hold the assistant's restatement of an instruction whose
+    source row sits much earlier. A session with no transcript has nothing
+    to pull (``False``). Any other failure -- unreadable file, archive that
+    will not open, a matched row that will not parse -- means latched.
+    """
+    import json
+    import mmap
+    from pathlib import Path
+
+    from local_operator.session.transcript import _resolved_transcript_path
+
+    try:
+        path = _resolved_transcript_path(Path(directory), read_only=True)
+        if path is None:
+            return False
+        with open(path, "rb") as handle:
+            if handle.seek(0, 2) == 0:
+                return False
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as view:
+                position = 0
+                while True:
+                    match = _SOURCE_NEEDLES.search(view, position)
+                    if match is None:
+                        return False
+                    start = view.rfind(b"\n", 0, match.start()) + 1
+                    end = view.find(b"\n", match.end())
+                    if end < 0:
+                        end = len(view)
+                    line = bytes(view[start:end]).strip()
+                    position = end + 1
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        # The last line of a live journal can be mid-append;
+                        # anything else that names a source and will not
+                        # parse is undecidable, so it counts.
+                        if end == len(view):
+                            continue
+                        return True
+                    payload = row.get("payload") if isinstance(row, Mapping) else None
+                    if isinstance(payload, Mapping) and entry_is_taint_source(
+                        str(row.get("type") or ""), payload
+                    ):
+                        return True
+    except FileNotFoundError:
+        return False
+    except Exception:  # noqa: BLE001 - §3.6: an undeterminable target means latched
+        logger.warning(
+            "bridge taint of session %s could not be determined; treating as latched",
+            directory,
+            exc_info=True,
+        )
+        return True
+
+
+#: Tools whose ``path`` argument reads file CONTENT. ``glob`` returns names
+#: only, so it is not here.
+_CONTENT_READ_TOOLS = frozenset({"read", "grep"})
+
+
+def _sessions_root() -> Any:
+    from local_operator.paths import config_dir
+
+    return (config_dir() / "sessions").resolve()
+
+
+def cross_session_read_latched(tool_name: str, arguments: Any, tool_context: Any) -> bool:
+    """Whether a ``read``/``grep`` call pulls a latched session's files.
+
+    A transcript (or a spill file) under ``<config>/sessions/<id>/`` is that
+    session's content as surely as a ``sessions`` peek is: a clean session
+    reading a latched one's journal must latch. Naming the sessions root
+    itself (a recursive grep over every session) is undecidable without
+    scanning all of them, so it counts as latched. A path that names no
+    session is not a pull. Never raises: an unresolvable path is judged by
+    its literal spelling and, if that names the sessions tree, counts.
+    """
+    if tool_name not in _CONTENT_READ_TOOLS or not isinstance(arguments, Mapping):
+        return False
+    raw = arguments.get("path")
+    if not isinstance(raw, str) or not raw.strip() or "://" in raw:
+        return False
+    from pathlib import Path
+
+    try:
+        root = _sessions_root()
+        candidate = Path(raw.strip()).expanduser()
+        if not candidate.is_absolute():
+            cwd = getattr(tool_context, "cwd", None)
+            candidate = Path(cwd or ".") / candidate
+        resolved = candidate.resolve()
+        if resolved == root:
+            return True
+        relative = resolved.relative_to(root)
+    except ValueError:
+        return False
+    except Exception:  # noqa: BLE001 - §3.6: undecidable; judged by its spelling
+        logger.warning("cross-session read path could not be resolved", exc_info=True)
+        return "sessions" in raw
+    session_dir = root / relative.parts[0]
+    return session_directory_latched(session_dir)
 
 
 def latch_of(tool_context: Any) -> BridgeTaintLatch | None:
@@ -393,7 +626,8 @@ def _classify(
         if tool_name == "web_read":
             # Its answering step is an auxiliary model call over the pages,
             # and ``urls`` fetches arbitrary hosts; neither is provably
-            # index-only, so it always asks while latched (memo §2.1).
+            # index-only, so it always asks while latched (team-bridge-egress.md: "Search
+            # providers").
             return "write", None
         if has_host_token(arguments.get("query")):
             return "write", None
@@ -419,6 +653,27 @@ def escalate_for_bridge_taint(
     the classifier escalates to ``write`` (§3.6).
     """
     latched = context_is_latched(tool_context, live_messages)
+    if not latched and cross_session_read_latched(tool_name, arguments, tool_context):
+        # A PULL: this call reads a latched session's files. Latch before it
+        # runs (one call early is the safe side); the session writes its own
+        # row on the next commit.
+        latch = latch_of(tool_context)
+        if latch is not None:
+            latch.mark()
+        latched = True
+    if latched and tool_name in ("web_search", "web_read") and latch_of(tool_context) is None:
+        # A host with no latch object is judged by its live messages here,
+        # but the search-provider filter (``web_search/tool.py``) sees no
+        # messages. Record the decision on the context so the two agree; if
+        # it cannot be recorded the filter would run unrestricted, so the
+        # call is refused instead (review M3, fail closed).
+        try:
+            if tool_context is None:
+                raise TypeError("no tool context to carry the latch")
+            tool_context.inherited_bridge_taint = True
+        except Exception:  # noqa: BLE001 - §3.6: could not pass the latch on; refuse
+            logger.warning("could not record bridge taint on the tool context", exc_info=True)
+            return EgressDecision(tier=tier, bridge_latched=True, refusal=SEARCH_PROVIDER_REFUSAL)
     if not latched:
         return EgressDecision(tier=tier)
     if tier != "read":
@@ -481,7 +736,7 @@ def session_grant_covers(grant: ApprovalGrant | None, *, title: str, bridge_latc
 
     A session grant made before the latch is void once the session latches;
     the call falls through to the card (not to the global default beneath).
-    Global auto is left exactly as today: that is Option C's accepted risk.
+    Global auto is left exactly as today: that is the accepted auto/yolo risk.
     """
     from local_operator.harness.approval import never_auto_approved
 
@@ -501,16 +756,26 @@ def session_grant_covers(grant: ApprovalGrant | None, *, title: str, bridge_latc
 # package must not become an import-time dependency of the tier seam.
 
 
-def _copy(name: str) -> str:
+def _copy(name: str, **params: str) -> str:
     from local_operator.i18n.keys import wire_bridge_taint as keys
     from local_operator.i18n.text import tr
 
-    return tr("wire.bridge_taint")(getattr(keys, name)())
+    return tr("wire.bridge_taint")(getattr(keys, name)(**params))
 
 
 def bridge_card_notice() -> str:
     """The line every approval card carries while the session is latched (S-46)."""
     return _copy("card_notice")
+
+
+def card_options_off_notice() -> str:
+    """Why a latched TUI card has no Allow all / ``S`` / ``G``, and the way back.
+
+    Names only exits that work on every surface today: a typed
+    ``/approvals auto`` in the terminal (desktop and phone carry no
+    ``bridge_ack`` yet) and ``/new``.
+    """
+    return _copy("card_options_off")
 
 
 def grant_suspended_notice() -> str:
@@ -526,8 +791,10 @@ def ack_refused_notice() -> str:
 # -- the full target on a latched card (S-46) ------------------------------------
 
 #: Tools whose card must show the egress target IN FULL while latched: the
-#: egress-capable read tools, and the two schedulers whose single approval
-#: arms unattended future calls (``monitor``/``wake`` creation).
+#: egress-capable read tools, ``browser`` (its describer shows a URL, but
+#: ``evaluate`` code and form values can carry a payload past it), and the two
+#: schedulers whose single approval arms unattended future calls
+#: (``monitor``/``wake`` creation).
 FULL_TARGET_TOOLS = frozenset(
     {"web_fetch", "read", "web_search", "web_read", "monitor", "wake", "browser"}
 )
@@ -558,3 +825,42 @@ def full_target_line(tool_name: str, arguments: Any) -> str:
     except (TypeError, ValueError):
         rendered = repr(arguments)
     return sanitize_prompt_line(rendered, limit=FULL_TARGET_LIMIT)
+
+
+#: ``sanitize_prompt_line``'s default clip for the ordinary summary.
+_SUMMARY_LIMIT = 500
+
+
+def _argument_scalars(value: Any) -> Iterable[str]:
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _argument_scalars(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _argument_scalars(item)
+    elif isinstance(value, bool) or value is None:
+        return
+    else:
+        yield str(value)
+
+
+def latched_card_summary(summary: str, tool_name: str, arguments: Any) -> str:
+    """The summary a latched card shows: the ordinary one, plus the full
+    request ONLY when the ordinary one hides part of it (S-46).
+
+    ``web_fetch`` has no describer, so its summary is already the raw
+    arguments, and ``browser``'s describer prints the URL: appending the full
+    line repeated the target, which wrapped a long URL far enough to scroll
+    Deny off the card (design D4). So the line is added only when the summary
+    was clipped, or some argument value does not appear in it verbatim -- a
+    value with a newline, a control character or a hidden tail is exactly one
+    that does not, so the safe direction is kept. Labelled, so the reader
+    knows this is the part to check (copy C6).
+    """
+    full = full_target_line(tool_name, arguments)
+    if not full:
+        return summary
+    clipped = len(summary) >= _SUMMARY_LIMIT - 1
+    if not clipped and all(value in summary for value in _argument_scalars(arguments)):
+        return summary
+    return f"{summary}. {_copy('full_request', request=full)}"

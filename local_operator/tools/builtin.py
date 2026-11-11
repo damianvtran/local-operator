@@ -2393,7 +2393,7 @@ async def _check_approval(context: ToolContext | None, tier: str, description: s
     if request_approval is None:
         return True
     # A self-gating tool's card in a Team-Bridge-latched session is as
-    # person-only as a tier-gated one (memo §4.2: every card, whatever raised
+    # person-only as a tier-gated one (team-bridge-egress.md: "Cards": every card, whatever raised
     # it). The latch lookup fails closed.
     from local_operator.harness.bridge_egress import context_is_latched
 
@@ -16502,6 +16502,11 @@ async def _execute_send_peer(
     reply = str(payload.get("reply") or "")
     if reply:
         details["reply"] = reply
+        # S-60, fail closed: a mesh owner's reply is that session's content,
+        # and no peer reports its Team Bridge latch today.
+        from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+        details[BRIDGE_TAINT_DETAILS_KEY] = True
     for key in ("code", "error", "peer_named"):
         if payload.get(key):
             details[key] = payload[key]
@@ -19924,7 +19929,11 @@ async def _sessions_peek_mesh(
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
-    return _text(tool_call_id, "sessions", text, details=details)
+    from local_operator.harness.bridge_egress import stamp_details
+
+    # S-60, fail closed: no mesh peer reports its session's Team Bridge latch
+    # today, so any peeked rows count as a teammate's agent message.
+    return _text(tool_call_id, "sessions", text, details=stamp_details(details, bool(rows)))
 
 
 async def _sessions_peek(
@@ -20041,7 +20050,18 @@ async def _sessions_peek(
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
-    return _text(tool_call_id, "sessions", text, details=details)
+    # A PULL of another session's transcript (review S-60): when that session
+    # holds a teammate's agent message, so does this result, and the stamp
+    # latches the reader exactly as the bridge result itself would have. The
+    # whole target journal is judged, not the window -- the window can carry
+    # the restatement without the source row. See bridge_egress.
+    from local_operator.harness.bridge_egress import (
+        session_directory_latched,
+        stamp_details,
+    )
+
+    target_latched = await asyncio.to_thread(session_directory_latched, directory)
+    return _text(tool_call_id, "sessions", text, details=stamp_details(details, target_latched))
 
 
 def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[str]:
@@ -20720,6 +20740,10 @@ async def _sessions_resume_mesh(
         reply = str(payload.get("reply") or "")
         if reply:
             details["reply"] = reply
+            # S-60, fail closed: see the mesh ``send`` reply above.
+            from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+            details[BRIDGE_TAINT_DETAILS_KEY] = True
         if payload.get("ok") is False:
             return _error(tool_call_id, "sessions", text, details=details)
         return _text(tool_call_id, "sessions", text, details=details)

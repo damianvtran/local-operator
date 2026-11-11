@@ -1569,7 +1569,12 @@ async def execute_network(
             # receipt keeps them; the error result still marks the non-completion.
             body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
             text, spill = spill_truncate(body, _TOOL, context)
-            return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
+            return _error(
+                tool_call_id,
+                _TOOL,
+                text,
+                details=_stamp_mesh_reply(params.action, scrubbed, spill or {"network": scrubbed}),
+            )
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
         # before ``error`` (which only the install/uninstall diagnostics still
         # use) and before stderr, which in ``--json`` mode is empty BY DESIGN —
@@ -1588,7 +1593,28 @@ async def execute_network(
 
     body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
     text, spill = spill_truncate(body, _TOOL, context)
-    return _text(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
+    return _text(
+        tool_call_id,
+        _TOOL,
+        text,
+        details=_stamp_mesh_reply(params.action, scrubbed, spill or {"network": scrubbed}),
+    )
+
+
+def _stamp_mesh_reply(
+    action: str, payload: dict[str, Any], details: dict[str, Any]
+) -> dict[str, Any]:
+    """Mark a result that carries a remote session's reply (review S-60).
+
+    A ``sessions`` send renders the owner's reply into this session's context.
+    No peer reports whether that session holds a teammate's agent message
+    (Team Bridge), so a reply counts as one: fail closed, see
+    ``harness/bridge_egress.py``.
+    """
+    from local_operator.harness.bridge_egress import stamp_details
+
+    carries = action == "sessions" and bool(str(payload.get("reply") or "").strip())
+    return stamp_details(details, carries) or details
 
 
 def build_network_tool(context: ToolContext) -> AgentTool | None:

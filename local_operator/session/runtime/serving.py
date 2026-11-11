@@ -1057,7 +1057,7 @@ class ServingSessionHandle(SessionHandle):
         # reconstructing the handle.
         self._auto_approve = auto_approve
         #: Whether the conversation's live ``auto`` was chosen while it already
-        #: held Team Bridge content (memo §4.2.1). Only such a grant keeps
+        #: held Team Bridge content (team-bridge-egress.md: "Grants"). Only such a grant keeps
         #: covering calls in a latched session; persisted beside the record.
         self._approve_granted_while_latched = False
         #: The FILE's ``tool_approval_mode`` as last known, independent of the
@@ -1488,10 +1488,10 @@ class ServingSessionHandle(SessionHandle):
             # account profile save is the exception: auto-approve is not
             # consent to rewriting account-wide agents (``never_auto_approved``).
             #
-            # Team Bridge (memo §4.2.1): a SESSION auto granted before the
+            # Team Bridge (team-bridge-egress.md: "Grants"): a SESSION auto granted before the
             # conversation latched no longer covers calls after it -- the call
             # falls through to the card. Global auto is untouched: closed for
-            # ask mode; accepted risk in auto/yolo (Option C). The session's own
+            # ask mode; accepted risk in auto/yolo. The session's own
             # latch is consulted too, so a card whose raiser passed no flag (a
             # profile save, an ``@path`` read) is still person-only.
             from local_operator.harness.bridge_egress import (
@@ -1676,7 +1676,8 @@ class ServingSessionHandle(SessionHandle):
         self._watch_bridge_latch()
         self._install_ask_surface(ask_gate)
 
-    # -- Team Bridge taint (memo §4.2.1, §4.2.2) ---------------------------------
+    # -- Team Bridge taint (team-bridge-egress.md: "Grants", "bridge_ack")
+    # ---------------------------------
 
     def _session_bridge_latched(self) -> bool:
         """Whether this handle's session holds Team Bridge content. Fail-closed."""
@@ -1687,7 +1688,7 @@ class ServingSessionHandle(SessionHandle):
             return True
 
     def _approval_grant(self) -> Any:
-        """The auto this gate runs under, with its scope (memo §4.2.1).
+        """The auto this gate runs under, with its scope (team-bridge-egress.md: "Grants").
 
         ``session`` whenever the conversation holds its own choice (a typed
         ``/approvals``, a desktop "Set auto", a record read back on resume);
@@ -1861,7 +1862,7 @@ class ServingSessionHandle(SessionHandle):
         self._explicit_approvals_mode = override
         self._auto_approve = override == "auto"
         # Absent/unreadable reads False: a pre-latch (or pre-S1) record is void
-        # once the session latches (memo §4.2.1).
+        # once the session latches (team-bridge-egress.md: "Grants").
         from local_operator.session.approval_policy import read_granted_while_latched
 
         self._approve_granted_while_latched = override == "auto" and read_granted_while_latched(
@@ -8255,7 +8256,7 @@ class ServingSessionHandle(SessionHandle):
                     # have to invent "global Ask" (the U4 defect).
                     payload["approval_global_mode"] = global_mode
                     if self._bridge_grant_suspended():
-                        # The EFFECTIVE mode (memo §4.2.1): the conversation's
+                        # The EFFECTIVE mode (team-bridge-egress.md: "Grants"): the conversation's
                         # auto predates its Team Bridge content, so this gate
                         # asks. Claiming auto here would contradict the card.
                         payload["approval_mode"] = "ask"
@@ -8663,7 +8664,8 @@ class ServingSessionHandle(SessionHandle):
         #: connection can answer it, and the verbs that need it are chosen
         #: several frames below.
         capabilities: frozenset[str] | None = None,
-        #: Team Bridge capability marker (memo §4.2.2); see ``_approvals_slash``.
+        #: Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"); see
+        #: ``_approvals_slash``.
         bridge_ack: bool = False,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
@@ -11309,7 +11311,8 @@ class ServingSessionHandle(SessionHandle):
             )
         latched = self._session_bridge_latched()
         if wanted_auto and latched and not bridge_ack:
-            # Version skew, closed in core (memo §4.2.2): desktop "Set auto" and
+            # Version skew, closed in core (team-bridge-egress.md: "bridge_ack"): desktop "Set
+            # auto" and
             # the ``/approvals`` picker send the same owner command, so an older
             # build's card escape would re-loosen a latched session in one
             # press. Only a frame carrying ``bridge_ack`` (sent by a build that

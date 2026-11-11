@@ -2375,7 +2375,8 @@ class ToolContext(BaseModel):
     #: a host that does not track taint, which is then judged by the live
     #: context alone. Never serialized: it is host state, not tool input.
     bridge_taint: Any = Field(default=None, exclude=True, repr=False)
-    #: Set on a ``task`` child spawned from a latched session (memo §3.2).
+    #: Set on a ``task`` child spawned from a latched session
+    #: (team-bridge-egress.md: "Propagation between sessions").
     #: Tighten-only: a child inherits its parent's taint for life.
     inherited_bridge_taint: bool = False
     # Human-readable title is display metadata only. Security-sensitive tools

@@ -1,10 +1,11 @@
-"""The runtime gate under Team Bridge taint (memo §4.2, §4.2.1, §4.2.2).
+"""The runtime gate under Team Bridge taint (team-bridge-egress.md: "Cards", "Grants",
+"bridge_ack").
 
 Rows: T22b (a parked card is not answered by a mode change), T22d (a pre-latch
 SESSION auto stops covering calls, also after resume), T22e (a post-latch
 ``/approvals auto`` needs ``bridge_ack`` over the routed seam, is stamped and
-survives resume), T22f (GLOBAL auto is unchanged -- the accepted risk of
-Option C: closed for ask mode; accepted risk in auto/yolo), and the card's
+survives resume), T22f (GLOBAL auto is unchanged -- the recorded decision:
+closed for ask mode; accepted risk in auto/yolo), and the card's
 projection (``bridge_latched``/``taint_raised`` and the notice in the detail).
 """
 
@@ -55,7 +56,7 @@ async def _parks(handle, *, taint_raised: bool = False) -> bool:
 async def test_t22f_global_auto_still_answers_inline_accepted_risk(tmp_path: Path) -> None:
     handle, session, _watcher, _emitted = _handle(tmp_path, auto_approve=True)
     setattr(session, "bridge_latched", True)
-    # No conversation record: the gate follows the machine default. Option C
+    # No conversation record: the gate follows the machine default. This slice
     # leaves it exactly as today -- this row documents the accepted risk.
     assert await _parks(handle) is False
     await handle.dispose()
@@ -111,7 +112,7 @@ async def test_t22e_post_latch_auto_needs_bridge_ack_then_is_stamped_and_survive
     assert (
         refused.data.get("ok") is False and refused.data.get("approval_reason") == "bridge_latched"
     )
-    assert "Team Bridge" in refused.text
+    assert "Agent messages" in refused.text and "in the terminal" in refused.text
     assert handle._auto_approve is False
     assert not (session_dir / OVERRIDE_FILENAME).exists()
     assert await _parks(handle) is True

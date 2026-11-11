@@ -466,6 +466,8 @@ export type MessageParams = {
   "wire.aida_cadence.interval_hours.label": undefined;
   "wire.bridge_taint.ack_refused": undefined;
   "wire.bridge_taint.card_notice": undefined;
+  "wire.bridge_taint.card_options_off": undefined;
+  "wire.bridge_taint.full_request": { "request": string };
   "wire.bridge_taint.grant_suspended": undefined;
   "wire.console.description": undefined;
   "wire.console.max_live.help": undefined;

@@ -1,17 +1,27 @@
 {
   "wire.bridge_taint.card_notice": {
-    "role": "one host-owned line on every approval card raised in a conversation that holds Team Bridge content",
-    "tone": "plain, cautionary, operator-facing; keep the em dash",
-    "note": "Team Bridge is a product name: never translate it. Rendered on TUI, desktop (via the pending description) and the y/N terminal prompt."
+    "role": "the caution shown on every approval card raised in a conversation that has received a message from another person's agent",
+    "tone": "calm, plain, operator-facing; two short sentences, no dashes",
+    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Rendered on the TUI card, the desktop and phone (as the first line of the pending description) and the y/N terminal prompt."
+  },
+  "wire.bridge_taint.card_options_off": {
+    "role": "one line on a latched TUI approval card saying why Allow all and the set-auto shortcuts are missing and how to get auto back",
+    "tone": "plain, helpful, not alarming",
+    "note": "Keep `/approvals auto` and `/new` verbatim: they are commands. \"in the terminal\" is deliberate: the desktop and phone cannot turn auto back on in such a conversation yet."
+  },
+  "wire.bridge_taint.full_request": {
+    "role": "label in front of the untruncated arguments of a tool call on a latched approval card",
+    "tone": "terse label",
+    "note": "{request} is the call's raw JSON arguments; never translate or reorder it."
   },
   "wire.bridge_taint.grant_suspended": {
-    "role": "one-time transcript notice when a session-scoped auto approval stops covering calls because Team Bridge content arrived",
-    "tone": "terse status line",
-    "note": "Keep `/approvals auto` verbatim: it is a command. Team Bridge is a product name."
+    "role": "one-time transcript notice when a session-scoped auto approval stops covering calls because a teammate's agent message arrived",
+    "tone": "calm status notice",
+    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` verbatim: it is a command."
   },
   "wire.bridge_taint.ack_refused": {
-    "role": "receipt detail when an 'approvals auto' command from an approval card is refused in a conversation holding Team Bridge content",
-    "tone": "terse receipt",
-    "note": "Keep `/approvals` verbatim: it is a command. Team Bridge is a product name."
+    "role": "receipt when an 'approvals auto' request from the desktop, the phone or an approval card is refused in a latched conversation",
+    "tone": "plain receipt with the one next step that works",
+    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` verbatim: it is a command."
   }
 }

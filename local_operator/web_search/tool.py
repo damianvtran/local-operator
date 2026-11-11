@@ -393,7 +393,8 @@ def tainted_provider_allowlist(
 
     ``None`` for a clean session (unrestricted). Keyed on the LATCH, not on the
     approval gate, so it holds in every mode including auto and yolo, and no
-    approval widens it (memo §2.1, S-53). The latch lookup itself fails closed.
+    approval widens it (team-bridge-egress.md: "Search providers", S-53). The latch lookup itself
+    fails closed.
     """
     from local_operator.harness.bridge_egress import (
         context_is_latched,

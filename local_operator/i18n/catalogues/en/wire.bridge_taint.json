@@ -1,5 +1,7 @@
 {
-  "wire.bridge_taint.card_notice": "Requested while this conversation contains Team Bridge content — check the full target before you allow it.",
-  "wire.bridge_taint.grant_suspended": "Tool approvals: asking again — this conversation now contains Team Bridge content. Type /approvals auto to allow calls without asking.",
-  "wire.bridge_taint.ack_refused": "Approvals unchanged: this conversation contains Team Bridge content, so auto can only be turned on from /approvals."
+  "wire.bridge_taint.card_notice": "This conversation includes a message from a teammate's agent (Agent messages). Check what this sends and where before you allow it.",
+  "wire.bridge_taint.card_options_off": "Allow all and auto are off in this conversation. To go back to auto, type /approvals auto in the terminal, or use /new for a fresh conversation.",
+  "wire.bridge_taint.full_request": "Full request: {request}",
+  "wire.bridge_taint.grant_suspended": "Auto approval is paused in this conversation because it now includes a message from a teammate's agent (Agent messages). Each tool call will ask you first. To go back to auto, type /approvals auto in the terminal.",
+  "wire.bridge_taint.ack_refused": "Auto approval is still off. This conversation includes a message from a teammate's agent (Agent messages), so auto can't be turned on from here. To turn it on, type /approvals auto in the terminal."
 }

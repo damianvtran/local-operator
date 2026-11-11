@@ -1025,7 +1025,7 @@ class PendingRequest:
     #: because a session override and the file can hold the same word, and a
     #: viewer that derives "the other one" is wrong exactly then (U4).
     approval_global_mode: str = ""
-    #: Team Bridge taint (``harness/bridge_egress.py``, memo §4.3). Host-set,
+    #: Team Bridge taint (``harness/bridge_egress.py``, team-bridge-egress.md: "Cards"). Host-set,
     #: never derived from the title. ``bridge_latched``: the conversation holds
     #: Team Bridge content, so this card is Allow/Deny only and no mode change
     #: or background approval may answer it (``requires_person``); a surface

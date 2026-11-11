@@ -18,5 +18,13 @@ def card_notice() -> Msg:
     return Msg("wire.bridge_taint.card_notice", {})
 
 
+def card_options_off() -> Msg:
+    return Msg("wire.bridge_taint.card_options_off", {})
+
+
+def full_request(*, request: str) -> Msg:
+    return Msg("wire.bridge_taint.full_request", {"request": request})
+
+
 def grant_suspended() -> Msg:
     return Msg("wire.bridge_taint.grant_suspended", {})

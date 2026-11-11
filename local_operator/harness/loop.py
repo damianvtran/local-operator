@@ -40,7 +40,10 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalUnavailableError, ask_approval
-from local_operator.harness.bridge_egress import escalate_for_bridge_taint, full_target_line
+from local_operator.harness.bridge_egress import (
+    escalate_for_bridge_taint,
+    latched_card_summary,
+)
 from local_operator.harness.degeneration import (
     DegenerationTrip,
     StreamDegenerationGuard,
@@ -6137,7 +6140,7 @@ class AgentLoop:
         # tools and the durable writers' mutating ops move to ``write``; a
         # search an approval could not make meaningful is refused here with no
         # card, in every mode (S-58). Closed for ask mode; accepted risk in
-        # auto/yolo (operator decision, Option C): the gate below still
+        # auto/yolo (docs/security/team-bridge-egress.md): the gate below still
         # answers by mode there. The nested eval ``tool()`` path reaches this
         # same method, so the seam stays singular.
         egress = escalate_for_bridge_taint(
@@ -6155,9 +6158,8 @@ class AgentLoop:
             if egress.bridge_latched:
                 # S-46: the full target, untruncated, on a latched card -- the
                 # ordinary summary's clip is where a hostile URL hides its tail.
-                full = full_target_line(tool.name, call.arguments)
-                if full:
-                    summary = f"{summary} — {full}"
+                # Only when the summary does not already show all of it.
+                summary = latched_card_summary(summary, tool.name, call.arguments)
             if context.one_turn_secret_leases:
                 try:
                     if config.redact_tool_result is None:

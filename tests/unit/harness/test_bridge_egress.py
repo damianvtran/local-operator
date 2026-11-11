@@ -1,12 +1,12 @@
 """Team Bridge taint: the latch, the tier seam and the card rules (finding S-38, slice 1).
 
-The acceptance matrix is the design memo's §9 (T-rows). Every egress row runs
-the REAL loop seam (``AgentLoop._runner_result``) against a recording fake
+The acceptance matrix is the T-rows in docs/security/team-bridge-egress.md.
+Every egress row runs the REAL loop seam (``AgentLoop._runner_result``) against a recording fake
 transport: a tool whose ``execute`` appends the URL it would have requested.
 A row passes when the canary never appears in a recorded request unless the
 scripted gate approved it, and the gate saw the escalated call.
 
-Status words this file pins (memo §1.1, operator decision Option C): closed
+Status words this file pins (team-bridge-egress.md: "Status"): closed
 for ask mode; accepted risk in auto/yolo. ``test_t_mode_auto_s1_*`` documents
 the accepted risk -- it must stay green, and must never be read as "closed".
 """
@@ -399,9 +399,9 @@ def test_service_restriction_refuses_rather_than_falling_back(tmp_path: Path) ->
     )
     # A forced provider that IS in the chain but outside the restriction is
     # refused with the Team Bridge remedy -- approval never widens the set.
-    with pytest.raises(RuntimeError, match="Team Bridge"):
+    with pytest.raises(RuntimeError, match="Agent messages"):
         service.candidates(member)
-    with pytest.raises(RuntimeError, match="Team Bridge"):
+    with pytest.raises(RuntimeError, match="Agent messages"):
         service.candidates()
     restricted = [p for p in WebSearchService(WebSearchSettings(), tmp_path).candidates()]
     try:
@@ -409,7 +409,7 @@ def test_service_restriction_refuses_rather_than_falling_back(tmp_path: Path) ->
             WebSearchSettings(), tmp_path, restrict_to=frozenset({"duckduckgo"})
         ).candidates()
     except RuntimeError as error:
-        assert "Team Bridge" in str(error)
+        assert "Agent messages" in str(error)
     else:
         assert set(tight) <= {"duckduckgo"} and set(tight) <= set(restricted)
 
@@ -443,7 +443,8 @@ async def test_t24_durable_writer_mutations_prompt(
 async def test_team_is_not_a_second_gate() -> None:
     gate = Gate(answer=False)
     _r, outbound = await _run("team", {"op": "create"}, messages=[_card()], gate=gate)
-    assert gate.calls == [] and outbound  # account-scope consent seam owns it (memo §2.2)
+    # The account-scope consent seam owns it (team-bridge-egress.md: "Seam").
+    assert gate.calls == [] and outbound
 
 
 # -- T26 / S-46: every card in a latched session is flagged and names the full target ------
@@ -483,7 +484,7 @@ async def test_a_gate_that_cannot_see_the_flag_refuses() -> None:
 
 @pytest.mark.asyncio
 async def test_t_mode_auto_s1_global_auto_still_runs_accepted_risk() -> None:
-    """Option C, stated: closed for ask mode; accepted risk in auto/yolo."""
+    """The recorded decision, stated: closed for ask mode; accepted risk in auto/yolo."""
 
     async def auto_gate(tool_name: str, description: str, **_flags: Any) -> bool:
         return True
@@ -521,7 +522,7 @@ def test_requires_person() -> None:
             True,
             True,
         ),  # T22e
-        (be.ApprovalGrant(auto=True, scope="global"), True, True),  # T22f: Option C
+        (be.ApprovalGrant(auto=True, scope="global"), True, True),  # T22f:
         (be.ApprovalGrant(auto=False, scope="global"), False, False),
         (None, True, False),
     ],
@@ -577,7 +578,16 @@ def test_t22_card_question_is_allow_deny_only_when_latched() -> None:
     )
     assert len(clean.options) == 3
     assert len(latched.options) == 2
-    assert latched.question.startswith(be.bridge_card_notice())
+    # Design D1: the question row is the clean card's, so the target owns row
+    # 1; the notice is painted in the card's own rows, never in the question.
+    assert latched.question == clean.question
+    prefixed = approval_question(
+        "bridge",
+        f"{be.bridge_card_notice()}\nreply to guest",
+        person_only=True,
+        notice=be.bridge_card_notice(),
+    )
+    assert prefixed.question == clean.question, "a runtime-prefixed notice is lifted out"
 
 
 # -- R8: every never_auto_approved( read is classified ---------------------------------------
@@ -589,35 +599,68 @@ R8_ALLOWLIST = {
     ("local_operator/harness/approval.py", "never_auto_approved"),  # the definition
     ("local_operator/harness/bridge_egress.py", "requires_person"),
     ("local_operator/harness/bridge_egress.py", "session_grant_covers"),
-    # --yolo's own gate: removed by S3 (not built under Option C).
+    # --yolo's own gate: auto/yolo is accepted risk, not changed in this slice.
     ("local_operator/session_factory.py", "auto_approve"),
     # Profile-diff question LAYOUT, not the answer policy (S-59).
     ("local_operator/tui/widgets/approval.py", "approval_question"),
-    ("local_operator/tui/widgets/approval.py", "__init__"),
+    ("local_operator/tui/widgets/approval.py", "ApprovalPrompt.__init__"),
 }
 
 
-def _enclosing_reads(path: Path) -> set[tuple[str, str]]:
+def _enclosing_reads(path: Path, root: Path = REPO) -> set[tuple[str, str]]:
+    """Every call of ``never_auto_approved``, keyed by ``Class.method``.
+
+    Review S-65: a dotted call (``approval.never_auto_approved(...)``) and an
+    aliased import (``from ... import never_auto_approved as gate``) are reads
+    too, and a bare ``__init__`` key admitted any constructor in the file.
+    """
     tree = ast.parse(path.read_text())
+    rel = str(path.relative_to(root))
     found: set[tuple[str, str]] = set()
+    aliases = {"never_auto_approved"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "never_auto_approved" and alias.asname:
+                    aliases.add(alias.asname)
 
-    def visit(node: ast.AST, function: str) -> None:
+    def is_read(call: ast.Call) -> bool:
+        func = call.func
+        if isinstance(func, ast.Name):
+            return func.id in aliases
+        return isinstance(func, ast.Attribute) and func.attr == "never_auto_approved"
+
+    def visit(node: ast.AST, function: str, klass: str) -> None:
         for child in ast.iter_child_nodes(node):
-            name = function
+            if isinstance(child, ast.ClassDef):
+                visit(child, function, child.name)
+                continue
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                name = child.name
+                key = f"{klass}.{child.name}" if klass else child.name
                 if child.name == "never_auto_approved":
-                    found.add((str(path.relative_to(REPO)), name))
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Name)
-                and child.func.id == "never_auto_approved"
-            ):
-                found.add((str(path.relative_to(REPO)), function))
-            visit(child, name)
+                    found.add((rel, key))
+                visit(child, key, "")
+                continue
+            if isinstance(child, ast.Call) and is_read(child):
+                found.add((rel, function))
+            visit(child, function, klass)
 
-    visit(tree, "<module>")
+    visit(tree, "<module>", "")
     return found
+
+
+def test_r8_guard_sees_dotted_and_aliased_reads(tmp_path: Path) -> None:
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "from local_operator.harness import approval\n"
+        "from local_operator.harness.approval import never_auto_approved as gate\n"
+        "class Card:\n"
+        "    def __init__(self, t):\n"
+        "        approval.never_auto_approved(t)\n"
+        "def f(t):\n"
+        "    return gate(t)\n"
+    )
+    assert _enclosing_reads(probe, tmp_path) == {("probe.py", "Card.__init__"), ("probe.py", "f")}
 
 
 def test_r8_every_never_auto_approved_read_is_classified() -> None:
