@@ -3441,14 +3441,23 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     still route and still reconnect (``manager._execute_tool_call``); only a schema
     changed mid-run is missed, over a window bounded by one prompt.
 
-    Activation is the parent's lazy path unchanged: ``read mcp://<server>``
-    lists a server, ``read mcp://<server>/<tool>`` activates exactly one tool —
-    into the CHILD's inventory. The child starts from the set the parent has
-    already activated, derived from the parent's live tool list rather than
-    plumbed out of ``wire_mcp_into_session``'s closure: a tool the manager
-    knows is in that list exactly when the parent activated it, so the fact is
-    already public. The parent paid those schemas' token cost for the very task
-    it is now delegating.
+    Selection is the parent's lazy path unchanged: ``read mcp://<server>``
+    lists a server, ``read mcp://<server>/<tool>`` shows one tool's schema
+    inline and DEFERS it — callable through the child's fallback resolver, not
+    published into the child's tools array (only an over-cap schema is
+    published, see ``make_mcp_resolver``). The child starts from two parent
+    sets. PUBLISHED: exactly what is in the parent's live tool list right now,
+    derived from it rather than plumbed out of ``wire_mcp_into_session``'s
+    closure — a tool the manager knows is in that list exactly when the parent
+    has it enabled, so the fact is already public, and it is lean by
+    construction: per-tool reads defer, and the parent's cold-boundary demotion
+    has already taken idle published schemas out. Every schema in it is re-sent
+    on each of the child's requests, which is why nothing beyond the parent's
+    enabled set is published here. DEFERRED: a copy of the parent's
+    ``_mcp_deferred_origins``, which includes everything the parent demoted, so
+    a tool the parent used earlier still resolves in the child by name or via
+    eval ``tool(...)`` — demoted never means unreachable. The copy is the
+    child's own: its discoveries do not leak back into the parent.
 
     ``restricted`` is the tool-allowlist case (a reviewer, a scout). Such a
     child used to get NO MCP at all, which cost it the reads its role is made

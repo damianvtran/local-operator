@@ -121,6 +121,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # Music tools resolve their own shipped copy without changing audited
+        # neighboring namespaces; exact-set and mutation checks still apply.
+        "wire.music",
         # Notification sounds (#3398): the settings section, rows, the built-in
         # sound names and `lop sound` help, in its own namespace so the audited
         # wire.settings hashes are untouched.
