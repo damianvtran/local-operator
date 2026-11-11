@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.busy_delivery",
-  "history_sha256": "b4391675512985c86155a386dbe08f8e9850c35c7d187c5de39b20addc004541",
+  "history_sha256": "6043bdc5368c178c2e575eac17159de221148db293bae57db268f794b29f3ea2",
   "entries": [
     {
       "locale": "vi",
@@ -27,6 +27,31 @@
       "status": "passed",
       "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 2 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: both_notice 'ğnếu kẹt' (1 minor). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): minor-only, BLOCKER_MAJOR 0. Accepted minors (not applied, to preserve audited bytes): both_notice idiom nit (round 2 re-opens the 'ğnếu kẹt'->'ğnếu chờ3 lâu' change round 1 requested). en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
       "round": "r2",
+      "keys_audited": 2
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.busy_delivery",
+      "source_sha256": "6c1285c73f609f9833ff623f0df8be0c1b66e773159a50269fa35fd2f3b41ac5",
+      "context_sha256": "ad56aac04e7626b408a51952b2260398cb2caec16637fab92df922e314ae7fc5",
+      "target_sha256": "f8565ad605327c7e79dcfc80fb6f872d32ad71d3cf17ed74e130231252e39101",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 2 keys audited in this namespace (queue_notice/both_notice). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit (same auditor, only the 8 changed/new keys audited): PASS 0 blocker/major, no findings, first pass. Wave-1 accepted minors on steer.description/both_notice/help: the steer.description and both_notice minors are superseded (replaced in wave 2 and re-audited); the help minor stands (help unchanged). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r3",
       "keys_audited": 2
     }
   ]

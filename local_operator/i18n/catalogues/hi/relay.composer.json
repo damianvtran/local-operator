@@ -8,5 +8,8 @@
   "relay.composer.delivery.label": "भेजने का तरीका",
   "relay.composer.delivery.steer": "दिशा दें",
   "relay.composer.delivery.queue": "कतार",
-  "relay.composer.delivery.both": "दोनों"
+  "relay.composer.delivery.both": "दोनों",
+  "relay.composer.delivery.steer_hint": "अभी बीच में रोकें (मौजूदा तरीका)",
+  "relay.composer.delivery.queue_hint": "प्रतीक्षा करें; टूल को न रोकें",
+  "relay.composer.delivery.both_hint": "प्रतीक्षा करें, देर हो तो रोकें"
 }

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "4e3b1ec24275caec814957dc354afd649fe0c05e521d6e4ed96a305d04eb3661",
+  "history_sha256": "db72b1b48b314e1dbf16e8da39ce76fc4a6151a99dfd0a251ad0535a0d255287",
   "entries": [
     {
       "locale": "fr",
@@ -154,6 +154,31 @@
       "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 8 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: steer.description used 'l’orientation', inconsistent with shipped 'orienter' (1 major). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): fr/es/hi PASS 0/0 (no findings). en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
       "round": "r2",
       "keys_audited": 8
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "bffca6147c3a32a964971f1622aa6cdca7d616f5d4044ea27f7af89c104b515b",
+      "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
+      "target_sha256": "1ee3e14834a2d3b84b72707501b4b0f0603e4003dde189b07a6bc19637a2955f",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 3 keys audited in this namespace (tui_busy_delivery choice steer/queue/both description). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit: first pass FAIL, 3 major ('si lent' unidiomatic in both_notice, both.description, both_hint). Remediation: both_notice replaced verbatim with auditor's suggestion 'en file — attend, puis interrompt si ça tarde'; description/hint use the auditor's suggestion with 'puis' dropped to fit the 34-cell column: 'Attendre, interrompre si ça tarde' (manager, no other wording invented). Round-2 delta audit (same auditor): PASS 0/0, no findings. Wave-1 finding (steer.description 'l'orientation', 1 major) is unchanged in kind: steer.description was replaced in wave 2 and re-audited ('Interrupt now (today''s behaviour)') and passed. No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r3",
+      "keys_audited": 3
     }
   ]
 }

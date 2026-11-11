@@ -1,4 +1,4 @@
 {
-  "tui.busy_delivery.queue_notice": "en cola — espera; las herramientas continúan",
-  "tui.busy_delivery.both_notice": "en cola — espera, luego guía si se atasca"
+  "tui.busy_delivery.queue_notice": "en cola — espera, herramientas siguen",
+  "tui.busy_delivery.both_notice": "en cola — espera, interrumpe si tarda"
 }

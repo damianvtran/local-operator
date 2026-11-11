@@ -1,4 +1,4 @@
 {
   "tui.busy_delivery.queue_notice": "已排队——先等当前步骤，工具照常运行",
-  "tui.busy_delivery.both_notice": "已排队——先等待，等太久则自动引导"
+  "tui.busy_delivery.both_notice": "已排队——先等待，过慢则自动打断"
 }

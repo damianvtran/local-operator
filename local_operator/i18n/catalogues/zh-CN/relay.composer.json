@@ -8,5 +8,8 @@
   "relay.composer.delivery.label": "发送方式",
   "relay.composer.delivery.steer": "引导",
   "relay.composer.delivery.queue": "排队",
-  "relay.composer.delivery.both": "排队后引导"
+  "relay.composer.delivery.both": "排队后引导",
+  "relay.composer.delivery.steer_hint": "立即打断（沿用现有行为）",
+  "relay.composer.delivery.queue_hint": "等待，绝不打断工具",
+  "relay.composer.delivery.both_hint": "先等待，过慢则打断"
 }

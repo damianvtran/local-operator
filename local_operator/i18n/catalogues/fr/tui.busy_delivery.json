@@ -1,4 +1,4 @@
 {
   "tui.busy_delivery.queue_notice": "en file — attend, les outils continuent",
-  "tui.busy_delivery.both_notice": "en file — attend, puis oriente si blocage"
+  "tui.busy_delivery.both_notice": "en file — attend, puis interrompt si ça tarde"
 }
