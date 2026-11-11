@@ -2496,8 +2496,6 @@ class _Walker:
         path, _ = _absolute(link.text, self.state.cwd)
         if path is not None:
             self.linked.add(path.rstrip("/"))
-        if len(operands) == 2:
-            self._record_link(link, operands[0], flags)
         # Provenance (q1029 incident, remote node 0.101.44): a session that
         # made ``ln -s <pad> ~/q1029`` could not remove that link later. Only
         # the plain two-operand form names the link itself; ``-t DIR`` or
@@ -2512,6 +2510,16 @@ class _Walker:
             and not link.text.endswith("/")
         ):
             self._create("symlink", self._literal_dir(link))
+        # AFTER the provenance record, never before: ``_create`` calls
+        # ``_name``, which drops any ``link_targets`` entry for the path it
+        # names. Run second, it erased the target ``_record_link`` had just
+        # stored, so ``ln -sfn <secrets> PAD/l && rm -f PAD/l/../config.yml``
+        # lost its re-linked landing and fell from CRITICAL to HIGH
+        # (convergence of PR #3811 onto #3793). ``_record_link`` names the
+        # path itself before storing, so this order invalidates the stale
+        # target and keeps the new one.
+        if len(operands) == 2:
+            self._record_link(link, operands[0], flags)
 
     def _find(self, args: list[Expanded]) -> None:
         roots: list[Expanded] = []
