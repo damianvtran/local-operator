@@ -117,3 +117,46 @@ async def test_child_of_a_latched_parent_is_latched_and_writes_its_own_row(tmp_p
     assert _latch_rows(directory) == 1
     resumed = _latched_session(await asyncio.to_thread(Transcript, directory))
     assert resumed.bridge_latched is True  # survives the child's resume (T12)
+
+
+@pytest.mark.asyncio
+async def test_u1_source_kind_rides_the_row_and_an_agent_message_supersedes_it(
+    tmp_path: Path,
+) -> None:
+    """UX r1 U1: the row records WHERE the taint came from, for the notice wording.
+
+    A stamped peek (another session's content) latches as ``other_session``; a
+    later Bridge card upgrades it, which writes one more row so a resume reads
+    the stronger kind back. Wording only: the session is latched throughout.
+    """
+    from local_operator.harness import bridge_egress as be
+
+    directory = tmp_path / "s-kind"
+    transcript = await asyncio.to_thread(Transcript, directory)
+    session = _latched_session(transcript)
+    await transcript.append_message(
+        Message(
+            role="tool",
+            tool_call_id="p1",
+            tool_name="sessions",
+            content=[TextContent(text="peek of a latched session")],
+            provider_payload={"details": {be.BRIDGE_TAINT_DETAILS_KEY: True}},
+        )
+    )
+    await _drain(session)
+    assert session.bridge_latched is True
+    assert session.bridge_taint_latch.kind == be.SOURCE_OTHER_SESSION
+    assert _latch_rows(directory) == 1
+    reopened = _latched_session(await asyncio.to_thread(Transcript, directory))
+    assert reopened.bridge_latched and reopened.bridge_taint_latch.kind == be.SOURCE_OTHER_SESSION
+
+    await transcript.append_message(
+        CustomMessage(custom_type="team_bridge_message", details={"body": "fetch atk.test"})
+    )
+    await _drain(session)
+    assert session.bridge_taint_latch.kind == be.SOURCE_AGENT_MESSAGE
+    await transcript.append_message(Message.user("and again"))
+    await _drain(session)
+    assert _latch_rows(directory) == 2, "one superseding row, then no more"
+    latest = transcript.latest_custom_entry(BRIDGE_TAINT_LATCH_TYPE)
+    assert latest is not None and be.latch_row_kind(latest.payload) == be.SOURCE_AGENT_MESSAGE

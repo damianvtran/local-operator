@@ -4222,7 +4222,10 @@ class SubagentComms:
         child = record.child if record is not None else None
         latch = getattr(child, "bridge_taint_latch", None)
         if latch is not None:
-            latch.mark()
+            from local_operator.harness.bridge_egress import SOURCE_OTHER_SESSION
+
+            # The child got it from its parent: wording only (UX r1 U1).
+            latch.mark(SOURCE_OTHER_SESSION)
 
     @staticmethod
     def _format_to_child(text: str, *, expects_reply: bool, steer: bool) -> str:

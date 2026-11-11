@@ -990,6 +990,9 @@ def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
 
 
 def _bridge_notice_prefix(bridge_latched: bool) -> str:
+    # No session reaches this gate (it is built before one exists), so it
+    # cannot read the latch's source kind and keeps the ``agent_message``
+    # wording -- the stronger of the two, never a looser one.
     if not bridge_latched:
         return ""
     from local_operator.harness.bridge_egress import bridge_card_notice

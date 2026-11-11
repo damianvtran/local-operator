@@ -53,10 +53,11 @@ Design constraints:
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.cells import cell_len
 from rich.console import Group, RenderableType
@@ -72,6 +73,8 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.harness.types import AskQuestion
@@ -1093,6 +1096,17 @@ class ApprovalSettingOutcome:
 #: and the callback it invokes cannot disagree.
 SETTING_KEYS: dict[str, str] = {"S": "session", "G": "global"}
 
+#: The keys a latched card withdraws (Allow all and the two set-auto
+#: destinations). Pressed from muscle memory they used to do nothing at all
+#: (UX round 1, U4); now they flash the card's own "why these are off" line.
+LATCHED_INERT_KEYS: frozenset[str] = frozenset({ALLOW_ALL_KEY, *SETTING_KEYS})
+
+#: How long that flash holds. A feedback pulse, not a policy threshold: long
+#: enough to read one line (~2 s at ordinary reading speed for ~25 words is
+#: the low end), short enough that the card is back to rest before the next
+#: deliberate keypress.
+LATCHED_FLASH_SECONDS = 2.5
+
 #: The mode words as a human reads them. ``auto`` in the command vocabulary is
 #: "Auto" in prose; the same capitalisation the band and the receipts use.
 _MODE_WORD = {"ask": "Ask", "auto": "Auto"}
@@ -1232,6 +1246,10 @@ class ApprovalPrompt(AskPickerScreen):
             else ""
         )
         self._latched_take = 0
+        #: U4: whether the "options are off" line is flashing, and its timer.
+        self._options_flash = False
+        self._options_flash_timer: Any = None
+        self._latched_notice_rows = 0
         super().__init__(
             [approval_question(tool_name, description, person_only=person_only, notice=notice)],
             self._answered,
@@ -1790,8 +1808,51 @@ class ApprovalPrompt(AskPickerScreen):
                 row = Text(line.plain.rstrip(), no_wrap=True, overflow="ellipsis")
                 row.stylize(ink_style)
                 rows.append(row)
+            if ink == "warning":
+                self._latched_notice_rows = len(rows)
         self._latched_rows_cache = (width, rows)
         return rows
+
+    def _flash_options_off(self) -> None:
+        """Flash the card's own "Allow all and auto are off" line (UX r1, U4).
+
+        Same row count as the resting card, so the flash never reflows the
+        frame: where every options row is on screen they are re-inked; where
+        the row budget cut them, the last visible row becomes the line on one
+        row, ellipsised. A press while flashing restarts the timer.
+        """
+        self._options_flash = True
+        timer = self._options_flash_timer
+        if timer is not None:
+            timer.stop()
+        try:
+            self._options_flash_timer = self.set_timer(
+                LATCHED_FLASH_SECONDS, self._end_options_flash
+            )
+        except Exception:  # noqa: BLE001 - feedback only; the card stays correct unflashed
+            logger.warning("could not time the latched-card flash", exc_info=True)
+            self._options_flash_timer = None
+        self._repaint()
+
+    def _end_options_flash(self) -> None:
+        self._options_flash = False
+        self._options_flash_timer = None
+        self._repaint()
+
+    def _flashed_latched_rows(self, rows: list[Text], width: int) -> list[Text]:
+        from local_operator.harness.bridge_egress import card_options_off_notice
+
+        ink = Style(color=theme_mod.semantic_color("warning"), bold=True)
+        if len(rows) >= len(self._latched_rows(width)):
+            head = rows[: self._latched_notice_rows]
+            tail = [Text(row.plain, no_wrap=True, overflow="ellipsis") for row in rows[len(head) :]]
+            for row in tail:
+                row.stylize(ink)
+            return head + tail
+        line = Text(" ".join(card_options_off_notice().split()), no_wrap=True, overflow="ellipsis")
+        line.truncate(max(1, width), overflow="ellipsis")
+        line.stylize(ink)
+        return [*rows[:-1], line]
 
     def _callout_rows(
         self, width: int, *, two_row: bool
@@ -1799,7 +1860,10 @@ class ApprovalPrompt(AskPickerScreen):
         """The callout as painted rows plus their hit spans."""
         if self._latched_notice:
             # No hit spans: nothing on a latched card loosens the gate.
-            return self._latched_rows(width)[: self._latched_take], []
+            rows = self._latched_rows(width)[: self._latched_take]
+            if self._options_flash and rows:
+                rows = self._flashed_latched_rows(rows, width)
+            return rows, []
         state = self._state_text(width)
         if two_row:
             parts, spans = self._handles(width)
@@ -2217,6 +2281,15 @@ class ApprovalPrompt(AskPickerScreen):
         """
         character = event.character
         if character is None:
+            return
+        if character in LATCHED_INERT_KEYS and self._latched_notice and self._answer is None:
+            # A withdrawn key on a latched card: consumed (it must not reach
+            # the composer) and answered with the card's own explanation, so a
+            # habitual press is never silent (UX r1, U4). Never a setting or
+            # an answer.
+            event.stop()
+            event.prevent_default()
+            self._flash_options_off()
             return
         # The two SETTING destinations are taken before the answer letters and
         # never through `_answer_with`: they change the rule for the NEXT

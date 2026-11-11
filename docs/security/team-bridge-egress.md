@@ -101,7 +101,8 @@ decision is recorded on the tool context so the provider filter agrees.
 
 Every card in a latched session offers Allow and Deny only. In the TUI, `A`,
 `S` and `G` are inert, and the slot that shows the approvals policy on a clean
-card shows the notice and one line on how to get auto back instead. The
+card shows the notice and one line on how to get auto back instead. Pressing
+`A`, `S` or `G` there answers nothing and briefly highlights that line. The
 question row is the same as on a clean card. For `web_fetch`, `read`,
 `web_search`, `web_read`, `browser` and `monitor`/`wake`, the card adds the
 full request when its ordinary summary is clipped or does not show every
@@ -109,6 +110,17 @@ argument verbatim. No mode change answers a parked card, and a viewer's
 background approval leaves it parked. Desktop and phone receive the
 `bridge_latched`/`taint_raised` flags and the notice as the first line of the
 description, whether the runtime or the TUI owns the gate.
+
+The latch records which kind of source set it, and that kind picks only the
+wording of the card notice, the paused-auto notice and the refused-auto
+receipt. `agent_message` means a Team Bridge card or `bridge` result reached
+this conversation. `other_session` means the content came through another
+session or device (a peek, a mesh reply, a cross-session read, a spill or
+archive copy, or a parent/child link). An Agent message wins when both apply,
+and a latch row with no kind reads as `agent_message`. The kind never changes
+a tier, a card's choices or a grant (`test_u1_kind_never_changes_the_decision`).
+The plain `[y/N]` terminal prompt has no session object, so it keeps the
+`agent_message` wording.
 
 ## Grants
 

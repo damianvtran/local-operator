@@ -1193,7 +1193,7 @@ class TuiSessionHandle(SessionHandle):
 
         return SlashResult(
             kind="notice",
-            text=ack_refused_notice(),
+            text=ack_refused_notice(self._session()),
             style="warning",
             data={"ok": False, "approval_reason": "bridge_latched"},
         ).model_dump(mode="json")
@@ -1607,7 +1607,7 @@ class TuiSessionHandle(SessionHandle):
         if latched:
             from local_operator.harness.bridge_egress import bridge_card_notice
 
-            description = f"{bridge_card_notice()}\n{description}"
+            description = f"{bridge_card_notice(self._session())}\n{description}"
         self._publish_pending_gate(
             PendingRequest(
                 request_id=request_id,

@@ -97,6 +97,35 @@ BRIDGE_TAINT_DETAILS_KEY = "bridge_taint"
 
 Tier = Literal["read", "write", "exec"]
 
+#: WHERE the latch's content came from (UX round 1, U1). It picks the WORDING
+#: of the card notice, the paused-auto notice and the refused-auto receipt,
+#: and nothing else: every tier, card and grant decision reads only
+#: ``latched`` (a guard test asserts the decision is identical for both
+#: kinds). Without it, a reply from the user's OWN laptop over the mesh was
+#: announced as "a message from a teammate's agent", which made an accurate
+#: warning look wrong.
+#:
+#: * ``agent_message`` -- a Team Bridge card or a ``bridge`` tool result
+#:   reached THIS session directly.
+#: * ``other_session`` -- the content arrived through another session or
+#:   device: a ``sessions`` peek, a mesh reply or peek, a ``read``/``grep``
+#:   under another session's directory, a spill or archive copy, or a
+#:   parent/child link. That session may itself hold an Agent message (or be
+#:   undeterminable, which counts), so its copy says "may contain".
+#:
+#: ``agent_message`` wins when both latched: it is the stronger, more specific
+#: statement and it is true. It is also the reading of an older latch row
+#: with no kind, so a transcript written before this field keeps its wording.
+SOURCE_AGENT_MESSAGE = "agent_message"
+SOURCE_OTHER_SESSION = "other_session"
+SourceKind = Literal["agent_message", "other_session"]
+_SOURCE_KINDS: frozenset[str] = frozenset({SOURCE_AGENT_MESSAGE, SOURCE_OTHER_SESSION})
+
+#: The latch row's ``details`` key carrying the kind. Additive inside version
+#: 1: a reader that does not know it ignores it, and a row without it reads
+#: as ``agent_message``.
+LATCH_ROW_KIND_KEY = "source_kind"
+
 #: Search providers whose wire shape is a plain index lookup (verified in
 #: security round 2: DDG HTML POST, Brave ``/res/v1/web/search``, SerpAPI
 #: ``engine=google``). An ALLOWLIST, so a provider added later starts on the
@@ -214,6 +243,46 @@ def message_is_taint_source(message: Any) -> bool:
     return _tool_payload_stamped(getattr(message, "provider_payload", None))
 
 
+def message_source_kind(message: Any) -> SourceKind | None:
+    """The source kind of one live message, or ``None`` when it is no source.
+
+    Only called on the latching path and the (rare) kind upgrade, never on a
+    clean session's hot path, so the duck-typed reads cost nothing that
+    matters. A Bridge card or ``bridge`` result is an Agent message; any other
+    source is a stamp, which only cross-session routes write.
+    """
+    if not message_is_taint_source(message):
+        return None
+    if getattr(message, "custom_type", None) == TEAM_BRIDGE_MESSAGE_TYPE:
+        return SOURCE_AGENT_MESSAGE
+    if (
+        getattr(message, "role", None) == "tool"
+        and getattr(message, "tool_name", None) == BRIDGE_TOOL_NAME
+    ):
+        return SOURCE_AGENT_MESSAGE
+    return SOURCE_OTHER_SESSION
+
+
+def latch_row_kind(payload: Mapping[str, Any]) -> SourceKind:
+    """The kind a latch row records; an old row (or an unknown value) is ``agent_message``."""
+    details = payload.get("details")
+    kind = details.get(LATCH_ROW_KIND_KEY) if isinstance(details, Mapping) else None
+    return kind if kind in _SOURCE_KINDS else SOURCE_AGENT_MESSAGE  # type: ignore[return-value]
+
+
+def entry_source_kind(entry_type: str, payload: Mapping[str, Any]) -> SourceKind | None:
+    """The source kind of one durable row (the latch row included), or ``None``."""
+    if not entry_is_taint_source(entry_type, payload):
+        return None
+    if entry_type == "custom":
+        return latch_row_kind(payload)
+    if payload.get("custom_type") == TEAM_BRIDGE_MESSAGE_TYPE:
+        return SOURCE_AGENT_MESSAGE
+    if payload.get("role") == "tool" and payload.get("tool_name") == BRIDGE_TOOL_NAME:
+        return SOURCE_AGENT_MESSAGE
+    return SOURCE_OTHER_SESSION
+
+
 def entry_is_taint_source(entry_type: str, payload: Mapping[str, Any]) -> bool:
     """Whether one durable transcript row is a source, or the latch row itself."""
     if entry_type == "custom":
@@ -247,6 +316,9 @@ class BridgeTaintLatch:
     ) -> None:
         self.inherited = bool(inherited)
         self._latched = self.inherited
+        #: Wording only (see :data:`SOURCE_AGENT_MESSAGE`). A child inheriting a
+        #: latched parent's taint got it through another session.
+        self._kind: SourceKind | None = SOURCE_OTHER_SESSION if self.inherited else None
         self._entries = entries
         #: Whether the durable journal is known to carry the latch row.
         self.row_present = False
@@ -262,11 +334,27 @@ class BridgeTaintLatch:
         """The cached state only (no scan). Use :meth:`is_latched` to decide."""
         return self._latched
 
-    def mark(self) -> bool:
-        """Set the latch. Returns True when this call is what set it."""
+    @property
+    def kind(self) -> SourceKind:
+        """Which notice wording applies. ``agent_message`` when unknown (the old wording)."""
+        return self._kind or SOURCE_AGENT_MESSAGE
+
+    def mark(self, kind: SourceKind = SOURCE_AGENT_MESSAGE) -> bool:
+        """Set the latch. Returns True when this call is what set it.
+
+        ``kind`` is wording only. The default is ``agent_message`` so a caller
+        that names no source keeps the pre-kind wording; every cross-session
+        route passes ``other_session``. A later ``agent_message`` upgrades an
+        ``other_session`` latch (and clears ``row_present`` so the writer
+        records the stronger kind); nothing ever downgrades it.
+        """
         if self._latched:
+            if kind == SOURCE_AGENT_MESSAGE and self._kind != SOURCE_AGENT_MESSAGE:
+                self._kind = SOURCE_AGENT_MESSAGE
+                self.row_present = False
             return False
         self._latched = True
+        self._kind = kind
         for callback in list(self.on_latched):
             # A callback failure must not unset or hide the latch; it is
             # reported loudly, never at debug.
@@ -278,30 +366,42 @@ class BridgeTaintLatch:
 
     def observe(self, messages: Iterable[Any]) -> bool:
         """Latch on any source among live messages. Returns the latched state."""
-        if self._latched:
+        if self._latched and self._kind == SOURCE_AGENT_MESSAGE:
             return True
+        # An ``other_session`` latch keeps looking, for wording only: a direct
+        # Agent message later upgrades the kind. That costs the same pass a
+        # clean session pays on every call.
         for message in messages:
-            if message_is_taint_source(message):
-                self.mark()
-                return True
-        return False
+            kind = message_source_kind(message)
+            if kind is not None:
+                self.mark(kind)
+                if kind == SOURCE_AGENT_MESSAGE:
+                    return True
+        return self._latched
 
     def observe_entries(self, rows: Iterable[tuple[str, Mapping[str, Any]]]) -> bool:
         """Latch on any source among durable rows (commit observer / scan)."""
-        hit = False
+        row_kind: SourceKind | None = None
         for entry_type, payload in rows:
-            if entry_type == "custom" and payload.get("custom_type") == BRIDGE_TAINT_LATCH_TYPE:
-                self.row_present = True
-                hit = True
+            kind = entry_source_kind(entry_type, payload)
+            if kind is None:
+                continue
+            if entry_type == "custom":
+                if row_kind != SOURCE_AGENT_MESSAGE:
+                    row_kind = kind
+            self.mark(kind)
+            if self._kind == SOURCE_AGENT_MESSAGE:
+                # Stop at the first Agent message (R6): the latch is monotonic
+                # and this kind is final, so the rest of the journal cannot
+                # change either answer. An ``other_session`` hit keeps reading,
+                # for WORDING only -- the gate already has its answer. Whether
+                # the row already exists is checked separately, in O(1), by
+                # the writer.
                 break
-            if entry_is_taint_source(entry_type, payload):
-                # Stop at the first source (R6): the latch is monotonic, so the
-                # rest of the journal cannot change the answer. Whether the row
-                # already exists is checked separately, in O(1), by the writer.
-                hit = True
-                break
-        if hit:
-            self.mark()
+        if row_kind is not None and row_kind == self._kind:
+            # The durable row already says what the latch says; a row with a
+            # weaker kind than the latch now holds is rewritten.
+            self.row_present = True
         return self._latched
 
     def is_latched(self, live_messages: Iterable[Any] = ()) -> bool:
@@ -313,6 +413,14 @@ class BridgeTaintLatch:
         (not the bounded provenance scan, which stops at 400 rows -- T13).
         """
         if self._latched:
+            if self._kind != SOURCE_AGENT_MESSAGE:
+                # Wording only, never the decision: the call is latched
+                # whatever this finds. Guarded because §3.6 forbids an error
+                # here from reaching the caller as anything but "latched".
+                try:
+                    self.observe(live_messages)
+                except Exception:  # noqa: BLE001 - wording only; the latch stays set
+                    logger.warning("bridge taint kind upgrade failed", exc_info=True)
             return True
         try:
             if self.observe(live_messages):
@@ -331,7 +439,7 @@ class BridgeTaintLatch:
         return self._latched
 
     def latch_row_details(self) -> dict[str, Any]:
-        return {"version": 1, "inherited": self.inherited}
+        return {"version": 1, "inherited": self.inherited, LATCH_ROW_KIND_KEY: self.kind}
 
 
 def link_latches(parent: BridgeTaintLatch, child: BridgeTaintLatch) -> Callable[[], None]:
@@ -347,11 +455,17 @@ def link_latches(parent: BridgeTaintLatch, child: BridgeTaintLatch) -> Callable[
     Each latch writes its own row on its next commit.
     """
     if parent.latched:
-        child.mark()
+        child.mark(SOURCE_OTHER_SESSION)
     elif child.latched:
-        parent.mark()
-    parent_cb = child.mark
-    child_cb = parent.mark
+        parent.mark(SOURCE_OTHER_SESSION)
+
+    # The linked side got its taint THROUGH the other session: wording only.
+    def parent_cb() -> None:
+        child.mark(SOURCE_OTHER_SESSION)
+
+    def child_cb() -> None:
+        parent.mark(SOURCE_OTHER_SESSION)
+
     parent.on_latched.append(parent_cb)
     child.on_latched.append(child_cb)
 
@@ -885,7 +999,7 @@ def escalate_for_bridge_taint(
         # row on the next commit.
         latch = latch_of(tool_context)
         if latch is not None:
-            latch.mark()
+            latch.mark(SOURCE_OTHER_SESSION)
         latched = True
         pulled = True
     if latched and tool_name in ("web_search", "web_read") and latch_of(tool_context) is None:
@@ -992,9 +1106,40 @@ def _copy(name: str, **params: str) -> str:
     return tr("wire.bridge_taint")(getattr(keys, name)(**params))
 
 
-def bridge_card_notice() -> str:
-    """The line every approval card carries while the session is latched (S-46)."""
-    return _copy("card_notice")
+def source_kind_of(holder: Any) -> SourceKind:
+    """The wording kind for a session, a tool context or a latch.
+
+    Never raises and never affects a decision: anything it cannot read gets
+    ``agent_message``, the pre-kind wording.
+    """
+    try:
+        latch = holder
+        if not isinstance(latch, BridgeTaintLatch):
+            latch = getattr(holder, "bridge_taint_latch", None)
+        if not isinstance(latch, BridgeTaintLatch):
+            latch = getattr(holder, "bridge_taint", None)
+        if isinstance(latch, BridgeTaintLatch):
+            return latch.kind
+    except Exception:  # noqa: BLE001 - wording only: fall back to the old copy
+        logger.warning("bridge taint source kind unreadable", exc_info=True)
+    return SOURCE_AGENT_MESSAGE
+
+
+def _kind_copy(name: str, source: Any) -> str:
+    # Whole sentences per kind (separate keys), never a kind word formatted
+    # into one sentence, so every locale translates a complete statement.
+    if source_kind_of(source) == SOURCE_OTHER_SESSION:
+        return _copy(f"{name}_other_session")
+    return _copy(name)
+
+
+def bridge_card_notice(source: Any = None) -> str:
+    """The line every approval card carries while the session is latched (S-46).
+
+    ``source`` is the session (or its latch / tool context); it chooses the
+    wording by :data:`SOURCE_AGENT_MESSAGE` kind and nothing else.
+    """
+    return _kind_copy("card_notice", source)
 
 
 def card_options_off_notice() -> str:
@@ -1007,14 +1152,14 @@ def card_options_off_notice() -> str:
     return _copy("card_options_off")
 
 
-def grant_suspended_notice() -> str:
+def grant_suspended_notice(source: Any = None) -> str:
     """The one-time notice when a pre-latch session auto stops covering calls."""
-    return _copy("grant_suspended")
+    return _kind_copy("grant_suspended", source)
 
 
-def ack_refused_notice() -> str:
+def ack_refused_notice(source: Any = None) -> str:
     """The receipt detail when ``approvals auto`` lacks ``bridge_ack`` (§4.2.2)."""
-    return _copy("ack_refused")
+    return _kind_copy("ack_refused", source)
 
 
 # -- the full target on a latched card (S-46) ------------------------------------

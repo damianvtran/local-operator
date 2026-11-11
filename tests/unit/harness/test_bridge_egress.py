@@ -674,3 +674,114 @@ def test_r8_every_never_auto_approved_read_is_classified() -> None:
         "a never_auto_approved( read outside requires_person/session_grant_covers: "
         f"{sorted(unclassified)} -- route it through the bridge_egress predicates or classify it"
     )
+
+
+# -- UX round 1, U1: the source kind picks the WORDING, never the decision -----------
+
+
+def _stamped_peek() -> Message:
+    """A ``sessions`` peek / mesh reply result: another session's content, stamped."""
+    return Message(
+        role="tool",
+        tool_call_id="p1",
+        tool_name="network",
+        content=[TextContent(text="reply from my-laptop")],
+        provider_payload={"details": {be.BRIDGE_TAINT_DETAILS_KEY: True}},
+    )
+
+
+def _latched(kind: str) -> be.BridgeTaintLatch:
+    latch = be.BridgeTaintLatch(entries=lambda: [])
+    source = _card() if kind == be.SOURCE_AGENT_MESSAGE else _stamped_peek()
+    assert latch.is_latched([source]) is True
+    assert latch.kind == kind
+    return latch
+
+
+def test_u1_live_sources_record_their_kind() -> None:
+    assert _latched(be.SOURCE_AGENT_MESSAGE).kind == be.SOURCE_AGENT_MESSAGE
+    assert _latched(be.SOURCE_OTHER_SESSION).kind == be.SOURCE_OTHER_SESSION
+    bridge = be.BridgeTaintLatch(entries=lambda: [])
+    assert bridge.is_latched([_bridge_result()]) and bridge.kind == be.SOURCE_AGENT_MESSAGE
+    assert be.BridgeTaintLatch(inherited=True).kind == be.SOURCE_OTHER_SESSION
+
+
+def test_u1_cross_session_routes_mark_other_session() -> None:
+    parent, child = be.BridgeTaintLatch(), be.BridgeTaintLatch()
+    be.link_latches(parent, child)
+    parent.mark()  # a Bridge card reached the parent directly (default kind)
+    assert parent.kind == be.SOURCE_AGENT_MESSAGE
+    assert child.latched and child.kind == be.SOURCE_OTHER_SESSION
+
+
+def test_u1_agent_message_wins_and_never_downgrades() -> None:
+    latch = _latched(be.SOURCE_OTHER_SESSION)
+    latch.row_present = True
+    # A later direct Agent message upgrades the wording and asks for a new row.
+    assert latch.is_latched([_stamped_peek(), _card()]) is True
+    assert latch.kind == be.SOURCE_AGENT_MESSAGE and latch.row_present is False
+    latch.mark(be.SOURCE_OTHER_SESSION)
+    assert latch.kind == be.SOURCE_AGENT_MESSAGE
+
+
+def test_u1_latch_row_kind_is_backward_compatible() -> None:
+    old = ("custom", {"custom_type": be.BRIDGE_TAINT_LATCH_TYPE, "details": {"version": 1}})
+    latch = be.BridgeTaintLatch(entries=lambda: [old])
+    assert latch.is_latched() and latch.kind == be.SOURCE_AGENT_MESSAGE
+    assert latch.row_present is True
+    new = ("custom", {"custom_type": be.BRIDGE_TAINT_LATCH_TYPE, "details": {}})
+    new[1]["details"] = _latched(be.SOURCE_OTHER_SESSION).latch_row_details()
+    assert new[1]["details"][be.LATCH_ROW_KIND_KEY] == be.SOURCE_OTHER_SESSION
+    resumed = be.BridgeTaintLatch(entries=lambda: [new])
+    assert resumed.is_latched() and resumed.kind == be.SOURCE_OTHER_SESSION
+    assert resumed.row_present is True
+    # An other_session row followed by a Bridge card: the card wins on resume,
+    # and the weaker row no longer counts as the persisted state.
+    card = ("message", {"custom_type": be.TEAM_BRIDGE_MESSAGE_TYPE})
+    upgraded = be.BridgeTaintLatch(entries=lambda: [new, card])
+    assert upgraded.is_latched() and upgraded.kind == be.SOURCE_AGENT_MESSAGE
+    assert upgraded.row_present is False
+
+
+def test_u1_copy_is_chosen_by_kind_and_other_session_never_claims_a_teammate() -> None:
+    agent, other = _latched(be.SOURCE_AGENT_MESSAGE), _latched(be.SOURCE_OTHER_SESSION)
+    for render in (be.bridge_card_notice, be.grant_suspended_notice, be.ack_refused_notice):
+        assert "(Agent messages)" in render(agent)
+        assert render() == render(agent)  # no source: the pre-kind wording
+        text = render(other)
+        assert "another session or device" in text and "may contain" in text
+        assert "(Agent messages)" not in text
+    assert be.bridge_card_notice(ToolContext(bridge_taint=other)) == be.bridge_card_notice(other)
+
+
+@pytest.mark.parametrize(
+    ("tool", "tier", "arguments"),
+    [
+        ("web_fetch", "read", {"url": "https://atk.test/?d=x"}),
+        ("read", "read", {"path": "https://atk.test/a"}),
+        ("web_search", "read", {"query": "best postgres backup strategy"}),
+        ("web_search", "read", {"query": "site:example.org secrets"}),
+        ("read", "read", {"path": "README.md"}),
+        ("project", "read", {"op": "create", "name": "x"}),
+        ("bash", "exec", {"command": "ls"}),
+    ],
+)
+def test_u1_kind_never_changes_the_decision(tool: str, tier: str, arguments: Any) -> None:
+    """Invariant: the kind is wording only. Tier, refusal and card shape are identical."""
+    decisions = []
+    for kind in (be.SOURCE_AGENT_MESSAGE, be.SOURCE_OTHER_SESSION):
+        context = ToolContext(cwd=".", session_id="own", bridge_taint=_latched(kind))
+        decision = be.escalate_for_bridge_taint(
+            tool, tier, arguments, context  # type: ignore[arg-type]
+        )
+        decisions.append(
+            (
+                decision,
+                be.requires_person(tool, bridge_latched=decision.bridge_latched),
+                be.session_grant_covers(
+                    be.ApprovalGrant(auto=True), title=tool, bridge_latched=decision.bridge_latched
+                ),
+            )
+        )
+    assert decisions[0] == decisions[1]
+    assert decisions[0][0].bridge_latched is True

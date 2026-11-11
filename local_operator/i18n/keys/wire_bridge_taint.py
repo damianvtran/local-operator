@@ -14,8 +14,16 @@ def ack_refused() -> Msg:
     return Msg("wire.bridge_taint.ack_refused", {})
 
 
+def ack_refused_other_session() -> Msg:
+    return Msg("wire.bridge_taint.ack_refused_other_session", {})
+
+
 def card_notice() -> Msg:
     return Msg("wire.bridge_taint.card_notice", {})
+
+
+def card_notice_other_session() -> Msg:
+    return Msg("wire.bridge_taint.card_notice_other_session", {})
 
 
 def card_options_off() -> Msg:
@@ -28,3 +36,7 @@ def full_request(*, request: str) -> Msg:
 
 def grant_suspended() -> Msg:
     return Msg("wire.bridge_taint.grant_suspended", {})
+
+
+def grant_suspended_other_session() -> Msg:
+    return Msg("wire.bridge_taint.grant_suspended_other_session", {})

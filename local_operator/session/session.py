@@ -21910,12 +21910,20 @@ class Session:
         self._bridge_latch_row_task = loop.create_task(self._write_bridge_latch_row())
 
     async def _write_bridge_latch_row(self) -> None:
-        from local_operator.harness.bridge_egress import BRIDGE_TAINT_LATCH_TYPE
+        from local_operator.harness.bridge_egress import (
+            BRIDGE_TAINT_LATCH_TYPE,
+            latch_row_kind,
+        )
 
         latch = self._bridge_taint
         if latch.row_present:
             return
-        if self._transcript.latest_custom_entry(BRIDGE_TAINT_LATCH_TYPE) is not None:
+        existing = self._transcript.latest_custom_entry(BRIDGE_TAINT_LATCH_TYPE)
+        if existing is not None and latch_row_kind(existing.payload) == latch.kind:
+            # A row with a weaker kind (``other_session`` while the latch now
+            # holds ``agent_message``) is superseded by a new one: the kind
+            # picks the notice wording, and the latest row is what a resume
+            # reads back.
             latch.row_present = True
             return
         try:

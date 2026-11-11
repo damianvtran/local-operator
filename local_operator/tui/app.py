@@ -30704,7 +30704,7 @@ class OperatorApp(App[None]):
                 None if bridge_latched else partial(self._set_global_auto_for_card, source)
             ),
             person_only=bridge_latched,
-            notice=bridge_card_notice() if bridge_latched else "",
+            notice=bridge_card_notice(source.session) if bridge_latched else "",
         )
         # A gate on a PEER's session carries the hint that says where an allow
         # happens: an allow from THIS origin would be refused by the owner's
@@ -31276,7 +31276,7 @@ class OperatorApp(App[None]):
                 # would refuse.
                 self._latch_parked_cards(source)
                 if suspended and source is self._interaction:
-                    self._append_block(NoticeBlock(grant_suspended_notice(), "warning"))
+                    self._append_block(NoticeBlock(grant_suspended_notice(latch), "warning"))
                     self._set_approve_all(self._approve_all, scope="keep")
 
             try:
@@ -31300,7 +31300,7 @@ class OperatorApp(App[None]):
             if enter is None:
                 continue
             try:
-                enter(bridge_card_notice())
+                enter(bridge_card_notice(source.session))
             except Exception:  # noqa: BLE001 - the setters still refuse; logged
                 logger.warning("could not re-render a parked card as latched", exc_info=True)
 
