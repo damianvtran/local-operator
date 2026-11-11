@@ -5728,7 +5728,8 @@ def _accepted_kwargs(callee: Callable[..., Any], **candidates: Any) -> dict[str,
 # used "recently" survives such a boundary. Eight runs covers a typical
 # multi-turn work burst on one task (investigate, fix, verify, report) while
 # still letting a tool from an earlier, finished task go; a wrong guess costs
-# little because a demoted tool stays callable and its URL re-shows the schema.
+# little because a demoted tool stays callable, and re-reading its URL adds it
+# back to the tool list at the next turn.
 MCP_DEMOTE_AFTER_IDLE_RUNS = 8
 
 
@@ -6092,7 +6093,10 @@ async def wire_mcp_into_session(
         not been called within ``MCP_DEMOTE_AFTER_IDLE_RUNS`` runs moves to the
         DEFERRED set. Demoted is not unresolvable: the deferred fallback
         resolver keeps serving the name, so a later call still runs — never
-        ``Tool not found`` — and re-reading the tool's URL shows its schema.
+        ``Tool not found`` — and, since only over-cap schemas are ever
+        published (so only they are demoted), re-reading the tool's URL goes
+        through the over-cap publish path and adds it back to the tool list at
+        the next turn rather than showing the schema inline.
 
         Returns whether anything moved, so the session forces a republish only
         when the array actually changed.

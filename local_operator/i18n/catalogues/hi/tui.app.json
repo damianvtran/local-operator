@@ -44,5 +44,8 @@
   "tui.app.providers.stale_all": "पुरानी सूची: सभी प्रोवाइडर",
   "tui.app.providers.stale_named": "पुरानी सूची: {names}",
   "tui.app.providers.stale_all_error": "पुरानी सूची: सभी प्रोवाइडर — {error}",
-  "tui.app.providers.no_live_list": "कोई लाइव सूची नहीं: {names}"
+  "tui.app.providers.no_live_list": "कोई लाइव सूची नहीं: {names}",
+  "tui.app.compaction.idle_receipt": "निष्क्रिय सत्र में संदर्भ संपीडित किया गया · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "निष्क्रिय सत्र में संदर्भ संपीडित किया गया",
+  "tui.app.compaction.idle_skipped": "निष्क्रिय-सत्र संपीडन छोड़ा गया · कुछ नहीं बदला"
 }

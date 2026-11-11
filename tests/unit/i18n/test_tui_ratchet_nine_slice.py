@@ -120,13 +120,26 @@ BASE = {
     "tui.app.providers.no_live_list": "no live list: {names}",
 }
 
+#: Keys the shell gained AFTER extraction, kept apart from ``BASE`` so that dict
+#: stays what it says -- the bytes each site carried before extraction -- while the
+#: whole namespace is still pinned below. These are the idle-compaction receipt and
+#: skip lines (PR #3753), whose English and translations were audited at these
+#: bytes; a re-word is a diff hunk here, as for ``BASE``.
+SINCE_EXTRACTION = {
+    "tui.app.compaction.idle_receipt": "context compacted while idle · {detail}",
+    "tui.app.compaction.idle_receipt_bare": "context compacted while idle",
+    "tui.app.compaction.idle_skipped": "idle compaction skipped · nothing changed",
+}
+
 
 def test_the_namespace_is_exactly_the_base_bytes() -> None:
-    """Every key, pinned to the bytes its site carried before extraction."""
+    """Every key, pinned to the bytes its site carried before extraction (or, for a
+    key added since, the bytes it shipped with)."""
     live = catalogues.load_catalogue("en", "tui.app")
-    assert live == BASE
+    assert live == {**BASE, **SINCE_EXTRACTION}
+    assert not set(BASE) & set(SINCE_EXTRACTION)
     sidecar = catalogues.context("en", "tui.app")
-    assert set(sidecar) == set(BASE)
+    assert set(sidecar) == set(BASE) | set(SINCE_EXTRACTION)
     for key, entry in sidecar.items():
         assert all(entry.get(field) for field in ("role", "tone", "note")), key
 
