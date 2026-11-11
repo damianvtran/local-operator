@@ -34,5 +34,29 @@
     "tone": "Imperative verb phrase, lowercase, no punctuation.",
     "maxCells": 28,
     "note": "Accessible name of the Stop action on the working line (the row that says what the agent is doing and for how long). Longer than the visible word 'stop' and must CONTAIN the same verb as relay.composer.action.stop so a screen-reader user hears the visible text. 'The agent' is the glossary's agent."
+  },
+  "relay.composer.delivery.label": {
+    "role": "busy-send mode chip, accessible name",
+    "tone": "One lowercase noun, no punctuation; the chip that opens the delivery-mode sheet while the agent is working.",
+    "maxCells": 16,
+    "note": "The small chip beside the model chip while the agent is working; it cycles through steer/queue/both without a sheet. Its accessible name carries the current mode."
+  },
+  "relay.composer.delivery.steer": {
+    "role": "busy-send mode option, sheet row",
+    "tone": "One lowercase verb, no punctuation; the mode that interrupts now.",
+    "maxCells": 16,
+    "note": "Sheet row for the delivery mode that interrupts the running turn at once, today's behaviour."
+  },
+  "relay.composer.delivery.queue": {
+    "role": "busy-send mode option, sheet row",
+    "tone": "One lowercase noun, no punctuation; the mode that waits.",
+    "maxCells": 16,
+    "note": "Sheet row for the delivery mode that waits for the step and never interrupts the tools."
+  },
+  "relay.composer.delivery.both": {
+    "role": "busy-send mode option, sheet row",
+    "tone": "One lowercase word, no punctuation; the mode that waits then interrupts.",
+    "maxCells": 16,
+    "note": "Sheet row for the delivery mode that waits without interrupting and escalates to a steer when it has waited too long."
   }
 }

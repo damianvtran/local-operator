@@ -1,0 +1,12 @@
+{
+  "tui.busy_delivery.queue_notice": {
+    "role": "busy-send notice",
+    "tone": "note",
+    "note": "Shown when a message sent to a working turn is queued without interrupting: it waits for this step and the tools keep running. Same rendered height as both_notice and the classic queued notice across 20-90 columns."
+  },
+  "tui.busy_delivery.both_notice": {
+    "role": "busy-send notice",
+    "tone": "note",
+    "note": "Shown when a message sent to a working turn is queued and escalates to a steer if it waits too long: it waits now and the tools keep running. Deliberately identical to queue_notice — the height contract keeps the settle from reflowing the transcript."
+  }
+}

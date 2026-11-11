@@ -929,6 +929,12 @@ export interface PromptImage {
     `mixed`. */
 export type InputMode = "typed" | "dictated" | "mixed";
 
+/** The busy-send delivery mode (busy-delivery-v1). Mirrors
+    `DELIVERY_MODES` in `local_operator/mobile/types.py`: `steer` is today's
+    urgent behaviour, `queue` waits without interrupting, `both` waits and
+    escalates. Absent on the wire reads as `steer` (the legacy frame). */
+export type DeliveryMode = "steer" | "queue" | "both";
+
 /** The daemon's voice-input answer on the list payload (`capabilities.stt`).
     Absent (an older daemon) reads the same as `available: false`: hide the
     mic. `reason` is diagnostics for the operator, not copy for the screen. */
@@ -980,6 +986,13 @@ export type CommandOp =
 			/** The reserved annotation (input-mode-v1), omitted when absent. */
 			input_mode?: InputMode;
 			input_path?: string;
+			/** The busy-send delivery mode (busy-delivery-v1). Omitted when
+			    absent or `steer`, so a legacy send stays byte-identical on the
+			    wire; a `queue`/`both` only ever rides when the relay advertised
+			    `features.busy_delivery` (the refusal is the relay's 400, shown
+			    to the reader, never silently downgraded). Part of the retry
+			    envelope's identity: a retry replays the pinned mode. */
+			delivery?: DeliveryMode;
 			/** Ask the relay to expand `$name` mentions before delivery (SKM-D1).
 			    Set only when this client saw `capabilities.skill_invocation` and
 			    the text carries `$`; an older relay drops it silently, which is

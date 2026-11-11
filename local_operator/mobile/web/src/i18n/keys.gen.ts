@@ -219,6 +219,10 @@ export type MessageParams = {
   "relay.composer.action.stop": undefined;
   "relay.composer.action.stop_agent": undefined;
   "relay.composer.action.stopping": undefined;
+  "relay.composer.delivery.both": undefined;
+  "relay.composer.delivery.label": undefined;
+  "relay.composer.delivery.queue": undefined;
+  "relay.composer.delivery.steer": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
   "relay.health.ended_send_failed": undefined;
@@ -1661,6 +1665,14 @@ export type MessageParams = {
   "wire.settings.tools_search_interception_enabled.label": undefined;
   "wire.settings.tools_search_interception_rg_excludes.help": undefined;
   "wire.settings.tools_search_interception_rg_excludes.label": undefined;
+  "wire.settings.tui_busy_delivery.choice.both.description": undefined;
+  "wire.settings.tui_busy_delivery.choice.both.label": undefined;
+  "wire.settings.tui_busy_delivery.choice.queue.description": undefined;
+  "wire.settings.tui_busy_delivery.choice.queue.label": undefined;
+  "wire.settings.tui_busy_delivery.choice.steer.description": undefined;
+  "wire.settings.tui_busy_delivery.choice.steer.label": undefined;
+  "wire.settings.tui_busy_delivery.help": undefined;
+  "wire.settings.tui_busy_delivery.label": undefined;
   "wire.settings.tui_sidebar_position.choice.left.description": undefined;
   "wire.settings.tui_sidebar_position.choice.left.label": undefined;
   "wire.settings.tui_sidebar_position.choice.right.description": undefined;

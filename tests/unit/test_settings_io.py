@@ -182,6 +182,7 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_STOP_DEFAULT,
     )
     from local_operator.tui import status_command
+    from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
@@ -228,6 +229,10 @@ def _consumer_defaults() -> dict[str, object]:
         "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
         "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
         "tui.sidebar_show_subagents": DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
+        # The TUI's submit-time reader's own constant, beside the fallback
+        # ``OperatorApp._busy_delivery_mode`` applies; the registry restates it
+        # rather than importing the TUI (settings_io stays off that path).
+        "tui.busy_delivery": DEFAULT_BUSY_DELIVERY,
         "retry.enabled": retry.enabled,
         "retry.maxRetries": retry.max_retries,
         "retry.baseDelayMs": retry.base_delay_ms,

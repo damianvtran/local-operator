@@ -12,6 +12,14 @@ import { contentDir } from "../lib/content-direction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
+import {
+	busyDeliverySupported,
+	deliveryForSend,
+	getDeliveryMode,
+	nextDeliveryMode,
+	setDeliveryMode,
+	type DeliveryMode,
+} from "../lib/delivery";
 import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	getPendingContinuation,
@@ -383,6 +391,60 @@ function EffortSheet({
 						/>
 						<span className="font-mono text-mono text-ink">
 							{rung}
+						</span>
+					</button>
+				))}
+			</div>
+		</Sheet>
+	);
+}
+
+/** The busy-send delivery-mode picker (busy-delivery-v1). One row per mode,
+    the chosen one marked with the same accent dot effort uses. The mode is a
+    per-device preference (`lib/delivery.ts`), never a command: choosing it
+    writes localStorage and closes; the next busy send carries it. */
+function DeliverySheet({
+	open,
+	onClose,
+	value,
+	onChoose,
+}: {
+	open: boolean;
+	onClose: () => void;
+	value: DeliveryMode;
+	onChoose: (mode: DeliveryMode) => void;
+}) {
+	const modes: Array<{ mode: DeliveryMode; labelKey: "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both" }> = [
+		{ mode: "steer", labelKey: "relay.composer.delivery.steer" },
+		{ mode: "queue", labelKey: "relay.composer.delivery.queue" },
+		{ mode: "both", labelKey: "relay.composer.delivery.both" },
+	];
+	return (
+		<Sheet
+			open={open}
+			onClose={onClose}
+			title={messageRuntime.t("relay.composer.delivery.label")}
+		>
+			<div className="flex flex-col p-2">
+				{modes.map(({ mode, labelKey }) => (
+					<button
+						key={mode}
+						type="button"
+						onClick={() => {
+							onChoose(mode);
+							onClose();
+						}}
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
+					>
+						<span
+							className={cn(
+								"size-2 shrink-0 rounded-full",
+								mode === value ? "bg-accent" : "bg-hairline",
+							)}
+							aria-hidden
+						/>
+						<span className="text-body text-ink">
+							{messageRuntime.t(labelKey)}
 						</span>
 					</button>
 				))}
@@ -786,6 +848,13 @@ export function Composer({
 	/* The `$name` catalogue. Empty while the capability is absent or the fetch
 	   failed — both mean "no picker", never a banner (SKM-D5). */
 	const [skills, setSkills] = useState<SkillEntry[]>([]);
+	/* The busy-send delivery mode (busy-delivery-v1): a per-device preference,
+	   read from localStorage once per composer mount. Re-read when streaming
+	   changes so a mode picked in another conversation applies here without
+	   a reload; a fresh send pins it into the envelope at submit time. */
+	const [delivery, setDelivery] = useState<DeliveryMode>(() => getDeliveryMode());
+	const [deliveryOpen, setDeliveryOpen] = useState(false);
+	const deliveryLabelKey = (delivery === "queue" ? "relay.composer.delivery.queue" : delivery === "both" ? "relay.composer.delivery.both" : "relay.composer.delivery.steer") as "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both";
 	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
 	   where the insertion left it. A ref because it is an instruction to an
 	   effect, not rendered state. */
@@ -1495,6 +1564,11 @@ export function Composer({
 					text: trimmed,
 					images: payloadImages,
 				};
+				/* The busy-send delivery mode is pinned into the envelope for a FRESH
+				   send only (a retained retry replays its stored mode, never the
+				   composer's current preference). `deliveryForSend` keeps `steer`,
+				   idle and unsupported sends byte-identical to the legacy frame. */
+				const deliveryPin = deliveryForSend(delivery, projection.streaming, busyDeliverySupported(capabilities));
 				const receipt = await submitContinuation(
 					pid,
 					submittedEnvelope.op,
@@ -1502,7 +1576,7 @@ export function Composer({
 					payloadImages,
 					/* The annotation is consulted only for a FRESH send (a retry replays
 					   the stored envelope's own bytes, annotation included). */
-					annotationForSend(provenanceRef.current),
+					{ ...annotationForSend(provenanceRef.current), ...(deliveryPin && deliveryPin !== "steer" ? { delivery: deliveryPin } : {}) },
 					/* The user's message leaves the composer HERE, into a row of its own,
 					   before the daemon has answered — the whole point of the optimistic
 					   path. It is painted under the ENVELOPE's id rather than a fresh one,
@@ -1637,7 +1711,15 @@ export function Composer({
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				/* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
+				/* A 400 that names the delivery modes is a REFUSAL with a remedy,
+				   rendered verbatim rather than swallowed as a generic retry line:
+				   the relay could not honour queue/both for this owner, and the
+				   user must see that sentence. Any other 400 keeps the generic
+				   copy below. Keyed on status + message shape so no mode string
+				   is special-cased. */
+				failure instanceof HttpError && failure.status === 400 && failure.message.includes("delivery")
+					? failure.message
+					: /* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
 				   not a transient failure: retrying the same draft is refused again,
 				   so the one retry sentence pointed at an action that cannot work and
 				   hid the cause (UX review U6). Keyed on the wire's typed code, so the
@@ -2157,6 +2239,38 @@ export function Composer({
 						</span>
 					) : queuedLabel ? <span data-queued-moved className="sr-only">{queuedLabel}</span> : null}
 					<div data-foot="cwd" className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
+					{/* The busy-send delivery-mode chip (busy-delivery-v1). Visible ONLY
+					   while the agent is working AND the relay advertised the feature:
+					   an older relay or an idle session never offers a control whose
+					   send would be refused. One tap cycles steer → queue → both and
+					   persists per device. The worded options are the sheet, opened by
+					   a second visible affordance — the sheet button beside the chip
+					   is the door, never a hidden gesture. */}
+					{projection.streaming && busyDeliverySupported(capabilities) ? (
+						<>
+							<button
+								type="button"
+								onClick={() => {
+									const next = nextDeliveryMode(delivery);
+									setDelivery(next);
+									setDeliveryMode(next);
+								}}
+								aria-label={`${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}`}
+								className={cn(COMPOSER_CHIP, "shrink-0 gap-1 px-2", delivery !== "steer" && "text-accent")}
+							>
+									<span aria-hidden data-delivery-glyph>‹</span>
+									<span>{messageRuntime.t(deliveryLabelKey)}</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => setDeliveryOpen(true)}
+									aria-label={messageRuntime.t("relay.composer.delivery.label")}
+									className={cn(COMPOSER_CHIP, "shrink-0 px-1")}
+								>
+									<span aria-hidden>⋯</span>
+								</button>
+							</>
+					) : null}
 					{/* The model chip is the model sheet's only door, so it never
 					   yields, and it never shows a bare glyph either: a lone ◇ did not
 					   say "model" (design D10), the label's first characters (`Cl…`)
@@ -2203,6 +2317,12 @@ export function Composer({
 				onPick={onSlashPick}
 				onSpace={onSlashSpace}
 				query={slashQuery(text) ?? ""}
+			/>
+			<DeliverySheet
+				open={deliveryOpen}
+				onClose={() => setDeliveryOpen(false)}
+				value={delivery}
+				onChoose={(mode) => { setDelivery(mode); setDeliveryMode(mode); }}
 			/>
 			<UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} />
 			<EffortSheet

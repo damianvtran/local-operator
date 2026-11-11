@@ -3058,6 +3058,38 @@ def tools_search_interception_rg_excludes_label() -> Msg:
     return Msg("wire.settings.tools_search_interception_rg_excludes.label", {})
 
 
+def tui_busy_delivery_choice_both_description() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.choice.both.description", {})
+
+
+def tui_busy_delivery_choice_both_label() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.choice.both.label", {})
+
+
+def tui_busy_delivery_choice_queue_description() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.choice.queue.description", {})
+
+
+def tui_busy_delivery_choice_queue_label() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.choice.queue.label", {})
+
+
+def tui_busy_delivery_choice_steer_description() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.choice.steer.description", {})
+
+
+def tui_busy_delivery_choice_steer_label() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.choice.steer.label", {})
+
+
+def tui_busy_delivery_help() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.help", {})
+
+
+def tui_busy_delivery_label() -> Msg:
+    return Msg("wire.settings.tui_busy_delivery.label", {})
+
+
 def tui_sidebar_position_choice_left_description() -> Msg:
     return Msg("wire.settings.tui_sidebar_position.choice.left.description", {})
 

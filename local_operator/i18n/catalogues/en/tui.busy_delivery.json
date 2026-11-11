@@ -1,0 +1,4 @@
+{
+  "tui.busy_delivery.queue_notice": "queued — waits now, tools keep running",
+  "tui.busy_delivery.both_notice": "queued — waits now, tools keep running"
+}

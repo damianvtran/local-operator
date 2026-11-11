@@ -137,6 +137,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
+from local_operator.i18n.keys import tui_busy_delivery as _busy_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
@@ -248,6 +249,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.busy_delivery import busy_delivery_mode
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
     OperatorCommandProvider,
@@ -641,6 +643,10 @@ _t_sound = tr("tui.sound")
 #: The queued-ask surfaces' own namespace (R5). Read through the binding at every
 #: use site, never copied: a language move re-materialises the catalogue.
 _t_asks = tr("tui.asks")
+#: Busy-send delivery notices (steer/queue/both). Its own namespace so a
+#: translation of one mode cannot stale the others' passed rows; read through
+#: the binding at every use so a language move re-materialises it.
+_t_busy = tr("tui.busy_delivery")
 #: First-run setup cues (the composer placeholder and the no-provider cue). Read
 #: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
 #: the two module constants below on a live language move.
@@ -775,6 +781,28 @@ RESTORED_COST_PREFIX = LOWER_BOUND_MARK
 #: made the reader translate. All four now describe what the user observes.
 QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
 SENT_STEER_NOTICE = "sent — the agent has it now"
+#: The post-send receipts for the two non-urgent delivery modes (``queue``
+#: and ``both``). ONE string for both, because from the reader's side they are
+#: one fact while both wait: the tools are NOT interrupted. `both` differs
+#: only in what happens AFTER the wait runs long, and naming that would push
+#: the row past the height budget below (measured: the honest escalation
+#: wording wraps at widths where the classic notice does not, pulling every
+#: row under it up when the settle restates it).
+#:
+#: Height-matched to `QUEUED_STEER_NOTICE` at every width 20-90 (measured on
+#: a mounted `NoticeBlock` through `App.run_test`, the same protocol as the
+#: cross-turn height test): the swap from the classic notice to this one
+#: happens at submit time, before the user has scrolled, so a height change
+#: there would still be a visible jump in the transcript the user is
+#: watching. "queued" leads because the row's job is to say the message is
+#: waiting, so it must read as the same family as the notice it replaces
+#: rather than a different kind of row.
+QUEUED_WAIT_NOTICE = _t_busy(_busy_keys.queue_notice())
+#: Same height as `QUEUED_WAIT_NOTICE`, for the same reason: a `both` send
+#: that escalates settles through the same `SENT_STEER_NOTICE` on delivery,
+#: so the queue notice each mode starts with must occupy the same rows or
+#: the submit itself reflows the transcript.
+BOTH_WAIT_NOTICE = _t_busy(_busy_keys.both_notice())
 #: Printed under a ``/model`` switch made WHILE a turn is running, and only
 #: then. The request already streaming cannot be re-targeted, so for a few
 #: seconds the band names the new model while the old one is visibly still
@@ -4645,9 +4673,11 @@ def _reload_setup_cues() -> None:
     a language change has to re-materialise them; every use site reads the module
     global at call time and therefore sees the moved text.
     """
-    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE
+    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE, QUEUED_WAIT_NOTICE, BOTH_WAIT_NOTICE
     SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
     AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+    QUEUED_WAIT_NOTICE = _t_busy(_busy_keys.queue_notice())
+    BOTH_WAIT_NOTICE = _t_busy(_busy_keys.both_notice())
 
 
 register_refresh(_reload_setup_cues)
@@ -20876,6 +20906,56 @@ class OperatorApp(App[None]):
         except Exception:
             return {}
 
+    def _busy_delivery_mode(self) -> str:
+        """The configured busy-send delivery mode, ``steer`` when unset/unreadable.
+
+        Read at SUBMIT time rather than cached at boot, for the same reason
+        ``_config_values`` holds: a LIVE-scope edit must take effect on the very
+        next send in this session. The fallback lives in
+        :mod:`local_operator.tui.busy_delivery` beside the predicate, so a
+        hand-edited ``busy_delivery: "sometimes"`` reads as the default rather
+        than reaching the engine as an unknown value the wire would refuse.
+        """
+        return busy_delivery_mode(self._config_values())
+
+    def _busy_notice(self, mode: str) -> str:
+        """The post-send receipt for one busy-send delivery mode."""
+        if mode == "queue":
+            return QUEUED_WAIT_NOTICE
+        if mode == "both":
+            return BOTH_WAIT_NOTICE
+        return QUEUED_STEER_NOTICE
+
+    class _DeliverySteer(Protocol):
+        # The delivery-aware twin of SessionProtocol.steer_message. The protocol
+        # deliberately omits the kwarg (older handles keep the legacy shape),
+        # so the call below routes through this narrow cast after the probe.
+        def steer_message(self, message: Any, delivery: str | None = None) -> None: ...
+
+    @staticmethod
+    def _steer_takes_delivery(session: Any) -> bool:
+        """Whether ``session.steer_message`` takes the ``delivery`` keyword.
+
+        The literal-parameter probe the server's ``_takes_delivery`` applies at
+        the wire: a session that predates the keyword must keep the legacy call
+        shape, so a `queue`/`both` preference can never throw a TypeError on
+        an old handle. An unreadable signature answers False (the conservative
+        side).
+        """
+        try:
+            parameters = inspect.signature(session.steer_message).parameters
+        except (TypeError, ValueError):
+            return False
+        return "delivery" in parameters
+
+    @classmethod
+    def _steer_message_with_delivery(cls, session: Any, message: Any, mode: str) -> None:
+        # Reached only when _steer_takes_delivery is true, so this cast is
+        # checked at runtime by the probe — SessionProtocol omits the kwarg
+        # so old doubles stay valid, hence the cast rather than the protocol.
+        steer = cast("OperatorApp._DeliverySteer", session)
+        steer.steer_message(message, delivery=mode)
+
     def session_cwd(self) -> str:
         """The session's working directory, falling back to the process's.
 
@@ -35460,7 +35540,14 @@ class OperatorApp(App[None]):
             # took back (`_recall_queued_steers`), so the app and the queue
             # must share one Message rather than each building their own.
             steer_message = Message.user(sent, images)
-            session.steer_message(steer_message)
+            # The delivery mode: only `queue`/`both` ride the keyword, and only
+            # when this session's handle takes it. `steer` keeps the legacy call
+            # shape so a pre-feature session sees byte-identical calls.
+            mode = self._busy_delivery_mode()
+            if mode != "steer" and OperatorApp._steer_takes_delivery(session):
+                OperatorApp._steer_message_with_delivery(session, steer_message, mode)
+            else:
+                session.steer_message(steer_message)
             # "boundary" is engine vocabulary the UI never defines, and this is
             # the line answering "did my text just get thrown away?" — so it says
             # when it will be sent, in the tense it will be sent in, at the
@@ -35479,7 +35566,7 @@ class OperatorApp(App[None]):
             # runs, and the engine delivers whatever has accumulated at the next
             # boundary — all of them, together. Settling only the newest would
             # leave the earlier rows lying.
-            queued = NoticeBlock(QUEUED_STEER_NOTICE, "note")
+            queued = NoticeBlock(self._busy_notice(mode), "note")
             self._append_block(queued)
             self._queued_steer_notices.append(queued)
             # The session will announce this steer as a user MessageStartEvent

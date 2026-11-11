@@ -3235,6 +3235,34 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.tui_sidebar_show_subagents_choice_false_description()),
         ),
     ),
+    Setting(
+        key="tui.busy_delivery",
+        path=("tui", "busy_delivery"),
+        section="appearance",
+        # LIVE: read at submit time (``_busy_delivery_mode``), so a /settings
+        # write changes the next send in this session with no relaunch.
+        label=_t(_ws.tui_busy_delivery_label()),
+        kind=Kind.ENUM,
+        default="steer",
+        help=_t(_ws.tui_busy_delivery_help()),
+        choices=(
+            Choice(
+                "steer",
+                _t(_ws.tui_busy_delivery_choice_steer_label()),
+                _t(_ws.tui_busy_delivery_choice_steer_description()),
+            ),
+            Choice(
+                "queue",
+                _t(_ws.tui_busy_delivery_choice_queue_label()),
+                _t(_ws.tui_busy_delivery_choice_queue_description()),
+            ),
+            Choice(
+                "both",
+                _t(_ws.tui_busy_delivery_choice_both_label()),
+                _t(_ws.tui_busy_delivery_choice_both_description()),
+            ),
+        ),
+    ),
     # -- hotkeys ------------------------------------------------------------
     # DERIVED from `keymap.KEY_ACTIONS` rather than spelled out, because the
     # id is simultaneously this key, the `Binding` id in `OperatorApp.BINDINGS`

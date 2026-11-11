@@ -32,3 +32,19 @@ def action_stop_agent() -> Msg:
 
 def action_stopping() -> Msg:
     return Msg("relay.composer.action.stopping", {})
+
+
+def delivery_both() -> Msg:
+    return Msg("relay.composer.delivery.both", {})
+
+
+def delivery_label() -> Msg:
+    return Msg("relay.composer.delivery.label", {})
+
+
+def delivery_queue() -> Msg:
+    return Msg("relay.composer.delivery.queue", {})
+
+
+def delivery_steer() -> Msg:
+    return Msg("relay.composer.delivery.steer", {})

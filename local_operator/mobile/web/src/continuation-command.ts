@@ -1,5 +1,5 @@
 import { sendCommand } from "./api";
-import type { InputMode, PromptImage, SkillExpansionReceipt } from "./types";
+import type { DeliveryMode, InputMode, PromptImage, SkillExpansionReceipt } from "./types";
 
 /*
  * ============================================================================
@@ -57,6 +57,11 @@ export interface ContinuationEnvelope {
 	    whatever the composer holds at retry time. Absent = the legacy reading. */
 	input_mode?: InputMode;
 	input_path?: string;
+	/** The busy-send delivery mode (busy-delivery-v1). Part of the envelope's
+	    identity like `input_mode`: a retry of a queued send must replay as
+	    queued, never as an urgent steer the composer now holds. Absent or
+	    `steer` is the legacy urgent reading. */
+	delivery?: DeliveryMode;
 	/** Ask the server to expand `$skill` references in `text` before delivery
 	    (SKILL invocation). Present only when the body that was accepted carried
 	    `$` and the session's capability said the backend understands it. Like
@@ -144,7 +149,15 @@ function validEnvelope(value: Partial<ContinuationEnvelope>): value is Continuat
 				value.input_path.length <= MAX_COMMAND_INPUT_PATH_CHARS)) &&
 		/* Absent is the legacy reading (a draft typed before this field existed),
 		   so an older stored envelope upgrades in place instead of being retired. */
-		(value.expand_skills === undefined || typeof value.expand_skills === "boolean")
+		(value.expand_skills === undefined || typeof value.expand_skills === "boolean") &&
+		/* The busy-send delivery mode (busy-delivery-v1): absent is the legacy
+		   urgent steer; a present value must be the wire vocabulary, never
+		   coerced — a mangled mode retires the envelope rather than riding to
+		   a queued steer the sender never wrote. */
+		(value.delivery === undefined ||
+			value.delivery === "steer" ||
+			value.delivery === "queue" ||
+			value.delivery === "both")
 	);
 }
 
@@ -244,6 +257,12 @@ function storedEnvelope(key: string): ContinuationEnvelope | null {
 export interface SendAnnotation {
 	input_mode: InputMode;
 	input_path?: string;
+	/** The busy-send delivery mode this fresh send carries. Only `queue`/`both`
+	    ever appear here (and only when the relay advertised the feature);
+	    `steer` is omitted so the fresh envelope stays byte-identical to a
+	    legacy one. Part of the envelope's identity: a retry replays the pinned
+	    mode, never the composer's current preference. */
+	delivery?: DeliveryMode;
 }
 
 /** Retain the exact producer envelope until acknowledgement. The UUID is the

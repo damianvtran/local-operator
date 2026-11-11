@@ -247,6 +247,10 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.action.stop": "stop",
       "relay.composer.action.stop_agent": "stop the agent",
       "relay.composer.action.stopping": "stopping",
+      "relay.composer.delivery.both": "both",
+      "relay.composer.delivery.label": "delivery",
+      "relay.composer.delivery.queue": "queue",
+      "relay.composer.delivery.steer": "steer",
     },
   },
   "relay.health": {
@@ -535,11 +539,4 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
  * rather than mixing two languages under one page tag. */
 export const BUNDLED_CHUNKS: Readonly<Record<string, () => Promise<
  { readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>> = {
-  "es": () => import("./bundled.es.gen"),
-  "fr": () => import("./bundled.fr.gen"),
-  "hi": () => import("./bundled.hi.gen"),
-  "ru": () => import("./bundled.ru.gen"),
-  "ur": () => import("./bundled.ur.gen"),
-  "vi": () => import("./bundled.vi.gen"),
-  "zh-CN": () => import("./bundled.zh-CN.gen"),
 };
