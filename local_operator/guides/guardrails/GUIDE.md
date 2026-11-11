@@ -79,6 +79,12 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `rm -rf .worktrees/<name>`. A worktree this session created is its own:
   through the ledger it ranks LOW even dirty or with `--force`, so commit or
   push what you want to keep before removing your own tree.
+
+  Before you `ask` to remove a worktree, preview `git worktree remove <exact path>`
+  with `preview_tool_call` and quote its worktree facts verbatim in the ask: branch,
+  open PR/MR state, the newest PR/MR with its state and date (merged, closed
+  unmerged, or none found), and whether an owning session is running. The newest
+  PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
   own prefix. Before it runs, the checkpoint extracts real tool calls: this
   session's from the harness's memory, its descendants' (found by `origin.json`
