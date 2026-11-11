@@ -774,6 +774,12 @@ export type MessageParams = {
   "wire.memory.sync.help": undefined;
   "wire.memory.sync.label": undefined;
   "wire.memory.title": undefined;
+  "wire.music.cancel_requested": { "job": string };
+  "wire.music.failed": { "error": string };
+  "wire.music.label": undefined;
+  "wire.music.progress": { "completed": string; "total": string };
+  "wire.music.ready": { "job": string };
+  "wire.music.started": { "job": string };
   "wire.notification_sound.cli.add.help": undefined;
   "wire.notification_sound.cli.add.keep_loudness.help": undefined;
   "wire.notification_sound.cli.add.name.help": undefined;

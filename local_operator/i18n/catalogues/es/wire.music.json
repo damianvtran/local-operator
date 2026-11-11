@@ -1,0 +1,8 @@
+{
+  "wire.music.label": "Música",
+  "wire.music.started": "Generación de música iniciada — trabajo {job}.",
+  "wire.music.progress": "Música: {completed}/{total} pistas finalizadas.",
+  "wire.music.ready": "Música lista — trabajo {job}.",
+  "wire.music.failed": "Error al generar música: {error}",
+  "wire.music.cancel_requested": "Se solicitó cancelar {job}. La generación en curso aún puede completarse y cobrarse; los resultados seguirán disponibles."
+}
