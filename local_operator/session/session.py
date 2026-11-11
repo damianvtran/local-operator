@@ -25852,11 +25852,52 @@ class Session:
         idle_flush_ms = int(getattr(compaction_api, "IDLE_FLUSH_MS", 5_400_000))
         if int(time.time() * 1000) - last_ms < idle_flush_ms:
             return
+        # The same cold-cache proof licenses shrinking the tools array: this
+        # run's first request re-writes the prefix anyway.
+        self._demote_cold_mcp_tools()
         try:
             llm_history = self._render_for_compaction()
             await self._sweep_stale_outputs(compaction_api, settings, llm_history)
         except Exception:  # noqa: BLE001 — an optimisation must never fail a run
             logger.debug("pre-run idle sweep failed", exc_info=True)
+
+    def _demote_cold_mcp_tools(self) -> bool:
+        """Run the MCP wiring's idle-schema demotion at a cache-cold boundary.
+
+        Called from exactly two places, the only moments a tools-array change
+        costs (close to) nothing: the idle flush in :meth:`_sweep_before_run`
+        (a gap of ``IDLE_FLUSH_MS`` has expired the provider cache) and a
+        compaction COMMIT in :meth:`_finish_compaction` (the history behind the
+        prefix is being rewritten, so the next request is a cache write of the
+        conversation anyway; the tools+system head is the small part of it).
+        Anywhere else a removal is a ``tools_changed`` miss on a warm cache.
+
+        THE SHRINK MUST LAND ON THAT SAME REQUEST. The array is latched once per
+        turn (:meth:`_wire_tools`); a compaction can commit mid-turn, and with
+        the latch held the smaller array would reach the provider only at the
+        NEXT turn — by which point the compacted history is warm again, so the
+        change would cost a second full miss. Clearing the latch here, and only
+        when the demotion actually moved something, makes the post-boundary
+        request publish the shrunk array together with its already-cold
+        rewrite. That is the one narrowly scoped exception to "publish once per
+        turn"; nothing else clears the latch mid-turn.
+
+        ``_mcp_cold_boundary_prune`` is installed by
+        ``session_factory.wire_mcp_into_session``; a session with no MCP wiring
+        (or a subagent, which borrows rather than owns the manager) has none.
+        Best-effort: bookkeeping must never fail a run or a compaction.
+        """
+        prune = getattr(self, "_mcp_cold_boundary_prune", None)
+        if prune is None:
+            return False
+        try:
+            changed = bool(prune())
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("MCP cold-boundary demotion failed", exc_info=True)
+            return False
+        if changed:
+            self._published_tools = None
+        return changed
 
     async def _plan_compaction(
         self, *, respect_threshold: bool
@@ -27056,6 +27097,9 @@ class Session:
             # receipt's own units (see where it is computed above), then the
             # whole figure bounded by what it is reporting a reduction FROM.
             tokens_after = min(plan.context_tokens, tokens_after + frame_correction)
+            # The commit has landed: the next request re-writes the history, so
+            # idle published MCP schemas leave the tools array on THAT request.
+            self._demote_cold_mcp_tools()
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
