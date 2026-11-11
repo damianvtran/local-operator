@@ -10223,6 +10223,21 @@ class Session:
                     wake_message.details["text"] = (
                         f"{wake_message.details['text']}\n\n{_PARKED_WAKE_FOLD_NOTE}"
                     )
+                # The receipt at delivery (QA Q5): the fold is the common path
+                # and was silent — the wake shaped the answer but the live
+                # transcript showed nothing until a later replay. Emitting here
+                # puts the line under the operator's echo and before the answer,
+                # so the answer stays last.
+                for wake_message in parked:
+                    if not wake_message.details.get("hidden"):
+                        await self._emit(
+                            WakeDeliveredEvent(
+                                text=str(wake_message.details["text"]),
+                                catchup=False,
+                                wake_id=str(wake_message.details.get("wake_id", "")),
+                                occurrence=int(wake_message.details.get("occurrence", 0) or 0),
+                            )
+                        )
                 initial = [*initial[:-1], *parked, *initial[-1:]]
             await self._run_turn_pipeline(
                 initial,
