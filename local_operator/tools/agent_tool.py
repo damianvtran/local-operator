@@ -105,6 +105,7 @@ from local_operator.harness.types import (
 )
 from local_operator.hub_sync.definition import DefinitionRevisionMismatch
 from local_operator.profile_scope import Scope
+from local_operator.profile_text_edits import TextEdit
 from local_operator.projects import truncate_row
 from local_operator.tools.builtin import (
     INHERIT_EFFORT,
@@ -196,6 +197,18 @@ class AgentParams(BaseModel):
         default=None,
         description="create/update: pin Radient Saver for this role; inherit clears it.",
     )
+    edits: list[TextEdit] | None = Field(
+        default=None,
+        description="update: patch/append long text losslessly.",
+    )
+    base_revision: str | None = Field(
+        default=None,
+        description="update: show's revision (CAS).",
+    )
+    replace: bool = Field(
+        default=False,
+        description="update: confirm a rewrite dropping lines.",
+    )
 
     @field_validator("effort", mode="before")
     @classmethod
@@ -282,7 +295,7 @@ class AgentParams(BaseModel):
         default=None,
         description=(
             "Default: this conversation if it has a store, else the account. "
-            "'global': the account, needs confirmation."
+            "'global': the account."
         ),
     )
     # ``as`` is a Python keyword, so the field carrying the design's ``[as=Y]`` is
@@ -745,14 +758,16 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             body = (
                 f"{identifier_text(context, specialist.name)} — registered specialist\n"
                 f"scope: {scope_words(row_scope(registry, specialist))}\n"
+                f"revision: {_agent_revision(registry, specialist)}\n"
                 f"when to use: {specialist.description or '(unstated)'}\n"
                 "tools: full inventory\n\n"
                 f"instructions:\n{instructions}\n\n"
                 f"launch with --agent {identifier_text(context, specialist.name)}, "
                 "or add it to a team roster."
             )
-            text, spill = spill_truncate(body, "agent", context)
-            return _text(tool_call_id, "agent", text, details=spill or None)
+            # Lossless authoring read (``profile_text_edits``); bounded by
+            # ``MAX_INSTRUCTIONS_CHARS`` on write.
+            return _text(tool_call_id, "agent", body, details={"complete": True})
     if profile is None:
         return _error(
             tool_call_id,
@@ -770,6 +785,8 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         try:
             row = registry.get_agent(profile.agent_id)
             scope_line = f"scope: {scope_words(row_scope(registry, row))}\n"
+            # The CAS token an intentional rewrite echoes (``profile_text_edits``).
+            scope_line += f"revision: {_agent_revision(registry, row)}\n"
         except Exception:  # noqa: BLE001 — the scope line is enrichment only
             scope_line = ""
     # Identifier fields: the role name and label head the body; both are
@@ -846,8 +863,50 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             "to apply the packaged values yourself"
         )
     body += "."
-    text, spill = spill_truncate(body, "agent", context)
-    return _text(tool_call_id, "agent", text, details=spill or None)
+    # LOSSLESS, never the generic head+tail preview: ``show`` is the read an
+    # ``update`` is written from, and a clipped middle read back as the whole
+    # text silently deletes it (``profile_text_edits``). Instructions are capped
+    # at ``MAX_INSTRUCTIONS_CHARS`` on write, which bounds this output.
+    return _text(tool_call_id, "agent", body, details={"complete": True})
+
+
+def _agent_revision(registry: Any, row: Any) -> str:
+    """The row's definition revision -- the same value ``_plan_account_save``
+    binds an account save to, so show/CAS/consent agree on one token."""
+    from local_operator.hub_sync.definition import definition_revision
+
+    fields = dict(registry.definition_revision_fields(str(row.id)))
+    fields["saver"] = profile_from_agent(registry, row).saver
+    return definition_revision("agent", str(row.id), fields)
+
+
+def _resolve_text_edits(registry: Any, existing: Any, params: AgentParams) -> AgentParams | str:
+    """Apply ``edits``/``base_revision``/``replace`` (``profile_text_edits``).
+
+    Returns ``params`` with ``instructions`` set to the resolved WHOLE value, so
+    the plan, proposal, backup and receipt all describe one before/after pair;
+    or the refusal sentence. Runs for every tool update, either store.
+    """
+    from local_operator.profile_text_edits import resolve_text_fields
+
+    try:
+        # The same source ``_plan_account_save`` diffs against.
+        fields = registry.definition_revision_fields(str(existing.id))
+        stored = str(fields.get("instructions") or "")
+        current = _agent_revision(registry, existing)
+    except Exception as error:  # noqa: BLE001 — an unreadable row is a refusal
+        return f"could not read {existing.name!r}: {error}"
+    resolved = resolve_text_fields(
+        {"instructions": stored},
+        whole={"instructions": params.instructions},
+        edits=params.edits,
+        base_revision=params.base_revision,
+        current_revision=current,
+        replace=params.replace,
+    )
+    if isinstance(resolved, str):
+        return resolved
+    return params.model_copy(update={**resolved, "edits": None})
 
 
 async def _ranked_names(index: Any, query: str) -> tuple[list[str], float]:
@@ -2130,22 +2189,23 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
         base_revision = definition_revision("agent", str(existing.id), before)
     changes = tuple(field for field, _key in _SAVE_FIELDS if getattr(params, field) is not None)
     lines: list[str] = []
+    instruction_section = ""
     for field, key in _SAVE_FIELDS:
         new = getattr(params, field)
         if new is None:
             continue
         if field == "instructions":
-            rendered, is_diff = _instruction_diff(
-                str(before.get("instructions") or ""),
-                str(new or ""),
-                fromfile="before",
-                tofile="after",
+            from local_operator.profile_text_edits import stats_heading
+
+            old_text = str(before.get("instructions") or "")
+            rendered, _is_diff = _instruction_diff(
+                old_text, str(new or ""), fromfile="before", tofile="after"
             )
-            # ``_instruction_diff`` falls back to the whole body when a diff
-            # would not be shorter; say so, or a reader cannot tell a full new
-            # text from a two-line diff.
-            heading = "instructions" if is_diff else "instructions (replaced; new text)"
-            lines.append(f"{heading}:\n{rendered}")
+            # Canonical whole-field counts in the heading, and the section is
+            # appended LAST (below) so ``profile_diff_summary`` never counts
+            # the body's own ``-`` bullets as removed lines.
+            instruction_section = f"{stats_heading('instructions', old_text, str(new or ''))}:\n"
+            instruction_section += rendered
             continue
         old = before.get(key) if key is not None else None
         # THE POLICY FIELDS ARE NAMED EXPLICITLY (operator requirement): a
@@ -2157,6 +2217,8 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
             "action_class": "class",
         }.get(field, field)
         lines.append(f"{label}: {_format_field(old)} -> {_format_field(new)}")
+    if instruction_section:
+        lines.append(instruction_section)
     return _AccountSave(
         agent_id=agent_id,
         changes=changes,
@@ -2376,22 +2438,24 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         key for key, _ in _SAVE_FIELDS if key in before and before[key] != fields.get(key)
     )
     from local_operator.profile_scope import profile_field_label
+    from local_operator.profile_text_edits import stats_heading
 
     summary_lines: list[str] = []
+    instruction_section = ""
     for key in changes:
         if key == "instructions":
-            rendered, _ = _instruction_diff(
-                str(fields.get(key) or ""),
-                str(before.get(key) or ""),
-                fromfile="before",
-                tofile="after",
-            )
-            summary_lines.append(f"instructions:\n{rendered}")
+            old_text, new_text = str(fields.get(key) or ""), str(before.get(key) or "")
+            rendered, _ = _instruction_diff(old_text, new_text, fromfile="before", tofile="after")
+            # Canonical counts, section last (see ``profile_diff_summary``).
+            instruction_section = f"{stats_heading('instructions', old_text, new_text)}:\n"
+            instruction_section += rendered
         else:
             summary_lines.append(
                 f"{profile_field_label(key)}: {_format_field(fields.get(key))} -> "
                 f"{_format_field(before.get(key))}"
             )
+    if instruction_section:
+        summary_lines.append(instruction_section)
     from local_operator.profile_approval import AgentImage
 
     before_image = {
@@ -2860,6 +2924,18 @@ async def _op_write(
                 ),
             )
     target = row_scope(registry, existing) if existing is not None else scope
+    if not creating and existing is not None and (is_role(existing) or is_specialist(existing)):
+        resolved = _resolve_text_edits(registry, existing, params)
+        if isinstance(resolved, str):
+            return _error(tool_call_id, "agent", resolved)
+        params = resolved
+    elif existing is None and (params.edits or params.base_revision or params.replace):
+        # A non-role row falls through: ``write_profile`` names it ("not a role").
+        return _error(
+            tool_call_id,
+            "agent",
+            "edits/base_revision/replace apply to op='update' of an existing role or specialist.",
+        )
     # A row that is not a role/specialist is refused by ``write_profile`` with its
     # own specific sentence ("... is not a role"); asking for durable consent
     # first would replace that answer with a scope question the caller did not ask

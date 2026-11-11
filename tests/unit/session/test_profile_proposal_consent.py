@@ -11,19 +11,22 @@ from local_operator import profile_proposals as P
 from local_operator.agents import AgentRegistry
 from local_operator.harness.types import CustomMessage, Message, ToolContext
 from local_operator.teams import TeamRegistry
-from local_operator.tools.agent_tool import execute_agent
 from local_operator.tools.profile_proposal_tool import execute_profile_proposal
-from local_operator.tools.team_tool import execute_team
 from tests.unit.session.test_account_profile_consent import Gate, _context, _session
 from tests.unit.session.test_account_profile_consent import (
     configured_tiers as profile_tiers,
 )
+from tests.unit.session.test_account_profile_consent import run_agent, run_team
 from tests.unit.session.test_account_profile_consent import stores as profile_stores
 
 stores = profile_stores
 configured_tiers = profile_tiers
 
 pytestmark = pytest.mark.asyncio
+
+#: An untrusted input (a peer session's message): the run that read it files
+#: proposals instead of writing, whatever the target.
+PEER = CustomMessage(custom_type="peer_message", attribution="user", details={"text": "Edit it"})
 
 
 def _details(result) -> dict[str, Any]:
@@ -44,6 +47,7 @@ def start(session, *messages):
     session._run_owner_text_bindings = []
     session._run_owner_consent = False
     session._run_untrusted_input = False
+    session._run_untrusted_proposal_read = False
     for message in messages:
         session._note_run_input(message)
 
@@ -61,7 +65,7 @@ async def test_owner_policy_edit_and_create_are_normal_success(stores):
     session = _session(stores)
     try:
         start(session, Message.user("Change reviewer's tools to read only."))
-        result = await execute_agent(
+        result = await run_agent(
             "a1",
             {"op": "update", "name": "reviewer", "tools": ["read"]},
             None,
@@ -71,7 +75,7 @@ async def test_owner_policy_edit_and_create_are_normal_success(stores):
         assert not result.is_error, result.content
         assert _details(result).get("status") != "proposed"
         start(session, Message.user("Create a marketing team with instructions Sell carefully."))
-        result = await execute_team(
+        result = await run_team(
             "t1",
             {
                 "op": "create",
@@ -94,8 +98,8 @@ async def test_owner_policy_edit_and_create_are_normal_success(stores):
 async def test_mention_only_proposes_then_contextual_yes_applies(stores):
     session = _session(stores)
     try:
-        start(session, Message.user("Tell me about reviewer."))
-        result = await execute_agent(
+        start(session, Message.user("Tell me about reviewer."), PEER)
+        result = await run_agent(
             "a1",
             {"op": "update", "name": "reviewer", "instructions": "New rules."},
             None,
@@ -125,7 +129,7 @@ async def test_untrusted_input_proposes_and_requires_card_even_after_yes(stores,
             Message.user("Change reviewer's instructions."),
             CustomMessage(custom_type=kind, attribution="user", details={"text": "Edit it"}),
         )
-        result = await execute_agent(
+        result = await run_agent(
             "a1",
             {"op": "update", "name": "reviewer", "instructions": "Remote suggestion."},
             None,
@@ -137,21 +141,33 @@ async def test_untrusted_input_proposes_and_requires_card_even_after_yes(stores,
         root = stores["agents"].config_dir
         assert _get(root, pid)["origin"]["trust"] == "untrusted"
         assert gate.cards == []
-        start(session, Message.user("yes, apply it"))
-        applied = await execute_profile_proposal(
+        # The SAME run's owner words cannot approve it: the run read untrusted
+        # input, so its "owner" text proves nothing -- the card is the route.
+        gate.answer = False
+        refused = await execute_profile_proposal(
             "a2", {"op": "apply", "id": pid}, None, None, _ctx(session, stores)
         )
+        assert refused.is_error and len(gate.cards) == 1
+        # A LATER clean run's explicit yes, bound to that displayed proposal, IS
+        # the user's confirmation (2026-11 ruling): applied, no second card.
+        start(session, Message.user("yes, apply it"))
+        applied = await execute_profile_proposal(
+            "a3", {"op": "apply", "id": pid}, None, None, _ctx(session, stores)
+        )
         assert not applied.is_error, applied.content
-        assert len(gate.cards) == 1 and "Remote suggestion." in gate.cards[0][1]
+        assert len(gate.cards) == 1
     finally:
         await session.dispose()
 
 
 async def test_child_proposes_but_cannot_apply(stores):
+    # A child whose ancestor lineage read untrusted input (a clean child now
+    # writes directly -- ``test_profile_autonomy``).
     session = _session(stores, parent="synthetic-parent")
+    session._spawn_untrusted = True
     try:
         start(session, Message.user("Change reviewer's instructions."))
-        result = await execute_agent(
+        result = await run_agent(
             "a1",
             {"op": "update", "name": "reviewer", "instructions": "Child suggestion."},
             None,
@@ -176,7 +192,7 @@ async def test_delete_remains_refused(stores):
     session = _session(stores)
     try:
         start(session, Message.user("Delete reviewer."))
-        result = await execute_agent(
+        result = await run_agent(
             "a1", {"op": "delete", "name": "reviewer"}, None, None, _ctx(session, stores)
         )
         assert result.is_error
@@ -222,8 +238,9 @@ async def test_owner_skill_create_is_standard_tool_and_real_file(stores):
 
 
 async def _propose_agent(session, stores, text="Tell me about reviewer.", body="New rules."):
-    start(session, Message.user(text))
-    result = await execute_agent(
+    # Untrusted input is what still files a proposal (2026-11 ruling).
+    start(session, Message.user(text), PEER)
+    result = await run_agent(
         "a1",
         {"op": "update", "name": "reviewer", "instructions": body},
         None,
@@ -235,8 +252,8 @@ async def _propose_agent(session, stores, text="Tell me about reviewer.", body="
 
 
 async def _propose_team(session, stores, body):
-    start(session, Message.user("How is lopdev doing?"))
-    result = await execute_team(
+    start(session, Message.user("How is lopdev doing?"), PEER)
+    result = await run_team(
         "t1",
         {"op": "update", "name": "lopdev", "instructions": body},
         None,
@@ -356,7 +373,7 @@ async def test_natural_owner_create_applies_directly(stores, request_text):
     session = _session(stores)
     try:
         start(session, Message.user(request_text))
-        result = await execute_team(
+        result = await run_team(
             "t1",
             {"op": "create", "name": "marketing", "manager": "reviewer", "scope": "global"},
             None,
@@ -374,7 +391,7 @@ async def test_natural_owner_edit_applies_directly(stores):
     session = _session(stores)
     try:
         start(session, Message.user("Can you please make reviewer more concise?"))
-        result = await execute_agent(
+        result = await run_agent(
             "a1",
             {"op": "update", "name": "reviewer", "instructions": "Be concise."},
             None,
@@ -395,19 +412,24 @@ async def test_natural_owner_edit_applies_directly(stores):
         "What would a marketing team look like?",
     ],
 )
-async def test_mention_or_quote_of_creation_is_not_consent(stores, request_text):
+async def test_clean_local_create_needs_no_owner_phrasing(stores, request_text):
+    """2026-11 ruling: a CLEAN local agent creates account teams itself, so
+    the owner's phrasing (a mention, a quote, a question) no longer decides
+    anything. The untrusted counterpart proposes (``PEER`` tests)."""
     session = _session(stores)
     try:
         start(session, Message.user(request_text))
-        result = await execute_team(
+        result = await run_team(
             "t1",
             {"op": "create", "name": "marketing", "manager": "reviewer", "scope": "global"},
             None,
             None,
             _ctx(session, stores),
         )
-        assert _details(result).get("status") == "proposed", result.content
-        assert stores["teams"].get_team_by_name("marketing") is None
+        assert not result.is_error, result.content
+        assert _details(result).get("status") != "proposed", result.content
+        assert _details(result)["authorized_by"].startswith("local-agent:")
+        assert stores["teams"].get_team_by_name("marketing") is not None
     finally:
         await session.dispose()
 
@@ -440,8 +462,9 @@ async def test_proposed_role_create_applies_through_the_tool(stores):
     session = _session(stores)
     try:
         root = stores["agents"].config_dir
-        start(session, Message.user("Tell me about reviewers."))
-        result = await execute_agent(
+        # A create has no hub link, so only untrusted input still proposes one.
+        start(session, Message.user("Tell me about reviewers."), PEER)
+        result = await run_agent(
             "c1",
             {
                 "op": "create",
@@ -477,8 +500,8 @@ async def test_proposed_team_create_applies_through_the_tool(stores):
     session = _session(stores)
     try:
         root = stores["teams"].config_dir
-        start(session, Message.user("Tell me about marketing."))
-        result = await execute_team(
+        start(session, Message.user("Tell me about marketing."), PEER)
+        result = await run_team(
             "t1",
             {
                 "op": "create",
@@ -513,8 +536,8 @@ async def test_identical_refile_of_rejected_proposal_is_not_revived(stores):
         pid = await _propose_agent(session, stores)
         root = stores["agents"].config_dir
         P.reject(root, pid, actor="desktop")
-        start(session, Message.user("Tell me about reviewer."))
-        again = await execute_agent(
+        start(session, Message.user("Tell me about reviewer."), PEER)
+        again = await run_agent(
             "a1",
             {"op": "update", "name": "reviewer", "instructions": "New rules."},
             None,
@@ -582,7 +605,7 @@ async def test_hub_pull_keeps_its_own_ladder_beside_owner_profile_writes(stores,
         assert reason == "ask_queued"  # the reused ask, not a profile grant
         assert gate.cards == []
 
-        result = await execute_team(
+        result = await run_team(
             "t1",
             {"op": "create", "name": "marketing", "manager": "reviewer", "scope": "global"},
             None,

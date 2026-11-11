@@ -311,7 +311,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # backup_id) shortened to win back the start-context budget the deferred
     # ``skill``/``profile_proposal`` inventory entries cost; the full
     # action_class/kind rationale stays in this tool's notes. Same printed table.
-    "agent": 1471,
+    # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1471 -> 1562
+    # (+91). The ``edits``/``base_revision``/``replace`` params (and the shared
+    # ``TextEdit`` item) plus the notes line on clean-local autonomy and
+    # lossless editing; the scope paragraph's confirmation clauses were cut to
+    # pay part of it. ``team`` gains the same params/notes (1500 -> 1574).
+    "agent": 1562,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -790,7 +795,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # per-slot ``saver`` member field; the same printed table as ``agent``.
     # RE-MEASURED (profile proposals, PR #3704): 1464 -> 1500 (+36), the same
     # Agents-proposal notes line as ``agent``.
-    "team": 1500,
+    # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1500 -> 1574
+    # (+74), the same params and notes line as ``agent``.
+    "team": 1574,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -845,7 +852,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
 #: -27 field-description trim as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1500, "task": 764}
+#: RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): agent
+#: 1500 -> 1591, the same +91 params/notes as the canonical arm; ``task`` 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1591, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

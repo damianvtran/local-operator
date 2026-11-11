@@ -42,6 +42,7 @@ from local_operator.profile_scope import (
     team_revision,
     update_profile_backup,
 )
+from local_operator.profile_text_edits import TextEdit
 from local_operator.projects import truncate_row
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
@@ -167,11 +168,23 @@ class TeamParams(BaseModel):
             "team name or another team's alias."
         ),
     )
+    edits: list[TextEdit] | None = Field(
+        default=None,
+        description="update: patch/append long text losslessly.",
+    )
+    base_revision: str | None = Field(
+        default=None,
+        description="update: show's revision (CAS).",
+    )
+    replace: bool = Field(
+        default=False,
+        description="update: confirm a rewrite dropping lines.",
+    )
     scope: Literal["global", "session"] | None = Field(
         default=None,
         description=(
             "Default: this conversation if it has a store, else the account. "
-            "'global': the account, needs confirmation."
+            "'global': the account."
         ),
     )
     # ``as`` is a Python keyword, so the design's ``[as=Y]`` is ``as_name`` here
@@ -413,6 +426,11 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     if registry is None:
         return _error(tool_call_id, "team", "no team registry attached to this session.")
     try:
+        # Disk, not the interval cache: the revision printed below is the CAS
+        # token an update echoes, and a cached row would print a stale one.
+        refresh = getattr(registry, "refresh", None)
+        if callable(refresh):
+            refresh()
         team = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
@@ -431,6 +449,9 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         f"{identifier_text(context, display_form(team.name, team.label))}. "
         f"Led by {identifier_text(context, team.manager)}",
         f"scope: {scope_words(row_scope(registry, team))}",
+        # The CAS token an intentional whole-field shortening must echo back
+        # (``profile_text_edits``): printed only here, beside the full text.
+        f"revision: {team_revision(team)}",
         f"description: {team.description or '(unstated)'}",
     ]
     if team.aliases:
@@ -452,8 +473,12 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     else:
         body += "\n\nproject: (none)"
     body += f"\n\nlaunch with /team {identifier_text(context, team.name)} <request>."
-    text, spill = spill_truncate(body, "team", context)
-    return _text(tool_call_id, "team", text, details=spill or None)
+    # LOSSLESS, never the generic head+tail preview: this is the authoring read
+    # an update is written from, and a clipped middle read back as the whole
+    # brief is how a 12.5k-char brief lost ~6k chars to one append (see
+    # ``profile_text_edits``). Both brief fields are already capped at
+    # ``MAX_TEAM_INSTRUCTIONS_CHARS`` on write, which bounds this output.
+    return _text(tool_call_id, "team", body, details={"complete": True})
 
 
 def _bounded_field(value: str | None, label: str) -> str | None:
@@ -569,6 +594,18 @@ async def _op_write(
 
         if not model_may_choose_tier():
             return _error(tool_call_id, "team", _overrides_refusal())
+    if existing is not None:
+        # Lossless-edit rules (``profile_text_edits``) run on EVERY tool update,
+        # either store, before the consent decision: the proposal, the backup
+        # and the receipt must all describe the resolved whole-field values.
+        resolved = _resolve_text_edits(existing, params)
+        if isinstance(resolved, str):
+            return _error(tool_call_id, "team", resolved)
+        params = resolved
+    elif params.edits or params.base_revision or params.replace:
+        return _error(
+            tool_call_id, "team", "edits/base_revision apply to op='update' of an existing team."
+        )
     try:
         members = parse_members(params.members) if params.members is not None else None
         if members is not None:
@@ -653,8 +690,12 @@ async def _op_write(
             team = registry.update_team(
                 existing.id,
                 fields,
+                # The caller's own ``base_revision`` (a lossless-edit CAS) binds
+                # under the writer lock too, not just at the pre-check above.
                 precondition=(
-                    _revision_precondition(base_revision) if base_revision is not None else None
+                    _revision_precondition(base_revision or params.base_revision)
+                    if (base_revision or params.base_revision) is not None
+                    else None
                 ),
             )
             verb = "updated"
@@ -774,23 +815,49 @@ def _team_changes(existing: Any, params: TeamParams) -> tuple[tuple[str, ...], s
     changes = tuple(
         field for field in _TEAM_SAVE_FIELDS if getattr(params, field, None) is not None
     )
+    from local_operator.profile_text_edits import stats_heading
+
     lines: list[str] = []
+    # Long-text sections go LAST, headed by the canonical whole-field counts
+    # (``profile_diff_summary`` reads those and skips their bodies).
+    texts: list[str] = []
     for field in changes:
         new = getattr(params, field)
         old = getattr(existing, field, None) if existing is not None else None
-        if field == "instructions":
-            rendered, is_diff = _instruction_diff(
+        if field in ("instructions", "project"):
+            rendered, _is_diff = _instruction_diff(
                 str(old or ""), str(new or ""), fromfile="before", tofile="after"
             )
-            heading = "instructions" if is_diff else "instructions (replaced; new text)"
-            lines.append(f"{heading}:\n{rendered}")
+            texts.append(f"{stats_heading(field, str(old or ''), str(new or ''))}:\n{rendered}")
         elif field in ("members", "overrides"):
             lines.append(  # i18n: ignore Model-facing definition diff; policy fields stay English
                 f"{field} (roster and model/effort pins): replaced as given"
             )
         else:
             lines.append(f"{field}: {_format_field(old)} -> {_format_field(new)}")
-    return changes, "\n".join(lines)
+    return changes, "\n".join(lines + texts)
+
+
+def _resolve_text_edits(existing: Any, params: TeamParams) -> TeamParams | str:
+    """Apply ``edits``/``base_revision``/``replace`` (``profile_text_edits``).
+
+    Returns ``params`` with ``instructions``/``project`` set to the resolved
+    WHOLE values (so the diff, proposal, backup and receipt below all see one
+    before/after pair), or the refusal sentence.
+    """
+    from local_operator.profile_text_edits import resolve_text_fields
+
+    resolved = resolve_text_fields(
+        {"instructions": existing.instructions or "", "project": existing.project or ""},
+        whole={"instructions": params.instructions, "project": params.project},
+        edits=params.edits,
+        base_revision=params.base_revision,
+        current_revision=team_revision(existing),
+        replace=params.replace,
+    )
+    if isinstance(resolved, str):
+        return resolved
+    return params.model_copy(update={**resolved, "edits": None})
 
 
 def _moved_refusal(name: str) -> str:

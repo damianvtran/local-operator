@@ -264,10 +264,16 @@ async def test_unattached_session_tool_queues_immediately(root):
             agent_registry=registry,
             authorize_durable_write=session._authorize_durable_write,
         )
+        # An untrusted run: since the 2026-11 ruling only such a run still files a
+        # proposal (a clean one writes directly); the whole-field rewrite is acked.
+        from tests.unit.session.test_account_profile_consent import _acked
+
+        session._run_untrusted_input = True
+        args = {"op": "update", "name": "reviewer", "instructions": "Queued, not saved."}
         result = await asyncio.wait_for(
             execute_agent(
                 "tool-queue",
-                {"op": "update", "name": "reviewer", "instructions": "Queued, not saved."},
+                _acked("agent", args, context),
                 None,
                 None,
                 context,
@@ -635,6 +641,11 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         )
 
     original = new_session()
+    # An untrusted run: since the 2026-11 ruling only such a run still files a
+    # proposal (a clean one writes directly); the whole-field rewrite is acked.
+    from tests.unit.session.test_account_profile_consent import _acked
+
+    original._run_untrusted_input = True
     args = {
         "op": "update",
         "name": "reviewer" if kind == "agent" else "lopdev",
@@ -648,7 +659,7 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         authorize_durable_write=original._authorize_durable_write,
     )
     queued = await (execute_agent if kind == "agent" else execute_team)(
-        "same-real-call", args, None, None, context
+        "same-real-call", _acked(kind, args, context), None, None, context
     )
     assert queued.details is not None
     assert queued.details["status"] == "proposed"

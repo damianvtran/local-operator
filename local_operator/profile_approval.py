@@ -765,14 +765,24 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
     # tools/delegate/class are not raw image keys. Use the same value pairs for
     # both projected agents and raw team fields so publication cannot fail after
     # a valid signed mutation has already committed.
+    from local_operator.profile_text_edits import stats_heading
+
+    #: What the receipt TEXT summarizes: the plain rows, then each long-text
+    #: field as one canonical-count heading (``profile_diff_summary`` reads
+    #: those and skips bodies). ``diff`` itself keeps its ``<field>:`` header
+    #: contract for the signed details.
+    rows: list[str] = []
+    counted: list[str] = []
     for field, (old, new) in values.items():
         if field == "instructions":
             value, _ = _instruction_diff(
                 str(old or ""), str(new), fromfile="before", tofile="after"
             )
             diff.extend(["instructions:", *value.splitlines()])
+            counted.append(f"{stats_heading(field, str(old or ''), str(new))}:")
         else:
             diff.append(f"{field}: {old!r} → {new!r}")
+            rows.append(diff[-1])
     from local_operator.profile_scope import profile_diff_summary
 
     details = {
@@ -789,7 +799,7 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
     if p.before is not None:
         details["profile_action"] = signed_descriptor(verified)
     text = f"Saved {p.profile_kind} {p.name!r} in your account after signed approval."
-    summary = profile_diff_summary("\n".join(diff))
+    summary = profile_diff_summary("\n".join(rows + counted))
     if summary:
         text += "\n" + summary
     return ToolResult(

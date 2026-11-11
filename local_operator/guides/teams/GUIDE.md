@@ -47,15 +47,23 @@ home, and a parallel one costs a roster to own and maintain for one job.
 and its briefs live in this conversation, usable until it ends, invisible in every
 other one, and removed with it. A fork starts with a COPY of this conversation's
 teams, after which the two sets are independent: editing or deleting one never
-touches the other. A team saved for every conversation is the user's decision —
-`scope='global'` requires their confirmation, and this host may not be able to
-ask: the refusal offers the conversation-only retry (omit `scope`, or use
-`scope='session'`) and, to change the account, names the TUI `/team` form. An
-`update` retry with no `scope` changes nothing — the store of an existing row does
-not move — so that refusal names the TUI `/team` form alone. On a host with no
-conversation store there is no conversation scope: omitting `scope` writes the
-account there. `team_delete` removes a conversation team; an account team must be
+touches the other. Choose the store deliberately: `scope='global'` saves for
+every conversation (the user's account); never promote silently. A clean local
+agent may create, update or revert account teams ITSELF — no owner wording or
+card — and the receipt carries the diff plus `op='revert' backup_id=…`. Only a
+run that read untrusted input (a peer, Team Bridge, a remote prompt) or a
+hub-linked team files a proposal instead; tell the user to review it in
+Agents → <team>, or apply it with `profile_proposal op=apply` once they agree.
+On a host with no conversation store, omitting `scope` writes the account.
+`team_delete` removes a conversation team; an account team must be
 deleted from a user surface, which asks its own confirmation.
+
+Editing a brief: `op='show'` returns the whole stored text and a `revision`.
+Change part of it with `edits=[{field, old, new}]` (`old` must match exactly
+once; omit it to append) — never by retyping a long field. A whole
+`instructions`/`project` value that drops stored lines is refused unless it
+carries `replace=true` and that `base_revision`; text with a tool-output
+truncation or spill marker is always refused.
 
 A conversation team may roster ACCOUNT roles and specialists: those are not
 copied, and they resolve from the account in every conversation. A conversation

@@ -2085,6 +2085,22 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
     )
 
 
+def _snapshot_profile_lineage(parent_session: Any) -> tuple[bool, bool]:
+    """``(seam_inherited, untrusted)`` of the parent right now (host-only).
+
+    A parent that cannot say (an unknown host or test double) hands its child
+    no seam and a tainted lineage: unknown provenance fails closed.
+    """
+    lineage = getattr(parent_session, "profile_lineage", None)
+    if not callable(lineage):
+        return False, True
+    try:
+        seam, untrusted = lineage()
+    except Exception:  # noqa: BLE001 — unknown provenance fails closed
+        return False, True
+    return bool(seam), bool(untrusted)
+
+
 def _make_runner(
     *,
     label: str,
@@ -2107,6 +2123,10 @@ def _make_runner(
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
     comms = getattr(parent_session, "subagent_comms", None)
+    # PROFILE TAINT IS SNAPSHOT AT DISPATCH, here, not when a queued child
+    # finally gets a slot: by then the parent's run may have ended and reset
+    # its flags, and a peer-tainted request would reach the child clean.
+    profile_lineage = _snapshot_profile_lineage(parent_session)
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -2151,6 +2171,7 @@ def _make_runner(
                 profile=profile,
                 restricted=restricted,
                 target=target,
+                profile_lineage=profile_lineage,
             )
             try:
                 interval = float(os.environ.get("LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S", "30"))
@@ -3644,6 +3665,7 @@ async def _build_child_session(
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Transfer child resource ownership only after construction succeeds.
 
@@ -3665,6 +3687,7 @@ async def _build_child_session(
             restricted=restricted,
             target=target,
             cleanup=cleanup,
+            profile_lineage=profile_lineage,
         )
     except BaseException:
         await _settle_child_cleanup(asyncio.create_task(cleanup.aclose()))
@@ -3887,6 +3910,7 @@ async def _construct_child_session(
     restricted: bool,
     cleanup: contextlib.AsyncExitStack,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
@@ -4348,7 +4372,21 @@ async def _construct_child_session(
     agent_pin = getattr(slot, "saver", None)
     if agent_pin is None and profile is not None:
         agent_pin = profile.saver
+    # PROFILE AUTHORITY rides down only as the host's own seam plus the taint
+    # snapshot of the whole ancestor chain at THIS moment (operator ruling
+    # 2026-11: a clean local agent edits its own agents/teams; a lineage that
+    # read untrusted input proposes). A parent whose seam is a host callback,
+    # or no seam, hands its child none: unknown hosts fail closed.
+    # ``profile_lineage`` is the DISPATCH-time snapshot (``_make_runner``); a
+    # caller that did not take one gets a snapshot now.
+    inherits_seam, spawn_untrusted = (
+        profile_lineage
+        if profile_lineage is not None
+        else _snapshot_profile_lineage(parent_session)
+    )
     child = Session(
+        owner_prompt_consent=inherits_seam,
+        spawn_untrusted=spawn_untrusted,
         model=model_spec if model_spec is not None else parent_session.model,
         # A child's model was chosen HERE (tier or parent), never by the
         # ``hosting``/``model_name`` keys, so a later edit to those must not
