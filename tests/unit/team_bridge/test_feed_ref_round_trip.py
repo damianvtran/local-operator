@@ -11,12 +11,16 @@ cursor never advanced, and the hub re-sent the same batch forever.
 These cases pin the fix at the grammar: encode and parse must agree
 on every shape the encoder can emit, the real ``record_feed_batch``
 path must accept it, and the genuinely malformed shapes must stay
-refused.
+refused by the parser (the store quarantines them, never wedges).
 """
 
 import pytest
 
-from local_operator.team_bridge.store import OwnerReceipt, Store, StoreRefused
+from local_operator.team_bridge.store import (
+    FEED_REF_QUARANTINE_CODE,
+    OwnerReceipt,
+    Store,
+)
 from local_operator.team_bridge.types import (
     CONVERSATION_FEED_KIND,
     CONVERSATION_FEED_TYPE,
@@ -173,14 +177,18 @@ def test_genuinely_malformed_refs_are_still_refused(value):
     assert parse_conversation_ref_value(value) is None
 
 
-def test_record_feed_batch_still_refuses_a_malformed_ref(tmp_path):
+def test_record_feed_batch_quarantines_a_malformed_ref(tmp_path):
+    # The batch no longer refuses as a whole (that atomic refusal was the
+    # wedge): the malformed ref is set aside as a ``malformed_feed_ref`` hold
+    # and the cursor still commits. Full quarantine pins live in
+    # ``test_feed_ref_quarantine.py``.
     store = Store(tmp_path)
     store.commit_enrollment(OWNER, OwnerReceipt("bridge_consent_v1", "receipt"))
-    with pytest.raises(StoreRefused) as excinfo:
-        store.record_feed_batch(
-            OWNER,
-            feed_seq(5),
-            [PREFIX + f"{CONVERSATION_ID}/{MESSAGE_ID}/1/1/human/thread_root="],
-            resync_required=False,
-        )
-    assert excinfo.value.code == "ref_migration_malformed"
+    store.record_feed_batch(
+        OWNER,
+        feed_seq(5),
+        [PREFIX + f"{CONVERSATION_ID}/{MESSAGE_ID}/1/1/human/thread_root="],
+        resync_required=False,
+    )
+    assert store.sync_state(OWNER)["feed_seq"] == 5
+    assert store.hold_count_readonly(OWNER, FEED_REF_QUARANTINE_CODE) == 1
