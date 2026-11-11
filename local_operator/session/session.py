@@ -25743,6 +25743,12 @@ class Session:
             if context_tokens >= threshold
             else (0, None)
         )
+        # Deliberately UNFILTERED: hidden internal timers (patience, ask_timeout)
+        # also run a model turn when they fire on an idle session, so they keep
+        # the prompt cache warm exactly like a visible wake. Dropping them via
+        # ``scheduled_rows`` would buy an advisor call the fire makes redundant.
+        # A fire that retires silently instead (watermark/TTL, a settled ask)
+        # costs one forgone idle pass — the same outcome as idle compaction off.
         runnable = self._wake.armed_schedules
         next_wake = min((row.next_due_at for row in runnable), default=None)
         ttl_s = self._idle_cache_ttl_s or compaction_api.fallback_cache_ttl_s(
