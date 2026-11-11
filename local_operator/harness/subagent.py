@@ -1892,6 +1892,24 @@ def missing_worktree_notice(agent: str, prompt: str) -> str | None:
     return MISSING_WORKTREE_NOTICE
 
 
+def reader_evidence_root(agent: str, profile_name: str | None, prompt: str) -> str | None:
+    """The verified worktree a reader child's ``evidence`` tool binds to, or None.
+
+    Only :data:`READER_ROLES` (by launch name, or by resolved profile name for a
+    ``team:`` launch), and only when the brief's ``Worktree:`` field names a
+    real checkout (``tools/evidence_tool.verified_worktree_root``). Coder,
+    manager, plain and top-level sessions never reach this, so they never get
+    the tool: it sanctions one receipt path for roles that review, it is not a
+    general write grant. Blocking (two ``git`` calls); call it off the loop.
+    """
+    from local_operator.tools.evidence_tool import first_verified_root
+
+    roles = {agent.strip().lower(), (profile_name or "").strip().lower()}
+    if not roles & READER_ROLES:
+        return None
+    return first_verified_root(match.group(1) for match in _WORKTREE_FIELD.finditer(prompt or ""))
+
+
 def _effective_prompt(
     prompt: str,
     agent: str,
@@ -4165,6 +4183,21 @@ async def _construct_child_session(
         tools = _with_readonly_shell_floor(tools, available_tools, shell_root=shell_write_root)
     if restricted and hub_tool is not None and not any(tool.name == "hub" for tool in tools):
         tools = list(tools) + [hub_tool]
+    # Same post-allowlist spare shape as ``hub``, for the receipt a reader is
+    # REQUIRED to file: a reviewer's allowlist has no write/edit, and a shell
+    # redirect into the repo reads as the reroute a careful auditor refuses, so
+    # without this it had no sanctioned way to put its own receipt where the
+    # repository mandates (session 4e70660bd1bf). Added AFTER the allowlist so
+    # no seed or registry row has to name it, and only here, so its schema
+    # costs nothing anywhere else.
+    # It binds to the brief's verified worktree; it does not sandbox ``bash``.
+    evidence_root = await asyncio.to_thread(
+        reader_evidence_root, agent, profile.name if profile is not None else None, prompt
+    )
+    if evidence_root is not None and not any(tool.name == "evidence" for tool in tools):
+        from local_operator.tools.evidence_tool import build_evidence_tool
+
+        tools = list(tools) + [build_evidence_tool(evidence_root)]
     # A restricted role receives the MCP tools its PARENT had already enabled
     # (see :func:`_child_mcp_wiring` for why inheriting is the honest line and
     # activation is not): withholding them cost a reviewer or scout the reads
