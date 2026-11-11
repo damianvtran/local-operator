@@ -742,6 +742,10 @@ _CONTENT_VERDICT_MARKERS = (
 #: Typed flag the guard sets on a scrubbed wire failure. ``True`` only when
 #: the RAW failure was on the allow-list below; the walk reads nothing else.
 _ADVANCE_ATTR = "tb_screen_advance"
+#: Typed marker on a guard refusal caused by the verified sender's PHYSICAL
+#: share (``Store._check_physical_sender``, A8 S-1). Read by
+#: ``screening._is_sender_budget_refusal``; see ``ScreeningWireGuard._charge``.
+SENDER_BUDGET_REFUSAL_ATTR = "tb_sender_budget_refusal"
 
 #: ``ProviderError.kind`` values a refusal can carry while NOTHING has been
 #: sent — each one a fact about the ROUTE, never the submission: the hop's
@@ -996,6 +1000,8 @@ def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseExc
     input_refusal = getattr(failure, "tb_input_refusal", False) is True or (
         isinstance(failure, ProviderError) and is_input_refusal(failure)
     )
+    # Same idempotent carry for the guard's own per-sender budget refusal.
+    sender_budget = getattr(failure, SENDER_BUDGET_REFUSAL_ATTR, False) is True
     if isinstance(failure, ProviderError):
         scrub = ProviderError(
             failure.status or 0,
@@ -1026,6 +1032,7 @@ def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseExc
     # Read by ``screening._is_input_refusal`` so a submission refusal stays out
     # of the outage breaker while the attempt is still charged and held.
     setattr(scrub, "tb_input_refusal", input_refusal)
+    setattr(scrub, SENDER_BUDGET_REFUSAL_ATTR, sender_budget)
     return scrub
 
 
@@ -1232,7 +1239,16 @@ class ScreeningWireGuard:
                 self._owner, message_id=self._message_id, job=job, turn=job.turn
             )
         except StoreRefused as failure:
-            raise self._refuse(f"screening dispatch refused ({failure.code})") from None
+            refusal = self._refuse(f"screening dispatch refused ({failure.code})")
+            if failure.code == "sender_exhausted":
+                # A8 S-1 (PR #3778 round 1 Q-1): the verified SENDER's physical
+                # share is spent. That is a fact about one sender, not about
+                # route health, so ``screening`` must hold it as a typed
+                # budget hold and never advance the ACCOUNT breaker -- else one
+                # sender parks every other sender (the #3195 class). A typed
+                # boolean survives the scrub; the code string does not.
+                setattr(refusal, SENDER_BUDGET_REFUSAL_ATTR, True)
+            raise refusal from None
         # Counted only AFTER the reservation holds: a refusal above means no
         # request will be sent, and must never read as "the wire was used".
         self._sends += 1
