@@ -89,6 +89,10 @@ async def _allow_notify(**_kwargs: Any) -> str:
     return "Notified."
 
 
+async def _music_journal(_record: dict[str, Any]) -> None:
+    """Presence-only durable door for the fully capable registry fixture."""
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
@@ -135,6 +139,7 @@ def _engine_context(**kwargs) -> ToolContext:
         # The inbox door (docs/design/notifications-inbox.md §3.2): presence-
         # only, the ONE fact ``build_notify_tool``'s createIf gate reads.
         notify_inbox=_allow_notify,
+        journal_music_job=_music_journal,
         # ``skill`` is a DEFAULT tool since the profile-proposals change, and
         # its createIf is the managed profile root (``skill_tool._config_dir``),
         # which every real session's context carries (session_factory sets
@@ -193,7 +198,9 @@ def _force_browser_available(monkeypatch):
     monkeypatch.setattr(
         audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
     )
-    from local_operator.tools import artifact_data_tool
+    from local_operator.tools import artifact_data_tool, music_tool
+
+    monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
 
@@ -337,11 +344,15 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     profile-proposals change then made ``profile_proposal`` and ``skill``
     default (both DEFERRED, so off the wire until fetched) and appended them,
     in that order, at the end of BOTH tables -- ``skill`` is no longer an
-    opt-in builder-only tail."""
-    builders = list(TOOL_BUILDERS)
-    assert DEFAULT_TOOL_NAMES[-2:] == ["profile_proposal", "skill"]
+    opt-in builder-only tail. The async music tools (``generate_music``,
+    ``modify_music``, ``music_status``) are the newest append after that."""
+    music = ["generate_music", "modify_music", "music_status"]
+    assert list(TOOL_BUILDERS)[-3:] == music
+    assert DEFAULT_TOOL_NAMES[-3:] == music
+    builders = list(TOOL_BUILDERS)[:-3]
+    assert DEFAULT_TOOL_NAMES[-5:-3] == ["profile_proposal", "skill"]
     assert builders[-2:] == ["profile_proposal", "skill"]
-    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-2]
+    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-5]
     assert defaults[-1] == "notify"
     assert builders[-1] == "notify"
     assert defaults[-2] == "artifact_data"

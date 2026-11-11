@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings",
-  "history_sha256": "0aa917589d10001b00611597ffcea00f3eda37b7bb215762a98f59fb65af22f4",
+  "history_sha256": "ccb24d3705c5773b6cf1c8d5e56f868d0b636f48017835a3b34c47b95bba88e2",
   "entries": [
     {
       "locale": "hi",
@@ -129,6 +129,27 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'और वापस पूर्ण पर जाने से वे लौटते नहीं' checked for accuracy, glossary (choice label 'पूर्ण' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). F1 MAJOR glossary: help 'कॉम्पैक्शन' vs glossary/hi guide/shipped 'संपीडन' (18 uses, section title) -> fixed. F2 minor glossary drift: 'पुनः आरंभ' in label and card.description vs shipped 'फिर शुरू' (25 uses incl. this key's own help) -> aligned. F3 minor glossary drift: 'संदेश' for turn vs shipped 'टर्न' (41 uses) -> aligned in full.description and help. Latin digits n/a. No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "206f2b124405f689f1f953755f384c8c3ab0e00036f079afa12006d3b42024e4",
+      "translator": {
+        "agent": "coder agent (radientdev team subagent, screening-pref implementer)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08"
+      },
+      "auditor": {
+        "agent": "verifier",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Corrections applied: 'खत्म' -> 'ख़त्म' (nukta, as spelled elsewhere in this catalogue) and 'कोई पसंद' -> 'कोई प्राथमिकता'. Delta review (NOT a full re-audit of the namespace) of the two new keys team_bridge_screening_model.label/.help added by the screening-preference change, en wire.settings sha 206f2b12. Audit by the independent verifier specialist (fallback disclosed: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol -> deepseek/deepseek-flash); verdict across the seven locales: 0 blockers, 4 major, 7 minor. This locale's required findings were applied and the SAME auditor re-checked the changed strings and passed them; no unresolved blocker/major remains. Source copy written by the coder agent, itself served on deepseek/deepseek-flash (same fallback chain). read_route_verified false: the audit read the catalogue, not a live surface."
     }
   ]
 }
