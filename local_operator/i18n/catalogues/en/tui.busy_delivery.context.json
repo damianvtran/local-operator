@@ -12,7 +12,7 @@
   "tui.busy_delivery.steer_notice": {
     "role": "busy-send notice",
     "tone": "note",
-    "note": "Shown when a steer is sent to a working turn: it interrupts the turn at its next tool boundary. 'may stop' rather than 'stops' because a streaming model or a tool that cannot be interrupted is not actually stopped. 'tool' names the observable thing, not the internal 'step'. One wrapped line at every supported width (40 up); restated in place to steer_joined_notice when a second steer joins it."
+    "note": "Shown when a steer is sent to a working turn: it interrupts the turn at its next tool boundary. 'may stop' rather than 'stops' because a streaming model or a tool that cannot be interrupted is not actually stopped. 'tool' names the observable thing, not the internal 'step'. One wrapped line at every supported width (40 up). Unlike queue_notice/both_notice it never restates: the joined wording describes where a WAITING message goes, not what a steer does."
   },
   "tui.busy_delivery.steer_joined_notice": {
     "role": "busy-send notice",
