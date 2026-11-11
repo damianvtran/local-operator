@@ -5868,9 +5868,12 @@ class AgentLoop:
 
         A DEFERRED tool (see ``tools/deferral.py``) was called without its schema
         having been sent, so the model guessed the shape. Name the door to the
-        real one — the host publishes the schema from the next turn on the
-        strength of the same failure. No-op for a published schema, or when the
-        text already carries the pointer.
+        real one. For a built-in deferred tool the host also publishes the
+        schema from the next turn on the strength of the same failure; for a
+        deferred MCP tool (dispatched through ``resolve_fallback_tool``) it does
+        NOT — that would re-grow the cache-prefix array — and ``tool://<name>``
+        renders the schema inline instead. No-op for a published schema, or
+        when the text already carries the pointer.
         """
         if cls._schema_was_published(name, config) or f"tool://{name}" in text:
             return text

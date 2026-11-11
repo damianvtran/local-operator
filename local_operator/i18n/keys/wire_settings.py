@@ -478,6 +478,38 @@ def compaction_enabled_label() -> Msg:
     return Msg("wire.settings.compaction_enabled.label", {})
 
 
+def compaction_idle_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.choice.false.description", {})
+
+
+def compaction_idle_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.choice.true.description", {})
+
+
+def compaction_idle_enabled_help() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.help", {})
+
+
+def compaction_idle_enabled_label() -> Msg:
+    return Msg("wire.settings.compaction_idle_enabled.label", {})
+
+
+def compaction_idle_min_growth_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_idle_min_growth_tokens.help", {})
+
+
+def compaction_idle_min_growth_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_idle_min_growth_tokens.label", {})
+
+
+def compaction_idle_threshold_tokens_help() -> Msg:
+    return Msg("wire.settings.compaction_idle_threshold_tokens.help", {})
+
+
+def compaction_idle_threshold_tokens_label() -> Msg:
+    return Msg("wire.settings.compaction_idle_threshold_tokens.label", {})
+
+
 def compaction_keep_recent_tokens_help() -> Msg:
     return Msg("wire.settings.compaction_keep_recent_tokens.help", {})
 

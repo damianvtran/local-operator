@@ -30,8 +30,8 @@ from local_operator.tui.widgets.editor import Editor, InlineCommandRequested
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.usage_panel import UsagePanel
 from local_operator.tui.widgets.welcome import WelcomeView
-from tests.unit.tui._settle import settle
 from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _factory
+from tests.unit.tui.waiting import settle
 
 #: The settled policy, one row per registry entry.
 #:
@@ -2291,16 +2291,17 @@ async def test_a_stopped_session_does_not_swallow_tab_and_enter() -> None:
 
         # SETTLE ON THE PRODUCT'S LATCH, not on one paused turn. `is_loading()`
         # is exactly what gates Tab/Enter (`editor.py`: `if key in ("tab",
-        # "enter") and self._picker.is_loading(): return`), and the /team roster
-        # worker clears it a turn or two after the text lands. One
-        # `pilot.pause()` is therefore a bet that the worker finished inside a
-        # single pumped batch — the race that failed this node on three
-        # unrelated heads, reported as "Enter was swallowed". The wait is a
-        # bounded COUNT of pumped turns, which survives contention where a
-        # wall-clock budget does not. ``settle`` raises "did not settle" when the
-        # latch never clears, so a stranded reserve still fails here; the assert
-        # that follows restates the same predicate for the reader, and the real
-        # subject is the Enter assertion after it.
+        # "enter") and self._picker.is_loading(): return`), and the argument-
+        # list message handler (`_fill_name_argument_list`) clears it a turn or
+        # two after the text lands. One `pilot.pause()` is a bet that handler
+        # ran inside a single pumped batch — the race that failed this node on
+        # three unrelated heads, reported as "Enter was swallowed". ``settle``
+        # JOINS the queued messages and the after-refresh queue each turn and is
+        # bounded by a wall deadline, not a turn count (a real pause costs
+        # >= ~20 ms, so a count is no load-invariant bound). No ``workers=``:
+        # the fill is a message handler, not a worker group. A stranded reserve
+        # still fails here as "never settled"; the assert after restates the
+        # predicate for the reader, and the real subject is the Enter assertion.
         await settle(
             pilot,
             lambda: editor.picker.is_loading() is False,
