@@ -200,8 +200,6 @@ def lnk(home: Path) -> Path:
 @pytest.mark.parametrize(
     "command",
     [
-        "ln -sfn ~/.local-operator/secrets {pad}/lnk && rm -f {pad}/lnk/../config.yml",
-        "ln -sfn ~/.local-operator/secrets {pad}/lnk; echo x > {pad}/lnk/../config.yml",
         "ln -sfn ~/repo/subdir {pad}/lnk && rm -rf {pad}/lnk/../.git",
         "rm -rf {pad}/tmpd && ln -s ~/repo/subdir {pad}/tmpd && rm -rf {pad}/tmpd/../.git",
         "rm -rf {pad}/tmpd && mv ~/w/other/sl {pad}/tmpd && rm -rf {pad}/tmpd/../.git",
@@ -300,3 +298,89 @@ def test_missing_component_landing_outside_own_pad_in_state_stays_critical(home:
     pad = _pad(home)
     # Lexically lands in another session directory: still evidence.
     assert _classify(home, f"rm -rf {pad}/nope/../../../other/x").risk is Risk.CRITICAL
+
+
+# Round 2 (review R2-1/R2-2, QA Q2-1, PR #3811): an unpinned ``..`` is ranked by
+# the landing its missing and re-linked parts produce — every missing component
+# a directory, every component an earlier ``ln -s``/``cp -s`` re-linked to a
+# LITERAL target followed to that target. Relaxing an own-pad lexical landing to
+# HIGH must not hide a ``..`` that crosses a link AFTER the missing part, nor a
+# re-link into the state root or another session.
+
+
+@pytest.fixture
+def slk(lnk: Path) -> Path:
+    """``<pad>/slk -> <state>/secrets``, planted before the command."""
+    (lnk / "slk").symlink_to(lnk.parent.parent.parent / "secrets")
+    return lnk
+
+
+_STATE = "~/.local-operator"
+
+
+@pytest.mark.parametrize(
+    ("command", "lands"),
+    [
+        # The missing part becomes a directory; ``slk`` then leaves the pad.
+        ("mkdir -p {pad}/n && rm -f {pad}/n/../slk/../config.yml", "config.yml"),
+        ("rm -f {pad}/nope/../slk/../config.yml", "config.yml"),
+        # A literal re-link: the kernel follows the NEW link.
+        (f"ln -sfn {_STATE}/secrets {{pad}}/lnk && rm -f {{pad}}/lnk/../config.yml", "config.yml"),
+        (f"ln -sfn {_STATE}/secrets {{pad}}/lnk; echo x > {{pad}}/lnk/../config.yml", "config.yml"),
+        (f"ln -sfn {_STATE}/secrets {{pad}}/new && rm -f {{pad}}/new/../config.yml", "config.yml"),
+        (f"cp -s {_STATE}/secrets {{pad}}/new && rm -f {{pad}}/new/../config.yml", "config.yml"),
+        ("cd {pad} && ln -sfn ../../../secrets rel && rm -f rel/../config.yml", "config.yml"),
+        # A re-link into ANOTHER session's directory forges its ask store.
+        (
+            f"ln -sfn {_STATE}/sessions/other/sub {{pad}}/l && echo x >> {{pad}}/l/../asks.jsonl",
+            "sessions/other/asks.jsonl",
+        ),
+        (
+            f"ln -sfn {_STATE}/sessions/other/sub {{pad}}/l && rm -f {{pad}}/l/../asks.jsonl",
+            "sessions/other/asks.jsonl",
+        ),
+    ],
+)
+def test_unpinned_dotdot_is_ranked_by_its_missing_and_relinked_landing(
+    home: Path, slk: Path, command: str, lands: str
+) -> None:
+    verdict = _classify(home, command.format(pad=slk))
+    assert verdict.risk is Risk.CRITICAL, verdict.targets
+    # The judge/refusal names the file the kernel acts on, not ``<pad>/...``.
+    landing = _real(home / ".local-operator") + "/" + lands
+    assert any(t.target.path == landing for t in verdict.targets), verdict.targets
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A literal re-link that stays in the own pad: HIGH, never LOW.
+        "ln -sfn {pad}/build/deep {pad}/lnk && rm -f {pad}/lnk/../x",
+        # Target unknowable (``mv``/``cp -a`` of a link, a variable): HIGH.
+        "mv ~/w/other/sl {pad}/fresh && rm -f {pad}/fresh/../x",
+        "L=$(cat f); ln -sfn $L {pad}/lnk && rm -f {pad}/lnk/../x",
+        # A later unknowable re-link replaces an earlier literal one.
+        "ln -sfn {pad}/slk {pad}/lnk && rm -rf {pad}/lnk && mv ~/w/other/sl {pad}/lnk"
+        " && rm -f {pad}/lnk/../x",
+    ],
+)
+def test_unpinned_dotdot_landing_in_own_pad_is_high(home: Path, slk: Path, command: str) -> None:
+    verdict = _classify(home, command.format(pad=slk))
+    assert verdict.risk is Risk.HIGH, verdict.targets
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"ln -sfn {_STATE} {{pad}}/lnk && cd -P {{pad}}/lnk && rm -f config.yml",
+        f"ln -sfn {_STATE}/secrets {{pad}}/lnk && cd -P {{pad}}/lnk && rm -f ../config.yml",
+        f"ln -sfn {_STATE} {{pad}}/lnk && set -P && cd {{pad}}/lnk && rm -f config.yml",
+        f"set -o physical; ln -sfn {_STATE} {{pad}}/lnk; cd {{pad}}/lnk; rm -f config.yml",
+    ],
+)
+def test_physical_cd_into_a_component_relinked_earlier_is_never_low(
+    home: Path, lnk: Path, command: str
+) -> None:
+    # Review round 2 (pre-existing): ``cd -P`` resolved the CHECK-time link.
+    verdict = _classify(home, command.format(pad=lnk))
+    assert verdict.risk is not Risk.LOW, verdict.targets

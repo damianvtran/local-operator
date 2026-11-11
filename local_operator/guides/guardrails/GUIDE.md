@@ -137,9 +137,14 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   that does not exist yet (`mkdir -p <pad>/n && rm -f <pad>/n/../x`), or below
   one an earlier part of the same command linked, moved or copied onto,
   deleted or created (`ln -sfn <dir> <pad>/l && rm -f <pad>/l/../x`), because
-  that same command could make the component a link to anywhere. A lexical
-  landing in protected state stays CRITICAL. Write `rm -f <pad>/x` instead. `cd -P` (or `cd` after
-  `set -P`/`set -o physical`) is followed to the directory the kernel resolves. The
+  that same command could make the component a link to anywhere. Such a word
+  is ranked by where it lands if every missing part becomes a directory and
+  every part re-linked with a literal `ln -s`/`cp -s` target points there:
+  landing in protected state (the state root's files, another session's
+  transcript or ask store) stays CRITICAL. Write `rm -f <pad>/x` instead.
+  `cd -P` (or `cd` after `set -P`/`set -o physical`) is followed to the
+  directory the kernel resolves; through a part the same command re-linked,
+  the working directory counts as unknown, so later relative paths rank HIGH. The
   `write`/`edit` file tools are not ranked HIGH there: they refuse only the
   evidence files, so a plain file in another session's scratchpad is not
   refused by them. CRITICAL here means every redirection (`>`, `>>`, `>|`,

@@ -26,6 +26,7 @@ best-effort ``stat`` calls whose failure never lowers a rank.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 import fnmatch
 import functools
@@ -1057,6 +1058,19 @@ def _glob_reaches_git_dir(pattern: str) -> str | None:
 
 
 def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
+    if target.landings:
+        # An unpinned ``..``: rank the landing its missing and re-linked parts
+        # produce (``Target.landings``) as well as ``path``, and keep the worse.
+        # On a tie the landing wins, so the judge and the refusal name the file
+        # the kernel acts on rather than the lexical ``<pad>/config.yml``
+        # (review R2-1, QA Q2-1 on PR #3811). ``raw_path`` is the landing too,
+        # so ``_kernel_reason`` judges it, not the check-time lookup.
+        readings = [
+            _rank(dataclasses.replace(target, path=p, raw_path=p, landings=()), prot, session_id)
+            for p in target.landings
+        ]
+        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id))
+        return max(readings, key=lambda r: r.risk)
     path = target.path
     notes: list[str] = list(target.empty)
     link = link_entry(target) if path is not None else None
