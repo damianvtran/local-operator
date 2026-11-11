@@ -227,7 +227,21 @@ async def exercise_lifecycle(source, *, prefix=False, conflict=False):
     if conflict:
         assert executed == []
         assert end.error is not None
-        assert "responses_tool_arguments_conflict" in end.error
+        reason = {
+            "changed_name": "call_identity",
+            "changed_id": "call_identity",
+            "missing": "final_arguments_type",
+            "nonstring": "final_arguments_type",
+        }.get(source, "argument_prefix")
+        assert (
+            f"responses_tool_arguments_conflict (reason={reason}, "
+            "event=response.output_item.done)"
+        ) in end.error
+        # The diagnosis must survive the real loop, not expose tool arguments or
+        # provider identities in the incident while trying to explain a conflict.
+        assert "synthetic.txt" not in end.error
+        assert "fc-synthetic" not in end.error
+        assert "call-synthetic" not in end.error
     else:
         assert executed == [json.loads(arguments)]
         assert end.error is None
@@ -387,4 +401,17 @@ async def test_terminal_batch_authority_precedes_all_approvals_and_effects(case)
         assert executed == []
         assert approvals == []
         assert len(requests) == 1
-        assert end.error is not None and "responses_tool_arguments_conflict" in end.error
+        assert end.error is not None
+        reason = {
+            "done_replacement": "slot_type",
+            "terminal_replacement": "slot_type",
+            "explicit_empty": "terminal_call_membership",
+            "reasoning_only": "slot_type",
+            "partial_membership": "terminal_call_membership",
+            "changed_identity": "call_identity",
+            "invalid_output": "terminal_output_type",
+        }[case]
+        stage = "response.output_item.done" if case == "done_replacement" else "response.completed"
+        assert f"responses_tool_arguments_conflict (reason={reason}, event={stage})" in end.error
+        assert "synthetic-0" not in end.error
+        assert "fc-0" not in end.error

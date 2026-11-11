@@ -617,13 +617,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the attempt file beside it.",
     ),
     "local_operator/procname.py": (
-        1,
-        "``_SOURCE_MARKER`` ('source'): the sidecar a published runtime image "
-        "carries inside ``<stable root>/runtime/<build key>/``, naming the "
-        "interpreter it was cloned from. It is install-level state about ONE "
+        3,
+        "``_SOURCE_MARKER`` ('source') and ``_IMAGE_SIDECAR`` ('image'): the "
+        "sidecars a published runtime image carries inside ``<stable root>/runtime/"
+        "<build key>[-<flavor>]/``, naming the interpreter it was cloned from and the "
+        "signed image's own size/mtime/flavor/identifier. Install-level state about ONE "
         "interpreter build, beside the published image under the lop install root "
         "and outside any session directory; a session travelling between devices "
-        "carries neither the image nor its marker",
+        "carries neither the image nor its sidecars. ``SIGNING_OPTIN_FILENAME`` "
+        "('runtime-signing.json'): the team-signing opt-in ``lop permissions setup`` "
+        "writes under the passwd home's config dir, naming a keychain identity of "
+        "THIS machine — machine-local consent, never a session-directory entry and "
+        "never meaningful on a peer",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
@@ -965,6 +970,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``INDEX_FILENAME``): a DEVICE-LOCAL record store beside ``sessions/``, never an "
         "entry of one and never carried in one — a card records THIS device's consent, "
         "so a move must not transport it",
+    ),
+    "local_operator/profile_proposals.py": (
+        2,
+        "``PROPOSALS_DIRNAME`` (``profile-proposals``) and its ``AUDIT_FILENAME`` "
+        "(``audit.jsonl``): the account-level proposal store under "
+        "``<config>/profile-proposals``, beside ``agents/``/``teams/`` — never a "
+        "session entry and never carried in one; a proposal targets this account's "
+        "profiles and is reviewed in Agents here",
     ),
     "local_operator/network/types.py": (
         1,

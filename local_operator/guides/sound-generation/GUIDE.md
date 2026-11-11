@@ -14,6 +14,11 @@ job to poll and no `*_status` tool beside them.
 
 When NOT to use them:
 
+- The user wants a song, score or other musical composition — that is
+  `generate_music` / `modify_music` (asynchronous Radient jobs, ElevenLabs
+  Music, about $0.15 per requested minute; `guide://music-generation`), not a
+  long sound-effect prompt.
+
 - The user wants the app (or `lop`) to SPEAK something out loud right now —
   the harness's own Speak control / speech playback is the route for that;
   `generate_voiceover` produces an audio FILE as an artifact, it does not play

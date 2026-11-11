@@ -408,6 +408,10 @@ class AcceptedLaw:
     # The hub's accepted consent-version set (``consent.accepted_versions``),
     # empty when the hub does not send one. See ``_consent_receipt_is_current``.
     consent_accepted_versions: tuple[str, ...] = ()
+    # The addressed-aware template the hub offers beside ``version``
+    # (``client.screening_addressed_version``): ``bridge-screen-v5`` or "". An
+    # optional per-message render upgrade, so a miss never refuses the law.
+    addressed_version: str = ""
 
 
 def _stage_text_floor(kind: str, version: Any, text: Any) -> tuple[str, str]:
@@ -498,6 +502,7 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     from local_operator.team_bridge.client import (
         _api_supported,
         _screening_is_trusted,
+        screening_addressed_version,
         screening_template_sha256,
     )
     from local_operator.team_bridge.store import StoreRefused
@@ -576,6 +581,7 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
         guidance_sha=guidance_sha,
         consent_sha=consent_sha,
         consent_accepted_versions=accepted_versions,
+        addressed_version=screening_addressed_version(status),
     )
 
 
@@ -612,6 +618,7 @@ class AcceptedCapture:
         "guidance_sha",
         "consent_sha",
         "source",
+        "addressed_version",
     )
 
     def __init__(
@@ -634,6 +641,7 @@ class AcceptedCapture:
         consent_sha: Any = None,
         source: Any = None,
         consent_accepted_versions: "tuple[str, ...]" = (),
+        addressed_version: str = "",
     ) -> None:
         if token is not _CAPTURE_TOKEN:
             raise ValueError("AcceptedCapture is minted only by the verified status path")
@@ -658,6 +666,7 @@ class AcceptedCapture:
         self.guidance_sha = guidance_sha
         self.consent_sha = consent_sha
         self.source = source
+        self.addressed_version = addressed_version
         object.__setattr__(self, "_locked", True)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -734,6 +743,8 @@ class _CyclePolicy:
     admission_revision: str
     approved_serving_identities: tuple[str, ...]
     provider: str
+    # Render option only (``PolicySnapshot.addressed_version``); never published.
+    addressed_version: str = ""
 
 
 async def verified_status_capture(
@@ -830,6 +841,7 @@ async def verified_status_capture(
         guidance_sha=law.guidance_sha,
         consent_sha=law.consent_sha,
         source="sdk-verified",
+        addressed_version=law.addressed_version,
     )
 
 
@@ -871,13 +883,30 @@ async def run_screening_cycle(
         resolve_screening_chain,
     )
     from local_operator.team_bridge.screening import ScreenResult, screen_message_async
+    from local_operator.team_bridge.settings import read_screening_model
     from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
     # ONE capture of the whole hop list: hop 0 is the configured default (the
     # published policy's model), the rest are the operator's configured
     # fallbacks, walked by ScreenChainRunner because failover disables its
     # own chain for isolated requests (see resolve_screening_chain).
-    chain = resolve_screening_chain(config_dir, settings)
+    #
+    # The machine's stored "Screening model" choice rides in as ``preferred``:
+    # it RE-ORDERS the evaluated screeners so the chosen pair is tried first and
+    # leaves the receiver's own cascade in place behind it (operator directive
+    # 2026-11-04: a choice must never block a receiver with no Anthropic account
+    # or an exhausted quota). ``None`` -- no choice, or one this build does not
+    # recognise -- is exactly the chain every machine screened with before the
+    # key existed.
+    chain = resolve_screening_chain(
+        config_dir,
+        settings,
+        preferred=(
+            getattr(settings, "screening_model", None)
+            if settings is not None
+            else read_screening_model(config_dir)
+        ),
+    )
     if not chain:
         # FAIL CLOSED: no preferred screener is credentialed AND the owner has
         # no usable configured model, so nothing can screen and the message is
@@ -1074,6 +1103,9 @@ async def run_screening_cycle(
             sorted({identity for hop in chain for identity in hop.approved_identities})
         ),
         provider=selection.provider,
+        # Re-checked against the template it names: a capture is only ever minted
+        # with "" or a version whose embedded bytes the status read matched.
+        addressed_version=str(getattr(capture, "addressed_version", "") or ""),
     )
     cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
 

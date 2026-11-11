@@ -786,19 +786,18 @@ def _fold(history: list[AgentMessage], directory: Path | None = None) -> list[An
     if directory is None:
         return fold_messages_to_entries(history)
     from local_operator.harness.peer_cycle_display import discover_records
-    from local_operator.session.transcript import Transcript
 
-    # The existing cache supplies the selected raw window. Only deterministic
-    # record IDs for its bounded roots use the existing index; no journal scan.
-    # READ-ONLY: this fold never writes, and the writer variant would restore a
-    # compressed session into a plain file just to replay it (review m2).
-    transcript = Transcript(directory, read_only=True)
-    records = discover_records(transcript, history[-4096:], directory.name)
+    # Both indexed readers accept a directory: constructing Transcript here
+    # would eagerly replay the whole journal just to obtain its path. Keep the
+    # non-None proof source so projection still uses indexed record validation.
+    # This also preserves read-only compressed-journal access (no restoration);
+    # existing cold index builds and prune-map reads remain unchanged.
+    records = discover_records(directory, history[-4096:], directory.name)
     return fold_messages_to_entries(
         history,
         session_id=directory.name,
         peer_cycle_display_records=records,
-        proof_transcript=transcript,
+        proof_transcript=directory,
     )
 
 

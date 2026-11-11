@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.errors.sdk_spec",
+  "history_sha256": "f8d5814169a1d4273412730a7dcca7d3aa9636d3c20eb6c156ed85762a7f244e",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": null,
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "27271caf37f4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-10",
+        "result": "changes_requested",
+        "findings": 5,
+        "unresolved_blocker_major": 4
+      },
+      "status": "changes_requested",
+      "note": "Round 1 changes_requested at cf5c90bad0d1 (0 blocker, 4 major, 1 minor): ES1 untranslated 'gate' in approval_callback_gate_required, ES2 'gate' in yolo_approval_unreachable, ES3 NUEVO vs literal NEW (spawn_model_pair_required), ES4 spawn_fields_unsupported wording, ES5 (minor) birth sample wording in spawn_birth_effort_pair_required. All five fixed in f17dc3c8153 from revised v2 translator values; re-audited in round 2. Target catalogue_sha256 = d95b92040e7b5aee30f8c10001f87208b279953909281df9c8f5975f0d6cecba (es bytes at cf5c90bad0d1; translation: initial translation (cf5c90bad0d1)); en source_sha256 = a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855. Audit comment: https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6755952414. Evidence: i18n/audits/evidence/es/wire.errors.sdk_spec/sdkes1/record.json. Audits are static linguistic and mechanical only (en source, context sidecar, locale style guide, glossary, scoped repository validator and runtime ICU parse): no native-speaker review and no rendered fit (SDK exception strings, no width cap). The SDK guards still render locale='en' (the 21-case test_real_guards_preserve_english_bytes test pins the English bytes), so this catalogue is dormant until stable codes exist on SessionSpecError. No second independent pass was run (SDK developer diagnostics, not high-visibility safety copy; the ru exemplar row also carries one audit). Translator and the passing auditors are different models (translator anthropic/claude-sonnet-5-5; auditors openai/gpt-6.1-sol and deepseek/deepseek-flash); the translator and the other locales' auditors share the Claude family, as disclosed on past rows. Dates are UTC (PR comment timestamps); the auditors' own receipts record local dates for some rounds."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": null,
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "8b3d0ec1d217",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-10",
+        "result": "clean",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 clean (0/0/0/0) at f990c30424e, scope cf5c90bad0d1..f990c30424e. The es file is byte-identical at 255b798d112 (git show sha256 d3c6426e7842ae43906e674e6fe65d0cd1dc4475460195620d8dde8ce219ad44 at both f990c30424e and 255b798d112), so this audit binds the final es bytes. Target catalogue_sha256 = d3c6426e7842ae43906e674e6fe65d0cd1dc4475460195620d8dde8ce219ad44 (es bytes at f990c30424e; translation: revised v2 (f17dc3c8153, merged into f990c30424e)); en source_sha256 = a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855. Audit comment: https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6756790373. Evidence: i18n/audits/evidence/es/wire.errors.sdk_spec/sdkes2/record.json. Audits are static linguistic and mechanical only (en source, context sidecar, locale style guide, glossary, scoped repository validator and runtime ICU parse): no native-speaker review and no rendered fit (SDK exception strings, no width cap). The SDK guards still render locale='en' (the 21-case test_real_guards_preserve_english_bytes test pins the English bytes), so this catalogue is dormant until stable codes exist on SessionSpecError. No second independent pass was run (SDK developer diagnostics, not high-visibility safety copy; the ru exemplar row also carries one audit). Translator and the passing auditors are different models (translator anthropic/claude-sonnet-5-5; auditors openai/gpt-6.1-sol and deepseek/deepseek-flash); the translator and the other locales' auditors share the Claude family, as disclosed on past rows. Dates are UTC (PR comment timestamps); the auditors' own receipts record local dates for some rounds."
+    }
+  ]
+}

@@ -25,7 +25,7 @@ from local_operator.tunnels.api import (
     credential_id,
     usable_credential_id,
 )
-from local_operator.tunnels.errors import RecordNotFound
+from local_operator.tunnels.errors import LocalPrerequisite, RecordNotFound
 from local_operator.tunnels.service import (
     authorization_failure_reason,
     cloudflared_binary,
@@ -170,6 +170,16 @@ def _status_text(
         # the docstring: a paragraph welded to the state is what buried the
         # command four rows down.
         lines.append(f"  {connector['detail']}")
+    transport = connector.get("transport")
+    if transport:
+        # `relay` / `cloudflare` are protocol identifiers, like the state words
+        # above; the dual-run note says cloudflared is still up beside the relay.
+        overlap = (
+            " (cloudflared still running)"
+            if transport == "relay" and connector.get("cloudflared")
+            else ""
+        )
+        lines.append(f"Transport: {transport}{overlap}")
     login = payload["login"]
     if login["state"] == "login_required":
         if stopped:
@@ -698,9 +708,16 @@ async def dispatch(args: argparse.Namespace) -> str:
         install.uninstall()
         return "Local connector uninstalled. Use lop tunnel revoke to delete cloud routes too."
     if action in {"install", "start", "restart"}:
-        value["cloudflared_path"] = await asyncio.to_thread(
-            cloudflared_binary, value.get("cloudflared_path")
-        )
+        try:
+            value["cloudflared_path"] = await asyncio.to_thread(
+                cloudflared_binary, value.get("cloudflared_path")
+            )
+        except LocalPrerequisite:
+            # The relay connector is built in: once /connect has offered it
+            # (and the kill switch is off), cloudflared is a dual-run extra the
+            # service uses when present, not a prerequisite for installing.
+            if not await asyncio.to_thread(config.relay_offered):
+                raise
         await asyncio.to_thread(_prepare_mobile, value)
         # User services do not inherit the terminal's environment. An explicit
         # foreground/Linux origin password stays in private local config;

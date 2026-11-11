@@ -98,6 +98,10 @@ async def _allow_notify(**_kwargs: Any) -> str:
     return "Notified."
 
 
+async def _journal_music_job(record: dict[str, Any]) -> None:
+    """Match the durable host callback contract without persisting benchmark data."""
+
+
 def build_real_tool_context(cwd: str) -> ToolContext:
     """A ToolContext whose capabilities are all present.
 
@@ -117,6 +121,8 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         action_class="proactive",
         subagent_launcher=_stub_for(_types.SubagentLauncher),
         jobs=_stub_for(_types.JobManagerProtocol),
+        # Music submission requires durable identity before any paid request.
+        journal_music_job=_journal_music_job,
         browser=_stub_for(_types.BrowserSurfaceProtocol, surface_id="stub"),
         subagent_comms=_UntypedStub(),
         agent_registry=_UntypedStub(),
@@ -161,6 +167,11 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # measure a surface one tool short of every such session's
         # (``notify``). The builder checks presence only; never awaited here.
         notify_inbox=_allow_notify,
+        # The ``skill`` tool's createIf is the managed profile root
+        # (``skill_tool._config_dir``). A real session always has one; without
+        # it here the measurement silently dropped ``skill`` from the surface.
+        # Never read or written by a measurement.
+        memory_config_dir=f"{cwd}/.stub-config",
     )
 
 
@@ -326,6 +337,19 @@ def _forced_artifact_data_backend() -> Iterator[None]:
         artifact_data_tool.anthropic_grant_stored = saved
 
 
+@contextmanager
+def _forced_music_backend() -> Iterator[None]:
+    """Measure the credential-gated music tools without reading real secrets."""
+    from local_operator.tools import music_tool
+
+    saved = music_tool.radient_available
+    music_tool.radient_available = lambda *args, **kwargs: True
+    try:
+        yield
+    finally:
+        music_tool.radient_available = saved
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
     """The default tool set as a fully-capable session would advertise it.
 
@@ -345,6 +369,7 @@ def build_real_tools(cwd: str) -> list[AgentTool]:
         _forced_video_backend(),
         _forced_audio_backend(),
         _forced_artifact_data_backend(),
+        _forced_music_backend(),
     ):
         return registry.create_tools(build_real_tool_context(cwd))
 

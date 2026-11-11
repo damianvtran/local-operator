@@ -1,0 +1,108 @@
+# vi/cli.permissions R2 audit log — 2026-11-09T19:39:52Z — HEAD 788cc399410196b080cfc9f7e7bd558ccb713140
+$ .venv/bin/python scripts/i18n/check.py
+advisory: local_operator/team_bridge/link_preview/extract.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/store.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/agent_tool.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/builtin.py: 142 literal(s) against a ceiling of 118
+advisory: local_operator/tools/confinement.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/secret_tool.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/tools/skill_tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tui/session_move.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/tunnels/cli.py: 14 literal(s) against a ceiling of 13
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/wakes/supervisor.py: 8 literal(s) against a ceiling of 5
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 215 file(s) scanned, 2539 literal(s) at or below the baseline, catalogues consistent; 81 advisory finding(s) (report-only until activated)
+exit=0
+
+$ .venv/bin/python $SCRATCH/vi-perm-r2/parity.py
+keys en/vi 38 38 missing [] extra []
+ok   cli.permissions.help.permissions 
+ok   cli.permissions.help.status 
+ok   cli.permissions.help.setup 
+ok   cli.permissions.status.not_macos 
+ok   cli.permissions.status.identity.team 
+ok   cli.permissions.status.identity.adhoc 
+ok   cli.permissions.status.identity.legacy 
+ok   cli.permissions.status.identity.none 
+ok   cli.permissions.status.image 
+ok   cli.permissions.status.optin.on 
+ok   cli.permissions.status.optin.off 
+ok   cli.permissions.status.optin.no_app 
+ok   cli.permissions.status.optin.unavailable 
+ok   cli.permissions.status.optin.blocked 
+ok   cli.permissions.status.reason.isolated_home 
+ok   cli.permissions.status.reason.runtime_root_override 
+ok   cli.permissions.status.reason.config_dir_override 
+ok   cli.permissions.status.reason.not_darwin 
+ok   cli.permissions.status.app.found 
+ok   cli.permissions.status.app.missing 
+ok   cli.permissions.status.screen.granted 
+ok   cli.permissions.status.screen.denied 
+ok   cli.permissions.status.screen.unknown 
+ok   cli.permissions.status.screen.no_image 
+ok   cli.permissions.status.scope 
+ok   cli.permissions.status.guide 
+ok   cli.permissions.setup.refused.tty 
+ok   cli.permissions.setup.refused.isolated 
+ok   cli.permissions.setup.no_app 
+ok   cli.permissions.setup.no_identity 
+ok   cli.permissions.setup.explain 
+ok   cli.permissions.setup.confirm 
+ok   cli.permissions.setup.cancelled 
+ok   cli.permissions.setup.failed 
+ok   cli.permissions.setup.always_allow 
+ok   cli.permissions.setup.already_signed 
+ok   cli.permissions.setup.done 
+ok   cli.permissions.setup.done_allow_once 
+parity failures: 0
+exit=0
+
+$ python3 $SCRATCH/vi-perm-r2/apple_labels.py (+ ConfirmAccess/KeyEditor/System Settings pairing)
+Localizable.loctable :: SCREEN_CAPTURE_HEADER :: en='Screen & System Audio Recording' :: vi='Bản ghi âm thanh hệ thống & màn hình'
+Localizable.loctable :: FILE_ACCESS_COMBINED :: en='Files & Folders' :: vi='Tệp & Thư mục'
+Localizable.loctable :: SCREEN_CAPTURE :: en='Screen Recording' :: vi='Ghi Màn hình'
+Localizable.loctable :: SCREENANDAUDIOCAPTURE :: en='Screen & System Audio Recording' :: vi='Bản ghi âm thanh hệ thống & màn hình'
+InfoPlist.loctable :: CFBundleDisplayName :: en='Privacy & Security' :: vi='Quyền riêng tư & Bảo mật'
+InfoPlist.loctable :: CFBundleName :: en='Privacy & Security' :: vi='Quyền riêng tư & Bảo mật'
+Localizable.loctable :: Keychain Access :: en='Keychain Access' :: vi='Truy cập chuỗi khóa'
+Localizable.loctable :: private key :: en='private key' :: vi='khóa cá nhân'
+Localizable.loctable :: Keychain :: en='Keychain' :: vi='Chuỗi khóa'
+InfoPlist.loctable :: CFBundleName :: en='Keychain Access' :: vi='Truy cập chuỗi khóa'
+InfoPlist.loctable :: keychain :: en='keychain' :: vi='chuỗi khóa'
+InfoPlist.loctable :: CFBundleDisplayName :: en='Keychain Access' :: vi='Truy cập chuỗi khóa'
+InfoPlist.loctable :: CFBundleDisplayName :: en='Accessibility' :: vi='Trợ năng'
+InfoPlist.loctable :: NSPrefPaneIconLabel :: en='Accessibility' :: vi='Trợ năng'
+InfoPlist.loctable :: CFBundleName :: en='Accessibility' :: vi='Trợ năng'
+Traceback (most recent call last):
+  File "<stdin>", line 5, in <module>
+KeyError: 'en'
+## ConfirmAccess.loctable langs-sample ['he', 'ko', 'id', 'fi', 'tr', 'nl', 'hu', 'ru'] base None
+   100267.title :: 'Luôn Cho phép' :: 'Luôn Cho phép'
+   100268.title :: 'Cho phép' :: 'Cho phép'
+## ACLEditor.loctable langs-sample ['ko', 'he', 'id', 'fi', 'tr', 'nl', 'hu', 'ru'] base None
+   164.title :: 'Xác nhận trước khi cho phép truy cập' :: 'Xác nhận trước khi cho phép truy cập'
+   100175.title :: 'Luôn cho phép các ứng dụng sau truy cập:' :: 'Luôn cho phép các ứng dụng sau truy cập:'
+   163.title :: 'Cho phép tất cả các ứng dụng truy cập mục này' :: 'Cho phép tất cả các ứng dụng truy cập mục này'
+## KeyEditor.loctable langs-sample ['he', 'ko', 'id', 'fi', 'tr', 'ru', 'hu', 'nl'] base None
+   302.label :: 'Kiểm soát truy cập' :: 'Kiểm soát truy cập'
+## InfoPlist.loctable langs-sample ['el~appletv', 'en_GB~iphone', 'vi~applewatch', 'th~appletv', 'da~mac', 'it~iphone', 'sv~ipad', 'cs~applewatch'] base None
+   CFBundleDisplayName :: 'Cài đặt hệ thống' :: 'Cài đặt hệ thống'
+   CFBundleName :: 'Cài đặt hệ thống' :: 'Cài đặt hệ thống'
+ConfirmAccess.loctable 100267.title {'en_PH': 'Always Allow', 'en_GB': 'Always Allow', 'en_AU': 'Always Allow', 'vi': 'Luôn Cho phép'}
+ConfirmAccess.loctable 100268.title {'en_PH': 'Allow', 'en_GB': 'Allow', 'en_AU': 'Allow', 'vi': 'Cho phép'}
+KeyEditor.loctable 302.label {'en_GB': 'Access Control', 'en_AU': 'Access Control', 'vi': 'Kiểm soát truy cập'}
+InfoPlist.loctable CFBundleDisplayName {'en_GB~iphone': 'Settings', 'en_PH~ipad': 'Settings', 'en_CA~appletv': 'Sprocket', 'vi~applewatch': 'Bánh răng', 'vi~mac': 'Cài đặt hệ thống', 'vi~iphone': 'Cài đặt', 'vi~ipad': 'Cài đặt', 'vi': 'Cài đặt hệ thống', 'vi~appletv': 'Bánh răng'}
+
+$ .venv/bin/python scripts/i18n/ledger.py history-sha --locale vi --namespace cli.permissions
+835d7c2a4997a9f98766ce2be26dcfd1755cdf3f193834ebe8fa9be83b3ec0de
+exit=0
+
+$ shasum -a 256 <inputs>
+d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186  local_operator/i18n/catalogues/en/cli.permissions.json
+f2d9ce73f2791f209b1be203b8f1e0d042eff7a348c0822ee28c5141a3cec099  local_operator/i18n/catalogues/en/cli.permissions.context.json
+afbd41b9bf3a507e910b8e08cf63dad017d9c9be70b22584768081f037c39ced  local_operator/i18n/catalogues/vi/cli.permissions.json
+e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888  i18n/style-guides/vi.md
+0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8  i18n/glossary.md

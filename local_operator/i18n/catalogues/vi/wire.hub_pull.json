@@ -1,0 +1,12 @@
+{
+  "wire.hub_pull.ask.local_edits": "* có chỉnh sửa của riêng bạn: chúng được giữ lại hoặc merge, không bao giờ bị ghi đè.",
+  "wire.hub_pull.ask.more": "{names} và {count} mục khác",
+  "wire.hub_pull.ask.new": "{count, plural, other {# mục mới}}: {names}",
+  "wire.hub_pull.ask.option.not_now": "Để sau",
+  "wire.hub_pull.ask.option.not_now.description": "Tạm thời không thay đổi gì.",
+  "wire.hub_pull.ask.option.update": "Cập nhật ngay",
+  "wire.hub_pull.ask.option.update.description": "Thêm các mục mới và cập nhật những mục bạn đã có. Chỉnh sửa của bạn được giữ lại.",
+  "wire.hub_pull.ask.resubscribe": "{count, plural, other {# mục sẽ lại nhận bản cập nhật}}: {names}",
+  "wire.hub_pull.ask.title": "Cập nhật các mục {org} của bạn từ hub của tổ chức?",
+  "wire.hub_pull.ask.updates": "{count, plural, other {# bản cập nhật}}: {names}"
+}

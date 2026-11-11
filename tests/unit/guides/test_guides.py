@@ -24,6 +24,23 @@ from local_operator.skills.embeddings import LocalEmbedder
 from local_operator.skills.index import SkillIndex, render_block
 
 
+def test_music_guide_describes_the_live_server_gated_service() -> None:
+    """Paid music is activated server-side (agent-server MUSIC_COMMERCIAL_AUTHORIZED,
+    ElevenLabs ``music_v2_5`` behind the public ``radient/music`` id). Core has no
+    local on/off switch, so the packaged guide must not tell the agent that paid
+    music is off -- an agent reading that would refuse a request the server would
+    serve. It must name the provider and the $0.15/min estimate users are quoted,
+    while keeping the server's ``cost`` object as the only money authority."""
+    guide = next(g for g in discover_guides() if g.name == "music-generation")
+    text = Path(guide.file_path).read_text(encoding="utf-8")
+    assert "remains off" not in text
+    assert "radient/music" in text
+    assert "ElevenLabs Music" in text
+    assert "$0.15 per requested minute" in text
+    assert "`cost` object is the only authority" in text
+    assert "write-tier approval" in text
+
+
 def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
     guides = discover_guides()
 
@@ -47,9 +64,11 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "memory",
         "mobile",
         "monitor",
+        "music-generation",
         "network",
         "org-hub",
         "peer-messaging",
+        "permissions",
         "projects",
         "qwencloud",
         "radient-vault",

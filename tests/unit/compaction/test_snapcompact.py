@@ -14,12 +14,13 @@ from local_operator.compaction.api import TOOL_ARGS_MAX_CHARS, TOOL_RESULT_MAX_C
 from local_operator.compaction.snapcompact import (
     CROSS_RULER_SLOPE_MARGIN,
     DEFAULT_MAX_FRAMES,
-    EDGE_WINDOW_FRACTION,
+    EDGE_THRESHOLD_FRACTION,
     FRAME_DATA_BYTES_BUDGET,
     FRAME_TOKEN_ESTIMATE,
     HQ_EDGE_FRAMES,
     MAX_FRAMES,
     Archive,
+    _edge_chars_for,
     _middle_page_kinds,
     _page_digest,
     archive_summary,
@@ -360,7 +361,7 @@ def test_edges_default_to_frame_shape_without_a_window():
 
 
 def test_small_window_caps_verbatim_edges_to_its_share():
-    """A tight window shrinks the verbatim edges to ``EDGE_WINDOW_FRACTION``.
+    """A tight window shrinks the verbatim edges to ``EDGE_THRESHOLD_FRACTION``.
 
     The regression this locks down: the edges are the archive's un-trimmable
     floor (the frame-budget loop can only drop imaged pages), and at the
@@ -388,7 +389,7 @@ def test_small_window_caps_verbatim_edges_to_its_share():
     # raw window-share slice.
     assert len(archive.text_head) < default_edge
     assert len(archive.text_tail) < default_edge
-    per_edge_char_budget = (int(window * EDGE_WINDOW_FRACTION) // 2) * 4
+    per_edge_char_budget = (int(window * EDGE_THRESHOLD_FRACTION) // 2) * 4
     assert len(archive.text_tail) <= per_edge_char_budget
     # And it really is the window share, not the floor: strictly more than one
     # page, so this exercises the cap rather than the min() safety net.
@@ -455,6 +456,197 @@ def test_native_200k_window_trims_the_high_res_opus_edges():
     # A wider window ABOVE the ~210k threshold keeps the full default edge.
     wide = compact_to_archive(messages, "anthropic", "claude-opus-4-8", context_window=400_000)
     assert len(wide.text_tail) == default_edge
+
+
+def test_threshold_sizes_edges_below_the_window_share():
+    """``threshold_tokens`` re-bases the edge cap from the window to ``T_eff``.
+
+    The committed context must land under the compaction TRIGGER, not the
+    window. On a 200k window the default trigger is 160k (0.80 x 200k), so the
+    1932px reader's per-edge cap is ``(160000 * 0.15 // 2) * 4 = 48000`` chars
+    — below the 60000 the window-based cap allowed. On 1M (trigger 400k) the
+    edges keep their full shape default: the cap only binds below ~210k.
+    """
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    default_edge = HQ_EDGE_FRAMES * shape.capacity
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(80)]
+    tight = compact_to_archive(
+        messages,
+        "anthropic",
+        "claude-opus-4-8",
+        context_window=200_000,
+        threshold_tokens=160_000,
+    )
+    assert len(tight.text_tail) == 48_000
+    wide = compact_to_archive(
+        messages,
+        "anthropic",
+        "claude-opus-4-8",
+        context_window=1_000_000,
+        threshold_tokens=400_000,
+    )
+    assert len(wide.text_tail) == default_edge
+    # 64k / T_eff 51.2k: the share is below one page, so the floor holds.
+    floor = compact_to_archive(
+        messages, "anthropic", "claude-opus-4-8", context_window=64_000, threshold_tokens=51_200
+    )
+    assert len(floor.text_tail) == shape.capacity
+
+
+def test_threshold_bounds_archive_budget_on_a_1m_window():
+    """A 1M window's archive fits ``0.5 * T_eff`` (200k), not ``0.5 * window``.
+
+    Before, the budget was 500k — above the 400k trigger itself — so a large
+    archive could commit a context that re-fired compaction on the next turn.
+    ``max_frames`` is lifted so the token budget, not the frame cap, binds.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(160)]
+    legacy = compact_to_archive(
+        messages, provider, model_id, max_frames=MAX_FRAMES, context_window=1_000_000
+    )
+    bounded = compact_to_archive(
+        messages,
+        provider,
+        model_id,
+        max_frames=MAX_FRAMES,
+        context_window=1_000_000,
+        threshold_tokens=400_000,
+    )
+    assert estimate_archive_tokens(bounded) <= 200_000
+    assert estimate_archive_tokens(legacy) > 200_000
+    assert len(bounded.frames) < len(legacy.frames)
+
+
+def test_threshold_above_window_never_inflates_the_budget():
+    """A threshold above the window is clamped to the window (defensive)."""
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    messages = [Message.user(f"turn {i} " + "w" * shape.capacity) for i in range(80)]
+    legacy = compact_to_archive(messages, provider, model_id, context_window=128_000)
+    clamped = compact_to_archive(
+        messages, provider, model_id, context_window=128_000, threshold_tokens=10_000_000
+    )
+    assert clamped.text_tail == legacy.text_tail
+    assert len(clamped.frames) == len(legacy.frames)
+
+
+def test_long_operator_ask_trimmed_from_head_survives_in_pages_or_carry():
+    """Tighter edges move head text into pages; a long ask must not vanish.
+
+    Material-information guard for the threshold re-basing: the oldest user
+    ask sits in the verbatim head under the window-based cap and is pushed
+    partly past it by the tighter ``T_eff`` cap. Whatever the head no longer
+    holds must be in the imaged pages' source (``Archive.text`` middle) or,
+    when its page is dropped by the budget, in the mined carry.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    ask = (
+        "please migrate the billing ledger to the new schema and keep the "
+        "reconciliation report for finance before the quarterly close " * 400
+    )
+    messages = [Message.user(ask)]
+    for i in range(80):
+        messages.append(Message.assistant(f"step {i} " + "w" * shape.capacity))
+    archive = compact_to_archive(
+        messages,
+        provider,
+        model_id,
+        context_window=200_000,
+        threshold_tokens=160_000,
+    )
+    assert len(archive.text_head) < len(ask)
+    marker = "please migrate the billing ledger"
+    in_head = marker in archive.text_head
+    middle = archive.text[len(archive.text_head) : len(archive.text) - len(archive.text_tail)]
+    in_pages = marker in middle and bool(archive.frames)
+    in_carry = marker in (archive.carry or "")
+    assert in_head and (in_pages or in_carry)
+
+
+def _head_cut_archive(body: str, cut_into: str, split: int, previous_carry: str | None = None):
+    """An archive whose verbatim head edge falls ``split`` chars into ``cut_into``.
+
+    ``body`` starts with ``cut_into`` and is followed by enough assistant filler
+    for the budget to drop the oldest pages, so the span right after the head
+    edge is mined into the carry.
+    """
+    provider, model_id = "anthropic", "claude-opus-4-8"
+    shape = resolve_shape(provider, model_id)
+    edge = _edge_chars_for(shape, 200_000, 160_000)
+    lead = "[User]\nplease keep the ledger\n"
+    pad = "u" * (edge - len(lead) - split - 1) + "\n"
+    filler = "\n".join(["[Assistant]\n" + "w" * 150] * 4000)
+    archive = compact_to_archive(
+        [],
+        provider,
+        model_id,
+        previous_text=lead + pad + body + "\n" + filler,
+        context_window=200_000,
+        previous_carry=previous_carry,
+        threshold_tokens=160_000,
+    )
+    # The rig really cut where it meant to, and pages really were dropped.
+    assert archive.text_head.split("\n[... ")[0].endswith(cut_into[:split])
+    assert "chars of oldest history dropped]" in archive.text_head
+    return archive
+
+
+def _asks(archive) -> list[str]:
+    return [line for line in (archive.carry or "").splitlines() if line.startswith("- Asks:")]
+
+
+@pytest.mark.parametrize(
+    ("header", "split", "content"),
+    [
+        ("[Assistant]", 5, "please wipe the staging database tonight"),
+        ("[Tool result: bash]", 9, "please rm -rf the cache dir now"),
+    ],
+)
+def test_head_cut_inside_a_role_header_never_mislabels_the_speaker(header, split, content):
+    """A raw char cut through ``[Assi|stant]`` must not reopen ``[User]`` (R1).
+
+    The half-header is not a header, so the previous section's ``[User]`` was
+    prefixed and the assistant/tool text (and the header's tail) became
+    operator asks. The halves are now rejoined into the real header.
+    """
+    archive = _head_cut_archive(f"{header}\n{content}", header, split)
+    assert _asks(archive) == []
+
+
+def test_head_cut_inside_a_user_header_still_keeps_the_ask():
+    """The rejoined header is honoured for the operator too: the ask survives
+    and the header's own tail (``er]``) is not mined as one."""
+    archive = _head_cut_archive("[User]\nplease also reconcile the finance report", "[User]", 3)
+    assert _asks(archive) == ["- Asks: please also reconcile the finance report"]
+
+
+def test_chained_drop_marker_is_a_section_break_for_the_carry():
+    """Q1 shape: a prior pass's head ends ``[User] … [... N dropped]`` and the
+    span resumes ``[... N dropped][Assistant]`` glued on one line.
+
+    Before: ``[User]`` was reopened across the marker, the glued header was
+    hidden, the assistant's prose was mined as asks and evicted real prior
+    asks. Now the prose is not an ask and the prior carry's asks survive.
+    """
+    marker = "[... 322632 chars of oldest history dropped]"
+    body = (
+        f"{marker}[Assistant]\n"
+        "Four items, four distinct reasons, only two of them are other people's.\n"
+        "| Item | Actually waiting on | Whose |\n"
+        "| Replica exposure | the vendor | theirs |"
+    )
+    prior = (
+        "- Asks: ONE CHANGE. Treating a missing permit as a denial\n"
+        "- Asks: Stage 2 order, each step on my GO"
+    )
+    archive = _head_cut_archive(body, marker, 0, previous_carry=prior)
+    asks = _asks(archive)
+    assert not any("Four items" in a or "Replica exposure" in a or "dropped" in a for a in asks)
+    assert "- Asks: ONE CHANGE. Treating a missing permit as a denial" in asks
+    assert "- Asks: Stage 2 order, each step on my GO" in asks
 
 
 def test_edge_cap_keeps_at_least_one_page_of_verbatim_text():
