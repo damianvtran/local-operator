@@ -926,7 +926,9 @@ class Creation:
     snapshots the matches before the call and records only new ones after it.
     """
 
-    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone"
+    #: ``symlink`` is the link ENTRY ``ln -s[f] SRC LINK`` makes, never the
+    #: directory it points at (see ``provenance.owned_link``).
+    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone" | "symlink"
     path: str | None = None
     parent: str | None = None
     pattern: str | None = None
@@ -2267,6 +2269,20 @@ class _Walker:
         path, _ = _absolute(link.text, self.state.cwd)
         if path is not None:
             self.linked.add(path.rstrip("/"))
+        # Provenance (q1029 incident, remote node 0.101.44): a session that
+        # made ``ln -s <pad> ~/q1029`` could not remove that link later. Only
+        # the plain two-operand form names the link itself; ``-t DIR`` or
+        # several sources put links INSIDE a directory, and a trailing slash
+        # asks ln to place the link inside an existing directory. The ledger
+        # re-checks after the call that the link really appeared there
+        # (``provenance.commit_creations``), so a dereferenced directory
+        # destination records nothing.
+        if (
+            len(operands) == 2
+            and not _cluster_value(args, "t", "--target-directory")
+            and not link.text.endswith("/")
+        ):
+            self._create("symlink", self._literal_dir(link))
 
     def _find(self, args: list[Expanded]) -> None:
         roots: list[Expanded] = []

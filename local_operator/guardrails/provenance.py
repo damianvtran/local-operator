@@ -403,7 +403,9 @@ def write_records(
     now = time.time()
     for path, kind in entries:
         try:
-            st = os.stat(path)
+            # A link row identifies the link ENTRY, so it is lstat'ed: its
+            # pointee may be an old directory nobody here made.
+            st = os.lstat(path) if kind == "symlink" else os.stat(path)
         except OSError:
             continue
         written.append(path)
@@ -470,6 +472,10 @@ def owned_record(
     best: CreationRecord | None = None
     for row in rows:
         rec = CreationRecord(*row)
+        if rec.kind == "symlink":
+            # A link row vouches for removing that link entry only
+            # (``owned_link``), never for its pointee or anything under it.
+            continue
         if not (real == rec.path or real.startswith(rec.path.rstrip("/") + "/")):
             continue
         try:
@@ -485,6 +491,66 @@ def owned_record(
     if best is not None and _foreign_inside(real, session_id, state_root=state_root):
         return None
     return best
+
+
+def link_path(path: str) -> str:
+    """The canonical path of the link ENTRY at ``path``: its parent resolved, its
+    own last component kept, so the link itself is never followed."""
+    parent, name = os.path.split(os.path.abspath(path))
+    return os.path.join(os.path.realpath(parent), name)
+
+
+def _link_identity(path: str) -> tuple[int, int, int] | None:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, creation_stamp(st))
+
+
+def owned_link(
+    path: str, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> CreationRecord | None:
+    """The ledger row for the symlink ENTRY at ``path`` this session made, or ``None``.
+
+    WHY A SEPARATE LOOKUP (q1029 incident). ``rm LINK`` unlinks the link and
+    leaves its pointee alone, so ownership of the link is a question about
+    the link entry: matched EXACTLY on its canonical path (``link_path``) and
+    its lstat identity (dev, ino, ``creation_stamp``), never by realpath
+    and never as a prefix — a path under a link lives in the pointee.
+
+    WHY IT MUST STILL BE A SYMLINK. A link the session made and someone then
+    replaced with a real directory (same name, ``rm link && mkdir link``)
+    holds that someone's data; the identity check already rejects a new
+    inode, and the ``islink`` check keeps the rule explicit even where an
+    inode number is reused. Any error means "not owned".
+    """
+    if not session_id or not path or not os.path.islink(path):
+        return None
+    canonical = link_path(path)
+    identity = _link_identity(canonical)
+    if identity is None:
+        return None
+    try:
+        conn = _connect(ledger_path(state_root), create=False)
+        if conn is None:
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp FROM created"
+                " WHERE owner = ? AND path = ? AND kind = 'symlink'",
+                (session_id, canonical),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        logger.debug("guardrail ledger unreadable", exc_info=True)
+        return None
+    for row in rows:
+        rec = CreationRecord(*row)
+        if rec.stamp is not None and (rec.dev, rec.ino, rec.stamp) == identity:
+            return rec
+    return None
 
 
 def _holds_git(directory: str) -> bool:
@@ -575,9 +641,13 @@ class PendingCreations:
     exact: list[tuple[str, str, str]] = field(default_factory=list)
     #: ``(parent, pattern, matches that already existed)`` for ``mktemp -d``.
     patterned: list[tuple[str, str, frozenset[str]]] = field(default_factory=list)
+    #: ``(link path, lstat identity before the call or None)`` for ``ln -s``.
+    #: ``ln -sf`` REPLACES an existing link, so "did not exist yet" (the
+    #: ``exact`` rule) would miss it; a changed identity is the creation.
+    links: list[tuple[str, tuple[int, int, int] | None]] = field(default_factory=list)
 
     def __bool__(self) -> bool:
-        return bool(self.exact or self.patterned)
+        return bool(self.exact or self.patterned or self.links)
 
 
 def _topmost_new(path: str) -> str | None:
@@ -601,7 +671,11 @@ def plan_creations(
     resolution = resolve_command(command, cwd=cwd_n, env=env, home=home)
     pending = PendingCreations(command=command)
     for created in resolution.created:
-        if created.path is not None:
+        if created.kind == "symlink" and created.path is not None:
+            if os.path.isdir(created.path) and not os.path.islink(created.path):
+                continue  # ln would put the link INSIDE this directory
+            pending.links.append((created.path, _link_identity(created.path)))
+        elif created.path is not None:
             top = _topmost_new(created.path)
             if top is not None:
                 pending.exact.append((created.kind, created.path, top))
@@ -667,6 +741,12 @@ def commit_creations(
             for match in now:
                 if match not in before and os.path.isdir(match):
                     entries.append((os.path.realpath(match), "mktemp"))
+        for path, before in pending.links:
+            # Recorded only if the call left a NEW link entry at that exact
+            # path: an ``ln -sf`` that dereferenced an existing link to a
+            # directory made its link inside the pointee instead.
+            if os.path.islink(path) and _link_identity(path) != before:
+                entries.append((link_path(path), "symlink"))
         entries = [
             (p, k)
             for p, k in dict(entries).items()

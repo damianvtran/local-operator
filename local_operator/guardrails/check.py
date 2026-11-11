@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from local_operator.guardrails.classify import Risk, Verdict, classify_bash
+from local_operator.guardrails.classify import Risk, Verdict, classify_bash, link_entry
 from local_operator.guardrails.judge import (
     GUARDRAILS_JUDGE_TIMEOUT_DEFAULT,
     JudgeBrief,
@@ -586,7 +586,11 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
                 unverifiable.append(t.pattern)
             paths.extend(os.path.realpath(m) for m in matches)
         else:
-            paths.append(os.path.realpath(t.path))
+            # A bare symlink operand of ``rm``/``unlink`` removes only the
+            # link, so its citation must cover the link entry, not the pointee
+            # (q1029 incident: ``ln -s <pad> ~/q1029`` could never cover a pad
+            # born before it). Anything else is verified on its realpath.
+            paths.append(link_entry(t) or os.path.realpath(t.path))
     paths = list(dict.fromkeys(paths))
     operator_only = [p for p in dict.fromkeys(operator_only) if p not in paths]
     operator = ctx.operator
@@ -621,7 +625,7 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             "",
         )
         tree = ""
-        if os.path.exists(os.path.join(path, ".git")):
+        if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
             tree = f"; git: {prov.worktree_state(path)}"
             if prov.is_primary_checkout(path):
                 tree += f" (primary checkout; as a clone: {prov.clone_state(path)})"

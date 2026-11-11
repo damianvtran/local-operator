@@ -61,7 +61,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   the session's own `git worktree add`/`git clone` leaf is recorded). A glob
   ranks LOW only when every current match is recorded. A primary checkout stays
   HIGH unless this session cloned it. `$HOME`, the state root and the protected
-  roots are never recorded.
+  roots are never recorded. A symlink you made (`ln -s[f] SRC LINK`) is
+  recorded too: `rm LINK` or `unlink LINK` by its exact path (no trailing slash)
+  removes only the link and ranks LOW while it is still that link; `rm -r LINK/`
+  reaches the pointee and is ranked as the pointee.
 - **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
   is LOW when the path is a registered linked worktree with no tracked or
   untracked change, no ignored entry beyond regenerable output (`node_modules`,
