@@ -26,11 +26,17 @@ from local_operator.harness.types import (
 )
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.runtime.supplements import SupplementRunner
-from local_operator.supplements.contract import SUPPLEMENT_CUSTOM_TYPE, reader_disposition
-from local_operator.supplements.trigger import music_sounds, snapshot_messages, turn_music_jobs
+from local_operator.supplements.contract import (
+    SUPPLEMENT_CUSTOM_TYPE,
+    reader_disposition,
+)
+from local_operator.supplements.trigger import (
+    music_sounds,
+    snapshot_messages,
+    turn_music_jobs,
+)
 from tests.unit.session.test_session import ScriptedStream, wait_for
 from tests.unit.supplements.test_runner import _await_row, _make_session
-
 
 JOB = "a1b2c3d4"
 
@@ -233,4 +239,39 @@ async def test_music_settling_before_the_turn_ends_lands_in_its_first_row(tmp_pa
         assert len(_rows(session.transcript)) == 1
     finally:
         await handles[0].dispose()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_graphics_path_links_music_and_carries_merged_tracks_to_its_terminal_row(
+    tmp_path, monkeypatch
+):
+    from tests.unit.supplements.test_runner_generator import (
+        BLOCK,
+        DATASETS,
+        StubRunner,
+        _decision,
+        _drain,
+        _handle,
+        _settings,
+    )
+
+    session = _make_session(tmp_path / "session", ScriptedStream([]), [], tmp_path)
+    handle = await _handle(session, tmp_path)
+    StubRunner(handle._supplements, answers=[BLOCK]).install(monkeypatch)
+    runner = handle._supplements
+    try:
+        # Parked before the row exists, as when the job settles mid-turn.
+        await runner.on_music_settled(receipt(track_artifact(0, "rainy-lo-fi-1.mp3")))
+        runner._render(
+            "answer", _decision(), DATASETS, "chart", "facts", _settings(), music_jobs=(JOB,)
+        )
+        await _drain(handle)
+        rows = _rows(session.transcript)
+        assert [row["state"] for row in rows] == ["decided", "done"]
+        for row in rows:
+            assert row["music_jobs"] == [JOB]
+            assert [s["title"] for s in row["sounds"]] == ["rainy-lo-fi-1.mp3"]
+    finally:
+        await handle.dispose()
         await session.dispose()

@@ -737,6 +737,13 @@ class SupplementRunner:
             # Files AND graphics: the generator half runs on its own task so a steer can cut
             # it without touching the decision's work, and so a slow model can never delay
             # the turn that is already over (§2.9).
+            # Only when present: the keywords are additive, and a turn with nothing
+            # withheld and no music keeps the exact call shape the render seam always had.
+            optional: dict[str, Any] = {}
+            if withheld:
+                optional["withheld"] = withheld
+            if music_jobs:
+                optional["music_jobs"] = music_jobs
             self._render(
                 answer.id,
                 decision,
@@ -745,10 +752,7 @@ class SupplementRunner:
                 answer.text,
                 settings,
                 sounds=sounds,
-                # Only when present: the keyword is additive, and a turn with nothing
-                # withheld keeps the exact call shape the render seam always had.
-                **({"withheld": withheld} if withheld else {}),
-                **({"music_jobs": music_jobs} if music_jobs else {}),
+                **optional,
             )
             return
         await self._write(

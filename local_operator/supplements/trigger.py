@@ -269,9 +269,7 @@ def snapshot_message(
         )
     artifacts: list[Mapping[str, Any]] = []
     music_job = ""
-    if getattr(message, "tool_name", "") in MUSIC_TOOLS and not getattr(
-        message, "is_error", False
-    ):
+    if getattr(message, "tool_name", "") in MUSIC_TOOLS and not getattr(message, "is_error", False):
         payload = getattr(message, "provider_payload", None)
         details = payload.get("details") if isinstance(payload, Mapping) else None
         raw_job = details.get("job_id") if isinstance(details, Mapping) else None

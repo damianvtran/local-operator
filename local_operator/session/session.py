@@ -5290,9 +5290,7 @@ class Session:
         #: Set by ``ServingSessionHandle`` to its ``SupplementRunner.on_music_settled``:
         #: the turn highlights must learn when a background music job settles, and the
         #: runner lives on the handle, not here. ``None`` (exec, children, tests) = no-op.
-        self.music_settled_listener: Callable[[Mapping[str, Any]], Awaitable[None]] | None = (
-            None
-        )
+        self.music_settled_listener: Callable[[Mapping[str, Any]], Awaitable[None]] | None = None
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
