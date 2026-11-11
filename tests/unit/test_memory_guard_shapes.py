@@ -607,7 +607,6 @@ def test_spelling_guard_skips_only_the_opaque_rule():
         guard_spelling(json.dumps({"body": SYNTH_GITHUB}))
 
 
-
 # --- Issue #3573: public URL locators and attachment extensions -------------------------
 # Om Patil's original cases, remediated per agent review round 1 (B1, M1, M2, m1) and
 # QA round 1 (Q1-Q4): GitHub locators are host-anchored and exempt only the run the
@@ -705,4 +704,4 @@ def test_public_url_identifiers_are_storable():
         assert not refused(text), text
 
     # A secret still wins even inside such a URL.
-    assert refused("api_key https://github.com/org/repo/commits/a1b2c3d4e5f6789012345678901234567890abcd")
+    assert refused(f"api_key https://github.com/org/repo/commits/{LOCATOR_HEX}")
