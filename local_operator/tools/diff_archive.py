@@ -77,6 +77,7 @@ class DiffBindingReadOptions(TypedDict, total=False):
 
     diff_bindings: bool
 
+
 #: Descriptor/artifact format version (the UI's frozen v1 contract).
 DIFF_ARCHIVE_VERSION = 1
 
