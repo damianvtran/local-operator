@@ -326,3 +326,203 @@ def test_agent_repair_reads_the_envelope_and_refuses_redirects(tmp_path, hub):
     assert record.identity.visibility == "public" and record.tenant_id is None
     assert ("/v1/agents/x", False) not in hub.seen
     assert all(not auth for _, auth in hub.seen)
+
+
+# -- review round 1 remediation ------------------------------------------------------------
+
+
+def _netrc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``requests`` at a netrc with an entry for the loopback hub's host."""
+
+    path = tmp_path / "netrc"
+    path.write_text("machine 127.0.0.1 login probe password must-not-be-sent\n")
+    path.chmod(0o600)
+    monkeypatch.setenv("NETRC", str(path))
+
+
+def test_probe_ignores_an_ambient_netrc_entry(tmp_path, hub, monkeypatch):
+    """R1: "no credential, ever" includes the one ``requests`` reads from netrc.
+
+    The NEGATIVE CONTROL comes first: a plain ``requests.get`` under the same
+    ``NETRC`` does send Basic auth to this hub, so the rig can see the leak the
+    probe must not have.
+    """
+
+    import requests
+
+    _netrc(tmp_path, monkeypatch)
+    hub.team()
+    requests.get(f"{hub.base}/teams/{HUB}", timeout=5)
+    assert hub.seen == [(f"/v1/teams/{HUB}", True)], "control: netrc must reach a plain GET"
+    hub.seen.clear()
+
+    ctx = _ctx(tmp_path, hub.base)
+    path = _legacy(ctx)
+    svc.check_items(ctx, kinds=("team",))
+    assert json.loads(path.read_text())["identity"]["visibility"] == "public"
+    # The FIRST GET is the probe -- the request whose 200 is read as proof.
+    # The second is the ordinary public check re-reading the repaired row; its
+    # netrc behaviour is every public read's and is deliberately unchanged.
+    assert hub.seen[0] == (f"/v1/teams/{HUB}", False), hub.seen
+
+    # The agent arm of the same probe.
+    hub.seen.clear()
+    source = prov.canonical_hub_source(ctx.config_manager)
+    prov.write_baseline(
+        ctx.config_dir,
+        prov.make_record(
+            "agent", "agent-local", "agent-hub", PUBLISHER, {"instructions": "x"}, "pull"
+        ),
+    )
+    hub.routes["/v1/agents/agent-hub"] = (200, {"result": {"id": "agent-hub"}}, {})
+    check = ItemCheck("agent", "agent-local", "a", "agent-hub", PUBLISHER, "up-to-date")
+    assert svc.repair_proven_public_scope(ctx, check, source=source) is not None
+    assert hub.seen[0] == ("/v1/agents/agent-hub", False), hub.seen
+
+
+def test_credential_free_refuses_a_bearer_request(tmp_path):
+    client = RadientClient(api_key=None, base_url="http://127.0.0.1:9/v1")
+    with pytest.raises(ValueError):
+        client.get_team(HUB, credential_free=True)  # the default sends the bearer
+    with pytest.raises(ValueError):
+        client.get_agent(HUB, credential_free=True, **{"with_" + "credential": True})
+
+
+def test_credential_free_agent_read_never_follows_a_redirect(tmp_path, hub, monkeypatch):
+    """A followed redirect re-reads netrc for its target, so credential_free refuses it."""
+
+    _netrc(tmp_path, monkeypatch)
+    hub.routes["/v1/agents/agent-hub"] = (302, {}, {"Location": f"{hub.base}/agents/x"})
+    hub.routes["/v1/agents/x"] = (200, {"result": {"id": "agent-hub"}}, {})
+    client = RadientClient(api_key=None, base_url=hub.base)
+    with pytest.raises(RuntimeError):
+        client.get_agent("agent-hub", credential_free=True)
+    assert hub.seen == [("/v1/agents/agent-hub", False)]
+
+
+def _probes(ctx: Any) -> dict[str, Any]:
+    return ctx.store().load().get(svc.PUBLIC_PROBE_STORE_KEY) or {}
+
+
+def test_a_404_is_probed_at_most_once_a_day_and_a_later_200_still_repairs(tmp_path, hub):
+    """R2: a genuine org row (404 to everyone outside it) stops costing a GET per check."""
+
+    hub.team(404, {"msg": "team_not_found"})
+    ctx = _ctx(tmp_path, hub.base)
+    path = _legacy(ctx)
+    before = path.read_bytes()
+    probe = (f"/v1/teams/{HUB}", False)
+
+    svc.check_items(ctx, kinds=("team",))
+    svc.check_items(ctx, kinds=("team",))
+    svc.check_items(ctx, kinds=("team",))
+    assert hub.seen == [probe]  # one probe, not one per check
+    assert path.read_bytes() == before
+    source = prov.canonical_hub_source(ctx.config_manager)
+    entry = _probes(ctx)[f"team:{HUB}"]
+    assert entry["source"] == source and PUBLISHER not in json.dumps(entry)
+
+    # The publisher makes the row public; once the backoff lapses, a check repairs it.
+    hub.team()
+    aged = (svc.datetime.now(svc.timezone.utc) - svc.PUBLIC_PROBE_BACKOFF).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    ctx.store().mutate(
+        lambda doc: doc[svc.PUBLIC_PROBE_STORE_KEY][f"team:{HUB}"].update(not_public_at=aged)
+    )
+    svc.check_items(ctx, kinds=("team",))
+    assert json.loads(path.read_text())["identity"]["visibility"] == "public"
+    assert _probes(ctx) == {}  # the stale 404 stamp is cleared by the repair
+
+
+def test_a_404_stamp_from_another_hub_source_does_not_suppress_the_probe(tmp_path, hub):
+    hub.team()
+    ctx = _ctx(tmp_path, hub.base)
+    path = _legacy(ctx)
+    ctx.store().mutate(
+        lambda doc: doc.setdefault(svc.PUBLIC_PROBE_STORE_KEY, {}).update(
+            {f"team:{HUB}": {"source": "https://other.test/v1", "not_public_at": prov.now_iso()}}
+        )
+    )
+    svc.check_items(ctx, kinds=("team",))
+    assert json.loads(path.read_text())["identity"]["visibility"] == "public"
+
+
+@pytest.mark.parametrize("answer", ["503", "mismatched-id"])
+def test_unproven_answers_are_not_remembered(tmp_path, hub, answer):
+    """Only a 404 backs off: a passing outage must not delay the repair by a day."""
+
+    if answer == "503":
+        hub.team(503, {"msg": "down"})
+    else:
+        hub.team(document={**TEAM_DOC, "id": "another-hub-id"})
+    ctx = _ctx(tmp_path, hub.base)
+    _legacy(ctx)
+    svc.check_items(ctx, kinds=("team",))
+    svc.check_items(ctx, kinds=("team",))
+    assert len(hub.seen) == 2 and _probes(ctx) == {}
+
+
+def test_writer_refuses_a_rescope_with_no_current_record(tmp_path):
+    """R3: a prune racing the repair must not have its deletion undone."""
+
+    ctx = _ctx(tmp_path, "https://hub.test/v1")
+    path = _legacy(ctx)
+    record = prov.read_baseline(ctx.config_dir, "team", LOCAL)
+    assert record is not None
+    public = prov.link_identity(
+        "team", LOCAL, HUB, origin=link_origin("https://hub.test/v1", "public", None)
+    )
+    repaired = prov.replace(record, tenant_id=None, scope_known=True, identity=public)
+    path.unlink()  # the prune landed while the probe was in flight
+
+    with pytest.raises(prov.LinkError) as refused:
+        prov.write_baseline(ctx.config_dir, repaired, proven_public_rescope=True)
+    assert refused.value.code == "origin-conflict"
+    assert not path.exists()
+
+
+def test_operator_ask_repaired_public_team_keeps_syncing(tmp_path, hub):
+    """R4: the ask -- "make sure that public hub syncs work properly" -- end to end.
+
+    repair -> a later check costs exactly one GET -> a new hub revision is
+    ``available`` -> the unattended apply merges and writes it, on a link that
+    is subscribed by the creation default (no stored policy).
+    """
+
+    from local_operator.teams import TeamRegistry
+
+    ctx = _ctx(tmp_path, hub.base)
+    teams = TeamRegistry(ctx.config_dir)
+    doc = {**TEAM_DOC, "instructions": "## Brief\nShip it.", "version": "1.0.0"}
+    hub.team(document=doc)
+    team = teams.import_hub_team(doc).team
+    prov.record_team_pull(
+        ctx.config_dir, teams.get_team(team.id), doc, tenant_id=PUBLISHER, scope_known=True
+    )
+    ctx = svc.HubSyncContext(
+        config_dir=ctx.config_dir,
+        config_manager=ctx.config_manager,
+        client_for_tenant=ctx.client_for_tenant,
+        team_registry=teams,
+    )
+
+    svc.check_items(ctx, kinds=("team",))  # the repair
+    row = svc.links_snapshot(ctx)["links"][0]
+    assert row["visibility"] == "public" and row["tenant_id"] is None
+    assert row["policy"]["subscribe"] is True and row["policy"]["auto_push"] is False
+
+    hub.seen.clear()
+    (later,) = svc.check_items(ctx, kinds=("team",))
+    assert later.verdict == "up-to-date"
+    assert hub.seen == [(f"/v1/teams/{HUB}", False)]  # exactly one GET, no credential
+
+    hub.team(document={**doc, "instructions": "## Brief\nShip it carefully.", "version": "1.1.0"})
+    (available,) = svc.check_items(ctx, kinds=("team",))
+    assert available.verdict == "available"
+    report = svc.apply_one(ctx, available, auto=True, allow_llm=False)
+    assert report.outcome == "merged" and report.applied, report
+    assert teams.get_team(team.id).instructions.strip() == "## Brief\nShip it carefully."
+    record = prov.read_baseline(ctx.config_dir, "team", team.id)
+    assert record is not None and record.identity is not None
+    assert record.identity.visibility == "public" and record.tenant_id is None

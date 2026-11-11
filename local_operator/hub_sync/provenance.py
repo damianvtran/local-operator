@@ -474,8 +474,10 @@ def write_baseline(
     public route's own definition of public. Pre-fix public pulls stored the
     PUBLISHER's tenant, so that tenant was never a scope; the anonymous answer
     is the proof the plain guard below cannot see. Every other combination
-    still refuses: an identified record, an organization target, a hub-id
-    change or a record that keeps a tenant.
+    refuses with ``LinkError("origin-conflict")``: NO current record (a prune
+    that deleted the item while the probe was in flight must not be undone by
+    the repair's write), an identified record, an organization target, a
+    hub-id change or a record that keeps a tenant.
     """
     path = baseline_path(config_dir, record.kind, record.local_id)
     _refuse_links(path)
@@ -487,6 +489,11 @@ def write_baseline(
     ) != (record.kind, record.local_id, record.hub_id, record.tenant_id):
         raise LinkError("origin-conflict", "baseline identity does not match the local origin")
     current = read_baseline(config_dir, record.kind, record.local_id)
+    if proven_public_rescope and current is None:
+        # A rescope REPAIRS an existing row; it never creates one (review round
+        # 1, R3). Falling through to an ordinary write here would let the
+        # repair resurrect the baseline of an item pruned mid-probe.
+        raise LinkError("origin-conflict", "there is no legacy record to rescope")
     if current is not None:
         # A missing historical API URL is NOT permission to change the known
         # remote id or organization. Only a genuinely unknown scope may be
