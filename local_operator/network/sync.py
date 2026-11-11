@@ -3064,14 +3064,25 @@ def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
         raise
 
 
-def _open_for_read(path: Path, scope: _WriteScope) -> int:
+def _open_for_read(path: Path, scope: _WriteScope, *, nonblock: bool = False) -> int:
     _assert_contained(scope, path, leaf_link=False)
     parent = _open_directory(scope, scope.relative_in(path.parent), path.name)
     try:
         try:
             before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            flags = os.O_RDONLY | _O_BINARY | _O_NOFOLLOW
+            if nonblock:
+                # A PEER NAMES THIS FILE (``network/files.py``), so the open itself must
+                # not be a wait the peer controls: a FIFO opened read-only blocks until a
+                # writer appears, parking a slow worker indefinitely, and opening a device
+                # can have side effects. Refuse a non-regular leaf BEFORE opening it, and
+                # open non-blocking so a swap in the window between stat and open cannot
+                # block either; ``_opened_regular`` then refuses whatever was opened.
+                if not stat.S_ISREG(before.st_mode):
+                    raise _refuse_io(path.name, "it is not a regular file.")
+                flags |= getattr(os, "O_NONBLOCK", 0)
             return _opened_regular(
-                os.open(path.name, os.O_RDONLY | _O_BINARY | _O_NOFOLLOW, dir_fd=parent),
+                os.open(path.name, flags, dir_fd=parent),
                 before,
                 path.name,
             )
@@ -3144,6 +3155,22 @@ def _symlink_at(target: str, root: Path, name: str, scope: _WriteScope) -> None:
         os.symlink(target, name, dir_fd=parent)
     finally:
         os.close(parent)
+
+
+#: PUBLIC NAMES for the containment primitives, for ``network/files.py``
+#: (docs/design/mesh-file-transfer.md, S1). ONE implementation of "open no-follow
+#: from a trusted anchor, refuse links and non-regular files, rename dirfd-relative"
+#: is the point: a second copy in the file-transfer slice would be a second set of
+#: rules to keep in step with this one, and the first divergence would be a hole.
+#: Aliases rather than renames, so the sync code's own call sites stay untouched.
+WriteScope = _WriteScope
+write_scope = _write_scope
+open_directory = _open_directory
+opened_regular = _opened_regular
+open_for_read = _open_for_read
+replace_at = _replace_at
+unlink_at = _unlink_at
+stream_digest = _stream_digest
 
 
 def _copy_contained(source: Path, destination: Path, scope: _WriteScope) -> None:

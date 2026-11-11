@@ -57,6 +57,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -268,6 +269,60 @@ class AttachmentStore:
                 logger.debug("attachment store: cannot write %s: %s", digest, exc)
                 return None
         return AttachmentRef(digest=digest, mime_type=mime_type, bytes=len(raw))
+
+    def adopt_file(
+        self, staged: Path, mime_type: str, *, expected_sha256: str
+    ) -> AttachmentRef | None:
+        """Move an already-written file into the store, verified; ``None`` on mismatch.
+
+        The FILE counterpart of :meth:`put_bytes`, for a mesh file pull
+        (``network/files.py``) whose payload can be up to 256 MiB: holding it in
+        memory to call ``put_bytes`` is the allocation the pull exists to avoid. So
+        the bytes are hashed STREAMED, and the staged file is RENAMED into place, which
+        also means the content never exists in the store half-written.
+
+        ``expected_sha256`` is the full 64-hex digest the sender announced before any
+        byte moved. A file that does not hash to it is NOT adopted (the caller deletes
+        it): the store is content-addressed by the first 32 hex of that digest, so
+        adopting a mismatch would file wrong bytes under a name that promises others.
+        Same order as ``put_bytes``: content first, then the sidecar, so a crash
+        between them leaves unused content rather than a sidecar naming nothing.
+        ``staged`` must be on the store's filesystem (the relay stages under the same
+        config root) — a cross-device rename fails and returns ``None``.
+        """
+        try:
+            digest_full = hashlib.sha256()
+            size = 0
+            with Path(staged).open("rb") as handle:
+                while True:
+                    block = handle.read(1 << 20)
+                    if not block:
+                        break
+                    size += len(block)
+                    digest_full.update(block)
+        except OSError as exc:
+            logger.debug("attachment store: cannot read staged %s: %s", staged, exc)
+            return None
+        hexdigest = digest_full.hexdigest()
+        if size == 0 or hexdigest != str(expected_sha256).removeprefix("sha256:"):
+            return None
+        digest = hexdigest[:_DIGEST_CHARS]
+        content = self._content_path(digest)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if content.exists():
+                # The digest IS the content: an existing file of this name already
+                # holds these bytes, so the staged copy is redundant, not a conflict.
+                Path(staged).unlink(missing_ok=True)
+            else:
+                os.replace(staged, content)
+            if not self._meta_path(digest).exists():
+                meta = {"digest": digest, "mime_type": mime_type, "bytes": size}
+                self._meta_path(digest).write_text(json.dumps(meta), encoding="utf-8")
+        except OSError as exc:
+            logger.debug("attachment store: cannot adopt %s: %s", digest, exc)
+            return None
+        return AttachmentRef(digest=digest, mime_type=mime_type, bytes=size)
 
     def locate(self, data_b64: str, mime_type: str) -> AttachmentRef | None:
         """The reference for bytes the store is EXPECTED to already hold.

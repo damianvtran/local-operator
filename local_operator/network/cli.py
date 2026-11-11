@@ -44,6 +44,8 @@ import argparse
 import asyncio  # stdlib, so add_parser's import graph stays stdlib-only.
 import json
 import logging
+import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -108,6 +110,9 @@ _ACTIONS = (
     # THE APPROVAL RECORDS (remote-onboarding §2.3): the durable half of the one
     # onboarding gesture — file, read, answer, and run when this build has a runner.
     "approvals",
+    # MESH FILE TRANSFER (docs/design/mesh-file-transfer.md): bytes out of a session
+    # on another device, verified end to end. S1 ships `pull` only.
+    "files",
 )
 
 
@@ -437,6 +442,31 @@ def add_parser(
     )
     approval_run.add_argument("approval")
     approval_run.add_argument("--json", action="store_true")
+
+    # `lop network files pull`: one file out of a session on another device, byte for
+    # byte. A subparser rather than another `network sessions` flag: `sessions` is a
+    # flag family over one address, and a verb that takes a SOURCE and a DESTINATION
+    # path does not fit that shape (mesh-file-transfer.md, Decision 5).
+    files_parser = actions.add_parser(
+        "files", help="Copy files out of sessions on other devices, verified"
+    )
+    file_actions = files_parser.add_subparsers(dest="files_command")
+    file_pull = file_actions.add_parser(
+        "pull",
+        help="Pull one scratchpad file or referenced attachment from a peer's session",
+    )
+    file_pull.add_argument("peer", help="The device that holds the session (name or id)")
+    file_pull.add_argument("session", help="The session id on that device")
+    file_pull.add_argument(
+        "source",
+        help="scratchpad://<path> in that session, or an attachment digest "
+        "(32 hex, optionally written attachment:<digest>) its transcript references",
+    )
+    file_pull.add_argument("--out", help="Also write the verified file here (refused if it exists)")
+    file_pull.add_argument(
+        "--force", action="store_true", help="Let --out replace an existing file"
+    )
+    file_pull.add_argument("--json", action="store_true")
 
     peers = actions.add_parser("peers", help="Reachable peers right now")
     peers.add_argument("--json", action="store_true")
@@ -10822,6 +10852,134 @@ def _guard_approvals_subcommand(args: argparse.Namespace) -> int:
     return 2
 
 
+def _guard_files_subcommand(args: argparse.Namespace) -> int:
+    """``lop network files`` with no verb is a usage error: S1 ships ``pull`` only."""
+    if getattr(args, "files_command", None) == "pull":
+        return _cmd_files_pull(args)
+    print(
+        "usage: lop network files pull <peer> <session> <scratchpad://path|digest> "
+        "[--out PATH] [--force] [--json]",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _file_pull_source(raw: str) -> dict[str, str]:
+    """``{"path": …}`` or ``{"attachment": …}`` from what the person typed.
+
+    Refused HERE, before the relay is asked, because a malformed source can only ever
+    be refused by the owner too — asking costs a dial for a sentence this side can give.
+    The owner still re-checks both forms: this is a courtesy, never the confinement.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    text = str(raw or "").strip()
+    if text.startswith("scratchpad://"):
+        return {"path": text}
+    digest = text.removeprefix("attachment:")
+    if re.fullmatch(r"[0-9a-f]{32}", digest):
+        return {"attachment": digest}
+    raise MeshRefusal(
+        "bad_request",
+        f"{text!r} is neither a scratchpad:// path nor an attachment digest (32 hex); "
+        "only those two are pulled",
+    )
+
+
+def _land_out(store_path: Path, out: Path, sha256: str, *, force: bool) -> None:
+    """Copy the verified store file to ``out``: verified again, never over a file.
+
+    A SIBLING TEMP, HASHED WHILE COPYING, THEN LINKED INTO PLACE. ``out`` never
+    exists half-written (a reader of a partial PNG sees a corrupt image, which is the
+    failure this verb exists to end), the copy is checked against the digest the owner
+    announced rather than trusted because the store held it, and ``os.link`` makes "do
+    not overwrite" atomic: two pulls to one name cannot both win. ``--force`` is the
+    one replacing path, and it replaces by rename, so it is never a torn write either.
+    """
+    import hashlib
+    import tempfile
+
+    from local_operator.network.types import MeshRefusal
+
+    directory = out.parent if str(out.parent) else Path(".")
+    handle = tempfile.NamedTemporaryFile(
+        dir=directory, prefix=f".{out.name}.", suffix=".part", delete=False
+    )
+    temp = Path(handle.name)
+    try:
+        digest = hashlib.sha256()
+        with handle, store_path.open("rb") as source:
+            while True:
+                block = source.read(1 << 20)
+                if not block:
+                    break
+                digest.update(block)
+                handle.write(block)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if "sha256:" + digest.hexdigest() != sha256:
+            raise MeshRefusal(
+                "integrity_failed",
+                f"the stored copy no longer hashes to {sha256}, so {out} was not written",
+            )
+        if force:
+            os.replace(temp, out)
+            return
+        try:
+            os.link(temp, out)
+        except FileExistsError:
+            raise MeshRefusal(
+                "out_exists", f"{out} already exists; pass --force to replace it"
+            ) from None
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _cmd_files_pull(args: argparse.Namespace) -> int:
+    """``lop network files pull``: ask THIS device's relay to pull, then land ``--out``.
+
+    The relay does the transfer (it holds the links) and files the verified bytes in
+    this device's attachment store; this side receives a PATH, never bytes, and copies
+    from it. The receipt is the same dictionary on both surfaces, with ``path`` naming
+    the copy the person asked for (``--out``, else the store file).
+    """
+    from local_operator.network import files
+    from local_operator.network.types import MeshRefusal
+
+    source = _file_pull_source(args.source)
+    out = Path(args.out).expanduser() if getattr(args, "out", None) else None
+    if out is not None:
+        # Checked BEFORE the transfer as well as at the link: refusing an existing
+        # --out after moving 256 MiB would spend the whole pull to say no.
+        if out.exists() and not args.force:
+            raise MeshRefusal("out_exists", f"{out} already exists; pass --force to replace it")
+        if not out.parent.is_dir():
+            raise MeshRefusal("out_invalid", f"{out.parent} is not a directory")
+    detail = _relay_answer(
+        "session_file_pull",
+        timeout=files.FILE_PULL_CLIENT_TIMEOUT_S,
+        peer=str(args.peer),
+        session_id=str(args.session),
+        **source,
+    )
+    store_path = str(detail.get("path") or "")
+    if out is not None:
+        _land_out(Path(store_path), out, str(detail.get("sha256") or ""), force=bool(args.force))
+    receipt = {
+        **detail,
+        "path": str(out) if out is not None else store_path,
+        "landed": {"store": store_path, "out": str(out) if out is not None else None},
+    }
+    lines = [
+        f"pulled {receipt.get('name')} from {receipt.get('peer')}: "
+        f"{receipt.get('bytes')} bytes, {receipt.get('sha256')}, verified",
+        f"saved to {receipt['path']}",
+    ]
+    if int(receipt.get("resumed_bytes") or 0) > 0:
+        lines.append(f"resumed after {receipt['resumed_bytes']} bytes already staged")
+    return _emit(args, receipt, lines)
+
+
 def _guard_member_subcommand(args: argparse.Namespace) -> int:
     """``lop network member`` with no verb is a usage error, not the destructive one.
 
@@ -11795,6 +11953,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     # ``approvals`` has sub-verbs, so it needs the same "tell me what you meant"
     # guard ``member``/``identity``/``credential`` have.
     "approvals": _guard_approvals_subcommand,
+    "files": _guard_files_subcommand,
     "peers": _cmd_peers,
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,
