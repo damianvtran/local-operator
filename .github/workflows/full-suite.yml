@@ -110,6 +110,38 @@ jobs:
   # merge gate (a skip is a verdict, not a silent pass — the gate refuses a
   # failed or cancelled job). It exists here so the moved jobs keep their
   # `needs: [changes]` + flag wiring byte-for-byte.
+  # THE MERGE BASE: every job below that checks out code tests the PR head
+  # merged into the main tip resolved ONCE here, never the cached merge ref.
+  #
+  # Why: on a `labeled` event `actions/checkout` checks out
+  # `refs/pull/<n>/merge`, and GitHub recomputes that ref only on a push to
+  # the PR, not when main moves, so a re-armed gate tested a stale main.
+  # 2026-11-10: #3723 gate 42881345745 checked out `15f31d1 = Merge 5cfa1bc4
+  # into 065ab3c8a9f` (36 behind main); #3720 gate 42881290246 a merge into
+  # `ce220b9216c` (38 behind); #3732 gate 42881232605 `ff0c557 = Merge
+  # 44e32ff6 into 1799972999c` (22 behind) re-failed a membership_change_push
+  # node main had already fixed (#3685, ad16110f), and the PR API kept the
+  # stale `merge_commit_sha` for over a minute — only a push refreshed it.
+  #
+  # How: `resolve` below reads the base branch tip with `git ls-remote` and
+  # exports it as `gate_base`; `test` re-exports it for `coverage-report`
+  # (whose only `needs` must stay `test`). Each job's `apply` step, right after
+  # its checkout, rebuilds the merge of `pull_request.head.sha` into exactly
+  # that SHA and fails with both SHAs named on a conflict or a failed
+  # `HEAD^1 == base` / `HEAD^2 == head` check. One SHA for the run is the
+  # point: shards must not drift onto different mains as main moves mid-run.
+  # Off `pull_request` both steps change nothing (push/schedule/dispatch test
+  # their checkout as before) and only log.
+  #
+  # Verify from a gate log: every checking-out job prints exactly one
+  #   full-suite tested-base=<base> head=<head> tree=<tree> merge=<sha> job=<id> event=<e>
+  # line. `tested-base` must be the main tip when `changes` ran (an ancestor
+  # of today's origin/main), `head` the PR head, and `tree` IDENTICAL in every
+  # job of the run (merge SHAs carry a timestamp; the tree does not).
+  #
+  # These two steps and the `gate_base` output are the ONLY difference from
+  # ci.yml's `changes` (a PR push recomputes the merge ref, so ci.yml needs
+  # neither); test_full_suite_changes_job_matches_ci strips exactly them.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -126,12 +158,25 @@ jobs:
       cli: ${{ steps.classify.outputs.cli }}
       server: ${{ steps.classify.outputs.server }}
       i18n: ${{ steps.classify.outputs.i18n }}
+      gate_base: ${{ steps.gate_base.outputs.gate_base }}
     steps:
       - uses: actions/checkout@v7
         with:
           # HEAD^1 must be present. Two commits is the whole requirement, as in
           # version-bump-guard.
           fetch-depth: 2
+
+      # Before the classifier, so `HEAD^1` below is the fresh base and the
+      # diff it classifies is the one the suite will test.
+      - name: Resolve the main tip this run tests against
+        id: gate_base
+        run: python3 scripts/gate_merge_base.py resolve
+
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ steps.gate_base.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -251,6 +296,11 @@ jobs:
     # p75 weights; their LPT test-time sums are NOT wall-time margin evidence.
     # See docs/ci-test-durations.md for provenance and post-change limits.
     timeout-minutes: 38
+    # Pass-through only, for `coverage-report` (whose `needs` must stay
+    # `test`). Every leg carries the same value from `changes`, so the
+    # last-leg-wins rule for matrix outputs cannot pick a different base.
+    outputs:
+      gate_base: ${{ needs.changes.outputs.gate_base }}
     strategy:
       fail-fast: false
       matrix:
@@ -297,6 +347,15 @@ jobs:
         tests/unit/network/test_membership_convergence.py::test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pass
     steps:
       - uses: actions/checkout@v7
+
+      # Stays step 2, never folded into the checkout: gen_test_durations.py binds
+      # timing sources to a bare first-step `actions/checkout@v7`.
+      # See "THE MERGE BASE" at the `changes` job and scripts/gate_merge_base.py.
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ needs.changes.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
@@ -621,6 +680,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Same base as the shards whose coverage this combines, via `test`'s output.
+      # See "THE MERGE BASE" at the `changes` job and scripts/gate_merge_base.py.
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ needs.test.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
@@ -843,6 +910,13 @@ jobs:
     timeout-minutes: 23
     steps:
       - uses: actions/checkout@v7
+      # Both platforms test the same fresh merge as the unit shards.
+      # See "THE MERGE BASE" at the `changes` job and scripts/gate_merge_base.py.
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ needs.changes.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
       - name: Set Up Python 3.12
         uses: actions/setup-python@v7
         with:

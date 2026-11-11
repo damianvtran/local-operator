@@ -188,6 +188,100 @@ def test_team_proposal_accept(root):
     assert TeamRegistry(root).get_team(str(team.id)).instructions == "New team brief."
 
 
+def _agent_create_image(name="fresh-role", agent_id="11111111-2222-3333-4444-555555555555"):
+    return {
+        "id": agent_id,
+        "name": name,
+        # The shape agent_tool._agent_proposal files: label already derived,
+        # model "" (the stored value) rather than None.
+        "label": "Fresh Role",
+        "description": "A role proposed from a conversation.",
+        "tags": ["role"],
+        "categories": ["role"],
+        "model": "",
+        "instructions": "Do the new thing.",
+    }
+
+
+def test_create_agent_proposal_accept(root):
+    """A create has no before image, so apply must mint the row's own metadata.
+
+    ``AgentImage`` carries only authored fields; ``created_date`` and ``version``
+    are required on ``AgentData`` and belong to the registry, not to the proposal.
+    """
+    from local_operator.profile_approval import snapshot
+
+    image = _agent_create_image()
+    record = PP.file(
+        root,
+        profile_kind="agent",
+        operation="create",
+        target_id=image["id"],
+        name=image["name"],
+        before=None,
+        after=image,
+        session_id="sess-c",
+    )
+    assert snapshot(root, "agent", image["id"]) is None
+    result = PP.apply(root, record["id"], actor="desktop")
+    assert result["proposal"]["state"] == PP.STATE_ACCEPTED
+    registry = AgentRegistry(root, migrate=False)
+    row = registry.get_agent(image["id"])
+    assert row.name == "fresh-role"
+    assert row.created_date is not None and row.version
+    assert registry.get_agent_system_prompt(image["id"]) == "Do the new thing."
+    # The written row round-trips to exactly the proposed authored image.
+    assert snapshot(root, "agent", image["id"]) == image
+    # ...and the files on disk load back through the model that rejected them.
+    import yaml
+
+    from local_operator.agents import AgentData
+
+    folder = root / "agents" / image["id"]
+    loaded = AgentData.model_validate(yaml.safe_load((folder / "agent.yml").read_text()))
+    assert loaded.id == image["id"] and loaded.created_date and loaded.version
+    assert (folder / "system_prompt.md").read_text() == "Do the new thing."
+
+
+def test_create_team_proposal_accept(root):
+    from local_operator.profile_approval import snapshot
+
+    image = {
+        "id": "team-fresh",
+        "name": "freshteam",
+        "label": "Freshteam",
+        "description": "",
+        "manager": "manager",
+        "members": [],
+        "aliases": [],
+        "instructions": "Brief.",
+        "project": "",
+    }
+    record = PP.file(
+        root,
+        profile_kind="team",
+        operation="create",
+        target_id=image["id"],
+        name=image["name"],
+        before=None,
+        after=image,
+        session_id="sess-ct",
+    )
+    result = PP.apply(root, record["id"], actor="desktop")
+    assert result["proposal"]["state"] == PP.STATE_ACCEPTED
+    team = TeamRegistry(root).get_team(image["id"])
+    assert team.created_date is not None
+    assert snapshot(root, "team", image["id"]) == image
+    import yaml
+
+    from local_operator.teams import Team
+
+    folder = root / "teams" / image["id"]
+    loaded = Team.model_validate(yaml.safe_load((folder / "team.yml").read_text()))
+    assert loaded.id == image["id"] and loaded.created_date
+    assert (folder / "instructions.md").read_text() == "Brief."
+
+
 # --- legacy mesh records ----------------------------------------------------
 
 
