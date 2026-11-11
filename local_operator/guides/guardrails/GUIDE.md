@@ -75,9 +75,9 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   ref — AND it is idle: no running session other than yours owns it (created
   it, or has its cwd inside) and its branch has no open PR (GitHub) or MR (GitLab) on the
   repo's remote. An open PR or MR is refused outright, at any state and even with an earlier
-  answered ask: finish or close it first. A running owner, or a PR state
-  nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed or timed out), goes to the
-  judge with those facts. An interrupted delete can leave a half-removed tree
+  answered ask: finish or close it first. A running owner, or (for a tree that is
+  not your own) a PR state nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed
+  or timed out), goes to the judge with those facts. An interrupted delete can leave a half-removed tree
   (tracked files gone, registration still present), so treat a failed
   removal as damage to report, not a step to retry. Anything else takes the
   ordinary ranking. Prefer this to
@@ -91,8 +91,11 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 - **Your own worktree.** A linked worktree the ledger records for this session
   (or a subagent it launched) is yours to remove: `git worktree remove [--force]
   <exact path>` or `rm -rf <exact path>` ranks LOW, with no judge call, when it
-  holds no tracked or untracked change and is idle (no open PR, no other
-  running session in it). Ignored entries (`.expo/`, `.pnpm-store/`, a
+  holds no tracked or untracked change and is idle (no other running session
+  in it, no open PR). A PR state `gh`/`glab` cannot read (failed, timed out)
+  does not hold your own clean tree: removal keeps the branch, so nothing is
+  lost and neither the forge nor the judge is asked. A KNOWN open PR still
+  refuses. Ignored entries (`.expo/`, `.pnpm-store/`, a
   `node_modules` symlink) never count against your own tree — `git worktree
   remove` deletes them itself. Real uncommitted work goes to the judge, whose
   brief carries the ledger row (creator, kind, time, creating command) and the
@@ -104,6 +107,14 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   (`~/repo/.worktrees/{a,b}` works); a relative `.worktrees/a`, or a path only
   in an option's description, names nothing (live ask a-1d54, 2026-11-11). Another session's
   worktree, a primary checkout, `$HOME` and the state root keep their ranking.
+- **In-place edits are writes, not deletes.** `sed -i` / `perl -i` rewrite a
+  file's content and remove no path, so they rank like any write: CRITICAL on
+  the state root, `config.yml`, `secrets/` and session evidence, LOW elsewhere
+  — a tracked file in your own, another session's or a primary checkout
+  alike (git restores it), and an untracked one. BSD `sed -i ''` is read as an
+  empty backup suffix, so neither the `''` nor the script is a target, and
+  `$f` from `for f in <glob>` is that glob, not the opaque working directory
+  (writes only; a delete through such a loop keeps the judge).
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
   own prefix. Before it runs, the checkpoint extracts real tool calls: this
   session's from the harness's memory, its descendants' (found by `origin.json`

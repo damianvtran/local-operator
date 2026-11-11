@@ -72,6 +72,15 @@ CREDENTIAL_MARK = OPAQUE_MARK + "credential" + OPAQUE_MARK
 #: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
 #: unknowable, but known to be a fresh entry under the temp directory.
 TEMP_MARK = "\x02"
+#: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
+#: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
+#: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
+#: (``cd $f``, ``x-$f``, ``$f/..``) stays opaque exactly as before; only a
+#: word that IS the variable is pinned to the glob (see ``_Walker._add``).
+#: Carried in the VALUE, not a side table keyed by name, so a reassignment
+#: (``f=$(cmd)``) can never inherit a stale glob, and a copy (``g=$f``)
+#: carries it correctly.
+FOR_GLOB_MARK = OPAQUE_MARK + "for-glob:"
 
 
 # ---------------------------------------------------------------------------
@@ -1764,6 +1773,10 @@ class _Walker:
         #: the loop variable; ``VAR`` for ``D=…/$VAR`` inside the body), so one
         #: iteration rewrites every related reference together.
         self.for_roots: dict[str, str] = {}
+        #: ``for VAR in <glob> …`` bindings, by the key inside the variable's
+        #: ``FOR_GLOB_MARK`` value: one ``(absolute text, absolute pattern)``
+        #: per list word (``pattern`` is ``None`` for a literal word).
+        self.for_globs: dict[str, list[tuple[str, str | None]]] = {}
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -2158,6 +2171,25 @@ class _Walker:
                     script_by_flag = True
                     k += 1 if attached else 2
                     continue
+                if (
+                    name in ("sed", "gsed")
+                    and _flags.endswith("i")
+                    and k + 1 < len(args)
+                    and args[k + 1].text == ""
+                    and not args[k + 1].opaque
+                    and not args[k + 1].empty
+                ):
+                    # BSD sed (macOS ``sed``): ``-i ''`` is ``-i`` with an EMPTY
+                    # backup suffix, so the '' is not the script and the word
+                    # after it is not a file. Read as GNU instead, '' would be
+                    # the script, which edits nothing: either way the next word
+                    # is never rewritten, so it is never a target. Before,
+                    # ``sed -i '' '/"$k"/d' f`` ranked the SCRIPT as a path (an
+                    # unset ``$k`` made it an "expanded empty" HIGH), and with
+                    # ``-e`` the '' itself resolved to the cwd as an overwrite.
+                    # Only a literal '' qualifies: ``-i "$SUF"`` may hold a name.
+                    k += 2
+                    continue
                 k += 1
                 continue
             if t.startswith("--"):
@@ -2467,6 +2499,38 @@ class _Walker:
             values.append(w)
         if not values:
             st.env[var] = OPAQUE_MARK
+            return
+        if (
+            st.cwd is not None
+            and any(v.pattern is not None for v in values)
+            and len(values) <= _MAX_FOR_COMBINATIONS
+            and all(not v.opaque and not v.empty and CREDENTIAL_MARK not in v.text for v in values)
+        ):
+            # FIELD CASE (2026-11-11, session a85e507ffdfa): ``for f in
+            # src/i18n/catalogues/*/ui.teamBridge.json; do sed -i '' '/…/d' $f;
+            # done`` in the session's own worktree bound ``$f`` to OPAQUE_MARK,
+            # so the edit's target collapsed onto the worktree ROOT and went
+            # to the judge as an opaque delete there. Bash iterates the glob's
+            # matches (or the pattern itself when nothing matches), so
+            # ``CMD $f`` inside the body touches exactly what ``CMD <glob>``
+            # would: the target IS that glob, ranked by the existing glob rules
+            # (CRITICAL when it reaches a protected name, LOW for an ordinary
+            # match set). Resolved against the cwd of the ``for`` itself, as
+            # bash expands it there, so a later ``cd`` in the body cannot move it.
+            key = str(len(self.for_globs))
+            entries: list[tuple[str, str | None]] = []
+            for v in values:
+                text = v.text if v.text.startswith("/") else os.path.join(st.cwd, v.text)
+                pattern = None
+                if v.pattern is not None:
+                    pattern = (
+                        v.pattern
+                        if v.pattern.startswith("/")
+                        else os.path.join(_glob_escape(st.cwd), v.pattern)
+                    )
+                entries.append((text, pattern))
+            self.for_globs[key] = entries
+            st.env[var] = FOR_GLOB_MARK + key + OPAQUE_MARK
             return
         if any(v.opaque or v.pattern is not None for v in values):
             st.env[var] = (
@@ -2832,6 +2896,18 @@ class _Walker:
     def _add(self, exp: Expanded, op: str, program: str, *, selected: bool = False) -> None:
         if exp.vanished and not exp.empty:
             return
+        pinned = self._for_glob_words(exp) if op in ("overwrite", "append") else None
+        if pinned is not None:
+            # ``$f`` from ``for f in <glob>``: one target per list word, each
+            # the glob (or literal) bash iterates — never the opaque cwd.
+            # WRITES ONLY (in-place edits, redirections, copy destinations):
+            # a delete/move keeps the opaque reading, because a glob DELETE
+            # ranks by rules that are looser than the opaque judge for some
+            # shapes (``rm -rf .worktrees/*`` ranks LOW today, foreign trees
+            # included), and this fix must not widen what a loop may remove.
+            for word in pinned:
+                self._add(word, op, program, selected=selected)
+            return
         target = _target(exp, op, program, self.state)
         target.selected = selected
         self._unpin_relinked(target, exp.text)
@@ -3020,6 +3096,21 @@ class _Walker:
         key = self._landing(dest)
         if known and pointee is not None and key is not None:
             self._set_link(key, pointee)
+    def _for_glob_words(self, exp: Expanded) -> list[Expanded] | None:
+        """The list words a whole-word ``$VAR`` bound by a glob ``for`` stands for.
+
+        Only when the word is EXACTLY that one value (``$f``, ``"$f"``,
+        ``${f}``): a prefix, suffix or second expansion leaves it opaque, the
+        fail-closed reading it had before.
+        """
+        text = exp.text
+        if not text.startswith(FOR_GLOB_MARK) or not text.endswith(OPAQUE_MARK):
+            return None
+        key = text[len(FOR_GLOB_MARK) : -len(OPAQUE_MARK)]
+        entries = self.for_globs.get(key)
+        if entries is None or exp.substitutions or exp.empty or exp.temp:
+            return None
+        return [Expanded(text=t, pattern=p, opaque_contained=False) for t, p in entries]
 
     def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
         """``(loop vars, {ref name: value})`` for every iteration after the first.

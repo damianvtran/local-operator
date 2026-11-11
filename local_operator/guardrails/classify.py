@@ -1161,7 +1161,21 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
                     f"finish or close it first ({facts})",
                 )
             idle = activity.pr_state == "none" and not activity.owners_running
-            if own is not None and idle and state == "clean":
+            # OWN + CLEAN does not need the forge (operator escalation
+            # 2026-11-11, session 99c51054bdbd): ``git worktree remove --force``
+            # of its own clean tree for MERGED #1858 was refused twice, once
+            # because "PR state unknown (gh lookup timed out)" sent it to the
+            # judge and the judge then timed out (20 s). What the PR lookup
+            # protects is OTHER people's work in the tree (the 2026-11-09
+            # incident: a tree under QA); for a tree the ledger proves this
+            # session created, with nothing uncommitted and no other running
+            # owner, removal loses nothing (the branch ref survives) whatever
+            # gh says. A KNOWN open PR still refuses above; only an unknown
+            # state is waived, and only here. A dirty own tree, a foreign tree
+            # and an unproven path keep the judge, and a judge timeout there
+            # stays a refusal.
+            own_idle = not activity.owners_running and activity.pr_state in ("none", "unknown")
+            if own is not None and own_idle and state == "clean":
                 # Nothing uncommitted, nobody else in it, no open PR: the
                 # creator removing it loses nothing, ``--force`` or not.
                 return RankedTarget(
