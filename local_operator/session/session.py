@@ -158,6 +158,7 @@ from local_operator.harness.subagent import (
     run_subagent,
     team_slot_name,
 )
+from local_operator.harness.tool_names import normalise_replay_tool_names
 from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     FAULT_INVALID_ARGUMENTS,
@@ -7213,11 +7214,14 @@ class Session:
         # symbols this seam always has — ``test_read_only_prompt_bound``'s stub
         # session mirrors exactly those, and routing through an instance method
         # it cannot know about broke the aside-equals-turn equality it pins.
-        return blocks, bound_replay_payloads(
-            with_attachment_hints(
-                self._render_history([*history, *turns]),
-                world_root=self._confinement_root,
-            )
+        return blocks, normalise_replay_tool_names(
+            bound_replay_payloads(
+                with_attachment_hints(
+                    self._render_history([*history, *turns]),
+                    world_root=self._confinement_root,
+                )
+            ),
+            self._tools,
         )
 
     @property

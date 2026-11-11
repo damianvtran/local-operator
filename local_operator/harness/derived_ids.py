@@ -20,6 +20,10 @@ ELIDED_ID_SUFFIX = "~rb"
 #: ``session.attachment_hints``: a copy carrying the attachment hint note.
 HINT_ID_SUFFIX = "~ah"
 
+#: ``harness.tool_names``: a copy whose garbled tool names were rewritten for
+#: the wire only (the durable transcript still holds the original name).
+NAME_ID_SUFFIX = "~nm"
+
 #: Every derived-copy suffix. Add a new derived-copy kind here, and the
 #: invalidation covers it.
-DERIVED_ID_SUFFIXES: tuple[str, ...] = (ELIDED_ID_SUFFIX, HINT_ID_SUFFIX)
+DERIVED_ID_SUFFIXES: tuple[str, ...] = (ELIDED_ID_SUFFIX, HINT_ID_SUFFIX, NAME_ID_SUFFIX)

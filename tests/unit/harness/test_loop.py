@@ -40,6 +40,7 @@ from local_operator.harness.rows import (
 )
 from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
+    FAULT_KEY,
     OUTPUT_LIMIT_ARGUMENTS,
     OUTPUT_LIMIT_KEY,
     OUTPUT_LIMIT_TURN,
@@ -948,6 +949,131 @@ async def test_fallback_tool_resolution():
     config = make_config(stream, resolve_fallback_tool=resolver)
     await AgentLoop().run_to_end([Message.user("go")], context, config, None)
     assert executed == ["deferred"]
+
+
+def _bash_tool(executed: list[str]) -> AgentTool:
+    async def execute(tool_call_id, args, signal, on_update, context):
+        executed.append("bash")
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="bash", content=[TextContent(text="ran")]
+        )
+
+    return AgentTool(
+        name="bash",
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        },
+        execute=execute,
+    )
+
+
+@pytest.mark.asyncio
+async def test_garbled_call_rejected_and_sanitised_on_next_request():
+    """A garbled call never runs, and the second request never shows the junk."""
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="bashLecture", args='{"command":"echo hi"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[_bash_tool(executed)])
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], context, make_config(stream), None
+    )
+    # The executor spy was never called: the call was rejected, not repaired.
+    assert executed == []
+    tool_result = next(m for m in messages if isinstance(m, Message) and m.role == "tool")
+    assert tool_result.is_error
+    assert tool_result.text.startswith("Tool not found: bashLecture")
+    assert "Did you mean `bash`?" in tool_result.text
+    # The durable history still holds the original garbled name.
+    stored_call = next(m for m in context.messages if isinstance(m, Message) and m.tool_calls)
+    assert stored_call.tool_calls[0].name == "bashLecture"
+    # But the second request was sanitised: bash, and no Lecture anywhere.
+    second = stream.requests[1]
+    names = [call.name for m in second.messages if isinstance(m, Message) for call in m.tool_calls]
+    texts = [
+        block.text
+        for m in second.messages
+        if isinstance(m, Message)
+        for block in m.content
+        if isinstance(block, TextContent)
+    ]
+    assert names == ["bash"]
+    joined = " ".join([*names, *texts])
+    assert "Lecture" not in joined
+    assert any(text.startswith("Not run:") for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_garbled_call_with_valid_args_never_runs():
+    """Schema-valid args do not save a garbled name: routing precedes validation."""
+    executed: list[str] = []
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(
+                    0, id="c1", name="bashLectureLecture", args='{"command":"echo hi"}'
+                ),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[_bash_tool(executed)])
+    await AgentLoop().run_to_end([Message.user("go")], context, make_config(stream), None)
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_error_text_keeps_the_full_name():
+    """The durable result keeps the full name; the compose bound clips the frame."""
+    long_name = "ghost" + "x" * 200
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name=long_name, args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], context, make_config(stream), None
+    )
+    tool_result = next(m for m in messages if isinstance(m, Message) and m.role == "tool")
+    assert tool_result.is_error
+    assert tool_result.text == f"Tool not found: {long_name}"
+    assert "Did you mean" not in tool_result.text
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_error_details_carry_near_miss():
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="bashLecture", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[_bash_tool([])])
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], context, make_config(stream), None
+    )
+    tool_result = next(m for m in messages if isinstance(m, Message) and m.role == "tool")
+    payload = tool_result.provider_payload or {}
+    details = payload.get("details") or {}
+    assert details.get("near_miss") == "bash"
+    assert details.get(FAULT_KEY) == "unknown_tool"
 
 
 @pytest.mark.asyncio
