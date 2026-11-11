@@ -248,3 +248,45 @@ async def test_q11_a_parked_card_is_re_rendered_when_the_latch_fires(
         await pilot.press("y")
         assert await parked is True
         await _latched_egress_still_asks(pilot, app, gate)
+
+
+@pytest.mark.asyncio
+async def test_y3_a_latch_in_another_conversation_leaves_this_card_alone(
+    config_dir: Path,
+) -> None:
+    """Review Y3: the latch-time redraw is scoped to the conversation that
+    latched (``_latch_parked_cards`` matches ``source_binding`` to the latching
+    source's token). A second conversation latching through the REAL watcher
+    must leave the first conversation's parked card at its three answers; the
+    first conversation latching then restyles it."""
+    from local_operator.tui.session_interaction import SessionInteraction
+
+    session = _LatchingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._set_approve_all(False)
+        gate = _gate(session)
+
+        parked = asyncio.ensure_future(gate("bash", "ls"))
+        await _wait_prompt(pilot, app)
+        assert _labels(app) == ["Allow", "Deny", "Allow all"]
+
+        other = _LatchingSession()
+        other_source = SessionInteraction(other)
+        assert other_source.token != app._interaction.token
+        app._watch_bridge_latch(other, other_source)
+        other.bridge_taint_latch.mark()
+        await pilot.pause()
+        await pilot.pause()
+        assert _labels(app) == [
+            "Allow",
+            "Deny",
+            "Allow all",
+        ], "another conversation's latch restyled this conversation's card"
+
+        session.bridge_taint_latch.mark()
+        await pilot.pause()
+        assert _labels(app) == ["Allow", "Deny"], "the scoping test's positive control"
+        await pilot.press("y")
+        assert await parked is True

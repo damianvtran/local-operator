@@ -6144,6 +6144,12 @@ class AgentLoop:
         # auto/yolo (docs/security/team-bridge-egress.md): the gate below still
         # answers by mode there. The nested eval ``tool()`` path reaches this
         # same method, so the seam stays singular.
+        # Review Y2: a pull made by a NESTED call (eval's ``tool()``) latches
+        # through this same method, but the row that persists is eval's own
+        # result, whose ``egress.pulled`` is False. So eval's row is stamped
+        # when the latch first set while it ran; see the stamp below.
+        _latch = getattr(tool_context, "bridge_taint", None) if tool_context is not None else None
+        latched_before_call = _latch is None or bool(getattr(_latch, "latched", True))
         egress = escalate_for_bridge_taint(
             tool.name, tier, call.arguments, tool_context, context.messages
         )
@@ -6548,7 +6554,11 @@ class AgentLoop:
                 and (result.details or {}).get(QUIET_TURN_KEY) is True
             ):
                 context.quiet_request_roots.add(item.quiet_root_id)
-            if egress.pulled:
+            if egress.pulled or (
+                tool.name == "eval"
+                and not latched_before_call
+                and bool(getattr(_latch, "latched", False))
+            ):
                 # Review S-70: this read/grep latched the session by pulling
                 # a latched session's content. Its result row carries the
                 # stamp, as a ``sessions`` peek's does, so the pulled text is

@@ -446,17 +446,73 @@ def _sessions_root() -> Any:
     return (config_dir() / "sessions").resolve()
 
 
+def _valid_session_id(session_id: str) -> bool:
+    from pathlib import PurePath
+
+    return (
+        bool(session_id)
+        and PurePath(session_id).name == session_id
+        and session_id
+        not in (
+            ".",
+            "..",
+        )
+    )
+
+
+def _transcript_missing(directory: Any) -> bool:
+    """Whether ``directory`` holds no resolvable transcript. Raises on error."""
+    from pathlib import Path
+
+    from local_operator.session.transcript import _resolved_transcript_path
+
+    try:
+        return _resolved_transcript_path(Path(directory), read_only=True) is None
+    except FileNotFoundError:
+        return True
+
+
 def _session_dir_latched(session_id: str) -> bool:
     """Whether the store session ``session_id`` is latched. Fail-closed.
 
     An id that cannot name a directory directly under the sessions root (empty,
-    a separator, ``..``) is not a known owner, so it counts as latched.
+    a separator, ``..``) is not a known owner, so it counts as latched. A
+    session directory with no transcript is clean HERE (S-60: a read of the
+    session's own files finds nothing to pull); content held ELSEWHERE whose
+    owner has no transcript is judged by :func:`_owned_copy_latched`.
     """
-    from pathlib import PurePath
-
-    if not session_id or PurePath(session_id).name != session_id or session_id in (".", ".."):
+    if not _valid_session_id(session_id):
         return True
     return session_directory_latched(_sessions_root() / session_id)
+
+
+def _owned_copy_latched(session_id: str, copy: Any = None) -> bool:
+    """Whether content OWNED by ``session_id`` but stored outside its session
+    directory (a spill entry, a decompressed archive copy) is latched.
+
+    FAIL-CLOSED on a missing owner (review S-72 / Y1). The content exists, so
+    an owner with no session directory, a deleted directory, or a directory
+    with no transcript does not mean "nothing to pull" (that S-60 rule fits a
+    read of the directory itself); it means the content's provenance is
+    unknown, and unknown counts as latched. The opt-in ``session/cleanup.py``
+    can remove a latched session while the shared 64 MiB spill store and the
+    decompressed cache keep its content, which is exactly this case.
+
+    ``copy`` is the decompressed copy's own directory: when the owner's journal
+    is gone, the byte-identical copy IS that journal, so it is scanned instead
+    of being counted blind; a copy with no transcript of its own counts.
+    """
+    if not _valid_session_id(session_id):
+        return True
+    directory = _sessions_root() / session_id
+    try:
+        if not _transcript_missing(directory):
+            return session_directory_latched(directory)
+        if copy is not None and not _transcript_missing(copy):
+            return session_directory_latched(copy)
+    except Exception:  # noqa: BLE001 - §3.6: an undeterminable owner means latched
+        logger.warning("owner %s of stored content could not be judged", session_id, exc_info=True)
+    return True
 
 
 def _spill_digest_latched(digest: str, reader_id: str = "") -> bool:
@@ -482,22 +538,84 @@ def _spill_digest_latched(digest: str, reader_id: str = "") -> bool:
         owner = str(meta.session_id or "")
         if owner and owner == reader_id:
             return False
-        return _session_dir_latched(owner)
+        return _owned_copy_latched(owner)
     except Exception:  # noqa: BLE001 - §3.6: an undeterminable owner means latched
         logger.warning("spill owner of %s could not be determined", digest, exc_info=True)
         return True
 
 
-def _above_without_hidden(resolved: Any, tree: Any) -> bool:
-    """Whether a recursive search rooted at ``resolved`` walks into ``tree``.
+#: Ignore files ripgrep reads (in the search root, below it AND in every parent
+#: of it) whose ``!`` whitelist un-hides a hidden directory. Measured on rg
+#: 14/15 (review S-71): ``!.local-operator`` in a ``.ignore`` or ``.rgignore``
+#: in the root or a parent, or in a ``.gitignore`` inside a git work tree, makes
+#: ``rg CANARY ~`` reach ``~/.local-operator/sessions``.
+_WHITELIST_IGNORE_FILES = (".ignore", ".rgignore", ".gitignore")
 
-    ``resolved`` is a strict ancestor of ``tree``. The search tools skip hidden
-    directories they were not named into (rg's default), so a dot-component on
-    the way down means the walk never reaches ``tree``: ``grep ~`` with the
-    default ``~/.local-operator`` is not a pull. A non-hidden custom config dir
-    loses that protection, and an ancestor of it then counts (review X1).
+
+def _ignore_file_may_whitelist(directory: Any) -> bool:
+    """Whether ``directory`` carries anything that can un-hide a hidden dir.
+
+    A ``.git`` entry counts outright: inside a work tree rg also honours
+    ``.git/info/exclude`` and the user's global excludes file, both measured
+    to whitelist, and neither is cheap to locate exactly. An ignore file
+    counts when any line is a ``!`` negation (a file without one cannot
+    whitelist anything); one that cannot be read counts.
     """
-    return not any(part.startswith(".") for part in tree.relative_to(resolved).parts)
+    if (directory / ".git").exists():
+        return True
+    for name in _WHITELIST_IGNORE_FILES:
+        file = directory / name
+        if not file.is_file():
+            continue
+        try:
+            text = file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return True
+        if any(line.lstrip().startswith("!") for line in text.splitlines()):
+            return True
+    return False
+
+
+def _ancestor_search_skips(resolved: Any, tree: Any, arguments: Mapping[str, Any]) -> bool:
+    """Whether a recursive search rooted at ``resolved`` provably skips ``tree``.
+
+    ``resolved`` is a strict ancestor of ``tree``. Both grep engines skip a
+    hidden directory they were not named into, so with the default
+    ``~/.local-operator`` a plain ``grep ~`` never reaches the stores and is
+    not a pull. That holds ONLY while nothing un-hides the directory (review
+    S-71), so the exemption is withheld -- the search counts as a pull -- when:
+
+    - no component between ``resolved`` and ``tree`` is hidden (a non-hidden
+      custom config dir, review X1);
+    - the call sets ANY ``include``: rg treats a ``-g`` glob that matches the
+      hidden directory's own name (``*``, ``*.*``, ``**``, ``**/*``) as a
+      whitelist, and deciding which globs can match is a parser this seam
+      should not carry, so every include is treated as one that may;
+    - an ignore file in ``resolved``, any parent of it, or a non-hidden
+      directory on the way down may whitelist the folder
+      (:func:`_ignore_file_may_whitelist`).
+
+    ``RIPGREP_CONFIG_PATH`` (a config carrying ``--hidden``) needs no rule here:
+    the grep tool passes ``--no-config`` (``tools/builtin.py``
+    ``_ripgrep_scan``). The Python fallback walk prunes every hidden directory
+    before it consults includes or ignore rules, so these conditions are
+    conservative for it, never short.
+    """
+    parts = tree.relative_to(resolved).parts
+    hidden_at = next((i for i, part in enumerate(parts) if part.startswith(".")), None)
+    if hidden_at is None:
+        return False
+    include = arguments.get("include")
+    if include is not None and include != "":
+        return False
+    on_the_way = [resolved.joinpath(*parts[:i]) for i in range(1, hidden_at + 1)]
+    for directory in (*reversed(resolved.parents), resolved, *on_the_way):
+        try:
+            if _ignore_file_may_whitelist(directory):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def cross_session_read_latched(tool_name: str, arguments: Any, tool_context: Any) -> bool:
@@ -515,7 +633,9 @@ def cross_session_read_latched(tool_name: str, arguments: Any, tool_context: Any
       ``spill://<digest>``, judged by the owner its metadata names
       (fail-closed on an unknown owner, :func:`_spill_digest_latched`);
     - any of those three trees' ROOT, or an ANCESTOR of one (the config dir
-      itself, ``<config>/cache``, or a non-hidden path above the config dir):
+      itself, ``<config>/cache``, or a path above the config dir unless the
+      search provably skips the hidden config dir,
+      :func:`_ancestor_search_skips`):
       a recursive search over many sessions' content is undecidable without
       scanning all of them, so it counts as latched, unconditionally. That is
       a superset of "a latched session exists under that root"; the cost is
@@ -563,11 +683,17 @@ def cross_session_read_latched(tool_name: str, arguments: Any, tool_context: Any
         if tree.is_relative_to(resolved):
             # ``resolved`` is an ancestor. At or below the config dir it was
             # named into explicitly, so nothing hidden is skipped on the way.
-            if resolved.is_relative_to(config) or _above_without_hidden(resolved, tree):
+            if resolved.is_relative_to(config) or not _ancestor_search_skips(
+                resolved, tree, arguments
+            ):
                 return True
-    for tree in (sessions, decompressed):
-        if resolved.is_relative_to(tree):
-            return _session_dir_latched(resolved.relative_to(tree).parts[0])
+    if resolved.is_relative_to(sessions):
+        return _session_dir_latched(resolved.relative_to(sessions).parts[0])
+    if resolved.is_relative_to(decompressed):
+        # A copy of ``sessions/<id>``'s archive, judged as that session; when
+        # the session is gone the copy itself is scanned (S-72, fail closed).
+        session_id = resolved.relative_to(decompressed).parts[0]
+        return _owned_copy_latched(session_id, decompressed / session_id)
     if resolved.is_relative_to(spills):
         # ``<digest>.txt`` (content) or ``<digest>.json`` (metadata); a stray
         # file there names no entry and has no owner, so it counts.

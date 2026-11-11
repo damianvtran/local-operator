@@ -82,12 +82,15 @@ async def _seam(
     latch: be.BridgeTaintLatch | None = None,
     cwd: str = ".",
     gate: Gate | None = None,
+    during: Any = None,
 ) -> tuple[ToolResult, list[str], Gate]:
     gate = gate or Gate()
     outbound: list[str] = []
 
     async def execute(call_id: str, a: dict[str, Any], *_: Any) -> ToolResult:
         outbound.append(json.dumps(a, sort_keys=True))
+        if during is not None:
+            during()
         return ToolResult(
             tool_call_id=call_id, tool_name=tool_name, content=[TextContent(text="ok")]
         )
@@ -485,6 +488,189 @@ async def test_s70_a_pull_result_is_stamped_and_an_ordinary_read_is_not(
         "read", {"path": str(tmp_path / "notes.md")}, latch=be.BridgeTaintLatch()
     )
     assert not be.details_stamped(plain.details)
+
+
+# -- S-71: what un-hides the hidden config dir for a search rooted above it ------
+
+
+def _hidden_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """``$HOME`` with the default HIDDEN ``.local-operator`` holding a latched
+    session, so a search rooted at ``$HOME`` is exempt only while rg skips it."""
+    home = tmp_path / "home"
+    config = home / ".local-operator"
+    config.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.delenv("RIPGREP_CONFIG_PATH", raising=False)
+    _journal(config, "aaaa11112222", latched=True)
+    return home, config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include", ["*", "*.*", "**", "**/*", "*.jsonl"])
+async def test_s71_any_include_above_the_hidden_config_dir_is_a_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include: str
+) -> None:
+    """Review S-71: rg treats a ``-g`` glob matching the hidden folder's own
+    name (``*``, ``*.*``, ``**``, ``**/*``; measured) as a whitelist, so
+    ``grep ~ include="*"`` returned a latched session's bridge row. Every
+    include counts -- ``*.jsonl`` does not reach the folder today, and is
+    counted anyway so no glob parser stands between the search and the gate."""
+    home, _ = _hidden_home(tmp_path, monkeypatch)
+    latch = be.BridgeTaintLatch()
+    await _seam("grep", {"path": str(home), "pattern": "x", "include": include}, latch=latch)
+    assert latch.latched, f"include={include!r} above the hidden config dir did not latch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [".rgignore", ".ignore", ".gitignore"])
+@pytest.mark.parametrize("where", ["root", "parent"])
+async def test_s71_an_ignore_whitelist_above_the_hidden_config_dir_is_a_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, where: str
+) -> None:
+    """Review S-71: ``!.local-operator`` in a ``.rgignore``/``.ignore`` in the
+    search root or a parent of it (rg reads both; measured) un-hides the folder.
+    A ``.gitignore`` is counted the same way (it whitelists inside a git work
+    tree; measured). The same file with no ``!`` line stays exempt."""
+    home, _ = _hidden_home(tmp_path, monkeypatch)
+    # The search is rooted at ``$HOME``; the parent row puts the whitelist one
+    # level ABOVE the search root, which rg also reads.
+    (tmp_path / name if where == "parent" else home / name).write_text(
+        "node_modules\n!.local-operator\n", encoding="utf-8"
+    )
+    latch = be.BridgeTaintLatch()
+    await _seam("grep", {"path": str(home), "pattern": "x"}, latch=latch)
+    assert latch.latched, f"a {name} whitelist in the {where} did not latch"
+
+
+@pytest.mark.asyncio
+async def test_s71_an_ignore_file_without_a_negation_or_a_git_tree_decides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, _ = _hidden_home(tmp_path, monkeypatch)
+    (home / ".rgignore").write_text("node_modules\n# !not-a-rule\n", encoding="utf-8")
+    latch = be.BridgeTaintLatch()
+    await _seam("grep", {"path": str(home), "pattern": "x"}, latch=latch)
+    assert not latch.latched, "an ignore file that cannot whitelist latched"
+    (home / ".git").mkdir()
+    await _seam("grep", {"path": str(home), "pattern": "x"}, latch=latch)
+    assert latch.latched, "a git work tree (info/exclude, global excludes) did not latch"
+
+
+def _real_grep(home: Path, **args: Any) -> str:
+    from local_operator.tools import builtin
+
+    context = ToolContext(cwd=str(home), session_id="reader")
+    call = {"pattern": "IGNORE PRIOR", "path": str(home), **args}
+    result = asyncio.run(builtin.execute_grep("g1", call, None, None, context))
+    return "".join(getattr(part, "text", "") for part in result.content)
+
+
+@pytest.mark.skipif(__import__("shutil").which("rg") is None, reason="needs ripgrep")
+def test_s71_the_grep_tool_ignores_ripgrep_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review S-71: ``RIPGREP_CONFIG_PATH`` naming a file with ``--hidden`` made
+    the REAL grep tool walk ``~/.local-operator`` and return the bridge row
+    while the classifier (which assumes rg's defaults) said "not a pull". The
+    tool passes ``--no-config`` now, so the search matches the classifier."""
+    home, _ = _hidden_home(tmp_path, monkeypatch)
+    rc = tmp_path / "rgrc"
+    rc.write_text("--hidden\n", encoding="utf-8")
+    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(rc))
+    monkeypatch.setenv("LOCAL_OPERATOR_GREP_ENGINE", "auto")
+    text = _real_grep(home)
+    assert "team_bridge_message" not in text and ".local-operator" not in text, text
+    latch = be.BridgeTaintLatch()
+    asyncio.run(_seam("grep", {"path": str(home), "pattern": "x"}, latch=latch))
+    assert not latch.latched, "the no-include, no-whitelist control must stay exempt"
+
+
+def test_s71_the_python_fallback_walk_never_enters_the_hidden_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback engine prunes hidden directories before includes and
+    ignore rules apply, so every S-71 un-hide is inert there and the (engine
+    agnostic) classifier's extra latches are conservative, never short."""
+    home, _ = _hidden_home(tmp_path, monkeypatch)
+    (home / ".ignore").write_text("!.local-operator\n", encoding="utf-8")
+    monkeypatch.setenv("LOCAL_OPERATOR_GREP_ENGINE", "python")
+    for include in (None, "*", "**/*"):
+        args = {"include": include} if include else {}
+        text = _real_grep(home, **args)
+        assert "team_bridge_message" not in text and ".local-operator" not in text, (include, text)
+
+
+# -- S-72 / Y1: content whose owner's journal is gone fails closed --------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["never_existed", "deleted", "no_transcript"])
+async def test_s72_a_spill_whose_owner_has_no_journal_latches(store: Path, case: str) -> None:
+    import shutil
+
+    owner = {"never_existed": "ghost0000001", "deleted": "gone00000001"}.get(case, "empty0000001")
+    if case == "deleted":
+        _journal(store, owner, latched=True)
+    if case == "no_transcript":
+        (store / "sessions" / owner).mkdir(parents=True)
+    digest = _spill(owner, f"echoed: web_fetch {FETCH['url']}")
+    if case == "deleted":
+        before = be.BridgeTaintLatch()
+        await _seam("read", {"path": f"spill://{digest}"}, latch=before)
+        assert before.latched
+        shutil.rmtree(store / "sessions" / owner)
+    latch = be.BridgeTaintLatch()
+    await _seam("read", {"path": f"spill://{digest}"}, latch=latch)
+    assert latch.latched, f"a spill whose owner is {case} was judged clean"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("latched", [True, False])
+async def test_s72_a_decompressed_copy_with_no_session_is_judged_by_itself(
+    store: Path, latched: bool
+) -> None:
+    import shutil
+
+    copy = _cached_copy(store, "aaaa11112222", latched=latched)
+    shutil.rmtree(store / "sessions" / "aaaa11112222")
+    latch = be.BridgeTaintLatch()
+    await _seam("read", {"path": str(copy)}, latch=latch)
+    assert latch.latched is latched
+    # A copy directory with no transcript either: provenance unknown.
+    orphan = store / "cache" / "decompressed" / "orphan000001"
+    orphan.mkdir(parents=True)
+    (orphan / "notes.txt").write_text("?", encoding="utf-8")
+    unknown = be.BridgeTaintLatch()
+    await _seam("read", {"path": str(orphan / "notes.txt")}, latch=unknown)
+    assert unknown.latched
+
+
+@pytest.mark.asyncio
+async def test_s72_the_readers_own_spill_and_a_clean_owners_spill_stay_clean(
+    store: Path,
+) -> None:
+    _journal(store, "bbbb22223333", latched=False)
+    for owner in ("reader", "bbbb22223333"):
+        latch = be.BridgeTaintLatch()
+        await _seam("read", {"path": f"spill://{_spill(owner, owner + ' out')}"}, latch=latch)
+        assert not latch.latched, owner
+
+
+# -- Y2: a pull made inside eval stamps eval's own row ---------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested_pull", [True, False])
+async def test_y2_eval_whose_nested_call_latched_is_stamped(nested_pull: bool) -> None:
+    """A nested ``tool()`` read latches the session through the same seam, but
+    the row that persists is eval's own result. It is stamped when the latch
+    first set while eval ran; an eval that latched nothing is untouched."""
+    latch = be.BridgeTaintLatch()
+    result, _, _ = await _seam(
+        "eval", {"code": "1"}, latch=latch, during=latch.mark if nested_pull else None
+    )
+    assert be.details_stamped(result.details) is nested_pull
 
 
 # -- R1 / S-67: a child spawned clean, then the parent latches ----------------------

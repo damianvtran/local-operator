@@ -2,7 +2,7 @@
   "wire.bridge_taint.card_notice": {
     "role": "the caution shown on every approval card raised in a conversation that has received a message from another person's agent",
     "tone": "calm, plain, operator-facing; two short sentences, no dashes",
-    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Rendered on the TUI card, the desktop and phone (as the first line of the pending description) and the y/N terminal prompt."
+    "note": "Agent messages is the product name of Team Bridge: render it exactly as this locale renders wire.settings.team_bridge.title (MATCH that string, translated as it is there; do not leave it in English unless that title is), capitalised as there. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Rendered on the TUI card, the desktop and phone (as the first line of the pending description) and the y/N terminal prompt."
   },
   "wire.bridge_taint.card_options_off": {
     "role": "one line on a latched TUI approval card saying why Allow all and the set-auto shortcuts are missing and how to get auto back",
@@ -17,11 +17,11 @@
   "wire.bridge_taint.grant_suspended": {
     "role": "one-time transcript notice when a session-scoped auto approval stops covering calls because a teammate's agent message arrived",
     "tone": "calm status notice",
-    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` verbatim: it is a command."
+    "note": "Agent messages is the product name of Team Bridge: render it exactly as this locale renders wire.settings.team_bridge.title (MATCH that string, translated as it is there; do not leave it in English unless that title is), capitalised as there. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` verbatim: it is a command."
   },
   "wire.bridge_taint.ack_refused": {
     "role": "receipt when an 'approvals auto' request from the desktop, the phone or an approval card is refused in a latched conversation",
     "tone": "plain receipt with the one next step that works",
-    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` and `/new` verbatim: they are commands."
+    "note": "Agent messages is the product name of Team Bridge: render it exactly as this locale renders wire.settings.team_bridge.title (MATCH that string, translated as it is there; do not leave it in English unless that title is), capitalised as there. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` and `/new` verbatim: they are commands."
   }
 }

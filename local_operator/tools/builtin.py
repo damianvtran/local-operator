@@ -13718,8 +13718,15 @@ async def _ripgrep_scan(
     # shared path:line:text grammar both expect to carry a path).
     # --column is what keeps a clipped long line's MATCH in view (see
     # ``_RG_LINE_RE``). --max-filesize is the caller's cap in plain bytes.
+    # --no-config: a ``RIPGREP_CONFIG_PATH`` file (the operator's, or one an
+    # environment sets) can add ``--hidden``/``--no-ignore`` and silently widen
+    # what this tool walks. The Team Bridge pull classifier
+    # (``harness/bridge_egress._ancestor_search_skips``) assumes rg's defaults,
+    # and the Python engine has no config at all, so both engines now answer
+    # the same arguments the same way (review S-71).
     argv = [
         rg,
+        "--no-config",
         "--no-heading",
         "--color",
         "never",

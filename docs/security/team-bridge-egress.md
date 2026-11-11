@@ -65,10 +65,15 @@ The latch follows bridge text wherever it is carried.
   - `read` or `grep` of a latched session's content, in every spelling:
     its directory (`<config>/sessions/<id>/`), the decompressed archive copy
     (`<config>/cache/decompressed/<id>/`), and a spill it owns
-    (`<config>/spill/<digest>.*` or `spill://<digest>`; a spill with no known
-    owner counts). A search rooted at any of those stores' roots, or at an
-    ancestor of one (the config directory itself, `<config>/cache`, or a
-    non-hidden path above the config directory), counts unconditionally.
+    (`<config>/spill/<digest>.*` or `spill://<digest>`). Spills and
+    decompressed copies fail closed on provenance: a spill with no known
+    owner, or whose owner has no session directory or no transcript (never
+    existed, or was cleaned up), counts; a decompressed copy whose session is
+    gone is judged by scanning the copy itself. A spill the reading session
+    wrote itself is not a pull. A search rooted at any of those stores'
+    roots, or at the config directory or `<config>/cache`, counts
+    unconditionally. A search rooted ABOVE the config directory counts
+    unless the walk provably skips it (see the hidden-directory rule below).
     `grep` with no `path` is judged at its working directory. The pulling
     call's own result is stamped too.
   The stamp is `details["bridge_taint"] = True` on the result. It feeds the
@@ -151,9 +156,19 @@ The T-rows are pinned in `tests/unit/harness/test_bridge_egress.py`,
   `read`; none reaches an attacker-chosen host today. A guard test fails when
   a new static read-tier tool appears so it is classified deliberately.
 - Pull paths not closed: a confined `bash` command reading another session's
-  files, and session titles in `sessions list`/`info`. A recursive `grep`
-  from above a HIDDEN config directory (the default `~/.local-operator`) is
-  not counted, because the search skips hidden directories it was not named
-  into.
+  files, and session titles in `sessions list`/`info`.
+- The hidden-directory rule: a `read` or `grep` rooted above a HIDDEN config
+  directory (the default `~/.local-operator`) is not counted only when ALL
+  of these hold, because then neither grep engine walks into it: the call
+  sets no `include`; no `.ignore`, `.rgignore` or `.gitignore` with a `!`
+  line sits in the search root, any parent of it, or a non-hidden directory
+  on the way down to the config directory; and none of those directories is
+  a git work tree (`.git`, whose `info/exclude` and the global excludes file
+  can whitelist too). Any `include` counts because ripgrep treats a glob
+  matching the folder's own name (`*`, `*.*`, `**`, `**/*`) as a whitelist.
+  The grep tool runs ripgrep with `--no-config`, so `RIPGREP_CONFIG_PATH`
+  cannot add `--hidden`; the Python fallback prunes every hidden directory
+  regardless of includes and ignore files. A non-hidden config directory
+  gets no exemption.
 - Stored injection through files and memory, a quarantined reader, and the
   preview CSP.
