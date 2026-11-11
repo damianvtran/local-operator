@@ -7306,8 +7306,9 @@ async def test_queued_switches_keep_send_order_and_each_acks_promptly() -> None:
         # Acceptance waits on nothing: the body is still parked on the held
         # loop. 1 s is the loopback round trip on a loaded CI host, not a window.
         assert elapsed < 1.0, elapsed
-        # A's body starts AFTER its ack (receipt first), so wait for it to
-        # enter before asserting B has not: asserting at once raced the body.
+        # A's body runs on its own task and may enter after the acks are
+        # read, so wait for it before asserting B has not: asserting at once
+        # raced the body.
         deadline = time.monotonic() + 5
         while not handle.entered:
             assert time.monotonic() < deadline, "A never started"

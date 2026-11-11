@@ -263,14 +263,17 @@ async def test_cold_loopback_listing_cannot_commit_after_resolution_cancellation
 
 
 @pytest.mark.asyncio
-async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_blocked() -> None:
+@pytest.mark.parametrize("post_ack_delay_s", [0.0, 0.5])
+async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_blocked(
+    post_ack_delay_s: float,
+) -> None:
     """The operator's acceptance item: settings answer instantly even mid-step.
 
     A REAL ``ServingSessionHandle`` whose session loop is held by a synchronous
     ``time.sleep`` (a tool step or an eval holding the loop). Without
     ``defer_ok`` the reply could only come after the sleep, because the switch
     body hops onto that loop. With it the runtime answers ``queued`` at once,
-    before any session-loop hop; the body then lands FIFO behind the blocking
+    with the hop already QUEUED but not run; the body then lands FIFO behind the blocking
     step and BEFORE the next thing the loop runs \u2014 which is where the agent
     loop's next ``_current_model`` read would be \u2014 and the outcome is
     published as ``settings_result`` for the ``request_id`` sent.
@@ -293,6 +296,21 @@ async def test_a_deferred_effort_switch_acks_queued_while_the_session_loop_is_bl
             return await handle.set_effort(effort, request_id=request_id)
 
     runtime = RuntimeServer(Host(), kind="tui")
+    if post_ack_delay_s:
+        # THE SLOW-HOST RACE, made deterministic (full-suite shard 3.12/1 on PR
+        # #3697): the runtime stalls right after writing the ``queued`` ack, so
+        # the client's next step reaches the session loop during the stall. It
+        # can only still run after the switch if the switch's hop was queued
+        # BEFORE the ack — the order ``_run_deferrable_switch`` must keep.
+        original_send = runtime._send_to
+
+        async def send_then_stall(conn: Any, frame: dict[str, Any]) -> Any:
+            sent_result = await original_send(conn, frame)
+            if frame.get("op") == "ack" and frame.get("queued"):
+                await asyncio.sleep(post_ack_delay_s)
+            return sent_result
+
+        runtime._send_to = send_then_stall  # type: ignore[method-assign]
     runtime.start()
     writer = None
     # Long enough that an ack which waited on the loop could not pass the
@@ -410,6 +428,33 @@ async def test_a_model_refusal_survives_a_later_effort_success_per_kind() -> Non
     assert state.settings_results["model"].request_id == "rid-model"
     assert state.settings_results["model"].ok is False
     assert state.settings_results["effort"].ok is True
+
+
+@pytest.mark.asyncio
+async def test_settings_results_stay_one_clipped_slot_per_kind() -> None:
+    """The attach frame's class guard counts ``settings_results`` as bounded.
+
+    That holds only while repeated switches OVERWRITE their kind's slot and the
+    free-text ``message`` (``str(exc)`` / slash text, which can echo caller
+    input) is clipped at publish; both views — state store and phone
+    projection — must carry the same bounded shape.
+    """
+    from tests.unit.session.runtime.test_serving import _AccessSession
+
+    session = _AccessSession("test/model")
+    handle = serving.ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    limit = serving.SETTINGS_RESULT_MESSAGE_CHARS
+    for index in range(50):
+        handle._publish_settings_result(
+            f"rid-{index}", kind="model", ok=False, code="failed", message="x" * (limit * 10)
+        )
+    state = session._frontend_state_store.state
+    assert set(state.settings_results) == {"model"}
+    assert state.settings_results["model"].request_id == "rid-49"
+    assert len(state.settings_results["model"].message) == limit
+    projected = handle._fold.projection.settings_results
+    assert set(projected) == {"model"}
+    assert len(projected["model"]["message"]) == limit
 
 
 @pytest.mark.asyncio

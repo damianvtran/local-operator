@@ -1342,8 +1342,9 @@ _SWITCH_OPS = frozenset({"set_model", "set_effort"})
 _SWITCH_SLASH_COMMANDS = frozenset({"model", "effort", "fast"})
 
 #: DEFERRED SETTINGS ARE ACCEPTED IMMEDIATELY. A ``defer_ok`` switch is acked
-#: ``queued`` before any session-loop hop (``_run_deferrable_switch``), idle or
-#: busy: an earlier 1.5 s inline window, measured at busy medians of 528–796 ms,
+#: ``queued`` without waiting on the session loop (``_run_deferrable_switch``),
+#: idle or busy — once its hop is QUEUED there, never once it has run: an
+#: earlier 1.5 s inline window, measured at busy medians of 528–796 ms,
 #: failed the operator's instant-acceptance requirement. Application and
 #: outcome delivery stay ordered on the switch lane; the outcome travels as
 #: ``settings_result``/``settings_results`` state, never on the reply. A caller
@@ -1364,6 +1365,11 @@ class _DeferredReply:
     req: Any
     sent: bool = False
     queued: bool = False
+    #: Set when the body reaches its handle call (``_settings_request_kw``),
+    #: which is what lets the ``queued`` ack trail the session-loop hop it
+    #: promises (see ``RuntimeServer._run_deferrable_switch``). Created lazily
+    #: on the runtime loop that owns the gate.
+    dispatched: asyncio.Event | None = None
 
 
 #: The ``_DeferredReply`` of the switch body running in THIS task context, read
@@ -1728,6 +1734,17 @@ def _settings_request_kw(fn: Any, frame: dict[str, Any]) -> dict[str, Any]:
     a test double keeps the exact call it always received, which is what keeps
     the no-``request_id`` path byte-for-byte unchanged.
     """
+    # THE DISPATCH MARK of a deferred switch body. Every switch arm evaluates
+    # this helper as the LAST argument of the handle call, with nothing awaited
+    # between it and the call, so once it runs the body goes on synchronously
+    # into the handle until its first suspension — and for the serving handle
+    # that suspension is AFTER ``run_coroutine_threadsafe`` has queued the
+    # session-loop hop. The ack waiter wakes only when this task yields, so
+    # the hop is already queued by the time ``queued`` is written. A non-
+    # deferred call has no gate and is untouched.
+    gate = _DEFERRED_REPLY.get()
+    if gate is not None and gate.dispatched is not None:
+        gate.dispatched.set()
     request_id = frame.get("request_id")
     if not isinstance(request_id, str) or not request_id.strip():
         return {}
@@ -2378,6 +2395,11 @@ class _ClientConn:
     #: hold them, while still running in order among themselves — see
     #: :data:`_SWITCH_OPS`.
     switch_chain: asyncio.Task[None] | None = None
+    #: Set once the most recently admitted ``defer_ok`` switch on this
+    #: connection has written its ``queued`` ack. A later deferred switch
+    #: acks only after it, so acks stay in send order even though each ack
+    #: now waits for its own body to dispatch (``_run_deferrable_switch``).
+    last_deferred_ack: asyncio.Event | None = None
     #: Strong references to those tasks. A bare ``create_task`` can be collected
     #: mid-await, which would leave an op half-run and its reply never written —
     #: the same reason ``RuntimeServer._event_sends`` exists.
@@ -5458,16 +5480,71 @@ class RuntimeServer:
         frame: dict[str, Any],
         previous: asyncio.Task[None] | None,
     ) -> None:
-        """Accept immediately on the runtime loop, then apply in switch order.
+        """Accept without waiting on the session loop, then apply in switch order.
 
         The chain retains this task until application completes: A→B and later
         prompts cannot overtake the mutation. Only acceptance is detached from
-        the body. The server owns queued bodies across socket closure and cancels
+        the body's completion; it trails the body's dispatch (comment below).
+        The server owns queued bodies across socket closure and cancels
         them at shutdown; outcomes arrive through ``settings_result``.
         """
-        # Receipt first, body second: even scheduling the session-loop hop can
-        # contend with turn work. Never let application latency hold acceptance.
-        gate = _DeferredReply(conn=conn, req=frame.get("req"), queued=True)
+        # HOP FIRST, RECEIPT SECOND, and the receipt still never waits on the
+        # session loop. ``queued`` promises "applies at the next step": work a
+        # client puts on the session loop AFTER reading the ack must run after
+        # the switch. Hops land FIFO, so that holds only if the body's hop is
+        # already queued when the ack is written. The old order (ack, then
+        # spawn the body) let a client's next step reach the loop first on a
+        # slow host and read the old setting (full-suite shard 3.12/1 on PR
+        # #3697, ``test_a_deferred_effort_switch_acks_queued_while_the_session_
+        # loop_is_blocked``). So the body starts first and the ack waits only
+        # until it has DISPATCHED (``_settings_request_kw`` marks it; the hop is
+        # submitted, not awaited, before the body next yields) or settled.
+        #
+        # Exception, by design: while an earlier switch on this connection is
+        # still applying, the body must wait for it before dispatching, and
+        # acceptance must not inherit that latency — the ack goes as soon as
+        # the earlier switch's own ack has (acks keep send order), and the
+        # chain keeps application behind the previous switch.
+        gate = _DeferredReply(
+            conn=conn, req=frame.get("req"), queued=True, dispatched=asyncio.Event()
+        )
+        # Claimed before the first await: tasks start in admission order, so
+        # each deferred switch sees exactly its predecessor's ack event.
+        earlier_ack = conn.last_deferred_ack
+        acked = asyncio.Event()
+        conn.last_deferred_ack = acked
+
+        async def body() -> None:
+            _DEFERRED_REPLY.set(gate)
+            if previous is not None:
+                await asyncio.wait({previous})
+            await self._on_request(frame, conn)
+
+        inner = asyncio.create_task(body())
+        self._deferred_switches.add(inner)
+        inner.add_done_callback(self._deferred_switches.discard)
+        try:
+            if previous is None or previous.done():
+                dispatched = asyncio.ensure_future(cast(asyncio.Event, gate.dispatched).wait())
+                try:
+                    await asyncio.wait({inner, dispatched}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    dispatched.cancel()
+            elif earlier_ack is not None and not earlier_ack.is_set():
+                await earlier_ack.wait()
+            await self._send_queued_ack(conn, frame, gate)
+        finally:
+            # Set however this ends (a cancelled or failed ack included), so a
+            # later switch never waits on an ack that will not come.
+            acked.set()
+        await asyncio.wait({inner})
+        if not inner.cancelled() and inner.exception() is not None:
+            raise cast(BaseException, inner.exception())
+
+    async def _send_queued_ack(
+        self, conn: _ClientConn, frame: dict[str, Any], gate: _DeferredReply
+    ) -> None:
+        """Write a deferred switch's ``queued`` receipt (one admitted request)."""
         self._admit_request()
         try:
             ack: dict[str, Any] = {
@@ -5482,19 +5559,6 @@ class RuntimeServer:
             await self._send_to(conn, ack)
         finally:
             self._release_request()
-
-        async def body() -> None:
-            _DEFERRED_REPLY.set(gate)
-            if previous is not None:
-                await asyncio.wait({previous})
-            await self._on_request(frame, conn)
-
-        inner = asyncio.create_task(body())
-        self._deferred_switches.add(inner)
-        inner.add_done_callback(self._deferred_switches.discard)
-        await asyncio.wait({inner})
-        if not inner.cancelled() and inner.exception() is not None:
-            raise cast(BaseException, inner.exception())
 
     def _op_settled(self, conn: _ClientConn, completed: asyncio.Task[None]) -> None:
         """Retire a dispatched op and consume its outcome.

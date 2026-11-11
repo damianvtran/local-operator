@@ -821,6 +821,21 @@ def _on_session_loop(method: _F) -> _F:
 #: can be acked ``queued`` and the ones that publish an outcome cannot drift.
 _SETTINGS_SLASH_COMMANDS = _SWITCH_SLASH_COMMANDS
 
+#: The longest ``message`` a published settings outcome carries. WHY a clip:
+#: ``settings_results`` is bounded in ENTRIES by the switch kinds above (one
+#: overwritten slot each), but its free text is ``str(exc)`` or a slash
+#: result's text, and both can echo caller input (a model id off the wire) or
+#: a multi-line listing. The attach frame's class guard
+#: (``tests/unit/session/test_attach_frame_size.py``) classifies the field as
+#: bounded on the strength of this clip, and pays for its worst case (every
+#: kind refused at this length) out of that guard's free-text pool. 300 holds
+#: the owner's one-sentence outcomes whole — ``model_unknown_refusal`` is 26
+#: characters of prose plus the provider and model id, the effort refusal 46
+#: plus the model id — while a pasted listing is cut. ``message`` is advisory (logs, clients with
+#: no translation of ``code``): ``code`` and ``ok`` carry the outcome, and a
+#: slash caller still gets the full text on its own reply.
+SETTINGS_RESULT_MESSAGE_CHARS = 300
+
 
 def _settings_refusal_code(error: BaseException) -> str:
     """The stable token a ``settings_result`` refusal carries in ``code``.
@@ -8272,7 +8287,12 @@ class ServingSessionHandle(SessionHandle):
         a reported failure. ``store.mutate`` is the same publication path
         ``pending_gate`` uses, so the field rides the next state push.
         """
-        result = {"request_id": request_id, "ok": ok, "code": code, "message": message}
+        result = {
+            "request_id": request_id,
+            "ok": ok,
+            "code": code,
+            "message": message[:SETTINGS_RESULT_MESSAGE_CHARS],
+        }
         # Two independent publications, each guarded on its own so a hiccup on
         # one cannot hide the outcome from the other's viewers: the phone reads
         # the projection (R1-M2), the TUI and desktop read the state store.
