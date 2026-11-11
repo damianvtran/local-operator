@@ -6794,14 +6794,21 @@ def _collapsed_value(setting: Setting, value: Any) -> str:
     one value have to read as one answer, so the collapsed row reads the same
     ``_choices_for`` the expansion paints and shows the same label.
 
-    DELIBERATELY NARROW: the label is used where it ENUMERATES a combination
-    the stored word only gestures at (more than one part, ``queue, then
-    steer``). Shown for every differing label, this would also restyle four
-    rows nobody asked about — ``12h`` → ``12-hour``, ``cross-family`` →
-    ``allow cross-vendor``, ``switch`` → ``this terminal``, ``7d`` → ``7 days``
-    (measured against the registry). Those are the same defect one size
-    smaller, and they belong to a design round that looks at the page, not to
-    this fix; until then their rows read exactly as they did.
+    DELIBERATELY NARROW, AND KEYED ON IDENTITY: the label is used only for
+    the choices listed in ``_COMBINATION_CHOICES`` — today the one row whose
+    label ENUMERATES a combination the stored word only gestures at
+    (``queue, then steer``). Shown for every differing label, this would also
+    restyle four rows nobody asked about — ``12h`` → ``12-hour``,
+    ``cross-family`` → ``allow cross-vendor``, ``switch`` → ``this terminal``,
+    ``7d`` → ``7 days`` (measured against the registry). Those are the same
+    defect one size smaller, and they belong to a design round that looks at
+    the page, not to this fix; until then their rows read exactly as they did.
+
+    The decision reads the SETTING KEY and the WIRE VALUE, never the label
+    text: the label is localized, and its part separators move with the
+    language (``ur`` separates with ``،`` U+060C, ``zh-CN`` has none at all),
+    which is how splitting the painted label on ASCII commas left this row
+    reading the bare ``both`` in both locales (V2-1/Q-4).
 
     Display only: the value that is WRITTEN is untouched. A bool, or an ENUM
     whose stored value is not one of its choices (hand-edited config), falls
@@ -6814,18 +6821,35 @@ def _collapsed_value(setting: Setting, value: Any) -> str:
     for choice in _choices_for(setting):
         if choice.value != value:
             continue
-        label = str(choice.label)
-        if label != rendered and _label_names_a_combination(label):
+        if _names_a_combination(setting, choice):
             # The SAME projection the picker applies to a choice label, so the
             # two surfaces paint one string rather than two spellings of it.
-            return _paint(label, source_locale="en")
+            return _paint(str(choice.label), source_locale="en")
         return rendered
     return rendered
 
 
-def _label_names_a_combination(label: str) -> bool:
-    """Whether ``label`` enumerates more than one behaviour (``queue, then steer``)."""
-    return len([part for part in label.split(",") if part.strip()]) > 1
+#: The ENUM choices whose LABEL names a COMBINATION of behaviours, as
+#: ``(setting key, stored value)``: the collapsed row shows the label for
+#: these, and the stored wire word for every other choice.
+#:
+#: Keyed by IDENTITY, never by reading the label: the label is TRANSLATED and
+#: its part separators move with the language — ``ur`` separates with ``،``
+#: (U+060C), ``zh-CN`` drops the separator altogether — so splitting the
+#: painted label measured the translation instead of the meaning, and the row
+#: read the bare wire word ``both`` in both locales (V2-1/Q-4). A setting key
+#: and a wire value cannot move with the language.
+_COMBINATION_CHOICES = frozenset({("delivery.busy_default", "both")})
+
+
+def _names_a_combination(setting: Setting, choice: settings_io.Choice) -> bool:
+    """Whether ``choice``'s label says more than its stored word, in any locale.
+
+    Named so the rule has ONE spelling: `_collapsed_value` reads it, its
+    docstring explains the restrictiveness, and the tests replace it with the
+    pre-V2-1 comma split to prove the new cases fail against the old logic.
+    """
+    return (setting.key, choice.value) in _COMBINATION_CHOICES
 
 
 def _render_value(value: Any) -> str:

@@ -161,25 +161,59 @@ async def test_enum_expansion_selects_a_choice(tmp_path: Path) -> None:
         assert view._expanded is None
 
 
+#: Every shipped locale. The collapsed row has to read the picker's label in
+#: ALL of them, not only the ones whose translation happens to carry an ASCII
+#: comma: ``ur`` separates with ``،`` (U+060C) and ``zh-CN`` with nothing.
+_SHIPPED_LOCALES = ("en", "fr", "ur", "zh-CN", "ru", "hi", "vi", "es")
+
+
 @pytest.mark.asyncio
-async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(tmp_path: Path) -> None:
-    """Q-1: `both` is a stored word the page never explains.
+@pytest.mark.parametrize("locale", _SHIPPED_LOCALES)
+async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(
+    tmp_path: Path, locale: str, restore_active_locale: Any
+) -> None:
+    """Q-1 / V2-1: `both` is a stored word the page never explains, in every locale.
 
     ``delivery.busy_default`` holds ``both``, and the collapsed row showed that
-    token while the picker one keypress away spelled the mode out as
-    ``queue, then steer``. Both now read one source (``_choices_for``), so the
-    two surfaces cannot describe the same value two different ways — and the
-    value WRITTEN stays ``both``, which is what the wire carries.
+    token while the picker one keypress away spelled the mode out. Both read
+    one source (``_choices_for``), so the two surfaces cannot describe the same
+    value two different ways — and the value WRITTEN stays ``both``, which is
+    what the wire carries.
+
+    The locale dimension IS the test: the swap-in decision must not read the
+    label's punctuation, because the separators are translated. ``ur`` parts
+    its phrase with ``،`` (U+060C) and ``zh-CN`` with no separator at all, and
+    a split on ASCII commas left the row reading ``both`` in exactly those two
+    (V2-1/Q-4).
     """
+    from local_operator.i18n.text import active_locale, set_active_locale
+    from local_operator.tui.widgets import settings_view
+
     ConfigManager(tmp_path).update_config({"delivery": {"busy_default": "both"}})
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 32)) as pilot:
         await pilot.pause()
+        # AFTER the boot: ``on_mount`` resolves the config's language, so a move
+        # made before ``run_test`` is overwritten with English and every case
+        # below would pass trivially. This is the live `/language` path.
+        set_active_locale(locale)
+        assert active_locale() == locale, active_locale()
         view = await _open_page(pilot, app)
         index = _select(view, "delivery.busy_default")
+        setting = view._rows[index].setting
+        assert setting is not None
+        # The exact string the picker paints for `both` in this locale.
+        painted = next(
+            str(choice.label)
+            for choice in settings_view._choices_for(setting)
+            if choice.value == "both"
+        )
         collapsed = view._row_text(view._rows[index], index, 120).plain
-        assert "queue, then steer" in collapsed, collapsed
-        assert " both" not in collapsed, collapsed
+        assert painted in collapsed, (locale, painted, collapsed)
+        assert " both" not in collapsed, (locale, collapsed)
+        # The value CELL is exactly the picker's label, not merely present in
+        # the row: one string painted by two surfaces.
+        assert settings_view._collapsed_value(setting, "both") == painted, locale
 
         # The picker paints the same label: one source, one answer.
         view.action_activate()
@@ -190,16 +224,81 @@ async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(tmp_path: P
             if row.kind == "choice"
             and row.setting is not None
             and row.setting.key == "delivery.busy_default"
+            and row.choice is not None
+            and row.choice.value == "both"
         ]
-        assert any("queue, then steer" in label for label in labels), labels
+        assert labels, locale
+        assert painted in labels[0], (locale, painted, labels[0])
 
         # DISPLAY only: what is stored is still the wire value.
-        from local_operator import settings_io
-
         stored = settings_io.read_setting(
             view._manager, settings_io.BY_KEY["delivery.busy_default"]
         )
         assert stored == "both", stored
+
+
+@pytest.mark.parametrize("locale", ("ur", "zh-CN"))
+def test_no_other_enum_choice_changes_its_collapsed_text(
+    locale: str, restore_active_locale: Any
+) -> None:
+    """The other 165 ENUM choices keep reading their stored word, in every locale.
+
+    V2-1's restriction: the label swap-in is for the ONE choice whose label
+    names a combination (``delivery.busy_default=both``). Every other choice
+    paints exactly what it painted before — notably the four rows whose
+    English label differs from the stored word (``12h`` → ``12-hour``,
+    ``cross-family`` → ``allow cross-vendor``, ``switch`` → ``this terminal``,
+    ``7d`` → ``7 days``), whose restyle is a design decision this fix must not
+    make on its own.
+
+    Expected values are derived HERE from the ENGLISH source label — the
+    independent statement of "this label names a combination" — rather than
+    from the implementation's own table, so a stray or missing entry fails
+    instead of agreeing with itself. ``ur`` and ``zh-CN`` are the two locales
+    the old comma split got wrong.
+    """
+    from local_operator.i18n.messages import render
+    from local_operator.i18n.text import set_active_locale
+    from local_operator.tui.widgets import settings_view
+
+    def english_label(choice: settings_io.Choice) -> str:
+        """The authored English label behind a localized one.
+
+        Resolved through the same namespace probe every render uses: choice
+        labels live in more than one catalogue (``retry``'s account-policy
+        members carry their own namespace), so the code alone does not name
+        the file.
+        """
+        message = getattr(choice.label, "message", None)
+        if message is None:
+            return str(choice.label)
+        return render(message.code, dict(message.params), locale="en")
+
+    set_active_locale(locale)
+    checked = 0
+    for setting in settings_io.SETTINGS:
+        if setting.kind is not Kind.ENUM:
+            continue
+        for choice in settings_view._choices_for(setting):
+            checked += 1
+            parts = [part for part in english_label(choice).split(",") if part.strip()]
+            expected = (
+                str(choice.label) if len(parts) > 1 else settings_view._render_value(choice.value)
+            )
+            assert settings_view._collapsed_value(setting, choice.value) == expected, (
+                locale,
+                setting.key,
+                choice.value,
+            )
+    # The registry's ENUM value space at the time of the fix (measured in this
+    # tree, not remembered): a setting or choice added later decides its own
+    # case and must re-state this count deliberately.
+    assert checked == 166, checked
+
+    # A hand-edited value that is not one of the choices still shows what is
+    # there rather than the nearest legal answer (the docstring's contract).
+    busy = settings_io.BY_KEY["delivery.busy_default"]
+    assert settings_view._collapsed_value(busy, "sometimes") == "sometimes"
 
 
 @pytest.mark.asyncio

@@ -35646,12 +35646,13 @@ class OperatorApp(App[None]):
             # the user is waiting for, and below `warning`, which is an alarm this
             # is not. Three warning-tinted rows on one frame for routine receipts
             # is how the loudest ink in the palette stops meaning anything.
-            # Held, not just appended: this row is a promise about the future
-            # ("sends when this step finishes") and the reference is what lets
-            # `on_steering_delivered` settle it into a statement of fact once
-            # the engine actually takes the message. Without that, the row went
-            # on saying `queued` for the rest of the session and the agent's
-            # eventual reply was the only evidence it had ever been delivered.
+            # Held, not just appended: this row is a promise about the turn
+            # ("steering — may stop a running tool") and the reference is what
+            # lets `on_steering_delivered` settle it into a statement of fact
+            # once the engine actually takes the message. Without that, the row
+            # went on saying the message was on its way for the rest of the
+            # session and the agent's eventual reply was the only evidence it
+            # had ever been delivered.
             #
             # A LIST because a user can queue several messages while one tool
             # runs, and the engine delivers whatever has accumulated at the next

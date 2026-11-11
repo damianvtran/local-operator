@@ -526,9 +526,10 @@ async def test_no_receipt_is_taller_than_the_shipped_baseline_from_40_up() -> No
     Each string is rendered in its OWN app through ``_settled_notice_height``
     (the protocol ``test_queued_steer_receipt.py`` proved for the cross-turn
     settle) and compared as a row count. The widths are the step boundaries
-    the wrap can move at (every width up to 60, where all five strings are
-    shorter than a body line, plus the two extremes); the height is a step
-    function of the wrap, so an interior width would only re-render the same
+    the wrap can move at (every width up to 60, where the four waiting strings
+    and the separately pinned deferred row are all shorter than a body line,
+    plus the two extremes); the height is a step function of the wrap, so an
+    interior width would only re-render the same
     step. Widths below 40 are not pinned: the app supports widths from 40 up.
     """
     waiting = {
