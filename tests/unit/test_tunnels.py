@@ -1839,6 +1839,95 @@ async def test_the_relay_names_a_lost_network_instead_of_one_flat_refusal(connec
     origin.assert_not_called()
 
 
+async def _wait_for_supervisor_health(client: httpx.AsyncClient, port: int) -> dict[str, Any]:
+    """Wait for startup, without confusing listener readiness with network state."""
+    health: dict[str, Any] | None = None
+    last_error: httpx.ConnectError | None = None
+    # run() is merely scheduled by the caller: even its early bind may not have
+    # happened yet. Retry only connection failures, not a bound server's read or
+    # protocol errors. Bound the requests too, not just the existing 200 sleeps.
+    try:
+        async with asyncio.timeout(10):
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                try:
+                    reply = await client.get(f"http://127.0.0.1:{port}/_lop_tunnel/health")
+                except httpx.ConnectError as failure:
+                    last_error = failure
+                    continue
+                # A fresh local: assigning Any to the declared `dict | None` would
+                # leave pyright treating it as possibly None.
+                body: dict[str, Any] = reply.json()
+                health = body
+                if body.get("reason"):
+                    return body
+    except TimeoutError:
+        pass
+    if health is None:
+        error = f"{type(last_error).__name__}: {last_error}" if last_error else "none recorded"
+        pytest.fail(
+            f"the gateway never answered the health readiness wait within 10 s; last error: {error}"
+        )
+    # A listener that answers with the wrong state must reach the caller's
+    # original supervisor assertions, not be relabelled as a startup failure.
+    assert health is not None
+    return health
+
+
+@pytest.mark.asyncio
+async def test_supervisor_health_wait_retries_connection_refusal():
+    attempts = 0
+
+    def respond(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise httpx.ConnectError("listener has not bound", request=request)
+        return httpx.Response(200, json={"ok": False, "reason": UNREACHABLE})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        health = await _wait_for_supervisor_health(client, 12345)
+    assert attempts == 3
+    assert health == {"ok": False, "reason": UNREACHABLE}
+
+
+@pytest.mark.asyncio
+async def test_supervisor_health_wait_names_the_last_refusal():
+    attempts = 0
+
+    def refuse(request):
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError(f"listener still closed, attempt {attempts}", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        with pytest.raises(pytest.fail.Exception) as failure:
+            await _wait_for_supervisor_health(client, 12345)
+    assert str(failure.value) == (
+        "the gateway never answered the health readiness wait within 10 s; "
+        f"last error: ConnectError: listener still closed, attempt {attempts}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectTimeout, httpx.ReadError],
+)
+async def test_supervisor_health_wait_does_not_retry_backend_errors(error_type):
+    attempts = 0
+
+    def fail(request):
+        nonlocal attempts
+        attempts += 1
+        raise error_type("not a refused connection", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as client:
+        with pytest.raises(error_type, match="not a refused connection"):
+            await _wait_for_supervisor_health(client, 12345)
+    assert attempts == 1
+
+
 @pytest.mark.asyncio
 async def test_the_supervisor_reports_a_lost_network_on_both_status_surfaces(
     tmp_path, monkeypatch, connection, signing_key
@@ -1876,36 +1965,29 @@ async def test_the_supervisor_reports_a_lost_network_on_both_status_surfaces(
         service.asyncio, "create_subprocess_exec", AsyncMock(return_value=_Connector())
     )
     task = asyncio.create_task(service.run())
-    async with httpx.AsyncClient(trust_env=False) as client:
-        health: dict[str, Any] = {}
-        for _ in range(200):
-            await asyncio.sleep(0.05)
-            reply = await client.get(
-                f"http://127.0.0.1:{served['gateway_port']}/_lop_tunnel/health"
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            health = await _wait_for_supervisor_health(client, served["gateway_port"])
+            assert health.get("ok") is False, health
+            assert health["reason"] == "control_plane_unreachable", health
+            assert "network" in health["detail"]
+
+            # Reached over the real listener the way the edge reaches it: loopback
+            # TCP, public Host. The gateway refuses before proof verification, which
+            # is the point — the phone never gets as far as its harness.
+            refused = await client.get(
+                f"http://127.0.0.1:{served['gateway_port']}/api/sessions",
+                headers={"host": HOST, PROOF_HEADER: proof(signing_key)},
             )
-            health = reply.json()
-            if health.get("reason"):
-                break
-        assert health.get("ok") is False, health
-        assert health["reason"] == "control_plane_unreachable", health
-        assert "network" in health["detail"]
-
-        # Reached over the real listener the way the edge reaches it: loopback
-        # TCP, public Host. The gateway refuses before proof verification, which
-        # is the point — the phone never gets as far as its harness.
-        refused = await client.get(
-            f"http://127.0.0.1:{served['gateway_port']}/api/sessions",
-            headers={"host": HOST, PROOF_HEADER: proof(signing_key)},
-        )
-        assert refused.status_code == 503
-        assert refused.json()["reason"] == "control_plane_unreachable"
-
-    # End it the way an operator's `lop tunnel stop` does, so the supervisor is
-    # not left running inside the test session.
-    stopped = config.load()
-    stopped["stopped"] = True
-    config.save(stopped)
-    assert await asyncio.wait_for(task, timeout=15) == 0
+            assert refused.status_code == 503
+            assert refused.json()["reason"] == "control_plane_unreachable"
+    finally:
+        # End it the way an operator's `lop tunnel stop` does, so the supervisor is
+        # not left running inside the test session.
+        stopped = config.load()
+        stopped["stopped"] = True
+        config.save(stopped)
+        assert await asyncio.wait_for(task, timeout=15) == 0
 
 
 @pytest.mark.asyncio
