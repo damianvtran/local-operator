@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "cli.config",
+  "history_sha256": "26595ee1f4837334b285ed0ffc037d7284a776952cb648d072d7d32424e8b728",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 6
+      },
+      "status": "passed",
+      "note": "zh-CN C1 `lop config` output (15 keys). Evidence: i18n/audits/evidence/zh-CN/cli.config/c1a/record.json. Independent auditor deepseek/deepseek-flash; 4 minor (opened locative, 压缩引擎, smart-hints wording, safety modal) 2 nit; no blocker/major.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.config/c1a/record.json",
+          "sha256": "40025804c858d08fddcef1218d1ce3d44339a1c50ca8224fb3c44ef360e14373"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.config/c1a/report.md",
+          "sha256": "e89f69ed074411a62afaff905e224c9d20097c63c9a5c523accf31845e79abfe"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.config/c1a/audit.log",
+          "sha256": "605c0c2d273ddbcfd991ab03aa81bb1449f18948e0a171be131b6a80f04b0dde"
+        }
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "zh-CN C1 `cli.config` FINAL: round-2 delta audit of the v2 bytes now shipped (target file sha256 c79f88f972e4), 0 BLOCKER/0 MAJOR/0 MINOR/2 NIT. Round 1: A deepseek 0M/6m/2n, B sonnet 0M/5m/3n; v2 revised 13 keys. Independent of translator openai/gpt-6.1-sol. Evidence: i18n/audits/evidence/zh-CN/cli.config/c1r2/record.json. No rendered frame; no native review.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.config/c1r2/record.json",
+          "sha256": "29ef8e12d5f71872115e9236e99e72d2cc08b938760c96491d0d802a540c6363"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.config/c1r2/report.md",
+          "sha256": "f4871100e8a9836593daa01617598559cff012fe5baca79c0a4118ddd87d915b"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.config/c1r2/round1-B-report.md",
+          "sha256": "cb7e62d60767cd1ea27d67e00f3070f691ae0dc02c208444f7568fbcbf00213f"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/cli.config/c1r2/verify.log",
+          "sha256": "5a16ebabfdbe724bba4dddc1153ed7efe80d35b0a62462cee8bb9f197455496c"
+        }
+      ]
+    }
+  ]
+}

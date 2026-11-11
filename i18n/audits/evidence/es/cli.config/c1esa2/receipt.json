@@ -1,0 +1,19 @@
+{
+ "schema": 1,
+ "audit_id": "c1esa2",
+ "audit_round": 2,
+ "locale": "es",
+ "namespace": "cli.config",
+ "audited_revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+ "files": {
+  "record.json": "b80d18e6438b74512caf9dc7d0f9d644797627f6174467efba393527bb1820b7",
+  "report.md": "a1879f7c4fdd4b4163f47632a73f348e4946aa0d4c2db3fc66c8e628dd2cc0c4",
+  "audit.log": "5be3ea586fce2748b276dd93fbf3989b78d1892c6a8c54ee5674f423afedc97b",
+  "checks.py.txt": "18d2c34b50b76df00ed30c43c657ae41713878c57474448a7d3a12183db59e09",
+  "target-audited.json": "e214c8d2dfc0a0b6d4cd3e97a6987614f6d6e0a115a0a9305cd97230f92645cf"
+ },
+ "bundle": "i18n/audits/evidence/es/cli.config/c1esa2",
+ "generated_by": "c1esa2 (i18n-auditor), session 95b953e7b8fd, model deepseek/deepseek-flash (session header, no fallback)",
+ "generated_at": "2026-11-11",
+ "notes": "Round-2 delta audit of the es v2 shard. record.json holds the verdict, findings and input hashes; audit.log is the execution log (commands actually run); report.md is the prose report; target-audited.json is the byte-identical (2656 B) copy of the audited value set whose sha256 the record's target_locale entry carries."
+}

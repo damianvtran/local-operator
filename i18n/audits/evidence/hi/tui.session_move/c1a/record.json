@@ -1,0 +1,131 @@
+{
+  "schema": 1,
+  "audit_id": "c1a",
+  "audit_kind": "independent_translation_audit_candidate",
+  "audit_position": "independent auditor of an unmerged candidate translation; the translator lane did not audit it",
+  "locale": "hi",
+  "namespace": "tui.session_move",
+  "audit_date": "2026-11-11",
+  "verdict": "changes_requested",
+  "status": "changes_requested",
+  "key_count": 7,
+  "keys_audited": 7,
+  "scope": "all 7 keys of tui.session_move in the C1 extraction slice (15 cli.config.* config-output lines and 7 tui.session_move.* /move refusals across the two namespaces), audited against the English source and its context sidecar",
+  "source_audit_revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+  "worktree": "<worktree>",
+  "branch": "i18n-c1",
+  "translator": {
+    "agent": "C1 translation lane of the lopdev team, a different agent from this auditor",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "auditor": {
+    "agent": "i18n-auditor, task teammate of the lopdev team, session bd8cbf2491b2; did not translate and did not edit any value it judged",
+    "session": "bd8cbf2491b2",
+    "model": "deepseek/deepseek-flash",
+    "actual_model_source": "harness-served model, disclosed in the session system prompt ('Model: deepseek/deepseek-flash'); no model was requested or pinned for this lane and no fallback is claimed",
+    "date": "2026-11-11",
+    "independent_from_translator_session": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "~/.local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/keys.json",
+      "sha256": "ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc"
+    },
+    "context": {
+      "path": "en context/meta sidecar: the per-key blocks inside keys.json and local_operator/i18n/catalogues/en/tui.session_move.context.json",
+      "sha256": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573"
+    },
+    "target": {
+      "path": "this bundle's target-candidate.json (copied from ~/.local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/hi.json)",
+      "sha256": "5076ea0da47639c58ce4b4f9311d3d4c4c76c796ab108c83f9256ab0fdc39229"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "mechanical_checks": [
+    "python3 scripts/i18n/check.py -> exit 0, 'catalogues consistent', 83 advisory ratchet rows only (log line 1-100 of audit.log)",
+    "repo catalogue checker check_catalogues() over a temp root holding the shipped en+hi trees plus the candidate files -> 0 problems; control run on the untouched repo tree -> 0 problems",
+    "key set and order identical to the English source (22/22); no key added or dropped; every value non-empty and none identical to English",
+    "placeholder sets identical per key; typed tokens (/approvals auto, auto, /move, --to, --keep, --queue, --drop-session-roles, --wait, local, <id>, <to>, <seconds>, provider ids, CLI, AI) preserved; backticked commands byte-identical modulo placeholders",
+    "every value parses in the shipped ICU subset and renders with runtime.render_message(..., 'hi'); no key carries a plural/select, so no CLDR category obligation applies here",
+    "typography: no ZWJ/ZWNJ, no double spaces, no Devanagari digits, no '!', no कृपया, no तुम/तू; nukta encoded as base+U+093C (9 uses, 0 precomposed), matching shipped hi (1377 uses, 0 precomposed)",
+    "width: no maxCells caps in this group; cli.config.list_title measures 12 cells (rich.cells.cell_len) against a ~30-cell box rule"
+  ],
+  "meaning_checks": [
+    "cli.config.running_sessions_unchanged keeps the safety claim: running sessions unchanged, a config write cannot loosen one, /approvals auto must be typed in each session you want ungated, new sessions open at auto",
+    "tui.session_move.deadline_exceeded reports an UNKNOWN outcome (did not finish in time; re-running reports how far it got) and does not say failed or succeeded",
+    "tui.session_move.cannot_wait / unsupported_flag / to_needs_device / cli_unavailable keep the shell route, the accepted flags, and the literal 'local' value; refusal tone is plain and blameless",
+    "no untranslated English sentence survives; the only Latin is kept-English product/command/flag/provider copy plus the mode word auto"
+  ],
+  "findings": [
+    {
+      "id": "HI-A02",
+      "severity": "major",
+      "namespace": "tui.session_move"
+    },
+    {
+      "id": "HI-A07",
+      "severity": "nit",
+      "namespace": "tui.session_move"
+    }
+  ],
+  "artifacts": [
+    "record.json",
+    "report.md",
+    "audit.log",
+    "target-candidate.json",
+    "receipt.json"
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "HI-A02",
+      "HI-A07"
+    ],
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 1
+  },
+  "second_independent_pass": "Requested for the high-visibility settings/error group: the whole group was re-read cold and re-derived from the English after the first pass, producing HI-A04 and HI-A09 and re-confirming both MAJOR couplings.",
+  "audit_notes_not_execution_log": "record.json and report.md are notes; audit.log holds the actual executed output of `python3 scripts/i18n/check.py` and the candidate validator, with rc lines. Nothing here is a rendered-frame or native-speaker claim.",
+  "limitations": [
+    "Independent LLM review on the harness-served model deepseek/deepseek-flash, not native-speaker certification; judgments are reasoned from the style guide, glossary, shipped catalogues and use sites. No translation/MT service was used for comparison or back-translation.",
+    "The audited target is an unmerged candidate held in a session scratchpad; target-candidate.json preserves the exact judged bytes, so the verdict is reproducible before the translation lands. The ledger row was therefore appended with status changes_requested (not passed); it must be superseded by a passing row after remediation, whose own audit re-reads the fixed strings.",
+    "Scalar text evidence only: no terminal frame was captured; widths are cell_len measurements, not pixels."
+  ],
+  "audit_ledger_row": {
+    "status": "appended",
+    "path": "i18n/audit-history/hi/tui.session_move.json",
+    "history_sha256_before": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "rows_in_history": 1,
+    "last_row_wins": "true — this changes_requested row is the effective row for hi/tui.session_move",
+    "command": "python3 scripts/i18n/ledger.py append --receipt <row> --expected-history-sha <history-sha> --apply",
+    "validation": "python3 scripts/i18n/ledger.py validate --base HEAD -> 'audit history: valid and append-only' (rc 0)"
+  },
+  "gate_results": [
+    {
+      "command": "python3 scripts/i18n/check.py",
+      "rc": 0,
+      "output": "check.py: ok — 217 file(s) scanned, 2540 literal(s) at or below the baseline, catalogues consistent; 83 advisory finding(s)"
+    },
+    {
+      "command": "python3 scripts/i18n/ledger.py append --receipt <row> --expected-history-sha 4f53cda1… --apply",
+      "rc": 0,
+      "output": "i18n/audit-history/hi/tui.session_move.json"
+    },
+    {
+      "command": "python3 scripts/i18n/ledger.py validate --base HEAD",
+      "rc": 0,
+      "output": "audit history: valid and append-only"
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.session_move",
+  "history_sha256": "def8247268df9bc048a55cd06bfe39864f390138ed9256830af336333e2c2a37",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "fr C1 `tui.session_move` (7 keys). Evidence: i18n/audits/evidence/fr/tui.session_move/c1a/record.json. Auditor deepseek/deepseek-flash; 2 minor, 0 nit: <appareil> vs corpus 'pair'; 'abouti' leans failure; no blocker/major gate.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1a/record.json",
+          "sha256": "ec78911a6f05421ae17b76c15e449346346fd3054c9d049b43eb123fb853ac02"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1a/report.md",
+          "sha256": "89c37c4227ba0c203351b5fc0891a7ce1b12558c6376bb0d4567e1c0cfdba9de"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1a/audit.log",
+          "sha256": "a7a2b5c339e9aede61c30f38020c0ffa3f6ad394db5d0bb92e226a6671f5c7a7"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "changes_requested",
+        "findings": 6,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "fr C1 `tui.session_move` round 1 audit B on the v1 bytes: 1 MAJOR, 2 minor, 3 nit (group-wide counts, same report for both namespaces). Superseded by the v2 revision and the final round-2 pass; report preserved at i18n/audits/evidence/fr/tui.session_move/c1r2/round1-B-report.md.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1r2/round1-B-report.md",
+          "sha256": "c42758bf49fddadc633319ced5588f7dc850bb248da2bb72cbe2b2f9efbbdcc6"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "fr C1 `tui.session_move` FINAL: round-2 delta audit of the v2 bytes now shipped (target file sha256 69636cbd76f3), 0 BLOCKER/0 MAJOR/0 MINOR/0 NIT. Round 1: A deepseek 0M/4m/3n, B sonnet 1 MAJOR (fixed in v2, confirmed here). Independent of translator openai/gpt-6.1-sol. Evidence: i18n/audits/evidence/fr/tui.session_move/c1r2/record.json. No rendered frame; no native review.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1r2/record.json",
+          "sha256": "dabfbaa99c6193c2f7a010047abd3a8a833f144d86cdcd39bcd65934d0199a19"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1r2/report.md",
+          "sha256": "079115cdef9f0cf12ecc8d2bc4a186562c485ee0e35bc16665b8234e9233bc3d"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1r2/round1-B-report.md",
+          "sha256": "c42758bf49fddadc633319ced5588f7dc850bb248da2bb72cbe2b2f9efbbdcc6"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/tui.session_move/c1r2/verify.log",
+          "sha256": "467f8075f051196e2d6b655a366458fb8436a79b55b8b048cbafdaa846b4188a"
+        }
+      ]
+    }
+  ]
+}

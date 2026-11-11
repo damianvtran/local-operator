@@ -1,0 +1,103 @@
+# independent i18n audit — hi — slice C1-A — executed 2026-11-11T07:28:19Z
+$ python3 scripts/i18n/check.py
+advisory: local_operator/agent_profiles.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/compaction/resume_card.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/compaction/snapcompact.py: 12 literal(s) against a ceiling of 10
+advisory: local_operator/disk_cli.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/disk_pressure.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/action_server.py: 5 literal(s) against a ceiling of 4
+advisory: local_operator/evaluation/runner/provider_client.py: 13 literal(s) against a ceiling of 9
+advisory: local_operator/evaluation/session_arm.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/evaluation/team_bridge_moderation/dataset.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/fixture.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/report.py: 32 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/runner.py: 6 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/evaluation/team_bridge_moderation/screenbench.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/check.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/classify.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/evidence.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/judge.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/preview.py: 14 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/provenance.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/guardrails/resolve.py: 16 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness/rows.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/harness/subagent.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/harness_import/mapping.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/service.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/claude.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/harness_import/sources/codex.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/hub_sync/service.py: 4 literal(s) against a ceiling of 1
+advisory: local_operator/librarian/proactive.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/metadata.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/library/store.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_cli.py: 81 literal(s) against a ceiling of 39
+advisory: local_operator/memory_guard.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_maintenance.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_triage.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/monitors/delivery.py: 29 literal(s) against a ceiling of 14
+advisory: local_operator/network/cli.py: 267 literal(s) against a ceiling of 228
+advisory: local_operator/network/credentials/finite_share.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/meshupdate.py: 3 literal(s) against a ceiling of 2
+advisory: local_operator/network/readiness.py: 24 literal(s) against a ceiling of 15
+advisory: local_operator/network/relay.py: 32 literal(s) against a ceiling of 31
+advisory: local_operator/network/tool.py: 24 literal(s) against a ceiling of 23
+advisory: local_operator/notifications/bulk.py: 5 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/notifications/store.py: 8 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/operator/cli.py: 26 literal(s) against a ceiling of 23
+advisory: local_operator/operator/handlers.py: 82 literal(s) against a ceiling of 69
+advisory: local_operator/operator/pair_handlers.py: 32 literal(s) against a ceiling of 23
+advisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/profile_scope.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/providers/auth_cli.py: 23 literal(s) against a ceiling of 20
+advisory: local_operator/saver/provenance.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_imports.py: 9 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_librarian.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_settings_intents.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/desktop_team_bridge.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/routes/notification_sounds.py: 4 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/server/utils/settings_intents.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/catalog.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session/delegated_retention.py: 12 literal(s) against a ceiling of 6
+advisory: local_operator/session_factory.py: 16 literal(s) against a ceiling of 15
+advisory: local_operator/sound_cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/supervisors.py: 9 literal(s) against a ceiling of 6
+advisory: local_operator/supplements/sweep.py: 6 literal(s) against a ceiling of 5
+advisory: local_operator/supplements/validate.py: 22 literal(s) against a ceiling of 21
+advisory: local_operator/team_bridge/agent_file_reads.py: 16 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/cli.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/connector/cli.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/connector/conversation.py: 13 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/link_preview/extract.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/store.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/team_bridge/tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/agent_tool.py: 7 literal(s) against a ceiling of 4
+advisory: local_operator/tools/artifact_data_tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/builtin.py: 143 literal(s) against a ceiling of 118
+advisory: local_operator/tools/confinement.py: 2 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tools/secret_tool.py: 3 literal(s) against a ceiling of 1
+advisory: local_operator/tools/skill_tool.py: 7 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/tui/session_move.py: 4 literal(s) against a ceiling of 3
+advisory: local_operator/tunnels/cli.py: 14 literal(s) against a ceiling of 13
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/wakes/supervisor.py: 8 literal(s) against a ceiling of 5
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 217 file(s) scanned, 2540 literal(s) at or below the baseline, catalogues consistent; 83 advisory finding(s) (report-only until activated)
+rc=0
+
+$ python3 ~/.local-operator/sessions/bd8cbf2491b2/scratchpad/validate_hi.py
+check_catalogues problems: 0
+control (real repo tree) problems: 0
+candidate contract problems: 0
+hi plural categories: {"categories": ["one", "other"], "samples": {"0": "one", "1": "one", "2": "other", "3": "other", "4": "other", "5": "other", "6": "other", "7": "other", "8": "other", "9": "other", "10": "other", "11": "other", "12": "other", "13": "other", "14": "other", "15": "other", "16": "other", "17": "other", "18": "other", "19": "other", "20": "other", "21": "other", "22": "other", "23": "other", "24": "other", "25": "other", "26": "other", "27": "other", "28": "other", "29": "other", "30": "other", "31": "other", "32": "other", "33": "other", "34": "other", "35": "other", "36": "other", "37": "other", "38": "other", "39": "other", "40": "other", "41": "other", "42": "other", "43": "other", "44": "other", "45": "other", "46": "other", "47": "other", "48": "other", "49": "other", "50": "other", "51": "other", "52": "other", "53": "other", "54": "other", "55": "other", "56": "other", "57": "other", "58": "other", "59": "other", "60": "other", "61": "other", "62": "other", "63": "other", "64": "other", "65": "other", "66": "other", "67": "other", "68": "other", "69": "other", "70": "other", "71": "other", "72": "other", "73": "other", "74": "other", "75": "other", "76": "other", "77": "other", "78": "other", "79": "other", "80": "other", "81": "other", "82": "other", "83": "other", "84": "other", "85": "other", "86": "other", "87": "other", "88": "other", "89": "other", "90": "other", "91": "other", "92": "other", "93": "other", "94": "other", "95": "other", "96": "other", "97": "other", "98": "other", "99": "other", "100": "other", "101": "other", "102": "other", "103": "other", "104": "other", "105": "other", "106": "other", "107": "other", "108": "other", "109": "other", "110": "other", "111": "other", "112": "other", "113": "other", "114": "other", "115": "other", "116": "other", "117": "other", "118": "other", "119": "other", "120": "other", "121": "other", "122": "other", "123": "other", "124": "other", "125": "other", "126": "other", "127": "other", "128": "other", "129": "other", "130": "other", "131": "other", "132": "other", "133": "other", "134": "other", "135": "other", "136": "other", "137": "other", "138": "other", "139": "other", "140": "other", "141": "other", "142": "other", "143": "other", "144": "other", "145": "other", "146": "other", "147": "other", "148": "other", "149": "other", "150": "other", "151": "other", "152": "other", "153": "other", "154": "other", "155": "other", "156": "other", "157": "other", "158": "other", "159": "other", "160": "other", "161": "other", "162": "other", "163": "other", "164": "other", "165": "other", "166": "other", "167": "other", "168": "other", "169": "other", "170": "other", "171": "other", "172": "other", "173": "other", "174": "other", "175": "other", "176": "other", "177": "other", "178": "other", "179": "other", "180": "other", "181": "other", "182": "other", "183": "other", "184": "other", "185": "other", "186": "other", "187": "other", "188": "other", "189": "other", "190": "other", "191": "other", "192": "other", "193": "other", "194": "other", "195": "other", "196": "other", "197": "other", "198": "other", "199": "other", "200": "other", "250": "other", "300": "other", "500": "other", "1000": "other", "10000": "other", "100000": "other", "1000000": "other", "1234567": "other", "0.5": "one", "1.5": "other", "101.5": "other", "11.5": "other", "2.5": "other", "21.5": "other", "3.5": "other"}}
+render cli.config.created -> X पर नई कॉन्फ़िगरेशन फ़ाइल बनाई गई
+render cli.config.opened -> X पर कॉन्फ़िगरेशन फ़ाइल खोली गई
+render cli.config.cleared -> X का मान हटाया गया: अब फिर से इसका डिफ़ॉल्ट मान लागू है
+render cli.config.updated -> X का मान X कर दिया गया
+render cli.config.list_description -> विवरण: X
+render tui.session_move.unsupported_flag -> /move --to के साथ केवल --keep, --queue और --drop-session-roles इस्तेमाल कर सकते हैं, X नहीं
+render tui.session_move.cli_unavailable -> CLI शुरू नहीं हो सका (X)
+render tui.session_move.deadline_exceeded -> स्थानांतरण तय समय में पूरा नहीं हुआ; `lop sessions move X --to X` फिर से चलाने पर पता चलेगा कि यह कहाँ तक पहुँचा
+render tui.session_move.cli_no_answer -> CLI बिना जवाब दिए निकास कोड X के साथ बंद हो गया
+rc=0

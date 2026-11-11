@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "cli.config",
+  "history_sha256": "e6a4b5c3dd34afdcfd26b29b0eb426b95901af1421fb699327fe58bdd89f542d",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 5,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "fr C1 `cli.config` (15 keys). Evidence: i18n/audits/evidence/fr/cli.config/c1a/record.json. Auditor deepseek/deepseek-flash; 2 minor, 3 nit: key agreement, unrecognised-key phrase, created/opened locative, 'specific' dropped; no blocker/major gate.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1a/record.json",
+          "sha256": "c401928d21c8bc4551d15e906d1e3ae12b5649485c1f9517acf0c732a2ba7caa"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1a/report.md",
+          "sha256": "89c37c4227ba0c203351b5fc0891a7ce1b12558c6376bb0d4567e1c0cfdba9de"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1a/audit.log",
+          "sha256": "a7a2b5c339e9aede61c30f38020c0ffa3f6ad394db5d0bb92e226a6671f5c7a7"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "changes_requested",
+        "findings": 6,
+        "unresolved_blocker_major": 1
+      },
+      "status": "changes_requested",
+      "note": "fr C1 `cli.config` round 1 audit B on the v1 bytes: 1 MAJOR, 2 minor, 3 nit (group-wide counts, same report for both namespaces). Superseded by the v2 revision and the final round-2 pass; report preserved at i18n/audits/evidence/fr/cli.config/c1r2/round1-B-report.md.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1r2/round1-B-report.md",
+          "sha256": "c42758bf49fddadc633319ced5588f7dc850bb248da2bb72cbe2b2f9efbbdcc6"
+        }
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.config",
+      "source_sha256": "40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "fr C1 `cli.config` FINAL: round-2 delta audit of the v2 bytes now shipped (target file sha256 bb4059eb4f5d), 0 BLOCKER/0 MAJOR/0 MINOR/0 NIT. Round 1: A deepseek 0M/4m/3n, B sonnet 1 MAJOR (fixed in v2, confirmed here). Independent of translator openai/gpt-6.1-sol. Evidence: i18n/audits/evidence/fr/cli.config/c1r2/record.json. No rendered frame; no native review.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1r2/record.json",
+          "sha256": "9e36dd279fe849c4fb8b51db46d3895a98e614fb7e66ef697714e6625a2dd00d"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1r2/report.md",
+          "sha256": "079115cdef9f0cf12ecc8d2bc4a186562c485ee0e35bc16665b8234e9233bc3d"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1r2/round1-B-report.md",
+          "sha256": "c42758bf49fddadc633319ced5588f7dc850bb248da2bb72cbe2b2f9efbbdcc6"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/cli.config/c1r2/verify.log",
+          "sha256": "467f8075f051196e2d6b655a366458fb8436a79b55b8b048cbafdaa846b4188a"
+        }
+      ]
+    }
+  ]
+}

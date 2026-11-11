@@ -1,0 +1,19 @@
+{
+  "locale": "ru",
+  "namespace": "tui.session_move",
+  "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (session e45ca4d0d71c; independent)",
+    "model": "deepseek/deepseek-flash",
+    "date": "2026-11-11",
+    "result": "passed",
+    "findings": 3
+  },
+  "status": "passed",
+  "note": "ru C1-A independent audit PASS: 7 keys, 0 blocker/major (1 minor, 1 nit in the PR thread); refusal/unknown-outcome meaning and Latin tokens checked. Evidence: i18n/audits/evidence/ru/tui.session_move/c1a/record.json. Binds this EN source; target hash at catalogue landing."
+}

@@ -1,0 +1,8 @@
+locale=ru v2_candidate_sha256=77d7c803ededadf18953f041e718ccc16b560589b04189b4d504d2aecaa6ab4a
+cli.config: shipped_file_sha256=69c22a7208f9188ed48642742d1fb65e14388a894abdbd04e088a959728b165f keys=15
+  key set and order == en: True
+  every value byte-equal to audited v2 candidate: True
+tui.session_move: shipped_file_sha256=034113a46cce8cc31ed52e35809ae1afa19405b6b060728b5dd9eeb032b41373 keys=7
+  key set and order == en: True
+  every value byte-equal to audited v2 candidate: True
+RESULT PASS

@@ -1,0 +1,89 @@
+### repo validator: worktree as-is
+check.py: catalogue checks: 0 problem(s)
+
+### repo validator: candidate fr mounted
+wrote cli.config: 15 keys
+wrote tui.session_move: 7 keys
+catalogue root: <scratchpad>/i18n-sim
+check.py: catalogue checks (candidate fr mounted): 0 problem(s)
+
+### independent verification (name+kind parity, typography, render)
+en keys: 22  fr keys: 22
+missing: []
+extra: []
+order identical: True
+values identical to en: []
+empty values: []
+parity problems: none
+typography inventory: {'\u202f': 8, '’': 13, '—': 5, '\xa0': 0, "'": 0, '"': 0}
+space-before-punctuation violations: none
+hand-written digits outside placeholders: none
+leading/trailing/double spaces: none
+
+--- render table (en cells | fr cells) ---
+cli.config.created
+  EN(62) Created new configuration file at ~/.local-operator/config.yml
+  FR(82) Nouveau fichier de configuration créé à l’emplacement ~/.local-operator/config.yml
+cli.config.opened
+  EN(57) Opened configuration file at ~/.local-operator/config.yml
+  FR(76) Fichier de configuration ouvert à l’emplacement ~/.local-operator/config.yml
+cli.config.cleared
+  EN(61) Cleared display.terminal_title: it reads as its default again
+  FR(73) display.terminal_title effacé : sa valeur par défaut s’applique à nouveau
+cli.config.updated
+  EN(41) Successfully updated model_effort to auto
+  FR(43) model_effort mis à jour avec la valeur auto
+cli.config.running_sessions_unchanged
+  EN(148) Running sessions are unchanged — a config write cannot loosen one; type /approvals auto in each session you want ungated. New sessions open at auto.
+  FR(259) Les sessions en cours restent inchangées — modifier la configuration ne peut pas assouplir leurs règles d’approbation ; saisissez /approvals auto dans chaque session où vous souhaitez désactiver les approbations. Les nouvelles sessions démarrent en mode auto.
+cli.config.list_title
+  EN(21) Configuration Options
+  FR(24) Options de configuration
+cli.config.list_description
+  EN(51) Description: Enregistrement auto de la conversation
+  FR(52) Description : Enregistrement auto de la conversation
+cli.config.list_unrecognised
+  EN(38) not a recognised key; nothing reads it
+  FR(44) clé non reconnue ; aucun composant ne la lit
+cli.config.list_desc_hosting
+  EN(77) AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)
+  FR(88) Plateforme du fournisseur d’IA (p. ex. radient, openai, deepseek, anthropic, openrouter)
+cli.config.list_desc_model_name
+  EN(42) The specific model to use for interactions
+  FR(39) Modèle à utiliser pour les interactions
+cli.config.list_desc_conversation_length
+  EN(98) [DEPRECATED — superseded by compaction] Maximum number of messages to keep in conversation history
+  FR(112) [OBSOLÈTE — remplacé par le compactage] Nombre maximal de messages à conserver dans l’historique de conversation
+cli.config.list_desc_detail_length
+  EN(111) [DEPRECATED — superseded by compaction] Number of recent messages to leave unsummarized in conversation history
+  FR(129) [OBSOLÈTE — remplacé par le compactage] Nombre de messages récents à conserver sans les résumer dans l’historique de conversation
+cli.config.list_desc_max_learnings_history
+  EN(84) [DEPRECATED — superseded by compaction] Maximum number of learning entries to retain
+  FR(83) [OBSOLÈTE — remplacé par le compactage] Nombre maximal d’apprentissages à conserver
+cli.config.list_desc_classification_notice
+  EN(92) [DEPRECATED] Smart hints is silent in the chat; the call and its cost are in the session log
+  FR(127) [OBSOLÈTE] Les suggestions intelligentes restent muettes dans le chat ; l’appel et son coût figurent dans le journal de session
+cli.config.list_desc_auto_save_conversation
+  EN(43) Whether to automatically save conversations
+  FR(45) Enregistrer automatiquement les conversations
+tui.session_move.ambiguous
+  EN(91) Use /move <path> for a working directory, or /move <session> --to <peer> to move a session.
+  FR(124) Utilisez /move <chemin> pour définir le répertoire de travail, ou /move <session> --to <appareil> pour déplacer une session.
+tui.session_move.to_needs_device
+  EN(44) --to needs a device: /move --to <peer|local>
+  FR(56) --to nécessite un appareil : /move --to <appareil|local>
+tui.session_move.cannot_wait
+  EN(89) this view cannot wait — from a shell: `lop sessions move <id> --to <to> --wait <seconds>`
+  FR(102) cette vue ne peut pas attendre — depuis un shell : `lop sessions move <id> --to <to> --wait <seconds>`
+tui.session_move.unsupported_flag
+  EN(77) /move --to takes only --keep, --queue and --drop-session-roles, not '--force'
+  FR(79) /move --to n’accepte que --keep, --queue et --drop-session-roles, pas '--force'
+tui.session_move.cli_unavailable
+  EN(61) could not start the CLI ([Errno 2] No such file or directory)
+  FR(65) impossible de lancer la CLI ([Errno 2] No such file or directory)
+tui.session_move.deadline_exceeded
+  EN(110) the move did not finish in time; `lop sessions move 3ef6295a5545 --to build-box` again reports where it got to
+  FR(147) le déplacement n’a pas abouti dans le délai imparti ; relancez `lop sessions move 3ef6295a5545 --to build-box` pour connaître son état d’avancement
+tui.session_move.cli_no_answer
+  EN(31) the CLI exited 2 with no answer
+  FR(50) la CLI s’est terminée avec le code 2, sans réponse

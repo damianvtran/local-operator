@@ -1,0 +1,17 @@
+{
+  "cli.config.created": "已创建配置文件：{path}",
+  "cli.config.opened": "已打开配置文件：{path}",
+  "cli.config.cleared": "已清除{key}：恢复为默认值",
+  "cli.config.updated": "已将{key}更新为{value}",
+  "cli.config.running_sessions_unchanged": "运行中的会话保持不变，写入配置无法放宽其审批要求；需在每个想免除工具审批的会话中输入/approvals auto。新会话以auto模式启动。",
+  "cli.config.list_title": "配置项",
+  "cli.config.list_description": "说明：{description}",
+  "cli.config.list_unrecognised": "无法识别的配置键，程序不会读取它",
+  "cli.config.list_desc_hosting": "AI托管平台（如radient、openai、deepseek、anthropic、openrouter）",
+  "cli.config.list_desc_model_name": "交互时使用的具体模型",
+  "cli.config.list_desc_conversation_length": "[已弃用，由压缩引擎取代] 对话历史中保留的消息数上限",
+  "cli.config.list_desc_detail_length": "[已弃用，由压缩引擎取代] 对话历史中保留原文、不作摘要的最近消息条数",
+  "cli.config.list_desc_max_learnings_history": "[已弃用，由压缩引擎取代] 保留的学习条目数上限",
+  "cli.config.list_desc_classification_notice": "[已弃用] 智能提示在对话中静默；调用及其费用记录在会话日志中",
+  "cli.config.list_desc_auto_save_conversation": "是否自动保存对话"
+}

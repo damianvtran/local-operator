@@ -1,0 +1,231 @@
+# c1-a2-vi audit log — actual command output (2026-11-11T07:57:18Z)
+
+$ cd ~/local-operator/.worktrees/i18n-c1 && ~/local-operator/.venv/bin/python run_check.py   # fixture-root monkeypatch: check.py check_catalogues() over en+vi with the v2 candidate
+catalogue root: <scratchpad>/c1-a2-vi/catalogues
+locales seen: ('en', 'vi')
+vi namespaces: 149
+cli.config present: True
+tui.session_move present: True
+check.py check_catalogues(): 0 problem(s)
+[exit 0]
+
+$ ~/local-operator/.venv/bin/python verify_mechanical.py
+keys: 22 / source 22; order identical: True
+placeholder tuples: checked 22
+backtick spans: compared 2 key(s) with spans
+typed tokens: checked 22 keys against 9 tokens
+empties/English-identical/NFC/bidi: checked 22
+widths (cells): running_sessions_unchanged=209, deadline_exceeded=127, list_desc_classification_notice=118, list_desc_detail_length=113, ambiguous=110, cannot_wait=95
+maxCells hints in source context: none
+  brackets tui.session_move.ambiguous: en=['path', 'session', 'peer'] vi=['đường dẫn', 'phiên', 'thiết bị ngang hàng']
+  brackets tui.session_move.to_needs_device: en=['peer|local'] vi=['thiết bị ngang hàng|local']
+  brackets tui.session_move.cannot_wait: en=['id', 'to', 'seconds'] vi=['id', 'to', 'seconds']
+angle brackets: checked
+changed keys: 9: ['cli.config.list_unrecognised', 'cli.config.list_desc_hosting', 'cli.config.list_desc_conversation_length', 'cli.config.list_desc_detail_length', 'cli.config.list_desc_max_learnings_history', 'tui.session_move.ambiguous', 'tui.session_move.to_needs_device', 'tui.session_move.cannot_wait', 'tui.session_move.deadline_exceeded']
+MECHANICAL: 0 failure(s)
+[exit 0]
+
+$ ~/local-operator/.venv/bin/python recount.py
+shipped vi values: 3978; en values: 4000
+
+== 'thiết bị ngang hàng': 9 value(s)
+   cli.sessions_help.peer: liệt kê các phiên do một thiết bị ngang hàng giữ (danh mục riêng của nó, qua mesh)
+   cli.sessions_help.move_to: một thiết bị ngang hàng (id hoặc tên), hoặc `local` để đưa cuộc trò chuyện về đây
+   cli.sessions_help.move_engage_on_arrival: khởi động cuộc trò chuyện trên đích ngay khi nó tới nơi, để nó chạy ở đó mà không cần prompt đầu tiên; cuộc trò chuyện đang có lượt chạy vẫn bị từ chố
+   cli.sessions_help.sync_owner: thiết bị ngang hàng đang giữ nó (mặc định: hỏi)
+   wire.memory.sync.help: Chia sẻ tăng dần các phạm vi đã chọn với những thiết bị ngang hàng hiện có đã ghép nối, có quyền receiver-admin và hỗ trợ memory-sync-v1. Việc này bao
+   wire.settings.display_hide_cross_session.help: Ẩn lưu lượng lop send và tin nhắn đến từ thiết bị ngang hàng khỏi bản ghi.
+   … 3 more
+
+== 'thiết bị': 52 value(s)
+   cli.exec_remote_help.network: Mạng để gửi lần chạy, theo tên hoặc ID. Bắt buộc khi thiết bị này ở trong nhiều hơn một mạng
+   cli.global_help.description: 
+    Local Operator - Môi trường để các mô hình AI dạng tác nhân thực hiện tác vụ trên thiết bị cục bộ.
+
+    Hỗ trợ nhiều nhà cung cấp gồm DeepSeek, O
+   cli.global_help.yolo_conditional: Có điều kiện cho lệnh tạo ngang hàng của động từ này: phiên chỉ bắt đầu không giám sát khi thiết bị đích cấp cho thiết bị này khả năng `unattended`
+   cli.group_help.network: Mạng mesh: ghép đôi thiết bị, điều khiển phiên trên các thiết bị
+   cli.group_help.pair: Ghép đôi điện thoại làm thiết bị của người vận hành: chỉ cần ký cấp quyền một lần
+   cli.mobile_help.devices: Liệt kê các thiết bị nhận push của máy tính này, hoặc thu hồi/hủy thu hồi một thiết bị
+   … 46 more
+
+== 'shell': 20 value(s)
+   cli.exec_help.workstream: Xuất bản lần chạy này thành một WORKSTREAM song song dài hạn mà người vận hành yêu cầu: nó được liệt kê ở thanh bên, /resume và danh sách trên điện th
+   cli.permissions.setup.refused.isolated: Không được phép ký bằng nhóm nhà phát triển trong tiến trình này ({reason}). Hãy chạy từ shell đăng nhập của chính bạn.
+   cli.sessions_help.resume_description: Tiếp tục các phiên đã lưu mà không cần vòng lặp shell: `--paused` (cặp interrupted/retired), `--failed` (error), hoặc `--all` (mọi phiên đã lưu, không
+   relay.transcript.fold.unit: {kind, select, files {{count, plural, other {# tệp}}} searches {{count, plural, other {# lượt tìm kiếm}}} web {{count, plural, other {# lượt tìm kiếm 
+   relay.transcript.fold.shell: {count, plural, other {# shell}}
+   tui.app.help.title_note: hiển thị trạng thái phiên bên ngoài ứng dụng; shell: `lop config edit display.terminal_title false`
+   … 14 more
+
+== 'trình bao': 0 value(s)
+
+== 'mã thoát': 4 value(s)
+   cli.agents_help.push: Push (tải lên) một tác nhân lên Radient; `--org` và `--hub-id` push qua luồng xem trước/xác nhận (mã thoát: 0 đã xuất bản, 1 lỗi, 2 chỉ xem trước còn 
+   cli.sessions_help.resume_description: Tiếp tục các phiên đã lưu mà không cần vòng lặp shell: `--paused` (cặp interrupted/retired), `--failed` (error), hoặc `--all` (mọi phiên đã lưu, không
+   cli.teams_help.push: Push một nhóm lên tổ chức hoặc hub công khai (Agent Hub); mã thoát: 0 đã xuất bản, 1 lỗi, 2 chỉ xem trước còn thay đổi đang chờ, 3 bị từ chối, 130 đã 
+   wire.remote_compute.finished_exit_code: mã thoát: {exit_code}
+
+== 'lỗi thời': 5 value(s)
+   relay.shell.usage.stale: Có thể đã lỗi thời.
+   wire.settings.classification_notice.help: Đã lỗi thời. Gợi ý thông minh im lặng trong cuộc trò chuyện; lệnh gọi nằm trong nhật ký.
+   wire.settings.conversation_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+   wire.settings.detail_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+   wire.settings.max_learnings_history.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+
+== 'bài học': 1 value(s)
+   wire.settings.max_learnings_history.label: Lịch sử bài học tối đa
+
+== 'nhà cung cấp': 77 value(s)
+   cli.credential_help.credential: Quản lý khóa API và thông tin xác thực cho các nhà cung cấp khác nhau
+   cli.exec_worker_help.hosting: Ghi đè nhà cung cấp
+   cli.global_help.description: 
+    Local Operator - Môi trường để các mô hình AI dạng tác nhân thực hiện tác vụ trên thiết bị cục bộ.
+
+    Hỗ trợ nhiều nhà cung cấp gồm DeepSeek, O
+   cli.global_help.hosting: Nhà cung cấp sẽ dùng (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)
+   cli.global_help.model: Mô hình sẽ dùng (ví dụ: gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest
+   cli.global_help.propagated_hosting: Nhà cung cấp cho lần chạy này (ví dụ: anthropic, openai, openrouter)
+   … 71 more
+
+== 'bộ máy nén': 3 value(s)
+   wire.settings.conversation_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+   wire.settings.detail_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+   wire.settings.max_learnings_history.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+
+== 'cơ chế nén': 1 value(s)
+   wire.settings.compaction_strategy.help: Cơ chế nén nào được dùng. auto chọn theo mô hình.
+
+== 'nén': 34 value(s)
+   cli.exec_runtime.compacting: [dim]đang nén ngữ cảnh…[/dim]
+   tui.import.preview_summary: {s, plural, other {# phiên}} · {m, plural, other {# tin nhắn}} (ước tính) · {c, plural, other {# lần nén}}
+   tui.import.session_meta: {messages, plural, other {# tin nhắn}} · {compactions, plural, other {# lần nén}} · {availability}
+   wire.memory.description: Truy hồi cục bộ có giới hạn và ghi lại khi nén trong khả năng cho phép; các dữ kiện truy xuất được không đáng tin.
+   wire.memory.capture.label: Ghi lại khi nén
+   wire.memory.capture.help: Ghi lại các quyết định, mục tiêu và tiến độ sau khi các lần nén đã hoàn tất; context-full cũng dùng lại bản tóm tắt sẵn có. Việc lưu tường minh vẫn là
+   … 28 more
+
+== 'nhận diện': 3 value(s)
+   cli.failure_details.unrecognized: đối số không được nhận diện: {arguments}
+   cli.permissions.status.identity.legacy: Danh tính runtime: một image nhận diện theo đường dẫn (không tạo được bundle ở đây), nên mỗi bản build Python là một mục riêng
+   wire.settings.web_fetch_blocked_retry.choice.false.description: giữ nguyên nhận diện
+
+== 'xác định': 18 value(s)
+   cli.aida_help.note_description: Ghi một ghi chú vào <config root>/system_prompt.md, bên trong mục 'About the operator' có đánh dấu, để mọi phiên và tác nhân con sau này đều thấy. Tệp
+   cli.services_status.supervision_unknown: chưa rõ giám sát: không thể xác định unit systemd
+   relay.shell.usage.window_unknown: Khung thời gian không xác định
+   relay.usage_reset.outcome_failed: Chưa xác định được kết quả đặt lại. Hãy thử lại để kiểm tra — thử lại không tốn thêm lượt nào.
+   tui.import.error_source: Nguồn {source} không xác định. Hãy chọn claude, codex hoặc omp.
+   tui.import.error_unknown_subcommand: Dạng /import {form} không xác định. Dùng list, preview, run, status hoặc cancel.
+   … 12 more
+
+== 'khóa': 59 value(s)
+   cli.config_help.edit_key: Khóa cấu hình cần cập nhật (ví dụ: hosting, model_name, conversation_length, detail_length, max_learnings_history, auto_save_conversation)
+   cli.config_help.edit_value: Giá trị mới cho khóa cấu hình (kiểu được tự động chuyển đổi theo khóa)
+   cli.credential_help.key: Khóa thông tin xác thực cần quản lý (ví dụ: RADIENT_API_KEY,DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, KIMI_API_KEY, ALIBABA_CLOUD_API_KEY, 
+   cli.credential_help.credential: Quản lý khóa API và thông tin xác thực cho các nhà cung cấp khác nhau
+   cli.exec_remote_help.detach: In ID lần chạy và khóa idempotency, rồi thoát thay vì theo dõi lần chạy
+   cli.exec_remote_help.idempotency_key: Khóa idempotency để dùng lại thay vì tạo mới, để lần thử lại của một lần chạy đã gửi không chạy hai lần
+   … 53 more
+
+== 'được thay thế': 4 value(s)
+   cli.global_help.agent: Chọn một tác nhân có tên kiểu cũ (tạo nếu chưa có). Không có --train, dùng một phiên lưu riêng; exec --profile sẽ gắn một vai trò dùng lại được thay t
+   wire.settings.conversation_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+   wire.settings.detail_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+   wire.settings.max_learnings_history.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+
+== 'thay bằng': 1 value(s)
+   wire.remote_compute.key_empty: --idempotency-key rỗng bị từ chối thay vì được thay bằng khóa mới: hãy bỏ tùy chọn này để tạo khóa mới, hoặc truyền khóa của lần chạy bạn đang chạy lạ
+
+
+== en keys mentioning compaction / deprecated
+  en cli.config.list_desc_conversation_length: [DEPRECATED — superseded by compaction] Maximum number of messages to keep in conversation history
+  vi cli.config.list_desc_conversation_length: <missing>
+  en cli.config.list_desc_detail_length: [DEPRECATED — superseded by compaction] Number of recent messages to leave unsummarized in conversation history
+  vi cli.config.list_desc_detail_length: <missing>
+  en cli.config.list_desc_max_learnings_history: [DEPRECATED — superseded by compaction] Maximum number of learning entries to retain
+  vi cli.config.list_desc_max_learnings_history: <missing>
+  en cli.config.list_desc_classification_notice: [DEPRECATED] Smart hints is silent in the chat; the call and its cost are in the session log
+  vi cli.config.list_desc_classification_notice: <missing>
+  en tui.import.preview_summary: {s, plural, one {# session} other {# sessions}} · {m, plural, one {# message} other {# messages}} (estimated) · {c, plural, one {# compaction} other {# compacti
+  vi tui.import.preview_summary: {s, plural, other {# phiên}} · {m, plural, other {# tin nhắn}} (ước tính) · {c, plural, other {# lần nén}}
+  en tui.import.session_meta: {messages, plural, one {# message} other {# messages}} · {compactions, plural, one {# compaction} other {# compactions}} · {availability}
+  vi tui.import.session_meta: {messages, plural, other {# tin nhắn}} · {compactions, plural, other {# lần nén}} · {availability}
+  en wire.memory.description: Bounded local recall and best-effort compaction capture; retrieved facts are untrusted.
+  vi wire.memory.description: Truy hồi cục bộ có giới hạn và ghi lại khi nén trong khả năng cho phép; các dữ kiện truy xuất được không đáng tin.
+  en wire.memory.capture.label: Compaction capture
+  vi wire.memory.capture.label: Ghi lại khi nén
+  en wire.memory.capture.help: Capture decisions, goals and progress after committed compactions; context-full also reuses its existing summary. Explicit stores remain the guaranteed route fo
+  vi wire.memory.capture.help: Ghi lại các quyết định, mục tiêu và tiến độ sau khi các lần nén đã hoàn tất; context-full cũng dùng lại bản tóm tắt sẵn có. Việc lưu tường minh vẫn là cách bảo 
+  en wire.settings.classification_notice.help: Deprecated. Smart hints is silent in the chat; the call is in the log.
+  vi wire.settings.classification_notice.help: Đã lỗi thời. Gợi ý thông minh im lặng trong cuộc trò chuyện; lệnh gọi nằm trong nhật ký.
+  en wire.settings.compaction.title: Compaction
+  vi wire.settings.compaction.title: Nén
+  en wire.settings.compaction_auto_continue.label: Continue after compaction
+  vi wire.settings.compaction_auto_continue.label: Tiếp tục sau khi nén
+  en wire.settings.compaction_enabled.label: Compaction
+  vi wire.settings.compaction_enabled.label: Nén
+  en wire.settings.compaction_mid_turn_enabled.label: Mid-turn compaction
+  vi wire.settings.compaction_mid_turn_enabled.label: Nén giữa lượt
+  en wire.settings.compaction_resume_replay.help: What a resumed session replays after a compaction. Card is far smaller, but earlier operator turns no longer survive verbatim, and switching back to full does n
+  vi wire.settings.compaction_resume_replay.help: Những gì một phiên được tiếp tục phát lại sau khi nén. Thẻ nhỏ hơn nhiều, nhưng các lượt trước của người vận hành không còn được giữ nguyên văn, và chuyển lại đ
+  en wire.settings.conversation_length.help: Deprecated. Superseded by the compaction engine.
+  vi wire.settings.conversation_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+  en wire.settings.detail_length.help: Deprecated. Superseded by the compaction engine.
+  vi wire.settings.detail_length.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+  en wire.settings.max_learnings_history.help: Deprecated. Superseded by the compaction engine.
+  vi wire.settings.max_learnings_history.help: Đã lỗi thời. Được thay thế bởi bộ máy nén.
+  en wire.settings.providers_openai_use_max_context_window.help: Off: provider default. On: supported max. Applies next request; compaction unchanged.
+  vi wire.settings.providers_openai_use_max_context_window.help: Tắt: mặc định của nhà cung cấp. Bật: mức tối đa được hỗ trợ. Áp dụng từ yêu cầu kế tiếp; nén không đổi.
+
+
+== angle-bracket placeholders in shipped vi
+   13  <id>
+   12  <name>
+    4  <message>
+    3  <url>
+    3  <provider>
+    2  <device_id>
+    2  <tenant_id>
+    2  <model>
+    1  <config root>
+    1  <config>
+    1  <team>
+    1  <team-id>
+    1  <tên>
+    1  <tên mới>
+    1  <source>
+    1  <text>
+    1  <chain-key>
+    1  <0-100>
+    1  <file>
+    1  <path>
+    1  <ask|auto>
+    1  <radient|typesafe|openrouter>
+    1  <value>
+    1  <commit>
+    1  <receipt>
+    1  <goal>
+    1  <n>
+
+== underscore placeholders inside angle brackets
+  cli.mobile_help.devices_command: <device_id>  :: list (mặc định), revoke <device_id>, hoặc unrevoke <device_id>
+  cli.mobile_help.devices_command: <device_id>  :: list (mặc định), revoke <device_id>, hoặc unrevoke <device_id>
+  cli.teams_help.push_org: <tenant_id>  :: Tenant tổ chức để xuất bản vào (`lop teams push --org <tenant_id> <team>`; cần `lop login radient`)
+  cli.teams_help.pull_org: <tenant_id>  :: Tenant tổ chức mà nhóm thuộc về (`lop teams pull --org <tenant_id> <team-id>`; cần `lop login radient`)
+
+== peer / device wording in shipped vi
+  cli.global_help.yolo_conditional: Có điều kiện cho lệnh tạo ngang hàng của động từ này: phiên chỉ bắt đầu không giám sát khi thiết bị đích cấp cho thiết bị này khả năng `unattended`
+  cli.sessions_help.peer: liệt kê các phiên do một thiết bị ngang hàng giữ (danh mục riêng của nó, qua mesh)
+  cli.sessions_help.move_to: một thiết bị ngang hàng (id hoặc tên), hoặc `local` để đưa cuộc trò chuyện về đây
+  cli.sessions_help.move_engage_on_arrival: khởi động cuộc trò chuyện trên đích ngay khi nó tới nơi, để nó chạy ở đó mà không cần prompt đầu tiên; cuộc trò chuyện đang có lượt chạy vẫn bị từ chối chứ khôn
+  cli.sessions_help.sync_owner: thiết bị ngang hàng đang giữ nó (mặc định: hỏi)
+  wire.errors.desktop.session_is_remote_open: {session_id} nằm trên {label}, và ứng dụng máy tính này chưa thể mở cuộc trò chuyện trên thiết bị khác. Hãy đưa nó về máy bằng `lop sessions move {session_id} -
+  wire.memory.sync.label: Đồng bộ bộ nhớ ngang hàng
+  wire.memory.sync.help: Chia sẻ tăng dần các phạm vi đã chọn với những thiết bị ngang hàng hiện có đã ghép nối, có quyền receiver-admin và hỗ trợ memory-sync-v1. Việc này bao gồm bộ nh
+  wire.sessions.approval_stop_peer: dừng {address} trên {peer}: bản dựng này luôn từ chối, sẽ không gửi gì
+  wire.settings.display_hide_cross_session.help: Ẩn lưu lượng lop send và tin nhắn đến từ thiết bị ngang hàng khỏi bản ghi.
+  wire.settings.network.description: Nơi thiết bị này lắng nghe, những gì nó báo cho thiết bị ngang hàng kết nối, và các giới hạn cho `lop network`: thời gian giữ nhật ký kiểm toán, số kết nối chưa
+  wire.settings.network_port.help: Cổng mà thiết bị ngang hàng kết nối tới; endpoint không ghi cổng sẽ dùng cổng này.
+  wire.slash.network: Mạng, thiết bị ngang hàng, trạng thái mesh máy này
+[exit 0]

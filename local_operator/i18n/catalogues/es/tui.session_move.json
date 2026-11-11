@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "Usa /move <ruta> para un directorio de trabajo, o /move <sesión> --to <dispositivo par> para mover una sesión.",
+  "tui.session_move.to_needs_device": "--to requiere un dispositivo: /move --to <dispositivo par|local>",
+  "tui.session_move.cannot_wait": "esta vista no puede esperar — desde un shell: `lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to solo admite --keep, --queue y --drop-session-roles, no {flag}",
+  "tui.session_move.cli_unavailable": "no se pudo iniciar la CLI ({reason})",
+  "tui.session_move.deadline_exceeded": "el traslado no terminó a tiempo; vuelve a ejecutar `lop sessions move {session} --to {to}` para consultar hasta dónde llegó",
+  "tui.session_move.cli_no_answer": "la CLI terminó con código de salida {code} sin dar una respuesta"
+}

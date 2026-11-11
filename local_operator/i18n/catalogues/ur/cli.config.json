@@ -1,0 +1,17 @@
+{
+  "cli.config.created": "{path} پر نئی کنفیگریشن فائل بنائی گئی",
+  "cli.config.opened": "{path} پر کنفیگریشن فائل کھولی گئی",
+  "cli.config.cleared": "{key} کی ویلیو صاف کر دی گئی: اب اس کی ڈیفالٹ ویلیو دوبارہ استعمال ہوتی ہے",
+  "cli.config.updated": "{key} کو {value} پر اپ ڈیٹ کر دیا گیا",
+  "cli.config.running_sessions_unchanged": "چلتے سیشنز میں کوئی تبدیلی نہیں ہوئی — کنفیگریشن محفوظ کرنے سے ان کی منظوری کی پابندی کم نہیں ہوتی؛ ہر اس سیشن میں /approvals auto لکھیں جس میں ٹولز کے لیے منظوری کی پابندی ہٹانا چاہتے ہوں۔ نئے سیشن auto موڈ میں شروع ہوتے ہیں۔",
+  "cli.config.list_title": "کنفیگریشن آپشنز",
+  "cli.config.list_description": "وضاحت: {description}",
+  "cli.config.list_unrecognised": "یہ کلید پہچانی نہیں گئی؛ پروگرام میں کہیں بھی اسے پڑھا نہیں جاتا",
+  "cli.config.list_desc_hosting": "AI پرووائیڈر پلیٹ فارم (مثلاً radient, openai, deepseek, anthropic, openrouter)",
+  "cli.config.list_desc_model_name": "بات چیت کے لیے استعمال ہونے والا مخصوص ماڈل",
+  "cli.config.list_desc_conversation_length": "[فرسودہ — اب کمپریشن اس کی جگہ لیتا ہے] گفتگو کی ہسٹری میں رکھے جانے والے پیغامات کی زیادہ سے زیادہ تعداد",
+  "cli.config.list_desc_detail_length": "[فرسودہ — اب کمپریشن اس کی جگہ لیتا ہے] گفتگو کی ہسٹری میں بغیر خلاصے کے رکھے جانے والے حالیہ پیغامات کی تعداد",
+  "cli.config.list_desc_max_learnings_history": "[فرسودہ — اب کمپریشن اس کی جگہ لیتا ہے] محفوظ رکھے جانے والے سیکھے ہوئے نکات کی زیادہ سے زیادہ تعداد",
+  "cli.config.list_desc_classification_notice": "[فرسودہ] ذہین اشارے چیٹ میں خاموش ہیں؛ ماڈل کی کال اور اس کی لاگت سیشن لاگ میں درج ہوتی ہیں",
+  "cli.config.list_desc_auto_save_conversation": "گفتگو خودکار طور پر محفوظ کرنی ہے یا نہیں"
+}

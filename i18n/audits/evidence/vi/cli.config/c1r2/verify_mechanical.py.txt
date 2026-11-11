@@ -1,0 +1,122 @@
+"""Independent mechanical verification of the vi v2 candidate (auditor pass).
+
+Deliberately re-derives everything from the files instead of trusting the
+translator's assertions or check.py's summary: key set/order, ICU argument
+tuples, backticked spans, typed tokens, angle-bracket placeholder counts,
+empties, English-identical values, bidi controls, NFC, cell widths.
+
+Exit 1 on any FAIL line.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import sys
+import unicodedata
+
+BASE = pathlib.Path.home() / ".local-operator/sessions/3ef6295a5545/scratchpad/c1-prep"
+keys = json.loads((BASE / "keys.json").read_text(encoding="utf-8"))
+v1 = json.loads((BASE / "vi.json").read_text(encoding="utf-8"))
+v2 = json.loads((BASE / "vi.v2.json").read_text(encoding="utf-8"))
+
+from rich.cells import cell_len  # noqa: E402
+
+FAILS: list[str] = []
+NOTES: list[str] = []
+
+
+def fail(msg: str) -> None:
+    FAILS.append(msg)
+
+
+# 1. key set and order ------------------------------------------------------
+if list(v2) != list(keys):
+    fail(f"key order/set differs: v2={list(v2)} vs keys={list(keys)}")
+print(f"keys: {len(v2)} / source {len(keys)}; order identical: {list(v2) == list(keys)}")
+
+# 2. ICU argument tuples ----------------------------------------------------
+ARG_RE = re.compile(r"\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:,\s*([a-z]+))?")
+for key, src in keys.items():
+    en_args = sorted(set(ARG_RE.findall(src["en"])))
+    vi_args = sorted(set(ARG_RE.findall(v2[key])))
+    if en_args != vi_args:
+        fail(f"{key}: args en={en_args} vi={vi_args}")
+    if "plural" in src["en"] or "select" in src["en"]:
+        NOTES.append(f"{key}: source carries ICU plural/select: {src['en']}")
+print("placeholder tuples: checked", len(keys))
+
+# 3. plural / select presence in translations -------------------------------
+for key, text in v2.items():
+    if re.search(r"\{[^}]*,\s*(plural|select)", text):
+        NOTES.append(f"{key}: translation defines ICU structure: {text}")
+
+# 4. backticked spans -------------------------------------------------------
+BT = re.compile(r"`([^`]*)`")
+for key, src in keys.items():
+    en_spans = BT.findall(src["en"])
+    vi_spans = BT.findall(v2[key])
+    if en_spans != vi_spans:
+        fail(f"{key}: backtick spans {vi_spans} != en {en_spans}")
+print("backtick spans: compared", sum(1 for k in keys if BT.search(keys[k]['en'])), "key(s) with spans")
+
+# 5. typed tokens verbatim --------------------------------------------------
+TOKENS = ["/approvals auto", "/move", "--to", "--keep", "--queue",
+          "--drop-session-roles", "--wait", "local", "/help"]
+for key, src in keys.items():
+    for tok in TOKENS:
+        in_en = tok in src["en"]
+        in_vi = tok in v2[key]
+        if in_en and not in_vi:
+            fail(f"{key}: token {tok!r} lost (en has it)")
+        if in_vi and not in_en:
+            NOTES.append(f"{key}: token {tok!r} appears in vi, not en (check intent)")
+print("typed tokens: checked", len(keys), "keys against", len(TOKENS), "tokens")
+
+# 6. empty / English-identical / NFC / bidi ---------------------------------
+BIDI = {chr(c) for c in list(range(0x202A, 0x202F)) + list(range(0x2066, 0x206A)) + [0x200E, 0x200F]}
+for key, text in v2.items():
+    if not text.strip():
+        fail(f"{key}: empty")
+    if text == keys[key]["en"]:
+        NOTES.append(f"{key}: identical to en (acceptable only for kept literals)")
+    if unicodedata.normalize("NFC", text) != text:
+        fail(f"{key}: not NFC")
+    bad = [hex(ord(c)) for c in text if c in BIDI]
+    if bad:
+        fail(f"{key}: bidi control(s) present: {bad}")
+print("empties/English-identical/NFC/bidi: checked", len(v2))
+
+# 7. cell widths ------------------------------------------------------------
+rows = sorted(((cell_len(t), k) for k, t in v2.items()), reverse=True)
+print("widths (cells):", ", ".join(f"{k.split('.')[-1]}={w}" for w, k in rows[:6]))
+print("maxCells hints in source context:", {k: v['context'].get('maxCells') for k, v in keys.items() if v['context'].get('maxCells')} or "none")
+
+# 8. angle-bracket placeholders --------------------------------------------
+ANG = re.compile(r"<([^<>]*)>")
+for key, src in keys.items():
+    en_b = ANG.findall(src["en"])
+    vi_b = ANG.findall(v2[key])
+    if len(en_b) != len(vi_b):
+        fail(f"{key}: angle-bracket count {len(vi_b)} != en {len(en_b)}")
+    elif en_b:
+        print(f"  brackets {key}: en={en_b} vi={vi_b}")
+print("angle brackets: checked")
+
+# 9. terminal punctuation parity for fragment vs sentence ------------------
+for key, src in keys.items():
+    en = src["en"]
+    vi = v2[key]
+    if en.endswith(".") != vi.endswith("."):
+        NOTES.append(f"{key}: trailing period parity differs: en={en[-1]!r} vi={vi[-1]!r}")
+
+# 10. changed-key delta ----------------------------------------------------
+changed = [k for k in keys if v1[k] != v2[k]]
+print(f"changed keys: {len(changed)}: {changed}")
+for note in NOTES:
+    print("NOTE:", note)
+for f in FAILS:
+    print("FAIL:", f)
+print(f"MECHANICAL: {len(FAILS)} failure(s)")
+sys.exit(1 if FAILS else 0)

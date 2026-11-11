@@ -1,0 +1,17 @@
+{
+  "cli.config.created": "Создан новый файл конфигурации: {path}",
+  "cli.config.opened": "Открыт файл конфигурации: {path}",
+  "cli.config.cleared": "Настройка {key} сброшена: снова действует значение по умолчанию",
+  "cli.config.updated": "Для {key} установлено значение {value}",
+  "cli.config.running_sessions_unchanged": "Работающие сессии не изменились — запись конфигурации не может ослабить требования к одобрениям в них; введите /approvals auto в каждой сессии, где одобрения не нужны. Новые сессии запускаются в режиме auto.",
+  "cli.config.list_title": "Параметры конфигурации",
+  "cli.config.list_description": "Описание: {description}",
+  "cli.config.list_unrecognised": "неизвестный ключ; программа его не использует",
+  "cli.config.list_desc_hosting": "Платформа провайдера ИИ (например, radient, openai, deepseek, anthropic, openrouter)",
+  "cli.config.list_desc_model_name": "Конкретная модель для взаимодействий",
+  "cli.config.list_desc_conversation_length": "[УСТАРЕЛО — заменено сжатием] Максимальное число сообщений, сохраняемых в истории беседы",
+  "cli.config.list_desc_detail_length": "[УСТАРЕЛО — заменено сжатием] Число последних сообщений в истории беседы, которые не сжимаются в сводку",
+  "cli.config.list_desc_max_learnings_history": "[УСТАРЕЛО — заменено сжатием] Максимальное число сохраняемых выводов",
+  "cli.config.list_desc_classification_notice": "[УСТАРЕЛО] «Умные подсказки» не выводят сообщений в чат; вызов модели и его стоимость записываются в журнал сессии",
+  "cli.config.list_desc_auto_save_conversation": "Сохранять ли беседы автоматически"
+}

@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "tui.session_move",
+  "history_sha256": "3c766e4e1c77a0ed00d336587f8bd17560960605877cb36d33f9889d6a2888c2",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), c1-au-es-A",
+        "session": "96bf9fded81d",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 2,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Pre-merge C1 shard audit: 22-key group (cli.config 15, tui.session_move 7), mechanical+idiom pass, second pass done. 0 blocker/major; 3 minor + 3 nit in i18n/audits/evidence/es/tui.session_move/c1esa1/record.json (group report in both bundles)."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev team), c1esa2",
+        "session": "95b953e7b8fd",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "R2 delta audit c1esa2: 4 changed keys here (ambiguous, to_needs_device, cannot_wait, cli_no_answer); 0 findings. deadline_exceeded re-verified: unknown outcome, command verbatim. Record: i18n/audits/evidence/es/tui.session_move/c1esa2/record.json"
+    }
+  ]
+}

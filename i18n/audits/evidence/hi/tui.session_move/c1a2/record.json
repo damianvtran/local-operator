@@ -1,0 +1,193 @@
+{
+  "schema": 1,
+  "audit_id": "c1a2",
+  "audit_kind": "independent_translation_audit_round2_delta",
+  "audit_position": "independent round-2 delta auditor of a remediated candidate; this auditor did not translate the strings and did not edit any value it judged",
+  "locale": "hi",
+  "audit_date": "2026-11-11",
+  "verdict": "passed",
+  "status": "passed",
+  "source_audit_revision": "b188079f32e6d978ad78fac96edc5c3516d028ab",
+  "worktree": "<worktree>",
+  "branch": "i18n-c1",
+  "translator": {
+    "agent": "C1 translation lane of the lopdev team, a different agent from this auditor",
+    "session": "e8ed223773d2",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "auditor": {
+    "agent": "i18n-auditor, task teammate of the lopdev team, session fb68c83d54be; did not translate and did not edit any value it judged",
+    "session": "fb68c83d54be",
+    "model": "deepseek/deepseek-flash",
+    "actual_model_source": "harness-served model, disclosed in this session's own system prompt ('Model: deepseek/deepseek-flash'); no model was requested or pinned for this lane and no fallback is claimed",
+    "date": "2026-11-11",
+    "independent_from_translator_session": true
+  },
+  "delta": {
+    "from": {
+      "path": "~/.local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/hi.json",
+      "sha256": "b67c087da565eba745ccf5b48421f92ac0f27907e9c220b57e59f93a4525b355"
+    },
+    "to": {
+      "path": "this bundle's target-candidate.json",
+      "sha256": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5",
+      "matches_translator_published_sha": true
+    },
+    "changed_keys": [
+      "cli.config.updated",
+      "cli.config.running_sessions_unchanged",
+      "cli.config.list_desc_hosting",
+      "cli.config.list_desc_model_name",
+      "cli.config.list_desc_detail_length",
+      "cli.config.list_desc_max_learnings_history",
+      "cli.config.list_desc_classification_notice",
+      "cli.config.list_desc_auto_save_conversation",
+      "tui.session_move.cli_no_answer"
+    ],
+    "unchanged_keys": [
+      "cli.config.created",
+      "cli.config.opened",
+      "cli.config.cleared",
+      "cli.config.list_title",
+      "cli.config.list_description",
+      "cli.config.list_unrecognised",
+      "cli.config.list_desc_conversation_length",
+      "tui.session_move.ambiguous",
+      "tui.session_move.to_needs_device",
+      "tui.session_move.cannot_wait",
+      "tui.session_move.unsupported_flag",
+      "tui.session_move.cli_unavailable",
+      "tui.session_move.deadline_exceeded"
+    ],
+    "judged": "the 9 changed keys, the unchanged neighbours a change could contradict, both declined round-1 findings, a full mechanical pass on all 22 keys, and both safety lines"
+  },
+  "mechanical_checks": [
+    "python3 scripts/i18n/check.py -> rc 0, 'check.py: ok — 217 file(s) scanned, 2540 literal(s) at or below the baseline, catalogues consistent; 83 advisory finding(s)'; the only advisory naming a file in this slice is the pre-existing session_move.py ratchet row (4 literals against a ceiling of 3), which by round 1's and this round's reading counts machine refusal codes, not user-facing English",
+    "python3 scripts/i18n/check.py --catalogues-only -> rc 0, 'catalogue checks: 0 problem(s)'",
+    "check_catalogues() over a private temp root (shipped en + hi trees, candidate installed as hi/cli.config.json and hi/tui.session_move.json) -> 0 problems; control run on the same root without the candidate -> 0 problems",
+    "key set and order identical to keys.json (22/22, order-identical); no key added or dropped; candidate group key sets equal the shipped en namespace key sets (15 and 7)",
+    "placeholder sets/types identical per key for all 22 ({path},{key},{value},{description},{flag},{reason},{session},{to},{code})",
+    "no ICU plural/select in this group, so no CLDR category obligation; every value parses in the shipped ICU subset",
+    "production render via local_operator.i18n.messages.render(..., locale='hi') -> 22/22 with source_locale 'hi', no English fallback and no code-only degradation; cli.config.updated also rendered for the four {value} shapes the sidecar promises (auto, True, 50, a list)",
+    "backticked spans byte-identical: `lop sessions move <id> --to <to> --wait <seconds>` and `lop sessions move {session} --to {to}`",
+    "typed tokens verbatim: /approvals auto, auto, /move, --to, --keep, --queue, --drop-session-roles, --wait, literal local inside <पीयर|local>, <id>, <to>, <seconds>, the five provider ids, CLI, AI",
+    "no empty values, none identical to the English source; every Latin run traces to a source token",
+    "no bidi controls, no ZWJ/ZWNJ, no Devanagari digits, no '!', no कृपया, no तुम/तू",
+    "nukta encoded base+U+093C (10 uses, 0 precomposed), matching shipped hi",
+    "final punctuation follows the English source's own stop pattern (danda on the two full sentences, none on label/fragment rows)",
+    "width: no maxCells/maxChars hint in either en context sidecar for this group; cli.config.list_title measures 12 cells (rich.cells.cell_len) against English's 21 and the ~30-cell rule budget"
+  ],
+  "safety_checks": [
+    "cli.config.running_sessions_unchanged keeps all four claims: running sessions unchanged (चल रहे सत्रों में कोई बदलाव नहीं हुआ); a config write cannot loosen them (… स्वीकृति की शर्तें ढीली नहीं हो सकतीं, direction correct, shipped ढीला verb); /approvals auto must be typed in EACH such session (उनमें से हर एक में … टाइप करें, command verbatim); new sessions open at auto (नए सत्र auto मोड में शुरू होते हैं, auto kept as the Latin mode word). Nothing promises that a loosening reaches a running session. Use site cli.py L3028 prints it only after tool_approval_mode was set to auto.",
+    "tui.session_move.deadline_exceeded reports an UNKNOWN outcome: session_move.py L210-217 returns this refusal with changed=True after subprocess.TimeoutExpired, so the move may have started. The Hindi claims only non-completion within the time bound (स्थानांतरण तय समय में पूरा नहीं हुआ) and that re-running reports how far it got (… फिर से चलाने पर पता चलेगा कि यह कहाँ तक पहुँचा); no success and no failure claim, re-run command byte-identical.",
+    "unsupported_flag receives an already-quoted argument (session_move.py L144 flag=repr(token)); the Hindi slot … इस्तेमाल कर सकते हैं, {flag} नहीं renders correctly with it ('--force' नहीं). cli_unavailable keeps CLI Latin and passes {reason} verbatim."
+  ],
+  "adjudications": [
+    {
+      "finding": "HI-A07 — <पाथ> should be <पथ> (tui.session_move.ambiguous)",
+      "decision": "decline_upheld",
+      "namespace": "tui.session_move",
+      "own_recount": "shipped hi values only (144 catalogue files, 3978 values, context sidecars excluded): पाथ 11 hits / 9 files vs पथ 8 hits / 6 files; the nearest neighbour in the same lop config surface family, cli.config_help.instructions, uses पाथ",
+      "reason": "the catalogue is genuinely mixed and the majority, including the nearest shipped neighbour, is पाथ; i18n/glossary.md has no row for path and i18n/style-guides/hi.md fixes nothing about this spelling; standardising पथ would have to move cli.config_help.instructions with it, which is a terminology scope, not a 22-key slice edit; round 1 graded this a NIT",
+      "deferred_as": "terminology-scope change, not a defect on this head"
+    },
+    {
+      "finding": "B:n1 — add सफलतापूर्वक to cli.config.updated",
+      "decision": "decline_upheld",
+      "namespace": "cli.config",
+      "own_recount": "use site read rather than the argument trusted: cli.py L3018 prints updated after settings_io.write_setting returned, and every failure path (ConfigUnreadableError L3029, ValueError, generic) returns from its own handler before that print",
+      "reason": "en.md forbids 'successfully' padding and hi.md asks for terse copy; a line that only prints on success, in the perfective कर दिया गया, loses no information without the adverb",
+      "deferred_as": "not a defect"
+    }
+  ],
+  "second_independent_pass": "Requested for the high-visibility settings/error group: the whole set was re-read cold from the English after the first pass, each string re-derived rather than compared with the first pass's notes. It produced HI-A2-01 and re-confirmed ढीली, the four safety claims, खास, लर्निंग्स and the प्रोवाइडर/एग्ज़िट calls. No BLOCKER surfaced on either pass.",
+  "audit_notes_not_execution_log": "record.json, report.md and this record's check lists are notes. audit.log holds the actual executed output of every command, section by section with its rc line. Nothing here is a rendered-frame or native-speaker claim.",
+  "limitations": [
+    "Independent LLM review on the harness-served deepseek/deepseek-flash, not native-speaker certification; judgments are reasoned from the style guides, the glossary, the shipped catalogues and the use sites. No translation/MT service was used for comparison or back-translation.",
+    "The candidate is not in the tree (hi/cli.config.json and hi/tui.session_move.json do not exist yet): target-candidate.json preserves the exact judged bytes. The passing ledger row is recorded for those bytes; if different bytes land, the row is stale and must be re-audited.",
+    "Scalar text evidence only: no terminal frame was captured; widths are cell_len measurements, not pixels.",
+    "Pre-existing shipped defects (e.g. wire.settings.classification_notice.help agreement) are cited only as terminology evidence and are not gated by this audit."
+  ],
+  "namespace": "tui.session_move",
+  "key_count": 7,
+  "keys_audited": 7,
+  "scope": "round-2 delta audit of the 7 tui.session_move.* keys of the C1 slice: the 1 changed key (cli_no_answer) judged, the unchanged neighbours checked for contradiction and for the safety claims of deadline_exceeded, and a full mechanical pass over all 7",
+  "target_hash_verified_against_translator": "candidate sha256 d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5 equals the hash the translator published in hi.v2-changes.md",
+  "findings": [],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "input_hashes": {
+    "en": {
+      "path": "~/.local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/keys.json",
+      "sha256": "ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.context.json",
+      "sha256": "09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573"
+    },
+    "en_catalogue": {
+      "path": "local_operator/i18n/catalogues/en/tui.session_move.json",
+      "sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e"
+    },
+    "target": {
+      "path": "this bundle's target-candidate.json",
+      "sha256": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5"
+    },
+    "target_source": {
+      "path": "~/.local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/hi.v2.json",
+      "sha256": "d575bebe3038926f3b4eea6f17c945db3f4337f1d1e8de0d4b6a039edf6321c5"
+    },
+    "previous_round_target": {
+      "path": "~/.local-operator/sessions/3ef6295a5545/scratchpad/c1-prep/hi.json",
+      "sha256": "b67c087da565eba745ccf5b48421f92ac0f27907e9c220b57e59f93a4525b355"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/hi.md",
+      "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+    },
+    "source_style_guide": {
+      "path": "i18n/style-guides/en.md",
+      "sha256": "c967c91037be79a7b184b3288b8c0326a261e4adae95b7db06d83e96f8ea6ec7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "rfc": {
+      "path": "docs/design/i18n.md",
+      "sha256": "21ed2c1d2118681b85738985415ece46625e8b2f2bc01d545a78e1c02344bec1"
+    }
+  },
+  "artifacts": [
+    "record.json",
+    "report.md",
+    "audit.log",
+    "target-candidate.json",
+    "receipt.json",
+    "reproduction/validate_hi_v2.py.txt",
+    "reproduction/render_realpath.py.txt",
+    "reproduction/recount_hi_terms.py.txt",
+    "reproduction/diff_v1_v2.py.txt"
+  ],
+  "audit_ledger_row": {
+    "status": "appended",
+    "path": "i18n/audit-history/hi/tui.session_move.json",
+    "command": "python3 scripts/i18n/ledger.py append --receipt <row> --expected-history-sha 519693f0b8255eae33db317ac7a2a51ed1ca8b0337e65ef2f00ba86a8fb873a4 --dry-run (rc 0), then the same command with --apply (rc 0)",
+    "expected_history_sha_before": "519693f0b8255eae33db317ac7a2a51ed1ca8b0337e65ef2f00ba86a8fb873a4",
+    "row_status": "passed",
+    "row_findings": 0,
+    "row_unresolved_blocker_major": 0,
+    "row_note_max_chars": 280,
+    "row_companions": "sha256 of record.json, report.md, audit.log and target-candidate.json, computed from these exact bundle bytes immediately before the append",
+    "ordering": "this record was written, then the row was appended, and this record is not edited afterwards; it therefore names the append that follows it rather than one it could observe",
+    "post_append_validation": "python3 scripts/i18n/ledger.py validate --base HEAD -> 'audit history: valid and append-only' (rc 0); the appended row and its companion hashes were re-read from disk afterwards"
+  }
+}

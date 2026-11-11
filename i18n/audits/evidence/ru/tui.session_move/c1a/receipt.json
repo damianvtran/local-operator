@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "audit_id": "c1a",
+  "locale": "ru",
+  "namespace": "tui.session_move",
+  "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+  "target_sha256": null,
+  "target_sha256_note": "not measurable yet: the ru catalogue is not in the tree; see projected_target_catalogue in record.json",
+  "hashes": {
+    "audit.log": "bf5b7a2d56f6dbd61f9d8c5701f95df864701cb35e9e18c5fe9fe236517360bb",
+    "record.json": "bbe158338a8dc52c6e00f7ce3429b6eac2d2bb33ad7eff5e6ff6719260a0725e",
+    "report.md": "154070602bbe9be96dc843cf954dfb46bb429a7a18b10b5033524de71f1410b7",
+    "row-tui.session_move.json": "04f4af703b321df49b28138d4a2ee3c5fc3f692cf146b10b1cc5f47cb42e6829",
+    "slice-report.md": "f4ad38093e779751de20a7fbe5f8acc315236f524c0a9bcdd2b95940c117bb1d"
+  },
+  "ledger_shard": {
+    "path": "i18n/audit-history/ru/tui.session_move.json",
+    "sha256": "dbf55a78e058c07effc48b22ab1c7c666cd7f77cc5bed7534cab6bf00ebd3964"
+  }
+}

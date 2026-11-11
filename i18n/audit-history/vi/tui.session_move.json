@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.session_move",
+  "history_sha256": "27413a58221fec2537c1d32272cc9437ee4c35f46cdc90c5d4c59592acdf1ff2",
+  "entries": [
+    {
+      "locale": "vi",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 6,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "vi C1 `tui.session_move` independent full second-pass audit of the v2 bytes (sonnet): 0 BLOCKER/0 MAJOR/2 minor/4 nit (group-wide). The round-1 A pass was lost and is not claimed; round-1 B (sonnet, v1) 0M/3m/2n is preserved. Report: i18n/audits/evidence/vi/tui.session_move/c1r2/second-pass-report.md.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/vi/tui.session_move/c1r2/second-pass-report.md",
+          "sha256": "5dbca6b4c99b35cf059f71ce6a23e49ff02755005ecef6edaa973d5df1eb75a4"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.session_move/c1r2/round1-B-report.md",
+          "sha256": "4947fed60a1436d15a20587f2935184ec908a8beaa44455c74116ec685a1de12"
+        }
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.session_move",
+      "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round-2 delta: 4 changed keys. Timeout notice reports an UNKNOWN outcome with the rerun command byte-identical; bracket placeholders no longer look typed. 0 BLOCKER/0 MAJOR, 0 findings. Target file sha256 14378b10be5e; evidence i18n/audits/evidence/vi/tui.session_move/c1r2/record.json.",
+      "companions": [
+        {
+          "path": "i18n/audits/evidence/vi/tui.session_move/c1r2/record.json",
+          "sha256": "98ba8fe28a8d7e28ac5199cd788cef5a645d2b3cdf65315d2b56b8e6dd89cb91"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.session_move/c1r2/report.md",
+          "sha256": "d8760013304f5183e8bdea2bf1d08514b54e1da3d58d02f3b2f05c6f300385e7"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/tui.session_move/c1r2/audit.log",
+          "sha256": "b423071f53ad15ecce217b516097d565f2ebf2314b17ad801b9c5de9c3eab790"
+        }
+      ]
+    }
+  ]
+}

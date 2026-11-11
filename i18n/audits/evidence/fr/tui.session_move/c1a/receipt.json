@@ -1,0 +1,34 @@
+{
+  "locale": "fr",
+  "namespace": "tui.session_move",
+  "source_sha256": "f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e",
+  "translator": {
+    "agent": "i18n-translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-11"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team)",
+    "model": "deepseek/deepseek-flash",
+    "date": "2026-11-11",
+    "result": "passed",
+    "findings": 2,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "note": "fr C1 `tui.session_move` (7 keys). Evidence: i18n/audits/evidence/fr/tui.session_move/c1a/record.json. Auditor deepseek/deepseek-flash; 2 minor, 0 nit: <appareil> vs corpus 'pair'; 'abouti' leans failure; no blocker/major gate.",
+  "companions": [
+    {
+      "path": "i18n/audits/evidence/fr/tui.session_move/c1a/record.json",
+      "sha256": "ec78911a6f05421ae17b76c15e449346346fd3054c9d049b43eb123fb853ac02"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.session_move/c1a/report.md",
+      "sha256": "89c37c4227ba0c203351b5fc0891a7ce1b12558c6376bb0d4567e1c0cfdba9de"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/tui.session_move/c1a/audit.log",
+      "sha256": "a7a2b5c339e9aede61c30f38020c0ffa3f6ad394db5d0bb92e226a6671f5c7a7"
+    }
+  ]
+}

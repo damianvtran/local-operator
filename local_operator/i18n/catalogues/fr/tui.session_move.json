@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "Utilisez /move <chemin> pour définir le répertoire de travail, ou /move <session> --to <pair> pour déplacer une session.",
+  "tui.session_move.to_needs_device": "--to nécessite un appareil : /move --to <pair|local>",
+  "tui.session_move.cannot_wait": "cette vue ne peut pas attendre — depuis un shell : `lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to n’accepte que --keep, --queue et --drop-session-roles, pas {flag}",
+  "tui.session_move.cli_unavailable": "impossible de lancer la CLI ({reason})",
+  "tui.session_move.deadline_exceeded": "le déplacement ne s’est pas terminé dans le délai imparti ; relancez `lop sessions move {session} --to {to}` pour savoir où il en est",
+  "tui.session_move.cli_no_answer": "la CLI s’est terminée avec le code de sortie {code}, sans réponse"
+}

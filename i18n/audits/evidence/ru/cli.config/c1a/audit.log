@@ -1,0 +1,76 @@
+# namespace: cli.config
+# audit_id: c1a · locale ru · slice C1 suffix A · auditor session e45ca4d0d71c (deepseek/deepseek-flash)
+# THIS FILE IS CAPTURED COMMAND OUTPUT, not notes. Values judged: the 15 cli.config.* keys.
+# Execution log — ru C1 slice A (independent i18n audit, session e45ca4d0d71c)
+# captured 2026-11-11T07:27:52Z · head b188079f32e6 · branch i18n/c1-core-english-paths
+
+$ shasum -a 256 <inputs>
+ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc  <scratchpad>/c1a-ru/keys.json
+d691d505003ee5dec761e2e94bbb5ba3de4c0ce9f32d69d3147bc20f997ff047  <scratchpad>/c1a-ru/ru.json
+f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5  i18n/style-guides/ru.md
+0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8  i18n/glossary.md
+40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac  local_operator/i18n/catalogues/en/cli.config.json
+9831a776d2f179969666f2271f9bc53ae7de8a18b8567732ba81bc8e2ca90e78  local_operator/i18n/catalogues/en/cli.config.context.json
+f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e  local_operator/i18n/catalogues/en/tui.session_move.json
+09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573  local_operator/i18n/catalogues/en/tui.session_move.context.json
+
+$ python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+$ .venv/bin/python -c "print(local_operator.__file__); print(runtime.__file__)"
+<worktree>/local_operator/__init__.py
+<worktree>/local_operator/i18n/runtime.py
+
+$ .venv/bin/python verify.py keys.json ru.json   # full output in mechanical.log
+tui.session_move.deadline_exceeded             142     102  OK
+tui.session_move.cli_no_answer                  40      36  OK
+
+problem_keys 0
+
+$ .venv/bin/python -c "catalogues.catalogue_sha256('en', ns)"
+cli.config 40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac
+tui.session_move f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e
+
+$ python3 scripts/i18n/ledger.py history-sha --locale ru --namespace <ns>
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+
+$ python3 scripts/i18n/ledger.py append --receipt row-<ns>.json --expected-history-sha 4f53cda1... --dry-run
+i18n/audit-history/ru/cli.config.json
+i18n/audit-history/ru/tui.session_move.json
+(no --apply was run; git status after the dry-runs was empty)
+
+# mechanical.log follows verbatim
+-----8<-----
+en file sha256 ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc
+ru file sha256 d691d505003ee5dec761e2e94bbb5ba3de4c0ce9f32d69d3147bc20f997ff047
+en keys 22  ru keys 22
+missing []  extra []  order_equal True
+empty_or_nonstring []
+english_identical []
+
+key                                          cells encells  verdict
+cli.config.created                              38      40  OK
+cli.config.opened                               32      35  OK
+cli.config.cleared                              64      44  OK
+cli.config.updated                              38      37  OK
+cli.config.running_sessions_unchanged          216     148  OK
+cli.config.list_title                           22      21  OK
+cli.config.list_description                     23      26  OK
+cli.config.list_unrecognised                    45      38  OK
+cli.config.list_desc_hosting                    84      77  OK
+cli.config.list_desc_model_name                 18      42  OK
+cli.config.list_desc_conversation_length        91      98  OK
+cli.config.list_desc_detail_length             106     111  OK
+cli.config.list_desc_max_learnings_history      68      84  OK
+cli.config.list_desc_classification_notice     107      92  OK
+cli.config.list_desc_auto_save_conversation     36      43  OK
+tui.session_move.ambiguous                     102      91  OK
+tui.session_move.to_needs_device                57      44  OK
+tui.session_move.cannot_wait                   116      89  OK
+tui.session_move.unsupported_flag               83      74  OK
+tui.session_move.cli_unavailable                35      34  OK
+tui.session_move.deadline_exceeded             142     102  OK
+tui.session_move.cli_no_answer                  40      36  OK
+
+problem_keys 0

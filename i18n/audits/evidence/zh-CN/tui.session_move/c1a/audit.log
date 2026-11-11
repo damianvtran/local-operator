@@ -1,0 +1,105 @@
+=== audit transcript — zh-CN / slice C1 core English paths (cli.config + tui.session_move), 22 keys
+=== auditor i18n-auditor (lopdev team), session 0ebc670d4b12, served model deepseek/deepseek-flash, date 2026-11-11 ===
+NOTE: one group-level transcript covers both new namespaces; a byte-identical copy is retained in each namespace bundle.
+
+$ git rev-parse HEAD ; git rev-parse --abbrev-ref HEAD
+b188079f32e6d978ad78fac96edc5c3516d028ab
+i18n/c1-core-english-paths
+
+$ shasum -a 256 <en catalogue + context sidecar inputs>
+40649e7419d144f7e8a550d5ae3c6d48defa7bb0b23f4a20ceac35f2b0fda5ac  local_operator/i18n/catalogues/en/cli.config.json
+9831a776d2f179969666f2271f9bc53ae7de8a18b8567732ba81bc8e2ca90e78  local_operator/i18n/catalogues/en/cli.config.context.json
+f4dd682b3b50d64a4009eac5ac78a34f5734b5dd0a5ef379951065da326a913e  local_operator/i18n/catalogues/en/tui.session_move.json
+09ed30a0b11969671c41e24fe255072c961fff1f90791a7b9f05cd998cbee573  local_operator/i18n/catalogues/en/tui.session_move.context.json
+
+$ python3 -c 'hashlib.sha256 over the translator-side inputs (c1-prep/keys.json, c1-prep/zh-CN.json)'
+ac35dc123a4241a3c1fdbd0f4f012636d9706695bacfb3601aa06eed2cae1ffc  c1-prep/keys.json (en + context/notes)
+de5dce9d9752a66038baeee6579debd7fb1f5be3ecadf124cb4fda9a2e9d8574  c1-prep/zh-CN.json (translation under audit)
+
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+$ python3 <mechanical probe: key set/order, placeholder sets, backtick spans, empties, en-identical>
+source keys 22 target keys 22 order identical True
+missing [] extra []
+ok   cli.config.created | 已在{path}创建配置文件
+ok   cli.config.opened | 已打开配置文件{path}
+ok   cli.config.cleared | 已清除{key}：将重新使用默认值
+ok   cli.config.updated | 已将{key}更新为{value}
+ok   cli.config.running_sessions_unchanged | 运行中的会话保持不变，写入配置不会放宽其审批要求；要让某个会话无需工具审批，需在该会话中输入/approvals auto。新会话以auto模式启动。
+ok   cli.config.list_title | 配置项
+ok   cli.config.list_description | 说明：{description}
+ok   cli.config.list_unrecognised | 无法识别的配置键，程序不会读取它
+ok   cli.config.list_desc_hosting | AI提供商平台（如radient、openai、deepseek、anthropic、openrouter）
+ok   cli.config.list_desc_model_name | 交互时使用的具体模型
+ok   cli.config.list_desc_conversation_length | [已弃用，已由压缩取代] 对话历史中保留的消息数上限
+ok   cli.config.list_desc_detail_length | [已弃用，已由压缩取代] 对话历史中不作摘要的最近消息数
+ok   cli.config.list_desc_max_learnings_history | [已弃用，已由压缩取代] 保留的学习条目数上限
+ok   cli.config.list_desc_classification_notice | [已弃用] 智能提示不在对话中显示通知，调用及其费用记录在会话日志中
+ok   cli.config.list_desc_auto_save_conversation | 是否自动保存对话
+ok   tui.session_move.ambiguous | 切换工作目录用/move <路径>，迁移会话用/move <会话> --to <设备>。
+ok   tui.session_move.to_needs_device | --to需指定设备：/move --to <设备|local>
+ok   tui.session_move.cannot_wait | 当前界面无法等待，需在终端中运行：`lop sessions move <id> --to <to> --wait <seconds>`
+ok   tui.session_move.unsupported_flag | /move --to仅支持--keep、--queue和--drop-session-roles，不支持{flag}
+ok   tui.session_move.cli_unavailable | 无法启动CLI（{reason}）
+ok   tui.session_move.deadline_exceeded | 迁移未在限定时间内完成；再次运行`lop sessions move {session} --to {to}`可查看当前进度
+ok   tui.session_move.cli_no_answer | CLI已退出，退出码为{code}，未返回结果
+
+$ .venv/bin/python <repo runtime: parse_message/render_message + message_arguments vs en>
+render ok cli.config.created -> 已在~/.local-operator/config.yml创建配置文件
+render ok cli.config.opened -> 已打开配置文件/tmp/config.yml
+render ok cli.config.cleared -> 已清除display.terminal_title：将重新使用默认值
+render ok cli.config.updated -> 已将model_effort更新为auto
+render ok cli.config.running_sessions_unchanged -> 运行中的会话保持不变，写入配置不会放宽其审批要求；要让某个会话无需工具审批，需在该会话中输入/approvals auto。新会话以auto模式启动。
+render ok cli.config.list_title -> 配置项
+render ok cli.config.list_description -> 说明：X
+render ok cli.config.list_unrecognised -> 无法识别的配置键，程序不会读取它
+render ok cli.config.list_desc_hosting -> AI提供商平台（如radient、openai、deepseek、anthropic、openrouter）
+render ok cli.config.list_desc_model_name -> 交互时使用的具体模型
+render ok cli.config.list_desc_conversation_length -> [已弃用，已由压缩取代] 对话历史中保留的消息数上限
+render ok cli.config.list_desc_detail_length -> [已弃用，已由压缩取代] 对话历史中不作摘要的最近消息数
+render ok cli.config.list_desc_max_learnings_history -> [已弃用，已由压缩取代] 保留的学习条目数上限
+render ok cli.config.list_desc_classification_notice -> [已弃用] 智能提示不在对话中显示通知，调用及其费用记录在会话日志中
+render ok cli.config.list_desc_auto_save_conversation -> 是否自动保存对话
+render ok tui.session_move.ambiguous -> 切换工作目录用/move <路径>，迁移会话用/move <会话> --to <设备>。
+render ok tui.session_move.to_needs_device -> --to需指定设备：/move --to <设备|local>
+render ok tui.session_move.cannot_wait -> 当前界面无法等待，需在终端中运行：`lop sessions move <id> --to <to> --wait <seconds>`
+render ok tui.session_move.unsupported_flag -> /move --to仅支持--keep、--queue和--drop-session-roles，不支持'--force'
+render ok tui.session_move.cli_unavailable -> 无法启动CLI（FileNotFoundError）
+render ok tui.session_move.deadline_exceeded -> 迁移未在限定时间内完成；再次运行`lop sessions move abc123 --to build-box`可查看当前进度
+render ok tui.session_move.cli_no_answer -> CLI已退出，退出码为2，未返回结果
+problems: 0 of 22
+
+$ python3 scripts/i18n/ledger.py history-sha --locale zh-CN --namespace <ns>
+cli.config: 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+tui.session_move: 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+
+$ python3 scripts/i18n/ledger.py append --dry-run --receipt <bundled receipt.json row> --expected-history-sha 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+cli.config: i18n/audit-history/zh-CN/cli.config.json
+tui.session_move: i18n/audit-history/zh-CN/tui.session_move.json
+
+NOTE (actual event, kept for the landing owner): the first dry-run packaged the receipt as {"schema":1,"entries":[row]} and was
+rejected with 'ledger.py: invalid audit key component: None' — append() reads a BARE row object. Re-run as a bare row: paths above.
+NOTE: --apply is deferred to the landing commit: append writes an immutable i18n/audit-history suffix and does not re-render
+the i18n/ledger.json mirror, and the zh-CN catalogues for these two namespaces do not exist in the tree yet (pre-landing audit).
+
+$ python3 <shipped-term probe: which zh verb does the shipped catalogue use for the session-move action?>
+cli.qwencloud_help.json cli.qwencloud_help.migrate :: 将明文ticket迁移至加密密钥存储
+cli.sessions_help.json cli.sessions_help.move :: 将对话移至另一设备，或带回本机
+cli.sessions_help.json cli.sessions_help.move_cancel_queued :: 取消尚未开始的排队移动；仅接受对话ID
+cli.sessions_help.json cli.sessions_help.move_engage_on_arrival :: 对话到达目标设备后立即启动，无需先发提示词即可成为活动状态；正在执行轮次的对话仍会被拒绝，而非排空等待，启动失败也不影响移动，因此退出状态表示移动结果：脚本读取--json中的`engagement.engaged`，移至对等设备时，启动结
+cli.sessions_help.json cli.sessions_help.move_queue :: 等待下一个安全点，而非拒绝繁忙对话：移动请求在对话所在设备上持久排队，并在轮次结束时执行（通知该设备上已连接的客户端，并提供跟随或断开的时间窗口）。与--keep同用时忽略
+cli.sessions_help.json cli.sessions_help.move_session :: 要移动的对话ID（使用--cancel-queued时，ID即该标志的值）
+tui.import.json tui.import.hint_move :: 移动
+tui.library.json tui.library.hint_move :: 移动
+tui.projects.json tui.projects.send.binding_move :: 移动
+tui.review.json tui.review.hint_move :: 移动
+tui.schedule.json tui.schedule.hint_move :: 移动
+wire.errors.desktop.json wire.errors.desktop.move_failed :: 无法移动到{requested}：{error}
+--- 迁移 (migrate) occurrences: 1
+
+$ python3 <same probe: the shipped settings-page wording for the three retired settings>
+conversation_length :: 已弃用。已被压缩引擎取代。
+detail_length :: 已弃用。已被压缩引擎取代。
+max_learnings_history :: 已弃用。已被压缩引擎取代。
+classification_notice :: 已弃用。智能提示在对话中静默；调用记录见日志。
