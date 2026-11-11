@@ -147,6 +147,7 @@ async def test_wake_during_operator_turn_open_is_parked(tmp_path, monkeypatch):
     await asyncio.sleep(0.05)
     assert len(stream.requests) == 1, f"wake spawned its own turn: {len(stream.requests)}"
     rows = _wake_rows(session)
+    assert rows, "expected a folded wake row, got none"
     assert all(
         "folded into your current answer" in r["details"]["text"] for r in rows
     ), f"wake row is not a folded row: {rows}"
@@ -183,8 +184,13 @@ async def test_idle_wake_delivered_immediately_and_wake_turn_does_not_open_windo
 
 @pytest.mark.asyncio
 async def test_park_cap_delivers_even_when_operator_stays_active(tmp_path, monkeypatch):
-    """Cell cap: operator turn stays open past patched D -> wake delivered at D,
-    not starved."""
+    """Cell cap: an operator turn that stays open past patched D delivers the
+    parked wake at D, not starved (the deadline's re-arm branch).
+
+    The operator turn is held open by blocking ``_flush_shell_records`` in
+    ``prompt()``: the wake parks at open, the deadline wakes with the turn
+    still open and re-arms, and delivery lands at ``first_park + D``.
+    """
     import local_operator.session.session as sess_mod
 
     monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 10.0)
@@ -198,10 +204,27 @@ async def test_park_cap_delivers_even_when_operator_stays_active(tmp_path, monke
     )
     session = make_session(tmp_path, stream)
 
-    await session.prompt("q")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_flush = session._flush_shell_records
+
+    async def blocked_flush() -> None:
+        entered.set()
+        await release.wait()
+        return await original_flush()
+
+    session._flush_shell_records = blocked_flush  # type: ignore[method-assign]
+    prompt_task = asyncio.ensure_future(session.prompt("q"))
+    await wait_for(lambda: entered.is_set(), timeout=3.0)
+    assert session._operator_turn_open
+
     await session._deliver_wake(_due())
-    await asyncio.sleep(0.05)
-    assert len(stream.requests) == 1
+    assert session._parked_wakes, "expected the wake to park"
+    # The deadline re-armed while the turn stayed open (no delivery yet).
+    await asyncio.sleep(0.4)
+    assert len(stream.requests) == 0, "deadline delivered before D"
+    release.set()
+    await prompt_task
 
     await wait_for(lambda: len(stream.requests) == 2, timeout=3.0)
     await session.dispose()
@@ -237,7 +260,8 @@ async def test_two_fires_of_one_id_while_parked_deliver_once(tmp_path, monkeypat
 
 @pytest.mark.asyncio
 async def test_dispose_with_parked_wake_leaves_no_pending_task(tmp_path, monkeypatch):
-    """Cell dispose: dispose with a parked wake -> no pending task."""
+    """Cell dispose: dispose with a parked wake -> no pending task, and the
+    wake is durable (held-delivery precedent), not lost."""
     import local_operator.session.session as sess_mod
 
     monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 5.0)
@@ -253,7 +277,207 @@ async def test_dispose_with_parked_wake_leaves_no_pending_task(tmp_path, monkeyp
 
     await session.prompt("q")
     await session._deliver_wake(_due())
+    assert session._parked_wakes, "expected the wake to park"
     await session.dispose()
 
     await asyncio.sleep(0.05)
     assert len(stream.requests) == 1, "parked wake fired after dispose"
+    assert _wake_rows(session), "parked wake was lost on dispose (no durable row)"
+
+
+@pytest.mark.asyncio
+async def test_parked_wake_emits_no_receipt_until_delivery(tmp_path, monkeypatch):
+    """MAJOR-1: a parked wake paints no ``WakeDeliveredEvent`` (and no TUI wake
+    line) until it actually delivers; delivery emits exactly one."""
+    import local_operator.session.session as sess_mod
+    from local_operator.harness.types import WakeDeliveredEvent
+
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 0.3)
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    events: list[object] = []
+    session.subscribe(events.append)
+
+    await session.prompt("q")
+    events.clear()
+    await session._deliver_wake(_due())
+    await asyncio.sleep(0.05)
+    assert not [
+        e for e in events if isinstance(e, WakeDeliveredEvent)
+    ], "parked wake emitted a receipt before delivery"
+
+    await wait_for(lambda: len(stream.requests) == 2, timeout=3.0)
+    receipts = [e for e in events if isinstance(e, WakeDeliveredEvent)]
+    assert len(receipts) == 1, f"expected 1 receipt at delivery, got {len(receipts)}"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_harness_injected_prompt_does_not_open_window(tmp_path, monkeypatch):
+    """MAJOR-2: a ``prompt(..., harness_injected=True)`` row must not open the
+    quiet window (neither ``_operator_turn_open`` nor the end stamp)."""
+    import local_operator.session.session as sess_mod
+
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 5.0)
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+
+    await session.prompt("goal loop text that is not chrome", harness_injected=True)
+    assert session._last_operator_turn_end is None, "harness-injected prompt stamped the window"
+    assert not session._operator_active()
+
+    await session._deliver_wake(_due())
+    await wait_for(lambda: len(stream.requests) == 2, timeout=3.0)
+    assert not session._parked_wakes, "idle wake after injected prompt parked"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_steer_into_wake_turn_opens_window_for_next_wake(tmp_path, monkeypatch):
+    """MAJOR-3: an operator steer admitted into a wake-initiated turn opens
+    the window; the next wake parks."""
+    import local_operator.session.session as sess_mod
+    from local_operator.harness.types import (
+        AgentTool,
+        StreamToolCallDelta,
+        TextContent,
+        ToolResult,
+    )
+
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 5.0)
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        await release_tool.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="block",
+            content=[TextContent(text="finished")],
+        )
+
+    tool = AgentTool(
+        name="block",
+        parameters={"type": "object", "properties": {}},
+        interruptible=True,
+        execute=blocking_execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="block", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[tool])
+
+    await session._deliver_wake(_due("w1", "first"))
+    await wait_for(lambda: tool_started.is_set(), timeout=3.0)
+    session.steer("operator: actually do X")
+    release_tool.set()
+    await wait_for(lambda: not session._is_streaming, timeout=3.0)
+    assert (
+        session._last_operator_turn_end is not None
+    ), "steer admitted into wake turn did not open the window"
+
+    await session._deliver_wake(_due("w2", "second"))
+    assert session._parked_wakes, "second wake did not park after steered turn"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wake_id", ["aida-cadence", "aida-extra-3", "librarian-cadence", "librarian-extra-2"]
+)
+async def test_cadence_family_wakes_never_park(tmp_path, monkeypatch, wake_id):
+    """MINOR-2: cadence-family rows from BOTH engines open their own turn."""
+    import local_operator.session.session as sess_mod
+
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 5.0)
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("q")
+    await session._deliver_wake(_due(wake_id, "check-in"))
+    await wait_for(lambda: len(stream.requests) == 2, timeout=3.0)
+    assert not session._parked_wakes, f"cadence wake {wake_id} parked"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_operator_wake_on_duty_session_parks_normally(tmp_path, monkeypatch):
+    """MINOR-2: an operator-armed wake on a duty session still parks — the
+    gate is the cadence-family id, not the duty flag."""
+    import local_operator.session.session as sess_mod
+
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 5.0)
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    session._aida_duty = True
+    await session.prompt("q")
+    await session._deliver_wake(_due("w7", "remind me"))
+    await asyncio.sleep(0.05)
+    assert session._parked_wakes, "operator wake on duty session did not park"
+    assert len(stream.requests) == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_parked_wake_is_busy_and_warm(tmp_path, monkeypatch):
+    """MAJOR-4(b): the runtime idle-exit predicates see a parked wake."""
+    import local_operator.session.session as sess_mod
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    monkeypatch.setattr(sess_mod, "WAKE_OPERATOR_QUIET_S", 5.0)
+    monkeypatch.setattr(sess_mod, "WAKE_PARK_CAP_S", 5.0)
+
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="a"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="b"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    await session.prompt("q")
+    await session._deliver_wake(_due())
+    assert session._parked_wakes
+    assert handle.is_busy() is True, "parked wake does not pin residency"
+    due_at = handle.next_wake_due_at()
+    assert due_at is not None, "parked wake is invisible to the warmth signal"
+    first_park = session._parked_wakes_first_park or 0.0
+    assert abs(due_at - int(first_park * 1000)) < 60_000 or due_at > 0
+    await session.dispose()

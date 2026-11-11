@@ -2348,12 +2348,23 @@ async def test_a_model_scheduled_wake_does_not_explain_its_root_end_to_end(
     was recorded, so nothing here was unreadable. The creating tool's receipt
     echoes the same text and is not a second author (QA4-1).
     """
-    from local_operator.analytics.recorder import reset_recorder_for_test
-    from local_operator.analytics.store import AnalyticsStore
-    from local_operator.compaction.thresholds import CompactionSettings
-    from local_operator.session.session import Session
-    from local_operator.session.transcript import Transcript
-    from local_operator.tools.registry import create_tools
+    import local_operator.session.session as _sess_mod
+
+    # The model schedules this wake from inside the operator's turn: wake
+    # deferral would (correctly) hold it to last turn end + W. This test's
+    # subject is the woken turn's divergence read, not deferral.
+    _orig_w = _sess_mod.WAKE_OPERATOR_QUIET_S
+    _sess_mod.WAKE_OPERATOR_QUIET_S = 0
+    try:
+        from local_operator.analytics.recorder import reset_recorder_for_test
+        from local_operator.analytics.store import AnalyticsStore
+        from local_operator.compaction.thresholds import CompactionSettings
+        from local_operator.session.session import Session
+        from local_operator.session.transcript import Transcript
+        from local_operator.tools.registry import create_tools
+    except Exception:  # noqa: BLE001
+        _sess_mod.WAKE_OPERATOR_QUIET_S = _orig_w
+        raise
 
     scratch = home.parent
     config_dir = scratch / "config"
@@ -2406,6 +2417,7 @@ async def test_a_model_scheduled_wake_does_not_explain_its_root_end_to_end(
         carriers = _wake_carriers(session)
         events = list(session._divergence_judge._events)
     finally:
+        _sess_mod.WAKE_OPERATOR_QUIET_S = _orig_w
         await session.dispose()
         recorder.close()
         reset_recorder_for_test(AnalyticsStore(scratch / "analytics-2.db")).close()
