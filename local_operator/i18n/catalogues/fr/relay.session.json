@@ -15,5 +15,7 @@
   "relay.session.directory.path_placeholder": "ou saisissez un autre chemin…",
   "relay.session.model.sheet_title": "modèle",
   "relay.session.model.filter_placeholder": "filtrer les modèles",
-  "relay.session.model.loading": "chargement…"
+  "relay.session.model.loading": "chargement…",
+  "relay.session.model.queued": "changement en attente — prendra effet à la prochaine étape",
+  "relay.session.model.refused": "{model} n’a pas été appliqué : {reason}"
 }

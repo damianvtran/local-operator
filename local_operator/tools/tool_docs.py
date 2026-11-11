@@ -206,7 +206,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
         notes=(
             "Account edits the owner explicitly requested apply directly. Otherwise "
             "the change is proposed in Agents → <name>; after their agreement use "
-            "profile_proposal op=apply with the displayed proposal ID.\n"
+            "profile_proposal op=apply with the displayed proposal ID. When asking "
+            "them, send a 1-3 line summary plus the proposal ID, never the full "
+            "instructions (they review the diff in Agents).\n"
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
             "- ``action_class``: 'proactive' lets a profile attach hidden "
@@ -280,7 +282,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
         notes=(
             "Account edits the owner explicitly requested apply directly. Otherwise "
             "the change is proposed in Agents → <name>; after their agreement use "
-            "profile_proposal op=apply with the displayed proposal ID.\n"
+            "profile_proposal op=apply with the displayed proposal ID. When asking "
+            "them, send a 1-3 line summary plus the proposal ID, never the full "
+            "instructions (they review the diff in Agents).\n"
             "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
             "when one covers the work; otherwise create it WITH NO ``scope`` so, "
             "where this host has a conversation store, it lives in THIS "
@@ -1749,6 +1753,7 @@ def _url_name(url: str) -> str:
 def make_tool_doc_resolver(
     inventory: Callable[[], Sequence[AgentTool]],
     on_tool_read: Callable[[str], str | None] | None = None,
+    fallback: Callable[[str], AgentTool | None] | None = None,
 ) -> Callable[[str], str | None]:
     """Build the ``tool://`` adapter for the ``read`` tool.
 
@@ -1770,13 +1775,24 @@ def make_tool_doc_resolver(
     (``tools/deferral.py``): reading a tool's reference is the explicit
     request for it, the way ``mcp://server/tool`` is for an MCP tool. A hook
     that raises appends nothing — the doc still answers.
+
+    ``fallback(name)`` serves a tool the inventory does NOT hold but the
+    session can still dispatch — a deferred MCP tool (found through
+    ``mcp://?search=`` or ``mcp://<server>/<tool>``, or demoted at a cold
+    boundary), resolved by the session's fallback tool resolver. Without it,
+    the loop's invalid-argument hint ("read tool://<name>") would lead to
+    ``Unknown tool`` for exactly the tools whose schema the model lacks. Such
+    a hit renders the schema doc INLINE and never reaches ``on_tool_read``:
+    the published tools array is position 0 of the prompt-cache prefix, and
+    keeping unused MCP schemas out of it is the whole point of deferring
+    them, so reading one must not republish it.
     """
 
     def resolver(url: str) -> str | None:
         if not url.startswith(TOOL_DOC_SCHEME):
             return None
         try:
-            doc = _resolve_tool_url(url, inventory)
+            doc = _resolve_tool_url(url, inventory, fallback)
         except Exception as exc:  # noqa: BLE001 — the resolver contract is "never raises"
             return f"Tool reference unavailable: {exc}"
         name = _url_name(url)
@@ -1791,7 +1807,20 @@ def make_tool_doc_resolver(
     return resolver
 
 
-def _resolve_tool_url(url: str, inventory: Callable[[], Sequence[AgentTool]]) -> str:
+# Appended to a fallback-served doc so the reader knows the schema it just
+# read is the one to use, and that the tool is callable without joining the
+# tool list (it does not: see ``make_tool_doc_resolver``'s ``fallback``).
+OUTSIDE_TOOL_LIST_NOTE = (
+    "Not in your tool list: call it directly by this name with the arguments "
+    "above; reading this reference does not add it to the list."
+)
+
+
+def _resolve_tool_url(
+    url: str,
+    inventory: Callable[[], Sequence[AgentTool]],
+    fallback: Callable[[str], AgentTool | None] | None = None,
+) -> str:
     tools = list(inventory())
     name = _url_name(url)
     available = ", ".join(sorted(tool.name for tool in tools if not tool.hidden)) or "(none)"
@@ -1800,6 +1829,13 @@ def _resolve_tool_url(url: str, inventory: Callable[[], Sequence[AgentTool]]) ->
         # the listing is what tells the reader which names exist at all.
         return f"Tool URL missing a name: expected tool://<name>\nAvailable tools: {available}"
     tool = next((candidate for candidate in tools if candidate.name == name), None)
+    if tool is None and fallback is not None:
+        try:
+            outside = fallback(name)
+        except Exception:  # noqa: BLE001 — a failed lookup is just a miss
+            outside = None
+        if outside is not None:
+            return f"{render_tool_doc(outside)}\n\n{OUTSIDE_TOOL_LIST_NOTE}"
     if tool is None:
         # Served AS CONTENT (like ``Unknown skill``): the available set is the
         # model's self-correction path, in one tool round.
@@ -1878,6 +1914,7 @@ def chain_tool_docs(
     inventory: Callable[[], Sequence[AgentTool]],
     *,
     on_tool_read: Callable[[str], str | None] | None = None,
+    fallback: Callable[[str], AgentTool | None] | None = None,
 ) -> Callable[[str], str | None]:
     """Put the ``tool://`` resolver AHEAD of ``base``; every other scheme
     reaches ``base`` exactly as before, and with no base configured the
@@ -1889,7 +1926,7 @@ def chain_tool_docs(
     or subagent, each with its own live inventory — answers ``tool://`` without
     touching the factory chain or the subagent wiring. Returns a
     :class:`ToolDocsLink` rather than a bare closure so the identity-sensitive
-    parity guard can recognise it (see the class docstring). ``on_tool_read``:
-    see :func:`make_tool_doc_resolver`.
+    parity guard can recognise it (see the class docstring). ``on_tool_read``
+    and ``fallback``: see :func:`make_tool_doc_resolver`.
     """
-    return ToolDocsLink(base, make_tool_doc_resolver(inventory, on_tool_read))
+    return ToolDocsLink(base, make_tool_doc_resolver(inventory, on_tool_read, fallback))

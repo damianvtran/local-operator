@@ -875,6 +875,17 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
     assert not any(
         row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
     ), "a non-hotkey row carries a scope"
+    clearables = {key: row["clearable"] for key, row in rows.items() if key.startswith("keymap.")}
+    assert clearables == {
+        "keymap.new_session": False,
+        "keymap.resume": False,
+        "keymap.quick_send": False,
+        "keymap.push_to_talk": True,
+        "keymap.start_recording": True,
+    }
+    assert not any(
+        row["clearable"] for key, row in rows.items() if not key.startswith("keymap.")
+    ), "a non-hotkey row carries clearable"
 
 
 async def test_settings_projection_carries_the_bounded_duration_contract(desktop):
@@ -985,6 +996,28 @@ async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(deskt
     response = await client.patch("/v1/settings/keymap.quick_send", json={"value": "CMD+SHIFT+N"})
     assert response.status_code == 200, response.text
     assert response.json()["result"]["value"] == "meta+shift+n"
+
+
+async def test_patch_of_none_clears_only_the_clearable_rows(desktop):
+    """`PATCH {value: "none"}` stores the cleared sentinel on opt-in rows only.
+
+    Both dictation rows accept `none` (both cleared at once is legal);
+    `quick_send` refuses it. Reset restores the default after a clear.
+    """
+    client, _app = desktop
+    for key in ("keymap.push_to_talk", "keymap.start_recording"):
+        response = await client.patch(f"/v1/settings/{key}", json={"value": "none"})
+        assert response.status_code == 200, response.text
+        assert response.json()["result"]["value"] == "none"
+        assert response.json()["result"]["clearable"] is True
+    refused = await client.patch("/v1/settings/keymap.quick_send", json={"value": "none"})
+    assert refused.status_code == 422, refused.text
+    for key in ("keymap.push_to_talk", "keymap.start_recording"):
+        reset = await client.post(f"/v1/settings/{key}/reset")
+        assert reset.status_code == 200, reset.text
+        row = reset.json()["result"]
+        assert row["is_default"] is True
+        assert row["value"] == row["default"]
 
 
 async def test_a_tier_mapping_round_trips_through_the_settings_route(desktop):

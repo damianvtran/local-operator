@@ -46,6 +46,57 @@ are masked wherever they appear on a model-visible surface:
   broker-delivered values, and values registered by a shape hit;
 * a value in a credential position that carries **value evidence** — issuer
   prefix, entropy, a key header, a DSN structure, or a known stored value.
+* every value under `data:`/`stringData:` of a Kubernetes object whose own
+  `kind` is `Secret` (YAML or JSON, `List` items, the escaped copy in a
+  `last-applied-configuration` annotation, and Go's `map[… data:map[K:V …]
+  kind:Secret …]` rendering that `kubectl -o go-template` prints on a
+  template error). The object declares them secret;
+  key names, `metadata` and every other field stay readable, and a `ConfigMap`
+  is never touched by this rule — also when it shares one output with a Secret
+  and no `---` (an object ends at its next `apiVersion` or a repeated key).
+  Lines carrying the `read` tool's ` 9| ` gutter are read after the gutter.
+  Template and reference expressions (`{{ … }}`, a whole `${…}` or `$(…)`) are
+  code, not values, and stay readable;
+* an **encoded spelling** of a credential: a base64/base64url, hex, `%xx`, or
+  JSON-escaped (`\/`, `\uXXXX`) token is masked whole when its DECODING is
+  masked by the rules above (a DSN with an inline password, a PEM key,
+  service-account JSON, a docker `auth`, a vendor token…). Decoding alone is
+  not evidence: a token that decodes to ordinary text, a digest, a SHA or binary
+  keeps its bytes. Nesting is followed two levels deep (a docker config inside
+  a Secret);
+* a service-account key's `private_key_id`. Its `client_email` and
+  `project_id` are identifiers and stay readable.
+* inside a JSON string that is itself JSON (`aws secretsmanager
+  get-secret-value`'s `SecretString`), the same rules as above apply to the
+  decoded JSON — no new keywords; a string that is a command or code is not
+  read this way.
+* a value a Terraform plan JSON (`terraform show -json`, Terraform Cloud's
+  `/plans/<id>/json-output`) itself marks sensitive: `before_sensitive`/
+  `after_sensitive` leaves, `sensitive_values`, a sensitive output, and an
+  input variable whose configuration declares `sensitive: true`, and an
+  input variable whose NAME is a credential name (`is_credential_name`: an
+  HCP variable set marked sensitive is not declared so in the configuration,
+  so the plan prints it with no marker). The `read` gutter is stripped for the
+  parse and restored. Keys,
+  resource addresses, types, names and every unmarked value stay readable; a
+  plan that does not parse whole (truncated) is left to the plaintext rules.
+* a value whose credential NAME sits one step away: the sibling `key`/`name`
+  field of a `{"key": NAME, "value": V}` object (HCP Terraform vars API,
+  GitLab CI variables API, Kubernetes `env:` entries, generic key/value
+  arrays) or the parent key of `{NAME: {"value": V}}`, in JSON (minified,
+  pretty, `read` gutter) and YAML. The name is judged by `is_credential_name`
+  and the value by the assignment rule's own value proof (a value with
+  whitespace is prose, as it is for `NAME=V`); only `V` is masked, in place
+  and unregistered. A URL value stays with the DSN/URL rules (they
+  keep user and host).
+* `is_credential_name` reads a name without its trailing environment
+  qualifiers (`_PROD`, `_PRODUCTION`, `_DEV`, `_STAGING`, `_STG`, `_QA`,
+  `_TEST`, `_LIVE`, `_SANDBOX`, numeric suffixes), and recognises
+  `…_SERVICE_ACCOUNT_JSON`, `…_CREDENTIALS_JSON` and a Slack/Discord/Teams
+  `…_WEBHOOK_URL` (whose URL is masked whole). A generic `*_URL` or `*_JSON`
+  is not a credential name.
+* a Minerva application key: `mrva-[qa-](live|dev)-` plus 32 or more
+  base64url characters (the bare prefix stays readable).
 
 ### 2.2 Not a secret
 
@@ -322,6 +373,66 @@ comment.
   route refuses symlinked logs and directories and keeps the file private, so
   the record exists before content is returned; that is a policy control, not a
   MAC.
+
+* The encoded-credential pass is bounded per scrub call (20,000 candidate
+  tokens, 4 MiB decoded): past either bound the remainder is not decoded. The
+  plaintext rules still run over all of it. Base64 of non-ASCII text is not
+  decoded (the cheap pre-check reads base64 of ASCII only).
+* The live `bash` stream (card, `jobs` peek, checkpoint `output_tail`) keeps
+  the last 256 KiB it released as lookbehind, and once an `apiVersion` has
+  appeared it holds an open `data:`/`stringData:` block until its object's
+  `kind` line or the object's end. A held data block may grow to 4 MiB (the
+  API server caps a Secret at 1 MiB); past that it is **withheld** — its bytes
+  are dropped from the stream and from the command's result, and a one-line
+  `[output withheld: …]` notice naming the safer read takes their place —
+  never released unchecked. Output with neither anchor is released exactly as
+  before.
+* The live stream holds a Terraform plan object (`{"format_version": …,
+  "terraform_version": …,` then `variables`, `planned_values`,
+  `resource_changes` or `prior_state`) until its closing brace, then releases
+  it whole, so the command's result is the masked plan with the ordinary
+  head + tail retention. State JSON (`terraform show -json` of state, `values`
+  third) is not held. While a plan is held the live card reads `[output held
+  for a credential check]`; `jobs` peek shows no new output until it is
+  released. A plan may be held up to 32 MiB (the plan rule's own parse bound;
+  measured linear, ~0.43 s/MiB). **Residual:** past 32 MiB the held bytes and
+  the rest of the plan are released to the plaintext rules only — base
+  behaviour, with a one-line notice — so a sensitive value in a plan that
+  large is not masked.
+* **Residual — truncated plans.** A plan cut before its end (`terraform show
+  -json | head -c N`, `| head -n 40`) cannot be judged: the sensitivity of an
+  input variable is declared in `configuration`, which prints after
+  `variables`, so `variables.*.value` of a sensitive variable is shown in the
+  clear. Masking every variable value on a prefix would be the broad masking
+  this policy rules out; the `terraform show -json` / Terraform Cloud
+  `json-output` steer (`DUMP_SHAPES`, `redaction_shapes.py`) points at
+  the redacted reads instead.
+* Terraform plan JSON is parsed only when it carries a plan anchor and a
+  sensitivity marker, and only up to 32 MiB; a larger or truncated plan keeps
+  only the plaintext rules. Masked plan values are not registered session-wide
+  (a sensitive attribute is often an ordinary short word).
+* The argument pass (code) and the team-bridge guard skip the Secret and
+  Terraform structure rules: a manifest the agent writes may carry an ordinary value that
+  must not be rewritten in its own program. The decode pass still runs there.
+* **Residual — a name printed after its value on a later stream release.**
+  The live `bash` stream gives the indirect-name rule a 4 KiB lookbehind, so
+  a `"key": NAME` line released before its `"value"` line is still read
+  together; a value printed BEFORE its name and released first has already
+  left. The settled result is judged whole. The YAML spelling looks at most
+  64 lines either side of a `value:` for its name (a cost bound).
+* `transcript.jsonl` (and its compaction temp) is created and kept `0600`;
+  an older transcript becomes `0600` on its next append. Every string in a
+  tool result's `details` is scrubbed before it is persisted, not only the
+  diff and the MCP payload. The details copy is masked in place and never
+  registered (a match only details shows cannot mask later output), and an
+  identifier-shaped details string (no whitespace, `=` or `:`) gets only the
+  exact values the session already holds.
+* A quoted `"key"`/`"name"` field whose value is a word-led identifier
+  (`setting_1042`, `release-20261111`) is a NAME and is kept; an opaque value
+  there (a UUID, a hex key) is still masked.
+* `client-inline-password` does not read `-p` followed by a port (all digits)
+  or a UUID as a password, and leaves `-p` to `kubectl` when `kubectl` is the
+  last command word before it (`kubectl logs -p <pod>`).
 
 ## 7. Enforcement map
 

@@ -28,5 +28,7 @@
   "tui.notices.model_default_changed": "оставляем {model}; значение по умолчанию изменено для новых сессий. /model saved применит его здесь",
   "tui.notices.model_default_changed_headline": "Модель не изменена",
   "tui.notices.effort_default_changed": "значение усилия рассуждений по умолчанию изменено для новых сессий ({effort}); /model saved применит его здесь",
-  "tui.notices.effort_default_changed_headline": "Умолчание усилия изменено"
+  "tui.notices.effort_default_changed_headline": "Умолчание усилия изменено",
+  "tui.notices.model_switch_queued": "переключение на {model} в очереди — вступит в силу на следующем шаге",
+  "tui.notices.model_switch_refused": "{model} не применён: {reason}"
 }

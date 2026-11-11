@@ -11352,6 +11352,14 @@ class RelayServer:
                     "model_id": str(model.get("model_id")),
                     **({"effort": level} if level else {}),
                     "offered_only": True,
+                    # DELIBERATELY NO ``defer_ok`` (PR #3697 review R1-M1). A
+                    # runtime acks every ``defer_ok`` switch ``queued`` BEFORE
+                    # the switch body runs, so the ``offered_only`` admission
+                    # below (``model_unknown``, a provider with no credential)
+                    # would be decided after this receipt was written and the
+                    # create would report a model it never got. A just-created
+                    # session is idle, so the synchronous answer costs nothing
+                    # and is the only one that can carry the refusal.
                 },
                 timeout_s=self.settings.op_wait_s,
             )

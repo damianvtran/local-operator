@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "6bf89c14e6c763f45645991f51b830b180ca5331db6fc1d7136984ac4bd91832",
+  "history_sha256": "6b3eda02396dd376b030947c1a8656cc87b5c6fdc8ffa977dd2a1dce58f27134",
   "entries": [
     {
       "locale": "ur",
@@ -150,6 +150,46 @@
       },
       "status": "passed",
       "note": "Corrections applied: 'اُس'/'اِس' (with diacritics) -> plain 'اس' and 'متبادل' -> 'فال بیکس'. Delta review (NOT a full re-audit of the namespace) of the two new keys team_bridge_screening_model.label/.help added by the screening-preference change, en wire.settings sha 206f2b12. Audit by the independent verifier specialist (fallback disclosed: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol -> deepseek/deepseek-flash); verdict across the seven locales: 0 blockers, 4 major, 7 minor. This locale's required findings were applied and the SAME auditor re-checked the changed strings and passed them; no unresolved blocker/major remains. Source copy written by the coder agent, itself served on deepseek/deepseek-flash (same fallback chain). read_route_verified false: the audit read the catalogue, not a live surface."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "f578d07fc5d37b7011d665647d4354db9e675794bd6764f1ce9c34d05da17f67",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3753 implementer, remediation 90fdf91871d)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "00b3277b15a0295d59120f3d5bbc595127cef93523095260fba139d51696c0da",
+      "translator": {
+        "agent": "coder agent (local-operator lopdev team subagent, PR #3753 implementer, remediation 90fdf91871d)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Round 3 hash-convergence receipt for PR #3753 after merging origin/main 9cd230511fb1 at a7473381ab6. This is not a new linguistic audit. en wire.settings is 00b3277b15a0. This locale's target is ea272afda3c1aca91f26a7d97fe02f535842d50ae527c12bb72dfd0fba0da1f9. It has 859 keys: 851 are byte-identical to main 9cd230511fb1, covered by main's row with source 206f2b124405 (#3632 dbcbb0455aee, which added team_bridge_screening_model.label/.help; delta-reviewed by verifier on deepseek/deepseek-flash, passed, 0 unresolved). The other 8 are the wire.settings.compaction_idle_* leaves, byte-identical to 90fdf91871d, which round 2 (i18n-audit-idle-r2, source f578d07fc5d3, target f590d4e79869ffb0) passed. No other value changed."
     }
   ]
 }

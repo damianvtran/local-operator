@@ -430,8 +430,11 @@ job rather than a hundred edits:
 | `pilot.pause()` | 539 |
 | `sleep(...)` | 403 |
 
-`tests/unit/tui/_settle.py` is the shared helper: it pumps a bounded COUNT of
-event-loop turns until the product's own condition holds. A turn count survives
-contention where a wall-clock budget does not — a loaded host inflates how long
-each turn takes, not how many turns the app needs.
+`tests/unit/tui/waiting.py::settle` is the shared helper: each turn it joins the
+queued messages, the named product worker groups, any tracked thread hops and
+the after-refresh queue, then checks the product's own condition, bounded by a
+wall deadline (30 s default). A turn count is not a load-invariant bound: a real
+`Pilot.pause()` costs at least ~20 ms and up to ~1 s under load (Textual 8.2.8
+`wait_for_idle`), so a fixed count is seconds on an idle host and minutes on a
+loaded one. Its "Convention" block says how to call it.
 
