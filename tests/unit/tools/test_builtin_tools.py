@@ -334,6 +334,34 @@ async def test_bash_streams_updates_while_running(tools, context) -> None:
 
 
 @pytest.mark.asyncio
+async def test_bash_live_view_says_a_terraform_plan_is_held(tools, context) -> None:
+    # PR #3756 round 2 (R2-1 (c)): a plan held whole for the sensitive-value
+    # check kept the card at "no output yet"; it now says why, live only.
+    script = (
+        "import sys, time\n"
+        'sys.stdout.write(\'before\\n{\\n  "format_version": "1.2",\\n'
+        '  "terraform_version": "1.9.5",\\n  "resource_changes": [\\n\')\n'
+        "sys.stdout.flush(); time.sleep(1.2)\n"
+        "sys.stdout.write('  ],\\n  \"planned_values\": {}\\n}\\nafter\\n')\n"
+    )
+    script_path = Path(context.cwd) / "plan.py"
+    script_path.write_text(script)
+    updates: list[str] = []
+
+    def on_update(update) -> None:
+        from local_operator.harness.types import TextContent
+
+        updates.append("".join(b.text for b in update.content if isinstance(b, TextContent)))
+
+    cmd = f"python3 {script_path}"
+    result = await tools["bash"].execute("c", {"command": cmd}, None, on_update, context)
+    assert result.is_error is False
+    assert any(builtin._LIVE_HELD_TEXT in u for u in updates)
+    assert builtin._LIVE_HELD_TEXT not in result.text
+    assert '"resource_changes"' in result.text and "after" in result.text
+
+
+@pytest.mark.asyncio
 async def test_bash_large_output_truncated(tools, context) -> None:
     # RT-12/RT-30: one combined budget, head+tail survive, marker present,
     # result never exceeds the limit.

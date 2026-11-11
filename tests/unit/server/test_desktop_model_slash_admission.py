@@ -54,8 +54,16 @@ class _SlashClient(AttachClient):
         self._connected = True
 
     async def slash_result(
-        self, command: str, args: str, images: list[dict[str, str]] | None = None
+        self,
+        command: str,
+        args: str,
+        images: list[dict[str, str]] | None = None,
+        *,
+        defer_ok: bool = False,
+        request_id: str | None = None,
     ) -> Any:
+        # Same signature as ``AttachClient.slash_result`` (the deferred keys
+        # are keyword-only there); this seam never defers.
         self.calls.append((command, args))
         return {
             "kind": "notice",
@@ -293,7 +301,9 @@ async def test_model_slash_lost_socket_ack_keeps_busy_disposition(desktop, tmp_p
             settled.set()
 
     class _ShortAckClient(AttachClient):
-        async def slash_result(self, command, args, images=None):
+        async def slash_result(
+            self, command, args, images=None, *, defer_ok=False, request_id=None
+        ):
             return await self._request_payload(
                 "slash_result", command=command, args=args, images=images or [], deadline_s=0.05
             )

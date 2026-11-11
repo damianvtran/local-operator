@@ -186,6 +186,28 @@ BIND_FAILED_REASON = "owner could not prepare this view; the session is alive �
 #: this client cannot read.
 _READ_LIMIT_BYTES = 1 << 20
 
+#: The ``detail`` a current runtime answers EVERY ``defer_ok`` switch with,
+#: before the switch runs (``server._run_deferrable_switch``): accepted, not yet
+#: applied. Not success and not an error — the outcome arrives later as state
+#: ``settings_result``/``settings_results`` keyed by ``request_id``. A caller
+#: that must report a refusal on the reply itself must not send ``defer_ok``.
+QUEUED_DETAIL = "queued"
+
+
+def _settings_defer_fields(defer_ok: bool, request_id: str | None) -> dict[str, Any]:
+    """The optional ``defer_ok``/``request_id`` keys, omitted when unset.
+
+    Omitted rather than sent as ``false``/``null`` so a caller that does not opt
+    in sends the byte-identical frame it always has.
+    """
+    fields: dict[str, Any] = {}
+    if defer_ok:
+        fields["defer_ok"] = True
+    if request_id:
+        fields["request_id"] = request_id
+    return fields
+
+
 #: Disconnect reason for a frame too large to read. Distinct from owner death
 #: because the remedy is different in kind: the owner is alive and healthy, and
 #: what failed is our ability to parse what it sent. Kept a named constant so a
@@ -275,6 +297,42 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
 
     #: The owner holds a live connection; an unacknowledged request is worth
     #: resending. Read through ``getattr`` by ``server/routes/desktop_sessions.py``.
+    owner_alive = True
+
+
+class OwnerWelcomeTimeout(ConnectionError):
+    """The owner ACCEPTED the dial and did not send its welcome in time.
+
+    WHY THIS IS TYPED (the Aida incident, 2026-11-09): a busy owner — a long
+    session mid-turn with a backlog of peer wakes — answered a desktop model pick
+    with ``503 runtime_unreachable`` ("Session owner is unavailable. Reconnect
+    and reconcile…") while it was live and a hand retry switched it. A bind
+    whose welcome read expired on THIS client's own timer surfaced as a bare
+    ``ConnectionError``, and the desktop control ladder
+    (``server/routes/desktop_sessions.py::errors``) maps a bare one to
+    unreachable. Only the ``attach_existing(control_budget=...)`` branch
+    converted a welcome expiry into the busy disposition, and only when ITS
+    outer deadline fired first; every other bind path (``_ensure_bound`` /
+    ``bind_runtime``, recovery, ``attach_existing`` without a control budget)
+    waits on this timer and so reported a live owner as gone.
+
+    WHY IT CANNOT MISLABEL A DEAD OWNER: this is raised only after
+    ``open_connection`` to the record's port SUCCEEDED and the auth frame was
+    written, i.e. a process holds that listening socket. A dead owner's port
+    refuses the connect (``owner socket unreachable``, raised above), and an
+    owner that closes the socket makes ``readline`` return ``b""`` (a different
+    refusal below); both stay plain ``ConnectionError`` and keep
+    ``runtime_unreachable``. Nothing has been sent to the session yet — the
+    welcome precedes every request frame — so resending is safe.
+
+    ``ConnectionError`` ONLY, deliberately not ``TimeoutError`` like
+    :class:`OwnerAckTimeout`: every caller of ``connect`` already catches
+    ``ConnectionError`` and none of their control flow changes; the class
+    exists solely to carry ``owner_alive`` to the ladder. The message is the
+    historical one, which the TUI's resume retry and its tests match.
+    """
+
+    #: Same disposition and duck-checked name as :class:`OwnerAckTimeout`.
     owner_alive = True
 
 
@@ -1310,7 +1368,9 @@ class AttachClient:
         try:
             first = await asyncio.wait_for(reader.readline(), timeout=ACK_TIMEOUT_S)
         except TimeoutError as exc:
-            raise ConnectionError("owner did not send its state") from exc
+            # Typed so a live-but-busy owner is retryable, not "unavailable";
+            # see ``OwnerWelcomeTimeout`` for why that cannot mislabel a dead one.
+            raise OwnerWelcomeTimeout("owner did not send its state") from exc
         except ValueError as exc:
             # The same overrun the pump handles, on the WELCOME frame — the one
             # read that happens before the pump exists. Named rather than left
@@ -2370,18 +2430,37 @@ class AttachClient:
         images: list[dict[str, str]] | None = None,
         *,
         bridge_ack: bool = False,
+        defer_ok: bool = False,
+        request_id: str | None = None,
     ) -> Any:
-        """Run one shared slash command on the owner; return its typed outcome.
+        """Run a shared slash, optionally accepting a deferred settings receipt.
 
-        The ``result`` frame carries a :class:`SlashResult` payload the invoker
-        renders locally, replacing the synthetic ``ran /…`` receipt that left
-        the follower's terminal with a transport message while the real answer
-        painted in the owner's.
+        ``queued`` is an explicit typed notice, never ``None``: callers must
+        distinguish acceptance from the later applied/refused outcome on state.
+        Legacy calls omit both new keys and keep their original result shape.
         """
-        extra: dict[str, Any] = {"bridge_ack": True} if bridge_ack else {}
-        return await self._request_payload(
-            "slash_result", command=command, args=args, images=images or [], **extra
+        fields = _settings_defer_fields(defer_ok, request_id)
+        # ``bridge_ack`` (team-bridge-egress.md: "bridge_ack") rides beside the
+        # deferral keys and, like them, only when set: an unmarked frame stays
+        # byte-identical, and a deferred ``approvals auto`` still carries the
+        # marker the owner re-checks when the queued body finally applies.
+        if bridge_ack:
+            fields["bridge_ack"] = True
+        if not defer_ok:
+            return await self._request_payload(
+                "slash_result", command=command, args=args, images=images or [], **fields
+            )
+        reply = await self._request_frame(
+            "slash_result", command=command, args=args, images=images or [], **fields
         )
+        self._raise_for_reply_error(reply)
+        if reply.get("queued") is True:
+            return {
+                "kind": "notice",
+                "text": QUEUED_DETAIL,
+                "data": {"queued": True, "request_id": request_id},
+            }
+        return reply.get("data")
 
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
         """Copy the authenticated owner's committed history, without interrupting it."""
@@ -2541,21 +2620,42 @@ class AttachClient:
             **fields,
         )
 
-    async def set_model(self, provider: str, model_id: str, effort: str | None = None) -> str:
+    async def set_model(
+        self,
+        provider: str,
+        model_id: str,
+        effort: str | None = None,
+        *,
+        defer_ok: bool = False,
+        request_id: str | None = None,
+    ) -> str:
         """Select a model on the owner, at ``effort`` when one was chosen.
 
         The key is OMITTED when no level was chosen rather than sent as null, so
         to an owner that predates it the frame is byte-identical to the one it
         has always received (the dispatch reads the key it knows and ignores
         the rest, and there is no protocol bump for an optional field).
+
+        ``defer_ok``/``request_id`` follow the same omit-when-unset rule. With
+        ``defer_ok`` a current runtime ALWAYS answers :data:`QUEUED_DETAIL`
+        immediately, idle or busy, before the switch body (and any refusal)
+        runs; the outcome arrives as state ``settings_result``/
+        ``settings_results`` keyed by ``request_id``. An older runtime ignores
+        both and answers on landing.
         """
         fields: dict[str, Any] = {"provider": provider, "model_id": model_id}
         if effort:
             fields["effort"] = effort
+        fields.update(_settings_defer_fields(defer_ok, request_id))
         return await self._request("set_model", **fields)
 
-    async def set_effort(self, effort: str) -> str:
-        return await self._request("set_effort", effort=effort)
+    async def set_effort(
+        self, effort: str, *, defer_ok: bool = False, request_id: str | None = None
+    ) -> str:
+        """Set the owner's reasoning level; ``defer_ok`` as :meth:`set_model`."""
+        return await self._request(
+            "set_effort", effort=effort, **_settings_defer_fields(defer_ok, request_id)
+        )
 
     async def rehome_if_current(self, expected: str, provider: str, model_id: str) -> str:
         """Move the owner off ``expected`` only if it is STILL exactly ``expected``.

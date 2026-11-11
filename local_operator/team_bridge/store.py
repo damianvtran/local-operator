@@ -1061,6 +1061,30 @@ def _owner_from_row(row: sqlite3.Row) -> OwnerSnapshot:
     ).validated()
 
 
+def _verified_sender(sender_account_id: Any, sender_kind: Any) -> str:
+    """The verified sender id for physical attribution, or ``""`` (unattributed).
+
+    The SAME classification the logical rows use (``_reserve_bucket``): the
+    hub-stated sender ACCOUNT is the bucket key, with or without a stated
+    class (an account whose class the lane does not state is still that
+    sender — round 1 S-1/S-2 of the budget work). A class outside the closed
+    ``human``/``agent`` set, or no account, is unattributed.
+    """
+
+    if (
+        isinstance(sender_account_id, str)
+        and sender_account_id
+        and sender_kind
+        in (
+            "",
+            "human",
+            "agent",
+        )
+    ):
+        return sender_account_id
+    return ""
+
+
 def _owner_key(owner: OwnerSnapshot) -> str:
     """The namespace key: hub origin + account + tenant + endpoint.
 
@@ -3535,6 +3559,22 @@ class Store:
         if "approved_serving" not in columns:
             conn.execute("ALTER TABLE screening_policy ADD COLUMN approved_serving TEXT")
 
+    @staticmethod
+    def _ensure_policy_privacy_column(conn: sqlite3.Connection) -> None:
+        """Add ``privacy_generation`` (A8) to a ``screening_policy`` that predates it.
+
+        Additive, ``NOT NULL DEFAULT 0`` (= privacy pass off), no schema stamp:
+        the same rule as :meth:`_ensure_policy_serving_column`. A legacy row
+        therefore reads as an OFF publication, which is exactly what it was.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_policy)")}
+        if "privacy_generation" not in columns:
+            conn.execute(
+                "ALTER TABLE screening_policy "
+                "ADD COLUMN privacy_generation INTEGER NOT NULL DEFAULT 0"
+            )
+
     def note_unusable_screening_pass(self, owner: OwnerSnapshot, message_id: str) -> int:
         """Count one more pass on which EVERY hop answered unusably; return the total.
 
@@ -5537,8 +5577,16 @@ class Store:
         expected_epoch: int | None = None,
         create_only: bool = False,
         approved_serving: "Sequence[tuple[str, str]] | None" = None,
+        privacy_generation: int = 0,
     ) -> int:
         """Publish the current accepted policy; return its durable epoch.
+
+        ``privacy_generation`` (A8, memo S-2) is the operator's privacy-pass
+        control generation this publication was minted under while ENABLED,
+        ``0`` while off. It is checked against the durable control row INSIDE
+        this transaction, so a stale publisher holding an enabled
+        ``_CyclePolicy`` after a disable (or an off one after an enable)
+        refuses ``policy_stale`` instead of republishing old authority.
 
         ``approved_serving`` is the full screening chain's ``(provider,
         model)`` set (see :func:`policy_serving_models`); stored sorted as
@@ -5567,10 +5615,12 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             self._ensure_policy_serving_column(conn)
+            self._ensure_policy_privacy_column(conn)
+            self._require_privacy_generation(conn, int(privacy_generation))
             key = _owner_key(owner)
             row = conn.execute(
                 "SELECT version, template_sha256, default_model, revision, epoch, "
-                "approved_serving FROM screening_policy WHERE owner_key = ?",
+                "approved_serving, privacy_generation FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if row is not None and create_only:
@@ -5599,8 +5649,17 @@ class Store:
                 conn.execute(
                     "INSERT INTO screening_policy "
                     "(owner_key, version, template_sha256, default_model, revision, epoch, "
-                    "accepted_at, approved_serving) VALUES (?,?,?,?,?,1,?,?)",
-                    (key, version, template_sha256, default_model, revision, time.time(), serving),
+                    "accepted_at, approved_serving, privacy_generation) VALUES (?,?,?,?,?,1,?,?,?)",
+                    (
+                        key,
+                        version,
+                        template_sha256,
+                        default_model,
+                        revision,
+                        time.time(),
+                        serving,
+                        int(privacy_generation),
+                    ),
                 )
                 return 1
             if expected_epoch is not None and int(row["epoch"]) != expected_epoch:
@@ -5614,13 +5673,14 @@ class Store:
                 and row["default_model"] == default_model
                 and row["revision"] == revision
                 and row["approved_serving"] == serving
+                and int(row["privacy_generation"] or 0) == int(privacy_generation)
             )
             if unchanged:
                 return int(row["epoch"])
             conn.execute(
                 "UPDATE screening_policy SET version = ?, template_sha256 = ?, "
                 "default_model = ?, revision = ?, epoch = ?, accepted_at = ?, "
-                "approved_serving = ? WHERE owner_key = ?",
+                "approved_serving = ?, privacy_generation = ? WHERE owner_key = ?",
                 (
                     version,
                     template_sha256,
@@ -5629,6 +5689,7 @@ class Store:
                     int(row["epoch"]) + 1,
                     time.time(),
                     serving,
+                    int(privacy_generation),
                     key,
                 ),
             )
@@ -6494,6 +6555,542 @@ class Store:
                 "reservation without a registered input proof cannot bind a job",
             )
 
+    # -- A8 privacy pass (privacy_pass.py; design memo §3, S-1, S-2) ---------
+    #
+    # WHY THESE LIVE HERE. The privacy pass is a production admission rule, so
+    # its proof must be checked where every other admission binding is: inside
+    # the native write transactions that reserve a physical send, publish a
+    # policy and commit an allow receipt. Everything below is ADDITIVE (the
+    # ``_ensure_*`` rule: created on the paths that touch it, no schema stamp
+    # moves) and CONTENTLESS: references, digests, closed codes and counts —
+    # never a body, prompt, reply, model reason or exception prose.
+
+    @staticmethod
+    def _ensure_privacy_tables(conn: sqlite3.Connection) -> None:
+        """Create the control row table and the decision table if absent.
+
+        ``privacy_control`` is ONE row per config root (this Store), outside
+        every enrollment/endpoint namespace, so an old endpoint cannot restore
+        an earlier enable. Only :meth:`advance_privacy_control` writes it.
+        ``privacy_decisions`` is the durable composite decision: one row per
+        (owner, message, envelope, policy revision, control generation, rule),
+        with the first stage's provenance and the privacy stage's lifecycle.
+        """
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS privacy_control ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), enabled INTEGER NOT NULL, "
+            "generation INTEGER NOT NULL, digest TEXT NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS privacy_decisions ("
+            "decision_id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+            "envelope_digest TEXT NOT NULL, body_sha256 TEXT NOT NULL, "
+            "admission_revision TEXT NOT NULL, policy_epoch INTEGER NOT NULL, "
+            "control_generation INTEGER NOT NULL, rule_version TEXT NOT NULL, "
+            "template_sha256 TEXT NOT NULL, trigger TEXT NOT NULL, channel TEXT NOT NULL, "
+            "first_preferred INTEGER NOT NULL, first_provider TEXT NOT NULL, "
+            "first_model TEXT NOT NULL, first_disposition TEXT NOT NULL, "
+            "first_attempt_id TEXT NOT NULL, stage_state TEXT NOT NULL, "
+            "lease_holder TEXT, lease_until REAL, deadline_at REAL, reservation_id TEXT, "
+            "route TEXT, privacy_result TEXT, privacy_model TEXT, final TEXT NOT NULL, "
+            "hold_code TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+            "completed_at REAL, "
+            "UNIQUE (owner_key, message_id, envelope_digest, admission_revision, "
+            "control_generation, rule_version))"
+        )
+
+    def _privacy_control(self, conn: sqlite3.Connection) -> dict[str, Any] | None:
+        self._ensure_privacy_tables(conn)
+        row = conn.execute(
+            "SELECT enabled, generation, digest FROM privacy_control WHERE id = 1"
+        ).fetchone()
+        return None if row is None else {k: row[k] for k in ("enabled", "generation", "digest")}
+
+    def _require_privacy_generation(self, conn: sqlite3.Connection, minted: int) -> None:
+        """Refuse unless ``minted`` (0 = off) agrees with the durable control row.
+
+        * row absent (never initialized) or disabled: only an OFF mint passes;
+        * row enabled at generation G: only a mint at exactly G passes.
+        A damaged row refuses. This is the native half of S-2: the fresh config
+        read happens in the caller, under the config lock; this transaction
+        makes the decision atomic with the write it guards.
+        """
+
+        try:
+            control = self._privacy_control(conn)
+            enabled = 0 if control is None else int(control["enabled"])
+            generation = 0 if control is None else int(control["generation"])
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise StoreRefused("control_unavailable", "privacy control row unreadable") from error
+        live = generation if enabled == 1 else 0
+        if enabled not in (0, 1) or int(minted) != live:
+            raise StoreRefused("policy_stale", "privacy control generation moved")
+
+    def _check_physical_sender(
+        self, conn: sqlite3.Connection, scope: str, sender: str, now: float
+    ) -> None:
+        """S-1: refuse ONE more physical send past the verified sender's share.
+
+        The ceiling is the EXISTING ``screening_budget.sender`` (no new pool,
+        no additive allowance), counted over PHYSICAL ``http`` rows in the same
+        rolling 3600 s window (``at > now - 3600``) as every other ceiling.
+        Bucket = (hub+recipient account scope, verified sender) — independent
+        of message id, body, endpoint, template, policy revision and flag
+        round trips, so a fresh id or a variant body spends the same share.
+        CONSERVATIVE by design (memo S-1 item 4): rows with NO attribution
+        (pre-upgrade history, unknown provenance) count against every named
+        sender, and an unattributed caller (``sender == ""``) counts ALL the
+        account's physical sends. Enforced only while A8 is enabled.
+        """
+
+        spent = conn.execute(
+            "SELECT COUNT(*) FROM screening_attempts "
+            "WHERE account_scope = ? AND kind = 'http' AND at > ? AND "
+            "(? = '' OR sender_account_id = ? OR sender_account_id IS NULL)",
+            (scope, now - 3600.0, sender, sender),
+        ).fetchone()[0]
+        if int(spent) >= self.screening_budget.sender:
+            raise StoreRefused("sender_exhausted", "physical sender sends/hour exhausted")
+
+    def _require_privacy_proof(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        *,
+        message_id: str,
+        envelope_digest: str | None,
+        admission_revision: str | None,
+        decision_id: str | None,
+    ) -> None:
+        """The NATIVE allow fence: an allow under A8 needs a matching proof.
+
+        Required when the control row is enabled OR the published policy was
+        minted enabled. The proof row must bind the same owner, message,
+        envelope, revision and the CURRENT control generation, and be settled
+        ``bypass`` (trusted preferred first hop) or ``admit`` with a completed
+        privacy stage whose result was ``deliver``. A missing row is never
+        success.
+        """
+
+        self._ensure_policy_privacy_column(conn)
+        control = self._privacy_control(conn)
+        enabled = control is not None and int(control["enabled"]) == 1
+        policy = conn.execute(
+            "SELECT privacy_generation FROM screening_policy WHERE owner_key = ?",
+            (_owner_key(owner),),
+        ).fetchone()
+        minted = int(policy["privacy_generation"] or 0) if policy is not None else 0
+        if not enabled and minted == 0:
+            # A8 off and the policy minted off: the legacy allow, unchanged.
+            return
+        if not enabled or control is None or minted != int(control["generation"]):
+            raise StoreRefused("policy_stale", "privacy control moved before commit")
+        if not decision_id:
+            raise StoreRefused("privacy_proof_missing", "allow without privacy evidence")
+        row = conn.execute(
+            "SELECT * FROM privacy_decisions WHERE decision_id = ?", (decision_id,)
+        ).fetchone()
+        if (
+            row is None
+            or row["owner_key"] != _owner_key(owner)
+            or row["message_id"] != message_id
+            or row["envelope_digest"] != envelope_digest
+            or row["admission_revision"] != admission_revision
+            or int(row["control_generation"]) != int(control["generation"])
+        ):
+            raise StoreRefused("privacy_proof_missing", "privacy evidence does not bind this allow")
+        if row["final"] == "bypass" and int(row["first_preferred"]) == 1:
+            return
+        if (
+            row["final"] == "admit"
+            and row["stage_state"] == "completed"
+            and row["privacy_result"] == "deliver"
+            and row["first_disposition"] == "deliver"
+        ):
+            return
+        raise StoreRefused("privacy_proof_missing", "privacy evidence is not a deliver")
+
+    def privacy_control_row(self) -> dict[str, Any] | None:
+        """The durable control row (``None`` = never initialized); raises when unreadable."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            return self._privacy_control(conn)
+
+    def advance_privacy_control(self, *, enabled: bool) -> int:
+        """Write the control row and ADVANCE its generation; return the new generation.
+
+        Called only by ``privacy_pass.write_privacy_pass_enabled`` while it holds
+        ``config_write_lock`` (lock order: config lock, then this transaction).
+        Every call advances, so false->true->false->true never revisits a
+        generation (no ABA).
+        """
+
+        from local_operator.team_bridge.privacy_pass import (
+            PRIVACY_RULE_VERSION,
+            PRIVACY_TEMPLATE_SHA256,
+        )
+
+        digest = hashlib.sha256(
+            f"{PRIVACY_RULE_VERSION}|{PRIVACY_TEMPLATE_SHA256}|{int(enabled)}".encode("utf-8")
+        ).hexdigest()
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            current = self._privacy_control(conn)
+            generation = 1 if current is None else int(current["generation"]) + 1
+            conn.execute(
+                "INSERT INTO privacy_control (id, enabled, generation, digest, updated_at) "
+                "VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, "
+                "generation = excluded.generation, digest = excluded.digest, "
+                "updated_at = excluded.updated_at",
+                (int(bool(enabled)), generation, digest, time.time()),
+            )
+            return generation
+
+    def find_privacy_decision(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        message_id: str,
+        envelope_digest: str,
+        admission_revision: str,
+        control_generation: int,
+        rule_version: str,
+    ) -> dict[str, Any] | None:
+        """The existing decision for this exact binding, or ``None``."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._ensure_privacy_tables(conn)
+            row = conn.execute(
+                "SELECT * FROM privacy_decisions WHERE owner_key = ? AND message_id = ? AND "
+                "envelope_digest = ? AND admission_revision = ? AND control_generation = ? "
+                "AND rule_version = ?",
+                (
+                    _owner_key(owner),
+                    message_id,
+                    envelope_digest,
+                    admission_revision,
+                    int(control_generation),
+                    rule_version,
+                ),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def open_privacy_decision(self, owner: OwnerSnapshot, **fields: Any) -> dict[str, Any]:
+        """Get-or-create the decision for its binding; return the row.
+
+        Idempotent per binding (the UNIQUE key), so a replay of the same
+        message under the same policy and control generation RESUMES its
+        decision instead of minting a second one. The first stage's parsed
+        outcome and provenance are persisted HERE, before any privacy await.
+
+        RE-STAMP (round 1 M-1). A row that never entered privacy work -- its
+        trigger is ``first_not_deliver`` or ``preferred_bypass`` and its stage
+        is still ``pending`` -- records only the LATEST first-stage attempt,
+        whose commit may not have landed (``finish_screening`` refused, the
+        process died). The legacy retry re-draws that first stage anyway, so
+        such a row is re-stamped with the CURRENT attempt's trigger and
+        ``first_*`` fields and re-opened. Freezing it instead left a
+        non-preferred retry looping on ``privacy_pending`` (paying the first
+        stage every time) and a preferred retry unable to prove its bypass.
+        A ``nonpreferred_deliver`` row is NEVER re-stamped: once a message's
+        recorded first verdict required the privacy stage, that requirement,
+        its claim and any settled privacy hold stand for the binding, so a
+        re-drawn first stage cannot shop its way out (S-1); the caller
+        routes such a retry through the stored row (``decide_admission``).
+        """
+
+        from local_operator.team_bridge.privacy_pass import (
+            PRIVACY_TEMPLATE_SHA256,
+            new_decision_id,
+        )
+
+        now = time.time()
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_privacy_tables(conn)
+            key = _owner_key(owner)
+            binding = (
+                key,
+                fields["message_id"],
+                fields["envelope_digest"],
+                fields["admission_revision"],
+                int(fields["control_generation"]),
+                fields["rule_version"],
+            )
+            row = conn.execute(
+                "SELECT * FROM privacy_decisions WHERE owner_key = ? AND message_id = ? AND "
+                "envelope_digest = ? AND admission_revision = ? AND control_generation = ? "
+                "AND rule_version = ?",
+                binding,
+            ).fetchone()
+            if row is not None:
+                if (
+                    row["trigger"] in ("first_not_deliver", "preferred_bypass")
+                    and row["stage_state"] == "pending"
+                    and row["final"] in ("open", "bypass", "first_stage")
+                    and row["hold_code"] is None
+                    and row["reservation_id"] is None
+                ):
+                    # No privacy claim, send or hold was ever recorded on this
+                    # row (the conjunction above), so re-stamping loses no
+                    # evidence and spends nothing.
+                    conn.execute(
+                        "UPDATE privacy_decisions SET policy_epoch = ?, trigger = ?, "
+                        "channel = ?, first_preferred = ?, first_provider = ?, "
+                        "first_model = ?, first_disposition = ?, first_attempt_id = ?, "
+                        "final = 'open', updated_at = ? WHERE decision_id = ?",
+                        (
+                            int(fields["policy_epoch"]),
+                            fields["trigger"],
+                            fields["channel"],
+                            int(bool(fields["first_preferred"])),
+                            fields["first_provider"],
+                            fields["first_model"],
+                            fields["first_disposition"],
+                            fields["first_attempt_id"],
+                            now,
+                            row["decision_id"],
+                        ),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM privacy_decisions WHERE decision_id = ?",
+                        (row["decision_id"],),
+                    ).fetchone()
+                return dict(row)
+            decision_id = new_decision_id()
+            conn.execute(
+                "INSERT INTO privacy_decisions (decision_id, owner_key, message_id, "
+                "envelope_digest, body_sha256, admission_revision, policy_epoch, "
+                "control_generation, rule_version, template_sha256, trigger, channel, "
+                "first_preferred, first_provider, first_model, first_disposition, "
+                "first_attempt_id, stage_state, final, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','open',?,?)",
+                (
+                    decision_id,
+                    key,
+                    fields["message_id"],
+                    fields["envelope_digest"],
+                    fields["body_sha256"],
+                    fields["admission_revision"],
+                    int(fields["policy_epoch"]),
+                    int(fields["control_generation"]),
+                    fields["rule_version"],
+                    PRIVACY_TEMPLATE_SHA256,
+                    fields["trigger"],
+                    fields["channel"],
+                    int(bool(fields["first_preferred"])),
+                    fields["first_provider"],
+                    fields["first_model"],
+                    fields["first_disposition"],
+                    fields["first_attempt_id"],
+                    now,
+                    now,
+                ),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM privacy_decisions WHERE decision_id = ?", (decision_id,)
+                ).fetchone()
+            )
+
+    def settle_privacy_decision(
+        self,
+        owner: OwnerSnapshot,
+        decision_id: str,
+        *,
+        final: str,
+        hold_code: str | None,
+        privacy_result: str | None = None,
+    ) -> None:
+        """Record the decision's final disposition (closed vocabulary only).
+
+        A settled ``hold`` is never re-opened to ``admit`` by this method:
+        only an explicit operator re-evaluation mints a new decision.
+        """
+
+        if final not in ("admit", "bypass", "first_stage", "hold"):
+            raise StoreRefused("invalid_outcome", "unknown privacy final")
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._ensure_privacy_tables(conn)
+            row = conn.execute(
+                "SELECT final, owner_key FROM privacy_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or row["owner_key"] != _owner_key(owner):
+                raise StoreRefused("unknown_attempt", "no such privacy decision")
+            if row["final"] == "hold" and final != "hold":
+                raise StoreRefused("write_once_conflict", "a privacy hold is final")
+            conn.execute(
+                "UPDATE privacy_decisions SET final = ?, hold_code = ?, "
+                "privacy_result = COALESCE(?, privacy_result), "
+                "stage_state = CASE WHEN stage_state = 'pending' AND ? IS NOT NULL "
+                "THEN 'not_run' ELSE stage_state END, updated_at = ? WHERE decision_id = ?",
+                (final, hold_code, privacy_result, privacy_result, time.time(), decision_id),
+            )
+
+    def claim_privacy_send(
+        self,
+        owner: OwnerSnapshot,
+        decision_id: str,
+        *,
+        turn: str,
+        control_generation: int,
+        expected_epoch: int,
+        admission_revision: str,
+        sender_account_id: str,
+        sender_kind: str,
+        template_sha256: str,
+        route: str,
+        deadline_at: float,
+    ) -> str:
+        """Atomically claim the privacy stage's ONE physical send; return its row id.
+
+        ONE write transaction (the caller holds the config lock around it):
+        live owner generation; the published policy still at the captured
+        epoch/revision and minted at this control generation, which must be
+        the durable row's (S-2 prewire); the account turn still ours; the
+        stage still ``pending`` (a ``claimed`` stage is never re-claimed — the
+        one-send token); the account physical ceiling AND the verified
+        sender's physical share (S-1) both have room. Then the attributed
+        ``http`` row is inserted and the stage marked ``claimed``. No budget
+        means no send; a refusal inserts nothing.
+        """
+
+        now = time.time()
+        reservation = str(uuid.uuid4())
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_privacy_tables(conn)
+                self._ensure_policy_privacy_column(conn)
+                self._ensure_attempt_allocation_columns(conn)
+                self._require_privacy_generation(conn, int(control_generation))
+                key = _owner_key(owner)
+                policy = conn.execute(
+                    "SELECT revision, epoch, privacy_generation FROM screening_policy "
+                    "WHERE owner_key = ?",
+                    (key,),
+                ).fetchone()
+                if (
+                    policy is None
+                    or policy["revision"] != admission_revision
+                    or int(policy["epoch"]) != int(expected_epoch)
+                    or int(policy["privacy_generation"] or 0) != int(control_generation)
+                ):
+                    raise StoreRefused("policy_stale", "published policy moved before privacy send")
+                schedule = conn.execute(
+                    "SELECT lease_holder, lease_expires FROM screening_schedule "
+                    "WHERE owner_key = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+                if (
+                    schedule is None
+                    or schedule["lease_holder"] != turn
+                    or float(schedule["lease_expires"] or 0.0) <= now
+                ):
+                    raise StoreRefused("retry_later", "account turn not held for privacy send")
+                row = conn.execute(
+                    "SELECT owner_key, stage_state, final, message_id, control_generation "
+                    "FROM privacy_decisions WHERE decision_id = ?",
+                    (decision_id,),
+                ).fetchone()
+                if row is None or row["owner_key"] != key:
+                    raise StoreRefused("unknown_attempt", "no such privacy decision")
+                if row["stage_state"] != "pending" or row["final"] != "open":
+                    raise StoreRefused("stage_taken", "privacy stage already claimed")
+                if int(row["control_generation"]) != int(control_generation):
+                    raise StoreRefused("policy_stale", "decision minted under another generation")
+                scope = self._account_scope(owner)
+                spent = conn.execute(
+                    "SELECT COUNT(*) FROM screening_attempts "
+                    "WHERE account_scope = ? AND kind = 'http' AND at > ?",
+                    (scope, now - 3600.0),
+                ).fetchone()[0]
+                if int(spent) >= self.screening_budget.account:
+                    raise StoreRefused("budget_exhausted", "http attempts/hour/account exhausted")
+                sender = _verified_sender(sender_account_id, sender_kind)
+                self._check_physical_sender(conn, scope, sender, now)
+                conn.execute(
+                    "INSERT INTO screening_attempts (attempt_id, kind, account_scope, owner_key, "
+                    "message_id, fingerprint, at, sender_account_id, sender_kind) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        reservation,
+                        "http",
+                        scope,
+                        key,
+                        row["message_id"],
+                        f"privacy:{decision_id}:{template_sha256}",
+                        now,
+                        sender or None,
+                        (sender_kind or None) if sender else None,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE privacy_decisions SET stage_state = 'claimed', lease_holder = ?, "
+                    "lease_until = ?, deadline_at = ?, reservation_id = ?, route = ?, "
+                    "updated_at = ? WHERE decision_id = ?",
+                    (turn, deadline_at, deadline_at, reservation, route, now, decision_id),
+                )
+                return reservation
+        except StoreRefused as refusal:
+            self._note_budget_refusal(owner, refusal.code)
+            raise
+
+    def complete_privacy_stage(
+        self,
+        owner: OwnerSnapshot,
+        decision_id: str,
+        *,
+        privacy_result: str,
+        privacy_model: str,
+        hold_code: str | None,
+    ) -> None:
+        """``claimed`` -> ``completed`` exactly once (a late completion is fenced).
+
+        Settles ``final`` in the same write: ``admit`` only for a valid
+        identity-verified ``deliver``, ``hold`` with its closed code otherwise.
+        """
+
+        now = time.time()
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._ensure_privacy_tables(conn)
+            row = conn.execute(
+                "SELECT owner_key, stage_state, final FROM privacy_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or row["owner_key"] != _owner_key(owner):
+                raise StoreRefused("unknown_attempt", "no such privacy decision")
+            if row["stage_state"] != "claimed" or row["final"] != "open":
+                raise StoreRefused("stage_taken", "privacy stage is not this claim's")
+            admit = hold_code is None and privacy_result == "deliver"
+            conn.execute(
+                "UPDATE privacy_decisions SET stage_state = 'completed', privacy_result = ?, "
+                "privacy_model = ?, final = ?, hold_code = ?, completed_at = ?, updated_at = ? "
+                "WHERE decision_id = ?",
+                (
+                    privacy_result,
+                    privacy_model,
+                    "admit" if admit else "hold",
+                    None if admit else (hold_code or "privacy_invalid"),
+                    now,
+                    now,
+                    decision_id,
+                ),
+            )
+
     def reserve_screening_dispatch(
         self, owner: OwnerSnapshot, *, message_id: str, job: Any, turn: str
     ) -> str:
@@ -6517,13 +7114,21 @@ class Store:
             self._require_live(conn, owner)
             if self._live_generation(conn, owner) != job.owner_generation:
                 raise StoreRefused("owner_changed", "job owner generation is stale")
+            self._ensure_policy_privacy_column(conn)
             policy = conn.execute(
-                "SELECT version, template_sha256, default_model, revision, epoch "
-                "FROM screening_policy WHERE owner_key = ?",
+                "SELECT version, template_sha256, default_model, revision, epoch, "
+                "privacy_generation FROM screening_policy WHERE owner_key = ?",
                 (_owner_key(owner),),
             ).fetchone()
             if policy is None:
                 raise StoreRefused("policy_stale", "no published policy for this job")
+            # A8 / S-2 at the WIRE: the published policy's privacy generation
+            # must agree with the operator's durable control row inside THIS
+            # transaction. A stale enabled process cannot send after a disable,
+            # and an off publication cannot send once A8 is enabled (it must
+            # republish first). Both disagreements refuse before any I/O.
+            privacy_generation = int(policy["privacy_generation"] or 0)
+            self._require_privacy_generation(conn, privacy_generation)
             if not job.provider or not job.approved:
                 # The reservation must check what the job CLAIMS (R6/Q3): a
                 # job with no canonical provider/approvals is not authority.
@@ -6576,11 +7181,30 @@ class Store:
             ).fetchone()[0]
             if int(spent) >= self.screening_budget.account:
                 raise StoreRefused("budget_exhausted", "http attempts/hour/account exhausted")
+            self._ensure_attempt_allocation_columns(conn)
+            # The VERIFIED allocation identity from the job, which the logical
+            # row's retained proof was just compared against above — never a
+            # message hint. Attribution is written on every physical row (also
+            # while A8 is off) so an enable later counts real history.
+            sender = _verified_sender(job.sender_account_id, job.sender_kind)
+            if privacy_generation > 0:
+                self._check_physical_sender(conn, scope, sender, now)
             conn.execute(
                 "INSERT INTO screening_attempts "
-                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (attempt_id, "http", scope, _owner_key(owner), message_id, job.digest, now),
+                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at, "
+                "sender_account_id, sender_kind) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    attempt_id,
+                    "http",
+                    scope,
+                    _owner_key(owner),
+                    message_id,
+                    job.digest,
+                    now,
+                    sender or None,
+                    (job.sender_kind or None) if sender else None,
+                ),
             )
             return attempt_id
 
@@ -6920,8 +7544,15 @@ class Store:
         turn: str | None = None,
         failure_class: str | None = None,
         rendered_template_sha256: str | None = None,
+        privacy_decision_id: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
+
+        ``privacy_decision_id`` (A8) is the conjunction PROOF an allow must
+        present while the privacy pass is enabled or the published policy was
+        minted enabled: :meth:`_require_privacy_proof` verifies it in this same
+        transaction. A missing or non-matching proof refuses — defence against
+        a forgotten future finalizer, not a second reducer.
 
         ``rendered_template_sha256`` rides a RECEIPT only: the hash of the
         prompt the model actually read (the batch template, or v3 for an
@@ -6981,6 +7612,15 @@ class Store:
                 # this transaction: nothing commits (A2/A3 bridge — the live
                 # check runs INSIDE the native write, not only outside it).
                 raise StoreRefused("policy_stale", "live policy changed at commit")
+            if receipt is not None and receipt.verdict == "allow":
+                self._require_privacy_proof(
+                    conn,
+                    owner,
+                    message_id=message_id,
+                    envelope_digest=envelope_digest,
+                    admission_revision=admission_revision,
+                    decision_id=privacy_decision_id,
+                )
             key = _owner_key(owner)
             attempt = conn.execute(
                 "SELECT kind, message_id, fingerprint, committed_message_id "

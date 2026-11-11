@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -155,3 +156,118 @@ async def test_t22b_a_parked_latched_card_is_not_answered_by_a_loosening(tmp_pat
     await handle.approval_answer(pending.request_id, False, False)
     assert await parked is False
     await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_t22e_a_queued_approvals_auto_reads_the_latch_when_it_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3697 x #3796: a slash that WAITED cannot loosen a session that latched meanwhile.
+
+    #3697 lets a settings frame carry ``defer_ok``/``request_id`` and acks the
+    switch lane's slashes (``/model``, ``/effort``, ``/fast``) ``queued`` before
+    their body runs. ``/approvals`` is not on that lane, so ``defer_ok`` on it
+    earns no early ack -- but it still waits on the connection's chain, which
+    joins every queued switch. The race this pins: ``approvals auto`` (no
+    ``bridge_ack``) is SENT while the session is clean, sits behind a held
+    switch, the session latches, then the switch releases. The latch check must
+    run when the command applies (``_approvals_slash``), not when it arrived.
+
+    Real ``RuntimeServer`` over a real ``ServingSessionHandle`` and the owning
+    console's real capability handshake (so the frame passes the authority
+    seam and reaches the Team Bridge rule); only the held switch body is a
+    stand-in, for the busy owner #3697's own tests model.
+    """
+    import threading
+
+    from local_operator.harness.approval import mint_operator_cap
+    from tests.unit.session.runtime.test_approval_authority_seam import _dial, _serve
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    cap = mint_operator_cap()
+    live = await _serve(tmp_path, operator_cap=cap)
+    handle = live.handle
+    setattr(handle._session, "bridge_latched", False)
+    release = threading.Event()
+    entered = asyncio.Event()
+
+    async def held_set_model(provider, model_id, *, request_id=None):  # noqa: ANN001, ANN202
+        # Accepting ``request_id`` is what makes the server defer this switch
+        # (``_switch_reports_outcome``), exactly as for a real outcome publisher.
+        entered.set()
+        assert await asyncio.to_thread(release.wait, 10), "the test never released"
+        return {"ok": True}
+
+    handle.set_model = held_set_model  # type: ignore[method-assign]
+    conn = None
+
+    async def replies(req: int, window: float) -> list[dict[str, Any]]:
+        assert conn is not None
+        seen: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + window
+        while (remaining := deadline - loop.time()) > 0:
+            try:
+                raw = await asyncio.wait_for(conn.reader.readline(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            if not raw.strip():
+                continue
+            frame = json.loads(raw)
+            if frame.get("req") == req and frame.get("op") in ("ack", "result", "error"):
+                seen.append(frame)
+                break
+        return seen
+
+    async def send(frame: dict[str, Any]) -> None:
+        assert conn is not None
+        conn.writer.write(json.dumps(frame).encode() + b"\n")
+        await conn.writer.drain()
+
+    try:
+        conn = await _dial(live.record, client="daemon", cap=cap)
+        await send(
+            {
+                "op": "set_model",
+                "req": 1,
+                "provider": "test",
+                "model_id": "A",
+                "defer_ok": True,
+                "request_id": "rid-model",
+            }
+        )
+        first = await replies(1, 5.0)
+        assert first and first[0].get("queued") is True, first
+        await asyncio.wait_for(entered.wait(), 5)
+        await send(
+            {
+                "op": "slash_result",
+                "req": 2,
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "defer_ok": True,
+                "request_id": "rid-approvals",
+                "operator_cap": conn.proof(cap),
+            }
+        )
+        # Not on the switch lane: no early ``queued`` receipt, the frame waits.
+        early = await replies(2, 0.5)
+        assert early == [], f"approvals answered before it applied: {early}"
+
+        setattr(handle._session, "bridge_latched", True)  # a bridge card lands meanwhile
+        release.set()
+
+        settled = await replies(2, 10.0)
+        assert len(settled) == 1 and settled[0]["op"] == "result", settled
+        payload = settled[0].get("data") or {}
+        data = payload.get("data") or {}
+        assert data.get("ok") is False, payload
+        assert data.get("approval_reason") == "bridge_latched", payload
+        assert "Agent messages" in str(payload.get("text")), payload
+        assert handle._auto_approve is False, "a queued auto loosened a latched session"
+    finally:
+        release.set()
+        if conn is not None:
+            conn.close()
+        await live.close(tmp_path)

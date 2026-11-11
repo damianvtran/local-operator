@@ -28,5 +28,7 @@
   "tui.notices.model_default_changed": "giữ {model}; mặc định đã đổi cho các phiên mới. /model saved sẽ áp dụng nó ở đây",
   "tui.notices.model_default_changed_headline": "Mô hình không đổi",
   "tui.notices.effort_default_changed": "mặc định nỗ lực suy luận đã đổi cho các phiên mới ({effort}); /model saved sẽ áp dụng nó ở đây",
-  "tui.notices.effort_default_changed_headline": "Đã đổi mặc định nỗ lực"
+  "tui.notices.effort_default_changed_headline": "Đã đổi mặc định nỗ lực",
+  "tui.notices.model_switch_queued": "Đã xếp hàng chuyển sang {model} — có hiệu lực ở bước tiếp theo",
+  "tui.notices.model_switch_refused": "Không áp dụng được {model}: {reason}"
 }
