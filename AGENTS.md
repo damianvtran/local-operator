@@ -3615,6 +3615,7 @@ The commit to retrieve each from:
 | `browser-extension` | `39691ea0` |
 | `sibling-modes-boot-layout` | `2c4ebc77` |
 | everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `fc80a967` (the last `main` before the sweep) |
+| the second sweep (PR #3683): every `docs/evidence/` path that survived the first, including `session-load-central-cache/bench_ab.json`, `search-bar-rung`, `team-bridge-h1`; plus root `fixtures/` and `examples/notebooks/` | `60a908c2` (`60a908c247c4c5067488356da9c935a505759b87`, the last `main` that tracked them; reusable rigs moved to `scripts/repro/`, fixtures to `tests/fixtures/`) |
 | `bench` | `ba225070` (the `main` this sweep branched from; the whole store is still present there — `git show ba225070:bench/README.md` retrieves the tables, `git show ba225070:bench/analytics-rollup-after.json` the numbers behind them) |
 
 ### Detached runner memory budgets

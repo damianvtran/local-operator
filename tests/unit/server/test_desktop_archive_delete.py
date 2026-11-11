@@ -567,7 +567,7 @@ async def test_a_deleted_session_is_not_served_by_the_daemon_that_deleted_it(
 
     The cause is by design one layer down: ``DesktopSessions.session`` hands out a
     RESIDENT bridge without re-checking the directory, because that lookup is the
-    expensive half of every read (see ``scripts/repro/session-load-central-cache``)
+    expensive half of every read (see ``docs/evidence/session-load-central-cache``)
     — and this test is what makes the delete the one event that tells it so.
     """
     client, root = archive_api
@@ -634,7 +634,7 @@ async def test_a_delete_during_a_cold_open_is_not_served_either(
     result that PREDATES the delete, finds no bridge, and would build one for a
     directory that is gone — the removed conversation resident and served again,
     for the whole cold-open window (seconds on a large journal, per
-    ``scripts/repro/session-load-central-cache``). The delay below is that window
+    ``docs/evidence/session-load-central-cache``). The delay below is that window
     made deterministic, and the fix is the directory re-check at INSERT time.
 
     Driven against a real pool rather than through the routes, because the race is

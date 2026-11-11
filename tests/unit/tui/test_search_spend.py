@@ -1069,7 +1069,7 @@ def test_the_bar_threshold_is_the_shortest_rung_of_every_ladder() -> None:
     shortest = "6 searches · 3 reads"
     threshold = threshold_for(shortest)
     # The literal, not only the formula: these are the numbers the issue quotes
-    # and the ones measured in scripts/repro/search-bar-rung.
+    # and the ones measured in docs/evidence/search-bar-rung.
     assert (len(shortest), threshold) == (20, 67), "the ladder moved; re-measure the frames"
 
     def block(width: int, session: Any) -> list[str]:

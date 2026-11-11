@@ -2115,7 +2115,7 @@ async def test_usages_since_newest_shrink_matches_the_method(tmp_path: Path) -> 
 # ``bench_ab.json`` (median of 3 samples per operation; the artifact carries one
 # load figure for the whole run at completion, and the per-worker range is the
 # README's prose, not a field in it) — the full table being in
-# ``scripts/repro/session-load-central-cache``: 2286.7 ms to construct and
+# ``docs/evidence/session-load-central-cache``: 2286.7 ms to construct and
 # 2059.5 ms to read on the 261 MB conversation, 580.7/546.3 ms on the 96 MB one,
 # and two of those seven sites are on the desktop OPEN path. Two things make the
 # swap safe and both are tested here: the DIFFERENTIAL (it must answer exactly

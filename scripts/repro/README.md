@@ -3,7 +3,11 @@
 Reusable capture and diagnostic sources live here, grouped by the surface they
 exercise. Historical screenshots, geometry dumps and execution reports do not.
 The original run context remains available through immutable links in the topic
-READMEs and Git history.
+READMEs and Git history. A `docs/evidence/<topic>/...` path cited in a source
+comment resolves at commit `60a908c247c4c5067488356da9c935a505759b87`
+([browse](https://github.com/damianvtran/local-operator/tree/60a908c247c4c5067488356da9c935a505759b87/docs/evidence));
+older sweeps' paths are in the commit table under AGENTS.md "Evidence goes on
+the PR"; see [docs/README.md](../../docs/README.md).
 
 - [Job IDs](job-id-coercion/README.md)
 - [Cold session facade](l3c-lazy-cold-facade/README.md)

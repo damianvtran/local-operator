@@ -32,6 +32,22 @@ files that are consumed by tools or linked from other repositories.
 - [Reusable reproduction tools](../scripts/repro/README.md) contain retained
   capture/diagnostic sources and the inputs they need. Historical proof captures
   formerly under `docs/evidence/` are available in Git history, not the tree.
+- **Retired `docs/evidence/` paths.** Source comments, tests and design notes
+  still cite measurements as `docs/evidence/<topic>/...` (for example
+  `docs/evidence/cmd-chords/MEASURED.md` or
+  `docs/evidence/session-load-central-cache/bench_ab.json`). Those citations are
+  deliberately left as written and resolve in Git history. Anything removed by
+  the final sweep resolves at immutable commit
+  `60a908c247c4c5067488356da9c935a505759b87`, the last `main` that tracked the
+  directory —
+  [browse `docs/evidence/` at that commit](https://github.com/damianvtran/local-operator/tree/60a908c247c4c5067488356da9c935a505759b87/docs/evidence),
+  or `git show 60a908c247c4:docs/evidence/<topic>/<file>`. Directories removed
+  by the earlier sweep (`cmd-chords`, `compaction-ruler`, `compaction-advisor`,
+  `fork-ux`, `browser-extension`, …) are absent there; the per-directory commit
+  table in [AGENTS.md](../AGENTS.md#7-evidence-goes-on-the-pr-never-into-the-repository)
+  names the one to `git show` from. Only the reusable
+  rigs moved, to [`scripts/repro/`](../scripts/repro/README.md); a citation of
+  a measurement, frame or report means the retired copy, not the rig.
 - [Legacy PR records](pr-evidence/) and [performance records](performance/)
   retain existing audit-linked measurements; their presence does not authorize
   committing new PR-only proof artifacts.

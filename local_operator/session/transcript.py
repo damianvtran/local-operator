@@ -1705,7 +1705,7 @@ def read_latest_custom_entry(
     construction that JSON-decodes the entire journal into memory. On the
     operator's store that is **2286.7 ms of construction and 2059.5 ms for the
     read** on the 261 MB conversation, 580.7/546.3 ms on the 96 MB one — the
-    before column of the A/B in ``scripts/repro/session-load-central-cache``,
+    before column of the A/B in ``docs/evidence/session-load-central-cache``,
     whose raw run is committed beside it as ``bench_ab.json``: median of 3 samples
     per operation, on the clean ``origin/main`` worktree the artifact's own
     ``trees.base`` records (``bf67bf699``, ``dirty: false``). That artifact

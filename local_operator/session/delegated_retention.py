@@ -161,7 +161,7 @@ never followed, ``.git`` never matched by shape — and reclaimed by four arms:
   taken by shape, and ONE documented exemption outranks the vocabulary: a
   path with a pad-relative segment whose case-folded name starts with
   ``evidence`` is never taken by this arm (measured: a real
-  ``scripts/repro/session-load-central-cache/`` holding scripts and bench
+  ``docs/evidence/session-load-central-cache/`` holding scripts and bench
   results matched the ``-cache`` segment suffix). An exempted entry is kept
   WHOLE as a directory and the walk still descends into it — rules (a) and
   (c) carry no evidence exemption, so a big stale log or a merged-clean tree
@@ -1780,7 +1780,7 @@ def _has_evidence_segment(relative: str) -> bool:
     ONE documented exemption to the build-shape arm: an entry under — or
     named by — a segment like ``evidence/`` is never shape-matched, because
     evidence outranks the shape vocabulary. Measured on a real pad whose
-    ``scripts/repro/session-load-central-cache/`` held scripts and bench
+    ``docs/evidence/session-load-central-cache/`` held scripts and bench
     results and matched the ``-cache`` segment suffix. Rule (a), stale
     output, is unaffected.
     """
