@@ -424,6 +424,11 @@ class _LeaseClock:
     same property -- the heartbeat, not the TTL, keeps the lease -- without
     depending on how promptly the OS runs the thread.
 
+    The frozen clock deliberately decouples the heartbeat's REAL cadence from
+    lease time, so it cannot by itself catch a heartbeat slower than the TTL;
+    ``test_the_lease_heartbeat_outlives_its_ttl`` pins that cadence separately
+    by spying on the heartbeat's own wait timeouts.
+
     ``gen`` counts advances. A renewal records the generation it STARTED in:
     the expiry it writes is read after that, so it is stamped no earlier than
     that generation's time.
@@ -475,6 +480,22 @@ async def test_the_lease_heartbeat_outlives_its_ttl(
         return ok
 
     monkeypatch.setattr(lease, "renew", renew)
+
+    # The frozen clock only checks that renewals land, not how often: a
+    # heartbeat waiting ``ttl * 3`` between renewals still lands every one of
+    # them, just late, and on a real clock its lease would lapse between beats.
+    # So record the timeout of every wait the heartbeat thread makes and pin it
+    # below the TTL. Patched on the class and filtered by thread name, so it
+    # sees the heartbeat's wait however the Event reached it, and nothing else.
+    beat_waits: list[float | None] = []
+    real_wait = threading.Event.wait
+
+    def spy_wait(self: threading.Event, timeout: float | None = None) -> bool:
+        if threading.current_thread().name == "hub-lease-heartbeat":
+            beat_waits.append(timeout)
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", spy_wait)
     assert lease.acquire()
     try:
         # Five half-TTL steps: 2.5 TTLs of lease time (> 2 TTLs, as before),
@@ -487,6 +508,10 @@ async def test_the_lease_heartbeat_outlives_its_ttl(
         assert not st.RunnerLease(tmp_path, ttl_s=0.3).acquire()
     finally:
         lease.release()
+    # At most half a TTL between beats leaves a full missed-or-late beat of
+    # margin before expiry; ``>= ttl`` would let the lease lapse between them.
+    assert beat_waits, "the heartbeat never waited on its stop event"
+    assert all(t is not None and t <= 0.3 / 2 for t in beat_waits), beat_waits
     contender = st.RunnerLease(tmp_path, ttl_s=0.3)
     assert contender.acquire()
     contender.release()
