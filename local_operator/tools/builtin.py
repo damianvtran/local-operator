@@ -22351,8 +22351,7 @@ class BrowserParams(BaseModel):
         default="",
         description=(
             "'open': ADOPT a tab the USER handed to this session (the FULL "
-            "handle 'tabs' reported); omitting it creates a new tab. 'close': a tab "
-            "a child handed to you (e.g. 'ui:9')."
+            "handle 'tabs' reported); omitting it creates a new tab."
         ),
     )
     backend: str = Field(
@@ -29176,9 +29175,14 @@ async def execute_browser(
     handed_close = await _browser_handed_close(tool_call_id, args, context)
     if handed_close is not None:
         return handed_close
-    state = _browser_state(context)
-    before = state.surface_id
+    # Read, never created, here: a holder created up front would turn a
+    # read-only inspection into state (the inner lane creates one when it
+    # genuinely needs it), which the inspection contract forbids.
+    before = getattr(getattr(context, "browser", None), "surface_id", "")
     result = await _execute_browser_owned(tool_call_id, args, signal, on_update, context)
+    state = getattr(context, "browser", None)
+    if state is None:
+        return result
     return _child_browser_fate_note(state, args, result, before)
 
 
@@ -30563,8 +30567,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
             "navigate it. Call 'close' before your final response unless a pending "
             "interaction needs it; 'tabs' lists every tab (handles redacted) and 'close' "
-            "ends only your own tab. A subagent's tab closes when it ends unless "
-            "'retain'ed, which hands it to the parent; never report a tab 'left open'. "
+            "ends only your own tab. A subagent's unretained tab closes when it ends; "
+            "'retain' hands it to the parent. "
             "An unapproved site fails with origin_not_allowed: call 'request_access', "
             "NOTIFY the operator, then 'await_access' before retrying. "
             "Never install or script a browser engine instead. Playbook: `guide://browser`."

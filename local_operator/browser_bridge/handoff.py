@@ -88,7 +88,9 @@ def hand_off(
     for handed in list(getattr(child_browser, "handed", ())):
         parent_browser.handed.append(handed)
         child_browser.handed.remove(handed)
-        fates.append(f"Browser: handed {public_surface_label(handed.surface_id)} to parent {target}")
+        fates.append(
+            f"Browser: handed {public_surface_label(handed.surface_id)} to parent {target}"
+        )
     surface = str(getattr(child_browser, "surface_id", "") or "")
     resource = getattr(child_browser, "resource", None)
     reason = _retention(resource)
