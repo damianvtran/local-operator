@@ -73,6 +73,7 @@ working backend, and ``lop services status`` still reports the drift.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
 import signal
@@ -710,8 +711,8 @@ def _ignore_reload_signal() -> Any:
         previous = signal.getsignal(RELOAD_SIGNAL)
         signal.signal(RELOAD_SIGNAL, signal.SIG_IGN)
         return lambda: signal.signal(RELOAD_SIGNAL, previous)
-    import ctypes
-
+    # ``ctypes`` is imported at module scope (review N1): this runs inside a
+    # wedged process, where taking the import machinery is one more lock.
     libc = ctypes.CDLL(None, use_errno=True)
     libc.signal.restype = ctypes.c_void_p
     libc.signal.argtypes = (ctypes.c_int, ctypes.c_void_p)
