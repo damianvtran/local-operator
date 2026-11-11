@@ -5570,6 +5570,106 @@ def _apply_spans(text: str, spans: list[_Span], floor: int, hits: list[ShapeHit]
     return "".join(pieces)
 
 
+# --- Kubernetes Secret printed as a Go map ---------------------------------------
+#
+# WHY (2026-11 post-mortem, the literal incident output): ``kubectl get secret X
+# -o go-template='{{index .data "K" | base64decode}}'`` on a missing key fails
+# with ``raw data was: {JSON}`` (masked by the JSON rule) and then ``object given
+# to template engine was: map[apiVersion:v1 data:map[K1:<b64> K2:<b64>] kind:Secret
+# metadata:map[…]]`` — Go's ``fmt`` rendering of the object, which no JSON/YAML
+# rule reads. Keys are sorted, so ``kind:Secret`` comes AFTER ``data:``; entries
+# are space-separated ``key:value``. Only a ``data:map[``/``stringData:map[``
+# whose OWN enclosing map says ``kind:Secret`` is masked (values only, keys kept):
+# a ConfigMap's ``data:map[`` is left alone.
+
+_GOMAP_DATA_RE = re.compile(r"(?<![\w.-])(data|stringData):map\[")
+_GOMAP_ENTRY_RE = re.compile(r"(?:(?<=\[)|(?<= ))([A-Za-z0-9_.-]+):")
+
+
+def _gomap_close(text: str, pos: int) -> int:
+    """Offset of the ``]`` closing the map whose body starts at ``pos``, else -1."""
+    depth = 0
+    for index in range(pos, len(text)):
+        char = text[index]
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            if depth == 0:
+                return index
+            depth -= 1
+        elif char == "\n":
+            return -1  # fmt prints a map on one line
+    return -1
+
+
+def _gomap_open(text: str, pos: int) -> int:
+    """Offset just after the ``map[`` enclosing ``pos``, else -1."""
+    depth = 0
+    for index in range(pos - 1, -1, -1):
+        char = text[index]
+        if char == "]":
+            depth += 1
+        elif char == "[":
+            if depth == 0:
+                return index + 1 if text.endswith("map", 0, index) else -1
+            depth -= 1
+        elif char == "\n":
+            return -1
+    return -1
+
+
+def _gomap_is_secret(text: str, start: int, end: int) -> bool:
+    """Whether the map body ``text[start:end]`` has ``kind:Secret`` at its own level."""
+    depth = 0
+    index = start
+    while index < end:
+        char = text[index]
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+        elif (
+            depth == 0
+            and (index == start or text[index - 1] == " ")
+            and text.startswith("kind:Secret", index)
+            and (index + 11 == end or text[index + 11] in " ]")
+        ):
+            return True
+        index += 1
+    return False
+
+
+def _k8s_secret_gomap_spans(text: str) -> list[_Span]:
+    if "map[" not in text or "kind:Secret" not in text:
+        return []
+    spans: list[_Span] = []
+    for match in _GOMAP_DATA_RE.finditer(text):
+        body = match.end()
+        close = _gomap_close(text, body)
+        owner = _gomap_open(text, match.start())
+        if close < 0 or owner < 0:
+            continue
+        owner_end = _gomap_close(text, owner)
+        if owner_end < 0 or not _gomap_is_secret(text, owner, owner_end):
+            continue
+        keys = list(_GOMAP_ENTRY_RE.finditer(text, body, close))
+        for index, key in enumerate(keys):
+            value_end = keys[index + 1].start() - 1 if index + 1 < len(keys) else close
+            value = text[key.end() : value_end]
+            if value and value != REDACTION_MARKER:
+                found = (
+                    [ShapeHit(K8S_SECRET_DATA_LABEL, value, window=value)]
+                    if match.group(1) == "data"
+                    else []
+                )
+                spans.append((key.end(), value_end, REDACTION_MARKER, found))
+    return spans
+
+
+def _scrub_k8s_secret_gomap(text: str, hits: list[ShapeHit]) -> str:
+    return _apply_spans(text, _k8s_secret_gomap_spans(text), 0, hits)
+
+
 def _scrub_k8s_secret_yaml(text: str, hits: list[ShapeHit]) -> str:
     return _apply_spans(text, _k8s_secret_yaml_spans(text), 0, hits)
 
@@ -5590,7 +5690,11 @@ def scrub_credential_structures_in_context(context: str, text: str) -> tuple[str
     if not text or ("Secret" not in text and "Secret" not in context):
         return text, []
     combined = context + text
-    spans = _k8s_secret_json_spans(combined) + _k8s_secret_yaml_spans(combined)
+    spans = (
+        _k8s_secret_json_spans(combined)
+        + _k8s_secret_yaml_spans(combined)
+        + _k8s_secret_gomap_spans(combined)
+    )
     hits: list[ShapeHit] = []
     return _apply_spans(combined, spans, len(context), hits), hits
 
@@ -5715,6 +5819,22 @@ def _tf_mask_plan(plan: dict[str, Any]) -> bool:
             ):
                 entry["value"] = REDACTION_MARKER
                 changed = True
+    # A variable set marked sensitive in HCP Terraform is NOT declared sensitive
+    # in the configuration, so the plan prints it in clear with no marker at all
+    # (2026-11-09 exposure: ``AWS_ACCESS_KEY``/``AWS_SECRET_KEY`` in a saved plan
+    # JSON). The variable's NAME is the one signal left, judged by the same
+    # ``is_credential_name`` every other surface uses: no new keyword list, and
+    # ``region``/``bucket`` stay readable.
+    if isinstance(variables, dict):
+        for name, entry in variables.items():
+            if (
+                isinstance(name, str)
+                and isinstance(entry, dict)
+                and entry.get("value") not in (None, "", REDACTION_MARKER)
+                and is_credential_name(name)
+            ):
+                entry["value"] = REDACTION_MARKER
+                changed = True
     return changed
 
 
@@ -5744,11 +5864,58 @@ def _render_like(plan: dict[str, Any], original: str) -> str:
 
 
 def _scrub_terraform_plan_json(text: str) -> str:
-    """Mask the values a Terraform plan JSON marks sensitive; see the section note."""
+    """Mask the values a Terraform plan JSON marks sensitive; see the section note.
+
+    A plan read through the ``read`` tool carries its line-number gutter on
+    every line, which no JSON parser accepts, so a pretty plan read as a file
+    was never masked (2026-11-09 exposure). The gutter is stripped for the
+    parse and put back on the same lines afterwards — the same tolerance the
+    Secret YAML rule has (round-1 QA Q4).
+    """
     if len(text) > _TF_PLAN_MAX_CHARS or not any(a in text for a in _TF_PLAN_ANCHORS):
         return text
-    if not any(m in text for m in _TF_PLAN_MARKERS):
+    # ``"variables"`` counts as a marker: a credential-named variable needs no
+    # sensitivity marker to be masked (see ``_tf_mask_plan``).
+    if not any(m in text for m in _TF_PLAN_MARKERS) and '"variables"' not in text:
         return text
+    if "| " in text and _READ_GUTTER_RE.match(text, text.find("\n") + 1):
+        guttered = _scrub_guttered_plan(text)
+        if guttered is not None:
+            return guttered
+    return _scrub_plain_terraform_plan_json(text)
+
+
+def _scrub_guttered_plan(text: str) -> Optional[str]:
+    """The plan rule over ``read``-gutter lines, gutters restored; ``None`` if unchanged."""
+    lines = text.splitlines(keepends=True)
+    gutters = [line[: _gutter_width(line)] for line in lines]
+    if sum(1 for gutter in gutters if gutter) < 2:
+        return None
+    stripped_lines = [line[len(gutter) :] for line, gutter in zip(lines, gutters)]
+    stripped = "".join(stripped_lines)
+    masked = _scrub_plain_terraform_plan_json(stripped)
+    if masked == stripped:
+        return None
+    new_lines = masked.splitlines(keepends=True)
+    if len(new_lines) == len(lines):
+        return "".join(gutter + line for gutter, line in zip(gutters, new_lines))
+    # The re-render changed the line count (an unusual source layout): keep
+    # the unchanged leading lines' gutters and number the rest on from there,
+    # at the first gutter's width.
+    lead = 0
+    while lead < len(new_lines) and new_lines[lead] == stripped_lines[lead]:
+        lead += 1
+    first_index, first = next((i, g) for i, g in enumerate(gutters) if g)
+    width = len(first) - 2
+    number = int(first[:width]) - first_index
+    out = []
+    for index, line in enumerate(new_lines):
+        gutter = gutters[index] if index < lead else f"{number + index:>{width}}| "
+        out.append(gutter + line)
+    return "".join(out)
+
+
+def _scrub_plain_terraform_plan_json(text: str) -> str:
     start = text.find("{")
     while start >= 0:
         try:
@@ -5785,6 +5952,7 @@ def _scrub_credential_structures(text: str, hits: list[ShapeHit]) -> str:
     if "Secret" in text:
         text = _scrub_k8s_secret_json(text, hits)
         text = _scrub_k8s_secret_yaml(text, hits)
+        text = _scrub_k8s_secret_gomap(text, hits)
     return _scrub_service_account_key_id(text, hits)
 
 
@@ -5806,26 +5974,63 @@ def _scrub_credential_structures(text: str, hits: list[ShapeHit]) -> str:
 #   or the object's end has arrived — only once ``apiVersion`` has appeared,
 #   which every Kubernetes object prints and ordinary JSON ``"data"`` rarely does;
 # * a HOLD on a Terraform plan object (``{"format_version": …,
-#   "terraform_version"``) until its closing brace, so the whole-plan rule sees
-#   one parseable plan.
+#   "terraform_version": …, "variables"``, or ``planned_values``/
+#   ``resource_changes``/``prior_state`` third) until its closing brace, so the
+#   whole-plan rule sees one parseable plan.
 #
-# Both holds are bounded by :data:`STRUCTURE_HOLD_LIMIT`. Past it the structure
-# is WITHHELD — dropped with a one-line notice — rather than released
-# unchecked: a value painted live cannot be taken back, and no real object is
-# that large (the API server caps a Secret at 1 MiB). Output with no
-# ``apiVersion`` and no plan opener is released exactly as before.
+# The data hold is bounded by :data:`STRUCTURE_HOLD_LIMIT`. Past it the block is
+# WITHHELD — dropped with a one-line notice — rather than released unchecked: a
+# value painted live cannot be taken back, and no real Secret is that large (the
+# API server caps one at 1 MiB). Output with no ``apiVersion`` and no plan
+# opener is released exactly as before.
+#
+# The PLAN hold is different (round-2 review R2-1, QA Q8), because a plan has no
+# size cap and the stream sink IS the settled result: withholding a 6 MiB plan
+# left the agent a 164-char notice where base kept a 2 MiB head + 2 MiB tail
+# (``_BashOutput``), including for already-redacted plans and for
+# ``terraform show -json`` STATE, which the plan rule never masks. So:
+#
+# * the opener requires the third key to be one the plan rule acts on, so state
+#   JSON (``"values"`` third — Terraform marshals ``jsonplan.Plan`` and
+#   ``jsonstate.State`` in struct order) is never held at all;
+# * a held plan is PARKED in this guard (:meth:`StructureStreamGuard.park`) and
+#   each later read scans only its own bytes. Kept in the redactor's
+#   ``pending`` it was re-joined and re-searched on every read (``-----BEGIN``,
+#   ``apiVersion``), quadratic in the plan: 4.92 MiB took 2.54 s and 12.3 MiB
+#   11.48 s;
+# * at its closing brace the WHOLE plan is released in one piece, so the
+#   settled rule masks it before the sink's head/tail cut — the result keeps
+#   base's shape with sensitive values masked. Only the live view waits;
+# * past :data:`STREAM_PLAN_HOLD_LIMIT` (the settled rule's own parse bound)
+#   nothing could mask it anyway, so the held bytes are released to the
+#   ordinary rules — base behaviour — with a one-line notice. Never dropped.
 
 #: Already-released characters kept as lookbehind (cut back to a line start).
 _STRUCTURE_CONTEXT_CHARS = 256 * 1024
-#: The most one held structure may grow before it is withheld (see above).
+#: The most one held data block may grow before it is withheld (see above).
 STRUCTURE_HOLD_LIMIT = 4 * 1024 * 1024
+#: The most one parked plan may grow before it is released unchecked. Equal to
+#: the settled rule's parse bound: a larger plan is not masked by it either, so
+#: holding longer would only delay the same bytes.
+#: Measured 2026-11-10 (64 KiB reads into the real ``_BashOutput`` sink, one
+#: sensitive value, 3 runs each, median / max): 4.97 MiB 1.49 / 2.83 s, 134 MB
+#: peak RSS; 9.97 MiB 3.37 / 3.66 s, 217 MB; 19.97 MiB 8.71 / 8.74 s, 350 MB
+#: (peak includes the probe's own fixture). Unguarded control at 15.24 MiB:
+#: 4.36 s median. Linear at ~0.43 s/MiB, so the bound costs ~14 s of live
+#: silence at worst — only for a plan nobody can read whole anyway.
+STREAM_PLAN_HOLD_LIMIT = _TF_PLAN_MAX_CHARS
+# "output withheld", not "live output withheld": the sink is the settled result,
+# so the block is gone from both (round-2 QA nit).
 _WITHHELD_SECRET_BLOCK = (
-    "[live output withheld: a Kubernetes data block over 4 MiB cannot be checked "
+    "[output withheld: a Kubernetes data block over 4 MiB cannot be checked "
     "for Secret values while streaming; select keys with jsonpath]\n"
 )
-_WITHHELD_PLAN = (
-    "[live output withheld: a Terraform plan JSON over 4 MiB cannot be checked for "
-    "sensitive values while streaming; use json-output-redacted or select fields with jq]\n"
+# Never recommends ``json-output-redacted``: past this bound nothing is known
+# about the plan's sensitivity, and an agent may already be reading that
+# endpoint (round-2 review R2-1 (c)).
+_UNCHECKED_PLAN = (
+    "[a Terraform plan JSON over 32 MiB was too large to check for sensitive "
+    "values; select fields with jq, e.g. `.resource_changes[].address`]\n"
 )
 
 _SECRET_DATA_HEADER_RE = re.compile(
@@ -5836,25 +6041,33 @@ _STREAM_KEY_RE = re.compile(r"(?:-[ \t]+)?\"?([A-Za-z_][\w.-]*+)\"?[ \t]*:")
 _JSON_CLOSERS = frozenset({"}", "},", "]", "],"})
 _TF_PLAN_OPEN_RE = re.compile(
     r'\{[ \t\r\n]*"format_version"[ \t]*:[ \t]*"[^"\n]*"[ \t\r\n]*,[ \t\r\n]*"terraform_version"'
+    r'[ \t]*:[ \t]*"[^"\n]*"[ \t\r\n]*,[ \t\r\n]*'
+    r'"(?:variables|planned_values|resource_changes|prior_state)"'
 )
 _TF_PLAN_HEAD = '{"format_version":"'
-_TF_PLAN_NEXT = ',"terraform_version"'
+_TF_PLAN_NEXT = ',"terraform_version":"'
+#: The keys the plan rule acts on that may follow ``terraform_version`` (the
+#: same set as ``_TF_PLAN_ANCHORS``, which the opener regex spells out).
+_TF_PLAN_THIRD = tuple("," + anchor for anchor in _TF_PLAN_ANCHORS)
 _JSON_PLAIN_RUN_RE = re.compile(r'[^"{}]*+')
 _JSON_STRING_RUN_RE = re.compile(r'(?:[^"\\]|\\.)*+')
 
 
 def _could_open_a_plan(fragment: str) -> bool:
     """Whether ``fragment`` (from a line-start ``{``) may still become a plan opener."""
-    compact = "".join(fragment.split())
-    if len(compact) <= len(_TF_PLAN_HEAD):
-        return _TF_PLAN_HEAD.startswith(compact)
-    if not compact.startswith(_TF_PLAN_HEAD):
-        return False
-    rest = compact[len(_TF_PLAN_HEAD) :]
-    quote = rest.find('"')
-    if quote < 0:
-        return len(rest) <= 32  # still inside the version string
-    return _TF_PLAN_NEXT.startswith(rest[quote + 1 :])
+    rest = "".join(fragment.split())
+    # Two ``"key":"<version>"`` pairs, then a third key the plan rule acts on.
+    for literal in (_TF_PLAN_HEAD, _TF_PLAN_NEXT):
+        if len(rest) <= len(literal):
+            return literal.startswith(rest)
+        if not rest.startswith(literal):
+            return False
+        rest = rest[len(literal) :]
+        quote = rest.find('"')
+        if quote < 0:
+            return len(rest) <= 32  # still inside the version string
+        rest = rest[quote + 1 :]
+    return any(third.startswith(rest) for third in _TF_PLAN_THIRD)
 
 
 def _json_scan(text: str, pos: int, depth: int, state: int) -> tuple[int, int, int, int]:
@@ -5931,7 +6144,17 @@ class StructureStreamGuard:
     text of the current read, and :meth:`hold` rebases them on the cut it returns.
     """
 
-    __slots__ = ("context", "_plan", "_plan_search", "_data", "_data_search", "_drop", "_notice")
+    __slots__ = (
+        "context",
+        "_plan",
+        "_plan_search",
+        "_data",
+        "_data_search",
+        "_drop",
+        "_notice",
+        "_parked",
+        "_parked_chars",
+    )
 
     def __init__(self) -> None:
         self.context = ""
@@ -5941,13 +6164,25 @@ class StructureStreamGuard:
         #: ``[start, column, scan, search_after]`` of the first unresolved data block.
         self._data: Optional[list[int]] = None
         self._data_search = 0
-        #: A structure being withheld from offset ``start``:
-        #: ``("plan", [start, depth, state])`` or
+        #: A data block being withheld from offset ``start``:
         #: ``("data", [start, column, unfinished_line, resume_offset])``.
         #: Bytes before ``start`` are not part of it and are kept.
         self._drop: Optional[tuple[str, list[Any]]] = None
-        #: The one-line notice owed for a structure just withheld.
+        #: The one-line notice owed for a structure just withheld or released unchecked.
         self._notice = ""
+        #: The bytes of an open plan moved out of the redactor's ``pending`` (see
+        #: :meth:`park`); while non-empty, ``self._plan`` holds the scan state.
+        self._parked: list[str] = []
+        self._parked_chars = 0
+
+    @property
+    def parked(self) -> bool:
+        """Whether an open plan is parked here (the live view is waiting on it)."""
+        return bool(self._parked)
+
+    @property
+    def parked_chars(self) -> int:
+        return self._parked_chars
 
     @property
     def withholding(self) -> bool:
@@ -5962,18 +6197,11 @@ class StructureStreamGuard:
         """``text`` without the withheld structure's bytes (all of them on ``final``)."""
         if self._drop is None:
             return text
-        kind, state = self._drop
+        _, state = self._drop
         start = state[0]
         keep = text[:start]
         if final:
             self._drop = None
-            return keep
-        if kind == "plan":
-            end, _, depth, scan_state = _json_scan(text, start, state[1], state[2])
-            if end >= 0:
-                self._drop = None
-                return keep + text[end:]
-            self._drop = ("plan", [start, depth, scan_state])
             return keep
         # The block is judged line by line, so its unfinished last line is kept
         # here (never in ``pending``, where a cap could release it) — capped,
@@ -5996,8 +6224,29 @@ class StructureStreamGuard:
         cut, plan_start = self._hold_plan(text, cut)
         if self._drop is None:
             cut = self._hold_data(text, cut, plan_start)
+            cut = self._hold_gomap_line(text, cut)
         self._rebase(cut)
         return cut
+
+    @staticmethod
+    def _hold_gomap_line(text: str, cut: int) -> int:
+        """Never cut inside a line holding a Go-map ``data:map[`` (see that rule).
+
+        ``fmt`` prints the whole object on ONE line, and ``kind:Secret`` sorts
+        after ``data:``, so the 8 KiB cap splitting a long line released the data
+        before the rule could see the kind. Bounded like the data hold; a line
+        past it is released as before.
+        """
+        if cut <= 0 or cut >= len(text) or text[cut - 1] == "\n":
+            return cut
+        line_start = text.rfind("\n", 0, cut) + 1
+        if len(text) - line_start > STRUCTURE_HOLD_LIMIT:
+            return cut
+        if text.find("map[", line_start, cut) < 0:
+            return cut
+        if _GOMAP_DATA_RE.search(text, line_start, cut) is None:
+            return cut
+        return line_start
 
     def _hold_plan(self, text: str, cut: int) -> tuple[int, int]:
         if self._plan is None and '"terraform_version"' in text:
@@ -6024,13 +6273,58 @@ class StructureStreamGuard:
             self._plan = None
             self._plan_search = end
             return max(cut, end), len(text)
-        if len(text) - start > STRUCTURE_HOLD_LIMIT:
-            # ``discard`` (called right after this release) rescans the held
-            # plan once from its brace and keeps scanning as bytes arrive.
-            self._plan = None
-            self._drop = ("plan", [start, 0, 0])
-            self._notice = _WITHHELD_PLAN
         return min(cut, start), start
+
+    def park(self, pending: str) -> str:
+        """Move an open plan out of ``pending``; return what stays there.
+
+        Called right after the release, once offsets are rebased on the cut, so
+        ``self._plan[0]`` is the plan's brace in ``pending`` and the scan has
+        reached ``pending``'s end. Bytes before the brace stay in ``pending``:
+        they are older than the plan and must still go out first.
+        """
+        if self._plan is None or self._plan[4] >= 0 or self._parked:
+            return pending
+        start = self._plan[0]
+        self._parked = [pending[start:]]
+        self._parked_chars = len(pending) - start
+        return pending[:start]
+
+    def absorb(self, pending: str, text: str, *, final: bool) -> Optional[str]:
+        """Feed a read into the parked plan: ``None`` while it is open, else the whole text.
+
+        Each read is scanned once, from where the last one stopped, so holding a
+        plan costs linear time in it (see the section note). The returned text is
+        ``pending`` + plan + the read, with the plan's state set so :meth:`hold`
+        releases it whole; past the bound or at end of stream it is returned
+        with no plan state, for the ordinary rules.
+        """
+        assert self._plan is not None
+        _, _, depth, in_string, _ = self._plan
+        end = -1
+        if not final:
+            end, _, depth, in_string = _json_scan(text, 0, depth, in_string)
+        if end < 0 and not final and self._parked_chars + len(text) <= STREAM_PLAN_HOLD_LIMIT:
+            self._parked.append(text)
+            self._parked_chars += len(text)
+            self._plan[2], self._plan[3] = depth, in_string
+            return None
+        start = len(pending)
+        whole = pending + "".join(self._parked) + text
+        if end >= 0:
+            plan_end = start + self._parked_chars + end
+            self._plan = [start, plan_end, 0, 0, plan_end]
+        else:
+            # Over the bound, or the stream ended inside the plan: no rule can
+            # parse it, so it goes to the plaintext rules (base behaviour), and
+            # the opener is skipped so it is not held again.
+            self._plan = None
+            self._plan_search = start + 1
+            if not final:
+                self._notice = _UNCHECKED_PLAN
+        self._parked = []
+        self._parked_chars = 0
+        return whole
 
     def _hold_data(self, text: str, cut: int, plan_start: int) -> int:
         limit = min(cut, plan_start)
@@ -8545,6 +8839,26 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         ),
     ),
     DumpShape(
+        "kubectl-secret-decode",
+        # 2026-11 post-mortem: ``-o go-template='{{index .data "K" |
+        # base64decode}}'`` (or ``-o jsonpath='{.data.K}' | base64 -d``) at the
+        # END of the pipeline prints the decoded value into the transcript — and
+        # on a missing key kubectl dumps the whole object. Fires only when nothing
+        # consumes the output: a further ``|`` or a ``>`` redirect (other than
+        # stderr into stdout / ``/dev/null``) is the safe form and stays quiet.
+        re.compile(
+            r"(?i)\bkubectl\b[^\n;|]*?\bget\s+secrets?\b[^\n;|]*?"
+            r"(?:-o\s*|--output(?:=|\s+))"
+            r"(?:go-template(?:=|\s+)(?:'[^'\n]*\bbase64decode\b[^'\n]*'"
+            r"|\"[^\"\n]*\bbase64decode\b[^\"\n]*\")"
+            r"|(?:jsonpath|go-template)\S*(?:\s+[^\s|;&>]+)*?\s*\|\s*base64\s+(?:-d|--decode|-D)\b)"
+            r"(?:\s+[^\s|;&>]+)*?"
+            r"(?:\s+(?:[0-9]?>&[0-9]|2>\s*/dev/null))*\s*(?=$|;|&&|\|\||\n)"
+        ),
+        "check the key exists first: `kubectl get secret NAME -o jsonpath='{.data}' | "
+        "jq 'keys'`; pipe the decoded value into its consumer, never to the terminal",
+    ),
+    DumpShape(
         "docker-inspect",
         re.compile(r"(?i)\bdocker\s+inspect\b"),
         "select the field you need: `docker inspect --format '{{.State.Status}}' NAME`",
@@ -8725,6 +9039,7 @@ _BRIEF_ADVICE: dict[str, str] = {
     "named-variable-dump": "use it in place: `$(lop secret get NAME)`",
     "kubectl-exec-env": "print names in the pod: `env | cut -d= -f1`",
     "kubectl-secret-read": "keys only: `-o jsonpath='{.data}' | jq keys`; never echo",
+    "kubectl-secret-decode": "pipe the decoded value to its consumer; check `jq keys`",
     "docker-inspect": "select a field: `--format '{{.State.Status}}'`",
     "docker-exec-env": "print names only: `env | cut -d= -f1`",
     "docker-compose-config": "read one part: `compose config --services`",
@@ -8753,6 +9068,7 @@ _BRIEF_LABEL: dict[str, str] = {
     "named-variable-dump": "variable",
     "kubectl-exec-env": "k8s env",
     "kubectl-secret-read": "k8s secret",
+    "kubectl-secret-decode": "k8s decode",
     "docker-inspect": "docker",
     "docker-exec-env": "docker env",
     "docker-compose-config": "compose",

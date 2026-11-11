@@ -47,8 +47,10 @@ are masked wherever they appear on a model-visible surface:
 * a value in a credential position that carries **value evidence** — issuer
   prefix, entropy, a key header, a DSN structure, or a known stored value.
 * every value under `data:`/`stringData:` of a Kubernetes object whose own
-  `kind` is `Secret` (YAML or JSON, `List` items, and the escaped copy in a
-  `last-applied-configuration` annotation). The object declares them secret;
+  `kind` is `Secret` (YAML or JSON, `List` items, the escaped copy in a
+  `last-applied-configuration` annotation, and Go's `map[… data:map[K:V …]
+  kind:Secret …]` rendering that `kubectl -o go-template` prints on a
+  template error). The object declares them secret;
   key names, `metadata` and every other field stay readable, and a `ConfigMap`
   is never touched by this rule — also when it shares one output with a Secret
   and no `---` (an object ends at its next `apiVersion` or a repeated key).
@@ -71,7 +73,11 @@ are masked wherever they appear on a model-visible surface:
 * a value a Terraform plan JSON (`terraform show -json`, Terraform Cloud's
   `/plans/<id>/json-output`) itself marks sensitive: `before_sensitive`/
   `after_sensitive` leaves, `sensitive_values`, a sensitive output, and an
-  input variable whose configuration declares `sensitive: true`. Keys,
+  input variable whose configuration declares `sensitive: true`, and an
+  input variable whose NAME is a credential name (`is_credential_name`: an
+  HCP variable set marked sensitive is not declared so in the configuration,
+  so the plan prints it with no marker). The `read` gutter is stripped for the
+  parse and restored. Keys,
   resource addresses, types, names and every unmarked value stay readable; a
   plan that does not parse whole (truncated) is left to the plaintext rules.
 
@@ -358,13 +364,32 @@ comment.
 * The live `bash` stream (card, `jobs` peek, checkpoint `output_tail`) keeps
   the last 256 KiB it released as lookbehind, and once an `apiVersion` has
   appeared it holds an open `data:`/`stringData:` block until its object's
-  `kind` line or the object's end; it holds a Terraform plan object (`{
-  "format_version": …, "terraform_version"`) until its closing brace. Output
-  with neither is released exactly as before. One held structure may grow to
-  4 MiB (the API server caps a Secret at 1 MiB); past that it is **withheld**
-  — its bytes are dropped from the stream and from the command's result, and
-  a one-line notice (which names the safer read) takes their
-  place — never released unchecked.
+  `kind` line or the object's end. A held data block may grow to 4 MiB (the
+  API server caps a Secret at 1 MiB); past that it is **withheld** — its bytes
+  are dropped from the stream and from the command's result, and a one-line
+  `[output withheld: …]` notice naming the safer read takes their place —
+  never released unchecked. Output with neither anchor is released exactly as
+  before.
+* The live stream holds a Terraform plan object (`{"format_version": …,
+  "terraform_version": …,` then `variables`, `planned_values`,
+  `resource_changes` or `prior_state`) until its closing brace, then releases
+  it whole, so the command's result is the masked plan with the ordinary
+  head + tail retention. State JSON (`terraform show -json` of state, `values`
+  third) is not held. While a plan is held the live card reads `[output held
+  for a credential check]`; `jobs` peek shows no new output until it is
+  released. A plan may be held up to 32 MiB (the plan rule's own parse bound;
+  measured linear, ~0.43 s/MiB). **Residual:** past 32 MiB the held bytes and
+  the rest of the plan are released to the plaintext rules only — base
+  behaviour, with a one-line notice — so a sensitive value in a plan that
+  large is not masked.
+* **Residual — truncated plans.** A plan cut before its end (`terraform show
+  -json | head -c N`, `| head -n 40`) cannot be judged: the sensitivity of an
+  input variable is declared in `configuration`, which prints after
+  `variables`, so `variables.*.value` of a sensitive variable is shown in the
+  clear. Masking every variable value on a prefix would be the broad masking
+  this policy rules out; the `terraform show -json` / Terraform Cloud
+  `json-output` steer (`DUMP_SHAPES`, `redaction_shapes.py`) points at
+  the redacted reads instead.
 * Terraform plan JSON is parsed only when it carries a plan anchor and a
   sensitivity marker, and only up to 32 MiB; a larger or truncated plan keeps
   only the plaintext rules. Masked plan values are not registered session-wide

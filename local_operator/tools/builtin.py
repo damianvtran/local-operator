@@ -2754,6 +2754,9 @@ class BashParams(BaseModel):
 #: mirrors rather than imports (the tool layer must not depend on the TUI layer);
 #: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
 _LIVE_PENDING_TEXT = "no output yet"
+#: The live card's line while a Terraform plan is held whole for the credential
+#: check (round-2 review R2-1 (c)): the output is coming, not withheld.
+_LIVE_HELD_TEXT = "[output held for a credential check]"
 
 #: What the live view carries once the pipe filter has faulted. The text is
 #: withheld rather than guessed at: a filter that cannot vouch for the bytes must
@@ -2854,6 +2857,10 @@ class _BashOutput:
         #: output yet" instead of the settled "``(empty)``" while a command is
         #: demonstrably producing output (see ``_LIVE_PENDING_TEXT``).
         self.withheld = 0
+        #: Whether those bytes include a Terraform plan parked for the credential
+        #: check (``StructureStreamGuard.park``): the live card says so, since a
+        #: multi-MiB plan can keep it quiet for a second or more.
+        self.held_for_check = False
 
     @property
     def retained_bytes(self) -> int:
@@ -3098,6 +3105,11 @@ class _PipeRedactor:
         #: (see the section note above ``StructureStreamGuard``).
         self._structures = StructureStreamGuard()
 
+    @property
+    def held_for_check(self) -> int:
+        """Characters of a Terraform plan parked for the whole-plan check, else 0."""
+        return self._structures.parked_chars
+
     def _set(self, values: Iterable[str]) -> None:
         self.secrets = sorted({value for value in values if value}, key=len, reverse=True)
         # EVERY SPELLING, not just the verbatim one, and that is why the list is
@@ -3166,8 +3178,25 @@ class _PipeRedactor:
 
     def _feed_scrubbed(self, chunk: bytes, *, final: bool = False) -> bytes:
         structures = self._structures
-        text = self.pending + self.decoder.decode(chunk, final=final)
-        # A structure too large to hold is WITHHELD, not released unchecked:
+        decoded = self.decoder.decode(chunk, final=final)
+        lead = ""
+        if structures.parked:
+            # An open Terraform plan is parked in the guard: scan only this read
+            # and publish nothing until its closing brace, so holding it stays
+            # linear (re-joining it into ``pending`` re-searched the whole plan
+            # on every read — round-2 review R2-1). ``absorb`` hands back the
+            # whole text once the plan is complete, over the bound, or final.
+            whole = structures.absorb(self.pending, decoded, final=final)
+            if whole is None:
+                return b""
+            text = whole
+            # Past the bound the plan goes to the ordinary rules; its notice
+            # LEADS the release so the sink's head keeps it (a notice after a
+            # 32 MiB release would land in the middle the sink drops).
+            lead = structures.withheld_notice()
+        else:
+            text = self.pending + decoded
+        # A data block too large to hold is WITHHELD, not released unchecked:
         # its bytes are dropped here as they arrive (notice already sent).
         text = structures.discard(text, final=final)
         cut = self._release_point(text, final=final)
@@ -3180,11 +3209,13 @@ class _PipeRedactor:
         if structures.withholding:
             self.pending = structures.discard(self.pending, final=final)
             notice = structures.withheld_notice()
+        elif not final:
+            self.pending = structures.park(self.pending)
         ready = self._mask_open_key_block(ready)
         ready, structure_hits = structures.scrub_release(ready)
         scrubbed, hits = scrub_secrets_with_hits(ready, self.secrets)
         hits = structure_hits + hits
-        scrubbed += notice
+        scrubbed = lead + scrubbed + notice
         # REPORT FROM HERE. This filter is the only layer that sees a credential
         # that exists only in a command's OUTPUT — the production case this
         # feature was written for — and it masks the bytes before the result
@@ -4720,7 +4751,10 @@ async def execute_bash(
                     continue
                 redactor.refresh(values)
                 safe = redactor.feed(chunk)
-                sink.withheld = len(redactor.pending)
+                # A parked Terraform plan is held too; counted so the card does
+                # not read ``(empty)`` while it waits, and flagged so it can say why.
+                sink.withheld = len(redactor.pending) + redactor.held_for_check
+                sink.held_for_check = redactor.held_for_check > 0
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
@@ -4778,6 +4812,9 @@ async def execute_bash(
             # Bytes are arriving and being held; ``(empty)`` would tell the
             # operator the opposite of what is happening.
             stdout = _LIVE_PENDING_TEXT
+        if stdout_chunks.held_for_check or stderr_chunks.held_for_check:
+            # Live view only (this snapshot is never the settled result).
+            stdout = f"{stdout}\n{_LIVE_HELD_TEXT}" if stdout else _LIVE_HELD_TEXT
         summary = _bash_output_summary(stdout, stderr)
         # The soft (memory.high) advisory is carried as its OWN field, not
         # prepended to the output text (design review D1). Prepended, it rode the

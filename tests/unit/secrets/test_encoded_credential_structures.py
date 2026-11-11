@@ -684,19 +684,177 @@ def test_output_without_a_structure_anchor_streams_exactly_as_before(
     assert guarded == per_read()
 
 
-def test_a_structure_over_the_hold_limit_is_withheld_not_released(
+def test_a_data_block_over_the_hold_limit_is_withheld_not_released(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from local_operator import redaction_shapes
 
     monkeypatch.setattr(redaction_shapes, "STRUCTURE_HOLD_LIMIT", 4096)
     yaml_text, values = _large_yaml_secret()
-    for text, secrets in ((_plan(200, 2), [SENSITIVE]), (yaml_text, values)):
-        data = text.encode() + b"after the structure\n"
-        out = _stream([data[k : k + 1024] for k in range(0, len(data), 1024)])
-        assert not [s for s in secrets if s in out]
-        assert out.count("[live output withheld") == 1
-        assert out.endswith("after the structure\n")
+    data = yaml_text.encode() + b"after the structure\n"
+    out = _stream([data[k : k + 1024] for k in range(0, len(data), 1024)])
+    assert not [s for s in values if s in out]
+    # "output withheld": the sink is the settled result, not only the live view.
+    assert out.count("[output withheld: a Kubernetes data block") == 1
+    assert "live output withheld" not in out
+    assert out.endswith("after the structure\n")
+
+
+def _big_plan(target: int, *, sensitive: bool, indent: int | None = 2) -> str:
+    """A plan over ``target`` chars; resource 0 carries ``SENSITIVE`` when asked.
+
+    ``sensitive=False`` is the ``json-output-redacted`` shape: the value is
+    ``null`` and the sensitivity maps still mark it.
+    """
+    per_change = len(_plan(100, indent)) / 100
+    count = int(target / per_change * 1.05) + 1
+    text = _plan(count, indent)
+    if not sensitive:
+        text = text.replace(json.dumps(SENSITIVE), "null", 1)
+    assert len(text) > target
+    return text
+
+
+def _settle(data: bytes, read: int = 65536) -> tuple[str, Any]:
+    """Stream ``data`` through the pipe filter into the real result sink."""
+    from local_operator.tools.builtin import _BashOutput, _PipeRedactor
+
+    redactor = _PipeRedactor([])
+    sink = _BashOutput()
+    held = False
+    for k in range(0, len(data), read):
+        sink.append(redactor.feed(data[k : k + read]))
+        held = held or redactor.held_for_check > 0
+    sink.append(redactor.feed(b"", final=True))
+    return sink.decode(), held
+
+
+def _raw_sink(data: bytes) -> str:
+    """Base's settled result for ``data``: the sink fed the bytes unchanged."""
+    from local_operator.tools.builtin import _BashOutput
+
+    sink = _BashOutput()
+    for k in range(0, len(data), 65536):
+        sink.append(data[k : k + 65536])
+    return sink.decode()
+
+
+def test_a_redacted_plan_over_4_mib_settles_with_base_head_and_tail() -> None:
+    # R2-1: a json-output-redacted plan over 4 MiB settled as a 164-char notice.
+    data = (_big_plan(6 * 1024 * 1024, sensitive=False) + "PLAN-TRAILER-LINE\n").encode()
+    settled, held = _settle(data)
+    assert held  # the live view did wait for the whole plan
+    assert settled == _raw_sink(data)  # nothing masked, so base's exact head + tail
+    assert settled.startswith('{\n  "format_version": "1.2"')
+    assert settled.endswith("PLAN-TRAILER-LINE\n")
+    assert "json-output-redacted" not in settled and "withheld" not in settled
+
+
+@pytest.mark.parametrize("indent", [2, None])
+def test_a_plan_over_4_mib_with_a_sensitive_value_settles_masked(indent: int | None) -> None:
+    text = _big_plan(5 * 1024 * 1024, sensitive=True, indent=indent)
+    data = (text + "PLAN-TRAILER-LINE\n").encode()
+    settled, _ = _settle(data)
+    assert SENSITIVE not in settled
+    assert '"address": "aws_ssm_parameter.p0"' in settled or '"address":"aws_ssm_parameter.p0"' in settled
+    last = text.count('"address"') - 1
+    assert f"aws_ssm_parameter.p{last}" in settled  # the tail survives too
+    assert settled.endswith("PLAN-TRAILER-LINE\n")
+    assert len(settled.encode()) > 3 * 1024 * 1024  # head + tail, not a notice
+
+
+def _state_json(target: int) -> str:
+    resources = [
+        {
+            "address": f"aws_lambda_function.f{i}",
+            "type": "aws_lambda_function",
+            "values": {
+                "function_name": f"f{i}",
+                # A ``"variables"`` key INSIDE the state must not make it a plan.
+                "environment": [{"variables": {"LOG_LEVEL": "info", "MODE": f"m{i}"}}],
+            },
+            "sensitive_values": {"environment": [{}]},
+        }
+        for i in range(target // 300 + 1)
+    ]
+    state = {
+        "format_version": "1.0",
+        "terraform_version": "1.9.5",
+        "values": {"root_module": {"resources": resources}},
+    }
+    return json.dumps(state, indent=2) + "\n"
+
+
+def test_terraform_state_json_streams_byte_identical_to_the_unguarded_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # R2-1 (a): ``terraform show -json`` STATE (``values`` third) is never held.
+    from local_operator.tools import builtin
+
+    data = _state_json(6 * 1024 * 1024).encode()
+    assert len(data) > 6 * 1024 * 1024
+
+    def per_read() -> list[bytes]:
+        redactor = builtin._PipeRedactor([])
+        reads = [redactor.feed(data[k : k + 65536]) for k in range(0, len(data), 65536)]
+        assert redactor.held_for_check == 0
+        return reads + [redactor.feed(b"", final=True)]
+
+    guarded = per_read()
+    assert b"".join(guarded) == data
+    monkeypatch.setattr(builtin.StructureStreamGuard, "hold", lambda self, text, cut, final: cut)
+    assert guarded == per_read()
+
+
+@pytest.mark.parametrize(
+    ("fragment", "expected"),
+    [
+        ('{\n  "format_version": "1.2",\n  "terraform_version": "1.9.5",\n', True),
+        ('{"format_version":"1.2","terraform_version":"1.9.5","vari', True),
+        ('{"format_version":"1.2","terraform_version":"1.9.5","planned_values"', True),
+        ('{"format_version":"1.0","terraform_version":"1.9.5","values"', False),
+        ('{"format_version":"1.0","terraform_version":"1.9.5","v', True),
+    ],
+)
+def test_a_plan_opener_needs_a_key_the_plan_rule_acts_on(fragment: str, expected: bool) -> None:
+    from local_operator.redaction_shapes import _could_open_a_plan
+
+    assert _could_open_a_plan(fragment) is expected
+
+
+def test_holding_a_plan_is_linear_in_its_size() -> None:
+    # R2-1: the held plan was re-joined and re-searched per read (4.92 MiB
+    # 2.54 s, 12.3 MiB 11.48 s). Same-run control: a 4x larger plan must take
+    # well under the 16x a per-read rescan costs.
+    small = _big_plan(512 * 1024, sensitive=False).encode()
+    large = _big_plan(2 * 1024 * 1024, sensitive=False).encode()
+
+    def timed(data: bytes) -> float:
+        best = float("inf")
+        for _ in range(2):
+            began = time.perf_counter()
+            _settle(data)
+            best = min(best, time.perf_counter() - began)
+        return best
+
+    assert timed(large) < timed(small) * 8
+
+
+def test_a_plan_over_the_stream_bound_is_released_to_the_plain_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import redaction_shapes
+
+    monkeypatch.setattr(redaction_shapes, "STREAM_PLAN_HOLD_LIMIT", 4096)
+    text = _plan(200, 2)
+    data = text.encode() + b"after the structure\n"
+    out = _stream([data[k : k + 1024] for k in range(0, len(data), 1024)])
+    notice = redaction_shapes._UNCHECKED_PLAN
+    assert out.count(notice) == 1 and out.startswith(notice)
+    # Not dropped: every byte is there (base behaviour), and the notice never
+    # sends an agent to json-output-redacted.
+    assert out[len(notice) :] == text + "after the structure\n"
+    assert "json-output-redacted" not in notice
 
 
 def test_configmap_before_a_secret_without_a_separator_keeps_its_values() -> None:
@@ -740,10 +898,8 @@ def test_secret_rule_reads_through_the_read_tool_gutter() -> None:
     assert out.count(REDACTION_MARKER) == scrub_shapes(text).count(REDACTION_MARKER)
 
 
-@pytest.mark.asyncio
-async def test_read_tool_session_masks_a_secret_manifest(tmp_path: Any) -> None:
-    # Q4 on the real path: a ``read`` through a Session, checked in the provider
-    # request and the durable transcript.
+async def _read_through_a_session(tmp_path: Any, path: Any) -> tuple[str, str]:
+    """``read`` ``path`` through a Session: (last provider request repr, durable transcript)."""
     from local_operator.harness.types import (
         ModelSpec,
         StreamEndEvent,
@@ -755,11 +911,6 @@ async def test_read_tool_session_masks_a_secret_manifest(tmp_path: Any) -> None:
     from local_operator.tools.builtin import build_read_tool
     from local_operator.variables import VariableStore
 
-    manifest = tmp_path / "secret.yaml"
-    manifest.write_text(
-        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\nstringData:\n"
-        f"  ENDPOINT_AUTH: {OPAQUE[:18]}\ndata:\n  BLOB: {OPAQUE}\n"
-    )
     requests: list[Any] = []
 
     def provider(request: Any, signal: Any = None) -> Any:
@@ -772,7 +923,7 @@ async def test_read_tool_session_masks_a_secret_manifest(tmp_path: Any) -> None:
                     index=0,
                     id="r0",
                     name="read",
-                    argument_delta=json.dumps({"path": str(manifest)}),
+                    argument_delta=json.dumps({"path": str(path)}),
                 )
                 yield StreamEndEvent(stop_reason="toolUse")
             else:
@@ -791,12 +942,205 @@ async def test_read_tool_session_masks_a_secret_manifest(tmp_path: Any) -> None:
         cwd=str(tmp_path),
         variables=VariableStore(cwd=str(tmp_path)),
     )
-    await session.prompt("read the manifest")
+    await session.prompt("read the file")
     durable = (tmp_path / "session" / "transcript.jsonl").read_text()
+    return repr(requests[-1]), durable
+
+
+@pytest.mark.asyncio
+async def test_read_tool_session_masks_a_secret_manifest(tmp_path: Any) -> None:
+    # Q4 on the real path: a ``read`` through a Session, checked in the provider
+    # request and the durable transcript.
+    manifest = tmp_path / "secret.yaml"
+    manifest.write_text(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\nstringData:\n"
+        f"  ENDPOINT_AUTH: {OPAQUE[:18]}\ndata:\n  BLOB: {OPAQUE}\n"
+    )
+    request, durable = await _read_through_a_session(tmp_path, manifest)
     for secret in (OPAQUE, OPAQUE[:18]):
-        assert secret not in repr(requests[-1])
+        assert secret not in request
         assert secret not in durable
-    assert "ENDPOINT_AUTH: " + REDACTION_MARKER in repr(requests[-1])
+    assert "ENDPOINT_AUTH: " + REDACTION_MARKER in request
+
+
+# --- 2026-11-09 exposure: plan variables, read gutter ----------------------------
+TF_AWS_KEY_ID = "AKIA" + "QX7FAKEFAKE1234Z"
+TF_AWS_SECRET = ("fAkE" + "s3cr3tK3yV4lu3" * 3)[:40]
+
+
+def _variable_set_plan(*, marked: bool) -> dict[str, Any]:
+    """An HCP plan whose variable set is sensitive; ``marked`` = declared in config."""
+    declared: dict[str, Any] = {"sensitive": True} if marked else {}
+    return {
+        "format_version": "1.2",
+        "terraform_version": "1.9.0",
+        "variables": {
+            "AWS_ACCESS_KEY": {"value": TF_AWS_KEY_ID},
+            "AWS_SECRET_KEY": {"value": TF_AWS_SECRET},
+            "region": {"value": "us-east-1"},
+        },
+        "planned_values": {"root_module": {}},
+        "resource_changes": [
+            {
+                "address": "aws_s3_bucket.b",
+                "change": {
+                    "actions": ["create"],
+                    "before": None,
+                    "after": {"bucket": "my-bucket"},
+                    "after_sensitive": {},
+                },
+            }
+        ],
+        "configuration": {
+            "root_module": {
+                "variables": {
+                    "AWS_ACCESS_KEY": dict(declared),
+                    "AWS_SECRET_KEY": dict(declared),
+                    "region": {},
+                }
+            }
+        },
+    }
+
+
+def _gutter(text: str) -> str:
+    return "\n".join(f"{i + 1:>6}| {line}" for i, line in enumerate(text.splitlines()))
+
+
+@pytest.mark.parametrize("marked", [True, False])
+@pytest.mark.parametrize("indent", [2, None])
+@pytest.mark.parametrize("guttered", [False, True])
+def test_plan_variables_are_masked_by_name_raw_and_through_the_read_gutter(
+    marked: bool, indent: int | None, guttered: bool
+) -> None:
+    text = json.dumps(_variable_set_plan(marked=marked), indent=indent)
+    if guttered:
+        text = _gutter(text)
+    out = scrub_shapes(text)
+    assert TF_AWS_SECRET not in out and TF_AWS_KEY_ID not in out
+    # Names, the non-credential variable and resources stay readable.
+    for kept in ("AWS_SECRET_KEY", "AWS_ACCESS_KEY", "us-east-1", "my-bucket", "aws_s3_bucket.b"):
+        assert kept in out
+    if guttered:
+        lines = out.splitlines()
+        assert len(lines) == len(text.splitlines())
+        assert all(line.startswith(f"{i + 1:>6}| ") for i, line in enumerate(lines))
+
+
+def test_a_plan_without_credential_names_is_untouched_through_the_gutter() -> None:
+    plan = _variable_set_plan(marked=False)
+    plan["variables"] = {"region": {"value": "us-east-1"}, "bucket": {"value": "b-1"}}
+    text = _gutter(json.dumps(plan, indent=2))
+    assert scrub_shapes(text) == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marked", [True, False])
+async def test_read_tool_session_masks_plan_variables(tmp_path: Any, marked: bool) -> None:
+    saved = tmp_path / "plan.json"
+    saved.write_text(json.dumps(_variable_set_plan(marked=marked), indent=2) + "\n")
+    request, durable = await _read_through_a_session(tmp_path, saved)
+    for secret in (TF_AWS_SECRET, TF_AWS_KEY_ID):
+        assert secret not in request
+        assert secret not in durable
+    assert "us-east-1" in request and "AWS_SECRET_KEY" in request
+
+
+# --- 2026-11 post-mortem: kubectl go-template error dump ------------------------
+GOMAP_V1 = b64("plainvalueQQ9zzfakeX1")
+GOMAP_V2 = b64("mrva-live-" + "a" * 32)
+GOMAP_HOOK = b64("https://hooks.slack.com/services/T000/B000/XXXXfakeXXXX")
+
+
+def _template_error_dump() -> str:
+    """kubectl's ``-o go-template`` failure on a missing key, values fake."""
+    secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "internal-jobs-sc"},
+        "data": {"MINERVA_API_KEY_PROD": GOMAP_V2, "OTHER": GOMAP_V1, "HOOK": GOMAP_HOOK},
+    }
+    return (
+        'error: error executing template "{{index .data \\"K\\" | base64decode}}": template: '
+        'output:1:2: executing "output" at <index .data "K">: error calling index: '
+        "index of untyped nil\n"
+        "raw data was: " + json.dumps(secret) + "\n"
+        "object given to template engine was: map[apiVersion:v1 data:map[HOOK:"
+        + GOMAP_HOOK
+        + " MINERVA_API_KEY_PROD:"
+        + GOMAP_V2
+        + " OTHER:"
+        + GOMAP_V1
+        + "] kind:Secret metadata:map[name:internal-jobs-sc]]\n"
+    )
+
+
+GOMAP_VALUES = (GOMAP_V1, GOMAP_V2, GOMAP_HOOK)
+
+
+def test_go_template_error_dump_masks_the_go_map_values_and_keeps_keys() -> None:
+    out = scrub_shapes(_template_error_dump())
+    assert [v for v in GOMAP_VALUES if v in out] == []
+    assert (
+        f"data:map[HOOK:{REDACTION_MARKER} MINERVA_API_KEY_PROD:{REDACTION_MARKER} "
+        f"OTHER:{REDACTION_MARKER}] kind:Secret metadata:map[name:internal-jobs-sc]]"
+    ) in out
+
+
+def test_go_map_rule_reads_only_the_owning_object() -> None:
+    configmap = "map[apiVersion:v1 data:map[LOG_LEVEL:info MODE:fast] kind:ConfigMap]\n"
+    assert scrub_shapes(configmap) == configmap
+    # A ConfigMap next to a Secret keeps its values; stringData is masked too.
+    both = configmap + "map[apiVersion:v1 kind:Secret stringData:map[TOKEN:tok-zq9-77]]\n"
+    out = scrub_shapes(both)
+    assert out.startswith(configmap)
+    assert f"stringData:map[TOKEN:{REDACTION_MARKER}]" in out
+    # A Secret NESTED in a ConfigMap's metadata does not claim the ConfigMap's data.
+    nested = "map[data:map[A:keep-me] kind:ConfigMap metadata:map[owner:map[kind:Secret]]]\n"
+    assert scrub_shapes(nested) == nested
+
+
+def test_live_stream_masks_the_go_template_dump_at_every_split_point() -> None:
+    data = _template_error_dump().encode()
+    leaks = [
+        p for p in range(1, len(data)) if any(v in _stream([data[:p], data[p:]]) for v in GOMAP_VALUES)
+    ]
+    assert leaks == []
+
+
+@pytest.mark.parametrize("size", [4096, 65536])
+def test_live_stream_masks_a_go_map_line_longer_than_the_8k_cap(size: int) -> None:
+    # One line: the cap used to cut it before ``kind:Secret`` (sorted after data).
+    values = [b64(f"opaque-{i}-" * 40) for i in range(60)]
+    entries = " ".join(f"K{i:02d}:{value}" for i, value in enumerate(values))
+    line = f"map[apiVersion:v1 data:map[{entries}] kind:Secret metadata:map[name:x]]\n"
+    assert len(line) > 8192
+    data = ("before\n" + line + "after\n").encode()
+    out = _stream([data[k : k + size] for k in range(0, len(data), size)])
+    assert [v for v in values if v in out] == []
+    assert out.startswith("before\n") and out.endswith("after\n") and "K59:" in out
+
+
+@pytest.mark.parametrize(
+    ("command", "fires"),
+    [
+        ("""kubectl get secret X -o go-template='{{index .data "K" | base64decode}}' 2>&1""", True),
+        ("""kubectl -n jobs get secret X -o go-template='{{index .data "K" | base64decode}}'""", True),
+        ("kubectl get secret X -o jsonpath='{.data.K}' | base64 -d", True),
+        ("kubectl get secret X -o jsonpath='{.data.K}' | base64 --decode; echo", True),
+        ("kubectl get secret X -o jsonpath='{.data.K}' | base64 -d | psql", False),
+        ("kubectl get secret X -o jsonpath='{.data.K}' | base64 -d > /tmp/k", False),
+        ("""kubectl get secret X -o go-template='{{index .data "K" | base64decode}}' | wc -c""", False),
+        ("export PW=$(kubectl get secret X -o jsonpath='{.data.K}' | base64 -d)", False),
+        ("kubectl get secret X -o jsonpath='{.data}' | jq 'keys'", False),
+        ("kubectl get secret X -o go-template='{{.metadata.name}}'", False),
+    ],
+)
+def test_decoded_secret_to_the_terminal_is_steered(command: str, fires: bool) -> None:
+    from local_operator.redaction_shapes import DUMP_SHAPES
+
+    shape = next(s for s in DUMP_SHAPES if s.label == "kubectl-secret-decode")
+    assert bool(shape.pattern.search(command)) is fires
 
 
 def test_templated_secret_values_are_left_as_code() -> None:

@@ -4284,6 +4284,7 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         "named-variable-dump": "printenv MONGO_DSN",
         "kubectl-exec-env": "kubectl exec x -- env",
         "kubectl-secret-read": "kubectl get secret n -o yaml",
+        "kubectl-secret-decode": "kubectl get secret n -o jsonpath='{.data.K}' | base64 -d",
         "docker-inspect": "docker inspect api",
         "docker-exec-env": "docker exec x env",
         "docker-compose-config": "docker compose config",
