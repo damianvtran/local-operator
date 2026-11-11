@@ -504,9 +504,92 @@ def _dump_successor_diagnostics(
             pass
 
 
+def _lose_the_retiring_frame(viewer: Any, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Make a reset overtake the owner's ``retiring`` frame, deterministically.
+
+    This is a test seam for CI gate 42969069065 (PR #3783, job 130362419678).
+    The old owner exited 0 and left ``runtime-exit.json`` saying "retiring for
+    <build>", but the viewer heard ``'owner connection reset'`` and never the
+    frame. That happens when the reset is queued before the pump reads the
+    frame: ``StreamReader.readuntil`` raises the stored exception before
+    scanning its buffer. The seam swaps the frame for the reset at the real
+    client's reader. The owner subprocess, its exit record and the app's
+    engage path stay real.
+
+    It covers EVERY connection this process dials, not only the current one.
+    Recovery can redial the retiring owner while its record is still
+    published, and a frame that reached that second connection would hide the
+    defect. The test asserts that the seam fired, so a frame that slipped
+    through fails the run instead of passing it.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+
+    #: One entry per retiring frame the seam swallowed, so the test can prove
+    #: the ordering under test happened rather than passing on a frame that
+    #: slipped through.
+    fired: list[int] = []
+
+    def lose_on(reader: asyncio.StreamReader) -> None:
+        # Filtered at ``feed_data``, the transport's entry into the reader, and
+        # NOT at ``readline``. The pump is usually parked INSIDE an earlier
+        # ``readline`` call, and a wrapper installed after that call started
+        # would let the very next line through. That gave a false pass on main
+        # in 2 of 7 runs, where the retiring frame was the next line. Only
+        # complete lines are forwarded, so a frame split across TCP reads is
+        # still recognised.
+        if getattr(reader, "_test_loses_retiring", False):
+            return
+        feed_data = reader.feed_data
+        feed_eof = reader.feed_eof
+        partial = bytearray()
+
+        def feed_losing_retiring(data: bytes) -> None:
+            partial.extend(data)
+            *lines, rest = bytes(partial).split(b"\n")
+            partial[:] = rest
+            for line in lines:
+                try:
+                    op = json.loads(line).get("op") if line.strip() else None
+                except ValueError:
+                    op = None
+                if op == "retiring":
+                    fired.append(id(reader))
+                    reader.set_exception(
+                        ConnectionResetError("test seam: reset overtook the retiring frame")
+                    )
+                    return
+                feed_data(line + b"\n")
+
+        def flush_then_eof() -> None:
+            if partial:
+                feed_data(bytes(partial))
+                partial.clear()
+            feed_eof()
+
+        reader.feed_data = feed_losing_retiring  # type: ignore[method-assign]
+        reader.feed_eof = flush_then_eof  # type: ignore[method-assign]
+        reader._test_loses_retiring = True  # type: ignore[attr-defined]
+
+    pump = AttachClient._pump
+
+    async def pump_losing_retiring(self: AttachClient) -> None:
+        if self._reader is not None:
+            lose_on(self._reader)
+        await pump(self)
+
+    monkeypatch.setattr(AttachClient, "_pump", pump_losing_retiring)
+    client = viewer._client
+    assert client is not None and client._reader is not None
+    # The current pump is already running with its reader captured, so the class
+    # patch cannot reach it. Patch that reader directly.
+    lose_on(client._reader)
+    return fired
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("frame_lost", [False, True], ids=["frame", "reset-before-frame"])
 async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
-    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    headless_tui_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frame_lost: bool
 ) -> None:
     """Design test 13: the resume-then-update case, end to end.
 
@@ -514,6 +597,11 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
     marker to NEW. Within the settle + stagger the old pid must be gone, the
     record must name a NEW pid, the viewer must be bound (not cold), and the
     ledger must contain none of :data:`FORBIDDEN`.
+
+    ``reset-before-frame`` runs the same journey with the ``retiring`` frame
+    lost to a reset (see :func:`_lose_the_retiring_frame`). The viewer must
+    still refresh from the owner's durable exit record, inside the same 30 s
+    deadline.
     """
     from local_operator.session.attached import AttachedSession
 
@@ -561,6 +649,9 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
                 diag_events: list[str] = []
                 diag_t0: list[float] = []
                 _install_successor_spies(app, viewer, diag_events, diag_t0)
+                seam_fired: list[int] = []
+                if frame_lost:
+                    seam_fired = _lose_the_retiring_frame(viewer, monkeypatch)
                 diag_t0.append(time.monotonic())
                 _flip(prefix)
 
@@ -601,6 +692,10 @@ async def test_a_watched_idle_runtime_refreshes_and_the_viewer_rebinds_silently(
                 assert (
                     new_record is not None and int(new_record.pid) != old_pid
                 ), "no successor runtime was engaged after the refresh"
+                if frame_lost:
+                    assert (
+                        seam_fired
+                    ), "the seam never swallowed a retiring frame; nothing was tested"
                 assert not viewer.is_cold, "the viewer must be bound to the successor"
                 assert (
                     new_record.source_ref == NEW_MARKER.split()[0]

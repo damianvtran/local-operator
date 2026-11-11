@@ -192,6 +192,27 @@ _READ_LIMIT_BYTES = 1 << 20
 #: host can tell the two apart rather than matching on prose.
 OVERSIZED_FRAME_REASON = "owner sent a frame too large to read"
 
+#: The reasons an owner ANNOUNCES on the wire before it closes the socket.
+#:
+#: A transport error that follows one of them must not replace it. The owner
+#: socket is loopback TCP, and an owner that closes while the viewer's own
+#: outbound bytes sit unread in its receive buffer can make the kernel send an
+#: RST rather than a FIN (RFC 2525 §2.17; the owner closes at
+#: ``RuntimeServer._drop_client``). The pump then reads the announced frame
+#: and, on its NEXT read, gets ``ConnectionResetError``, so the bare
+#: ``reason = "owner connection reset"`` assignment in :meth:`AttachClient._pump`
+#: overwrote a retirement the frame had already stated, and the viewer recovered
+#: a planned refresh as owner death.
+#: The announcement is the more specific fact, and the reset is only how the
+#: socket ended after it.
+_ANNOUNCED_REASONS = frozenset({STOPPED_REASON, RETIRING_REASON, MOVED_REASON, BIND_FAILED_REASON})
+
+
+def _reset_reason(announced: str) -> str:
+    """The disconnect reason for a transport reset, keeping an announced one."""
+    return announced if announced in _ANNOUNCED_REASONS else "owner connection reset"
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -1561,7 +1582,14 @@ class AttachClient:
                 _READ_LIMIT_BYTES,
             )
         except (ConnectionResetError, BrokenPipeError):
-            reason = "owner connection reset"
+            # Keeps a reason a frame already announced; see _ANNOUNCED_REASONS.
+            # This covers a reset that arrives AFTER the frame was read. When
+            # the reset is queued first, ``StreamReader.readuntil`` raises the
+            # stored exception before it looks at its buffer (CPython
+            # asyncio/streams.py), so the frame is lost on this side. The
+            # viewer's recovery covers that case from the owner's exit record
+            # (``attached._lost_owner_retired_for_refresh``).
+            reason = _reset_reason(reason)
         except ConnectionError as exc:
             # A frame the owner sent was refused by this side — malformed, a
             # sequence gap, or a sync a host callback rejected. The socket is
@@ -1574,7 +1602,7 @@ class AttachClient:
             reason = str(exc) or "owner sent a frame this client refused"
             logger.warning("attach client: %s; the connection cannot continue", reason)
         except OSError:
-            reason = "owner connection reset"
+            reason = _reset_reason(reason)
         except Exception as exc:  # noqa: BLE001 — a callback failure must still report
             # A host callback raised something else (a store rejecting an
             # update, a validation error). Same treatment: the pump cannot
