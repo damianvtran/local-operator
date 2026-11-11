@@ -921,3 +921,124 @@ async def test_a_crashed_relay_connector_is_logged_before_the_restart(
     out = capsys.readouterr().out
     assert "relay connector crashed: RuntimeError; restarting" in out
     assert "connector bug" not in out
+
+
+# -- 5. the gateway's keep-alive outlasts the relay's idle pool ----------------
+
+
+async def _read_response(stream: yamux.Stream) -> bytes:
+    """One Content-Length HTTP/1.1 response off a relay stream, as the relay reads it."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = await asyncio.wait_for(stream.read(), 10)
+        if not chunk:
+            raise ConnectionError(f"gateway closed the stream before a response: {data!r}")
+        data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = next(
+        int(line.split(b":", 1)[1])
+        for line in head.split(b"\r\n")
+        if line.lower().startswith(b"content-length:")
+    )
+    while len(body) < length:
+        chunk = await asyncio.wait_for(stream.read(), 10)
+        if not chunk:
+            raise ConnectionError("gateway closed the stream mid-body")
+        body += chunk
+    return head.split(b"\r\n", 1)[0]
+
+
+def test_the_gateway_keep_alive_outlasts_every_client_idle_pool():
+    """C1.3 + cloudflared: the client, never the gateway, closes an idle connection."""
+    from local_operator.tunnels import service
+
+    assert service.GATEWAY_KEEP_ALIVE_SECONDS > relay_connector.RELAY_IDLE_CONN_TIMEOUT
+    assert service.GATEWAY_KEEP_ALIVE_SECONDS > service.CLOUDFLARED_IDLE_CONN_TIMEOUT
+    built = service.gateway_server_config(object(), 4100)
+    assert built.timeout_keep_alive == service.GATEWAY_KEEP_ALIVE_SECONDS
+    assert (built.host, built.port, built.access_log) == ("127.0.0.1", 4100, False)
+
+
+@pytest.mark.asyncio
+async def test_a_pooled_relay_stream_still_serves_after_uvicorns_default_keep_alive():
+    """Regression: 502 relay_upstream_reset bursts on a loaded machine (2026-11-11).
+
+    The relay reuses an idle stream for up to 30 s (C1.3). The gateway used
+    uvicorn's 5 s keep-alive, so after 5 s idle it closed the loopback
+    connection under a stream the relay still pooled; a POST sent on it raced
+    that close and the connector reset the stream. Here the second request
+    goes out on the SAME stream after 5.5 s idle, through the gateway's real
+    server configuration, and must be answered.
+    """
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    from local_operator.tunnels.service import gateway_server_config
+
+    async def echo(request: Request):
+        return PlainTextResponse(f"{request.method} {len(await request.body())}")
+
+    app = Starlette(routes=[Route("/api/echo", echo, methods=["GET", "POST"])])
+    port = free_port()
+    server = uvicorn.Server(gateway_server_config(app, port))
+    serve = asyncio.create_task(server.serve())
+    log: list[str] = []
+    try:
+        while not server.started:
+            await asyncio.sleep(0.01)
+        async with FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+            connector = make_connector(relay, grant_for(relay, "tok"), port, log=log)
+            async with running(connector):
+                session = await relay.wait_sessions(1)
+                stream = await session.open()
+                await stream.write(b"GET /api/echo HTTP/1.1\r\nHost: t\r\n\r\n")
+                assert await _read_response(stream) == b"HTTP/1.1 200 OK"
+                # Longer than uvicorn's default keep-alive (5 s), well inside
+                # the relay's 30 s idle pool.
+                await asyncio.sleep(5.5)
+                await stream.write(
+                    b"POST /api/echo HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\n\r\nabc"
+                )
+                assert await _read_response(stream) == b"HTTP/1.1 200 OK"
+                assert not stream.was_reset and not stream.remote_closed
+        assert not [line for line in log if "reset by this device" in line]
+    finally:
+        server.should_exit = True
+        await serve
+
+
+@pytest.mark.asyncio
+async def test_a_device_reset_is_logged_with_its_cause_and_rate_limited():
+    """A device RST is named in the service log, once per window (relay logs cannot)."""
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead = probe.getsockname()[1]
+    log: list[str] = []
+    async with FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+        connector = make_connector(relay, grant_for(relay, "tok"), dead, log=log)
+        async with running(connector):
+            session = await relay.wait_sessions(1)
+            for _ in range(3):
+                stream = await session.open()
+                with pytest.raises(yamux.StreamReset):
+                    await asyncio.wait_for(stream.read(), 5)
+    resets = [line for line in log if "reset by this device" in line]
+    assert len(resets) == 1, log
+    assert "gateway dial failed: ConnectionRefusedError" in resets[0]
+
+
+def test_the_reset_log_counts_what_it_suppressed():
+    lines: list[str] = []
+    tally = relay_connector.ResetLog(lines.append, window=0.05)
+    tally("first")
+    tally("second")
+    tally("third")
+    time.sleep(0.06)
+    tally("fourth")
+    assert lines == [
+        "relay stream reset by this device: first",
+        "relay stream reset by this device: fourth (+2 more in the previous 0.05 s)",
+    ]

@@ -53,6 +53,33 @@ from local_operator.tunnels.relay.connector import (
 
 POLL_SECONDS = 10
 
+#: cloudflared's own origin idle timeout (`originRequest.keepAliveTimeout`,
+#: default 1m30s): the dual-run's other client of this gateway.
+CLOUDFLARED_IDLE_CONN_TIMEOUT = 90.0
+#: How long the gateway keeps an idle keep-alive connection open.
+#:
+#: WHY IT MUST OUTLAST EVERY CLIENT'S IDLE POOL. Both clients of the gateway pool
+#: idle connections: the relay keeps up to 4 idle yamux streams per session for
+#: 30 s (C1.3, ``relay.connector.RELAY_IDLE_CONN_TIMEOUT``) and cloudflared keeps origin
+#: connections for 90 s. uvicorn's default is 5 s. With that default the
+#: GATEWAY closed a pooled connection the client still considered reusable, and
+#: a request the client had already sent on it raced the close: the connector
+#: found the loopback socket closed (ECONNRESET / ENOTCONN), reset the stream,
+#: and the relay answered 502 ``relay_upstream_reset``. Go retries an idempotent
+#: request on a reused connection, so only POST/PUT/PATCH/DELETE reached the
+#: phone — but every one of them in the window failed at once.
+#:
+#: The race window is the gap between uvicorn's close and the relay reading the
+#: device's FIN: one WAN RTT plus however long this process's event loop is
+#: stalled. On a machine at load average ~100 that stall reaches hundreds of
+#: milliseconds (measured: the relay rig in PR evidence reproduces a 4-of-4 POST
+#: failure under a 300 ms stall with the 5 s default and none with this value).
+#: The fix is the standard rule for HTTP keep-alive: the server's idle timeout
+#: must exceed the client's, so the client (which knows no request is in
+#: flight) is always the side that closes an idle connection. Bounded rather
+#: than unlimited so a client that never closes cannot pin sockets forever.
+GATEWAY_KEEP_ALIVE_SECONDS = 120
+
 #: The kinds a supervisor must never retry, because nothing the process can do
 #: changes them: each one needs an act by the operator.
 PARKING_KINDS = frozenset({"terminal_login", "terminal_remote", "terminal_config"})
@@ -556,6 +583,26 @@ def active(record: Any) -> bool:
     )
 
 
+def gateway_server_config(app: Any, port: int) -> Any:
+    """The uvicorn ``Config`` the loopback gateway is served with.
+
+    One function so the keep-alive invariant (see ``GATEWAY_KEEP_ALIVE_SECONDS``)
+    is testable against the exact server the service runs, not a copy of it.
+    """
+    import uvicorn
+
+    return uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        access_log=False,
+        proxy_headers=False,
+        timeout_graceful_shutdown=2,
+        timeout_keep_alive=GATEWAY_KEEP_ALIVE_SECONDS,
+    )
+
+
 async def run() -> int:
     import uvicorn
 
@@ -753,17 +800,7 @@ async def run() -> int:
                     ready_file.unlink(missing_ok=True)
                     token_file.unlink(missing_ok=True)
 
-            server = uvicorn.Server(
-                uvicorn.Config(
-                    gateway.app(),
-                    host="127.0.0.1",
-                    port=value["gateway_port"],
-                    log_level="warning",
-                    access_log=False,
-                    proxy_headers=False,
-                    timeout_graceful_shutdown=2,
-                )
-            )
+            server = uvicorn.Server(gateway_server_config(gateway.app(), value["gateway_port"]))
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
             # ONE helper for every server boot path: `add_signal_handler` is
