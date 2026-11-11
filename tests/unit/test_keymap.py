@@ -65,11 +65,11 @@ def test_every_binding_action_exists_on_the_app() -> None:
     from local_operator.tui.app import OperatorApp
 
     for action in keymap.KEY_ACTIONS:
-        if action.scope == "desktop":
+        if action.scope in ("desktop", "composer"):
             # The INVERSE guard, made ABLE TO FAIL (review round 1, F2):
-            # `action=""` is the contract for a desktop row, and the method
-            # the id tail would name must not exist — Textual resolves it
-            # only when an impossible key is pressed, which is exactly the
+            # `action=""` is the contract for a desktop/composer row, and the
+            # method the id tail would name must not exist — Textual resolves
+            # it only when an impossible key is pressed, which is exactly the
             # dead binding this guard exists to catch. (The old spelling
             # interpolated the empty `action` and so checked `action_`, a
             # name that fails only once the contract is already broken.)
@@ -102,6 +102,10 @@ def test_shipped_defaults_are_bindable_and_unreserved() -> None:
     (a desktop default that was an OS-reserved chord could never register).
     """
     for action in keymap.KEY_ACTIONS:
+        if action.default == "":
+            # The composer rows ship unbound (D8): an empty default is the
+            # encoding of "no chord", not a value to validate.
+            continue
         assert (
             keymap.validate_key(action.default, scope=action.scope, action_id=action.id) is None
         ), action.id
@@ -112,7 +116,8 @@ def test_shipped_defaults_are_bindable_and_unreserved() -> None:
 
 
 def test_shipped_defaults_do_not_collide_with_each_other() -> None:
-    defaults = [action.default for action in keymap.KEY_ACTIONS]
+    # Unbound defaults ("" — the composer rows) are not a shared key.
+    defaults = [action.default for action in keymap.KEY_ACTIONS if action.default]
     assert len(defaults) == len(set(defaults))
 
 
@@ -703,3 +708,99 @@ def test_display_key_maps_platform_tokens_only_for_desktop_scope() -> None:
     )
     assert keymap.alternates("") == frozenset()
     assert keymap.alternates(" f5 , ctrl+g ") == frozenset({"f5", "ctrl+g"})
+
+
+# --- Composer-scope send chords (T3, D4-D9) ----------------------------------
+# The three `keymap.send_*` rows: unbound defaults, the chord grammar the
+# terminals can deliver, and the refusals that keep Enter and the composer's
+# own keys. The anti-drift tests above already cover them with
+# ``action == ""`` (scope-aware since desktop rows exist); these pin the
+# composer half the app-table half cannot see.
+
+
+def test_send_chords_ship_unbound_with_composer_scope_and_modes() -> None:
+    """D8: every surface ships unbound in v1; the id tail is the mode."""
+    for mode in ("steer", "queue", "both"):
+        action = keymap.BY_ID[f"keymap.send_{mode}"]
+        assert action.scope == "composer"
+        assert action.action == ""
+        assert action.default == ""
+        assert action.tip == ""
+        assert keymap.SEND_MODES[action.id] == mode
+        assert keymap.scope_of(action.id) == "composer"
+        assert keymap.capturable_in_terminal(action.id) is True
+        setting = settings_io.BY_KEY[action.id]
+        assert setting.kind is settings_io.Kind.HOTKEY
+        assert setting.hotkey_scope == "composer"
+        assert setting.section == "keymap"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ctrl+enter",
+        "alt+enter",
+        "super+enter",
+        "ctrl+shift+enter",
+        "alt+shift+enter",
+        "alt+q",
+        "alt+s",
+        "ctrl+alt+s",
+    ],
+)
+def test_composer_grammar_accepts_deliverable_chords(key: str) -> None:
+    """Measured: modified Enter is kitty-only; alt+letter works everywhere."""
+    assert keymap.validate_key(key, scope="composer") is None
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "enter",
+        "shift+enter",
+        "ctrl+j",
+        "ctrl+m",
+        "ctrl+c",
+        "escape",
+        "tab",
+        "ctrl+u",
+        "g",
+        "shift",
+        "ctrl+g",
+        "f5",
+        "alt",
+        "super+d",
+    ],
+)
+def test_composer_grammar_refuses_reserved_and_plain_values_with_a_reason(key: str) -> None:
+    """D7: every refusal names why — a silent no-op reads as a broken key."""
+    reason = keymap.validate_key(key, scope="composer")
+    assert reason, key
+
+
+def test_composer_grammar_same_string_differs_by_scope() -> None:
+    """`ctrl+enter` is bindable for composer, refused for app (not a Keys name)."""
+    assert keymap.validate_key("ctrl+enter", scope="composer") is None
+    assert keymap.validate_key("ctrl+enter", scope="app") is not None
+
+
+def test_unbound_default_survives_resolved_keymap() -> None:
+    """Omission is the encoding of unbound: no override means no chord."""
+    resolved, rejected = keymap.resolved_keymap({})
+    assert not any(action_id.startswith("keymap.send_") for action_id in resolved)
+    assert not any(action_id.startswith("keymap.send_") for action_id in rejected)
+    resolved, rejected = keymap.resolved_keymap({"keymap.send_queue": "ctrl+enter"})
+    assert resolved == {"keymap.send_queue": "ctrl+enter"}
+    assert rejected == []
+    resolved, rejected = keymap.resolved_keymap({"keymap.send_queue": "banana"})
+    assert "keymap.send_queue" not in resolved
+    assert rejected == ["keymap.send_queue"]
+
+
+def test_group_conflict_across_two_send_ids() -> None:
+    """One key, two modes has no reading under which it is intended (D7)."""
+    values = {"keymap.send_queue": "ctrl+enter"}
+    conflict = keymap.group_conflict("keymap.send_steer", "ctrl+enter", values)
+    assert conflict is not None and "send as queue" in conflict
+    assert keymap.group_conflict("keymap.send_queue", "ctrl+enter", values) is None
+    assert keymap.group_conflict("keymap.send_both", "alt+s", values) is None

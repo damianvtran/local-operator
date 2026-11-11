@@ -221,6 +221,9 @@ _KEYMAP_COPY = {
     "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
     "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
     "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+    "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
+    "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
+    "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),
 }
 
 

@@ -1099,6 +1099,10 @@ def _sample_value(setting: settings_io.Setting) -> object:
         return setting.default
     if setting.kind is Kind.LIST:
         return list(setting.members[:1]) or []
+    if setting.kind is Kind.HOTKEY and setting.hotkey_scope == "composer":
+        # The composer rows ship unbound (default ""), so the default is not
+        # a writable sample. This row's own deliverable chord is the probe.
+        return "ctrl+enter"
     if setting.kind is Kind.TEXT:
         if setting.validate_value is not None:
             # A validated TEXT setting rejects an arbitrary probe by design

@@ -48,5 +48,35 @@
     "role": "Settings row help for the desktop start-recording hotkey",
     "tone": "plain, one sentence",
     "note": "EN-only context sidecar. No ICU arguments."
+  },
+  "wire.settings.keymap.send_steer.label": {
+    "role": "Settings row label for the composer shortcut that sends the message right away as a steer",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. Composer shortcut row. No ICU arguments."
+  },
+  "wire.settings.keymap.send_steer.help": {
+    "role": "Settings row help for the send-as-steer composer shortcut",
+    "tone": "plain, two sentences; second teaches the terminal limit",
+    "note": "EN-only context sidecar. Keep the limit sentence verbatim: Ctrl/Alt/Cmd+Enter needs enhanced-key terminals, Alt+letter works everywhere, and macOS needs Option-as-Meta. No ICU arguments."
+  },
+  "wire.settings.keymap.send_queue.label": {
+    "role": "Settings row label for the composer shortcut that queues the message for after the current step",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. Composer shortcut row. No ICU arguments."
+  },
+  "wire.settings.keymap.send_queue.help": {
+    "role": "Settings row help for the send-as-queue composer shortcut",
+    "tone": "plain, two sentences; second teaches the terminal limit",
+    "note": "EN-only context sidecar. Keep the limit sentence verbatim: Ctrl/Alt/Cmd+Enter needs enhanced-key terminals, Alt+letter works everywhere, and macOS needs Option-as-Meta. No ICU arguments."
+  },
+  "wire.settings.keymap.send_both.label": {
+    "role": "Settings row label for the composer shortcut that sends now and again after the step",
+    "tone": "concise verb phrase, sentence case",
+    "note": "EN-only context sidecar. Composer shortcut row. No ICU arguments."
+  },
+  "wire.settings.keymap.send_both.help": {
+    "role": "Settings row help for the send-as-both composer shortcut",
+    "tone": "plain, two sentences; second teaches the terminal limit",
+    "note": "EN-only context sidecar. Keep the limit sentence verbatim: Ctrl/Alt/Cmd+Enter needs enhanced-key terminals, Alt+letter works everywhere, and macOS needs Option-as-Meta. No ICU arguments."
   }
 }

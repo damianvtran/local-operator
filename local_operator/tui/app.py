@@ -26601,6 +26601,7 @@ class OperatorApp(App[None]):
                 message.attachments,
                 sent=sent,
                 typed=text,
+                delivery=message.delivery,
             )
         finally:
             source.turn.submitted_draft = None
@@ -35459,6 +35460,7 @@ class OperatorApp(App[None]):
         *,
         sent: str | None = None,
         typed: str = "",
+        delivery: str | None = None,
     ) -> None:
         """Paint one user prompt and dispatch it.
 
@@ -35559,7 +35561,13 @@ class OperatorApp(App[None]):
             # failure record (``_mark_send_failed``), so `edit` returns the
             # text to the composer — the same posture as the no-session arm
             # above, which is why this arm reuses it.
-            mode = self._busy_delivery_mode()
+            # The chord the operator pressed wins over the configured
+            # default for THIS send only (D9); a plain Enter falls back to
+            # the live LIVE-scope setting. Either way the refusal below is
+            # the same: a mode the handle cannot honour is refused, never
+            # downgraded — a chorded queue against a legacy handle must not
+            # become an urgent steer under a "queued" row.
+            mode = delivery or self._busy_delivery_mode()
             if mode != "steer" and not OperatorApp._steer_takes_delivery(session):
                 from local_operator.session.runtime.types import (
                     BUSY_DELIVERY_UNSUPPORTED,
@@ -48598,6 +48606,31 @@ class OperatorApp(App[None]):
         # produces. Narrow so a partial apply cannot pass for a clean one
         # (review round 1, m1).
         resolved, rejected = _keymap.resolved_keymap(values)
+        # The composer-scope send chords have no ``Binding`` to re-key, so
+        # ``set_keymap`` alone would never move them: push them from the
+        # SAME resolved keymap, so a config write (either site) changes the
+        # next send with no relaunch. The map is key name -> mode, read
+        # from the persisted value rather than from any binding map (the
+        # stale-map hazard ``action_holding`` documents).
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — no composer mounted (pre-boot apply)
+            editor = None
+        if editor is not None:
+            chords: dict[str, str] = {}
+            for action_id, mode in _keymap.SEND_MODES.items():
+                raw = values.get(action_id)
+                if raw is None:
+                    continue
+                if _keymap.validate_key(raw, scope="composer", action_id=action_id) is not None:
+                    continue
+                for part in _keymap.normalize_key(str(raw)).split(","):
+                    if part:
+                        chords[part] = mode
+            try:
+                editor.set_send_chords(chords)
+            except Exception:  # noqa: BLE001 — a bad chord map must not break apply
+                logger.debug("keymap: send chords push failed", exc_info=True)
         try:
             self.set_keymap(resolved)
         except Exception:  # noqa: BLE001 — a bad keymap must not take down the app

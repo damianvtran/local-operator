@@ -1813,6 +1813,12 @@ export type MessageParams = {
   "wire.settings.keymap.quick_send.label": undefined;
   "wire.settings.keymap.resume.help": undefined;
   "wire.settings.keymap.resume.label": undefined;
+  "wire.settings.keymap.send_both.help": undefined;
+  "wire.settings.keymap.send_both.label": undefined;
+  "wire.settings.keymap.send_queue.help": undefined;
+  "wire.settings.keymap.send_queue.label": undefined;
+  "wire.settings.keymap.send_steer.help": undefined;
+  "wire.settings.keymap.send_steer.label": undefined;
   "wire.settings.keymap.start_recording.help": undefined;
   "wire.settings.keymap.start_recording.label": undefined;
   "wire.skill_adoption.alias_occupied": undefined;
