@@ -15132,21 +15132,42 @@ class Session:
                 profile_name=record["name"],
                 changes=intent.changes,
                 diff=tuple(intent.summary.splitlines()),
+                summary=tuple(
+                    profile_proposals.summary_line(item)
+                    for item in profile_proposals.summarize_changes(
+                        profile_proposals.changes(
+                            record.get("before"), record["after"], record.get("fields") or []
+                        )
+                    )
+                ),
             )
         gate = self._request_approval
         if gate is None:
             from local_operator.harness.approval import ApprovalUnavailableError
 
             raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface is attached")
-        changed = (
-            ", ".join(profile_field_label(field) for field in intent.changes) or "(no fields named)"
+        from local_operator import profile_proposals
+
+        # The first line is unchanged (TUI/mobile show the card raw). The
+        # second line used to be followed by ``intent.summary`` verbatim — a
+        # whole instructions diff or new skill file — so a direct save of a
+        # long brief reproduced the unbounded ask card. Line 2 is now a bounded
+        # list of the fields/paths the save touches (names only: the intent
+        # has no structured before/after, and counts parsed from its prose
+        # summary mis-counted — PR #3777 R3-1), then — after a blank line —
+        # the change content clipped to SAVE_DETAIL_MAX_CHARS: a direct save
+        # has no review page (skills have no proposal path), so the card is
+        # the only place the approver can read what they approve (R2-2).
+        # Proposal cards stay 3 lines with structured counts.
+        changed = profile_proposals.save_changes_line(
+            profile_field_label(field) for field in intent.changes
         )
         card = (
             f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
-            f"Changes: {changed}."
+            f"{changed}."
         )
-        if intent.summary:
-            card += f"\n{intent.summary}"
+        if intent.summary.strip():
+            card += "\n\n" + profile_proposals.clip_save_detail(intent.summary)
         if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
             return f"approval:{intent.base_revision or 'new'}"
         return None
@@ -15201,13 +15222,12 @@ class Session:
             return "granted"
         if self._request_approval is None:
             return "refused"
-        card = (
-            f"Apply proposal {proposal_id} to {proposal['kind']} {proposal['name']!r}?\n"
-            f"Origin: {proposal['origin']['trust']}. Review in Agents → {proposal['name']}.\n"
-            + "\n".join(
-                f"{c['label']}: {c['before_text']} → {c['after_text']}"
-                for c in P.detail(Path(registry.config_dir), proposal)["changes"]
-            )
+        # A bounded summary, never the full before → after text: a multi-KB
+        # team brief inline made the ask card fill the conversation and hide
+        # its own options. The diff is reviewed in Agents → <name>; the first
+        # line's form is a contract with the UI (see approval_card_text).
+        card = P.approval_card_text(
+            proposal, P.detail(Path(registry.config_dir), proposal)["changes"]
         )
         return (
             "card"
