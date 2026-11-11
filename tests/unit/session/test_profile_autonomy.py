@@ -1258,3 +1258,50 @@ async def test_child_taint_reaches_the_parent_through_the_real_runner(
         assert parent.profile_lineage() == (True, True)
     finally:
         await parent.dispose()
+
+
+async def _fork_lineage(local, source: Transcript, through: str) -> tuple[bool, bool]:
+    """The episode a session rebuilt from a REAL ``fork_snapshot`` cut reports."""
+    fork_id, _omitted, _landed = await source.fork_snapshot(through_entry_id=through)
+    forked = Session(
+        model=MODEL,
+        stream_fn=_never_stream,
+        tools=[],
+        transcript=Transcript(source.directory.parent / fork_id),
+        system_blocks_provider=lambda: ["stable"],
+        agent_registry=local["agents"],
+        team_registry=local["teams"],
+        owner_prompt_consent=True,
+    )
+    try:
+        return forked.profile_lineage()
+    finally:
+        await forked.dispose()
+
+
+async def test_a_fork_cut_never_inherits_episode_facts_from_after_its_cut(local, tmp_path) -> None:
+    """M2 fork row: a cut BEFORE a later owner turn's clean marker keeps its own
+    untrusted tail tainted; a cut before a later peer row stays clean. The
+    parent's later markers describe history the child does not have."""
+    from local_operator.session.session import PROFILE_TRUST_CUSTOM_TYPE
+
+    source = Transcript(tmp_path / "config" / "sessions" / "src")
+    await source.append_message(Message.user("start"))
+    await source.append_message(Message.assistant("ok"))
+    await source.append_message(PEER)
+    tainted_cut = await source.append_message(Message.assistant("peer noted"))
+    await source.append_custom(PROFILE_TRUST_CUSTOM_TYPE, {"untrusted": True})
+    await source.append_message(Message.user("owner again"))
+    await source.append_custom(PROFILE_TRUST_CUSTOM_TYPE, {"untrusted": False})
+    await source.append_message(Message.assistant("clean now"))
+    assert source.latest_custom(PROFILE_TRUST_CUSTOM_TYPE) == {"untrusted": False}
+    assert await _fork_lineage(local, source, tainted_cut.id) == (True, True)
+
+    clean = Transcript(tmp_path / "config" / "sessions" / "clean")
+    await clean.append_message(Message.user("start"))
+    clean_cut = await clean.append_message(Message.assistant("ok"))
+    await clean.append_custom(PROFILE_TRUST_CUSTOM_TYPE, {"untrusted": False})
+    await clean.append_message(PEER)
+    await clean.append_custom(PROFILE_TRUST_CUSTOM_TYPE, {"untrusted": True})
+    await clean.append_message(Message.assistant("peer noted"))
+    assert await _fork_lineage(local, clean, clean_cut.id) == (True, False)

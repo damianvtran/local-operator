@@ -102,6 +102,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ENTRY_MESSAGE = "message"
+
+#: The host's profile-trust EPISODE record (``Session``'s durable taint bit;
+#: ``details = {"untrusted": bool}``). Defined here, beside the journal, because
+#: a fork cut must treat it as prefix state (``fork_snapshot``).
+PROFILE_TRUST_CUSTOM_TYPE = "profile_trust"
 ENTRY_COMPACTION = "compaction"
 ENTRY_CUSTOM = "custom"
 
@@ -3244,6 +3249,25 @@ class Transcript:
                             continue
                         if later:
                             excluded.add(row.id)
+                if through_entry_id is not None:
+                    # EPISODE FACTS ARE PREFIX STATE. A ``profile_trust`` row
+                    # after the cut describes conversation the child does not
+                    # have -- a later owner turn's CLEAN marker would launder
+                    # the child's own untrusted tail, a later taint would
+                    # misdescribe a clean prefix. Drop every such row; the
+                    # child rebuilds its episode from what it kept (newest
+                    # retained record plus the retained rows after it).
+                    last_kept = max(
+                        (i for i, row in enumerate(self._entries) if row.id in retained),
+                        default=-1,
+                    )
+                    excluded.update(
+                        row.id
+                        for i, row in enumerate(self._entries)
+                        if i > last_kept
+                        and row.type == ENTRY_CUSTOM
+                        and row.payload.get("custom_type") == PROFILE_TRUST_CUSTOM_TYPE
+                    )
                 fork_id = fork_session(
                     self.directory.parent.parent,
                     self.directory.name,

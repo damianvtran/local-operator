@@ -341,6 +341,7 @@ from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
+    PROFILE_TRUST_CUSTOM_TYPE,
     Transcript,
     context_cut_index,
 )
@@ -435,9 +436,10 @@ def _is_remote_prompt(message: Any) -> bool:
 #: run-scoped taint reset at every run start, so a Bridge-tainted child's job
 #: result waking the parent in a NEW run let a plain profile write go direct
 #: (QA round 1, Q1). Unlisted in the collapsible/bookkeeping sets on purpose:
-#: every entry is kept through file compaction and copied by forks, and the
-#: newest one wins (``latest_custom``).
-PROFILE_TRUST_CUSTOM_TYPE = "profile_trust"
+#: every entry is kept through file compaction and copied by a whole fork, and
+#: the newest one wins (``latest_custom``). A fork CUT drops the rows after its
+#: cut (``Transcript.fork_snapshot``): they describe history the child lacks.
+#: The name lives in ``session.transcript`` (imported above) for that reason.
 
 #: Internal inputs that carry no outside party's words (``_note_run_input``).
 _PROFILE_BENIGN_INPUTS = frozenset(
