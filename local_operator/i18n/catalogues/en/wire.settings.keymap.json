@@ -13,6 +13,6 @@
   "wire.settings.keymap.send_steer.help": "Send now, interrupting the step. Overrides Delivery when busy.",
   "wire.settings.keymap.send_queue.label": "Send as queue",
   "wire.settings.keymap.send_queue.help": "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
-  "wire.settings.keymap.send_both.label": "Send as both",
-  "wire.settings.keymap.send_both.help": "Wait, then interrupt if slow. Overrides Delivery when busy."
+  "wire.settings.keymap.send_both.label": "Send as queue, then steer",
+  "wire.settings.keymap.send_both.help": "Wait, then steer if slow. Overrides Delivery when busy."
 }

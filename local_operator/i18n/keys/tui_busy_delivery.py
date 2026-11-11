@@ -16,3 +16,11 @@ def both_notice() -> Msg:
 
 def queue_notice() -> Msg:
     return Msg("tui.busy_delivery.queue_notice", {})
+
+
+def steer_joined_notice() -> Msg:
+    return Msg("tui.busy_delivery.steer_joined_notice", {})
+
+
+def steer_notice() -> Msg:
+    return Msg("tui.busy_delivery.steer_notice", {})

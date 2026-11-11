@@ -38,6 +38,10 @@ def delivery_both() -> Msg:
     return Msg("relay.composer.delivery.both", {})
 
 
+def delivery_both_chip() -> Msg:
+    return Msg("relay.composer.delivery.both_chip", {})
+
+
 def delivery_both_hint() -> Msg:
     return Msg("relay.composer.delivery.both_hint", {})
 

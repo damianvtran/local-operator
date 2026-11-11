@@ -7,6 +7,16 @@
   "tui.busy_delivery.both_notice": {
     "role": "busy-send notice",
     "tone": "note",
-    "note": "Shown when a message sent to a working turn is queued and escalates to a steer (an interrupt) if it sits too long (about 45 seconds): it waits first, tools keep running, then it interrupts like a steer. Kept within a few characters of queue_notice so the rendered height matches."
+    "note": "Shown when a message sent to a working turn is queued and escalates to a steer (an interrupt) if it sits too long (about 45 seconds): it waits first, tools keep running, then it steers like a steer. Kept within a few characters of queue_notice and steer_joined_notice so the rendered height matches; the row restates to steer_joined_notice in place when a steer is already waiting, so the two must keep the same rendered height."
+  },
+  "tui.busy_delivery.steer_notice": {
+    "role": "busy-send notice",
+    "tone": "note",
+    "note": "Shown when a steer is sent to a working turn: it interrupts the turn at its next tool boundary. 'may stop' rather than 'stops' because a streaming model or a tool that cannot be interrupted is not actually stopped. 'tool' names the observable thing, not the internal 'step'. One wrapped line at every supported width (40 up); restated in place to steer_joined_notice when a second steer joins it."
+  },
+  "tui.busy_delivery.steer_joined_notice": {
+    "role": "busy-send notice",
+    "tone": "note",
+    "note": "Shown on a waiting queue/both row once ANY steer is also waiting: the steers go out at the next boundary, and the waiting message goes with them rather than waiting for the next turn. 'your steer' refers to the steer row above, the user's own message. Also shown on a queue/both row submitted while a steer is already waiting. Must render at the same height as the notice it replaces in place (queue_notice / both_notice)."
   }
 }

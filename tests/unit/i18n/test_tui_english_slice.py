@@ -243,8 +243,8 @@ KEYMAP_ENGLISH = {
         "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
     ),
     "keymap.send_both": (
-        "Send as both",
-        "Wait, then interrupt if slow. Overrides Delivery when busy.",
+        "Send as queue, then steer",
+        "Wait, then steer if slow. Overrides Delivery when busy.",
     ),
 }
 

@@ -244,7 +244,7 @@ BUSY_DELIVERY_CAPABILITY = "busy-delivery-v1"
 #: senders that gate on the same record — the attach client and the desktop
 #: admit path — quote it rather than a copy that could drift.
 BUSY_DELIVERY_UNSUPPORTED = (
-    "this session's runtime predates delivery modes (queue/both); "
+    "this session's runtime predates delivery modes (queue, or queue then steer); "
     "send it as a steer, or update the runtime"
 )
 

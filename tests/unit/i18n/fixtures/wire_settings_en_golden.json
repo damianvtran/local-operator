@@ -954,8 +954,8 @@
  "wire.settings.tools_search_interception_enabled.label": "Block unbounded searches",
  "wire.settings.tools_search_interception_rg_excludes.help": "Give ripgrep a generated config that skips node_modules/.git/out etc., so an `rg` the guard does not block is still fast. Applies to ripgrep only.",
  "wire.settings.tools_search_interception_rg_excludes.label": "...prune vendor trees for ripgrep",
- "wire.settings.delivery_busy_default.choice.both.description": "Wait, then interrupt if slow",
- "wire.settings.delivery_busy_default.choice.both.label": "both",
+ "wire.settings.delivery_busy_default.choice.both.description": "Wait, then steer if slow",
+ "wire.settings.delivery_busy_default.choice.both.label": "queue, then steer",
  "wire.settings.delivery_busy_default.choice.queue.description": "Wait; never interrupt tools",
  "wire.settings.delivery_busy_default.choice.queue.label": "queue",
  "wire.settings.delivery_busy_default.choice.steer.description": "Interrupt a running tool now",
@@ -1076,6 +1076,6 @@
  "wire.settings.keymap_send_steer.help": "Send now, interrupting the step. Overrides Delivery when busy.",
  "wire.settings.keymap_send_queue.label": "Send as queue",
  "wire.settings.keymap_send_queue.help": "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
- "wire.settings.keymap_send_both.label": "Send as both",
- "wire.settings.keymap_send_both.help": "Wait, then interrupt if slow. Overrides Delivery when busy."
+ "wire.settings.keymap_send_both.label": "Send as queue, then steer",
+ "wire.settings.keymap_send_both.help": "Wait, then steer if slow. Overrides Delivery when busy."
 }
