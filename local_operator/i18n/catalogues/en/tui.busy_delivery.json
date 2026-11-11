@@ -1,4 +1,4 @@
 {
-  "tui.busy_delivery.queue_notice": "queued — waits now, tools keep running",
-  "tui.busy_delivery.both_notice": "queued — waits, then steers if it stalls"
+  "tui.busy_delivery.queue_notice": "queued — waits, tools keep running",
+  "tui.busy_delivery.both_notice": "queued — waits, interrupts if slow"
 }

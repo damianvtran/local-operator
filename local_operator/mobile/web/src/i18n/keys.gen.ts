@@ -220,9 +220,12 @@ export type MessageParams = {
   "relay.composer.action.stop_agent": undefined;
   "relay.composer.action.stopping": undefined;
   "relay.composer.delivery.both": undefined;
+  "relay.composer.delivery.both_hint": undefined;
   "relay.composer.delivery.label": undefined;
   "relay.composer.delivery.queue": undefined;
+  "relay.composer.delivery.queue_hint": undefined;
   "relay.composer.delivery.steer": undefined;
+  "relay.composer.delivery.steer_hint": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
   "relay.health.ended_send_failed": undefined;

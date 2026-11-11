@@ -58,5 +58,20 @@
     "tone": "One lowercase word, no punctuation; the mode that waits then interrupts.",
     "maxCells": 16,
     "note": "Sheet row for the delivery mode that waits without interrupting and escalates to a steer when it has waited too long."
+  },
+  "relay.composer.delivery.steer_hint": {
+    "role": "busy-send mode hint, sheet row",
+    "tone": "One short sentence fragment under the option label; no terminal period.",
+    "note": "Muted hint line under the 'steer' row of the delivery sheet: interrupts the running turn at once, today's behaviour. Same meaning as the settings description."
+  },
+  "relay.composer.delivery.queue_hint": {
+    "role": "busy-send mode hint, sheet row",
+    "tone": "One short sentence fragment under the option label; no terminal period.",
+    "note": "Muted hint line under the 'queue' row of the delivery sheet: waits for the step and never interrupts the tools. Same meaning as the settings description."
+  },
+  "relay.composer.delivery.both_hint": {
+    "role": "busy-send mode hint, sheet row",
+    "tone": "One short sentence fragment under the option label; no terminal period.",
+    "note": "Muted hint line under the 'both' row of the delivery sheet: waits like queue, then interrupts like steer if it has waited too long. Same meaning as the settings description."
   }
 }

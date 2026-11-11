@@ -8,5 +8,8 @@
   "relay.composer.delivery.label": "delivery",
   "relay.composer.delivery.steer": "steer",
   "relay.composer.delivery.queue": "queue",
-  "relay.composer.delivery.both": "both"
+  "relay.composer.delivery.both": "both",
+  "relay.composer.delivery.steer_hint": "Interrupt now (today's behaviour)",
+  "relay.composer.delivery.queue_hint": "Wait; never interrupt tools",
+  "relay.composer.delivery.both_hint": "Wait, then interrupt if slow"
 }
