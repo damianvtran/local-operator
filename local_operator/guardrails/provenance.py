@@ -52,15 +52,17 @@ from __future__ import annotations
 
 import fnmatch
 import glob as _glob
+import itertools
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
 import subprocess
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +79,17 @@ _DB_TIMEOUT_S = 2.0
 #: worktrees, 2026-11-07): median 0.015 s, max 0.86 s. 10 s is far above that and still
 #: short enough that a hung filesystem cannot hold the turn.
 _GIT_TIMEOUT_S = 10.0
+#: Bound on the ONE ``git status --porcelain --ignored`` that ``worktree_state``
+#: runs. The 10 s probe bound above was measured on an idle machine; under the
+#: disk pressure of ~25 concurrent sessions (2026-11-09, ~4 GiB free) the same
+#: status calls on the operator's real linked worktrees measured n=6, median
+#: ~21 s, max 34.3 s (``lo-i18n-es`` 20.4/28.9 s, ``.worktrees/durable-write``
+#: 34.3/23.5 s, local-operator-ui ``i18n-restored-content`` 5.0/3.3 s). Every
+#: one timed out, ``worktree_state`` said ``unknown``, and a clean
+#: ``git worktree remove`` fell through to the repository-root refusal. 60 s
+#: sits above that max; the ``git worktree remove`` it gates walks the same
+#: tree, so the guard costs at most what the delete itself costs.
+_WORKTREE_STATUS_TIMEOUT_S = 60.0
 #: How far back the operator brief reads. A transcript can hold thousands of
 #: rows; the judge needs the recent operator words, not the session's history.
 _SCAN_LIMIT = 400
@@ -92,9 +105,52 @@ TRUSTED_ASK_SURFACES = frozenset({"terminal", "tui", "desktop", "mirror"})
 #: Words that make an ask answer a refusal ("Leave them", "No, keep it").
 _DECLINE_RE = re.compile(
     r"(?i)\b(no|nope|keep|cancel|don'?t|do not|stop|leave|not now|not yet|hold off"
-    r"|skip|later|wait|no thanks)\b"
+    r"|skip|later|wait|no thanks|abort|nah|negative|never ?mind|reject|deny|decline)\b"
 )
 _ASK_ID_RE = re.compile(r"(?<![\w-])(a-[0-9a-f]{4,12})(?![\w-])")
+#: Where a free-text answer's first clause ends ("Go ahead and copy | but …").
+_CLAUSE_BREAK_RE = re.compile(r"(?i)\s*(?:\bbut\b|\bhowever\b|;|\.(?:\s|$)|\s[—–-]\s)\s*")
+#: Words AFTER the first clause that narrow or delay the approval.
+_CARVE_OUT_RE = re.compile(
+    r"(?i)\b(except|excluding|keep|leave|skip|only|cancel|stop|wait|hold off|not yet|not now"
+    r"|later|instead)\b"
+    r"|\b(?:don'?t|do not|never|no)\s+"
+    r"(?:delete|remove|copy|overwrite|touch|move|rm|run|do|change)\b"
+    r"|\bnot\s+(?:the|that|those|this|these|any|all)\b"
+)
+#: A typed answer that is a BARE yes, matched against the WHOLE answer
+#: (review R1-B2, PR #3710): "Go ahead and copy", "yes please", "ok, delete
+#: them". Anything more — a second clause, "but", "not", "just", "only",
+#: "minus", "stays" — is not settled here; the judge reads its text. A prefix
+#: match let "Yes for es; no for fr" approve all three files.
+_BARE_AFFIRM_RE = re.compile(
+    r"(?i)\W*(?:yes|yep|yeah|ok|okay|sure|go ahead|go for it|approved?|proceed|do it|please do"
+    r"|confirm(?:ed)?|sounds good|lgtm)"
+    r"(?:[\s,]+(?:and\s+)?(?:copy|delete|remove|move|proceed|do it|go ahead)"
+    r"(?:\s+(?:it|them|those|these|all|all of them|everything|the files))?)?"
+    r"(?:[\s,]+please)?\W*"
+)
+#: A PICKED option label that says yes to the question (review R1-M1): only
+#: such a pick settles without the judge; "Abort", "Installer only", "Nah"
+#: never do, whatever their description names.
+#: A picked label that says yes to the WHOLE question, nothing narrower
+#: (review R2-M1): "Yes", "Delete", "Yes, delete them", "Remove all 57",
+#: "Go ahead", "Delete both". "Delete es only" or "Delete the es receipt"
+#: does not match, so it approves only the paths its own label names.
+_WHOLE_SET_OPTION_RE = re.compile(
+    r"(?i)\W*(?:yes|ok|okay|sure|approved?|go ahead|proceed|confirm|do it"
+    r"|delete|remove|copy|move|overwrite|replace|clean ?up)"
+    r"(?:[\s,]+(?:and\s+)?(?:delete|remove|copy|move|overwrite|replace|proceed|go ahead|do it))?"
+    r"(?:\s+(?:all(?:\s+(?:\d+|of\s+them|them))?|them(?:\s+all)?|everything|both|it|these|those))?"
+    r"\W*"
+)
+_AFFIRM_OPTION_RE = re.compile(
+    r"(?i)^\W*(?:yes|ok|okay|sure|approve[ds]?|go ahead|proceed|confirm|do it"
+    r"|delete|remove|copy|move|overwrite|replace|clean ?up)\b"
+)
+#: Pointer-less ask lookup in the lineage (``lineage_asks``): recent only.
+_LINEAGE_ASK_WINDOW_MS = 24 * 3600 * 1000
+_LINEAGE_ASKS_PER_SESSION = 8
 
 
 # -- ledger -------------------------------------------------------------------
@@ -632,7 +688,7 @@ def commit_creations(
 # -- git worktrees -------------------------------------------------------------
 
 
-def _git(args: Sequence[str], cwd: str) -> str | None:
+def _git(args: Sequence[str], cwd: str, *, timeout: float = _GIT_TIMEOUT_S) -> str | None:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     # Read-only probes: no prompts, no index refresh writes, no credential helper.
     env.update(GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
@@ -641,7 +697,7 @@ def _git(args: Sequence[str], cwd: str) -> str | None:
             ["git", "-C", cwd, *args],
             capture_output=True,
             text=True,
-            timeout=_GIT_TIMEOUT_S,
+            timeout=timeout,
             env=env,
             check=False,
         )
@@ -668,19 +724,183 @@ _REGENERABLE = frozenset(
         ".turbo",
         "coverage",
         ".tox",
+        # Added 2026-11-09 from the operator's real clean worktrees, each of
+        # which the old list called dirty: setuptools metadata from an editable
+        # install, generic tool caches (``.cache`` — vite/eslint/parcel), and
+        # Finder's per-directory ``.DS_Store``.
+        ".eggs",
+        ".cache",
+        ".DS_Store",
     }
 )
+#: Basename patterns with the same standing as :data:`_REGENERABLE`:
+#: bytecode, editable-install metadata (``<dist>.egg-info``), macOS AppleDouble
+#: sidecars (``._<name>``, metadata about a sibling), and the throwaway esbuild
+#: bundles local-operator-ui tests write beside themselves and unlink
+#: (``scripts/_*.bundle.mjs``; a killed run leaves them behind — that repo's
+#: ``.gitignore`` documents the convention).
+_REGENERABLE_GLOBS = ("*.pyc", "*.egg-info", "._*", "_*.bundle.mjs", "_*.bundle.cjs")
+
+
+def _regenerable(name: str) -> bool:
+    return name in _REGENERABLE or any(fnmatch.fnmatchcase(name, g) for g in _REGENERABLE_GLOBS)
+
+
+#: Bound on ONE process-cwd inventory (``lsof -a -u <uid> -d cwd -Fn -w``).
+#: Measured on this machine under ~25 concurrent sessions: QA round 1 of
+#: PR #3700, n=28, 1.6–5.54 s with 11/28 censored at the old 5 s bound; the
+#: manager's lane measured 3–10 s; a 2026-11-09 re-run here, n=7, 1.30–3.95 s.
+#: 20 s sits above the observed max (10 s). A timeout still returns ``None``,
+#: which ``worktree_state`` reads as ``busy`` — fail closed.
+_CWD_INVENTORY_TIMEOUT_S = 20.0
+#: How long one successful inventory is reused within this process. WHY: a
+#: ``git worktree remove`` call is checked, previewed and often retried within
+#: seconds, and each inventory costs seconds under load (QA Q-1: every removal
+#: walked it, a preview doubled it). INVARIANT and its price: a process that
+#: ``cd``s into the tree less than 30 s after an inventory is not seen; that is
+#: the same window a process starting right after the probe always had, and
+#: the owning-session check (``worktree_activity``) reads the session
+#: registry fresh on every call. Failures are never cached.
+_CWD_INVENTORY_TTL_S = 30.0
+_cwd_inventory_cache: tuple[float, tuple[str, ...]] | None = None
+
+
+def _cwd_inventory() -> tuple[str, ...] | None:
+    """Realpaths of every cwd this uid's processes hold, or ``None`` if unknown.
+
+    lsof's cwd inventory is read-only and avoids probing process command lines
+    (which may carry secrets). Linux exposes the same data under /proc. A
+    disappearing process no longer owns a cwd; other inspection errors give
+    ``None``. A success is cached for :data:`_CWD_INVENTORY_TTL_S`.
+    """
+    global _cwd_inventory_cache
+    now = time.monotonic()
+    cached = _cwd_inventory_cache
+    if cached is not None and now - cached[0] < _CWD_INVENTORY_TTL_S:
+        return cached[1]
+    paths: list[str] = []
+    if os.path.isdir("/proc/self"):
+        try:
+            for entry in os.scandir("/proc"):
+                if not entry.name.isdecimal():
+                    continue
+                try:
+                    if entry.stat().st_uid != os.getuid():
+                        continue
+                    paths.append(os.readlink(os.path.join(entry.path, "cwd")))
+                except FileNotFoundError:
+                    continue
+        except OSError:
+            return None
+    else:
+        try:
+            proc = subprocess.run(
+                ["lsof", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fn", "-w"],
+                capture_output=True,
+                text=True,
+                timeout=_CWD_INVENTORY_TIMEOUT_S,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if proc.returncode != 0:
+            return None
+        paths = [line[1:] for line in proc.stdout.splitlines() if line.startswith("n/")]
+        if not paths:
+            return None  # this process alone holds a cwd: an empty list is a failed read
+    inventory = tuple(os.path.realpath(p) for p in paths)
+    _cwd_inventory_cache = (now, inventory)
+    return inventory
+
+
+def _live_cwd_inside(real: str) -> bool | None:
+    """Whether a live process uses this tree; unknown never grants an exemption.
+
+    Reads :func:`_cwd_inventory` (bounded, cached per process). ``None`` —
+    timeout or an unreadable inventory — fails closed in ``worktree_state``.
+    This protects ordinary clean removals as well as abandoned adds.
+    """
+    inventory = _cwd_inventory()
+    if inventory is None:
+        return None
+    return any(cwd == real or cwd.startswith(real + os.sep) for cwd in inventory)
+
+
+def _only_regenerable(directory: str) -> bool:
+    """Every entry under ``directory`` is regenerable (bounded; over → False).
+
+    WHY. ``git status --ignored`` collapses a directory whose content is ALL
+    ignored into the directory itself: ``scripts/`` holding only throwaway
+    ``_*.bundle.mjs`` files reports as ``!! scripts/``, and that basename says
+    nothing about its content. So the walk judges content, not names: a FILE
+    passes by :func:`_regenerable`, but a nested DIRECTORY named like build
+    output (``work/build/``, ``data/.cache/``) is walked like any other —
+    under an arbitrarily named ignored parent its name proves nothing (review
+    m1, PR #3700: ``work/build/thesis.md`` read as clean). Only a directory
+    matching a pattern in :data:`_REGENERABLE_GLOBS` (``*.egg-info``) is
+    accepted whole; the ignored ROOT itself is accepted by name in
+    ``worktree_state``. Not a directory, a symlink, an unreadable tree or more
+    than :data:`_WALK_ENTRIES` entries all count as NOT regenerable — fail
+    closed.
+    """
+    if not os.path.isdir(directory) or os.path.islink(directory):
+        return False
+    seen = 0
+    stack = [directory]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            return False
+        seen += len(entries)
+        if seen > _WALK_ENTRIES:
+            return False
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                if any(fnmatch.fnmatchcase(entry.name, g) for g in _REGENERABLE_GLOBS):
+                    continue
+                stack.append(entry.path)
+            elif not _regenerable(entry.name):
+                return False
+    return True
 
 
 def worktree_state(path: str) -> str:
-    """``clean`` / ``dirty`` / ``not-linked`` / ``unknown`` for a worktree path.
+    """The removal-relevant state of a worktree path.
 
-    Linked = its ``.git`` is a FILE, its git-dir differs from the common dir,
-    and the repository's ``git worktree list`` names it (not as the main
-    checkout). Clean = ALL of: no tracked or untracked change, no ignored entry
-    outside :data:`_REGENERABLE`, and HEAD on a branch or contained in some
-    ref. Anything less is ``dirty`` and takes the ordinary ranking — where an
-    OWN worktree can still pass through the ledger or history evidence.
+    One of ``clean``, ``dirty``, ``locked``, ``stale-initializing`` (locked
+    "initializing" for over an hour, otherwise clean), ``busy`` (a live process
+    cwd is inside it, or the inventory could not be read), ``not-linked`` or
+    ``unknown``.
+
+    Linked = its ``.git`` is a FILE, its git-dir differs from the common dir
+    and sits in ``<common>/worktrees/<name>``, and that registration's
+    ``gitdir`` file points back at this path — exactly the records
+    ``git worktree list`` reads, read here without spawning git. Clean = ALL
+    of: not locked, no tracked or untracked change, no ignored entry that is
+    not regenerable (:func:`_regenerable`), and HEAD on a branch or contained
+    in some ref. Anything less is ``dirty`` and takes the ordinary ranking —
+    where an OWN worktree can still pass through the ledger or history
+    evidence.
+
+    WHY no "pushed or merged" test for a branch HEAD. ``git worktree remove``
+    deletes the working tree and ``<common>/worktrees/<name>``; it never
+    deletes the branch. The branch ref lives in the common repository, so
+    every commit on it is still reachable after the removal — whether pushed,
+    squash-merged (not an ancestor of any remote ref) or purely local. Asking
+    for remote reachability refused clean worktrees of squash-merged branches
+    and protected nothing. Only a DETACHED HEAD loses commits (no ref names
+    them once the worktree's own HEAD file is gone), so only that case checks
+    ``--contains``. Deleting the branch afterwards is a separate command
+    (``git branch -D``) the guard does not exempt.
+
+    COST. Under heavy disk pressure each git probe here measured up to 34 s
+    (see :data:`_WORKTREE_STATUS_TIMEOUT_S`), so this makes the fewest probes
+    that answer the question: one ``rev-parse``, file reads for registration
+    and lock, ONE ``git status --porcelain --ignored --untracked-files=normal``
+    for tracked, untracked
+    (``??``) and ignored (``!!``) entries alike, and ``symbolic-ref``. A
+    timeout is still ``unknown`` — never ``clean``.
     """
     try:
         real = os.path.realpath(path)
@@ -696,23 +916,36 @@ def worktree_state(path: str) -> str:
         return "unknown"
     git_dir = os.path.realpath(lines[0])
     common = os.path.realpath(os.path.join(real, lines[1]))
-    if git_dir == common:
+    if git_dir == common or os.path.dirname(git_dir) != os.path.join(common, "worktrees"):
         return "not-linked"
-    listing = _git(["worktree", "list", "--porcelain"], real)
-    if listing is None:
-        return "unknown"
-    trees = [
-        os.path.realpath(ln[len("worktree ") :])
-        for ln in listing.splitlines()
-        if ln.startswith("worktree ")
-    ]
-    if real not in trees[1:]:
+    try:
+        with open(os.path.join(git_dir, "gitdir"), encoding="utf-8") as fh:
+            back = fh.read().strip()
+    except OSError:
         return "not-linked"
-    status = _git(["status", "--porcelain", "--untracked-files=all"], real)
-    if status is None:
+    # Relative when ``worktree.useRelativePaths`` is set (git >= 2.48):
+    # relative to the registration directory itself.
+    back = os.path.join(git_dir, back)
+    if os.path.realpath(os.path.dirname(back)) != real:
+        # Registered for another path (a moved or copied tree): not this one.
+        return "not-linked"
+    stale_initializing = False
+    lock = os.path.join(git_dir, "locked")
+    try:
+        with open(lock, encoding="utf-8") as fh:
+            reason = fh.read().strip()
+        # One hour is the operator's explicit stale-add policy, not a measured
+        # probe timeout. Never unlock or mutate this record from the guard.
+        age = time.time() - os.stat(lock).st_mtime
+        stale_initializing = reason == "initializing" and age > 3600
+        if not stale_initializing:
+            return "locked"
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError):
         return "unknown"
-    if status.strip():
-        return "dirty"
+    if _live_cwd_inside(real) is not False:
+        return "busy"  # unknown process inventory also fails closed
     # ``git worktree remove`` deletes IGNORED content too (review R1-MAJOR-4 /
     # QA Q1: an ignored ``.env`` and an ignored nested repo with the only copy
     # of its history went with it). Only regenerable entries may remain. A
@@ -720,15 +953,26 @@ def worktree_state(path: str) -> str:
     # directory: under a name not on the list it is dirty outright, and under
     # an allowlisted name (``build/keep/.git``) the bounded walk below finds
     # it (review R2-MINOR-1).
-    ignored = _git(["status", "--porcelain", "--ignored"], real)
+    # ``--untracked-files=normal`` is explicit (review M1, PR #3700): with
+    # ``status.showUntrackedFiles=no`` in repo or user config a bare status
+    # hides ``??`` entries, the tree reads clean, and ``git worktree remove``
+    # (which reads the same config) deletes them. ``normal`` overrides the
+    # config and keeps the collapsed ``!! dir/`` shape the walk expects.
+    ignored = _git(
+        ["status", "--porcelain", "--ignored", "--untracked-files=normal"],
+        real,
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
     if ignored is None:
         return "unknown"
+    if any(ln and not ln.startswith("!! ") for ln in ignored.splitlines()):
+        return "dirty"  # a tracked change or an untracked (``??``) entry
     for line in ignored.splitlines():
         if not line.startswith("!! "):
             continue
         entry = line[3:].strip().strip('"').rstrip("/")
         name = os.path.basename(entry)
-        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+        if not _regenerable(name) and not _only_regenerable(os.path.join(real, entry)):
             return "dirty"
         if _holds_git(os.path.join(real, entry)):
             return "dirty"
@@ -748,7 +992,250 @@ def worktree_state(path: str) -> str:
         )
         if not (refs or "").strip():
             return "dirty"
-    return "clean"
+    return "stale-initializing" if stale_initializing else "clean"
+
+
+#: Bound on the ONE ``gh pr list`` that :func:`worktree_activity` runs: the
+#: manager's allocation for this lookup (~8 s). Measured 2026-11-09 on this
+#: machine, n=5 against damianvtran/local-operator: 1.29–1.81 s. A timeout is
+#: "PR state unknown", which never ranks LOW. The ``glab mr list`` lookup shares
+#: it: measured 2026-11-09, n=3 against minervaai/go-protos, 1.12–1.32 s.
+_GH_TIMEOUT_S = 8.0
+_GITHUB_URL_RE = re.compile(
+    r"^(?:https?://(?:[^@/]+@)?github\.com/|(?:ssh://)?git@github\.com[:/])"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+#: A GitLab remote: gitlab.com or a self-hosted host named ``gitlab…``. The
+#: project path may nest groups (``group/sub/project``). WHY GitLab at all:
+#: the disk lane's positive controls are Minerva (GitLab) worktrees, and with
+#: GitHub alone every one of them read "PR state unknown" and went to the judge.
+_GITLAB_URL_RE = re.compile(
+    r"^(?:https?://(?:[^@/]+@)?|(?:ssh://)?git@)(?P<host>[^/:@]*gitlab[^/:]*)[:/]"
+    r"(?P<path>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)/?$"
+)
+
+
+@dataclass(frozen=True)
+class WorktreeActivity:
+    """Is anyone still working in a linked worktree? Facts for the guard.
+
+    WHY (operator incident, 2026-11-09). A disk-pressure lane removed
+    ``local-operator-ui/.worktrees/profile-proposals``: clean, no live cwd,
+    head already an ancestor of main — every ``worktree_state`` test passed —
+    yet its branch carried an OPEN PR under QA, and the removal deleted 34
+    tracked files from under that PR and broke Storybook. "Clean" says nothing
+    is LOST; it does not say nothing is IN USE. These are the two in-use
+    signals the guard can read cheaply: an open PR for the branch, and a
+    running session that owns the tree.
+    """
+
+    branch: str | None
+    #: ``open`` / ``none`` / ``unknown``.
+    pr_state: str
+    pr_number: int | None = None
+    #: How the forge names it: ``PR #`` (GitHub) or ``MR !`` (GitLab).
+    pr_label: str = "PR #"
+    #: Why the PR state is unknown (no GitHub/GitLab remote, lookup failed, timeout).
+    pr_detail: str = ""
+    #: Running sessions other than the caller that own the tree.
+    owners_running: tuple[str, ...] = ()
+
+    def facts(self) -> str:
+        branch = self.branch or "(detached HEAD)"
+        if self.pr_state == "open":
+            pr = f"open {self.pr_ref}"
+        elif self.pr_state == "none":
+            pr = "no open PR" if self.pr_label == "PR #" else "no open MR"
+        else:
+            pr = f"PR state unknown ({self.pr_detail})"
+        owner = (
+            "owning session running: " + ", ".join(self.owners_running)
+            if self.owners_running
+            else "no other running session owns it"
+        )
+        return f"branch {branch}; {pr}; {owner}"
+
+    @property
+    def pr_ref(self) -> str:
+        return f"{self.pr_label}{self.pr_number}"
+
+
+def _remote_urls(real: str) -> list[str]:
+    """The worktree's remote URLs, ``origin`` first."""
+    out = _git(["config", "--get-regexp", r"^remote\..*\.url$"], real)
+    urls: list[tuple[bool, str]] = []
+    for line in (out or "").splitlines():
+        key, _, url = line.partition(" ")
+        urls.append((key != "remote.origin.url", url.strip()))
+    return [url for _, url in sorted(urls)]
+
+
+def _github_repo(real: str) -> str | None:
+    """``owner/name`` of the worktree's GitHub remote (``origin`` first)."""
+    for url in _remote_urls(real):
+        m = _GITHUB_URL_RE.match(url)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def _gitlab_repo(real: str) -> str | None:
+    """The worktree's GitLab project as ``glab --repo`` takes it, or ``None``.
+
+    ``group/sub/project`` on gitlab.com; ``https://<host>/<path>`` on a
+    self-hosted host, so glab resolves the right instance.
+    """
+    for url in _remote_urls(real):
+        m = _GITLAB_URL_RE.match(url)
+        if m:
+            host, path = m.group("host"), m.group("path").removesuffix(".git")
+            return path if host == "gitlab.com" else f"https://{host}/{path}"
+    return None
+
+
+def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
+    """Open PR numbers whose head is ``branch`` on ``repo``; ``None`` if unknown.
+
+    The injection point tests replace. ``GH_PROMPT_DISABLED`` keeps gh from
+    ever prompting inside a guard check.
+    """
+    env = dict(os.environ, GH_PROMPT_DISABLED="1")
+    try:
+        proc = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "number",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT_S,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+        return [int(r["number"]) for r in rows]
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _glab_open_mrs(repo: str, branch: str) -> list[int] | None:
+    """Open MR iids whose source is ``branch`` on ``repo``; ``None`` if unknown.
+
+    The GitLab twin of :func:`_gh_open_prs` (tests replace it). ``glab mr
+    list`` lists OPEN MRs by default; glab 1.91 has no ``--state`` flag, and an
+    unknown flag would exit non-zero and read as "unknown" on every call.
+    ``GLAB_NO_PROMPT`` keeps glab from prompting inside a guard check.
+    """
+    env = dict(os.environ, GLAB_NO_PROMPT="1")
+    try:
+        proc = subprocess.run(
+            ["glab", "mr", "list", "--repo", repo, "--source-branch", branch, "-F", "json"],
+            capture_output=True,
+            text=True,
+            timeout=_GH_TIMEOUT_S,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+        return [int(r["iid"]) for r in rows if r.get("state", "opened") == "opened"]
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _running_owners(real: str, session_id: str) -> tuple[str, ...]:
+    """Running sessions (not the caller) that own the worktree at ``real``.
+
+    Owner = the session the creation ledger attributes the ``git worktree
+    add`` to (``kind='worktree'`` row for this exact path), or any live/wedged
+    session whose recorded cwd is inside the tree. The CALLER is excluded: a
+    session removing its own worktree is the owner acting, not a conflict.
+    Read fresh on every call (no cache). Unreadable ledger or registry → no
+    owner known from that source; the other in-use checks still apply.
+    """
+    creators: set[str] = set()
+    try:
+        conn = _connect(ledger_path(), create=False)
+        if conn is not None:
+            try:
+                creators = {
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT DISTINCT creator FROM created WHERE path=? AND kind='worktree'",
+                        (real,),
+                    )
+                }
+            finally:
+                conn.close()
+    except (sqlite3.Error, OSError):
+        logger.debug("guardrail ledger unreadable", exc_info=True)
+    running: list[str] = []
+    try:
+        from local_operator.session.runtime import registry
+
+        # reap=False: a guard check must never move another session's record.
+        for rec, state in registry.scan(None, reap=False):
+            sid = str(getattr(rec, "session_id", "") or "")
+            if state not in ("live", "wedged") or not sid or sid == session_id:
+                continue
+            cwd = os.path.realpath(str(getattr(rec, "cwd", "") or "/nonexistent-cwd"))
+            if sid in creators or cwd == real or cwd.startswith(real + os.sep):
+                running.append(sid)
+    except Exception:  # noqa: BLE001 — an unreadable registry names no owner
+        logger.debug("session registry unreadable", exc_info=True)
+    return tuple(dict.fromkeys(running))
+
+
+def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
+    """Open-PR and owning-session facts for a linked worktree (see the class)."""
+    real = os.path.realpath(path)
+    owners = _running_owners(real, session_id)
+    branch = _git(["symbolic-ref", "--quiet", "--short", "HEAD"], real)
+    branch = (branch or "").strip() or None
+    if branch is None:
+        # Detached: no branch, so no PR can be headed by it.
+        return WorktreeActivity(None, "none", owners_running=owners)
+    repo = _github_repo(real)
+    tool, label, lookup = "gh", "PR #", _gh_open_prs
+    if repo is None:
+        repo = _gitlab_repo(real)
+        tool, label, lookup = "glab", "MR !", _glab_open_mrs
+    if repo is None:
+        return WorktreeActivity(
+            branch, "unknown", pr_detail="no GitHub or GitLab remote", owners_running=owners
+        )
+    prs = lookup(repo, branch)
+    if prs is None:
+        return WorktreeActivity(
+            branch,
+            "unknown",
+            pr_label=label,
+            pr_detail=f"{tool} lookup on {repo} failed or timed out",
+            owners_running=owners,
+        )
+    if prs:
+        return WorktreeActivity(
+            branch, "open", pr_number=min(prs), pr_label=label, owners_running=owners
+        )
+    return WorktreeActivity(branch, "none", pr_label=label, owners_running=owners)
 
 
 def _ignored_unregenerable(real: str) -> bool:
@@ -762,7 +1249,7 @@ def _ignored_unregenerable(real: str) -> bool:
             continue
         entry = line[3:].strip().strip('"').rstrip("/")
         name = os.path.basename(entry)
-        if name not in _REGENERABLE and not fnmatch.fnmatchcase(name, "*.pyc"):
+        if not _regenerable(name):
             return True
         if _holds_git(os.path.join(real, entry)):
             return True
@@ -981,6 +1468,10 @@ class OperatorWords:
     #: path naming is checked against what the OPERATOR saw.
     ask_id: str = ""
     session_id: str = ""
+    #: The part of an ask answer that approves with no judge reading it
+    #: (``_approved_text``): the yes/no question the operator said yes to, or
+    #: the picked options. ``DeleteCase.evidence_basis`` settles on it.
+    approved: str = ""
 
 
 @dataclass
@@ -1041,7 +1532,33 @@ def verified_ask(
         logger.debug("guardrail: ask store unreadable", exc_info=True)
         return None
     record = next((r for r in records if str(r.get("ask_id")) == ask_id), None)
-    if record is None or str(record.get("status") or "") not in ("answered", "late"):
+    return _ask_words(record, session_id) if record is not None else None
+
+
+def _answer_declines(answer: str, labels: Sequence[str]) -> bool:
+    """Does one chosen answer refuse (or carve out) what the ask proposed?
+
+    An option the operator PICKED is judged by its label ("Keep them", "No,
+    re-audit instead"). A free-text answer is read clause-wise (incident
+    2026-11-09, ask a-daca): "Go ahead and copy but also send this to Aida to
+    tune the guardrails so they don't block this" approves — its ``don't``
+    is about the guard, not the copy — while "Yes, but keep the third one"
+    and "Don't delete them" still refuse. The first clause may not decline at
+    all, and no clause may carve anything out (``except``, ``keep``, ``don't
+    delete``…). When in doubt it declines: the judge never sees a veto.
+    """
+    if answer in labels:
+        return bool(_DECLINE_RE.search(answer))
+    # The first clause may not decline; no clause may carve anything out
+    # ("Go ahead, except the last one").
+    head = _CLAUSE_BREAK_RE.split(answer, maxsplit=1)[0]
+    return bool(_DECLINE_RE.search(head)) or bool(_CARVE_OUT_RE.search(answer))
+
+
+def _ask_words(record: Mapping[str, Any], session_id: str) -> OperatorWords | None:
+    """One folded ask record as consent (see :func:`verified_ask` for the bar)."""
+    ask_id = str(record.get("ask_id") or "")
+    if str(record.get("status") or "") not in ("answered", "late"):
         return None
     surface = str((record.get("answered_by") or {}).get("surface") or "")
     if surface not in TRUSTED_ASK_SURFACES:
@@ -1051,22 +1568,24 @@ def verified_ask(
         return None
     answers = record.get("answers") or {}
     parts: list[str] = []
+    approved: list[str] = []
     for q in questions:
         if q.get("secret"):
             continue
         chosen = [str(v) for v in (answers.get(str(q.get("id") or "")) or [])]
-        if not chosen or any(_DECLINE_RE.search(v) for v in chosen):
+        opts = [o for o in (q.get("options") or []) if isinstance(o, Mapping)]
+        labels = [str(o.get("label") or "") for o in opts]
+        if not chosen or any(_answer_declines(v, labels) for v in chosen):
             # Deterministic veto (review R1-MINOR-3): a declining answer is
             # never consent, whatever a judge that read the history concludes.
             continue
-        options = "; ".join(
-            str(o.get("label") or "") for o in (q.get("options") or []) if isinstance(o, Mapping)
-        )
+        options = "; ".join(labels)
         parts.append(
             f"Q: {q.get('question') or ''}"
             + (f" [options: {options}]" if options else "")
             + f" -> operator answered: {', '.join(chosen)}"
         )
+        approved.extend(_approved_text(q, opts, labels, chosen))
     if not parts:
         return None
     return OperatorWords(
@@ -1074,7 +1593,115 @@ def verified_ask(
         text="\n".join(parts),
         ask_id=ask_id,
         session_id=session_id,
+        approved="\n".join(approved),
     )
+
+
+def _approved_text(
+    q: Mapping[str, Any],
+    opts: Sequence[Mapping[str, Any]],
+    labels: Sequence[str],
+    chosen: list[str],
+) -> list[str]:
+    """What this answer approves WITHOUT a judge reading it (``OperatorWords.approved``).
+
+    Settled deterministically only when the answer can mean one thing:
+    * the WHOLE question, when it is a yes/no ask (every option but the one
+      picked declines) and each picked label is a bare affirmative over the
+      whole set — "Yes", "Delete", a-a382's "Remove all 57", "Go ahead" — or
+      the operator typed a bare affirmative ("Go ahead and copy");
+    * otherwise only the paths a picked label NAMES ITSELF, and only when
+      each picked label says yes and nothing in it declines.
+    An option's description approves nothing (review R2-M1): "Delete es only"
+    described as "…; fr remains" must not settle fr, and a narrowing label
+    ("Delete es only", "Delete the es receipt") must not approve the
+    question's other paths. Anything else — a qualified typed answer, a pick
+    like "Installer only" / "Abort" — still reaches the judge as the
+    operator's words (``OperatorWords.text``), unless ``_answer_declines``
+    vetoed it.
+    """
+    out: list[str] = []
+    picked = [o for o in opts if str(o.get("label") or "") in chosen]
+    typed = [v for v in chosen if v not in labels]
+    # A pick approves only when its label says yes and nothing in label or
+    # description declines (review R1-M1: "Abort" / "Leave … in place").
+    affirmed = [
+        o
+        for o in picked
+        if _AFFIRM_OPTION_RE.match(str(o.get("label") or ""))
+        and not _DECLINE_RE.search(f"{o.get('label') or ''} {o.get('description') or ''}")
+    ]
+    if len(affirmed) != len(picked):
+        return []
+    if typed and not all(_BARE_AFFIRM_RE.fullmatch(v) for v in typed):
+        # A qualified typed answer is the judge's to read (R1-B2); the
+        # question text is never approved by it, nor are picks beside it.
+        return []
+    # Only the label: it is what the operator read and chose. The label's own
+    # paths are approved; a description is context, never consent (R2-M1).
+    out.extend(str(o.get("label") or "") for o in affirmed)
+    others = [lbl for lbl in labels if lbl not in chosen]
+    yes_no = bool(picked) and bool(others) and all(_DECLINE_RE.search(lbl) for lbl in others)
+    whole = all(_WHOLE_SET_OPTION_RE.fullmatch(str(o.get("label") or "")) for o in affirmed)
+    if (yes_no and whole) or (typed and not picked):
+        out.append(str(q.get("question") or ""))
+    return out
+
+
+def lineage_asks(
+    session_id: str,
+    *,
+    known: Iterable[tuple[str, str]] = (),
+    state_root: str | os.PathLike[str] | None = None,
+    now_ms: int | None = None,
+) -> list[OperatorWords]:
+    """Recent answered asks in ``session_id``'s lineage, no pointer needed.
+
+    WHY. A task tree is one owner: the operator answers an ask in the parent
+    and a subagent runs the approved command (incident 2026-11-09, a-daca was
+    answered in 9ad475b6f5d9 while the copy ran lower in its tree). A pointer
+    (``a-xxxx`` in the brief) was the only way to reach that ask; a brief that
+    forgot it left the guard blind to consent it could verify. Bounded: only
+    the lineage (ancestors, never siblings or strangers), only asks answered
+    in the last :data:`_LINEAGE_ASK_WINDOW_MS`, at most
+    :data:`_LINEAGE_ASKS_PER_SESSION` per session, every one through the same
+    store checks as a pointer (:func:`_ask_words`). ``known`` = ``(ask_id,
+    session_id)`` pairs already in the brief.
+    """
+    try:
+        from local_operator.asks import store
+        from local_operator.paths import config_dir
+
+        root = Path(state_root) if state_root is not None else config_dir()
+        lineage, _ = session_lineage(session_id, state_root=root)
+        now = now_ms if now_ms is not None else store.now_ms()
+    except Exception:  # noqa: BLE001 — no lineage, no extra consent
+        logger.debug("guardrail: lineage asks unreadable", exc_info=True)
+        return []
+    seen = set(known)
+    out: list[OperatorWords] = []
+    for sid in lineage:
+        try:
+            directory = store.session_dir(root, sid)
+            if not directory.is_dir():
+                continue
+            records = store.fold(store.read_events(directory), now)
+        except Exception:  # noqa: BLE001 — an unreadable store is no consent
+            continue
+        recent = [
+            r
+            for r in records
+            if now - int(r.get("answered_at") or 0) <= _LINEAGE_ASK_WINDOW_MS
+            and (str(r.get("ask_id") or ""), sid) not in seen
+        ]
+        recent.sort(key=lambda r: int(r.get("answered_at") or 0), reverse=True)
+        for record in recent[:_LINEAGE_ASKS_PER_SESSION]:
+            words = _ask_words(record, sid)
+            if words is None:
+                continue
+            label = words.label + (f" (session {sid})" if sid != session_id else "")
+            out.append(replace(words, label=label))
+    return out
 
 
 def _text_of(message: Any) -> str:
@@ -1161,6 +1788,82 @@ def session_lineage(
             ]
         queue.extend(p for p in pointers if isinstance(p, str))
     return lineage, operator_opened
+
+
+def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
+    """The top of ``session_id``'s SUBAGENT tree: ``parent`` links only.
+
+    WHY parent-only (case 7, 2026-11-09): sibling lanes under one manager
+    (``a13e8dbc573f``'s auditor and settings lane) are one owner, but an
+    agent-opened workstream (``opened_by``) is a separate task, so every
+    workstream an assistant ever opened never becomes one tree. The registry
+    row is read first (``read_lineage``), then ``origin.json``.
+    """
+    from local_operator.paths import config_dir
+
+    root = Path(state_root) if state_root is not None else config_dir()
+    registry = read_lineage(root)
+    valid = re.compile(r"[A-Za-z0-9_-]{1,64}")
+    seen: list[str] = []
+    sid = session_id
+    while sid and valid.fullmatch(sid) and sid not in seen and len(seen) < 32:
+        seen.append(sid)
+        row = registry.get(sid) or {}
+        parent = row.get("parent") or (read_origin(root, sid) or {}).get("parent")
+        if not isinstance(parent, str) or not parent:
+            break
+        sid = parent
+    return seen[-1] if seen else session_id
+
+
+def same_task_tree(a: str, b: str, *, state_root: str | os.PathLike[str] | None = None) -> str:
+    """How ``b`` relates to ``a`` in one subagent tree, or ``""`` if it does not.
+
+    ``"ancestor"``, ``"descendant"`` or ``"sibling"`` (same root, neither above
+    the other). Shown to the judge verbatim as the lineage fact.
+    """
+    if not a or not b or a == b:
+        return ""
+    root_a = task_tree_root(a, state_root=state_root)
+    if root_a != task_tree_root(b, state_root=state_root):
+        return ""
+    lineage_a, _ = session_lineage(a, state_root=state_root)
+    if b in lineage_a:
+        return "ancestor"
+    lineage_b, _ = session_lineage(b, state_root=state_root)
+    return "descendant" if a in lineage_b else "sibling"
+
+
+def tracked_script(path: str | None, *, state_roots: Iterable[str] = ()) -> bool:
+    """Is ``path`` a committed, unmodified file of a repository outside every session dir?
+
+    Review R2-m1: "in the index" was not enough. A tracked script with
+    uncommitted edits, or one staged in a repo the agent just ``git init``-ed
+    in a scratchpad, is code the agent wrote, not the project's reviewed
+    tool, so it keeps the HIGH. The bar is therefore: tracked
+    (``ls-files --error-unmatch``), identical to ``HEAD`` (``diff --quiet``,
+    which also fails when there is no commit) and in a repository whose
+    top level is not under any state root's ``sessions/`` directory.
+    """
+    if not path or os.path.islink(path) or not os.path.isfile(path):
+        return False
+    directory, name = os.path.split(path)
+    if _git(["ls-files", "--error-unmatch", "--", name], directory) is None:
+        return False
+    if _git(["diff", "--quiet", "HEAD", "--", name], directory) is None:
+        return False
+    top = _git(["rev-parse", "--show-toplevel"], directory)
+    if not top:
+        return False
+    top_real = os.path.realpath(top.strip())
+    for state in state_roots:
+        for spelling in {state, os.path.realpath(state)}:
+            sessions = os.path.join(spelling, "sessions") + os.sep
+            if (top_real + os.sep).startswith(sessions) or (top.strip() + os.sep).startswith(
+                sessions
+            ):
+                return False
+    return True
 
 
 def operator_brief(
@@ -1251,9 +1954,7 @@ def operator_brief(
             label = found.label + (f" (relayed by {relayed_by})" if relayed_by else "")
             if sid != session_id:
                 label += f" (session {sid})"
-            brief.words.append(
-                OperatorWords(label=label, text=found.text, ask_id=ask_id, session_id=sid)
-            )
+            brief.words.append(replace(found, label=label, session_id=sid))
             asks += 1
     return brief
 
@@ -1282,6 +1983,62 @@ def _expand_word(word: str, home: str, cwd: str | None) -> str | None:
 _PROSE_END = frozenset("?!:]}")
 
 
+#: A path word holding brace lists, as asks write a set of siblings:
+#: ``~/x/merge-{es,fr,zh-cn}-909a.json``, ``~/r/.worktrees/{a, b (QA
+#: scratch), c}`` or ``~/x/{a,b}/{c,d}``. A list may hold spaces and
+#: parenthetical notes. The lookbehind anchors the word at its start, so no
+#: tail of a word (``/{c,d}``) is ever read as a path of its own.
+_BRACE_PATH_RE = re.compile(
+    r"(?<![^\s`'\"(\[])((?:~|/)(?:[^\s`'\",;(){}]|\{[^{}]{1,4000}\})*\{[^{}]{1,4000}\}"
+    r"(?:[^\s`'\",;(){}]|\{[^{}]{1,4000}\})*)"
+)
+_BRACE_LIST_RE = re.compile(r"\{([^{}]*)\}")
+_MAX_PROSE_BRACE_ITEMS = 256
+
+
+def _expand_prose_braces(text: str) -> str:
+    """Spell out brace lists in path words, so each leaf is named literally.
+
+    WHY (incident 2026-11-09, ask a-daca): the operator approved "…/onboarding-
+    value-merge-{es,fr,hi,ru,ur,vi,zh-cn}-909a2c50a0bd.json"; ``_PATHISH``
+    stopped at the first comma, so no receipt was "named". Each item must be
+    one path piece (no whitespace once its ``(note)`` is dropped, no wildcard
+    added) or the whole word is left as written — never guess a name.
+
+    Review R1-M2 (PR #3710): a word yields ONLY its fully expanded leaves
+    (``~/x/{a,b}/{c,d}`` → four paths, every list expanded), never a
+    half-expanded word whose first piece is a PARENT of what the operator
+    named. ``.``/``..``/empty items are refused: ``~/r/{.,build}`` would
+    name ``~/r`` itself, approving a recursive delete of the whole tree.
+    """
+
+    def spell(match: re.Match[str]) -> str:
+        word = match.group(1)
+        pieces = _BRACE_LIST_RE.split(word)  # literal, items, literal, items, …
+        lists: list[list[str]] = []
+        for body in pieces[1::2]:
+            items = [re.sub(r"\([^()]*\)", "", item).strip() for item in body.split(",")]
+            if len(items) < 2 or any(
+                not item
+                or re.search(r"[\s*?\[{}]", item)
+                or any(part in ("", ".", "..") for part in item.split("/"))
+                for item in items
+            ):
+                return word  # not a sibling list: left exactly as written
+            lists.append(items)
+        if math.prod(len(items) for items in lists) > _MAX_PROSE_BRACE_ITEMS:
+            return word
+        leaves = []
+        for combo in itertools.product(*lists):
+            leaf = pieces[0]
+            for item, literal in zip(combo, pieces[2::2], strict=True):
+                leaf += item + literal
+            leaves.append(leaf)
+        return " ".join(leaves)
+
+    return _BRACE_PATH_RE.sub(spell, text)
+
+
 def _path_readings(text: str) -> list[tuple[str, bool]]:
     """``(word, may_be_a_glob)`` readings of every path-looking word in ``text``.
 
@@ -1292,7 +2049,7 @@ def _path_readings(text: str) -> list[tuple[str, bool]]:
     never names ``or.env`` (review round 4, MINOR-2).
     """
     out: list[tuple[str, bool]] = []
-    for match in _PATHISH.finditer(text):
+    for match in _PATHISH.finditer(_expand_prose_braces(text)):
         raw = match.group(1)
         out.append((raw.rstrip("/.:"), True))
         stripped = raw[:-1].rstrip("/.:") if raw[-1:] in _PROSE_END else ""

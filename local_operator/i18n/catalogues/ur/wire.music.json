@@ -1,0 +1,8 @@
+{
+  "wire.music.label": "موسیقی",
+  "wire.music.started": "موسیقی کی تخلیق شروع ہو گئی — کام {job}۔",
+  "wire.music.progress": "موسیقی: {completed}/{total} ٹریک مکمل ہو گئے۔",
+  "wire.music.ready": "موسیقی تیار ہے — کام {job}۔",
+  "wire.music.failed": "موسیقی کی تخلیق ناکام ہو گئی: {error}",
+  "wire.music.cancel_requested": "{job} کو منسوخ کرنے کی درخواست کی گئی ہے۔ جاری تخلیق مکمل ہو سکتی ہے اور اس کی فیس وصول ہو سکتی ہے؛ نتائج دستیاب رہیں گے۔"
+}

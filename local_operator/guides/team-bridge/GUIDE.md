@@ -272,11 +272,40 @@ resync, not on every quiet poll, so an old time on a quiet account is normal.
 When a message has been held (in screening, or admitted and waiting for
 delivery) for longer than `team_bridge.hold_alert_after_minutes` (default 60,
 `0` turns it off, maximum 10080), the receiver raises one inbox notification in
-the designated session and clears it once nothing is held that long. It has no
+the designated session and clears it once nothing is held that long. Holds
+waiting for your review in the Agent messages holds list are not counted — the
+sidebar badge already shows them. It has no
 `lop config edit` key: run `lop config open` and add
 `hold_alert_after_minutes: <minutes>` under `values:` > `team_bridge:`. The
 receiver re-reads it without a restart. `lop team-bridge receiver status` shows
 what is held.
+
+### Which held messages clear on their own, and which wait for a person
+
+Every hold ends in one of two ways; none waits forever:
+
+- **Retried automatically** (the sender sees "screening temporarily
+  unavailable"): provider errors, an open breaker, a spent budget, and a reply
+  the screener could not be read from — `empty_reply` (every model answered
+  blank, even after one re-draw and a failover to the next model in the chain)
+  and `parse_failed` (it answered off-format). These are never cached; the
+  receiver re-screens them on its backoff (doubling to one hour).
+- **Waiting for the owner's review** (the sender sees "awaiting review"): the
+  screener's own answer said hold — `model_hold` (unsure), `model_refused` (its
+  safety refusal), `reply_truncated`, `bounce_without_category`. The answer is
+  cached, so a retry never re-draws it hoping for "deliver". With
+  `team_bridge.review_held` on (the default), the desktop Agent messages holds
+  list (and its sidebar badge) offers **Deliver** (the agent gets it, marked as
+  released by its owner) or **Discard** (the sender sees "not delivered"). A
+  review hold writes no notification at all — no per-message notice and no
+  long-hold alert; the badge is the signal. Set `review_held: false` under
+  `values:` > `team_bridge:` to go back to holds with no Deliver/Discard; those
+  holds count toward the long-hold alert again.
+
+The owner's own posts are never screened by their own agent: a message whose
+server-recorded sender is the owner's account, posting as a person, is
+delivered with no model call and no budget spent. A teammate with the same
+display name, or an agent under the owner's account, is still screened.
 
 ## Screening budgets
 

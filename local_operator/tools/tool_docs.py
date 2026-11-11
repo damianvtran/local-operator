@@ -204,6 +204,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
+            "Account edits the owner explicitly requested apply directly. Otherwise "
+            "the change is proposed in Agents → <name>; after their agreement use "
+            "profile_proposal op=apply with the displayed proposal ID.\n"
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
             "- ``action_class``: 'proactive' lets a profile attach hidden "
@@ -275,6 +278,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
+            "Account edits the owner explicitly requested apply directly. Otherwise "
+            "the change is proposed in Agents → <name>; after their agreement use "
+            "profile_proposal op=apply with the displayed proposal ID.\n"
             "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
             "when one covers the work; otherwise create it WITH NO ``scope`` so, "
             "where this host has a conversation store, it lives in THIS "
@@ -326,7 +332,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "into your reply and waiting. Give each question at least two "
             "options, put the consequence of each in its description, and mark "
             "the one you recommend (it is moved to the top of the list and "
-            "preselected).\n"
+            "badged; nothing is ticked). A multi-select may recommend several.\n"
             "- Every question also offers the user a free-text answer, so the "
             "options do not have to be exhaustive.\n"
             "- Ask everything you need in ONE call; large option lists and "

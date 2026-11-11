@@ -18,6 +18,7 @@ import local_operator.harness.loop as loop_module
 from local_operator.harness.loop import (
     ABORT_DRAIN_TIMEOUT_S,
     CONTINUE_TRUNCATED_ANSWER_PROMPT,
+    EMPTY_PROVIDER_RETRY_NOTICE_TEXT,
     LENGTH_ENDED_CALL_RESULT_TEXT,
     LENGTH_STOP_RECOVERY_PROMPT,
     MAX_CONNECTIVITY_CONTINUATIONS,
@@ -7408,6 +7409,321 @@ async def test_a_bare_stop_without_the_session_bit_keeps_the_old_ending():
     assert not any(
         isinstance(event, NoticeEvent) and "arrived empty" in event.text for event in events
     )
+
+
+# ---------------------------------------------------------------------------
+# Provider-empty responses: the provider sent NOTHING, so the request is re-issued
+# ---------------------------------------------------------------------------
+
+
+def _provider_empty_turn() -> list[StreamEvent]:
+    """A turn on which the provider sent no content of any kind.
+
+    No text delta, no call, no reasoning, no usage: what a 200 stream with zero
+    ``choices`` (or an Anthropic message with an empty ``content`` array)
+    assembles to.
+    """
+    return [StreamEndEvent(stop_reason="stop")]
+
+
+def _reasoning_only_turn(kind: str) -> list[StreamEvent]:
+    """A wordless stop that is NOT provider-empty: reasoning, no final text.
+
+    One per way a wire shows it, because the discriminator must hold on each.
+    """
+    if kind == "anthropic_thinking_block":
+        payload = {
+            "native_replay": {
+                "protocol": "anthropic-messages",
+                "items": [{"type": "thinking", "thinking": "hm", "signature": "sig"}],
+            }
+        }
+        return [StreamEndEvent(stop_reason="stop", provider_payload=payload)]
+    if kind == "chat_reasoning_content":
+        payload = {
+            "native_replay": {
+                "protocol": "openai-chat",
+                "items": [{"reasoning_content": "thinking it through"}],
+            }
+        }
+        return [
+            StreamReasoningDelta(delta="thinking it through"),
+            StreamEndEvent(stop_reason="stop", provider_payload=payload),
+        ]
+    if kind == "responses_reasoning_tokens":
+        # The Responses wire keeps no payload without ``encrypted_content``: the
+        # usage split is the ONLY trace of the reasoning there.
+        usage = Usage(input_tokens=10, output_tokens=64, reasoning_tokens=64)
+        return [StreamEndEvent(stop_reason="stop", usage=usage)]
+    if kind == "google_thought_part":
+        payload = {
+            "native_replay": {
+                "protocol": "google-content",
+                "items": [{"text": "pondering", "thought": True}],
+            }
+        }
+        return [StreamEndEvent(stop_reason="stop", provider_payload=payload)]
+    if kind == "output_tokens_without_breakdown":
+        # Generation the client could not show (hidden reasoning, or markup its
+        # filter removed): the provider did not send nothing.
+        return [StreamEndEvent(stop_reason="stop", usage=Usage(input_tokens=10, output_tokens=7))]
+    raise AssertionError(kind)
+
+
+def _user_prompts(messages: list[Any]) -> list[str]:
+    return [m.text.strip() for m in messages if isinstance(m, Message) and m.role == "user"]
+
+
+async def _run_empty_scenario(
+    turns: list[list[StreamEvent]], tools: list[AgentTool] | None = None, **config: Any
+) -> tuple[ScriptedStream, list[Any]]:
+    stream = ScriptedStream(turns)
+    events: list[Any] = []
+    async for event in AgentLoop().run(
+        [Message.user("go")],
+        LoopContext(tools=tools or []),
+        make_config(stream, recover_wordless_stop=True, **config),
+        None,
+    ):
+        events.append(event)
+    return stream, events
+
+
+@pytest.mark.asyncio
+async def test_a_provider_empty_response_is_reissued_once_with_no_prompt_added():
+    """The provider sent nothing, so the SAME request goes out again: nothing is
+    appended (no "you said nothing" prompt about a message the model never
+    wrote), the empty row never reaches the wire, and the answer is delivered."""
+    stream, events = await _run_empty_scenario(
+        [
+            _provider_empty_turn(),
+            [StreamTextDelta(delta="the answer"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+
+    assert len(stream.requests) == 2
+    # Byte-for-byte the same conversation: no chrome prompt, no empty assistant.
+    assert [m.model_dump() for m in stream.requests[1].messages] == [
+        m.model_dump() for m in stream.requests[0].messages
+    ]
+    assert WORDLESS_STOP_RECOVERY_PROMPT not in _user_prompts(stream.requests[1].messages)
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is None and end.aborted is False
+    assert [m.text for m in end.messages if isinstance(m, Message) and m.role == "assistant"] == [
+        "the answer"
+    ]
+    assert WORDLESS_STOP_RECOVERY_PROMPT not in _user_prompts(end.messages)
+    # A distinct notice for this retry, not the re-prompt wording.
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert [n.text for n in notices] == [EMPTY_PROVIDER_RETRY_NOTICE_TEXT], notices
+    assert not any("arrived empty" in n.text for n in notices)
+
+
+@pytest.mark.asyncio
+async def test_a_second_provider_empty_response_stops_the_turn_and_names_model_and_time():
+    """Exactly two requests, never three, and never the old re-prompt: the turn
+    ends as a visible failure that says which model and when."""
+    import re
+    from datetime import datetime, timezone
+
+    before = datetime.now(timezone.utc).replace(microsecond=0)
+    stream, events = await _run_empty_scenario(
+        [
+            _provider_empty_turn(),
+            _provider_empty_turn(),
+            [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+
+    assert len(stream.requests) == 2
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error, "the failure must be a persisted error, not a silent stop"
+    assert "test/m" in end.error
+    assert end.failing_model == "test/m"
+    stamp = re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", end.error)
+    assert stamp, end.error
+    when = datetime.strptime(stamp.group(0), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    assert before <= when <= datetime.now(timezone.utc)
+    assert WORDLESS_STOP_RECOVERY_PROMPT not in _user_prompts(end.messages)
+    assert WORDLESS_STOP_RECOVERY_PROMPT not in _user_prompts(stream.requests[1].messages)
+    # One retry notice (the first), and no re-prompt notice.
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert [n.text for n in notices] == [EMPTY_PROVIDER_RETRY_NOTICE_TEXT], notices
+    # The empty rows are not left in the transcript either.
+    assert not any(isinstance(m, Message) and m.role == "assistant" for m in end.messages)
+
+
+@pytest.mark.asyncio
+async def test_the_failure_classifies_as_an_incident_naming_the_model():
+    """The error text is what ``Session`` journals as the run's incident; it must
+    survive that classifier readable (and not be mistaken for another category)."""
+    from local_operator.incidents import classify_incident
+
+    _, events = await _run_empty_scenario([_provider_empty_turn(), _provider_empty_turn()])
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error
+    incident = classify_incident(end.error, "test", "m")
+    assert incident.category == "unknown"
+    rendered = incident.render()
+    assert "test/m" in rendered and "no content" in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "anthropic_thinking_block",
+        "chat_reasoning_content",
+        "responses_reasoning_tokens",
+        "google_thought_part",
+        "output_tokens_without_breakdown",
+    ],
+)
+async def test_a_reasoning_only_wordless_stop_keeps_the_existing_single_re_ask(kind: str):
+    """The pre-existing path, unchanged: reasoning with no final text is the
+    model's own silence, so the re-ask WITH its prompt and its notice still runs,
+    and the provider-empty retry never fires."""
+    stream, events = await _run_empty_scenario(
+        [
+            _reasoning_only_turn(kind),
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+
+    assert len(stream.requests) == 2
+    assert _user_prompts(stream.requests[1].messages)[-1] == WORDLESS_STOP_RECOVERY_PROMPT
+    codes = [e.code for e in events if isinstance(e, NoticeEvent)]
+    assert codes == ["tui.notices.empty_reply"], codes
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_a_whitespace_only_stop_keeps_the_existing_re_ask():
+    """A bare newline is content the provider DID send (the measured OSWorld
+    shape): it stays on the pre-existing path."""
+    stream, events = await _run_empty_scenario(
+        [_wordless_stop_turn(), [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]]
+    )
+    assert len(stream.requests) == 2
+    assert _user_prompts(stream.requests[1].messages)[-1] == WORDLESS_STOP_RECOVERY_PROMPT
+    assert [e.code for e in events if isinstance(e, NoticeEvent)] == ["tui.notices.empty_reply"]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_empty_retry_does_not_spend_the_wordless_re_ask():
+    """Separate budgets: empty (retried), then a reasoning-only stop still gets
+    its own re-ask, then the answer."""
+    stream, events = await _run_empty_scenario(
+        [
+            _provider_empty_turn(),
+            _reasoning_only_turn("anthropic_thinking_block"),
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    assert len(stream.requests) == 3
+    assert WORDLESS_STOP_RECOVERY_PROMPT not in _user_prompts(stream.requests[1].messages)
+    assert _user_prompts(stream.requests[2].messages)[-1] == WORDLESS_STOP_RECOVERY_PROMPT
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_provider_empty_responses_separated_by_a_healthy_turn_each_get_their_retry():
+    """The retry allowance is for CONSECUTIVE empties: a healthy turn between
+    them proves the provider recovered, so a long run is not failed by its
+    second, unrelated, blip."""
+    executed: list[str] = []
+    stream, events = await _run_empty_scenario(
+        [
+            _provider_empty_turn(),
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"ok"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            _provider_empty_turn(),
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ],
+        tools=[echo_tool(executed)],
+    )
+    assert len(stream.requests) == 4
+    assert executed == ["echo"]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+    assert [e.text for e in events if isinstance(e, NoticeEvent)] == [
+        EMPTY_PROVIDER_RETRY_NOTICE_TEXT
+    ] * 2
+
+
+@pytest.mark.asyncio
+async def test_healthy_turns_never_touch_the_provider_empty_branch():
+    """Text, tool calls and a ``length`` stop with prose are not empty."""
+    executed: list[str] = []
+    stream, events = await _run_empty_scenario(
+        [
+            [
+                tool_call_delta(0, id="c1", name="echo", args='{"text":"ok"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ],
+        tools=[echo_tool(executed)],
+    )
+    assert len(stream.requests) == 2 and executed == ["echo"]
+    assert not any(isinstance(e, NoticeEvent) for e in events)
+
+    stream, events = await _run_empty_scenario(
+        [[StreamTextDelta(delta="answer"), StreamEndEvent(stop_reason="stop")]]
+    )
+    assert len(stream.requests) == 1
+    assert not any(isinstance(e, NoticeEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_a_requested_stop_skips_the_provider_empty_retry():
+    """A supervisor's stop outranks the retry, as it does the wordless re-ask."""
+    stream = ScriptedStream(
+        [_provider_empty_turn(), [StreamTextDelta(delta="x"), StreamEndEvent(stop_reason="stop")]]
+    )
+    events = [
+        event
+        async for event in AgentLoop().run(
+            [Message.user("go")],
+            LoopContext(tools=[]),
+            make_config(
+                stream,
+                recover_wordless_stop=True,
+                graceful_cancel_requested=lambda: len(stream.requests) >= 1,
+            ),
+            None,
+        )
+    ]
+    assert len(stream.requests) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True and end.error is None
+    assert not any(isinstance(e, NoticeEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_provider_empty_response_without_the_session_bit_keeps_the_old_ending():
+    """Where silence is legitimate (internal arrivals) nothing changes: no retry,
+    no failure, one request."""
+    stream = ScriptedStream(
+        [_provider_empty_turn(), [StreamTextDelta(delta="x"), StreamEndEvent(stop_reason="stop")]]
+    )
+    events = [
+        event
+        async for event in AgentLoop().run(
+            [Message.user("go")], LoopContext(tools=[]), make_config(stream), None
+        )
+    ]
+    assert len(stream.requests) == 1
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+    assert not any(isinstance(e, NoticeEvent) for e in events)
 
 
 def test_wordless_stop_prompt_is_harness_chrome():

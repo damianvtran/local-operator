@@ -146,7 +146,7 @@ from local_operator.imaging import (
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
 )
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import python_argv, session_python_argv
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
 from local_operator.procstate import (
@@ -210,6 +210,7 @@ from local_operator.tools.confinement import (
     shell_sandbox_unavailable_reason_async,
     shell_write_confinement_of,
 )
+from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT, fits_source_evidence
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -10909,11 +10910,11 @@ async def execute_edit(
     if pad_advisory:
         text = f"{text}\n{pad_advisory}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "edit",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -11121,7 +11122,7 @@ def _edit_file_result_locked(
             )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    details = _diff_details(str(path), original, current)
+    details = _with_diff_source(_diff_details(str(path), original, current), original, current)
     if pad_advisory:
         # The worker thread already returns ``details``; this private, popped key
         # carries the receipt line without changing that transaction's shape.
@@ -11251,6 +11252,11 @@ _MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
 #: It is popped before rendering, so the structured diff remains unchanged.
 _SCRATCHPAD_ADVISORY_KEY = "_scratchpad_advisory"
 
+#: The same one-way worker-to-result channel for the complete raw file sides.
+#: Popped by ``_diff_text_result`` onto a private ``ToolResult`` attribute, so
+#: it never reaches the persisted details.
+_DIFF_SOURCE_KEY = "_diff_source"
+
 
 #: One unified-diff hunk header. Counts default to 1 when omitted, which the
 #: grammar allows for a single-line side.
@@ -11335,6 +11341,48 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     if omitted:
         details[DIFF_TRUNCATED_ROWS_KEY] = omitted
     return details
+
+
+def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[str, Any]:
+    """Attach the complete sides as source evidence for the loop's seam.
+
+    Called by the write/edit transactions with the exact bytes they diffed.
+    The scratch key is popped onto a private ``ToolResult`` attribute by
+    ``_diff_text_result`` (see ``tools/diff_limits`` for why the per-hunk
+    judgement alone is not enough). Over the bound no complete-side proof is
+    possible, so the diff is withheld instead; counters and path stay exact.
+    """
+    if not isinstance(details.get("diff"), list):
+        return details
+    if fits_source_evidence(before, after):
+        details[_DIFF_SOURCE_KEY] = (before, after)
+    else:
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    return details
+
+
+def _diff_text_result(
+    tool_call_id: str, tool_name: str, text: str, details: dict[str, Any]
+) -> ToolResult:
+    """``_text`` for write/edit, moving the raw source evidence off ``details``.
+
+    ``details`` is serialized everywhere, so the raw sides must leave it before
+    a ``ToolResult`` exists. They ride the private ``_diff_source`` together
+    with the raw preview, and the public preview becomes the withheld receipt
+    until the loop's seam (``AgentLoop._settle_write_diff``) publishes the
+    source-masked copy. A path that never reaches that seam (a direct
+    ``execute`` caller, a copy that dropped the private attribute) therefore
+    publishes the receipt, never raw rows.
+    """
+    source = details.pop(_DIFF_SOURCE_KEY, None)
+    preview = details.get("diff")
+    if source is not None and isinstance(preview, list):
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    result = _text(tool_call_id, tool_name, text, details=details)
+    if source is not None and isinstance(preview, list):
+        before, after = source
+        result._diff_source = (before, after, tuple(preview))
+    return result
 
 
 def _utf8_size(rows: Sequence[str]) -> int:
@@ -12004,11 +12052,11 @@ async def execute_write(
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "write",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -12036,7 +12084,7 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    details = _diff_details(str(path), previous, content)
+    details = _with_diff_source(_diff_details(str(path), previous, content), previous, content)
     introduced = _marker_introduced(previous, content)
     if introduced:
         details[_MARKER_INTRODUCED_KEY] = introduced
@@ -20106,22 +20154,22 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
 async def _sessions_launch(
     argv: list[str], env: dict[str, str], cwd: str | None
 ) -> tuple[int, str]:
-    """Run THIS build's CLI (``python -P -m local_operator.cli …``) and return
-    ``(returncode, stderr)``.
+    """Run the new session's CLI and return ``(returncode, stderr)``.
 
-    Not ``shutil.which("lop")``: the ``lop`` on PATH may be a different build
-    (a global install, a generation pointer) than the session that spawned
-    it, and the two could disagree about a flag the argv above uses.
-    ``python_argv`` adds ``-P`` so a checkout that merely happens to be the
-    cwd cannot shadow the installed package — the same spelling
-    ``update.py``'s relaunch and ``tui/session_move.py``'s nested run use.
+    A generation-installed parent resolves the concrete CURRENT interpreter
+    for this independent session, not its own pinned old build. Developer and
+    legacy installs stay on their own interpreter. Never use PATH's ``lop``:
+    it may belong to an unrelated install. ``session_python_argv`` also keeps
+    ``-P`` so a checkout in the cwd cannot shadow the selected distribution.
+    This boundary intentionally follows updates; same-session helpers and mesh
+    protocol calls continue to use their parent's build.
 
     The child is its own process group so a fired bound can reap the whole
     tree; ``stdin`` is /dev/null because an exec run is never interactive
     (``--control`` is deliberately not exposed by this tool).
     """
     process = await asyncio.create_subprocess_exec(
-        *python_argv(*_SESSIONS_CLI, *argv),
+        *session_python_argv(*_SESSIONS_CLI, *argv),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -35349,8 +35397,8 @@ class AskParams(BaseModel):
 #: marked an option ``recommended`` has already stated what it would do.
 ASK_UNANSWERED_TEXT = (
     "The user closed the question without answering, so nothing was chosen. "
-    "Do not ask again: decide yourself (take your recommended option where you "
-    "gave one), then say in one line what you assumed and carry on."
+    "Do not ask again: decide yourself (take your recommended option(s) where you "
+    "gave any), then say in one line what you assumed and carry on."
 )
 
 
