@@ -1,0 +1,37 @@
+{
+  "msg": "Connector configuration",
+  "result": {
+    "cloudflared_token": "<cloudflared token>",
+    "tunnel": {
+      "id": "0123456789abcdef0123456789abcdef",
+      "owner_account_id": "acct_fixture_owner",
+      "...": "every existing Tunnel field, unchanged",
+      "transport": "cloudflare"
+    },
+    "gateway_port": 4100,
+    "origin_auth": {
+      "issuer": "https://tunnels.radienthq.com",
+      "jwks": {
+        "keys": [
+          {
+            "kty": "RSA",
+            "use": "sig",
+            "alg": "RS256",
+            "kid": "<origin kid>",
+            "n": "<n>",
+            "e": "AQAB"
+          }
+        ]
+      },
+      "owner_account_id": "acct_fixture_owner",
+      "tunnel_id": "0123456789abcdef0123456789abcdef",
+      "version": 7
+    },
+    "relay": {
+      "url": "wss://tunnels.radienthq.com/v1/connector",
+      "token": "CONNECTOR_JWT_SEE_connector_jwt.json",
+      "expires_at": "2025-11-10T13:10:00Z",
+      "protocol": "radient-tunnel.v1"
+    }
+  }
+}

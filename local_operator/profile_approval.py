@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal, Mapping
 
@@ -421,8 +422,43 @@ def write_image(
         )
         if current is None:
             # Preallocated identity is signed; create_agent's random id cannot
-            # replace it. Preserve its ordinary defaults via AgentData schema.
-            row = AgentData.model_validate(dict(image, id=target_id))
+            # replace it, so build the row the way create_agent does. The image
+            # is AUTHORED fields only: created_date/version are required on
+            # AgentData and registry-owned, so they are minted here (feeding the
+            # bare image to model_validate raised "created_date/version Field
+            # required" and an image `model` of None is not a valid str).
+            from importlib.metadata import version
+
+            from local_operator.paths import default_agent_cwd
+
+            now = datetime.now(timezone.utc)
+            row = AgentData(
+                id=target_id,
+                created_date=now,
+                version=version("local-operator"),
+                name=image["name"],
+                label=image["label"],
+                description=image["description"],
+                tags=list(image["tags"]),
+                categories=list(image["categories"]),
+                model=image["model"] or "",
+                # pyright reads AgentData's Field(...) defaults as required
+                # parameters, so the unauthored fields are spelled out as
+                # create_agent spells them.
+                security_prompt="",
+                hosting="",
+                last_message="",
+                last_message_datetime=now,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+                current_working_directory=default_agent_cwd(),
+            )
             r.save_agent(row)
         else:
             r.update_agent(target_id, AgentEditFields(**fields))
@@ -437,7 +473,9 @@ def write_image(
                 r.delete_team(target_id)
             return
         if current is None:
-            r.save_team(Team.model_validate(image))
+            # TeamImage is authored fields only; created_date is required on
+            # Team and registry-owned (create_team mints it the same way).
+            r.save_team(Team.model_validate(dict(image, created_date=datetime.now(timezone.utc))))
         else:
             fields = {key: value for key, value in image.items() if key != "id"}
             r.update_team(target_id, TeamEditFields(**fields))

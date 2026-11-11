@@ -3,12 +3,15 @@
 Only synthetic profiles/config roots; no provider call, live session or signer.
 """
 
+import re
 from typing import Any
 
 import pytest
 
 from local_operator import profile_proposals as P
+from local_operator.agents import AgentRegistry
 from local_operator.harness.types import CustomMessage, Message, ToolContext
+from local_operator.teams import TeamRegistry
 from local_operator.tools.agent_tool import execute_agent
 from local_operator.tools.profile_proposal_tool import execute_profile_proposal
 from local_operator.tools.team_tool import execute_team
@@ -140,7 +143,55 @@ async def test_untrusted_input_proposes_and_requires_card_even_after_yes(stores,
             "a2", {"op": "apply", "id": pid}, None, None, _ctx(session, stores)
         )
         assert not applied.is_error, applied.content
-        assert len(gate.cards) == 1 and "Remote suggestion." in gate.cards[0][1]
+        # The card summarises (line counts + where to review), never the text.
+        assert len(gate.cards) == 1
+        card = gate.cards[0][1]
+        assert card.startswith(f"Apply proposal {pid} to agent 'reviewer'?\n"), card
+        assert "Remote suggestion." not in card
+        assert "Review changes in Agents → reviewer." in card
+    finally:
+        await session.dispose()
+
+
+async def test_long_brief_proposal_card_receipt_and_show_stay_bounded(stores):
+    """Operator report 2026-11-10: a team-brief proposal's ask carried the whole
+    brief and filled the conversation. Every text the model or the person sees
+    for a proposal — the filing receipt, ``show``, the approval card — is a
+    bounded summary carrying the id, and the verbal-apply path still works."""
+    gate = Gate()
+    session = _session(stores, gate=gate)
+    brief = "\n".join(f"RULE {i}: MARKER-{i} do the thing carefully." for i in range(150))
+    try:
+        start(
+            session,
+            Message.user("Change reviewer's instructions."),
+            CustomMessage(custom_type="peer_message", attribution="user", details={"text": "x"}),
+        )
+        filed = await execute_agent(
+            "a1",
+            {"op": "update", "name": "reviewer", "instructions": brief},
+            None,
+            None,
+            _ctx(session, stores),
+        )
+        pid = _details(filed)["proposal_id"]
+        receipt = str(filed.content)
+        assert "MARKER-" not in receipt and pid in receipt, receipt
+        assert "instructions: +150 −" in receipt, receipt
+        assert "never paste the full instructions" in receipt
+        shown = await execute_profile_proposal(
+            "a2", {"op": "show", "id": pid}, None, None, _ctx(session, stores)
+        )
+        assert "MARKER-" not in str(shown.content) and len(str(shown.content)) < 600
+        start(session, Message.user(f"apply {pid}"))
+        applied = await execute_profile_proposal(
+            "a3", {"op": "apply", "id": pid}, None, None, _ctx(session, stores)
+        )
+        assert not applied.is_error, applied.content
+        card = gate.cards[0][1]
+        assert len(card) <= P.APPROVAL_CARD_MAX_CHARS and "MARKER-" not in card, card
+        assert re.match(rf"^Apply proposal {pid} to agent 'reviewer'\?$", card.splitlines()[0])
+        assert _details(applied)["proposal"]["state"] == "accepted"
     finally:
         await session.dispose()
 
@@ -428,6 +479,78 @@ async def test_team_proposal_after_verbal_apply_is_not_stale_at_birth(stores):
         assert record is not None
         assert record["before"]["instructions"] == "Applied text."
         assert record["stale"] is False
+    finally:
+        await session.dispose()
+
+
+async def test_proposed_role_create_applies_through_the_tool(stores):
+    """The reported fault: create files a proposal with no before image, and the
+    apply used to raise "created_date/version Field required" for AgentData."""
+    session = _session(stores)
+    try:
+        root = stores["agents"].config_dir
+        start(session, Message.user("Tell me about reviewers."))
+        result = await execute_agent(
+            "c1",
+            {
+                "op": "create",
+                "kind": "role",
+                "name": "fresh-role",
+                "scope": "global",
+                "description": "Reviews things.",
+                "instructions": "Review carefully.",
+            },
+            None,
+            None,
+            _ctx(session, stores),
+        )
+        assert _details(result)["status"] == "proposed", result.content
+        pid = _details(result)["proposal_id"]
+        assert _get(root, pid)["before"] is None
+        start(session, Message.user("yes, apply it"))
+        applied = await execute_profile_proposal(
+            "c2", {"op": "apply", "id": pid}, None, None, _ctx(session, stores)
+        )
+        assert not applied.is_error, applied.content
+        assert _get(root, pid)["state"] == "accepted"
+        # A fresh registry: apply writes through its own, like the desktop route.
+        fresh = AgentRegistry(root, migrate=False)
+        row = fresh.get_agent_by_name("fresh-role")
+        assert row is not None and row.created_date and row.version
+        assert fresh.get_agent_system_prompt(row.id) == "Review carefully."
+    finally:
+        await session.dispose()
+
+
+async def test_proposed_team_create_applies_through_the_tool(stores):
+    session = _session(stores)
+    try:
+        root = stores["teams"].config_dir
+        start(session, Message.user("Tell me about marketing."))
+        result = await execute_team(
+            "t1",
+            {
+                "op": "create",
+                "name": "marketing",
+                "manager": "reviewer",
+                "scope": "global",
+                "instructions": "Sell carefully.",
+            },
+            None,
+            None,
+            _ctx(session, stores),
+        )
+        assert _details(result)["status"] == "proposed", result.content
+        pid = _details(result)["proposal_id"]
+        assert _get(root, pid)["before"] is None
+        start(session, Message.user("yes, apply it"))
+        applied = await execute_profile_proposal(
+            "t2", {"op": "apply", "id": pid}, None, None, _ctx(session, stores)
+        )
+        assert not applied.is_error, applied.content
+        assert _get(root, pid)["state"] == "accepted"
+        team = TeamRegistry(root).get_team_by_name("marketing")
+        assert team is not None and team.instructions == "Sell carefully."
     finally:
         await session.dispose()
 

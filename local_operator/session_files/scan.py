@@ -127,6 +127,9 @@ _RESULT_TOOLS: Final = frozenset(
         "generate_sound_effect",
         "generate_video",
         "video_status",
+        "generate_music",
+        "modify_music",
+        "music_status",
     }
 )
 #: Tool names whose CALL rows are worth parsing: the ones that pair with a result above.
@@ -136,6 +139,9 @@ _ARTIFACT_TOOLS: Final = frozenset(
         "generate_image",
         "generate_video",
         "video_status",
+        "generate_music",
+        "modify_music",
+        "music_status",
         "generate_voiceover",
         "generate_sound_effect",
     }
@@ -606,7 +612,7 @@ class FileScan:
             (
                 (_str(details.get("tool")) or "generate_voiceover")
                 if payload.get("custom_type") == "audio_settle_v1"
-                else "generate_video"
+                else "generate_music" if details.get("material") == "music" else "generate_video"
             ),
             _str(details.get("request_id") or details.get("job_id")),
             details,

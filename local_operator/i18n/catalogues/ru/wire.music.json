@@ -1,0 +1,8 @@
+{
+  "wire.music.label": "Музыка",
+  "wire.music.started": "Генерация музыки запущена — задание {job}.",
+  "wire.music.progress": "Музыка: завершено дорожек {completed}/{total}.",
+  "wire.music.ready": "Музыка готова — задание {job}.",
+  "wire.music.failed": "Не удалось создать музыку: {error}",
+  "wire.music.cancel_requested": "Запрошена отмена задания {job}. Генерация может завершиться и быть оплачена; результаты останутся доступны."
+}

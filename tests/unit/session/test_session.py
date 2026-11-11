@@ -175,6 +175,16 @@ def echo_tool(executed: list[str], delay: float = 0.0, name: str = "echo") -> Ag
     )
 
 
+def answer_then_bare_stops(bare: int) -> list[list[StreamEvent]]:
+    """One prose turn, then ``bare`` turns on which the provider sends nothing.
+
+    For cells whose PROMPT turn is incidental: a person-asked turn that opens with
+    a bare stop is now re-issued and then fails, which would end the session.
+    """
+    answer: list[StreamEvent] = [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]
+    return [answer] + [[StreamEndEvent(stop_reason="stop")] for _ in range(bare)]
+
+
 def make_session(tmp_path, stream, tools=None, **kwargs) -> Session:
     transcript = Transcript(tmp_path / "sess")
     return Session(
@@ -5604,7 +5614,10 @@ async def test_a_delivery_that_cannot_be_made_durable_is_reported(tmp_path, monk
     runtime that is leaving, and returning quietly is a result the operator never
     learns they lost.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    # The prompt turn answers in prose: a bare stop (nothing at all from the
+    # provider) on a person-asked turn is now re-issued once and then FAILS the
+    # turn, which would abort the session before the delivery this cell exercises.
+    stream = ScriptedStream(answer_then_bare_stops(3))
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     spent_before = len(stream.requests)
@@ -5666,7 +5679,10 @@ async def test_a_failed_hold_is_still_durable_when_the_disposal_won(tmp_path, mo
     possible — it accepts appends until the very end of ``dispose``, which is the
     same fact MAJOR-1's fix rests on.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    # The prompt turn answers in prose: a bare stop (nothing at all from the
+    # provider) on a person-asked turn is now re-issued once and then FAILS the
+    # turn, which would abort the session before the delivery this cell exercises.
+    stream = ScriptedStream(answer_then_bare_stops(3))
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     transcript = session._transcript
@@ -5714,7 +5730,10 @@ async def test_a_job_result_still_opens_exactly_one_turn_off_the_latch(tmp_path)
     path was written to fix (see ``_deferred_job_results``). Off the latch, N
     results are still exactly ONE batched turn.
     """
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    # The prompt turn answers in prose: a bare stop (nothing at all from the
+    # provider) on a person-asked turn is now re-issued once and then FAILS the
+    # turn, which would abort the session before the delivery this cell exercises.
+    stream = ScriptedStream(answer_then_bare_stops(3))
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     spent_before = len(stream.requests)
@@ -5809,7 +5828,10 @@ async def test_a_prompt_turn_recovers_a_wordless_stop_once(tmp_path):
     which the latch and wake cells pin."""
     stream = ScriptedStream(
         [
-            [StreamEndEvent(stop_reason="stop")],
+            # A bare newline: the provider DID send something (the measured wordless
+            # shape), so this stays on the re-ask path. A turn with NO content at all
+            # is the provider-empty retry, pinned in the cells below.
+            [StreamTextDelta(delta="\n"), StreamEndEvent(stop_reason="stop")],
             [StreamTextDelta(delta="hello"), StreamEndEvent(stop_reason="stop")],
         ]
     )
@@ -5819,6 +5841,60 @@ async def test_a_prompt_turn_recovers_a_wordless_stop_once(tmp_path):
     assert len(stream.requests) == 2, "the prompt turn spends exactly one re-ask"
     second = json.dumps(stream.requests[1].model_dump(mode="json"))
     assert "arrived with no text" in second, "the re-ask states the missing fact"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_turn_reissues_a_provider_empty_response_without_a_prompt(tmp_path):
+    """A person asked and the provider sent NOTHING: the same request goes out
+    again, with no "arrived with no text" prompt, and the answer lands."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="hello"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("hello")
+
+    assert len(stream.requests) == 2
+    assert "arrived with no text" not in json.dumps(stream.requests[1].model_dump(mode="json"))
+    assert stream.requests[1].messages == stream.requests[0].messages
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_two_provider_empty_responses_journal_an_incident_naming_model_and_time(tmp_path):
+    """The failure reaches the transcript through the ordinary incident path:
+    exactly two requests, a persisted ``session_incident`` row that names the
+    model and a UTC timestamp, and no re-ask prompt anywhere in the history."""
+    import re
+
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("hello")
+
+    assert len(stream.requests) == 2
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sess" / "transcript.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    text = "\n".join(
+        row["payload"]["details"]["text"]
+        for row in rows
+        if row.get("payload", {}).get("custom_type") == "session_incident"
+    )
+    assert f"({MODEL.provider}/{MODEL.model_id})" in text
+    assert "Empty provider response" in text
+    assert re.search(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", text), text
+    assert "arrived with no text" not in json.dumps(rows)
     await session.dispose()
 
 
@@ -7399,7 +7475,7 @@ async def test_the_user_message_stamp_is_identical_across_a_restart(tmp_path):
 async def test_ask_agent_running_is_false_only_for_a_stopped_idle_session(tmp_path):
     """D6 predicate: pending abort AND no turn in flight. Idle-without-abort and
     mid-turn are both "running"."""
-    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    stream = ScriptedStream(answer_then_bare_stops(2))
     session = make_session(tmp_path, stream)
     assert session.ask_agent_running() is True  # idle, never stopped
     session.abort("interrupted")
@@ -7415,3 +7491,64 @@ async def test_ask_agent_running_is_false_only_for_a_stopped_idle_session(tmp_pa
     await session.prompt("hello")  # a fresh prompt clears the stop
     assert session.ask_agent_running() is True
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_never_receives_the_garbled_tool_name(tmp_path):
+    """The compaction span is sanitised before the summary prompt is built.
+
+    ``build_compaction_prompt`` renders each call's name and each error's
+    tool name and text, so an unsanitised span handed the compaction model the
+    raw garble — and a summary that kept it re-entered durable history in the
+    compaction marker (review round 1, R1). The span the summarizer sees must
+    be the sanitised view; the caller's list stays untouched.
+    """
+    from local_operator.compaction import api as compaction_api
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    executed: list[str] = []
+    session = make_session(tmp_path, stream, tools=[echo_tool(executed, name="bash")])
+    try:
+        span = [
+            Message.user("go"),
+            Message(
+                role="assistant",
+                content=[TextContent(text="running it")],
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name="bashLecture",
+                        arguments={"command": "echo hi"},
+                    )
+                ],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="Tool not found: bashLecture")],
+                tool_call_id="c1",
+                tool_name="bashLecture",
+                is_error=True,
+            ),
+        ]
+        seen: list[list[Message]] = []
+
+        async def summarize(messages, complete_fn, previous_summary=None):
+            seen.append(list(messages))
+            return "SUMMARY"
+
+        fake_api = types.SimpleNamespace(
+            split_leading_marker=compaction_api.split_leading_marker,
+            summarize_messages=summarize,
+        )
+        summary, _ = await session._produce_summary(fake_api, list(span), "context-full")
+        assert summary == "SUMMARY"
+        assert len(seen) == 1
+        prompt = compaction_api.build_compaction_prompt(seen[0])
+        assert "Lecture" not in prompt
+        names = [c.name for m in seen[0] if m.role == "assistant" for c in m.tool_calls]
+        assert names == ["bash"]
+        # The caller's history is untouched (request-copy only).
+        assert span[1].tool_calls[0].name == "bashLecture"
+        assert span[2].text == "Tool not found: bashLecture"
+    finally:
+        await session.dispose()

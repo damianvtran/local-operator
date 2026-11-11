@@ -1,0 +1,8 @@
+{
+  "wire.music.label": "Âm nhạc",
+  "wire.music.started": "Đã bắt đầu tạo nhạc — tác vụ {job}.",
+  "wire.music.progress": "Âm nhạc: {completed}/{total} bản nhạc đã hoàn tất.",
+  "wire.music.ready": "Nhạc đã sẵn sàng — tác vụ {job}.",
+  "wire.music.failed": "Tạo nhạc thất bại: {error}",
+  "wire.music.cancel_requested": "Đã yêu cầu hủy {job}. Quá trình tạo đang chạy vẫn có thể hoàn tất và bị tính phí; kết quả vẫn có thể truy xuất."
+}

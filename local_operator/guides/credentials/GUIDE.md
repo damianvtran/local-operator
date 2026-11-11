@@ -333,6 +333,20 @@ history, not as a signal about this session.
   copy deleted — unread — and nothing more.
 - **Never paste one into a tool argument** that is echoed back, including your
   own reasoning text.
+- **Never dump a whole secret object to learn what it holds.** `kubectl get
+  secret NAME -o yaml|json`, `printenv` and `cat .env` print every value. A
+  `bash` result for one carries a `[credential guard] …` line under its exit
+  code that names the safer form: key names only (`kubectl get secret NAME -o
+  jsonpath='{.data}' | jq 'keys'`), or one key piped straight into the command
+  that consumes it (`-o jsonpath='{.data.KEY}' | base64 -d | <consumer>`).
+  The same steer covers `aws secretsmanager get-secret-value` printed to the
+  terminal (check the name with `describe-secret`; redirected, piped or
+  `$( )`-captured, it stays quiet), Terraform Cloud's `/plans/<id>/json-output` (read
+  `json-output-redacted`) and `terraform show -json` (the human view masks
+  sensitive values). The
+  line steers; it never blocks. A Secret's `data`/`stringData` values, and any
+  base64/%xx/JSON-escaped token that decodes to a credential, are masked anyway
+  — that is the backstop, not a reason to dump one.
 - **Never move a secret between stores** without being asked. Reading one out of
   the long-term store to put it somewhere more convenient defeats the store.
 

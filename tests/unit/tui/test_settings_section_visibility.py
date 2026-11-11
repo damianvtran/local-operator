@@ -106,7 +106,14 @@ async def test_every_screening_row_explains_itself_at_eighty_by_twenty_four() ->
             for row in view._rows
             if row.setting is not None and row.setting.key.startswith("team_bridge.screening.")
         ]
-        assert len(keys) == 4, keys
+        # The model preference joins the four ceilings; all five need help.
+        assert keys == [
+            "team_bridge.screening.budget_per_hour",
+            "team_bridge.screening.unaddressed_budget_per_hour",
+            "team_bridge.screening.ambient_budget_per_hour",
+            "team_bridge.screening.sender_budget_per_hour",
+            "team_bridge.screening.model",
+        ], keys
         painted: dict[str, str] = {}
         for key in keys:
             view._select_setting_row(key)

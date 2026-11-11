@@ -595,10 +595,10 @@ def raise_notice(
     """Raise (once) the per-message notice for an eligible work-scope hold.
 
     Returns a closed code: ``raised`` | ``unchanged`` | ``ineligible`` |
-    ``overflow`` | ``refused``. ``notified_at`` is written ONLY after
-    ``notify`` returned, because the 60-minute alert skips a hold only once its
-    own notice is recorded (DESIGN §2.4): a refused notice must leave the hold
-    visible to the long-hold alert.
+    ``badge_only`` (a review hold: no inbox item) | ``overflow`` | ``refused``.
+    ``notified_at`` is written ONLY after ``notify`` returned, because the
+    60-minute alert skips a hold only once its own notice is recorded (DESIGN
+    §2.4): a refused notice must leave the hold visible to the long-hold alert.
     """
 
     from local_operator.i18n.keys import cli_team_bridge_hold as _k
@@ -608,6 +608,19 @@ def raise_notice(
     decision = store.work_scope_decision(owner, message_id)
     if decision is None or not decision.get("eligible"):
         return "ineligible"
+    if str(decision.get("hold_code") or "") in REVIEW_HOLD_CODES:
+        # A review hold raises NO inbox item — neither the per-message notice nor
+        # the overflow (operator report 2026-11-10). #3714 (a79c82fb) routed every
+        # review hold through this notice, and with ``model_hold`` & co. common
+        # that wrote one row per held message (~28 in minutes, the first per
+        # sender at ``high``) for messages the Agent messages sidebar badge and
+        # holds list already show. The review row itself (Deliver/Discard, the
+        # badge count) is written by the screener and is untouched here.
+        # ``notified_at`` stays NULL on purpose: the hold remains visible to the
+        # ONE keyed 60-minute long-hold alert, exactly as before #3714, so a
+        # review hold is never invisible to every alert.
+        logger.info("bridge: hold notice code=badge_only")
+        return "badge_only"
     if decision.get("notified_at") is not None:
         return "unchanged"
     t = tr("cli.team_bridge_hold")
@@ -627,15 +640,10 @@ def raise_notice(
         priority = _banner_priority(
             str(owner.endpoint_id), str(decision.get("sender_digest") or ""), monotonic()
         )
-        # The work-scope body names "new work", which is false for a review hold
-        # (the screener was unsure, refused, or answered off-grammar). Until a
-        # dedicated keyed string ships through the i18n ledger, a review hold
-        # reuses the audited generic "waiting for your review" copy.
-        review = str(decision.get("hold_code") or "") in REVIEW_HOLD_CODES
         notifications.notify(
             session_id,
             title=t(_k.held_title()),
-            body_md=t(_k.more_body(count=1)) if review else t(_k.held_body()),
+            body_md=t(_k.held_body()),
             priority=priority,
             key=notice_key(owner.endpoint_id, message_id),
         )
@@ -682,6 +690,102 @@ def clear_notice(
         store.mark_work_scope_cleared(owner, message_id, now=time.time())
     except Exception:  # noqa: BLE001 — chrome; the decision already stands
         logger.info("bridge: hold notice code=clear_failed")
+
+
+# -- retiring the review-hold notices #3714 wrote (operator report 2026-11-10) --
+#
+# WHY. Before ``raise_notice`` stopped writing them, every review hold left one
+# inbox row (and, past the cap, the overflow row) that nothing would ever take
+# down short of a Deliver/Discard per message. Stopping the producer does not
+# clear an inbox that is already flooded, so the connector runs this once per
+# process per endpoint (``connector.loop``), with or without a new hold.
+#
+# SELECTORS, and nothing wider. A row is dismissed only when its key is
+# EXACTLY ``notice_key(endpoint, message_id)`` for a live-generation decision
+# row whose ``hold_code`` is a review code and whose ``notified_at`` is set —
+# i.e. a notice this producer recorded writing. A work-scope hold's notice uses
+# the same key shape and is never touched, nor is any other key. The overflow
+# row (``overflow_key(endpoint)``) is shared with the work-scope class, so it is
+# dismissed only once the standing count is back under the cap, which is when
+# its "N more" claim stopped being true anyway.
+#
+# DISMISS, NEVER DELETE. Rows stay readable under the dismissed filter, filed
+# ``dismissed_via=REVIEW_NOTICE_RETIRED_VIA`` so they read as retired, not as
+# the operator's own dismissal; a row the operator already dismissed is left
+# exactly as they filed it. The decision row is only stamped ``cleared_at`` (its
+# notice is gone), which frees the per-endpoint cap: Deliver/Discard, the
+# holds list and the sidebar badge read the decision and the hold, never this.
+# Idempotent: a second pass finds nothing live and nothing uncleared.
+
+#: ``dismissed_via`` on a review-hold notice this module retired.
+REVIEW_NOTICE_RETIRED_VIA = "bridge_review_retired"
+
+#: Endpoints this process has already retired notices for (in memory like
+#: ``_last_banner``): after a restart the pass runs once more and is a no-op.
+_retired_endpoints: set[str] = set()
+
+
+def retire_review_notices(store: Any, owner: Any, *, config_dir: Path) -> dict[str, int]:
+    """Dismiss the review-hold inbox rows #3714 wrote; return closed counts.
+
+    ``dismissed`` per-message rows, ``overflow`` rows, ``cleared`` decision
+    rows. Raises on store errors; :func:`retire_review_notices_once` is the
+    never-raising caller.
+    """
+
+    from local_operator.notifications.store import NotificationStore
+
+    notifications = NotificationStore(config_dir)
+    endpoint = str(owner.endpoint_id)
+    out = {"dismissed": 0, "overflow": 0, "cleared": 0}
+
+    def dismiss_live(key: str) -> int:
+        live = [
+            (str(item["id"]), int(item["revision"]))
+            for item in notifications.find_by_key(key)
+            if not item.get("dismissed")
+        ]
+        if not live:
+            return 0
+        result = notifications.apply("dismiss", ids=live, via=REVIEW_NOTICE_RETIRED_VIA)
+        return len(result.changed)
+
+    for decision in store.work_scope_decisions(owner):
+        if str(decision.get("hold_code") or "") not in REVIEW_HOLD_CODES:
+            continue
+        if decision.get("notified_at") is None:
+            continue
+        message_id = str(decision["message_id"])
+        out["dismissed"] += dismiss_live(notice_key(endpoint, message_id))
+        if decision.get("cleared_at") is None:
+            store.mark_work_scope_cleared(owner, message_id, now=time.time())
+            out["cleared"] += 1
+    if store.standing_work_scope_notices(owner) < STANDING_NOTICE_CAP:
+        out["overflow"] = dismiss_live(overflow_key(endpoint))
+    return out
+
+
+def retire_review_notices_once(owner: Any, config_dir: Path) -> str:
+    """Run :func:`retire_review_notices` once per endpoint per process; never raises."""
+
+    from local_operator.team_bridge.store import Store
+
+    endpoint = str(getattr(owner, "endpoint_id", ""))
+    if endpoint in _retired_endpoints:
+        return "done"
+    try:
+        counts = retire_review_notices(Store(config_dir), owner, config_dir=config_dir)
+    except Exception:  # noqa: BLE001 — chrome; retried on the next process start
+        logger.info("bridge: review notice retire code=failed")
+        return "failed"
+    _retired_endpoints.add(endpoint)
+    logger.info(
+        "bridge: review notice retire code=ok dismissed=%d overflow=%d cleared=%d",
+        counts["dismissed"],
+        counts["overflow"],
+        counts["cleared"],
+    )
+    return "ok"
 
 
 __all__ = [

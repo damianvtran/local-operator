@@ -32,6 +32,7 @@ import uuid
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar, cast
 
 from pydantic import SecretStr, TypeAdapter, ValidationError
@@ -55,8 +56,13 @@ from local_operator.harness.intent import (
     sanitize_intent,
     scan_streaming_intent,
 )
+from local_operator.harness.provider_empty import is_provider_empty
 from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.tool_names import (
+    near_miss_tool,
+    normalise_replay_tool_names,
+)
 from local_operator.harness.types import (
     FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
@@ -131,6 +137,7 @@ from local_operator.incidents import (
     REASONING_ECHO_MARKERS,
 )
 from local_operator.model.effort import real_rungs
+from local_operator.redaction_shapes import redaction_scope
 from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -341,6 +348,77 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 #: (``added``/``removed``/``path``/``spill`` handles) whose readers compare
 #: exact values.
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
+
+
+def _is_content_string(value: str) -> bool:
+    """Prose, output, a URL or a ``NAME=VALUE``/``name: value`` carrier — not a
+    bare identifier (see ``content_only``)."""
+    return "=" in value or ":" in value or any(char.isspace() for char in value)
+
+
+def _redact_nested_strings(
+    value: Any, redact: Callable[[str], str], *, content_only: bool = False
+) -> Any:
+    """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``.
+
+    Keys, numbers, booleans and container TYPES are kept (a tuple stays a
+    tuple), so a reader comparing a field it did not expect to change — a
+    counter, a flag, a ``job_ids`` tuple — sees exactly what it stored.
+
+    ``content_only`` gives a string with no whitespace, ``=`` or ``:`` only the
+    exact-value pass (``redaction_scope("values")``): that is an IDENTIFIER (a
+    question id, a model name, a path, a handle) that its reader matches
+    exactly. Measured on the 200 most recent sessions before the filter: the
+    shape pass masked ``questions[].id``, ``question_ids[]`` and ``model`` values
+    through the vendor-prefix rule — an ask answer keyed by that id could no
+    longer be matched. A value the session already holds as a credential carries
+    no such risk, so it is still masked there (PR #3789 review R3). Prose,
+    command output, URLs and ``KEY=value`` lines (where a credential actually
+    travels in details: ``rows``, ``text``, ``prompt``) get the full pass.
+    """
+    if isinstance(value, str):
+        if not value:
+            return value
+        if content_only and not _is_content_string(value):
+            with redaction_scope("values"):
+                return redact(value)
+        return redact(value)
+    if isinstance(value, dict):
+        return {
+            key: _redact_nested_strings(item, redact, content_only=content_only)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(
+            _redact_nested_strings(item, redact, content_only=content_only) for item in value
+        )
+    if isinstance(value, list):
+        return [_redact_nested_strings(item, redact, content_only=content_only) for item in value]
+    return value
+
+
+#: Shortest string that can carry anything the redactor masks (a registered
+#: value or a shape); the same floor as ``redaction_shapes.DETECTED_COMPONENT_FLOOR``.
+_DETAIL_SCAN_MIN_CHARS = 8
+
+
+def _carries_scannable_string(value: Any, depth: int = 0) -> bool:
+    """Whether a JSON-shaped ``value`` holds a string long enough to need the redactor.
+
+    The cheap ON-loop gate for :meth:`AgentLoop._redact_details`: most results'
+    details are ids, modes, counters and flags, and must not pay a thread hop.
+    Past a nesting depth it answers ``True`` (scan it) rather than recursing.
+    """
+    if isinstance(value, str):
+        return len(value) >= _DETAIL_SCAN_MIN_CHARS
+    if depth > 32:
+        return True
+    if isinstance(value, dict):
+        return any(_carries_scannable_string(item, depth + 1) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_carries_scannable_string(item, depth + 1) for item in value)
+    return False
+
 
 # The producer caps diffs at 200 rows; this independent publication budget leaves
 # framing room, not permission to accept unbounded executor metadata. Refusal
@@ -719,6 +797,32 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: allowance per turn would re-buy the same diagnosis. Each re-ask is one
 #: extra model call.
 MAX_WORDLESS_STOP_RECOVERIES = 1
+
+#: How many times the SAME request is re-issued after a PROVIDER-EMPTY response:
+#: a clean ``stop`` on which the provider sent no content of any kind -- no text,
+#: no call, no reasoning, no output tokens (``provider_empty.is_provider_empty``). The
+#: wordless-stop re-ask above cannot tell that from a model that thought and
+#: said nothing, and its prompt ("your last message arrived with no text") asks
+#: a model to account for a message it never wrote; the remedy for a provider
+#: that sent nothing is to ask the provider again, unchanged.
+#:
+#: ONE, and CONSECUTIVE: a second provider-empty response on the re-issued
+#: request ends the turn as a named failure (model and time) rather than falling
+#: through to the re-ask. Unlike the run-scoped budgets around it the count
+#: resets on any turn that is not provider-empty -- a healthy turn between two
+#: blips proves the provider recovered, so each blip earns its own single retry
+#: and a long run is not failed by its second unrelated one. The cost is bounded
+#: by that: every retry is one extra call, and it is only ever followed by real
+#: progress or by the end of the turn. Not a ``RetrySettings`` knob: those govern
+#: transport errors (``providers.failover``), and this response was a success.
+MAX_EMPTY_PROVIDER_RETRIES = 1
+
+#: The one notice on the first retry. Names the cause (the PROVIDER sent nothing)
+#: so it cannot be read as the wordless re-ask's "the model's reply arrived empty".
+EMPTY_PROVIDER_RETRY_NOTICE_TEXT = (
+    "the provider sent an empty response (no text, no tool calls, no reasoning) — "
+    "re-sending the same request once"
+)
 
 
 #: How many times ONE run re-asks a model whose turn was cut off at the output
@@ -2393,6 +2497,9 @@ class AgentLoop:
         # Run-scoped and topped up by nothing, like the truncation budget
         # above: a fresh allowance per turn would re-buy the same diagnosis.
         wordless_stop_recoveries = 0
+        # CONSECUTIVE provider-empty responses already re-issued -- see
+        # ``MAX_EMPTY_PROVIDER_RETRIES`` for why this one resets on a healthy turn.
+        empty_provider_retries = 0
         # The output contract's budget for THIS run (== per turn: a ``--loop``
         # iteration re-enters ``_run`` fresh). Counted only on the terminal
         # seam, so every non-clean exit -- abort, stream error, continuation
@@ -3422,6 +3529,14 @@ class AgentLoop:
                             has_more_tool_calls = True
                             continue
 
+                    # Whether the provider sent nothing at all this turn. Settled
+                    # once, here, so the consecutive count below resets on EVERY
+                    # other outcome (text, calls, a ``length`` cut, a reasoning-
+                    # only stop) and the wordless arm further down reads it.
+                    turn_provider_empty = stop_reason == "stop" and is_provider_empty(assistant)
+                    if not turn_provider_empty:
+                        empty_provider_retries = 0
+
                     tool_results: list[ToolResult] = []
                     if stop_reason == "length":
                         # Whitespace-only prose counts as NOTHING, which is how
@@ -3752,6 +3867,7 @@ class AgentLoop:
                         and stop_reason == "stop"
                         and not (assistant.text or "").strip()
                     ):
+                        wordless_graceful = _graceful_cancel_requested(config)
                         # A WORDLESS STOP: a clean ``stop`` arrived with no
                         # text and no tool calls, and no arm above claimed it
                         # (not a ``length`` cut-off, not the nameless-call
@@ -3781,7 +3897,52 @@ class AgentLoop:
                         # stop outranks the re-ask (the nameless rule): falling
                         # through ends the turn as it did before this arm
                         # existed.
-                        wordless_graceful = _graceful_cancel_requested(config)
+                        if turn_provider_empty and not wordless_graceful:
+                            # The provider sent NOTHING (see
+                            # ``MAX_EMPTY_PROVIDER_RETRIES``), which is not the
+                            # model's silence: re-issue the same request, add
+                            # no prompt, and do not spend the wordless re-ask.
+                            # Either way the empty row leaves the history, for
+                            # the re-ask's reasons: it is illegal on the
+                            # Anthropic wire and would poison the next request.
+                            if context.messages and context.messages[-1] is assistant:
+                                context.messages.pop()
+                            if new_messages and new_messages[-1] is assistant:
+                                new_messages.pop()
+                            if empty_provider_retries < MAX_EMPTY_PROVIDER_RETRIES:
+                                empty_provider_retries += 1
+                                # Raw English, like the nameless-call notice: a new
+                                # catalogue key would stale every shipped locale's
+                                # ``tui.notices`` (eligibility is hash-bound) until
+                                # each is re-translated and independently audited.
+                                yield NoticeEvent(
+                                    text=EMPTY_PROVIDER_RETRY_NOTICE_TEXT, kind="warning"
+                                )
+                                # No TurnEndEvent, for the wordless re-ask's
+                                # reason: nothing was shown for this turn.
+                                has_more_tool_calls = True
+                                continue
+                            # The re-issued request came back empty too: STOP.
+                            # Not the old re-prompt -- a provider that twice
+                            # sent nothing is not helped by being asked why.
+                            failed_spec = turn_model or self._current_model(config)
+                            failing_model = f"{failed_spec.provider}/{failed_spec.model_id}"
+                            yield AgentEndEvent(
+                                messages=new_messages,
+                                error=(
+                                    f"Empty provider response: {failing_model} returned no "
+                                    "content at all (no text, no tool calls, no reasoning) "
+                                    f"on {empty_provider_retries + 1} consecutive attempts, "
+                                    "the last at "
+                                    f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}. "
+                                    "The harness re-issued the request once and stopped; "
+                                    "retry, or switch models."
+                                ),
+                                failing_model=failing_model,
+                                generation=generation,
+                            )
+                            self._discard_pending_custom(pending)
+                            return
                         if (
                             wordless_stop_recoveries < MAX_WORDLESS_STOP_RECOVERIES
                             and not wordless_graceful
@@ -4574,7 +4735,7 @@ class AgentLoop:
             # compaction's own render
             # or the token estimators, which must keep seeing the transcript as
             # it is: the bound is a property of the request, not of the session.
-            converted = bound_replay_payloads(converted)
+            converted = normalise_replay_tool_names(bound_replay_payloads(converted), context.tools)
             if effort_ceiling is not None:
                 # A retreat is in force -- an empty-truncation step-down, or the
                 # reasoning-echo recovery's switch to thinking off. The host's
@@ -5620,12 +5781,31 @@ class AgentLoop:
         if tool is None and config.resolve_fallback_tool is not None:
             tool = config.resolve_fallback_tool(call.name)
         if tool is None:
+            # No length clip here: the never-run compose frame already bounds
+            # the reason to NOT_RUN_REASON_MAX_CHARS (200), and a pre-clip
+            # would make a long name read as fully spelled while the frame
+            # says it was clipped. The analytics-recorded name is the one
+            # place a 64-char clip survives (see _report_tool_call).
+            near = near_miss_tool(call.name, context.tools)
+            text = f"Tool not found: {call.name}"
+            details: dict[str, object] = {FAULT_KEY: FAULT_UNKNOWN_TOOL}
+            if near is not None:
+                text += f". Did you mean `{near}`?"
+                details["near_miss"] = near
+                # Provider-controlled name: log the real tool and the junk
+                # length only, never the junk itself (it can carry a credential).
+                logger.warning(
+                    "unknown tool name was a near-miss of %s "
+                    "(junk remainder %d chars); call rejected",
+                    near,
+                    len(call.name) - len(near),
+                )
             return _PlannedCall(
                 call=call,
                 failure=self._synthetic_result(
                     call,
-                    f"Tool not found: {call.name}",
-                    details={FAULT_KEY: FAULT_UNKNOWN_TOOL},
+                    text,
+                    details=details,
                 ),
             )
 
@@ -5778,9 +5958,12 @@ class AgentLoop:
 
         A DEFERRED tool (see ``tools/deferral.py``) was called without its schema
         having been sent, so the model guessed the shape. Name the door to the
-        real one — the host publishes the schema from the next turn on the
-        strength of the same failure. No-op for a published schema, or when the
-        text already carries the pointer.
+        real one. For a built-in deferred tool the host also publishes the
+        schema from the next turn on the strength of the same failure; for a
+        deferred MCP tool (dispatched through ``resolve_fallback_tool``) it does
+        NOT — that would re-grow the cache-prefix array — and ``tool://<name>``
+        renders the schema inline instead. No-op for a published schema, or
+        when the text already carries the pointer.
         """
         if cls._schema_was_published(name, config) or f"tool://{name}" in text:
             return text
@@ -7364,7 +7547,7 @@ class AgentLoop:
                 session_id = getattr(tool_context, "session_id", "") or ""
             if not session_id:
                 return
-            name = item.tool.name if item.tool is not None else item.call.name
+            name = item.tool.name if item.tool is not None else item.call.name[:64]
             duration = result.duration_s
             callback(
                 name,
@@ -7775,12 +7958,16 @@ class AgentLoop:
         UI are all untouched, while the stored copy, the replay and the
         transcript get the mask the result text already had.
 
-        **Only the content-bearing keys, and only their strings.**
-        :data:`_CONTENT_BEARING_DETAIL_KEYS` names them (the file tools' diff
-        today). The other keys in the same dict — ``added``/``removed``
-        counters, the ``path``, ``spill`` handles — keep their exact values,
-        because their readers parse and compare them (the diff badge, compaction
-        pruning, the spill reader).
+        **Every string, and only strings.** :data:`_CONTENT_BEARING_DETAIL_KEYS`
+        (the file tools' diff) gets the hunk-aware masking below; every other
+        key's strings go through ``redact`` in place, without registering what
+        they match (follow-up to PR #3756: a details string outside the diff was
+        persisted unmasked); identifier-shaped strings get only the exact-value
+        pass (see :func:`_redact_nested_strings`). Numbers,
+        booleans, keys and container types keep their exact values — the
+        ``added``/``removed`` counters the diff badge reads, compaction's flags —
+        and an ordinary string (a ``path``, a ``spill`` handle) carries no shape,
+        so the redactor returns it unchanged.
 
         **A sibling of :meth:`_redact_content`, not a fusion**, because the two
         fire at different rates: the content scan is every result's hot path,
@@ -7798,14 +7985,16 @@ class AgentLoop:
         # to mask. See the block in ``_redact_content``.
         if tool_name in PUBLIC_COPY_TOOLS:
             return details
-        if not any(
-            isinstance(details.get(key), str)
-            or (
-                isinstance(details.get(key), (list, tuple))
-                and any(isinstance(item, str) for item in details[key])
-            )
-            for key in _CONTENT_BEARING_DETAIL_KEYS
-        ):
+        # EVERY string in details is masked, not only the diff and the MCP
+        # payload (follow-up to PR #3756). ``Message.tool_result`` lifts the
+        # whole dict into ``provider_payload['details']`` and that is written to
+        # transcript.jsonl as is, so any tool that echoes command output, a row
+        # or a URL into details (``rows``, ``jobs``, ``url`` …) persisted what
+        # the result text had masked. One walk at this seam covers every tool,
+        # present and future, instead of a list of keys that is wrong the day a
+        # tool adds one. Only strings change; keys, numbers and flags keep their
+        # exact values for the readers that parse them.
+        if not _carries_scannable_string(details):
             return details
 
         def _run() -> dict[str, Any]:
@@ -7813,7 +8002,23 @@ class AgentLoop:
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
-                out = dict(details)
+                # IN PLACE, never registered (PR #3789 review R1): details is a
+                # copy of what the result's content already carried, and the
+                # content scan registered everything found there. A match only
+                # these strings show must not become a session-wide value: a
+                # details-only false positive would then mask the same bytes in
+                # every later, unrelated result. The diff keeps base behaviour.
+                with redaction_scope("uncontained"):
+                    out = {
+                        key: (
+                            value
+                            if key in _CONTENT_BEARING_DETAIL_KEYS
+                            else _redact_nested_strings(
+                                value, redact, content_only=key != "server_result"
+                            )
+                        )
+                        for key, value in details.items()
+                    }
                 for key in _CONTENT_BEARING_DETAIL_KEYS:
                     if key in details:
                         value = details[key]
@@ -7831,6 +8036,8 @@ class AgentLoop:
                             out[key] = tuple(masked) if isinstance(value, tuple) else masked
                         else:
                             out[key] = _redact_diff_detail(value, redact)
+                # ``server_result`` (an MCP result's raw payload, PR #3756 QA Q6)
+                # is covered by the walk above like every other key.
                 return out
 
         return await asyncio.to_thread(_run)

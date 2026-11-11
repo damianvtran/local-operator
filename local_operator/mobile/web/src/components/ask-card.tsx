@@ -37,8 +37,10 @@
  */
 import { contentDir } from "../lib/content-direction";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
+import { ASK_QUESTION_FRACTION, ASK_QUESTION_LIST_FRACTION, columnCap } from "../lib/column";
 import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
@@ -47,6 +49,7 @@ import {
 	isAnswerable,
 	isDeadConversation,
 	isLapsed,
+	recommendedRows,
 	unansweredQuestions,
 } from "../lib/asks";
 import { clearAskDraft, messageRuntime, useAskDraft } from "../store";
@@ -202,6 +205,57 @@ function answerValues(cell: readonly string[]): string[] {
 }
 
 /** One question's control, plus whether it currently holds a complete answer. */
+/**
+ * A question's text, capped at a share of the column and scrolling inside
+ * itself (`ASK_QUESTION_FRACTION`), so a paragraph- or brief-length question
+ * can never push this question's options and free-text field off screen.
+ * `whitespace-pre-line` keeps an agent's line breaks (a proposal summary is
+ * three lines); `break-words` stops a long token from widening the card.
+ * `tabIndex` makes the scroller keyboard-reachable once it overflows.
+ */
+function QuestionText({ text }: { text: string }) {
+	return (
+		<span
+			dir={contentDir(text)}
+			data-testid="ask-question-text"
+			tabIndex={0}
+			style={columnCap(ASK_QUESTION_FRACTION)}
+			className="lo-scroll block min-w-0 overflow-y-auto overflow-x-hidden break-words whitespace-pre-line"
+		>
+			{text}
+		</span>
+	);
+}
+
+/**
+ * The question stack of a multi-question card, capped as a whole
+ * (`ASK_QUESTION_LIST_FRACTION`) and scrolling inside itself (PR #3777 code
+ * review M2). Each question's text is already capped at
+ * `ASK_QUESTION_FRACTION`, but three long questions at 0.3 each, plus their
+ * options, still exceed the column and push the card's shared send/decline
+ * (or dismiss) row off screen. A single question is left unwrapped so its
+ * options stay directly under its excerpt, as before; the card's answer row
+ * always renders outside this region.
+ */
+function QuestionList({ count, children }: { count: number; children: ReactNode }) {
+	if (count <= 1) return <>{children}</>;
+	return (
+		<div
+			data-testid="ask-question-list"
+			// A focusable scroller needs a name or a screen reader announces a
+			// bare stop (PR #3777 R2-5); the dock's existing "N questions
+			// waiting" string names it without a new catalogue entry.
+			role="region"
+			aria-label={messageRuntime.t("relay.asks.dock.waiting", { count })}
+			tabIndex={0}
+			style={columnCap(ASK_QUESTION_LIST_FRACTION)}
+			className="lo-scroll flex min-w-0 flex-col gap-3 overflow-y-auto overflow-x-hidden"
+		>
+			{children}
+		</div>
+	);
+}
+
 function QuestionField({
 	question,
 	value,
@@ -289,8 +343,9 @@ function QuestionField({
 				   because the harness option model has no boolean to read. Any index
 				   is honoured — the wire, the type and the TUI all treat it as a
 				   position, and pinning it to 0 would badge nothing the day the
-				   runtime stops hoisting (agent review round 2, N1). */
-				const recommended = question.recommended === index;
+				   runtime stops hoisting (agent review round 2, N1). A multi-select
+				   may recommend several rows, so every one in the set is badged. */
+				const recommended = recommendedRows(question).includes(index);
 				return (
 					<button
 						key={option.label}
@@ -737,6 +792,7 @@ export function AskCard({
 					    the queue's own rule are the same statement. It stays apart from any
 					    Decline: declining ANSWERS the agent, dismissing answers nobody and
 					    buys no turn (the agent is told on its next run — §14). */}
+					<QuestionList count={questions.length}>
 					{questions.map((question, index) => (
 						<span
 							key={String(question.id ?? index)}
@@ -747,9 +803,10 @@ export function AskCard({
 									{index + 1}/{questions.length}
 								</span>
 							) : null}
-							<span className="min-w-0">{question.question}</span>
+							<QuestionText text={question.question} />
 						</span>
 					))}
+					</QuestionList>
 					{dismissible ? (
 						<>
 							<button
@@ -790,6 +847,7 @@ export function AskCard({
 				</>
 			) : offered ? (
 				<>
+					<QuestionList count={open_questions.length}>
 					{open_questions.map((question, index) => {
 						const id = String(question.id);
 						return (
@@ -800,7 +858,7 @@ export function AskCard({
 											{index + 1}/{questions.length}
 										</span>
 									) : null}
-									<span className="min-w-0">{question.question}</span>
+									<QuestionText text={question.question} />
 								</span>
 								<QuestionField
 									question={question}
@@ -843,6 +901,7 @@ export function AskCard({
 							</div>
 						);
 					})}
+					</QuestionList>
 
 					{/* R6 (agent review round 1): an answerable ask whose questions are all
 					    already taken elsewhere used to render no fields and a permanently
