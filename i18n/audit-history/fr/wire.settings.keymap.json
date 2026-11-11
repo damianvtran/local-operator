@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "540be526340bda0e8bac4568802321a53fe8370161c7dd887eed9efb1f29af69",
+  "history_sha256": "476ce8038456011c9f12c5b26662a2a8d3b6ac191800262f95820fe601fb3116",
   "entries": [
     {
       "locale": "fr",
@@ -100,6 +100,31 @@
       },
       "status": "passed",
       "note": "S3 TUI send-chord rows 5425d7845 (branch feat/tui-send-chords, 2026-11-11): 6 NEW keys wire.settings.keymap.send_steer/send_queue/send_both (label/help); en source and en context sidecar gained the 6 keys in 77d1fa2ba; keys_audited 6. Translator and auditor as row. Audit: fr PASS first pass, 0 findings.  No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "ba8eba05a347b728f6956d2da6292ce98d67857b50a559555c8078250ca267ae",
+      "context_sha256": "69ced296d8ea842453c6c69213c73520c8bf9680e8855d580a92959dfb95c442",
+      "target_sha256": "aff0d718f808d02d2372a6f91ebaf2a1b7e0f25a1dbe5dbbb99587c8377149c1",
+      "keys_audited": 3,
+      "round": "r2",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, changed keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S6 re-translation (branch feat/tui-send-chords, HEAD 73bb22ca2 + uncommitted catalogues, 2026-11-11): 3 CHANGED-ENGLISH keys wire.settings.keymap.send_steer.help / send_queue.help / send_both.help (en source changed in 73bb22ca2: helps now name Delivery override behaviour); existing translations updated, values changed only in these 3 keys. keys_audited 3. Translator and auditor as row. Audit: es/zh-CN/ru/vi/ur PASS 0/0 first pass; fr FAIL round 1 (3 majors: tu-imperative register + 1 minor) -> auditor replacements applied, round 2 PASS 0/0; hi FAIL round 1 (4 majors: override wording) -> auditor replacements applied, round 2 PASS 0/0. Receipt records round r2 (repo's next round id for this namespace) with final bytes. No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }

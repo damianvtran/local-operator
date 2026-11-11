@@ -10,9 +10,9 @@
   "wire.settings.keymap.start_recording.label": "ریکارڈنگ شروع کریں",
   "wire.settings.keymap.start_recording.help": "ڈیسک ٹاپ ونڈو میں آواز سے متن کی ریکارڈنگ شروع کرتا ہے۔",
   "wire.settings.keymap.send_steer.label": "ہدایت کے طور پر بھیجیں",
-  "wire.settings.keymap.send_steer.help": "پیغام فوراً بھیجتا ہے اور جاری مرحلے میں مداخلت کرتا ہے۔ Ctrl/Alt/Cmd+Enter صرف ان ٹرمینلز میں کام کرتے ہیں جو بہتر کیز سپورٹ کرتے ہیں؛ Alt+حرف ہر جگہ کام کرتا ہے (macOS ٹرمینلز میں Option-as-Meta درکار ہے)۔",
+  "wire.settings.keymap.send_steer.help": "فوراً بھیجتا ہے اور مرحلے میں مداخلت کرتا ہے۔ “مصروف ہونے پر ترسیل” کو بدل دیتا ہے۔",
   "wire.settings.keymap.send_queue.label": "قطار کے طور پر بھیجیں",
-  "wire.settings.keymap.send_queue.help": "موجودہ مرحلہ مکمل ہونے کا انتظار کرتا ہے اور چلتے ٹولز میں کبھی مداخلت نہیں کرتا۔ Ctrl/Alt/Cmd+Enter صرف ان ٹرمینلز میں کام کرتے ہیں جو بہتر کیز سپورٹ کرتے ہیں؛ Alt+حرف ہر جگہ کام کرتا ہے (macOS ٹرمینلز میں Option-as-Meta درکار ہے)۔",
+  "wire.settings.keymap.send_queue.help": "مرحلے کا انتظار کرتا ہے؛ ٹولز میں کبھی مداخلت نہیں کرتا۔ “مصروف ہونے پر ترسیل” کو بدل دیتا ہے۔",
   "wire.settings.keymap.send_both.label": "دونوں کے طور پر بھیجیں",
-  "wire.settings.keymap.send_both.help": "قطار کی طرح انتظار کرتا ہے، پھر پیغام زیادہ دیر رکا رہے تو ہدایت کی طرح مداخلت کرتا ہے۔ Ctrl/Alt/Cmd+Enter صرف ان ٹرمینلز میں کام کرتے ہیں جو بہتر کیز سپورٹ کرتے ہیں؛ Alt+حرف ہر جگہ کام کرتا ہے (macOS ٹرمینلز میں Option-as-Meta درکار ہے)۔"
+  "wire.settings.keymap.send_both.help": "انتظار، پھر دیر ہو تو مداخلت۔ “مصروف ہونے پر ترسیل” کو بدل دیتا ہے۔"
 }

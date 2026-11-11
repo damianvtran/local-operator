@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "relay.composer",
-  "history_sha256": "270d88156822db8a12509afdb0a16177f9cfa824a195bc1b0bb72f03bc363a57",
+  "history_sha256": "2caf5d12efafb8025b8dec85ed546545ada43ef9eaf06bcc408e39e9efb40b54",
   "entries": [
     {
       "locale": "zh-CN",
@@ -53,6 +53,31 @@
       "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 3 keys audited in this namespace (delivery.steer_hint/queue_hint/both_hint). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit (same auditor, only the 8 changed/new keys audited): PASS 0 blocker/major, no findings, first pass. Wave-1 accepted minor on both.description ('~10 cells longer than neighbours') is superseded: that description was replaced in wave 2 and re-audited. No second independent audit: copy is not high-visibility/safety; no second_audit field.",
       "round": "r3",
       "keys_audited": 3
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.composer",
+      "source_sha256": "da5ca9a8da854d91ff2ca0cfbe1c481ddcef92eda2dbc5e24e5335a326a538be",
+      "context_sha256": "23273d9e7895f3ad880be485d78ec233a30fc610098abf8ea78d6bb52df3a894",
+      "target_sha256": "5ab9070fe230a75ed18100b1f807c5c20f57da18be84e0618665f4fbe453f6b0",
+      "keys_audited": 1,
+      "round": "r4",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, changed keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S6 re-translation (branch feat/tui-send-chords, HEAD 73bb22ca2 + uncommitted catalogues, 2026-11-11): 1 CHANGED-ENGLISH key relay.composer.delivery.steer_hint (byte-identical mirror of wire.settings steer description; en source changed in 5425d7845/73bb22ca2); existing translations updated, value changed only in this 1 key. keys_audited 1. Translator and auditor as row. Audit: es/zh-CN/ru/vi/ur PASS 0/0 first pass; fr FAIL round 1 (3 majors + 1 minor) -> auditor replacements applied, round 2 PASS 0/0; hi FAIL round 1 (4 majors: override wording) -> auditor replacements applied, round 2 PASS 0/0. Receipt records next round id for this namespace with final bytes. No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }

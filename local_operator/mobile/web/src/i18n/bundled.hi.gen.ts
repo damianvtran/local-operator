@@ -253,7 +253,7 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.delivery.queue": "\u0915\u0924\u093e\u0930",
       "relay.composer.delivery.queue_hint": "\u092a\u094d\u0930\u0924\u0940\u0915\u094d\u0937\u093e \u0915\u0930\u0947\u0902; \u091f\u0942\u0932 \u0915\u094b \u0928 \u0930\u094b\u0915\u0947\u0902",
       "relay.composer.delivery.steer": "\u0926\u093f\u0936\u093e \u0926\u0947\u0902",
-      "relay.composer.delivery.steer_hint": "\u0905\u092d\u0940 \u092c\u0940\u091a \u092e\u0947\u0902 \u0930\u094b\u0915\u0947\u0902 (\u092e\u094c\u091c\u0942\u0926\u093e \u0924\u0930\u0940\u0915\u093e)",
+      "relay.composer.delivery.steer_hint": "\u091a\u0932 \u0930\u0939\u0947 \u091f\u0942\u0932 \u0915\u094b \u0905\u092d\u0940 \u0930\u094b\u0915\u0947\u0902",
     },
   },
   "relay.health": {

@@ -9,7 +9,7 @@
   "relay.composer.delivery.steer": "guiar",
   "relay.composer.delivery.queue": "en cola",
   "relay.composer.delivery.both": "ambos",
-  "relay.composer.delivery.steer_hint": "Interrumpe ya (como hasta ahora)",
+  "relay.composer.delivery.steer_hint": "Interrumpe ya una herramienta",
   "relay.composer.delivery.queue_hint": "Espera; no interrumpe herramientas",
   "relay.composer.delivery.both_hint": "Espera y luego interrumpe si tarda"
 }

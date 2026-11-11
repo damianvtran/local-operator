@@ -9,7 +9,7 @@
   "relay.composer.delivery.steer": "orienter",
   "relay.composer.delivery.queue": "file d’attente",
   "relay.composer.delivery.both": "les deux",
-  "relay.composer.delivery.steer_hint": "Interrompre maintenant (actuel)",
+  "relay.composer.delivery.steer_hint": "Interrompre un outil en cours",
   "relay.composer.delivery.queue_hint": "Attendre, sans interrompre d’outil",
   "relay.composer.delivery.both_hint": "Attendre, interrompre si ça tarde"
 }

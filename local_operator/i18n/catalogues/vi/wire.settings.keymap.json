@@ -10,9 +10,9 @@
   "wire.settings.keymap.start_recording.label": "Bắt đầu ghi âm",
   "wire.settings.keymap.start_recording.help": "Bắt đầu ghi âm chuyển giọng nói thành văn bản trong cửa sổ desktop.",
   "wire.settings.keymap.send_steer.label": "Gửi dạng định hướng",
-  "wire.settings.keymap.send_steer.help": "Gửi tin nhắn ngay và ngắt bước đang chạy. Ctrl/Alt/Cmd+Enter chỉ dùng được trên terminal hỗ trợ phím nâng cao; Alt+chữ cái dùng được ở mọi nơi (terminal macOS cần bật Option làm Meta).",
+  "wire.settings.keymap.send_steer.help": "Gửi ngay, ngắt bước đang chạy. Ghi đè “Cách gửi khi bận”.",
   "wire.settings.keymap.send_queue.label": "Gửi dạng hàng đợi",
-  "wire.settings.keymap.send_queue.help": "Chờ bước hiện tại chạy xong và không bao giờ ngắt các công cụ đang chạy. Ctrl/Alt/Cmd+Enter chỉ dùng được trên terminal hỗ trợ phím nâng cao; Alt+chữ cái dùng được ở mọi nơi (terminal macOS cần bật Option làm Meta).",
+  "wire.settings.keymap.send_queue.help": "Chờ bước xong, không ngắt công cụ. Ghi đè “Cách gửi khi bận”.",
   "wire.settings.keymap.send_both.label": "Gửi dạng cả hai",
-  "wire.settings.keymap.send_both.help": "Chờ như hàng đợi, rồi ngắt như định hướng nếu tin nhắn đã chờ quá lâu. Ctrl/Alt/Cmd+Enter chỉ dùng được trên terminal hỗ trợ phím nâng cao; Alt+chữ cái dùng được ở mọi nơi (terminal macOS cần bật Option làm Meta)."
+  "wire.settings.keymap.send_both.help": "Chờ, rồi ngắt nếu chậm. Ghi đè “Cách gửi khi bận”."
 }

@@ -10,9 +10,9 @@
   "wire.settings.keymap.start_recording.label": "Iniciar grabación",
   "wire.settings.keymap.start_recording.help": "Inicia la grabación de voz a texto en la ventana de escritorio.",
   "wire.settings.keymap.send_steer.label": "Enviar: guiar",
-  "wire.settings.keymap.send_steer.help": "Envía el mensaje ya e interrumpe el paso en curso. Ctrl/Alt/Cmd+Enter solo funcionan en terminales que admiten teclas avanzadas; Alt+letra funciona en todas (en las terminales de macOS hace falta Option como Meta).",
+  "wire.settings.keymap.send_steer.help": "Envía ya e interrumpe el paso. Anula “Entrega con el agente ocupado”.",
   "wire.settings.keymap.send_queue.label": "Enviar: en cola",
-  "wire.settings.keymap.send_queue.help": "Espera a que termine el paso actual y nunca interrumpe las herramientas en ejecución. Ctrl/Alt/Cmd+Enter solo funcionan en terminales que admiten teclas avanzadas; Alt+letra funciona en todas (en las terminales de macOS hace falta Option como Meta).",
+  "wire.settings.keymap.send_queue.help": "Espera; no interrumpe herramientas. Anula “Entrega con el agente ocupado”.",
   "wire.settings.keymap.send_both.label": "Enviar: ambos",
-  "wire.settings.keymap.send_both.help": "Espera en el modo «en cola» y, si el mensaje lleva demasiado tiempo esperando, interrumpe como en el modo «guiar». Ctrl/Alt/Cmd+Enter solo funcionan en terminales que admiten teclas avanzadas; Alt+letra funciona en todas (en las terminales de macOS hace falta Option como Meta)."
+  "wire.settings.keymap.send_both.help": "Espera; si tarda, interrumpe. Anula “Entrega con el agente ocupado”."
 }

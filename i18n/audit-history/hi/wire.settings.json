@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings",
-  "history_sha256": "c20a7dd5e0626bcfd7ea473157e90f5d16e591242e381b6314aaac89bd9f7db3",
+  "history_sha256": "faf8035635681b7b67fb6056054b17adc65dc3910c58f03a966e4936a26c0e5b",
   "entries": [
     {
       "locale": "hi",
@@ -250,6 +250,31 @@
       },
       "status": "passed",
       "note": "S1 Message sending section (branch feat/busy-delivery-modes @ 4b70d0d83 + uncommitted catalogue edits, 2026-11-11): 10 keys audited in this namespace. 8 keys carried over by rename from wire.settings.tui_busy_delivery.* (label, help, choice.steer/queue/both label/description) to wire.settings.delivery_busy_default.*; values moved byte-identically from the keys audited in earlier waves (r2/r3 + r4 union, PR #3768 history) and re-audited in context this round. 2 NEW keys: wire.settings.composer.title, wire.settings.composer.description. en source renamed in 4b70d0d83; en context sidecar gained the 2 composer entries in the same commit. keys_audited lists all 10 keys of this slice. Audit: fr/es/zh-CN/ru/vi/hi PASS 0 blocker/major, no findings, first pass. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "b1568a0fa23f7e4683dc44f988fa6c94fd67e1385a96dbb6be4cd3902577fdc0",
+      "context_sha256": "dc630a851848e6545d8a4603ee00430ddb426cbe73444eee185c4ee1674e61ad",
+      "target_sha256": "ebfa37e7d335af209b5c5650ddc3c37dd8200a29815df35b6a9a7f95c6bc28bb",
+      "keys_audited": 2,
+      "round": "r2",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, changed keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S6 re-translation (branch feat/tui-send-chords, HEAD 73bb22ca2 + uncommitted catalogues, 2026-11-11): 2 CHANGED-ENGLISH keys wire.settings.delivery_busy_default.help and wire.settings.delivery_busy_default.choice.steer.description (en source changed in 5425d7845/73bb22ca2); existing translations updated, values changed only in these 2 keys. keys_audited 2. Translator and auditor as row. Audit: es/zh-CN/ru/vi/ur PASS 0/0 first pass; fr FAIL round 1 (3 majors + 1 minor colon-spacing/antecedent) -> auditor replacements applied, round 2 PASS 0/0; hi FAIL round 1 (4 majors: override wording) -> auditor replacements applied, round 2 PASS 0/0. Receipt records round r2 (repo's next round id for this namespace) with final bytes. No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }

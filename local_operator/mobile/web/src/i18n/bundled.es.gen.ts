@@ -253,7 +253,7 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.delivery.queue": "en cola",
       "relay.composer.delivery.queue_hint": "Espera; no interrumpe herramientas",
       "relay.composer.delivery.steer": "guiar",
-      "relay.composer.delivery.steer_hint": "Interrumpe ya (como hasta ahora)",
+      "relay.composer.delivery.steer_hint": "Interrumpe ya una herramienta",
     },
   },
   "relay.health": {

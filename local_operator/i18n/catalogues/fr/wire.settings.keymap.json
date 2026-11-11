@@ -10,9 +10,9 @@
   "wire.settings.keymap.start_recording.label": "Démarrer l’enregistrement",
   "wire.settings.keymap.start_recording.help": "Démarre l’enregistrement de dictée dans la fenêtre de l’application de bureau.",
   "wire.settings.keymap.send_steer.label": "Envoi : orienter",
-  "wire.settings.keymap.send_steer.help": "Envoie le message tout de suite et interrompt l’étape en cours. Ctrl/Alt/Cmd+Enter ne fonctionnent que dans les terminaux qui gèrent les touches étendues ; Alt+lettre fonctionne partout (sur macOS, le terminal doit traiter Option comme Meta).",
+  "wire.settings.keymap.send_steer.help": "Envoyer et interrompre l’étape. Remplace « Envoi quand l’agent est occupé ».",
   "wire.settings.keymap.send_queue.label": "Envoi : file d’attente",
-  "wire.settings.keymap.send_queue.help": "Attend la fin de l’étape en cours, sans jamais interrompre les outils en cours d’exécution. Ctrl/Alt/Cmd+Enter ne fonctionnent que dans les terminaux qui gèrent les touches étendues ; Alt+lettre fonctionne partout (sur macOS, le terminal doit traiter Option comme Meta).",
+  "wire.settings.keymap.send_queue.help": "Attendre, sans interrompre d’outil. Remplace « Envoi quand l’agent est occupé ».",
   "wire.settings.keymap.send_both.label": "Envoi : les deux",
-  "wire.settings.keymap.send_both.help": "Attend comme « file d’attente », puis interrompt comme « orienter » si le message a trop attendu. Ctrl/Alt/Cmd+Enter ne fonctionnent que dans les terminaux qui gèrent les touches étendues ; Alt+lettre fonctionne partout (sur macOS, le terminal doit traiter Option comme Meta)."
+  "wire.settings.keymap.send_both.help": "Attendre, interrompre si ça tarde. Remplace « Envoi quand l’agent est occupé »."
 }

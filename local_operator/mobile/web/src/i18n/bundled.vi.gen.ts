@@ -253,7 +253,7 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.delivery.queue": "h\u00e0ng \u0111\u1ee3i",
       "relay.composer.delivery.queue_hint": "Ch\u1edd; kh\u00f4ng ng\u1eaft c\u00f4ng c\u1ee5",
       "relay.composer.delivery.steer": "\u0111\u1ecbnh h\u01b0\u1edbng",
-      "relay.composer.delivery.steer_hint": "Ng\u1eaft ngay (nh\u01b0 hi\u1ec7n nay)",
+      "relay.composer.delivery.steer_hint": "Ng\u1eaft ngay c\u00f4ng c\u1ee5 \u0111ang ch\u1ea1y",
     },
   },
   "relay.health": {

@@ -10,9 +10,9 @@
   "wire.settings.keymap.start_recording.label": "रिकॉर्डिंग शुरू करें",
   "wire.settings.keymap.start_recording.help": "डेस्कटॉप विंडो में स्पीच-टू-टेक्स्ट रिकॉर्डिंग शुरू करता है।",
   "wire.settings.keymap.send_steer.label": "दिशा देकर भेजें",
-  "wire.settings.keymap.send_steer.help": "संदेश अभी भेजता है और चल रहे चरण को बीच में रोक देता है. Ctrl/Alt/Cmd+Enter केवल उन टर्मिनल में काम करते हैं जो उन्नत कीज़ सपोर्ट करते हैं; Alt+अक्षर हर जगह काम करता है (macOS टर्मिनल में Option को Meta बनाना ज़रूरी है).",
+  "wire.settings.keymap.send_steer.help": "अभी भेजकर चल रहे चरण को रोकता है। उस संदेश के लिए “व्यस्त होने पर भेजने का तरीका” की जगह लागू होता है।",
   "wire.settings.keymap.send_queue.label": "कतार में भेजें",
-  "wire.settings.keymap.send_queue.help": "मौजूदा चरण पूरा होने तक प्रतीक्षा करता है; चल रहे टूल को कभी नहीं रोकता. Ctrl/Alt/Cmd+Enter केवल उन टर्मिनल में काम करते हैं जो उन्नत कीज़ सपोर्ट करते हैं; Alt+अक्षर हर जगह काम करता है (macOS टर्मिनल में Option को Meta बनाना ज़रूरी है).",
+  "wire.settings.keymap.send_queue.help": "चरण पूरा होने तक रुकता है; टूल को कभी नहीं रोकता। उस संदेश के लिए “व्यस्त होने पर भेजने का तरीका” की जगह लागू होता है।",
   "wire.settings.keymap.send_both.label": "दोनों तरह से भेजें",
-  "wire.settings.keymap.send_both.help": "कतार की तरह प्रतीक्षा करता है, फिर संदेश को ज़्यादा देर रुकना पड़े तो दिशा देने की तरह बीच में रोक देता है. Ctrl/Alt/Cmd+Enter केवल उन टर्मिनल में काम करते हैं जो उन्नत कीज़ सपोर्ट करते हैं; Alt+अक्षर हर जगह काम करता है (macOS टर्मिनल में Option को Meta बनाना ज़रूरी है)."
+  "wire.settings.keymap.send_both.help": "पहले रुकता है, देर हो तो रोक देता है। उस संदेश के लिए “व्यस्त होने पर भेजने का तरीका” की जगह लागू होता है।"
 }
