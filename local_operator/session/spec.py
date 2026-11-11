@@ -67,6 +67,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # import-cheap contract above governs the RUNTIME import surface (the
     # fresh-interpreter probe is its guard). Imported rather than respelled
     # so this spec's schema vocabulary cannot drift from ``OutputContract``'s.
+    from local_operator.i18n.messages import Msg
     from local_operator.output_contract import OutputSchemaValue
 
 __all__ = [
@@ -84,13 +85,45 @@ __all__ = [
 class SessionSpecError(ValueError):
     """Invalid input to the SDK surface — refused before anything is built.
 
-    Keyed spec diagnostics render English source through the existing envelope,
-    not the configured locale: callers still receive the historical single
-    string argument, with no new exception attributes. Imports stay inside
-    failing branches so valid value construction remains stdlib-only and never
-    reads configuration before SDK root isolation. Translation needs a separate
-    caller-contract migration; extraction does not authorize that behavior.
+    Keyed spec diagnostics render in the process's active language
+    (see :func:`spec_refusal_text`), so a French operator's embedding program
+    reads French refusals. Callers still receive the historical single string
+    argument, with no new exception attributes: the stable machine category is
+    the exception TYPE plus the catalogue message id the text came from
+    (``wire.errors.sdk_spec.<key>``), neither of which depends on the locale.
+    Imports stay inside failing branches so valid value construction remains
+    stdlib-only and never reads configuration on the happy path.
     """
+
+
+def spec_refusal_text(message: "Msg") -> str:
+    """Render a ``wire.errors.sdk_spec`` message in the ACTIVE locale.
+
+    WHY the active locale rather than the old ``locale="en"`` pin: these
+    refusals were extracted pinned to English because the exception is a plain
+    one-string ``ValueError`` with no code field. Nothing in this repo parses
+    the sentence (callers catch the type; the stable identity is the catalogue
+    message id), and the operator contract is that selecting a language leaves
+    no English in the interface, so the pin is lifted: ``lop`` itself (TUI,
+    exec, serve) moves the process locale at boot and on a live language
+    change, and a refusal raised there paints in that language.
+
+    WHY ``active_locale()`` and not the config chain (``render_resolved``): the
+    pre-root refusals fire BEFORE the SDK has isolated the caller's declared
+    roots, so resolving the language would read whatever ambient config
+    directory the process happens to see — the exact read the SDK's
+    isolation contract forbids (``test_sdk4_pre_root_refusals_never_construct_
+    or_read_locale``). The active locale is a plain process variable: no I/O,
+    no ``ConfigManager``. A bare SDK embedder that never boots a locale keeps
+    the English source, byte-identical to the pre-localization text.
+
+    The lazy imports keep spec construction stdlib-only on the valid path
+    (guarded by ``test_importing_spec_leaves_the_engine_off_the_graph``).
+    """
+    from local_operator.i18n.messages import render
+    from local_operator.i18n.text import active_locale
+
+    return render(message.code, dict(message.params), locale=active_locale())
 
 
 class VolatileRootError(SessionSpecError):
@@ -335,34 +368,30 @@ class ApprovalPolicy:
                 from local_operator.i18n.keys import wire_errors_sdk_spec
 
                 raise SessionSpecError(
-                    wire_errors_sdk_spec.approval_declared_tools_empty().envelope(locale="en")[
-                        "text"
-                    ]
+                    spec_refusal_text(wire_errors_sdk_spec.approval_declared_tools_empty())
                 )
         elif self.tools:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(
-                wire_errors_sdk_spec.approval_tools_wrong_mode(mode=repr(self.mode)).envelope(
-                    locale="en"
-                )["text"]
+                spec_refusal_text(
+                    wire_errors_sdk_spec.approval_tools_wrong_mode(mode=repr(self.mode))
+                )
             )
         if self.mode == "callback":
             if not callable(self.handler):
                 from local_operator.i18n.keys import wire_errors_sdk_spec
 
                 raise SessionSpecError(
-                    wire_errors_sdk_spec.approval_callback_gate_required().envelope(locale="en")[
-                        "text"
-                    ]
+                    spec_refusal_text(wire_errors_sdk_spec.approval_callback_gate_required())
                 )
         elif self.handler is not None:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(
-                wire_errors_sdk_spec.approval_handler_wrong_mode(mode=repr(self.mode)).envelope(
-                    locale="en"
-                )["text"]
+                spec_refusal_text(
+                    wire_errors_sdk_spec.approval_handler_wrong_mode(mode=repr(self.mode))
+                )
             )
 
     @classmethod
@@ -506,14 +535,12 @@ class SessionSpec:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(
-                wire_errors_sdk_spec.agent_identity_conflict().envelope(locale="en")["text"]
+                spec_refusal_text(wire_errors_sdk_spec.agent_identity_conflict())
             )
         if self.resume is not None and not str(self.resume):
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
-            raise SessionSpecError(
-                wire_errors_sdk_spec.resume_empty().envelope(locale="en")["text"]
-            )
+            raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.resume_empty()))
         if self.tools is not None and not isinstance(self.tools, tuple):
             # A list is the ergonomic spelling; frozen here so the spec is
             # hashable and cannot be mutated between validation and use.
@@ -521,7 +548,7 @@ class SessionSpec:
         if self.tools is not None and not self.tools:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
-            raise SessionSpecError(wire_errors_sdk_spec.tools_empty().envelope(locale="en")["text"])
+            raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.tools_empty()))
         if self.yolo and self.approvals.mode in ("refuse", "callback"):
             # yolo short-circuits the gate object on the session side, so a
             # refuse/callback gate installed here could never be consulted —
@@ -530,9 +557,11 @@ class SessionSpec:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(
-                wire_errors_sdk_spec.yolo_approval_unreachable(
-                    approval_mode=self.approvals.mode
-                ).envelope(locale="en")["text"]
+                spec_refusal_text(
+                    wire_errors_sdk_spec.yolo_approval_unreachable(
+                        approval_mode=self.approvals.mode
+                    )
+                )
             )
         # The output-contract fields are validated cheaply HERE (stdlib only —
         # see ``_OUTPUT_FORMATS``) and fully by ``OutputContract.__post_init__``
@@ -544,21 +573,23 @@ class SessionSpec:
                 from local_operator.i18n.keys import wire_errors_sdk_spec
 
                 raise SessionSpecError(
-                    wire_errors_sdk_spec.output_format_invalid(
-                        formats=", ".join(_OUTPUT_FORMATS)
-                    ).envelope(locale="en")["text"]
+                    spec_refusal_text(
+                        wire_errors_sdk_spec.output_format_invalid(
+                            formats=", ".join(_OUTPUT_FORMATS)
+                        )
+                    )
                 )
         if self.output_schema is not None and self.output_format is None:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(
-                wire_errors_sdk_spec.output_schema_requires_format().envelope(locale="en")["text"]
+                spec_refusal_text(wire_errors_sdk_spec.output_schema_requires_format())
             )
         if self.output_retries is not None and self.output_format is None:
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
             raise SessionSpecError(
-                wire_errors_sdk_spec.output_retries_requires_format().envelope(locale="en")["text"]
+                spec_refusal_text(wire_errors_sdk_spec.output_retries_requires_format())
             )
         if self.output_retries is not None and (
             isinstance(self.output_retries, bool)
@@ -567,18 +598,14 @@ class SessionSpec:
         ):
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
-            raise SessionSpecError(
-                wire_errors_sdk_spec.output_retries_range().envelope(locale="en")["text"]
-            )
+            raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.output_retries_range()))
         if self.world_root is not None and not str(self.world_root).strip():
             # Cheap and stdlib-only, like the checks above; the CONTAINMENT
             # checks need the roots and live in ``sdk.open_session``, where
             # they run once before any construction.
             from local_operator.i18n.keys import wire_errors_sdk_spec
 
-            raise SessionSpecError(
-                wire_errors_sdk_spec.world_root_empty().envelope(locale="en")["text"]
-            )
+            raise SessionSpecError(spec_refusal_text(wire_errors_sdk_spec.world_root_empty()))
 
     def to_namespace(self) -> argparse.Namespace:
         """The narrow session-factory namespace, field-for-field as exec builds it.
