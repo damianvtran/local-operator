@@ -1051,7 +1051,14 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             worktree_state,
         )
 
-        state = worktree_state(path)
+        # OWN FIRST (operator escalation 2026-11-11, session 316765a40496): a
+        # worktree the ledger proves this session or its subagent created is
+        # judged on what its removal can LOSE. Before, a ``dirty`` state —
+        # here only ignored ``.expo/``/``.pnpm-store/`` git deletes anyway —
+        # returned HIGH below before the ledger check was ever reached, and
+        # the judge saw no ledger fact, so finished own trees were refused.
+        own = _owned_by_session(target, path, prot, session_id)
+        state = worktree_state(path, own=own is not None)
         if state != "not-linked":
             # Clean is not idle (operator incident 2026-11-09: a clean worktree
             # whose branch had an OPEN PR under QA was removed, deleting 34
@@ -1070,6 +1077,23 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
                     f"finish or close it first ({facts})",
                 )
             idle = activity.pr_state == "none" and not activity.owners_running
+            if own is not None and idle and state == "clean":
+                # Nothing uncommitted, nobody else in it, no open PR: the
+                # creator removing it loses nothing, ``--force`` or not.
+                return RankedTarget(
+                    target,
+                    Risk.LOW,
+                    f"{own[0]}; linked worktree with no uncommitted change ({facts})",
+                )
+            if own is not None and state == "dirty":
+                # Real tracked/untracked work in an OWN tree: the judge decides
+                # with the ledger row and the exact entries (``build_delete_case``
+                # lists both); the reason names them for the agent too.
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    f"{own[0]}; linked worktree state: dirty; {_changes_phrase(path)}; {facts}",
+                )
             if idle and state == "clean" and not target.forced:
                 return RankedTarget(target, Risk.LOW, f"a clean linked git worktree ({facts})")
             if idle and state == "stale-initializing" and target.force_count == 2:
@@ -1133,6 +1157,19 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             # predicate would destroy.
             return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
         owned = _owned_by_session(target, path, prot, session_id)
+        if owned is not None and target.pattern is None:
+            # ``rm -rf <own linked worktree>`` is held to the same bar as
+            # ``git worktree remove --force`` of it (2026-11-11): ignored
+            # output never counts, real uncommitted work goes to the judge.
+            from local_operator.guardrails.provenance import worktree_state
+
+            spelling = reasons[0][0]
+            if worktree_state(spelling, own=True) == "dirty":
+                return RankedTarget(
+                    target,
+                    Risk.HIGH,
+                    f"{owned[0]}; linked worktree state: dirty; {_changes_phrase(spelling)}",
+                )
         if owned is not None:
             reason, matches = owned
             shown = ""
@@ -1148,6 +1185,12 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _changes_phrase(path: str) -> str:
+    from local_operator.guardrails.provenance import describe_changes
+
+    return describe_changes(path)
 
 
 def _owned_by_session(
