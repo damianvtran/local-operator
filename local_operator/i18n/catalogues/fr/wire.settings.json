@@ -146,6 +146,8 @@
   "wire.settings.compaction_wire_bytes_budget.label": "Limite de taille de requête (octets)",
   "wire.settings.compaction_wire_bytes_trigger.help": "Compacte dès que la requête dépasse cette taille, pour résumer tôt les sessions riches en captures d’écran plutôt que de supprimer des images. 0 désactive.",
   "wire.settings.compaction_wire_bytes_trigger.label": "Déclencheur de taille de requête (octets)",
+  "wire.settings.composer.description": "Comment un message envoyé pendant que l’agent travaille est remis. Une modification s’applique immédiatement dans le terminal et l’application de bureau.",
+  "wire.settings.composer.title": "Envoi des messages",
   "wire.settings.conversation_length.help": "Obsolète. Remplacé par le moteur de compactage.",
   "wire.settings.conversation_length.label": "Longueur de conversation",
   "wire.settings.desktop.description": "Où vous mène un clic sur une notification lorsque l’application de bureau n’est pas lancée.",
