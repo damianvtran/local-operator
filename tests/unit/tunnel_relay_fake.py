@@ -162,7 +162,11 @@ class FakeRelay:
         return None
 
     async def _handle(self, ws: ServerConnection) -> None:
-        claims = self.tokens[ws.request.headers["Authorization"].removeprefix("Bearer ")]
+        # The handshake hook (_authorize) already refused any request without a
+        # known token, so ws.request is always set here; assert it for pyright.
+        request = ws.request
+        assert request is not None
+        claims = self.tokens[request.headers["Authorization"].removeprefix("Bearer ")]
         mux = yamux.Session(ws.send, client=True)
 
         async def receive() -> None:
