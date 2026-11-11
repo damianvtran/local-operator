@@ -461,7 +461,22 @@ def _refuse_links(path: Path) -> None:
 
 
 @serialized_config_path_write
-def write_baseline(config_dir: Path, record: BaselineRecord) -> Path:
+def write_baseline(
+    config_dir: Path, record: BaselineRecord, *, proven_public_rescope: bool = False
+) -> Path:
+    """Write one baseline record under the origin guards.
+
+    ``proven_public_rescope`` is the ONE exception to "a known scope never
+    changes", and only in one direction: a legacy record with a tenant and NO
+    identity may become a PUBLIC, tenant-free, identified record, because the
+    caller (``service.repair_proven_public_scope``) has just watched the
+    configured hub serve that exact row to a credential-free request -- the
+    public route's own definition of public. Pre-fix public pulls stored the
+    PUBLISHER's tenant, so that tenant was never a scope; the anonymous answer
+    is the proof the plain guard below cannot see. Every other combination
+    still refuses: an identified record, an organization target, a hub-id
+    change or a record that keeps a tenant.
+    """
     path = baseline_path(config_dir, record.kind, record.local_id)
     _refuse_links(path)
     if record.identity is not None and (
@@ -476,8 +491,18 @@ def write_baseline(config_dir: Path, record: BaselineRecord) -> Path:
         # A missing historical API URL is NOT permission to change the known
         # remote id or organization. Only a genuinely unknown scope may be
         # selected explicitly during source resolution.
+        rescoped = (
+            proven_public_rescope
+            and current.identity is None
+            and bool(current.tenant_id)
+            and record.tenant_id is None
+            and record.identity is not None
+            and record.identity.visibility == "public"
+        )
+        if proven_public_rescope and not rescoped:
+            raise LinkError("origin-conflict", "only an unidentified tenant row may become public")
         if current.hub_id != record.hub_id or (
-            current.scope_known and current.tenant_id != record.tenant_id
+            current.scope_known and current.tenant_id != record.tenant_id and not rescoped
         ):
             raise LinkError(
                 "origin-conflict", "retain the existing remote identity and known scope"

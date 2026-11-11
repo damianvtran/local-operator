@@ -933,7 +933,12 @@ class RadientClient:
             ) from e
 
     def get_agent(
-        self, agent_id: str, *, with_credential: bool = False
+        self,
+        agent_id: str,
+        *,
+        with_credential: bool = False,
+        timeout: Optional[float] = None,
+        refuse_redirects: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Get agent details from the Radient Agent Hub by ID.
 
@@ -954,6 +959,14 @@ class RadientClient:
                 ORGANIZATION row is answered 404 to anyone who cannot prove
                 membership (§8.2), so the org pull's tenant check passes
                 ``True`` and reads the row as the signed-in person.
+            timeout (float | None): Per-request socket timeout; ``None`` keeps
+                the historical unbounded read for existing callers.
+            refuse_redirects (bool): Raise on a 3xx instead of following it.
+                The legacy public-scope repair reads this answer as PROOF
+                that the configured hub serves the row publicly, and a
+                redirect means some other URL answered -- which proves
+                nothing about this one (``get_team`` refuses the same way).
+                Off by default so existing callers keep their behaviour.
 
         Returns:
             Optional[Dict[str, Any]]: The agent details as a dictionary if found,
@@ -967,9 +980,14 @@ class RadientClient:
         headers = self._get_headers(
             content_type="application/json", require_api_key=with_credential
         )
+        extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+        if refuse_redirects:
+            extra["allow_redirects"] = False
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, **extra)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+            if refuse_redirects:
+                self._refuse_redirect(response)
             return response.json()
         except requests.exceptions.HTTPError as e:
             # raise_for_status() always attaches the failing response, but HTTPError can
