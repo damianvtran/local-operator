@@ -484,6 +484,17 @@ def _kernel_reason(target: Target, prot: _Protected) -> str | None:
         # Opaque, globbed or unresolvable: no exemption, so the literal path
         # decides; under session state that is CRITICAL.
         lexical = target.path or ""
+        if target.unpinned and any(_in_own_pad(s, prot) for s in _spellings(lexical)):
+            # A ``..`` after a component that does not exist yet
+            # (``mkdir -p <pad>/n && rm -rf <pad>/n/../build``) whose lexical
+            # landing is this session's OWN pad. If ``n`` ends up a directory
+            # the kernel lands there too; only a link made by this same
+            # command could send it elsewhere. CRITICAL is unliftable, and the
+            # operator's ask is that agents can clean up their own scratch, so
+            # this is not evidence: ``_rank`` ranks the unpinned target HIGH
+            # for the judge instead (PR #3811, both round-1 reports). A
+            # lexical landing anywhere else under session state stays CRITICAL.
+            return None
         for state in prot.state_roots:
             if _under_evidence(lexical, os.path.join(state, _LEDGER_DIRNAME)):
                 return "the guardrail's own records"
@@ -871,6 +882,10 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
             if _under(path, state) and path != state:
                 return "overwrites a file inside the local-operator state root"
         return None
+    if target.pattern is not None and not target.opaque:
+        git_dir = _glob_reaches_git_dir(target.pattern)
+        if git_dir is not None:
+            return git_dir
     if target.glob_children and not target.glob_all:
         # R3-2: a children-glob directly in a home or in the state root
         # (``~/D*``, ``~/[A-Z]*``, ``Doc*`` at cwd $HOME) can match the
@@ -906,13 +921,8 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
         # unpushed commit, stash and linked-worktree record just as deleting
         # the root does, so it ranks with the root. Only a git DIRECTORY (a
         # linked worktree's ``.git`` is a one-line pointer file).
-        if (
-            os.path.basename(path).casefold() == ".git"
-            and not os.path.islink(path)
-            and os.path.isdir(path)
-            and os.path.exists(os.path.join(path, "HEAD"))
-        ):
-            return "a git repository's .git directory (its history)"
+        if _is_git_dir(path):
+            return _GIT_DIR_REASON
     except OSError:
         return "an unreadable path"
     return None
@@ -1001,6 +1011,51 @@ def _spelling_order(path: str, spellings: set[str]) -> list[str]:
     return sorted(spellings, key=lambda s: (s != lexical, s))
 
 
+_GIT_DIR_REASON = "a git repository's .git directory (its history)"
+
+
+def _is_git_dir(path: str) -> bool:
+    """A repository's ``.git`` DIRECTORY (a linked worktree's ``.git`` is a
+    one-line pointer file; a link is removed, not followed)."""
+    return (
+        os.path.basename(path).casefold() == ".git"
+        and not os.path.islink(path)
+        and os.path.isdir(path)
+        and os.path.exists(os.path.join(path, "HEAD"))
+    )
+
+
+def _glob_reaches_git_dir(pattern: str) -> str | None:
+    """``_GIT_DIR_REASON`` when the glob ``pattern`` matches a ``.git``
+    directory, else ``None``.
+
+    WHY. The ``.git`` rule in ``_high_reason`` judges one path, so
+    ``rm -rf ~/repo/.gi*`` (or ``.g?t``, ``.[g]it``, ``cd ~/repo && rm -rf
+    .g*``) named only the literal prefix ``~/repo`` and ranked LOW while the
+    shell deletes the history (review R1-2, PR #3811). Each match of the
+    existing bounded expansion is checked instead. Only a final component
+    that can match a LEADING dot counts: bash's ``*``/``?`` never do without
+    ``dotglob``, and treating ``rm -rf ~/repo/*`` as a ``.git`` delete would
+    over-block ordinary tree cleanups. A leading ``[`` counts conservatively
+    (``[.]git`` does not match in bash, but ``fnmatch`` says it does).
+    Past the expansion bound this rule simply does not apply; the evidence
+    checks own that fail-closed case.
+    """
+    last = pattern.rstrip("/").rsplit("/", 1)[-1]
+    # Casefolded: ``.GI*`` names ``.git`` on a case-insensitive volume; the
+    # on-disk matches below decide whether it really exists.
+    if not last.startswith((".", "[")) or not fnmatch.fnmatchcase(".git", last.casefold()):
+        return None
+    matches = _expand_glob(pattern)
+    for match, _linked in matches or ():
+        try:
+            if _is_git_dir(match):
+                return _GIT_DIR_REASON
+        except OSError:
+            return "an unreadable path"
+    return None
+
+
 def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
     path = target.path
     notes: list[str] = list(target.empty)
@@ -1016,8 +1071,8 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         notes.append("relative to a working directory that cannot be determined")
     if target.unpinned:
         notes.append(
-            "a '..' follows a component that does not resolve yet, so where it lands "
-            "cannot be known (unresolved)"
+            "a '..' follows a component that is missing or that this command re-links, "
+            "so where it lands cannot be known (unresolved)"
         )
     if path is None:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes) or "unresolved target")

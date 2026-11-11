@@ -892,7 +892,11 @@ class Target:
     #: keeps any CRITICAL that reading earns but never ranks the target LOW,
     #: not even inside this session's scratchpad, because the missing component
     #: may be created as a link by an earlier part of the same command
-    #: (``ln -s <repo>/sub <pad>/n && rm -rf <pad>/n/../.git``).
+    #: (``ln -s <repo>/sub <pad>/n && rm -rf <pad>/n/../.git``). Also set when
+    #: the component EXISTS but an earlier part of the command named it — as
+    #: an ``ln`` link, a ``mv``/``cp``/``rsync`` destination, or a delete or
+    #: creation target — since it may be a different link by then
+    #: (``_Walker._unpin_relinked``, review R1-1 on PR #3811).
     unpinned: bool = False
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
@@ -1643,6 +1647,14 @@ class _Walker:
         #: Paths an earlier segment of THIS command made into a symlink (S7):
         #: what they point at is resolved only at run time.
         self.linked: set[str] = set()
+        #: Every path an earlier part of THIS command deleted, moved, copied or
+        #: wrote to, or created (lexical and resolved spellings, no trailing
+        #: ``/``). Any of them may be a symlink by the time a later word's
+        #: ``..`` is looked up (``rm -rf <pad>/d && mv <link> <pad>/d``), so a
+        #: ``..`` after one is unpinned (review R1-1, PR #3811); see
+        #: :meth:`_unpin_relinked`. ``linked`` is the ``ln -s`` half of the same
+        #: fact and stays separate because S7 also uses it on its own.
+        self.named: set[str] = set()
         #: ``for VAR in a b c`` literal lists: a target using $VAR fans out.
         self.for_lists: dict[str, list[str]] = {}
         #: The loop variable each ``for_lists`` entry derives from (itself for
@@ -2602,6 +2614,7 @@ class _Walker:
     def _create(self, kind: str, path: str | None) -> None:
         if path is not None:
             self.result.created.append(Creation(kind=kind, path=path))
+            self.named.add(path.rstrip("/") or "/")
 
     def _mkdir(self, args: list[Expanded]) -> None:
         operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
@@ -2689,6 +2702,7 @@ class _Walker:
             return
         target = _target(exp, op, program, self.state)
         target.selected = selected
+        self._unpin_relinked(target, exp.text)
         if target.path is not None:
             stripped = target.path.rstrip("/") or "/"
             if any(stripped == ln or stripped.startswith(ln + "/") for ln in self.linked):
@@ -2709,9 +2723,45 @@ class _Walker:
             target.opaque_contained = False
             return
         for _roots, values in iterations:
-            extra = _target(_fan_out(exp, values), op, program, self.state)
+            fanned = _fan_out(exp, values)
+            extra = _target(fanned, op, program, self.state)
             extra.selected = selected
+            self._unpin_relinked(extra, fanned.text)
             self.result.targets.append(extra)
+
+    def _unpin_relinked(self, target: Target, text: str) -> None:
+        """Mark ``target`` unpinned when a component before one of its ``..``
+        was named earlier in this command, then remember ``target`` itself.
+
+        WHY. ``physical_path`` resolves ``..`` against the filesystem as it is
+        at CHECK time, but the command runs its parts in order: in
+        ``ln -sfn ~/.local-operator/secrets <pad>/lnk && rm -f <pad>/lnk/../config.yml``
+        the ``rm`` follows the NEW link, so the kernel deletes the state root's
+        ``config.yml`` while the check-time lookup (``lnk`` -> ``<pad>/build``)
+        reads ``<pad>/config.yml`` — LOW (review R1-1, PR #3811). The same goes
+        for a path an earlier part deleted (and so may recreate), moved or
+        copied onto, or created. Where the new link will point is often
+        knowable, but not in general (``mv``, ``cp -a`` of a link, variables),
+        so the target is ``unpinned``: ``classify`` keeps any CRITICAL its
+        lexical or check-time reading earns and otherwise ranks it HIGH, never
+        LOW. Only a component BEFORE a ``..`` matters — without a ``..`` the
+        path is named through the link itself and S7 (``_add``) covers it.
+        """
+        raw = _joined(text, self.state.cwd)
+        named = self.linked | self.named
+        if raw and named and ".." in raw.split("/"):
+            parts = raw.split("/")
+            last = max(k for k, part in enumerate(parts) if part == "..")
+            prefixes = {
+                os.path.normpath("/" + "/".join(parts[:k]).lstrip("/"))
+                for k in range(1, last + 1)
+                if parts[k - 1] not in ("", ".", "..")
+            }
+            if prefixes & named:
+                target.unpinned = True
+        for spelled in (target.path, os.path.normpath(raw) if raw else None):
+            if spelled:
+                self.named.add(spelled.rstrip("/") or "/")
 
     def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
         """``(loop vars, {ref name: value})`` for every iteration after the first.
@@ -2781,6 +2831,10 @@ class _Walker:
         if exp.opaque or exp.pattern is not None:
             return
         path, _ = _absolute(exp.text, self.state.cwd)
+        if path is not None:
+            # The destination may BECOME a link (``mv <link> <dest>`` after an
+            # earlier ``rm -rf <dest>``): see ``_unpin_relinked``.
+            self.named.add(path.rstrip("/") or "/")
         if path is not None and os.path.isdir(path):
             # Moving/copying INTO a directory replaces nothing named here, but
             # it CREATES ``dir/<source name>``: recorded as an append so a

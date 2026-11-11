@@ -728,6 +728,12 @@ def evidence_write_verdict(
         text = os.path.join(ctx.cwd or os.getcwd(), text)
     # Named where the kernel writes it (``..`` after links), not the lexical
     # collapse; ``spellings(text)`` below also judges the raw realpath.
+    # The ``normpath`` fallback (a missing component before a ``..``) needs no
+    # ``unpinned`` withholding like ``classify._rank``'s (review R1-3, PR
+    # #3811): this verdict only ever REFUSES, it never grants a LOW, and a file
+    # tool runs no earlier command part that could turn the missing component
+    # into a link — it creates parents as real directories (``os.makedirs``),
+    # after which the lexical reading IS where the write lands.
     target = Target(
         path=physical_path(text) or os.path.normpath(text), op="overwrite", program=tool_name
     )

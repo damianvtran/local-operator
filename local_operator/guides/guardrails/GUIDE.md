@@ -132,9 +132,13 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   CRITICAL. A path written with `..` is judged where the kernel lands it
   (`..` resolves after following links): inside your own scratchpad it stays
   LOW, inside another session's scratchpad HIGH, anywhere else in session
-  state CRITICAL. Where it cannot be pinned at check time — a `..` below a directory that
-  does not exist yet, as in `mkdir -p <pad>/n && rm -f <pad>/n/../x` — it is
-  deliberately CRITICAL: write `rm -f <pad>/x` instead. `cd -P` (or `cd` after
+  state CRITICAL. Where it cannot be pinned at check time it is judged (HIGH),
+  never LOW, even in your own scratchpad or `/tmp`: a `..` below a directory
+  that does not exist yet (`mkdir -p <pad>/n && rm -f <pad>/n/../x`), or below
+  one an earlier part of the same command linked, moved or copied onto,
+  deleted or created (`ln -sfn <dir> <pad>/l && rm -f <pad>/l/../x`), because
+  that same command could make the component a link to anywhere. A lexical
+  landing in protected state stays CRITICAL. Write `rm -f <pad>/x` instead. `cd -P` (or `cd` after
   `set -P`/`set -o physical`) is followed to the directory the kernel resolves. The
   `write`/`edit` file tools are not ranked HIGH there: they refuse only the
   evidence files, so a plain file in another session's scratchpad is not
