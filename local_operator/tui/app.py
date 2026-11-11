@@ -137,6 +137,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
+from local_operator.i18n.keys import tui_boot_prompt as _boot_prompt_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
@@ -622,6 +623,7 @@ _t = tr("tui.app")
 #: twin (`session/runtime/serving.py`) renders the SAME words; resolved per call.
 _lang_t = tr("wire.language_receipts")
 _kind_t = tr("tui.notification_kinds")
+_boot_prompt_t = tr("tui.boot_prompt")
 #: `/update`'s progress notices. Their own namespace because they carry the
 #: reassurance the operator asked for (2026-11-03): an update does not stop a
 #: running session. Session runtimes are detached processes
@@ -6074,6 +6076,17 @@ class OperatorApp(App[None]):
         #: here so the seam's consumption is a no-op on an app that never ran
         #: ``/aida``; without it the FIRST adoption of any kind raised.
         self._pending_aida_prompt: tuple[str, str, Any] | None = None
+        #: Bumped by EVERY ``_adopt_session`` — the one place a session becomes
+        #: current. ``_boot_session`` reads it before construction and steps
+        #: aside when it moved, because boot's sidebar ``navigation_generation``
+        #: fence never sees a ``/resume``: a ``/resume <id>`` typed while boot
+        #: was still building used to land and then be OVERWRITTEN by boot's
+        #: fresh session, so the user's next prompt went to the wrong
+        #: conversation (architect's in-process reproduction on d0301a22fba2).
+        #: An epoch rather than another generation bump at each resume site
+        #: because adoption is the single seam every transition funnels through;
+        #: a counter at the seam cannot miss a path the way per-caller bumps can.
+        self._adoption_epoch = 0
         #: The scheduled first-run Aida ensure `run_tui` starts — never awaited
         #: there (see `_schedule_aida_boot_ensure`). Held so the task cannot be
         #: garbage-collected mid-flight; ``None`` until a CLI boot starts one.
@@ -12944,6 +12957,8 @@ class OperatorApp(App[None]):
         precondition. Anything genuinely slow belongs in a worker, the way
         :meth:`_measure_preloaded_context` already puts its measurement in one.
         """
+        # See `_adoption_epoch`: boot's step-aside fence reads this.
+        self._adoption_epoch += 1
         self._invalidate_pending_frontend_state()
         # A new conversation's supplement registries start empty: the previous
         # session's blocks went with the cleared ledger, and its read/seen sets
@@ -14320,6 +14335,68 @@ class OperatorApp(App[None]):
         if text.strip():
             self._submit_prompt(text)
 
+    #: Longest stretch of a startup prompt quoted back in the step-aside notice
+    #: when the composer is already taken. Generous because the notice is the
+    #: prompt's ONLY remaining copy in that case (the sidecar is consumed);
+    #: bounded so a pasted wall of text cannot bury the transcript.
+    _UNSENT_BOOT_PROMPT_QUOTE_LIMIT = 500
+
+    def _return_unsent_boot_prompts(self, session: Any) -> None:
+        """Hand back the prompts a stepped-aside boot would have sent.
+
+        Boot steps aside (see `_boot_session`) when the user navigated or
+        resumed elsewhere while it was building. Its stashed prompts — a
+        ``/fork``'s opening message (the sidecar `_submit_boot_prompt`
+        consumes) and an ``/aida <request>`` stashed for boot's own session —
+        were written for a conversation that is no longer on screen.
+
+        PRODUCT DECISION (Team Bridge manager, session 2c6111e02b16): NEVER
+        send such a prompt — sending into the conversation the user switched
+        to would be a turn they did not ask for — and NEVER drop it silently,
+        which is what this branch did before. If the current composer is empty
+        the prompt becomes an UNSENT draft there plus one notice; if the user
+        already typed something, their draft is left untouched and the
+        prompt's text rides the notice so it is not lost.
+
+        The sidecar is consumed here on purpose: left on disk it would fire
+        on that fork's next resume, breaking the restore-and-idle rule
+        `fork.consume_boot_prompt` exists to keep.
+        """
+        texts: list[str] = []
+        session_id = getattr(session, "session_id", "") or ""
+        if session_id:
+            try:
+                from local_operator.fork import consume_boot_prompt
+                from local_operator.paths import config_dir
+
+                texts.append(consume_boot_prompt(config_dir() / "sessions" / session_id))
+            except Exception:
+                # Same best-effort rule as `_submit_boot_prompt`: an unreadable
+                # sidecar must not fail the step-aside.
+                logger.debug("boot step-aside: boot prompt unreadable", exc_info=True)
+        pending = self._pending_aida_prompt
+        # Only HER stash for boot's OWN session belongs to this boot; a stash
+        # for another id belongs to a transition still in flight and stays.
+        if pending is not None and session_id and pending[0] == session_id:
+            self._pending_aida_prompt = None
+            texts.append(pending[1])
+        text = "\n\n".join(part for part in texts if part.strip())
+        if not text:
+            return
+        editor = self._editor()
+        if not editor.text.strip() and not editor.attachments():
+            # The restore funnel, so the caret lands AFTER the text the way a
+            # returned draft does: the gesture is "read, edit, Enter".
+            self._load_editor_draft(SessionDraft(text=text))
+            self._system_notice(_boot_prompt_t(_boot_prompt_keys.returned_to_composer()), "warning")
+            return
+        quoted = text
+        if len(quoted) > self._UNSENT_BOOT_PROMPT_QUOTE_LIMIT:
+            quoted = quoted[: self._UNSENT_BOOT_PROMPT_QUOTE_LIMIT].rstrip() + "…"
+        self._system_notice(
+            _boot_prompt_t(_boot_prompt_keys.not_sent_kept_draft(prompt=quoted)), "warning"
+        )
+
     async def _preflight_usage(self, session: Any) -> None:
         """Warm the provider's quota reading once the app is already painted.
 
@@ -14419,6 +14496,7 @@ class OperatorApp(App[None]):
         # thing on screen her conversation, exactly as the setup exit does.
         await self._route_first_run_boot()
         navigation_generation = self._sidebar_navigation.generation
+        adoption_epoch = self._adoption_epoch
         built = asyncio.ensure_future(self._construct_session())
         try:
             session = await built
@@ -14428,8 +14506,19 @@ class OperatorApp(App[None]):
         except Exception as error:  # TUI-012: construction error path
             self._on_boot_failed(error)
             return
-        if navigation_generation != self._sidebar_navigation.generation:
+        # STEP ASIDE when the user moved while boot was building: a sidebar
+        # click bumps `navigation_generation`, and a `/resume` (or any other
+        # transition) that already LANDED bumps `_adoption_epoch`. Either way
+        # the conversation on screen is the one the user chose, and adopting
+        # boot's session now would replace it. A `/resume` still dialling when
+        # boot finishes has not adopted, so boot adopts as before and the
+        # resume replaces it through its own swap path.
+        if (
+            navigation_generation != self._sidebar_navigation.generation
+            or adoption_epoch != self._adoption_epoch
+        ):
             if session is not self._session:
+                self._return_unsent_boot_prompts(session)
                 await session.dispose()
             return
         self._adopt_session(session)
