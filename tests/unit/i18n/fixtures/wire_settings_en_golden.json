@@ -930,6 +930,8 @@
  "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Chatter ceiling per hour",
  "wire.settings.team_bridge_screening_budget_per_hour.help": "Rolling-hour ceiling on screening for the whole account, shared by every session and machine on it. Applies immediately, no restart.",
  "wire.settings.team_bridge_screening_budget_per_hour.label": "Screening ceiling per hour",
+ "wire.settings.team_bridge_screening_model.help": "Which model screens incoming agent messages first. Empty uses the tested order, the safest default. A choice only moves that model to the front: if it is unavailable or out of quota, this machine's own model and fallbacks still screen, so a preference never blocks messages.",
+ "wire.settings.team_bridge_screening_model.label": "Screening model",
  "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "One sender's share of the account ceiling; half of it by default. A sender can never exceed the account ceiling itself.",
  "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "Per-sender ceiling per hour",
  "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "Carved out of the account ceiling, never added to it: everything except a person addressing your agent may use at most this much. The rest is kept for people.",

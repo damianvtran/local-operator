@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 
+from local_operator.team_bridge.settings import read_screening_model
 from local_operator.team_bridge.store import (
     SCREENING_FAILURE_CLASSES as _STORE_FAILURE_CLASSES,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "SCREENING_EVALUATED_MODELS",
     "SCREENING_MODEL_UNAVAILABLE",
     "is_evaluated_screening_model",
+    "evaluated_screening_pair",
     "resolve_default_selection",
     "resolve_screening_chain",
     "resolve_screening_selection",
@@ -387,6 +389,31 @@ def provider_hold_code(failure: BaseException) -> str:
     return "provider_error"
 
 
+def evaluated_screening_pair(provider: str, model_id: str) -> tuple[str, str] | None:
+    """The TABLE's own spelling of ``provider/model_id``, or ``None`` if unlisted.
+
+    ONE implementation of "is this pair on the table", because three places now
+    ask it and a second copy would drift from the eval table: the chain
+    (:func:`resolve_screening_chain`, which re-orders to this entry), the
+    membership predicate (:func:`is_evaluated_screening_model`), and the desktop
+    plane, which must not show a stored model as SELECTED while the chain
+    silently ignores it — or fold a login flavour into the config file under a
+    provider spelling no entry uses.
+
+    Folding is by credential STORAGE owner (``anthropic-key`` -> ``anthropic``);
+    an id the registry cannot resolve admits nothing, so an unreadable registry
+    fails closed rather than promoting an unknown pair.
+    """
+
+    try:
+        from local_operator.providers.registry import credential_provider_id
+
+        canonical = (credential_provider_id(provider), model_id)
+    except Exception:  # noqa: BLE001 — an unreadable registry admits nothing
+        return None
+    return canonical if canonical in SCREENING_EVALUATED_MODELS else None
+
+
 def is_evaluated_screening_model(provider: str, model_id: str) -> bool:
     """Whether ``provider/model_id`` is on :data:`SCREENING_EVALUATED_MODELS`.
 
@@ -395,13 +422,7 @@ def is_evaluated_screening_model(provider: str, model_id: str) -> bool:
     because a sibling snapshot or a router alias has no eval result.
     """
 
-    try:
-        from local_operator.providers.registry import credential_provider_id
-
-        storage = credential_provider_id(provider)
-    except Exception:  # noqa: BLE001 — an unreadable registry admits nothing
-        return False
-    return (storage, model_id) in SCREENING_EVALUATED_MODELS
+    return evaluated_screening_pair(provider, model_id) is not None
 
 
 def _credentialed_providers(config_dir: Path) -> set[str]:
@@ -564,11 +585,22 @@ def resolve_screening_chain(
     (fail-closed). When every hop is tried and fails on route errors, the
     pipeline holds the same code (:func:`provider_hold_code`).
 
-    ``preferred`` is the stored "Screening model" choice (Aida 2026-11-04;
-    follow-up UI, nothing passes it yet): a pair FROM the table moved to the
-    front of stage 1. Off-table values are ignored -- a setting can re-order
-    the preferred screeners, never promote another model -- and when the
-    chosen pair is unreachable the rest of stage 1 and then stage 2 still run.
+    ``preferred`` is the stored "Screening model" choice (Aida 2026-11-04): a
+    pair FROM the table moved to the front of stage 1. TWO production callers
+    pass it -- the screening cycle (``scheduler.py``) and
+    :func:`resolve_screening_selection`, which the image gate and the
+    canonical-provider read use -- so a stored choice is what this machine
+    screens with, everywhere. Off-table values are ignored -- a setting can
+    re-order the preferred screeners, never promote another model -- and a hop
+    whose ROUTE fails is walked past, so the rest of stage 1 and then stage 2
+    still run. "The route failed" is exactly the closed set
+    :func:`_sender_cannot_cause` admits: a credential the provider answers 401,
+    quota or an empty balance (429/402), a 404 for a pair the route does not
+    serve, a gateway/overload status whose text names no content verdict, a
+    timeout, or a transport error raised before the body was sent. Any failure
+    the sender's own bytes can provoke (every other 4xx, and a 403) still STOPS
+    the walk and holds -- that is what keeps a crafted message from buying a
+    weaker screener (S-1).
 
     WHY THE CHAIN WALK EXISTS AT ALL: a screening request is ``isolated=True``
     and the failover layer turns retry off for isolated requests
@@ -581,19 +613,18 @@ def resolve_screening_chain(
     model.
     """
 
-    # Lazy, to avoid the import cycle; one import serves both uses below.
-    from local_operator.providers.registry import (
-        credential_provider_id,
-        credential_source_id,
-    )
+    # Lazy, to avoid the import cycle; ``credential_source_id`` is the only
+    # registry call this walk makes (the table fold lives in
+    # :func:`evaluated_screening_pair`).
+    from local_operator.providers.registry import credential_source_id
 
     credentialed = _credentialed_providers(config_dir)
     order = list(SCREENING_EVALUATED_MODELS)
     if preferred is not None:
         # Folded onto the table's own spelling so a login flavour
         # (``anthropic-key``) re-orders the canonical entry, never adds one.
-        canonical = (credential_provider_id(preferred[0]), preferred[1])
-        if canonical in order:
+        canonical = evaluated_screening_pair(preferred[0], preferred[1])
+        if canonical is not None:
             order = [canonical] + [pair for pair in order if pair != canonical]
     hops: list[DefaultSelection] = []
     for provider, model_id in order:
@@ -636,7 +667,14 @@ def resolve_screening_selection(config_dir: Path) -> DefaultSelection | None:
     configuration only, never a session's chat model.
     """
 
-    chain = resolve_screening_chain(config_dir)
+    chain = resolve_screening_chain(
+        config_dir,
+        # This is a chain built for REAL use (the image gate, the canonical
+        # provider read), so the machine's stored "Screening model" choice is
+        # part of it exactly as it is in the cycle: a preference that re-orders
+        # the evaluated screeners and nothing else.
+        preferred=read_screening_model(config_dir),
+    )
     return chain[0] if chain else None
 
 
@@ -663,6 +701,29 @@ _QUOTA_STATUSES = frozenset({429, 402})
 #: ``kind="auth"`` — so neither the status nor the kind can separate a bad
 #: credential from a content verdict. A 403 HOLDS (PR #3194 review M2 / S-5).
 _AUTH_STATUSES = frozenset({401})
+#: The ROUTE does not serve this (provider, model) at all: a retired model, a
+#: pair the owner's account is not enabled for, or a gateway rejecting an
+#: unknown model — which sends no body at all, so ``not_found_error`` wording
+#: is frequently absent and :func:`_describe_bare_status` supplies the text.
+#: That is why the status alone is the signal here: demanding a typed code first
+#: would fail-closed on exactly the bare 404 the operator directive of
+#: 2026-11-04 covers.
+#:
+#: WHY 404 ADVANCES WHILE 403 STOPS — the split is deliberate (PR #3632 review
+#: R1), not an oversight. Neither status says anything about the SUBMISSION: no
+#: body makes a provider report a missing model, so advancing on a 404 cannot
+#: buy a weaker screener (S-1). It only says the chosen pair is not deployable
+#: on this account, which is the OWNER's configuration — and a preference must
+#: never block (the same directive that removed the credential and quota
+#: cases). A 403 is not like that: one marker-less status carries BOTH a content
+#: verdict (see :data:`_AUTH_STATUSES`) and a genuine permission error, and
+#: neither the status nor ``kind`` separates them. Advancing there would drop a
+#: content verdict the first provider already reached (S-1) AND paper over a
+#: credential fault the owner has to see. So a 403 keeps stopping, and its hold
+#: records ``auth_unusable`` (``screening_failure_class``): the owner is told
+#: their account cannot reach the model they chose, rather than the message
+#: quietly screening somewhere else.
+_NOT_FOUND_STATUSES = frozenset({404})
 #: Content-verdict wording a provider can relay on an otherwise-advancing
 #: gateway status — Alibaba's "Output data may contain inappropriate content"
 #: arrives as a relayed 502 (``failover.py`` ``is_input_refusal`` docstring).
@@ -703,9 +764,11 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     screener, and the first provider refusing the input is itself evidence.
     Only failures of the ROUTE advance: our credential rejected (401, or an
     OAuth refresh that failed — never 403, see ``_AUTH_STATUSES``), quota
-    (429), a timeout, a gateway/overload status (502/503/504/529) whose raw
-    text names no content verdict, or a transport error our own client raised
-    before the body was sent.
+    (429), a route that does not serve the pair at all (404 — see
+    ``_NOT_FOUND_STATUSES`` for why that advances while a 403 does not), a
+    timeout, a gateway/overload status (502/503/504/529) whose raw text names
+    no content verdict, or a transport error our own client raised before the
+    body was sent.
 
     MUST be evaluated on the RAW exception, before ``_scrub_wire_failure``
     erases everything but typed fields; it reads types, ``status``, typed
@@ -744,7 +807,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     if isinstance(status, int) and status:
         if status in _AUTH_STATUSES or status in _QUOTA_STATUSES:
             return True
-        if status not in _ADVANCE_STATUSES:
+        if status not in _ADVANCE_STATUSES and status not in _NOT_FOUND_STATUSES:
             return False
         raw = str(getattr(failure, "message", "") or "").lower()
         return not any(marker in raw for marker in _CONTENT_VERDICT_MARKERS)
@@ -1528,11 +1591,12 @@ class ScreenChainRunner:
       a FRESH wire guard and dedicated client: per-send charging, the route
       check and the hop's own (provider, model) tuple check all still apply.
     * Advance ONLY on a failure a sender cannot cause (:func:`_sender_cannot_cause`:
-      credential unusable, quota, timeout, 502/503/504/529, a pre-send
-      transport error), or on the unevidenced ``("", None)`` signal (serving
-      identity is request-local provenance, not something a body controls).
+      credential unusable, quota, a route that does not serve the pair (404),
+      timeout, 502/503/504/529, a pre-send transport error), or on the
+      unevidenced ``("", None)`` signal (serving identity is request-local
+      provenance, not something a body controls).
       EVERYTHING ELSE STOPS AND HOLDS (S-1/S-2): any other 4xx (content-filter
-      400, 413), any other 5xx, every :class:`_ScreeningStreamRefused`
+      400, 413, every 403), any other 5xx, every :class:`_ScreeningStreamRefused`
       (refusal, length, tool use, over-cap, missing end/stop, error, aborted,
       images_unsupported), the guard's own fail-closed refusals, and local
       defects. A sender-triggerable failure must never buy a weaker screener.

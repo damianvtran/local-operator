@@ -314,7 +314,10 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     # `id` is replaced by `request_id` (mapped back via _pending_question_ids);
     # `multi` is DEFERRED — the answer path is single-value end to end, so
     # carrying it would render a picker that discards every answer but the first.
-    deliberately_dropped = {"id", "multi"}
+    # `recommended_all` rides with `multi`: the set only exists on a multi-select,
+    # which this wire cannot express, so the phone keeps the int contract
+    # (`recommended=0`, the first pick) and the set is not carried.
+    deliberately_dropped = {"id", "multi", "recommended_all"}
     # `question` is the one deliberate RENAME: AskQuestion.question is carried
     # as PendingRequest.title.
     assert ask_fields - deliberately_dropped <= expected | {"question"}, (
@@ -750,3 +753,24 @@ def test_ask_dismiss_accepts_the_two_reasons(reason: str) -> None:
 def test_ask_dismiss_refuses_an_unknown_reason_at_the_wire(reason: Any) -> None:
     with pytest.raises(ValueError, match="reason must be"):
         validate_control_frame({"op": "ask_dismiss", "ask_id": "a-1", "reason": reason})
+
+
+def test_a_recommendation_set_reaches_the_phone_as_the_first_pick_only() -> None:
+    """The native phone's `PendingRequest` has no `multi` and no set, so it
+    keeps the int contract: `recommended=0`, and no new key on the wire."""
+    question = AskQuestion(
+        id="wire-2",
+        question="Which scopes?",
+        options=[AskOption(label=label) for label in ("Gamma", "Alpha", "Beta")],
+        multi=True,
+        recommended=[2, 0],
+    )
+    assert question.recommended_all == [0, 1]
+
+    wire, pending, rebuilt = _round_trip(question)
+
+    assert pending.recommended == 0
+    assert wire["recommended"] == 0
+    assert "recommended_all" not in wire
+    assert [option.label for option in rebuilt.options] == ["Beta", "Gamma", "Alpha"]
+    assert rebuilt.recommended == 0

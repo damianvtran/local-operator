@@ -1472,6 +1472,8 @@ class FakeMcpManager:
         # creating attributes the production object also has.
         self.on_incident: Callable[[str, str], None] | None = None
         self.on_recovery: Callable[[str, int], None] | None = None
+        # The use clock ``wire_mcp_into_session`` installs (cold-boundary demotion).
+        self.on_tool_called: Callable[[str, str], None] | None = None
         #: Ticks the auth-revalidation poller has performed against this manager.
         self.revalidations = 0
 
@@ -1772,10 +1774,28 @@ async def test_the_settled_re_report_carries_the_network_subset_of_that_round(
     assert settled.all_failures_are_network is True
 
 
+def _over_inline_cap_schema() -> dict[str, Any]:
+    """A schema whose compact JSON exceeds the per-tool inline cap."""
+    from local_operator.mcp.resources import MAX_INLINE_TOOL_SCHEMA_CHARS
+
+    return {
+        "type": "object",
+        "properties": {},
+        "description": "x" * (MAX_INLINE_TOOL_SCHEMA_CHARS + 1),
+    }
+
+
 @pytest.mark.asyncio
 async def test_mcp_detail_read_activates_exactly_one_schema_in_the_live_session(
     monkeypatch,
 ) -> None:
+    """The PUBLICATION fallback: an over-cap schema still enters the tool list.
+
+    A per-tool read normally renders its schema inline and defers (see
+    ``tests/unit/session/test_mcp_schema_lifecycle.py``); only a schema over
+    ``MAX_INLINE_TOOL_SCHEMA_CHARS`` takes this route, so the fixture's schema
+    is padded past the cap to keep pinning it.
+    """
     from local_operator.harness.types import AgentTool
 
     async def never_execute(*args, **kwargs):
@@ -1785,7 +1805,7 @@ async def test_mcp_detail_read_activates_exactly_one_schema_in_the_live_session(
     selected = AgentTool(
         name="mcp__linear_get_user",
         description="Return the authenticated Linear user",
-        parameters={"type": "object", "properties": {}},
+        parameters=_over_inline_cap_schema(),
         approval_tier="read",
         execute=never_execute,
     )
@@ -1854,7 +1874,9 @@ async def test_activating_an_mcp_tool_keeps_a_capability_merged_after_wiring(
     mcp_tool = AgentTool(
         name="mcp__linear_get_user",
         description="Return the authenticated Linear user",
-        parameters={"type": "object", "properties": {}},
+        # Over the inline cap so the read takes the publication path this test
+        # is about (an inline-sized schema defers and never rebinds).
+        parameters=_over_inline_cap_schema(),
         approval_tier="read",
         execute=never_execute,
     )

@@ -53,11 +53,14 @@ import { messageRuntime, useCapabilities, useDraft } from "../store";
 import {
 	browserCanRecord,
 	micSlot,
+	dictatedDraftIntact,
 	pressIsReflex,
 	primaryRole,
+	sendRecordingNext,
 	trackArrival,
 	type Arrival,
 	type PrimaryRole,
+	type SendRecordingPhase,
 } from "../lib/composer-slots";
 import { stopTurn, useTurnStopping } from "../lib/turn-stop";
 import type { PromptImage, SessionProjection, SkillEntry, SlashCommand } from "../types";
@@ -667,6 +670,28 @@ function PrimaryButton({
 			</button>
 		);
 	}
+	if (role === "send-recording-busy") {
+		/* The press was taken: a static disc that still names what it was, inert.
+		   `aria-disabled` + a no-op rather than `disabled`, so the disc keeps its
+		   accent look instead of the sunken disabled one (the working line's Stop
+		   does the same). It is a fresh button (keyed by role), so a press that
+		   began on the role before it cannot complete here; focus is handed to the
+		   field by the role-change effect. Slot A carries the one spinner. */
+		return (
+			<button
+				type="button"
+				data-role={role}
+				aria-label="send recording"
+				aria-busy
+				aria-disabled
+				onClick={() => {}}
+				{...focus}
+				className={cn(COMPOSER_ROUND, "bg-accent text-on-accent")}
+			>
+				<span aria-hidden>↑</span>
+			</button>
+		);
+	}
 	const connecting = role === "connecting";
 	return (
 		<button
@@ -674,9 +699,13 @@ function PrimaryButton({
 			data-role={role}
 			onClick={onSend}
 			disabled={!canSend || connecting}
-			aria-label={messageRuntime.t(
-				connecting ? "relay.composer.action.connecting" : role === "steer" ? "relay.composer.action.steer" : "relay.composer.action.send",
-			)}
+			aria-label={
+				role === "send-recording"
+					? "send recording"
+					: messageRuntime.t(
+							connecting ? "relay.composer.action.connecting" : role === "steer" ? "relay.composer.action.steer" : "relay.composer.action.send",
+						)
+			}
 			{...focus}
 			className={cn(
 				COMPOSER_ROUND,
@@ -840,12 +869,30 @@ export function Composer({
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	/* THE PRIMARY SLOT'S ROLE (slot B of the action cluster). One occupant, so
 	   send / steer / stop are never drawn together; see `primaryRole`. */
+	const [dictation, setDictation] = useState<DictationState>("idle");
+	/* The transient outcome line (added / empty / discarded); lives in the same
+	   status row as the live states so nothing moves between them (D3). */
+	const [dictationNotice, setDictationNotice] = useState("");
+	const dictationRef = useRef<DictationState>("idle");
+	dictationRef.current = dictation;
+	/* "SEND RECORDING" (slot B while the mic records): stop the take, transcribe it
+	   and submit the words as a message, in one press. The phase is state because it
+	   draws slot B; the pending press (the draft and attachments it saw, and what
+	   the box must hold when the transcript has landed) is a ref because only the
+	   handlers and the effect below read it. See `sendRecordingNext`. */
+	const [sendRecording, setSendRecording] = useState<SendRecordingPhase>("idle");
+	const sendRecordingRef = useRef<{
+		draft: { text: string; images: typeof images };
+		expected: string | null;
+	} | null>(null);
 	const stopping = useTurnStopping(pid, projection.streaming);
 	const role = primaryRole({
 		alive: projection.streaming,
 		stopping,
 		sending,
 		hasPayload: text.trim() !== "" || images.length > 0,
+		dictation,
+		sendRecording,
 	});
 	/* When the role last ARRIVED in the slot, for the Stop guard. A ref written in a
 	   layout effect: it is read only from a click handler, never during render. */
@@ -955,12 +1002,6 @@ export function Composer({
 		};
 	}, [pid, skillCapability]);
 
-	const [dictation, setDictation] = useState<DictationState>("idle");
-	/* The transient outcome line (added / empty / discarded); lives in the same
-	   status row as the live states so nothing moves between them (D3). */
-	const [dictationNotice, setDictationNotice] = useState("");
-	const dictationRef = useRef<DictationState>("idle");
-	dictationRef.current = dictation;
 	const [recordSeconds, setRecordSeconds] = useState(0);
 	const recorderRef = useRef<MediaRecorder | null>(null);
 	const streamRef = useRef<MediaStream | null>(null);
@@ -1224,6 +1265,14 @@ export function Composer({
 		}
 	};
 
+	/** The pending "Send recording" is over and NOTHING is sent: a failure, an
+	    empty or edited-over transcript, a discarded take. The words, if any, are
+	    already in the box as an ordinary dictation. */
+	const endDictatedSend = () => {
+		sendRecordingRef.current = null;
+		setSendRecording((phase) => sendRecordingNext(phase, { type: "discarded" }));
+	};
+
 	/** Stop the in-flight dictation and DISCARD it: tracks released, timers
 	    cleared, any in-flight result dropped when it lands. Idempotent, and
 	    safe while the permission prompt is still up (the epoch refuses the
@@ -1233,6 +1282,10 @@ export function Composer({
 		dictationActiveRef.current = false;
 		dictationEpochRef.current++;
 		clearDictationTimers();
+		/* A take thrown away sends nothing: the pending "Send recording" ends with it
+		   (the status row's cancel, a typed send, an unmount), or slot B would hold
+		   its busy face for good. */
+		endDictatedSend();
 		/* U5: a transcription in flight is cancelled for REAL — the abort reaches
 		   the request, not just the UI. A no-op when nothing is in flight. */
 		transcribeAbortRef.current?.abort();
@@ -1323,6 +1376,30 @@ export function Composer({
 		}
 	};
 
+	/* ENTER DURING A TAKE IS "INSERT TRANSCRIPT", AS ON DESKTOP: stop the take,
+	   transcribe it, put the words in the box, send nothing. It is a window-level
+	   key (the mic or Cancel the user just tapped holds focus, not the box), claimed
+	   only while a take is RECORDING: while it is transcribing there is no recorder
+	   left to stop, and `dictation !== "recording"` leaves the key inert, so the take
+	   in flight is neither discarded nor sent (the Send recording phase is also
+	   transcribing, so its busy disc is covered by the same rule). A focused button
+	   keeps its own native Enter (Cancel cancels, the Send recording disc sends the
+	   take); Shift+Enter stays the box's newline, and an IME owns Enter while it
+	   composes a candidate. */
+	useEffect(() => {
+		if (dictation !== "recording") return undefined;
+		const onKey = (event: KeyboardEvent) => {
+			if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+			const target = event.target;
+			if (target instanceof Element && target !== textareaRef.current && target.closest("button, a, input, select, textarea, summary, [role='dialog']")) return;
+			event.preventDefault();
+			stopDictation();
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- `stopDictation` reads refs and stable setters only
+	}, [dictation]);
+
 	const finishDictation = async (recorder: MediaRecorder) => {
 		clearDictationTimers();
 		releaseDictationTracks();
@@ -1332,6 +1409,7 @@ export function Composer({
 		if (dictationCancelledRef.current) return;
 		if (chunks.length === 0) {
 			dictationActiveRef.current = false;
+			endDictatedSend();
 			setDictation("idle");
 			setRecordSeconds(0);
 			return;
@@ -1347,6 +1425,7 @@ export function Composer({
 		} catch (e) {
 			if (dictationCancelledRef.current) return;
 			dictationActiveRef.current = false;
+			endDictatedSend();
 			setError(dictationErrorCopy(e));
 			setDictation("idle");
 			setRecordSeconds(0);
@@ -1364,6 +1443,15 @@ export function Composer({
 		const previous = textRef.current;
 		const joined = joinDraft(previous, result.text);
 		const cleaned = result.text.trim();
+		/* A "Send recording" press sends ONLY when the box is still what the press
+		   saw (same text, same attachments) and the transcript has words. The
+		   transcript is appended exactly as an ordinary dictation appends it, and
+		   the effect below submits it once that render has committed. */
+		const pressed = sendRecordingRef.current;
+		const dictatedSend =
+			pressed !== null &&
+			cleaned !== "" &&
+			dictatedDraftIntact(pressed.draft, { text: previous, images: imagesRef.current });
 		if (cleaned !== "" && joined !== previous) {
 			provenanceRef.current = noteDictation(provenanceRef.current, {
 				start: joined.length - cleaned.length,
@@ -1375,16 +1463,41 @@ export function Composer({
 			revealAppendRef.current = true;
 			setText(joined);
 			setCaret(null);
-			/* U3: a polite completion line, the announcement a screen reader was
-			   missing; see the DICTATION_ADDED comment for the focus tradeoff. */
-			setDictationNotice(DICTATION_ADDED);
+			if (dictatedSend && pressed) {
+				pressed.expected = joined;
+				setSendRecording((phase) => sendRecordingNext(phase, { type: "transcript", usable: true }));
+			} else {
+				/* U3: a polite completion line, the announcement a screen reader was
+				   missing; see the DICTATION_ADDED comment for the focus tradeoff. */
+				setDictationNotice(DICTATION_ADDED);
+			}
 		} else if (cleaned === "") {
 			/* D2: silence (or a cut-off) is answered instead of the silent
 			   return to idle the design review caught. */
 			setDictationNotice(DICTATION_EMPTY);
 		}
+		/* Empty, or the box changed under the wait: the words (if any) stay in the
+		   box for the user to read, and nothing is sent. */
+		if (!dictatedSend) endDictatedSend();
 		setDictation("idle");
 		setRecordSeconds(0);
+	};
+
+	/** "SEND RECORDING": stop the take, transcribe it and submit the words in one
+	    press. Only the PRESS lives here; the send is the effect below, run against
+	    the render in which the transcript is in the box. */
+	const sendRecordingPress = () => {
+		if (dictationRef.current !== "recording" || sendRecordingRef.current !== null) return;
+		if (sending || retryPending || disabled) return;
+		/* A recorder that is already stopping (the 120 s cap fired between the render
+		   and this tap) has its own transcribe-and-insert in flight, and no `onstop`
+		   is left to answer this press: entering the phase would hold slot B for
+		   good. The take is inserted, not sent. */
+		const recorder = recorderRef.current;
+		if (!recorder || recorder.state === "inactive") return;
+		sendRecordingRef.current = { draft: { text: textRef.current, images: imagesRef.current }, expected: null };
+		setSendRecording((phase) => sendRecordingNext(phase, { type: "press" }));
+		stopDictation();
 	};
 
 	/** Clear the draft AND its provenance window: a fresh message starts clean. */
@@ -1672,6 +1785,37 @@ export function Composer({
 		const failure = await stopTurn(pid);
 		if (failure !== null) setError(failure);
 	};
+
+	/* THE SEND HALF OF "SEND RECORDING", run against the render in which the
+	   transcript is in the box (the handlers' closures are older). It sends only the
+	   text this press produced, never a slash command (a transcript that starts
+	   with "/" stays in the box for the user to read), and not while another send
+	   or a pending retry owns the composer. Every refusal ends the phase and leaves
+	   the words in the box. `submitting` holds slot B inert until the send settles,
+	   so the disc cannot flip to Stop under the finger. */
+	useEffect(() => {
+		if (sendRecording === "ready-to-submit") {
+			const pending = sendRecordingRef.current;
+			sendRecordingRef.current = null;
+			const entered =
+				pending !== null &&
+				pending.expected !== null &&
+				text === pending.expected &&
+				images === pending.draft.images &&
+				!sending &&
+				!retryPending &&
+				!disabled &&
+				!isSlashDraft(text, images.length);
+			if (entered) void send(text);
+			else setDictationNotice(DICTATION_ADDED);
+			setSendRecording((phase) => sendRecordingNext(phase, { type: "checked", entered }));
+			return;
+		}
+		if (sendRecording === "submitting" && !sending) {
+			setSendRecording((phase) => sendRecordingNext(phase, { type: "settled", sending: false }));
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- `send` is this render's; the phase is the trigger
+	}, [sendRecording, sending, text, images]);
 
 	const onChange = (value: string, caretAt: number | null) => {
 		applyUserEdit(value);
@@ -2134,6 +2278,12 @@ export function Composer({
 							}
 							if (e.key === "Enter" && !e.shiftKey) {
 								e.preventDefault();
+								/* While a take is recording or transcribing, Enter must not send the
+								   typed draft: `send` discards the take, and the words the user just
+								   spoke vanish. The desktop composer refuses it the same way. During
+								   a RECORDING the window-level handler above turns this same key
+								   into Insert transcript; here it only keeps the newline out. */
+								if (dictationRef.current !== "idle" || sendRecording !== "idle") return;
 								void send(text);
 							}
 						}}
@@ -2188,8 +2338,15 @@ export function Composer({
 						key={role}
 						role={role}
 						arrivedAt={() => arrivalRef.current?.arrivedAt ?? 0}
-						canSend={!retryPending && (text.trim() !== "" || images.length > 0) && !disabled}
-						onSend={() => void send(text)}
+						canSend={
+							role === "send-recording"
+								? !retryPending && !sending && !disabled
+								: /* A plain Send or Steer is inert while the take is being transcribed:
+								     a press would abort the request and send the OLD draft, the same
+								     discard `send` makes of a live take. */
+									!retryPending && dictation !== "transcribing" && (text.trim() !== "" || images.length > 0) && !disabled
+						}
+						onSend={() => (role === "send-recording" ? sendRecordingPress() : void send(text))}
 						onStop={() => void abort()}
 						onFocusChange={(focused) => { slotFocusedRef.current = focused; }}
 					/>

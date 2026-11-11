@@ -146,7 +146,7 @@ from local_operator.imaging import (
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
 )
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import python_argv, session_python_argv
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
 from local_operator.procstate import (
@@ -20154,22 +20154,22 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
 async def _sessions_launch(
     argv: list[str], env: dict[str, str], cwd: str | None
 ) -> tuple[int, str]:
-    """Run THIS build's CLI (``python -P -m local_operator.cli …``) and return
-    ``(returncode, stderr)``.
+    """Run the new session's CLI and return ``(returncode, stderr)``.
 
-    Not ``shutil.which("lop")``: the ``lop`` on PATH may be a different build
-    (a global install, a generation pointer) than the session that spawned
-    it, and the two could disagree about a flag the argv above uses.
-    ``python_argv`` adds ``-P`` so a checkout that merely happens to be the
-    cwd cannot shadow the installed package — the same spelling
-    ``update.py``'s relaunch and ``tui/session_move.py``'s nested run use.
+    A generation-installed parent resolves the concrete CURRENT interpreter
+    for this independent session, not its own pinned old build. Developer and
+    legacy installs stay on their own interpreter. Never use PATH's ``lop``:
+    it may belong to an unrelated install. ``session_python_argv`` also keeps
+    ``-P`` so a checkout in the cwd cannot shadow the selected distribution.
+    This boundary intentionally follows updates; same-session helpers and mesh
+    protocol calls continue to use their parent's build.
 
     The child is its own process group so a fired bound can reap the whole
     tree; ``stdin`` is /dev/null because an exec run is never interactive
     (``--control`` is deliberately not exposed by this tool).
     """
     process = await asyncio.create_subprocess_exec(
-        *python_argv(*_SESSIONS_CLI, *argv),
+        *session_python_argv(*_SESSIONS_CLI, *argv),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -35397,8 +35397,8 @@ class AskParams(BaseModel):
 #: marked an option ``recommended`` has already stated what it would do.
 ASK_UNANSWERED_TEXT = (
     "The user closed the question without answering, so nothing was chosen. "
-    "Do not ask again: decide yourself (take your recommended option where you "
-    "gave one), then say in one line what you assumed and carry on."
+    "Do not ask again: decide yourself (take your recommended option(s) where you "
+    "gave any), then say in one line what you assumed and carry on."
 )
 
 

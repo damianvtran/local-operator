@@ -47,6 +47,7 @@ import {
 	isAnswerable,
 	isDeadConversation,
 	isLapsed,
+	recommendedRows,
 	unansweredQuestions,
 } from "../lib/asks";
 import { clearAskDraft, messageRuntime, useAskDraft } from "../store";
@@ -289,8 +290,9 @@ function QuestionField({
 				   because the harness option model has no boolean to read. Any index
 				   is honoured — the wire, the type and the TUI all treat it as a
 				   position, and pinning it to 0 would badge nothing the day the
-				   runtime stops hoisting (agent review round 2, N1). */
-				const recommended = question.recommended === index;
+				   runtime stops hoisting (agent review round 2, N1). A multi-select
+				   may recommend several rows, so every one in the set is badged. */
+				const recommended = recommendedRows(question).includes(index);
 				return (
 					<button
 						key={option.label}
