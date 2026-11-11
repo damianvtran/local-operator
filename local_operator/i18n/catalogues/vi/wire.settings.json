@@ -736,6 +736,8 @@
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Trần tán gẫu mỗi giờ",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "Trần sàng lọc theo khung giờ trượt cho toàn bộ tài khoản, dùng chung cho mọi phiên và mọi máy đăng nhập vào tài khoản đó. Có hiệu lực ngay, không cần khởi động lại.",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "Trần sàng lọc mỗi giờ",
+  "wire.settings.team_bridge_screening_model.help": "Mô hình nào sàng lọc tin nhắn từ tác nhân gửi đến trước. Để trống sẽ dùng thứ tự đã được kiểm nghiệm, mặc định an toàn nhất. Việc chọn chỉ đưa mô hình đó lên trước: nếu mô hình không khả dụng hoặc hết hạn mức, mô hình đã cấu hình trên máy này và các phương án dự phòng vẫn sàng lọc, nên lựa chọn không bao giờ chặn tin nhắn.",
+  "wire.settings.team_bridge_screening_model.label": "Mô hình sàng lọc",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "Phần của một người gửi trong trần tài khoản; mặc định là một nửa. Một người gửi không bao giờ vượt quá chính trần tài khoản.",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "Trần theo người gửi mỗi giờ",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "Lấy ra từ trần tài khoản, không bao giờ cộng thêm vào tổng: mọi thứ, trừ khi có người nhắn trực tiếp cho tác nhân của bạn, chỉ được dùng tối đa chừng này. Phần còn lại để dành cho con người.",

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "8c13130a8b3fe73e4ae79de7635344a77ca221b8f53d3c49a4675dc1a55c6064",
+  "history_sha256": "bb0d0fdf8e366d385f0ec37f97e628b6920c87683297ffb20995be110d0fd9c7",
   "entries": [
     {
       "locale": "es",
@@ -133,6 +133,27 @@
     {
       "locale": "es",
       "namespace": "wire.settings",
+      "source_sha256": "206f2b124405f689f1f953755f384c8c3ab0e00036f079afa12006d3b42024e4",
+      "translator": {
+        "agent": "coder agent (radientdev team subagent, screening-pref implementer)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08"
+      },
+      "auditor": {
+        "agent": "verifier",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Delta review (NOT a full re-audit of the namespace) of the two new keys team_bridge_screening_model.label/.help added by the screening-preference change, en wire.settings sha 206f2b12. Audit by the independent verifier specialist (fallback disclosed: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol -> deepseek/deepseek-flash); verdict: 0 blockers, 4 major, 7 minor across the seven locales. This locale PASSED with no required change (options offered by the auditor were not required and were not taken). Source copy written by the coder agent, itself served on deepseek/deepseek-flash (same fallback chain). read_route_verified false: the audit read the catalogue, not a live surface."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
       "source_sha256": "440b3561fe65bd10971369890785ecc7b0383563580385cd19aafd51ad5149d4",
       "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
       "target_sha256": "87b023b7c4d9e6bb7e52ba367b0f9d9d3e9f9f689ce9afdb2d46dab29dc7497c",
@@ -179,6 +200,31 @@
       "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 3 keys audited in this namespace (tui_busy_delivery choice steer/queue/both description). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit (same auditor, only the 8 changed/new keys audited): PASS 0 blocker/major, no findings, first pass. Wave-1 findings (queue_notice/queue.description majors, steer.description minor) are superseded where their keys were replaced in wave 2 and re-audited. No second independent audit: copy is not high-visibility/safety; no second_audit field.",
       "round": "r3",
       "keys_audited": 3
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "b1bcfd823f343c8f08f46b98fb827fa563904a709fbfe75a67f2e8a1cf8c49b6",
+      "context_sha256": "31cff35cdb37c6e87efd4d9a9f9ef737d479b1efe4f19dad2139a412a3bce25e",
+      "target_sha256": "93fbb12017cd7b9c395d25081004c9da1f461b8fda799464757cf8bcb204fc40",
+      "translator": {
+        "agent": "upstream: coder agent (radientdev team subagent, screening-pref implementer); ours: task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "upstream: deepseek/deepseek-flash (requested); ours: anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "no new audit: union of two independent audits. Upstream (screening keys, verifier deepseek/deepseek-flash, 2026-11-08; delta review of team_bridge_screening_model.label/.help at en sha 206f2b12…, findings 0, unresolved_blocker_major 0). Ours (busy-delivery keys, codex MCP gpt-5.6-sol requested, 2026-11-10; wave 1 r2 + wave 2 r3, findings 0, unresolved_blocker_major 0).",
+        "model": "upstream: deepseek/deepseek-flash (requested); ours: gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "MERGE-UNION receipt (NOT a new semantic audit): merge reconciliation of concurrent additions to one namespace; no value changed. Origin/main en wire.settings sha 206f2b124405… and ours bffca6147c3a… merged to b1bcfd823f34…. Proof (this session, scripted): merged <locale>/wire.settings.json == origin/main's file + exactly our 8 tui_busy_delivery keys; every value byte-identical to one of the two independently audited states (origin/main catalogue for upstream keys; committed e635f034a catalogue for our 8 keys); keyset union, zero mismatches on all 7 locales. Only wave-1/2 keys were newly audited by us (r2 keys_audited 8, r3 keys_audited 3, previous rows in this file); upstream keys audited under their own row. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed.",
+      "round": "r4",
+      "keys_audited": 10
     }
   ]
 }
