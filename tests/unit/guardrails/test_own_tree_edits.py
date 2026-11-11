@@ -38,6 +38,7 @@ from typing import Any
 import pytest
 
 from local_operator.guardrails import provenance as prov
+from local_operator.guardrails import resolve
 from local_operator.guardrails.check import CallContext, GuardSettings, check_tool_call
 from local_operator.guardrails.classify import Risk, classify_bash
 from local_operator.guardrails.preview import preview_tool_call
@@ -494,3 +495,82 @@ def test_a_cd_after_the_loop_keeps_the_field_pin(home: Path, ui: Path) -> None:
     )
     v = _classify(home, command)
     assert v.risk is Risk.LOW, [(t.target.path, t.reason) for t in v.targets]
+
+
+# -- review round 3 (PR #3816) -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # ``done`` as an ARGUMENT ended the body scan before the ``cd``.
+        ": > $f; echo done; cd ~/.local-operator",
+        # A nested loop behind ``time`` was not counted, so its ``done``
+        # closed the outer body early.
+        ": > $f; time while false; do :; done; cd ~/.local-operator",
+        ": > $f; time -p while false; do :; done; cd ~/.local-operator",
+        ": > $f; ! until true; do :; done; cd ~/.local-operator",
+        # A nested loop opened behind ``then``, inside ``if … fi``.
+        ": > $f; if true; then while false; do :; done; fi; cd ~/.local-operator",
+        ": > $f; if while false; do :; done; then :; fi; cd ~/.local-operator",
+    ],
+    ids=["echo-done", "time-while", "time-p-while", "bang-until", "then-while", "if-while"],
+)
+def test_the_body_ends_at_a_done_in_command_position(home: Path, ui: Path, body: str) -> None:
+    """m1 (round 3): ``done`` closes a loop only as the first word of a command.
+
+    Real bash, with ``wt/{a,config}.yml`` and ``st/config.yml``: ``(cd wt &&
+    for f in *.yml; do : > $f; echo done; cd ../st; done)`` and the same loop
+    with ``time while false; do :; done`` in place of ``echo done`` both left
+    ``st/config.yml`` at 0 bytes. The scan stopped at the first ``done`` word,
+    never saw the ``cd`` and pinned the state root's config.yml LOW.
+    """
+    wt = ui / ".worktrees" / "bridge-single-recipient"
+    (wt / "a.yml").write_text("k: v\n")
+    (wt / "config.yml").write_text("k: v\n")
+    _own(home, wt)  # the root changed after recording (Linux ctime stamp)
+    v = _classify(home, f"cd {WT} && for f in *.yml; do {body}; done")
+    assert v.risk >= Risk.HIGH, [(t.target.path, t.reason) for t in v.targets]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "sed -i '' '/x/,/y/d' $f; echo done",
+        "sed -i '' '/x/,/y/d' $f; if true; then while false; do :; done; fi",
+    ],
+    ids=["echo-done", "if-nested-loop"],
+)
+def test_a_done_argument_or_nested_loop_keeps_the_field_pin(
+    home: Path, ui: Path, body: str
+) -> None:
+    """The fix must still find the real end: no ``cd`` in the body stays LOW."""
+    command = (
+        f"cd {WT} && for f in src/i18n/catalogues/*/ui.teamBridge.json; "
+        f"do {body}; done; cd ~/.local-operator"
+    )
+    v = _classify(home, command)
+    assert v.risk is Risk.LOW, [(t.target.path, t.reason) for t in v.targets]
+
+
+def _for_body_moves_of(command: str, index: int) -> bool:
+    lexed = resolve.lex(command)
+    pieces, _ = resolve._fd_redirect_merge(lexed.segments, lexed.bodies)
+    return resolve._for_body_moves(pieces, index)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "for f in *.yml; do sed -i '' /x/d $f",  # no closing ``done``
+        "for f in *.yml; do : > $f; time while false; do :; done",  # only the inner one closes
+    ],
+    ids=["unterminated", "only-inner-done"],
+)
+def test_an_undetermined_body_end_fails_closed(command: str) -> None:
+    """No matching ``done``: the body's extent is unknown, so do not pin."""
+    assert _for_body_moves_of(command, 0) is True
+
+
+def test_a_piece_that_does_not_open_a_loop_fails_closed() -> None:
+    assert _for_body_moves_of("echo for; done", 0) is True

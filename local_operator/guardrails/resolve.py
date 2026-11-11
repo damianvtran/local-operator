@@ -1677,7 +1677,30 @@ _BODY_MOVES_RE = re.compile(
     r"|(?<![\w./~$-])set(?:\s+\S+)*?\s+(?:[-+][A-Za-z]*P|[-+]o\b|\$)"
 )
 _LOOP_OPENERS = ("for", "while", "until", "select")
-_LOOP_LEAD_WORDS = ("do", "then", "else", "elif", "!", "{", "(")
+#: Words that may sit in front of a loop keyword or ``done`` in command
+#: position (review round 3 m1). ``time`` takes an optional ``-p``.
+_LOOP_LEAD_WORDS = ("time", "!", "if", "then", "else", "elif", "do")
+
+
+def _command_word(text: str) -> str:
+    """The word in command position of a piece, past reserved lead words.
+
+    Strips leading ``time [-p]``, ``!``, ``if``, ``then``, ``else``, ``elif``,
+    ``do`` and group openers ``{``/``(`` (not ``((``, arithmetic), and trailing
+    ``)``/``}`` glued to the word (``done)`` closes a loop in a subshell).
+    """
+    head = text.strip()
+    while head:
+        word = head.split(None, 1)[0]
+        if word in _LOOP_LEAD_WORDS:
+            head = head[len(word) :].lstrip()
+            if word == "time" and head.split(None, 1)[:1] == ["-p"]:
+                head = head[2:].lstrip()
+        elif head[:1] in ("(", "{") and head[:2] != "((":
+            head = head[1:].lstrip()
+        else:
+            return word.rstrip(")}")
+    return ""
 
 
 def _for_body_moves(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
@@ -1691,32 +1714,31 @@ def _for_body_moves(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool
     subshell (``do (cd ~/.local-operator && sed -i … $f)``). Rather than
     model iterations and subshells, a relative glob is pinned only when the
     body, nested loops and subshells included, holds no ``cd``/``pushd``/
-    ``popd``/``set -P`` at all. The extent runs to the matching ``done``
-    (nested loops counted); an unterminated loop scans to the end.
+    ``popd``/``set -P`` at all.
+
+    The extent runs to the matching ``done`` (nested loops counted). Review
+    round 3 m1: ``done`` and the loop openers count only in COMMAND position
+    (:func:`_command_word`) — ``echo done`` is an argument, and a nested
+    ``time while …`` / ``then while …`` is a loop whose ``done`` must not
+    close this one. Either mistake ended the scan before a later ``cd``.
+    When no matching ``done`` is found the extent is unknown, so this fails
+    closed (``True``: do not pin).
     """
     depth = 0
     body: list[str] = []
     for text, _flag, _op in pieces[index:]:
-        head = text.strip()
-        while True:
-            word = head.split(None, 1)[0] if head else ""
-            if word in _LOOP_LEAD_WORDS:
-                head = head[len(word) :].lstrip()
-            elif head[:1] in ("(", "{") and head[:2] != "((":
-                head = head[1:].lstrip()
-            else:
-                break
-        if (head.split(None, 1)[0] if head else "") in _LOOP_OPENERS:
+        word = _command_word(text)
+        if word in _LOOP_OPENERS:
             depth += 1
-        body.append(text if body else head.split(None, 1)[-1])
-        tail = _strip_trailing_redirects(text).rstrip(")}; ")
-        while tail.endswith("done") and (len(tail) == 4 or not (tail[-5].isalnum() or tail[-5] in "_./-")):
+        elif word == "done":
             depth -= 1
-            tail = tail[:-4].rstrip(")}; ")
+        if not body and depth != 1:
+            return True  # this piece does not open a loop as parsed: fail closed
+        # The header (``for f in <words>``) is excluded: a list word is data.
+        body.append(text if body else "")
         if depth <= 0:
-            break
-    # The header (``for f in <words>``) is excluded: a list word is data.
-    return bool(_BODY_MOVES_RE.search("\n".join(body[1:])))
+            return bool(_BODY_MOVES_RE.search("\n".join(body[1:])))
+    return True
 
 
 #: A STDOUT redirect: fd-less or ``1>``, or ``&>`` (R6-2). ``2>err.log`` only
@@ -3223,6 +3245,7 @@ class _Walker:
         key = self._landing(dest)
         if known and pointee is not None and key is not None:
             self._set_link(key, pointee)
+
     def _for_glob_words(self, exp: Expanded) -> list[Expanded] | None:
         """The list words a whole-word ``$VAR`` bound by a glob ``for`` stands for.
 
