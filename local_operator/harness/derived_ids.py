@@ -14,6 +14,8 @@ because ``compaction.tokens`` must not import ``session``.
 
 from __future__ import annotations
 
+import itertools
+
 #: ``harness.replay_bound``: a copy with the middle of a long tool result elided.
 ELIDED_ID_SUFFIX = "~rb"
 
@@ -27,3 +29,21 @@ NAME_ID_SUFFIX = "~nm"
 #: Every derived-copy suffix. Add a new derived-copy kind here, and the
 #: invalidation covers it.
 DERIVED_ID_SUFFIXES: tuple[str, ...] = (ELIDED_ID_SUFFIX, HINT_ID_SUFFIX, NAME_ID_SUFFIX)
+
+
+def derived_copy_ids(base_id: str) -> frozenset[str]:
+    """Every id a derived copy of ``base_id`` could carry.
+
+    The writers append their suffix to whatever id their input already
+    carries, so a message transformed twice is keyed with the composed id
+    (``<id>~rb~nm`` for a bounded, then named, call). Eviction must cover any
+    ordering or combination of the suffixes, not just the single ones, so
+    this enumerates every subset in every order: 15 derived ids for the
+    three current suffixes, and a new suffix adds O(n) ones without touching the
+    eviction. Excludes ``base_id`` itself, which the caller pops separately.
+    """
+    out: set[str] = set()
+    for length in range(1, len(DERIVED_ID_SUFFIXES) + 1):
+        for combination in itertools.permutations(DERIVED_ID_SUFFIXES, length):
+            out.add(f"{base_id}{''.join(combination)}")
+    return frozenset(out)

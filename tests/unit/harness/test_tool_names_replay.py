@@ -221,3 +221,87 @@ def test_repeated_garble_rewrites_to_bash(name: str):
     history = garbled_pair(name=name)
     out = normalise_replay_tool_names(history, TOOLS)
     assert next(m for m in out if m.role == "assistant").tool_calls[0].name == "bash"
+
+
+def test_reused_call_id_later_keeps_its_genuine_error():
+    """A call id reused later must not consume the earlier garble's rewrite.
+
+    Pairing is in order: the pending rewrite is consumed by the NEXT result
+    with that id, later repetition is a new call and keeps its own result.
+    """
+    history = [
+        Message.user("go"),
+        Message(
+            role="assistant",
+            content=[TextContent(text="a")],
+            tool_calls=[ToolCall(id="c1", name="bashLecture", arguments={})],
+            provider_payload={"x": 1},
+        ),
+        Message(
+            role="tool",
+            content=[TextContent(text="Tool not found: bashLecture")],
+            tool_call_id="c1",
+            tool_name="bashLecture",
+            is_error=True,
+        ),
+        Message(
+            role="assistant",
+            content=[TextContent(text="b")],
+            tool_calls=[ToolCall(id="c1", name="bash", arguments={"y": 2})],
+            provider_payload={"x": 2},
+        ),
+        Message(
+            role="tool",
+            content=[TextContent(text="exit status 1: permission denied")],
+            tool_call_id="c1",
+            tool_name="bash",
+            is_error=True,
+        ),
+    ]
+    out = normalise_replay_tool_names(history, ["bash"])
+    calls = [m for m in out if m.role == "assistant"]
+    results = [m for m in out if m.role == "tool"]
+    assert calls[0].tool_calls[0].name == "bash"
+    assert calls[0].provider_payload is None
+    assert results[0].text == format_malformed_notice("bash")
+    # Later, genuine pair untouched (by identity).
+    assert calls[1] is history[3]
+    assert results[1] is history[4]
+    assert results[1].text == "exit status 1: permission denied"
+
+
+def test_replay_warning_is_deduped_per_process(caplog) -> None:
+    """One warning per (real name, remainder length) per process.
+
+    Rebuilding the same history must not emit one line per garbled call per
+    request; the comment in the normaliser pins that contract.
+    """
+    import logging
+
+    from local_operator.harness.tool_names import _LOGGED_NEAR_MISSES
+
+    _LOGGED_NEAR_MISSES.clear()
+    history = [Message.user("go")]
+    for i in range(3):
+        history.append(
+            Message(
+                role="assistant",
+                content=[TextContent(text="a")],
+                tool_calls=[ToolCall(id=f"c{i}", name="bashLecture", arguments={})],
+            )
+        )
+    for i in range(3):
+        history.append(
+            Message(
+                role="tool",
+                content=[TextContent(text="Tool not found: bashLecture")],
+                tool_call_id=f"c{i}",
+                tool_name="bashLecture",
+                is_error=True,
+            )
+        )
+    with caplog.at_level(logging.WARNING, logger="local_operator.harness.tool_names"):
+        for _ in range(3):
+            normalise_replay_tool_names(history, TOOLS)
+    warnings = [r for r in caplog.records if "replay tool name" in r.message]
+    assert len(warnings) == 1

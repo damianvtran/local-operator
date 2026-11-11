@@ -27487,6 +27487,17 @@ class Session:
         :meth:`_offloaded`, at a call site that cannot use it (this is not a
         ruler on the module).
         """
+        # The compaction span is a model request in both strategies (the text
+        # summarizer serializes it into the prompt; the archive renders back
+        # into later requests), so it takes the same wire sanitiser as the
+        # turn and the aside — before ``split_leading_marker`` — and the garbled
+        # name never reaches the compaction model, where a summary that kept it
+        # would write it back into durable history through the compaction
+        # marker. Copy-only: the caller's span stays untouched. Other history
+        # builders need no cover: the eval runner's history carries no tool
+        # calls, the mobile relay sends no model request of its own, and a
+        # subagent seeds no parent history.
+        to_summarize = normalise_replay_tool_names(list(to_summarize), self._tools)
         if strategy == "snapcompact":
             try:
                 from local_operator.compaction import snapcompact

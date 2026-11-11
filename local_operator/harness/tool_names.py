@@ -56,6 +56,12 @@ _CANDIDATE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: ``bash2``) — a different tool, never a garble.
 _IDENT_CHAR_RE = re.compile(r"^[a-z0-9_]")
 
+#: ``(real name, remainder length)`` pairs already warned about, so one
+#: garbled call costs one WARNING per process instead of one per request
+#: build. The remainder itself is never stored — only its length, for the
+#: same reason the log line never carries it.
+_LOGGED_NEAR_MISSES: set[tuple[str, int]] = set()
+
 
 def near_miss_tool(name: str, tools: Iterable[object]) -> str | None:
     """The real tool ``name`` garbled from, or ``None`` when it did not.
@@ -125,32 +131,17 @@ def normalise_replay_tool_names(
     provider-native payload still holds the original garbled name. Messages
     with no near-miss pass through by identity; the function is idempotent
     and never mutates its input.
-    """
-    rewrites: dict[str, str] = {}
-    for message in messages:
-        if not isinstance(message, Message):
-            continue
-        if message.role != "assistant" or not message.tool_calls:
-            continue
-        for call in message.tool_calls:
-            real = near_miss_tool(call.name, tool_names)
-            if real is not None:
-                rewrites[call.id] = real
-                # One line per garbled call per process (deduped): the real
-                # name and the remainder LENGTH only — never the remainder
-                # itself, which is provider-controlled and may carry a
-                # credential. See loop.py's assembled-call warning for the
-                # same rule.
-                logger.warning(
-                    "replay tool name was a near-miss of %s (junk remainder %d chars); "
-                    "rewriting the name for the wire only",
-                    real,
-                    len(call.name) - len(real),
-                )
-    if not rewrites:
-        return list(messages)
 
+    Pairing is in order: a pending rewrite is set when its assistant call is
+    seen and consumed by the next result with that id, so a call id reused
+    later in the history keeps its own genuine result instead of being
+    rewritten as though it were the earlier garble's. The pending entry is
+    also consumed by a non-error result — the garbled call's only result is
+    the harness's error, so that result needed no rewrite, and consuming
+    keeps the pending set from leaking onto a later reuse.
+    """
     out: list[Message] = []
+    pending: dict[str, str] = {}
     for message in messages:
         if not isinstance(message, Message):
             out.append(message)
@@ -159,18 +150,35 @@ def normalise_replay_tool_names(
             calls: list[ToolCall] = []
             changed = False
             for call in message.tool_calls:
-                real = rewrites.get(call.id)
+                real = near_miss_tool(call.name, tool_names)
                 if real is None:
                     calls.append(call)
-                else:
-                    calls.append(call.model_copy(update={"name": real}))
-                    changed = True
+                    continue
+                pending[call.id] = real
+                remainder_len = len(call.name) - len(real)
+                if (real, remainder_len) not in _LOGGED_NEAR_MISSES:
+                    _LOGGED_NEAR_MISSES.add((real, remainder_len))
+                    # The real name and the remainder LENGTH only — never the
+                    # remainder itself, which is provider-controlled and may
+                    # carry a credential. See loop.py's assembled-call warning
+                    # for the same rule.
+                    logger.warning(
+                        "replay tool name was a near-miss of %s (junk remainder %d chars); "
+                        "rewriting the name for the wire only",
+                        real,
+                        remainder_len,
+                    )
+                calls.append(call.model_copy(update={"name": real}))
+                changed = True
             if changed:
                 out.append(_norm_copy(message, tool_calls=calls, provider_payload=None))
             else:
                 out.append(message)
-        elif message.role == "tool" and message.tool_call_id in rewrites and message.is_error:
-            real = rewrites[message.tool_call_id]
+        elif message.role == "tool" and message.tool_call_id in pending:
+            real = pending.pop(message.tool_call_id)
+            if not message.is_error:
+                out.append(message)
+                continue
             notice = format_malformed_notice(real)
             content = [
                 TextContent(text=notice) if isinstance(block, TextContent) else block
