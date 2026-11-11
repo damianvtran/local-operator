@@ -1397,6 +1397,10 @@ class ServingSessionHandle(SessionHandle):
         # and disposal reaps it (``SupplementRunner.cancel``). Scheduling is a no-op when
         # the feature is disabled.
         self._supplements.schedule_sweep(loop)
+        # Settled background music joins its producing turn's highlights (the runner's
+        # ``on_music_settled``). Owner-only, like ``_maybe_supplement``: a follower must
+        # never write a supplement row.
+        session.music_settled_listener = self._on_music_settled
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
@@ -4637,6 +4641,12 @@ class ServingSessionHandle(SessionHandle):
             )
         except Exception:  # noqa: BLE001 — the event path never fails on the judge
             logger.debug("goal judge trigger failed", exc_info=True)
+
+    async def _on_music_settled(self, receipt: Mapping[str, Any]) -> None:
+        from local_operator.session.goal_judge import owns_the_session
+
+        if owns_the_session(self._session):
+            await self._supplements.on_music_settled(receipt)
 
     def _maybe_supplement(self, event: AgentEndEvent) -> None:
         """Schedule a turn supplement off a turn's end (docs/design/turn-supplements.md §2.1).
