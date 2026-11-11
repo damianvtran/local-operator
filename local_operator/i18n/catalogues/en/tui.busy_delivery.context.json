@@ -7,6 +7,6 @@
   "tui.busy_delivery.both_notice": {
     "role": "busy-send notice",
     "tone": "note",
-    "note": "Shown when a message sent to a working turn is queued and escalates to a steer if it waits too long: it waits now and the tools keep running. Deliberately identical to queue_notice — the height contract keeps the settle from reflowing the transcript."
+    "note": "Shown when a message sent to a working turn is queued and escalates to a steer if it sits too long (about 45 seconds): it waits first, tools keep running, then it interrupts like a steer. Kept within a few characters of queue_notice so the rendered height matches across 20-90 columns."
   }
 }
