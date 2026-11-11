@@ -332,7 +332,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "into your reply and waiting. Give each question at least two "
             "options, put the consequence of each in its description, and mark "
             "the one you recommend (it is moved to the top of the list and "
-            "preselected).\n"
+            "badged; nothing is ticked). A multi-select may recommend several.\n"
             "- Every question also offers the user a free-text answer, so the "
             "options do not have to be exhaustive.\n"
             "- Ask everything you need in ONE call; large option lists and "

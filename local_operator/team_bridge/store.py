@@ -1505,6 +1505,8 @@ _DELIVERY_HOLD_CODES = frozenset(
         "schema_unsupported",
         "schema_unversioned",
         "ref_migration_conflict",
+        # record_feed_batch's quarantine of a ref this build cannot read
+        "malformed_feed_ref",
         "stale_generation",
         "not_enrolled",
         "busy",
@@ -1713,6 +1715,48 @@ def read_screening_status(config_dir: Path) -> dict[str, Any] | None:
         return store.screening_status_readonly(owner)
     except Exception:  # noqa: BLE001 — a status read never fails its caller
         return None
+
+
+#: ``screening_holds.hold_code`` for a feed ref :func:`_contentless_delivery_key`
+#: refused. See :func:`_quarantine_feed_ref`.
+FEED_REF_QUARANTINE_CODE = "malformed_feed_ref"
+
+#: Key prefix of a quarantine row. Never a ``bcmsg_``/``bmsg_`` id and never the
+#: conversation-ref prefix, so no retry, release or publish path mistakes the row
+#: for a message it could act on.
+FEED_REF_QUARANTINE_PREFIX = "quarantine:feed_ref:"
+
+
+def _quarantine_feed_ref(conn: sqlite3.Connection, owner_key: str, raw: str) -> None:
+    """Park ONE unreadable feed ref as a visible, content-free hold.
+
+    WHY. A feed batch is written atomically; a ref the parser refuses used to
+    abort the batch, so the cursor never advanced and the receiver stalled on
+    one row. The owner must still SEE that something arrived and was set aside
+    (``lop team-bridge receiver status`` counts holds by code), so the ref
+    becomes a ``screening_holds`` row rather than being dropped silently.
+
+    CONSTRAINTS. The key is a SHA-256 digest of the raw ref, never the ref: a
+    refused value is by definition one this build cannot vouch for, and an old
+    layout could carry display names. The digest is stable, so a re-fetched
+    page re-hits the same row (``INSERT OR IGNORE`` keeps the first
+    ``created_at``) instead of growing the table.
+    The row is excluded from :meth:`Store.due_screening_holds`: there is no
+    message to re-drive, so it waits for the owner, not the backoff.
+    """
+
+    digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    conn.execute(
+        "INSERT OR IGNORE INTO screening_holds "
+        "(owner_key, message_id, hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+        (
+            owner_key,
+            f"{FEED_REF_QUARANTINE_PREFIX}{digest}",
+            FEED_REF_QUARANTINE_CODE,
+            None,
+            time.time(),
+        ),
+    )
 
 
 def _contentless_delivery_key(value: str) -> str:
@@ -3140,7 +3184,10 @@ class Store:
         """
 
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+        from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
         from local_operator.team_bridge.types import is_conversation_message_id
+
+        review_codes = sorted(REVIEW_HOLD_CODES)
 
         empty: dict[str, Any] = {"count": 0}
         cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
@@ -3158,13 +3205,27 @@ class Store:
             # so it leaves this count ONLY once that notice was actually
             # recorded (``notified_at``). A refused notice keeps it here, so no
             # held message can be invisible to both alerts.
+            #
+            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) with a decision
+            # row leaves it too (operator report 2026-11-10: "the sidebar badge
+            # is sufficient", at most one daily rollup). Its decision row IS the
+            # Deliver/Discard item the Agent messages badge and holds list show,
+            # so the owner already sees it; counting it here made this keyed
+            # rollup re-revision (re-banner) on every count change during a
+            # model_hold flood. Keyed on the DECISION, not the hold code alone:
+            # with ``review_held: false`` no decision is written, the hold has no
+            # badge exit, and it stays counted here so it is never invisible to
+            # every alert. Work-scope holds and screening-unavailable codes
+            # (provider errors, parse failures) are unaffected.
             try:
                 noticed = {
                     str(r["message_id"])
                     for r in conn.execute(
                         "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
-                        "AND notified_at IS NOT NULL",
-                        (_owner_key(owner),),
+                        "AND (notified_at IS NOT NULL OR hold_code IN ({}))".format(
+                            ",".join("?" * len(review_codes))
+                        ),
+                        (_owner_key(owner), *review_codes),
                     ).fetchall()
                 }
             except sqlite3.OperationalError:
@@ -4480,9 +4541,21 @@ class Store:
             ).fetchone()
             pending = int(current["pending_resync"]) if current is not None else 0
             for ref in event_refs:
+                try:
+                    canonical = _contentless_delivery_key(str(ref))
+                except StoreRefused:
+                    # ONE ref this build cannot read must never wedge the feed.
+                    # The batch is atomic, so raising here used to roll back
+                    # every good ref AND the cursor; the next poll re-fetched
+                    # the same page and failed the same way, forever (operator
+                    # report 2026-11-10: every inbound message stuck at
+                    # ``not_admitted`` behind one 8-part ref). Quarantine the
+                    # bad ref as a visible hold instead and let the rest commit.
+                    _quarantine_feed_ref(conn, _owner_key(owner), str(ref))
+                    continue
                 conn.execute(
                     "INSERT OR IGNORE INTO feed_refs (owner_key, ref, seq) VALUES (?,?,?)",
-                    (_owner_key(owner), _contentless_delivery_key(str(ref)), int(cursor)),
+                    (_owner_key(owner), canonical, int(cursor)),
                 )
             if resync_required or pending:
                 # A fresh cursor may be LOWER than the stored one (the server
@@ -7490,6 +7563,10 @@ class Store:
                     f"SELECT message_id, hold_code, retry_at, created_at, {no_batch} AS no_batch "
                     "FROM screening_holds "
                     "WHERE owner_key = ? AND (retry_at IS NULL OR retry_at <= ?) "
+                    # A quarantined feed ref has no message the retry could
+                    # re-drive (its key is a digest, by design): it waits for
+                    # the owner, never for the backoff.
+                    f"AND hold_code != '{FEED_REF_QUARANTINE_CODE}' "
                     # HIGHEST TIER, THEN OLDEST, among the due rows (agent-server
                     # #294 S-1; #3400 m3): a refill makes a whole backlog due at
                     # once, and the bounded pass must serve a person's DM before
@@ -7894,9 +7971,17 @@ class Store:
             key = _owner_key(owner)
             deleted = 0
             for ref in refs:
+                try:
+                    stored = _contentless_delivery_key(str(ref))
+                except StoreRefused:
+                    # A row an older writer stored before its shape stopped
+                    # parsing: delete it by its exact stored spelling. Raising
+                    # would roll back the whole drained batch and replay it
+                    # forever (the same wedge ``record_feed_batch`` guards).
+                    stored = str(ref)
                 cur = conn.execute(
                     "DELETE FROM feed_refs WHERE owner_key = ? AND ref = ?",
-                    (key, _contentless_delivery_key(str(ref))),
+                    (key, stored),
                 )
                 deleted += int(cur.rowcount or 0)
             return deleted
@@ -8220,10 +8305,17 @@ class Store:
         return int(rows[0]["n"]) if rows else 0
 
     def unnotified_work_scope_holds(self, owner: OwnerSnapshot) -> int:
+        from local_operator.team_bridge.hold_release import WORK_SCOPE_HOLD
+
         rows = self._work_scope_rows(
             "SELECT COUNT(*) AS n FROM work_scope_decisions WHERE owner_key = ? "
-            "AND eligible = 1 AND notified_at IS NULL AND cleared_at IS NULL",
-            (_owner_key(owner),),
+            "AND eligible = 1 AND notified_at IS NULL AND cleared_at IS NULL "
+            # Only work-scope holds can be waiting for a per-message notice: a
+            # review hold is badge-only and never notified (operator report
+            # 2026-11-10), so counting it would inflate the overflow's "N more"
+            # forever.
+            "AND hold_code = ?",
+            (_owner_key(owner), WORK_SCOPE_HOLD),
         )
         return int(rows[0]["n"]) if rows else 0
 

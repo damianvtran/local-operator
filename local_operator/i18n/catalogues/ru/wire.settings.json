@@ -736,6 +736,8 @@
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Потолок болтовни в час",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "Скользящий часовой потолок фильтрации для всей учётной записи: его делят все её сессии и компьютеры. Применяется сразу, без перезапуска.",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "Потолок фильтрации в час",
+  "wire.settings.team_bridge_screening_model.help": "Какая модель первой проверяет входящие сообщения агентов. Пустое значение использует проверенный порядок — самый безопасный вариант. Выбор лишь выдвигает эту модель вперёд: если она недоступна или исчерпала квоту, фильтрацию выполняют собственная модель этой машины и её резервные варианты, поэтому предпочтение никогда не блокирует сообщения.",
+  "wire.settings.team_bridge_screening_model.label": "Модель фильтрации",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "Доля одного отправителя от потолка учётной записи; по умолчанию — половина. Отправитель никогда не может превысить сам потолок учётной записи.",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "Потолок на отправителя в час",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "Выделяется из потолка учётной записи и никогда не добавляется к нему: всё, что не является сообщением человека вашему агенту, может занимать не больше этой доли. Остальное остаётся людям.",

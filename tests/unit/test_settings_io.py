@@ -664,6 +664,7 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
         DEFAULT_TEAM_BRIDGE_ENABLED,
         DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
+        DEFAULT_TEAM_BRIDGE_SCREENING_MODEL,
         DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR,
         DEFAULT_TEAM_BRIDGE_SESSION,
@@ -675,6 +676,10 @@ def _team_bridge_consumer_defaults() -> dict[str, object]:
             DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR
         ),
         "team_bridge.screening.budget_per_hour": DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
+        # The ONE screening default that is not a number: "no preference". A row
+        # advertising anything else would mean the page offers a model the chain
+        # does not try until a write lands.
+        "team_bridge.screening.model": DEFAULT_TEAM_BRIDGE_SCREENING_MODEL,
         "team_bridge.screening.sender_budget_per_hour": (
             DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR
         ),
@@ -822,8 +827,17 @@ def test_the_screening_read_maximum_matches_the_registry_rows() -> None:
         "team_bridge.screening.unaddressed_budget_per_hour",
         "team_bridge.screening.ambient_budget_per_hour",
         "team_bridge.screening.sender_budget_per_hour",
+        # The model CHOICE is not a ceiling: it has no maximum to mirror, and
+        # the read path clamps nothing about it. Pinned here as well as in
+        # ``test_no_setting_can_disable_the_admission_gate`` because a row that
+        # slid into this list would have to satisfy one of the two shapes, and
+        # this is the assertion that would notice.
+        "team_bridge.screening.model",
     ]
     for row in rows:
+        if row.key == "team_bridge.screening.model":
+            assert row.maximum is None, row.key
+            continue
         assert row.maximum == SCREENING_BUDGET_MAX_READ, row.key
 
 

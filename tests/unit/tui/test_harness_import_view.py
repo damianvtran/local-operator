@@ -17,6 +17,7 @@ from local_operator.slash_commands import SLASH_COMMANDS, slash_command_for
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.harness_import_view import HarnessImportView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.waiting import settle
 
 FIXTURES = Path(__file__).resolve().parents[1] / "harness_import" / "fixtures"
 
@@ -59,7 +60,15 @@ async def _open_omp(pilot) -> HarnessImportView:
             break
         await pilot.press("down")
     await pilot.press("enter")
-    await _settle(pilot, lambda: view._state == "sessions")
+    # ``_state`` flips to "sessions" before the list's layout lands, so a test
+    # acting on the page (End, scroll offsets) must also wait for the loading
+    # worker to finish and the refresh after it.
+    await settle(
+        pilot,
+        lambda: view._state == "sessions",
+        what="the omp session list opened",
+        workers=("harness-import",),
+    )
     return view
 
 

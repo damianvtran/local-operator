@@ -1,0 +1,8 @@
+{
+  "wire.music.label": "Music",
+  "wire.music.started": "Music generation started — job {job}.",
+  "wire.music.progress": "Music: {completed}/{total} tracks settled.",
+  "wire.music.ready": "Music ready — job {job}.",
+  "wire.music.failed": "Music generation failed: {error}",
+  "wire.music.cancel_requested": "Cancellation requested for {job}. Running generation may still complete and be charged; results remain retrievable."
+}

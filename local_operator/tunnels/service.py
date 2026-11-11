@@ -14,7 +14,9 @@ import shutil
 import signal
 import socket
 import subprocess
+import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
@@ -42,6 +44,11 @@ from local_operator.tunnels.gateway import (
     TERMINAL_DETAIL,
     UNREACHABLE,
     Gateway,
+)
+from local_operator.tunnels.relay.connector import (
+    RelayConnector,
+    RelayGrant,
+    parse_grant,
 )
 
 POLL_SECONDS = 10
@@ -84,6 +91,97 @@ def _announce(message: str) -> None:
     print(f"{stamp} local_operator.tunnels.service: {message}", flush=True)
 
 
+#: How long cloudflared keeps running after this process first sees the tunnel's
+#: `transport` read "relay" (C2.2 requires at least 15 min; the program brief
+#: asks for a 30-minute overlap, which satisfies both). The overlap covers
+#: resolvers still caching the old proxied CNAME after the per-hostname DNS
+#: flip: until they expire, some phones still reach the device via Cloudflare.
+#: Counted from first observation in THIS process because the flip time is not
+#: on the record; a restart therefore re-runs cloudflared for one more window,
+#: which costs a child process and never a request.
+RELAY_OVERLAP_SECONDS = 30 * 60
+
+
+class CloudflaredOverlap:
+    """Decide, poll by poll, whether cloudflared must still run beside the relay."""
+
+    def __init__(self, window: float | None = None) -> None:
+        self.window = RELAY_OVERLAP_SECONDS if window is None else window
+        self.relay_since: float | None = None
+
+    def keep(self, transport: object, now: float) -> bool:
+        if transport != config.TRANSPORT_RELAY:
+            # Not flipped, or flipped back: Cloudflare is the public path.
+            self.relay_since = None
+            return True
+        if self.relay_since is None:
+            self.relay_since = now
+        return now - self.relay_since < self.window
+
+
+def connector_name() -> str:
+    """`hello.connector` and the WS User-Agent: ``local-operator/<version>`` (C1.1)."""
+    import importlib.metadata
+
+    try:
+        version = importlib.metadata.version("local-operator")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    return f"local-operator/{version}"[:64]
+
+
+async def refresh_relay(
+    api: RadientTunnels, value: dict[str, Any], connection: dict[str, Any]
+) -> RelayGrant | None:
+    """A fresh connector token from `/connect`, or ``None`` to leave relay mode.
+
+    ``None`` when the answer no longer matches what this process verified at
+    start (inactive, another version, relay withdrawn): the session's hello
+    must equal the token's claims (C1.4), and a different version means a new
+    origin-proof context anyway, so the right move is the restart that
+    re-runs every start-up check.
+    """
+    fresh = config.validate_connection(await api.request("POST", tunnel_path(value) + "/connect"))
+    tunnel = fresh["tunnel"]
+    if not active(tunnel) or tunnel.get("version") != connection["tunnel"]["version"]:
+        return None
+    return parse_grant(fresh.get("relay"))
+
+
+async def _spawn_cloudflared(
+    binary: str, *, ready_file: Path, token_file: Path, env: dict[str, str]
+) -> asyncio.subprocess.Process:
+    return await asyncio.create_subprocess_exec(
+        binary,
+        "tunnel",
+        "--no-autoupdate",
+        "--loglevel",
+        "error",
+        "--grace-period",
+        "1s",
+        "--pidfile",
+        str(ready_file),
+        "run",
+        "--token-file",
+        str(token_file),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+async def _terminate(child: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        child.terminate()
+    try:
+        await asyncio.wait_for(child.wait(), timeout=5)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            child.kill()
+        await child.wait()
+
+
 def cloudflared_binary(configured: str | None = None) -> str:
     binary = configured or shutil.which("cloudflared")
     if not binary:
@@ -93,12 +191,22 @@ def cloudflared_binary(configured: str | None = None) -> str:
         raise LocalPrerequisite(
             "Install cloudflared 2025.4.0 or newer, then run lop tunnel install."
         )
-    result = subprocess.run(
-        [binary, "tunnel", "run", "--help"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            [binary, "tunnel", "run", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as failure:
+        # A saved `cloudflared_path` that no longer exists (the operator removed
+        # cloudflared, the program's end state) or a hung probe is the same
+        # local prerequisite as "not installed": callers that make cloudflared
+        # optional when the relay is offered catch only LocalPrerequisite, and
+        # an OSError here would crash-loop a device the relay could serve.
+        raise LocalPrerequisite(
+            "Install cloudflared 2025.4.0 or newer, then run lop tunnel install."
+        ) from failure
     if result.returncode or "--token-file" not in result.stdout:
         raise LocalPrerequisite(
             "Update cloudflared to 2025.4.0 or newer (token-file support required)."
@@ -481,7 +589,20 @@ async def run() -> int:
         healed = config.load()
         _announce(f"pin re-pointed at start to credential {healed.get('credential_id')}")
         value = healed
-    binary = cloudflared_binary(value.get("cloudflared_path"))
+    override = config.transport_override()
+    missing_binary: LocalPrerequisite | None = None
+    binary: str | None
+    try:
+        binary = cloudflared_binary(value.get("cloudflared_path"))
+    except LocalPrerequisite as failure:
+        if override == config.TRANSPORT_CLOUDFLARE:
+            raise
+        # Deferred, not dropped: only `/connect` can say whether this server
+        # offers the relay, and a relay-capable device needs no cloudflared at
+        # all. Without a relay the same LocalPrerequisite is raised right after
+        # `/connect`, so an old server parks exactly as before (one /connect
+        # later).
+        binary, missing_binary = None, failure
     # Bind before contacting the cloud or starting cloudflared: a conflicting
     # listener must never receive an enabled public route even momentarily.
     listener = socket.socket()
@@ -500,6 +621,8 @@ async def run() -> int:
     server: Any = None
     serve_task: asyncio.Task[Any] | None = None
     gateway: Gateway | None = None
+    relay: RelayConnector | None = None
+    relay_task: asyncio.Task[None] | None = None
     restart = False
     try:
         # Proxy configuration and environment credentials are not forwarded to
@@ -530,6 +653,13 @@ async def run() -> int:
                     "Gateway port changed in the console. Run lop tunnel connect again."
                 )
             enforce_harness_ports(connection, value)
+            offered = parse_grant(connection.get("relay"))
+            # Recorded whatever the kill switch says, so setup surfaces know what
+            # the server offers; `config.relay_offered` applies the switch.
+            await asyncio.to_thread(config.record_relay_offer, offered is not None)
+            grant = None if override == config.TRANSPORT_CLOUDFLARE else offered
+            if grant is None and missing_binary is not None:
+                raise missing_binary
             needs_mobile = any(
                 h["enabled"] and h["id"] == "local-operator"
                 for h in connection["tunnel"]["harnesses"]
@@ -539,46 +669,90 @@ async def run() -> int:
                 password = value.get("mobile_password")
             if needs_mobile and not password:
                 raise LocalPrerequisite("Install the mobile relay with lop mobile install first.")
+
+            def cloudflared_ready() -> bool:
+                return ready_file.exists() and child is not None and child.returncode is None
+
             gateway = Gateway(
                 connection,
                 client,
                 mobile_password=password,
                 opencode_basic=value.get("opencode_basic"),
                 connector_ready=lambda: (
-                    ready_file.exists() and child is not None and child.returncode is None
+                    (relay is not None and relay.connected) or cloudflared_ready()
                 ),
+                connector_transport=lambda: (
+                    config.TRANSPORT_RELAY if relay is not None else config.TRANSPORT_CLOUDFLARE
+                ),
+                cloudflared_running=cloudflared_ready,
             )
+
             token = connection.get("cloudflared_token")
-            if not isinstance(token, str) or not token or "\n" in token:
+            token_usable = isinstance(token, str) and bool(token) and "\n" not in token
+            if grant is None and not token_usable:
                 raise ValueError("Radient did not return a connector token.")
-            config.private_write(token_file, token)
-            ready_file.unlink(missing_ok=True)
-            # No credentials in argv, inherited environment, or logs. A
-            # per-tunnel token authorizes only its connector, never Cloudflare
-            # account administration. cloudflared debug logging is forbidden.
-            child_env = {
-                k: v
-                for k, v in os.environ.items()
-                if k in {"PATH", "HOME", "SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR"}
-            }
-            child = await asyncio.create_subprocess_exec(
-                binary,
-                "tunnel",
-                "--no-autoupdate",
-                "--loglevel",
-                "error",
-                "--grace-period",
-                "1s",
-                "--pidfile",
-                str(ready_file),
-                "run",
-                "--token-file",
-                str(token_file),
-                env=child_env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+
+            async def start_cloudflared() -> None:
+                nonlocal child
+                assert binary is not None and isinstance(token, str)
+                config.private_write(token_file, token)
+                ready_file.unlink(missing_ok=True)
+                # No credentials in argv, inherited environment, or logs. A
+                # per-tunnel token authorizes only its connector, never Cloudflare
+                # account administration. cloudflared debug logging is forbidden.
+                child_env = {
+                    k: v
+                    for k, v in os.environ.items()
+                    if k in {"PATH", "HOME", "SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+                }
+                child = await _spawn_cloudflared(
+                    binary, ready_file=ready_file, token_file=token_file, env=child_env
+                )
+
+            if grant is None:
+                await start_cloudflared()
+            elif binary is not None and token_usable:
+                # Dual-run (C2.2): until the hostname's DNS has flipped to the
+                # relay, public traffic still arrives through Cloudflare, so the
+                # relay session alone would serve nobody.
+                await start_cloudflared()
+            else:
+                _announce("relay offered and cloudflared unavailable; running relay-only")
+            if grant is not None:
+                relay = RelayConnector(
+                    grant,
+                    tunnel_id=connection["tunnel"]["id"],
+                    version=connection["tunnel"]["version"],
+                    gateway_port=value["gateway_port"],
+                    refresh=lambda: refresh_relay(api, value, connection),
+                    name=connector_name(),
+                    announce=_announce,
+                )
+            overlap = CloudflaredOverlap()
+
+            async def reconcile_cloudflared(record: dict[str, Any]) -> None:
+                """Keep cloudflared exactly as long as public DNS may still use it."""
+                if binary is None or not token_usable:
+                    return
+                running = child is not None and child.returncode is None
+                if overlap.keep(record.get("transport"), time.monotonic()):
+                    if not running:
+                        # Crashed, or retired before an unflip: Cloudflare is
+                        # the public path again, so it must come back.
+                        _announce(
+                            "cloudflared not running while Cloudflare still routes; starting it"
+                        )
+                        await start_cloudflared()
+                elif running:
+                    assert child is not None
+                    _announce(
+                        f"transport is relay for {RELAY_OVERLAP_SECONDS // 60} min; "
+                        "stopping cloudflared"
+                    )
+                    await _terminate(child)
+                    ready_file.unlink(missing_ok=True)
+                    token_file.unlink(missing_ok=True)
+
             server = uvicorn.Server(
                 uvicorn.Config(
                     gateway.app(),
@@ -644,6 +818,8 @@ async def run() -> int:
                             stop.set()
                             return
                         gateway.authorize()
+                        if relay is not None:
+                            await reconcile_cloudflared(record)
                     try:
                         await asyncio.wait_for(stop.wait(), timeout=POLL_SECONDS)
                     except TimeoutError:
@@ -656,7 +832,15 @@ async def run() -> int:
             # as the truth about a process none of them can see.
             _withdraw_park(because="the connector is serving")
             stopping = asyncio.create_task(stop.wait())
-            exited = asyncio.create_task(child.wait())
+            if relay is not None:
+                # In relay mode the relay task is the connector whose end stops
+                # the unit; cloudflared is a dual-run helper the poller restarts
+                # or retires (`reconcile_cloudflared`), never a reason to exit.
+                relay_task = asyncio.create_task(relay.run())
+                exited = relay_task
+            else:
+                assert child is not None
+                exited = asyncio.create_task(child.wait())
             try:
                 # `scanner` belongs in this set: a poller that dies of a failure
                 # this loop does not classify must stop the unit rather than
@@ -668,8 +852,26 @@ async def run() -> int:
                 )
             finally:
                 stopping.cancel()
-                exited.cancel()
-                await asyncio.gather(stopping, exited, return_exceptions=True)
+                if relay_task is not None and relay_task.done():
+                    # Revoked, or `/connect` stopped offering the relay: both
+                    # are answered by a fresh `/connect`, i.e. a restart — the
+                    # same remedy the poller applies to a version change.
+                    restart = True
+                    crash = None if relay_task.cancelled() else relay_task.exception()
+                    if (
+                        crash is not None
+                        and relay is not None
+                        and not (relay.revoked.is_set() or relay.withdrawn.is_set())
+                    ):
+                        # A connector bug must not become a silent restart loop:
+                        # name the exception type (never its args, which could
+                        # carry request bytes) so the service log says why.
+                        _announce(f"relay connector crashed: {type(crash).__name__}; restarting")
+                elif relay_task is None:
+                    exited.cancel()
+                await asyncio.gather(stopping, return_exceptions=True)
+                if relay_task is None:
+                    await asyncio.gather(exited, return_exceptions=True)
                 # Consume the poller's own failure when that is what ended the
                 # unit, and bound it: teardown must not wait on a poller parked
                 # inside a control-plane request.
@@ -687,19 +889,17 @@ async def run() -> int:
         if scanner is not None:
             scanner.cancel()
             await asyncio.gather(scanner, return_exceptions=True)
+        if relay is not None:
+            await relay.close()
+        if relay_task is not None:
+            relay_task.cancel()
+            await asyncio.gather(relay_task, return_exceptions=True)
         if server is not None:
             server.should_exit = True
         if serve_task is not None:
             await serve_task
         if child is not None and child.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                child.terminate()
-            try:
-                await asyncio.wait_for(child.wait(), timeout=5)
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    child.kill()
-                await child.wait()
+            await _terminate(child)
         listener.close()
         token_file.unlink(missing_ok=True)
         ready_file.unlink(missing_ok=True)

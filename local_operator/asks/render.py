@@ -69,7 +69,7 @@ LATE_LEAD = (
 TIMEOUT_NOTICE = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
-    "Proceed without it: use your recommended option or best judgment and state the "
+    "Proceed without it: use your recommended option(s) or best judgment and state the "
     "assumption in your report."
 )
 
@@ -111,7 +111,7 @@ TIMEOUT_NOTICE_DISMISSED = (
     "[Ask timed out] No reply to ask {ask_id} arrived within {waited} (asked {asked}). "
     "{questions}\n"
     "The user dismissed it without answering.\n"
-    "Proceed without it: use your recommended option or best judgment and state the "
+    "Proceed without it: use your recommended option(s) or best judgment and state the "
     "assumption in your report."
 )
 

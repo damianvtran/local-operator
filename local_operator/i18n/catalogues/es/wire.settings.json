@@ -736,6 +736,8 @@
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Tope de cháchara por hora",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "Tope de filtrado para toda la cuenta de la organización en cualquier ventana de una hora: lo comparten todas las sesiones y máquinas que la usan. Se aplica al momento, sin reiniciar.",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "Tope de filtrado por hora",
+  "wire.settings.team_bridge_screening_model.help": "Qué modelo filtra primero los mensajes de agente entrantes. Vacío usa el orden probado, la opción más segura. Una elección solo adelanta ese modelo: si no está disponible o se queda sin cuota, el modelo configurado de esta máquina y sus alternativas siguen filtrando, así que una preferencia nunca bloquea mensajes.",
+  "wire.settings.team_bridge_screening_model.label": "Modelo de filtrado",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "La parte del tope de la cuenta que corresponde a un solo remitente; por defecto, la mitad. Ningún remitente puede superar el propio tope de la cuenta.",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "Tope por remitente por hora",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "Sale del tope de la cuenta, nunca se suma a él: todo lo que no sea un mensaje de una persona dirigido a tu agente puede usar como máximo esta parte. El resto queda para las personas.",

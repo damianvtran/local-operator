@@ -183,6 +183,17 @@ test-affected: ## Run the tests this branch's diff affects; print PR evidence
 # had armed none, on every arming. `jq --arg` is the supported way to bind the
 # values, and gh's `--json` output is what it consumes.
 #
+# Before any label write, look for live gates on this head. A status-filtered
+# existence query needs only one result (not a bounded slice of old history).
+# This guard is advisory and non-atomic: it reduces redundant queued runs but
+# does not guarantee their absence, and is not a lock. Simultaneous direct label writes
+# can still produce two runs; native per-ref concurrency remains the backstop.
+# Retry transient lookups at most 3 times, 1 s apart, 5 s per request, sharing
+# a 17 s total advisory budget (3*5 + 2*1), then warn and proceed. This is a
+# small operator-wait policy budget, not a measured GitHub latency percentile.
+# Auth failures refuse; unusable responses require the manual override. The explicit
+# I_KNOW_A_GATE_RUN_EXISTS=1 override skips the lookup with a visible warning,
+# so even an unreachable API cannot prevent an intentional arm.
 # Prints the triggered run and how to follow it.
 merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	@set -e; \
@@ -195,6 +206,35 @@ merge-gate: ## Re-arm the full-suite merge gate on PR=<number>
 	set -- $$spec; state="$$1"; head_sha="$$2"; head="$$3"; \
 	if [ "$$state" != "OPEN" ]; then \
 	  echo "make merge-gate: PR #$(PR) is $$state, not OPEN; only an open PR can be re-armed" >&2; exit 1; \
+	fi; \
+	if [ "$(I_KNOW_A_GATE_RUN_EXISTS)" = "1" ]; then \
+	  echo "WARNING: I_KNOW_A_GATE_RUN_EXISTS=1: existing-gate lookup did not run (skipped); intentionally arming without duplicate detection" >&2; \
+	else \
+	advisory_helper="$(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/merge_gate_advisory.py"; \
+	advisory_deadline="$$(python3 -c 'import time; print(time.monotonic() + 17)')"; \
+	for active_status in queued in_progress pending waiting requested; do \
+	  if active="$$(python3 "$$advisory_helper" "$$advisory_deadline" \
+	    gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" \
+	    --commit "$$head_sha" --status "$$active_status" --limit=1 --json databaseId,url)"; then :; \
+	  else \
+	    if printf '%s\n' "$$active" | grep -Eiq 'HTTP 401|bad credentials|unauthori[sz]ed|authentication failed' \
+	      || { printf '%s\n' "$$active" | grep -Eiq 'HTTP 403' && ! printf '%s\n' "$$active" | grep -Eiq 'rate.?limit'; }; then \
+	      echo "make merge-gate: existing-gate lookup auth/permission failure: $$active; no label changed" >&2; exit 1; \
+	    fi; \
+	    if printf '%s\n' "$$active" | grep -Eiq 'rate.?limit|HTTP 429|HTTP 5[0-9][0-9]|timed? out|timeout|network|connection|no response|API unavailable|error connecting|no such host|TLS handshake|EOF' || [ -z "$$active" ]; then \
+	      echo "WARNING: existing-gate lookup unavailable after bounded retry ($$active_status): $${active:-no response}; proceeding to arm without duplicate detection; manual recovery for an unusable lookup or owner-diagnosed stuck/invalid run: make merge-gate PR=$(PR) I_KNOW_A_GATE_RUN_EXISTS=1" >&2; \
+	      break; \
+	    fi; \
+	    echo "make merge-gate: cannot check existing $$active_status gates (unrecognised response): $$active; no label changed; lane-owner manual recovery only: make merge-gate PR=$(PR) I_KNOW_A_GATE_RUN_EXISTS=1" >&2; exit 1; \
+	  fi; \
+	  active="$$(printf '%s\n' "$$active" | jq -er 'if type == "array" and all(.[]; type == "object" and (.databaseId | type == "number") and (.url | type == "string" and length > 0)) then (.[0] // empty | "\(.databaseId) \(.url)"), "" else error("malformed run response") end')" \
+	    || { echo "make merge-gate: malformed existing-gate response; no label changed; lane-owner manual recovery only: make merge-gate PR=$(PR) I_KNOW_A_GATE_RUN_EXISTS=1" >&2; exit 1; }; \
+	  if [ -n "$$active" ]; then \
+	      echo "make merge-gate: refusing to arm PR #$(PR): $$active_status gate run $$active already exists for $$head_sha" >&2; \
+	      echo "  follow that run; intentional duplicate only: make merge-gate PR=$(PR) I_KNOW_A_GATE_RUN_EXISTS=1" >&2; \
+	      exit 1; \
+	  fi; \
+	done; \
 	fi; \
 	prev="$$(gh run list --workflow=full-suite.yml --event=pull_request --branch "$$head" --limit 20 \
 	  --json databaseId,headSha \
