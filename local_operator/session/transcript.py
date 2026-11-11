@@ -219,6 +219,13 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         CHANNEL_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
+        # Idle / pre-wake compaction's anti-thrash receipts
+        # (``compaction/idle.py``): written while the session is parked, so
+        # they must not move the activity clock. Literals pinned against
+        # ``COMPACTION_IDLE_*_TYPE`` by a unit test (this module does not import
+        # the compaction package).
+        "compaction_idle_pass",
+        "compaction_idle_declined",
         # Each finite display proof has its own deterministic key. Unlike the
         # hot checkpoint this archive must survive compaction of later turns.
         "frontend_peer_cycle_display_v1",
@@ -2876,6 +2883,7 @@ class Transcript:
         carried_asks: list[dict[str, Any]] | None = None,
         carried_decisions: list[dict[str, Any]] | None = None,
         resume_card: dict[str, Any] | None = None,
+        trigger: str | None = None,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -2955,6 +2963,13 @@ class Transcript:
         # byte-identical to one written before the card existed (#3448).
         if resume_card is not None:
             payload["resume_card"] = resume_card
+        # Only non-default triggers are spelled (today: ``"idle"``), for the
+        # same byte-identity reason: a size or manual pass writes the record
+        # it always wrote. The idle pass's measured after-size rides its
+        # ``compaction_idle_pass`` custom row, because it is only known after
+        # this marker is committed.
+        if trigger:
+            payload["trigger"] = trigger
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(

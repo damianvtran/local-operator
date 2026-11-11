@@ -18,6 +18,18 @@ def aida_next_checkin(*, when: str) -> Msg:
     return Msg("tui.app.aida.next_checkin", {"when": when})
 
 
+def compaction_idle_receipt(*, detail: str) -> Msg:
+    return Msg("tui.app.compaction.idle_receipt", {"detail": detail})
+
+
+def compaction_idle_receipt_bare() -> Msg:
+    return Msg("tui.app.compaction.idle_receipt_bare", {})
+
+
+def compaction_idle_skipped() -> Msg:
+    return Msg("tui.app.compaction.idle_skipped", {})
+
+
 def config_applied(*, keys: str) -> Msg:
     return Msg("tui.app.config.applied", {"keys": keys})
 

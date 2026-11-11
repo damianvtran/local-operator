@@ -2514,6 +2514,96 @@ _WIRE_BUDGET_RATCHET = 0.75
 _WIRE_BUDGET_FLOOR = 4_000_000
 
 
+def _idle_cache_ttl_from_usage(usage: Any) -> float | None:
+    """``compaction.idle.cache_ttl_from_usage``, degrading to ``None``.
+
+    Resolved lazily for the reason the session imports ``compaction.api``
+    lazily: a build without the compaction package must still run turns.
+    """
+    try:
+        from local_operator.compaction.idle import cache_ttl_from_usage
+    except ImportError:  # pragma: no cover - compaction is part of every build
+        return None
+    return cache_ttl_from_usage(usage)
+
+
+async def _settle_before_end(
+    hook: Callable[[CompactionOutcome], Awaitable[None]] | None,
+    outcome: CompactionOutcome,
+) -> None:
+    """Run ``_finish_compaction``'s ``before_end`` hook; never raises.
+
+    Swallowing is the contract: the hook is bookkeeping, and a raise here
+    would skip the ``compaction_end`` event every host needs to leave its
+    "compacting" state.
+    """
+    if hook is None:
+        return
+    try:
+        await hook(outcome)
+    except Exception:  # noqa: BLE001 - bookkeeping must not eat the end event
+        logger.debug("compaction before_end hook failed", exc_info=True)
+
+
+def _idle_growth_baseline(transcript: Any) -> tuple[int | None, int | None, str]:
+    """``(A_M, D, marker_id)`` for idle compaction's growth gate, from disk.
+
+    ``A_M`` is the context size the latest compaction marker ``M`` left:
+
+    1. the FIRST provider ``context_tokens`` recorded after ``M``: the first
+       request on the compacted context measured what the pass left, in the
+       provider's own units. Preferred over the receipt because the receipt
+       is a LOCAL estimate, and on snapcompact it is clamped to the
+       before-size whenever the archive frames' provider pricing cannot be
+       seen locally (``_finish_compaction``'s receipt math);
+    2. else the ``compaction_idle_pass`` row an idle pass wrote for ``M``
+       (covers the gap between the pass and the next request);
+    3. else ``None``: a pass exists but nothing has measured it yet, which
+       the predicate reads as zero growth (no request has grown it).
+
+    ``0`` when the session has never compacted. ``D`` is the context size of
+    the latest ``compaction_idle_declined`` row written for this same ``M``
+    (a decline before a newer pass is void). Transcript-derived on purpose:
+    the anti-thrash rule must survive a runtime restart, and the journal is
+    the one state a restarted session rebuilds from.
+    """
+    from local_operator.compaction.idle import (
+        COMPACTION_IDLE_DECLINED_TYPE,
+        COMPACTION_IDLE_PASS_TYPE,
+    )
+
+    if transcript is None:
+        return 0, None, ""
+    marker = transcript.latest_entry("compaction")
+    marker_id = marker.id if marker is not None else ""
+    declined: int | None = None
+    decline = transcript.latest_custom(COMPACTION_IDLE_DECLINED_TYPE)
+    if decline is not None and str(decline.get("marker_id") or "") == marker_id:
+        value = decline.get("context_tokens")
+        if isinstance(value, int) and not isinstance(value, bool):
+            declined = value
+    if marker is None:
+        return 0, declined, marker_id
+    entries = transcript.entries()
+    position = next(
+        (index for index in range(len(entries) - 1, -1, -1) if entries[index].id == marker_id),
+        None,
+    )
+    if position is not None:
+        for entry in entries[position + 1 :]:
+            usage = entry.payload.get("usage") if entry.type == "message" else None
+            if isinstance(usage, dict):
+                tokens = usage.get("context_tokens")
+                if isinstance(tokens, int) and tokens > 0:
+                    return tokens, declined, marker_id
+    receipt = transcript.latest_custom(COMPACTION_IDLE_PASS_TYPE)
+    if receipt is not None and str(receipt.get("marker_id") or "") == marker_id:
+        value = receipt.get("tokens_after")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, declined, marker_id
+    return None, declined, marker_id
+
+
 def _newest_usage_at_ms(transcript: Transcript, *, now_ms: int | None = None) -> int:
     """Epoch ms of the newest provider usage the transcript recorded, else 0.
 
@@ -4895,6 +4985,31 @@ class Session:
         # treadmill on the user's bill. Non-negotiable: once set, the advisor
         # is done for the life of the session.
         self._advisor_disabled = False
+        # --- Idle / pre-wake compaction (``compaction/idle.py``) ------------
+        #
+        # One session-owned timer, armed at a turn end whose context qualifies
+        # and cancelled by any turn start or dispose. It lives on the Session
+        # (the runtime process), not the TUI, so a headless session parked on
+        # a wake gets the same pass as an attached one. All anti-thrash state is
+        # re-derived from the TRANSCRIPT at every arm/fire (markers plus the
+        # ``compaction_idle_*`` custom rows), so none of it is kept here: a
+        # restart cannot forget a decline and refire.
+        self._idle_timer: asyncio.TimerHandle | None = None
+        self._idle_task: asyncio.Task[Any] | None = None
+        #: Set while the idle pass holds ``_turn_lock`` and is committing. A turn
+        #: start must NOT cancel the task then: a wake delivery is queued on the
+        #: lock and runs on the compacted context once it is released; a typed
+        #: ``prompt()`` is refused with ``TurnInFlight``, as during ``/compact``.
+        self._idle_committing = False
+        #: Cache lifetime the provider last WROTE this prefix with, sticky
+        #: across read-only turns (a read refreshes, it does not change, the
+        #: lifetime). ``None`` until a usage reports a 5m/1h write split.
+        self._idle_cache_ttl_s: float | None = None
+        #: Epoch ms of the latest assistant ``message_start``, which the loop
+        #: yields BEFORE building the request — a lower bound on when the
+        #: provider last read (and so refreshed) the cached prefix, which makes
+        #: ``E = anchor + TTL`` err early, the safe direction.
+        self._idle_cache_anchor_ms = 0
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
         # The advisor call was already off the turn, but the PASS it authorised
@@ -7607,6 +7722,14 @@ class Session:
         # and the journal stays one row per switch, not one per keystroke.
         self._selected_model_dirty = True
         self._spawn_selected_model_write()
+        # Idle compaction's cache clock describes the OLD model's prompt
+        # cache; the new model's namespace is cold. An armed timer would fire
+        # the parked advisor on the new model as a full cache WRITE of the
+        # context, the one cost the feature must never buy (PR #3753 review
+        # R1). Forget both; the next turn end re-arms from fresh usage.
+        self._cancel_idle_compaction()
+        self._idle_cache_ttl_s = None
+        self._idle_cache_anchor_ms = 0
         if explicit:
             # The user chose: from here a ``hosting``/``model_name`` edit on
             # disk keeps its hands off this session (see
@@ -15234,6 +15357,11 @@ class Session:
                 self._last_usage = message.usage
                 if message.usage.context_tokens:
                     self._context_tokens_hint = int(message.usage.context_tokens)
+                # Idle compaction's cache clock: sticky, so a read-only turn
+                # keeps the lifetime the prefix was written with.
+                written_ttl = _idle_cache_ttl_from_usage(message.usage)
+                if written_ttl is not None:
+                    self._idle_cache_ttl_s = written_ttl
                 return
 
     def _adopt_off_record_usage(self, usage: Usage) -> None:
@@ -19049,6 +19177,13 @@ class Session:
         # stamps the count of the call that just reported instead of the one
         # before it -- strictly fresher, and the boundary note below still
         # runs (idempotent: it re-adopts the newest usage it scans).
+        if (
+            isinstance(event, MessageStartEvent)
+            and isinstance(event.message, Message)
+            and event.message.role == "assistant"
+        ):
+            # Idle compaction's cache anchor; see ``_idle_cache_anchor_ms``.
+            self._idle_cache_anchor_ms = int(time.time() * 1000)
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
             # The provider-cache clock the prune sweeps read
@@ -20294,6 +20429,9 @@ class Session:
             # latch makes the second call a no-op in the common case.
             await self._monitors.announce_unannounced_disables()
         self._is_streaming = True
+        # Any turn supersedes a pending idle pass: it re-reads the warm cache
+        # itself, and its own turn end re-arms the check on the new context.
+        self._cancel_idle_compaction()
         self._generation += 1  # monotonic; stamped on start AND end events
         self._last_activity_ms = int(time.time() * 1000)
         signal = AbortSignal()
@@ -25286,6 +25424,11 @@ class Session:
             # Refused: below threshold, disabled, nothing worth summarizing.
             # The automatic path has nobody to tell — a turn that did not need
             # compacting must not narrate that fact every time.
+            #
+            # This IS the turn end of a session that may now go idle on a large
+            # context, so it is where the idle / pre-wake pass is considered.
+            # Arming only schedules a timer; the predicate is re-run at fire.
+            self._arm_idle_compaction()
             return
         if planned.advisor_hint is not None and self._pass_may_run_off_the_turn(planned):
             # Advisory AND genuinely below the configured trigger: nothing is
@@ -25605,6 +25748,353 @@ class Session:
             )
         return advanced
 
+    # --- Idle / pre-wake compaction -----------------------------------------
+    #
+    # Lifecycle: ``_maybe_compact`` (turn end, below the ordinary trigger) ->
+    # ``_arm_idle_compaction`` (predicate on cheap inputs; arms ONE timer at
+    # ``F = E - (advisor_timeout_s + 30 s)``) -> ``_on_idle_timer`` ->
+    # ``_run_idle_compaction`` (predicate again on the exact estimate, parked
+    # advisor as a cache read, then the ordinary plan/commit under the turn
+    # lock). Any turn start or dispose cancels it (``_cancel_idle_compaction``).
+    # Cold start at session LOAD (a resumed session that is already idle) is
+    # deliberately not armed: its cache age is unknown to this process and
+    # the first turn's end arms it anyway.
+
+    def _idle_inputs(self, settings: Any, compaction_api: Any, context_tokens: int) -> Any:
+        """Run ``idle_compaction_due`` on this session's current state."""
+        t_eff = compaction_api.resolve_threshold_tokens(
+            self.effective_model.context_window, settings
+        )
+        threshold = compaction_api.idle_threshold_for(
+            t_eff, int(getattr(settings, "idle_threshold_tokens", 0) or 0)
+        )
+        # The transcript scan only matters above the idle line; below it the
+        # predicate answers ``below_idle_threshold`` before reading these.
+        baseline, declined = (
+            _idle_growth_baseline(self._transcript)[:2]
+            if context_tokens >= threshold
+            else (0, None)
+        )
+        # Deliberately UNFILTERED: hidden internal timers (patience, ask_timeout)
+        # also run a model turn when they fire on an idle session, so they keep
+        # the prompt cache warm exactly like a visible wake. Dropping them via
+        # ``scheduled_rows`` would buy an advisor call the fire makes redundant.
+        # A fire that retires silently instead (watermark/TTL, a settled ask)
+        # costs one forgone idle pass — the same outcome as idle compaction off.
+        runnable = self._wake.armed_schedules
+        next_wake = min((row.next_due_at for row in runnable), default=None)
+        ttl_s = self._idle_cache_ttl_s or compaction_api.fallback_cache_ttl_s(
+            self.effective_model.provider
+        )
+        anchor = self._idle_cache_anchor_ms or self._last_provider_request_ms
+        expiry = int(anchor + ttl_s * 1000)
+        decision = compaction_api.idle_compaction_due(
+            enabled=bool(settings.enabled) and bool(getattr(settings, "idle_enabled", False)),
+            strategy=self._resolve_strategy(settings),
+            is_subagent=bool(self._parent_session_id),
+            context_tokens=context_tokens,
+            t_eff=t_eff,
+            idle_threshold_tokens=int(getattr(settings, "idle_threshold_tokens", 0) or 0),
+            idle_min_growth_tokens=int(getattr(settings, "idle_min_growth_tokens", 0) or 0),
+            baseline_after_tokens=baseline,
+            declined_at_tokens=declined,
+            next_wake_due_ms=next_wake,
+            cache_expiry_ms=expiry,
+            now_ms=int(time.time() * 1000),
+            advisor_timeout_s=float(getattr(settings, "advisor_timeout_s", 30.0) or 30.0),
+        )
+        return decision, expiry, t_eff
+
+    def _arm_idle_compaction(self) -> None:
+        """Arm the idle pass's timer when this turn end qualifies; never raises.
+
+        Cheap by construction (it runs at every turn end): the context figure
+        is the provider-reported size, with no render or tokenize. A session
+        with NO provider-reported size is not armed at all: without a wire
+        usage there is no observed prompt cache to race, and the economics
+        this feature rests on (advisor = cache read) are unknown. The exact
+        ``compaction_context_tokens`` figure is taken at FIRE time, where a
+        pass is genuinely on the table.
+        """
+        self._cancel_idle_compaction()
+        if self._disposed:
+            return
+        try:
+            from local_operator.compaction import api as compaction_api
+
+            settings = self._compaction_settings or compaction_api.CompactionSettings()
+            if not getattr(settings, "idle_enabled", False) or self._parent_session_id:
+                return
+            context_tokens = self._idle_gate_tokens()
+            if context_tokens is None:
+                return
+            decision, expiry, _t_eff = self._idle_inputs(settings, compaction_api, context_tokens)
+            if not decision.due:
+                logger.debug("idle compaction not armed: %s", decision.reason)
+                return
+            timeout = float(getattr(settings, "advisor_timeout_s", 30.0) or 30.0)
+            fire_at = compaction_api.idle_fire_at_ms(expiry, timeout)
+            delay_s = max(0.0, (fire_at - int(time.time() * 1000)) / 1000.0)
+            loop = asyncio.get_running_loop()
+        except Exception:  # noqa: BLE001 - an optimisation must never break a turn end
+            logger.debug("idle compaction arm failed", exc_info=True)
+            return
+        generation = self._generation
+        self._idle_timer = loop.call_later(delay_s, self._on_idle_timer, generation)
+        logger.debug(
+            "idle compaction armed in %.0fs (context=%d growth=%d/%d wake_pending=%s)",
+            delay_s,
+            decision.context_tokens,
+            decision.growth_tokens,
+            decision.growth_needed_tokens,
+            decision.wake_pending,
+        )
+
+    def _idle_gate_tokens(self) -> int | None:
+        """The ONE context figure the idle gates compare, or ``None``.
+
+        Provider-reported size of the last request PLUS that request's own
+        visible reply (``output_tokens - reasoning_tokens``; reasoning is not
+        re-sent): the reply is part of the next request, so a turn whose
+        final reply carries the context over the idle line arms at THAT turn
+        end, not one turn later (PR #3753 QA Q4). Both the arm check and the
+        decline journal use this figure (review R2): the decline used to
+        store ``max(provider, local)`` while the arm compared provider-only,
+        so on image-heavy sessions where the local estimate runs high the gap
+        silently stretched suppression past the advertised ``G``. No local
+        tokenize: this runs at every turn end.
+        """
+        usage = self._last_usage
+        if usage is None or not usage.context_tokens:
+            return None
+        reply = max(0, int(usage.output_tokens or 0) - int(usage.reasoning_tokens or 0))
+        return int(usage.context_tokens) + reply
+
+    def _cancel_idle_compaction(self) -> None:
+        """Drop the armed timer, and an idle pass that has not taken the lock.
+
+        A pass that is COMMITTING (holds ``_turn_lock``) is left to finish. A
+        wake / ``_prompt_messages`` delivery queues on that lock and runs on
+        the compacted context; a typed ``prompt()`` is refused with
+        ``TurnInFlight`` exactly as during ``/compact`` (the TUI holds it and
+        re-sends on ``compaction_end``).
+        """
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        task = self._idle_task
+        if task is not None and not task.done() and not self._idle_committing:
+            task.cancel()
+            self._idle_task = None
+
+    def _on_idle_timer(self, generation: int) -> None:
+        self._idle_timer = None
+        if self._disposed or generation != self._generation:
+            return
+        self._idle_task = self._spawn_background(self._run_idle_compaction(generation))
+
+    def _idle_may_proceed(self, generation: int) -> bool:
+        """Every bail-out shared by the fire, post-advisor and post-lock checks."""
+        return not (
+            self._disposed
+            or generation != self._generation
+            or self._is_streaming
+            or self._turn_lock.locked()
+            or self._compacting
+            or self._compaction_pass_in_flight
+            or self._pending_compaction is not None
+            or self._advisor_in_flight
+        )
+
+    async def _journal_idle_decline(self, context_tokens: int, why: str) -> None:
+        """Durably record "not now" so the advisor waits for ``G`` more growth."""
+        if self._transcript is None:
+            return
+        from local_operator.compaction.idle import COMPACTION_IDLE_DECLINED_TYPE
+
+        _baseline, _declined, marker_id = _idle_growth_baseline(self._transcript)
+        try:
+            await self._transcript.append_custom(
+                COMPACTION_IDLE_DECLINED_TYPE,
+                {"marker_id": marker_id, "context_tokens": int(context_tokens), "why": why},
+                # Bookkeeping about a session nobody is working in: it must not
+                # re-rank the session as freshly active.
+                preserve_mtime=True,
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping, never a crash
+            logger.debug("idle compaction: decline journal failed", exc_info=True)
+
+    async def _run_idle_compaction(self, generation: int) -> None:
+        """The idle pass: parked advisor, then the ordinary pass. Total, never raises.
+
+        Ordering is the race design:
+
+        1. Bail unless nothing else owns the conversation, then re-run the
+           predicate on the EXACT context figure.
+        2. The advisor runs WITHOUT the turn lock: it is a read-only aside
+           (append-only request, so it reads the warm prefix) and a wake or
+           user message arriving meanwhile must not wait on it. Such a turn
+           bumps ``_generation`` and cancels this task; no decline is
+           journaled, because nothing was decided.
+        3. Only then take the lock WITHOUT waiting (``locked()`` is checked and
+           ``acquire`` is called with no await in between, so the uncontended
+           fast path cannot yield), set ``_compacting`` exactly as
+           ``compact_now`` does, and plan with the parked hint. A wake
+           delivery arriving now queues on the lock and runs on the reduced
+           context; a typed ``prompt()`` is refused with ``TurnInFlight`` as
+           during ``/compact``, and a host holding it re-sends on
+           ``compaction_end`` — which is why every yielding write happens
+           BEFORE that event (``before_end``), never between it and release.
+        4. Every way the pass ends without compacting journals a decline,
+           including a failed summarize/commit (PR #3753 UX U2): otherwise a
+           provider that fails every time is re-asked, and re-fails, at every
+           small wake.
+        """
+        try:
+            from local_operator.compaction import api as compaction_api
+
+            if not self._idle_may_proceed(generation):
+                return
+            settings = self._compaction_settings or compaction_api.CompactionSettings()
+            history = list(self._context.messages)
+            provider_reported = (
+                self._last_usage.context_tokens if self._last_usage is not None else None
+            )
+            # The anti-thrash figure (review R2): what declines record and what
+            # the arm check compared. The pass itself sizes on the exact figure.
+            gate_tokens = self._idle_gate_tokens()
+            local_estimate = await self._offloaded(
+                compaction_api, "estimate_messages_tokens", self._render_for_compaction()
+            )
+            context_tokens = compaction_api.compaction_context_tokens(
+                provider_reported, local_estimate
+            )
+            decision, _expiry, t_eff = self._idle_inputs(settings, compaction_api, context_tokens)
+            if not decision.due or not self._idle_may_proceed(generation):
+                logger.debug("idle compaction skipped at fire: %s", decision.reason)
+                return
+            timeout = float(getattr(settings, "advisor_timeout_s", 30.0) or 30.0)
+            prompt = compaction_api.build_advisor_prompt(
+                history,
+                context_tokens=context_tokens,
+                threshold_tokens=t_eff,
+                parked=True,
+                wake_pending=decision.wake_pending,
+            )
+            self._advisor_in_flight = True
+            failure = "advisor_timeout"
+            try:
+                raw = await asyncio.wait_for(
+                    self.advise_compaction([Message.user(prompt)]), timeout
+                )
+            except asyncio.TimeoutError:
+                raw = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a provider failure is a decline
+                # Journaled like a "no": an advisor that fails every time must
+                # not be re-asked at every turn end until G more growth.
+                logger.debug("idle compaction advisor call failed", exc_info=True)
+                raw = None
+                failure = "advisor_error"
+            finally:
+                self._advisor_in_flight = False
+            if generation != self._generation or self._disposed:
+                return
+            genuine_user_ids = {
+                message.id
+                for message in self._context.messages
+                if isinstance(message, Message) and message.role == "user"
+            }
+            hint = (
+                compaction_api.validate_hint(
+                    compaction_api.parse_hint(raw),
+                    history,
+                    genuine_user_ids=genuine_user_ids,
+                    min_confidence=float(getattr(settings, "advisor_min_confidence", 0.6) or 0.0),
+                    keep_recent_tokens=int(settings.keep_recent_tokens),
+                    floor_cap=self._advisor_floor_cap(settings),
+                    turn_index=generation,
+                    parked=True,
+                )
+                if raw is not None
+                else None
+            )
+            if hint is None:
+                await self._journal_idle_decline(
+                    gate_tokens or context_tokens,
+                    failure if raw is None else "advisor_declined",
+                )
+                return
+            if not self._idle_may_proceed(generation):
+                return
+            await self._turn_lock.acquire()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001 - an idle optimisation must never surface
+            logger.debug("idle compaction failed before commit", exc_info=True)
+            return
+        self._idle_committing = True
+        self._compacting = True
+        decline_tokens = gate_tokens or context_tokens
+        try:
+            if generation != self._generation:
+                return
+            planned = await self._plan_compaction(respect_threshold=False, parked_hint=hint)
+            if isinstance(planned, CompactionOutcome):
+                await self._journal_idle_decline(decline_tokens, f"refused:{planned.reason}")
+                return
+            # Refuse a pass that would fold too little to pay for itself: the
+            # rewrite of the shortened prefix is a cold cache write, so the
+            # summarized span has to be worth at least G/2 (``compaction/idle.py``).
+            summarized = await self._offloaded(
+                compaction_api, "estimate_messages_tokens", planned.llm_history[: planned.cut]
+            )
+            growth_needed = compaction_api.idle_growth_for(
+                t_eff, int(getattr(settings, "idle_min_growth_tokens", 0) or 0)
+            )
+            if summarized < growth_needed // 2:
+                await self._journal_idle_decline(decline_tokens, "too_little_to_summarize")
+                return
+
+            async def settle(outcome: CompactionOutcome) -> None:
+                # Runs BEFORE ``compaction_end`` (see ``_finish_compaction``):
+                # after that event nothing here may yield until release.
+                if not outcome.ran:
+                    await self._journal_idle_decline(decline_tokens, "pass_failed")
+                    return
+                if self._transcript is None:
+                    return
+                marker = self._transcript.latest_entry("compaction")
+                await self._transcript.append_custom(
+                    compaction_api.COMPACTION_IDLE_PASS_TYPE,
+                    {
+                        "marker_id": marker.id if marker is not None else "",
+                        "tokens_before": int(outcome.tokens_before),
+                        "tokens_after": int(outcome.tokens_after),
+                        "summarized_tokens": int(summarized),
+                    },
+                    preserve_mtime=True,
+                )
+
+            outcome = await self._run_compaction(planned, reason="idle", before_end=settle)
+            if outcome.ran:
+                self._held_context_tokens = outcome.tokens_after
+        except Exception:  # noqa: BLE001
+            logger.warning("idle compaction pass failed", exc_info=True)
+            # A raise outside the pass (planning, the summarized-span ruler)
+            # is a failure too, and journals like one so it cannot repeat at
+            # every small wake (UX U2). Before release, but no end event has
+            # been emitted on this path, so the await cannot race a held prompt.
+            await self._journal_idle_decline(decline_tokens, "pass_failed")
+        finally:
+            self._compacting = False
+            self._idle_committing = False
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+
     async def compact_now(self) -> CompactionOutcome:
         """Compact the context NOW, on the user's explicit request (``/compact``).
 
@@ -25917,7 +26407,7 @@ class Session:
         return changed
 
     async def _plan_compaction(
-        self, *, respect_threshold: bool
+        self, *, respect_threshold: bool, parked_hint: Any | None = None
     ) -> _CompactionPlan | CompactionOutcome:
         """Everything decided BEFORE a pass commits, for both triggers.
 
@@ -25931,6 +26421,12 @@ class Session:
         prune alone brought back under the line never buys a summary. It also
         means a manual ``/compact`` on a context with nothing to summarize has
         still reclaimed whatever the prune found.
+
+        ``parked_hint`` is the idle pass's validated parked advisor hint
+        (``_run_idle_compaction``; ``validate_hint(parked=True)``) and is the
+        ONLY input that may narrow the verbatim window below the task floor:
+        it replaces that floor with ``max(keep_recent_tokens, min(hint, cap))``.
+        Every other caller passes ``None`` and keeps widen-only exactly.
         """
         try:
             from local_operator.compaction import api as compaction_api
@@ -26061,7 +26557,19 @@ class Session:
         # advisory or not, and introduces no second gate.
         keep_recent = settings.keep_recent_tokens
         boundary_floor: Any = getattr(compaction_api, "task_boundary_floor", None)
-        if callable(boundary_floor):
+        if parked_hint is not None:
+            # IDLE PASS. The task floor measures "since the last genuine user
+            # turn", which on a parked session is often hours of FINISHED work;
+            # the parked advisor read the whole conversation and anchored at
+            # the start of still-open work, with compact_now and >= 0.75
+            # confidence (``validate_hint(parked=True)``). Its window replaces
+            # the floor, clamped by the same cap every hint takes, and never
+            # below ``keep_recent_tokens``.
+            keep_recent = max(
+                keep_recent,
+                min(int(parked_hint.preserve_tokens), self._advisor_floor_cap(settings)),
+            )
+        elif callable(boundary_floor):
             # Resolved by name off the module for the tolerance ``_offloaded``
             # grants its rulers: a partial test double that predates this
             # degrades to plain recency rather than crashing the pass.
@@ -26108,7 +26616,14 @@ class Session:
             keep_recent = max(keep_recent, capped_hint)
 
         cut = await self._offloaded(compaction_api, "find_cut_point", llm_history, keep_recent)
-        if (cut is None or cut <= 0) and keep_recent > settings.keep_recent_tokens:
+        if (
+            (cut is None or cut <= 0)
+            and keep_recent > settings.keep_recent_tokens
+            # Never for an idle pass: plain recency would cut INSIDE the window
+            # the parked advisor said must survive. An idle pass that cannot
+            # honour its anchor refuses (and journals a decline) instead.
+            and parked_hint is None
+        ):
             # A WIDENED PRESERVE WINDOW CAN SPAN THE WHOLE COMPACTABLE
             # WINDOW: the task floor (the incident's source) and a clamped
             # advisor hint both ride this guard. When the last genuine user
@@ -26226,16 +26741,22 @@ class Session:
             # cut, but it is only carried onto the plan when the advice is what
             # made the pass happen. Same predicate as the async routing, so
             # "advisory pass" means one thing across the file.
+            # An idle pass is caused by its parked hint by definition (it has
+            # no size trigger), so the receipt names the advisor's reason.
             advisor_hint=(
-                advisor_hint
-                if advisory_ok
-                and not self._fires_on_size_alone(
-                    compaction_api,
-                    context_tokens,
-                    settings,
-                    self._wire_bytes_of(compaction_api, llm_history),
+                parked_hint
+                if parked_hint is not None
+                else (
+                    advisor_hint
+                    if advisory_ok
+                    and not self._fires_on_size_alone(
+                        compaction_api,
+                        context_tokens,
+                        settings,
+                        self._wire_bytes_of(compaction_api, llm_history),
+                    )
+                    else None
                 )
-                else None
             ),
         )
 
@@ -26376,8 +26897,17 @@ class Session:
             return None
         return hint
 
-    async def _run_compaction(self, plan: _CompactionPlan, *, reason: str) -> CompactionOutcome:
+    async def _run_compaction(
+        self,
+        plan: _CompactionPlan,
+        *,
+        reason: str,
+        before_end: Callable[[CompactionOutcome], Awaitable[None]] | None = None,
+    ) -> CompactionOutcome:
         """Commit one compaction pass — THE pass, for both triggers.
+
+        ``before_end`` (the idle pass only) is awaited with the outcome BEFORE
+        ``compaction_end`` is emitted; see :meth:`_finish_compaction`.
 
         ``reason`` rides the two events so a host can tell an automatic pass
         from one the user asked for while keeping one vocabulary for both
@@ -26398,7 +26928,9 @@ class Session:
         """
         await self._cancel_background_compaction()
         await self._emit(CompactionStartEvent(reason=reason))
-        return await self._finish_compaction(plan, reason=reason, summarized=None)
+        return await self._finish_compaction(
+            plan, reason=reason, summarized=None, before_end=before_end
+        )
 
     async def _cancel_background_compaction(self) -> None:
         """Stop an in-flight background pass so a synchronous one does not double-bill.
@@ -26567,8 +27099,21 @@ class Session:
         *,
         reason: str,
         summarized: tuple[str, dict[str, Any] | None] | None,
+        before_end: Callable[[CompactionOutcome], Awaitable[None]] | None = None,
     ) -> CompactionOutcome:
         """Summarize if needed, then COMMIT — the one commit, for every path.
+
+        ``before_end`` runs a caller's yielding bookkeeping (the idle pass's
+        receipt or failure decline) BEFORE ``compaction_end`` is emitted, on
+        success and failure alike. The end event is the signal a host acts on
+        — the TUI dispatches a prompt it held "until compaction finishes" from
+        that handler — so once it is out, nothing between it and the
+        caller's ``_turn_lock.release()`` may yield. An await there let the
+        held prompt reach ``Session.prompt`` while the lock was still held and
+        be refused with ``TurnInFlight`` (PR #3753 QA Q1 / UX U1). Manual
+        ``/compact`` has no such await, which is why it never showed the bug.
+        The hook must not raise; a raise is logged and swallowed so the event
+        is still emitted and the outcome still returned.
 
         ``summarized`` is the pre-computed output of
         :meth:`_summarize_for_compaction` for the asynchronous path, or ``None``
@@ -26789,6 +27334,7 @@ class Session:
                 carried_asks=carried_asks,
                 carried_decisions=carried_decisions,
                 resume_card=resume_card,
+                trigger="idle" if reason == "idle" else None,
             )
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale
@@ -27117,6 +27663,13 @@ class Session:
             # The commit has landed: the next request re-writes the history, so
             # idle published MCP schemas leave the tools array on THAT request.
             self._demote_cold_mcp_tools()
+            outcome = CompactionOutcome(
+                ran=True,
+                strategy=plan.strategy,
+                tokens_before=plan.context_tokens,
+                tokens_after=tokens_after,
+            )
+            await _settle_before_end(before_end, outcome)
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
@@ -27131,16 +27684,15 @@ class Session:
                     detail=_advisor_detail(plan.advisor_hint),
                 )
             )
-            return CompactionOutcome(
-                ran=True,
-                strategy=plan.strategy,
-                tokens_before=plan.context_tokens,
-                tokens_after=tokens_after,
-            )
+            return outcome
         except Exception as exc:
             logger.warning("compaction failed", exc_info=True)
+            failed = CompactionOutcome(
+                ran=False, reason="failed", detail=f"compaction failed: {exc}"
+            )
+            await _settle_before_end(before_end, failed)
             await self._emit(CompactionEndEvent(reason=reason, success=False))
-            return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
+            return failed
 
     def _fires_on_size_alone(
         self, compaction_api: Any, context_tokens: int, settings: Any, wire_bytes: int
@@ -34085,6 +34637,9 @@ class Session:
             # keep a parent-teardown attestation.
             self._abandon_refused_teardown_stamps(teardown_stamps)
             self._wake.dispose()
+            # The idle timer is a bare ``call_later`` handle (the task it
+            # spawns is a tracked background task, already cancelled above).
+            self._cancel_idle_compaction()
             self._monitors.dispose()
             # A shell receipt can be queued behind a turn that was just aborted.
             # Its normal turn-finally flush should already have run, but this

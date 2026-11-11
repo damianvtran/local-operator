@@ -1025,6 +1025,14 @@ export type MessageParams = {
   "wire.settings.compaction_enabled.choice.true.description": undefined;
   "wire.settings.compaction_enabled.help": undefined;
   "wire.settings.compaction_enabled.label": undefined;
+  "wire.settings.compaction_idle_enabled.choice.false.description": undefined;
+  "wire.settings.compaction_idle_enabled.choice.true.description": undefined;
+  "wire.settings.compaction_idle_enabled.help": undefined;
+  "wire.settings.compaction_idle_enabled.label": undefined;
+  "wire.settings.compaction_idle_min_growth_tokens.help": undefined;
+  "wire.settings.compaction_idle_min_growth_tokens.label": undefined;
+  "wire.settings.compaction_idle_threshold_tokens.help": undefined;
+  "wire.settings.compaction_idle_threshold_tokens.label": undefined;
   "wire.settings.compaction_keep_recent_tokens.help": undefined;
   "wire.settings.compaction_keep_recent_tokens.label": undefined;
   "wire.settings.compaction_mid_turn_enabled.choice.false.description": undefined;
