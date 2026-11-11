@@ -17,5 +17,17 @@
   "relay.session.model.filter_placeholder": "ماڈلز فلٹر کریں",
   "relay.session.model.loading": "لوڈ ہو رہا ہے…",
   "relay.session.model.queued": "تبدیلی قطار میں — اگلے مرحلے میں لاگو ہوگی",
-  "relay.session.model.refused": "{model} لاگو نہیں ہوا: {reason}"
+  "relay.session.model.refused": "{model} لاگو نہیں ہوا: {reason}",
+  "relay.session.temporary_toggle": "عارضی چیٹ",
+  "relay.session.temporary_subtitle": "عارضی · {status}",
+  "relay.session.temporary_keep": "چیٹ رکھیں",
+  "relay.session.temporary_make": "عارضی بنائیں…",
+  "relay.session.temporary_confirm_title": "اس چیٹ کو عارضی بنائیں؟",
+  "relay.session.temporary_confirm_body": "یہ ابھی آپ کی چیٹ فہرست سے ہٹ جائے گی اور کچھ دیر کوئی سرگرمی نہ ہونے پر حذف ہو جائے گی۔ آپ کے کمپیوٹر پر اس کی بدلی ہوئی فائلیں محفوظ رہیں گی۔",
+  "relay.session.temporary_deleted_title": "یہ عارضی چیٹ حذف کر دی گئی",
+  "relay.session.temporary_deleted_detail": "کچھ دیر کوئی سرگرمی نہ ہونے پر اسے حذف کر دیا گیا اور اب یہ دوبارہ نہیں کھل سکتی۔ آپ کے کمپیوٹر پر اس کی بدلی ہوئی فائلیں موجود ہیں۔",
+  "relay.session.temporary_new": "نئی عارضی چیٹ",
+  "relay.session.back_to_chats": "چیٹس پر واپس",
+  "relay.session.keep_and_pin": "رکھیں اور پن کریں",
+  "relay.session.keep_and_link": "رکھیں اور منسلک کریں"
 }

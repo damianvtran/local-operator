@@ -17,5 +17,17 @@
   "relay.session.model.filter_placeholder": "lọc mô hình",
   "relay.session.model.loading": "đang tải…",
   "relay.session.model.queued": "đã xếp hàng thay đổi — có hiệu lực ở bước tiếp theo",
-  "relay.session.model.refused": "Không áp dụng được {model}: {reason}"
+  "relay.session.model.refused": "Không áp dụng được {model}: {reason}",
+  "relay.session.temporary_toggle": "Cuộc trò chuyện tạm thời",
+  "relay.session.temporary_subtitle": "Tạm thời · {status}",
+  "relay.session.temporary_keep": "Giữ cuộc trò chuyện",
+  "relay.session.temporary_make": "Chuyển thành tạm thời…",
+  "relay.session.temporary_confirm_title": "Chuyển cuộc trò chuyện này thành tạm thời?",
+  "relay.session.temporary_confirm_body": "Cuộc trò chuyện sẽ rời khỏi danh sách ngay bây giờ và bị xóa sau một thời gian không hoạt động. Các tệp nó đã thay đổi trên máy tính của bạn vẫn được giữ lại.",
+  "relay.session.temporary_deleted_title": "Cuộc trò chuyện tạm thời này đã bị xóa",
+  "relay.session.temporary_deleted_detail": "Cuộc trò chuyện đã bị xóa sau một thời gian không hoạt động và không thể mở lại. Các tệp nó đã thay đổi trên máy tính của bạn vẫn còn nguyên.",
+  "relay.session.temporary_new": "Cuộc trò chuyện tạm thời mới",
+  "relay.session.back_to_chats": "Quay lại danh sách trò chuyện",
+  "relay.session.keep_and_pin": "Giữ và ghim",
+  "relay.session.keep_and_link": "Giữ và liên kết"
 }

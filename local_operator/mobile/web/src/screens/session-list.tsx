@@ -39,8 +39,10 @@ import {
 	getAttentionUnread,
 	getDirectories,
 	getTags,
+	HttpError,
 	markAllSeen,
 	setSessionPin,
+	setSessionTemporary,
 	startSession,
 } from "../api";
 import { ProjectsSheet } from "../components/projects-sheet";
@@ -62,6 +64,7 @@ import { navigate } from "../router";
 import {
 	applySessionPin,
 	clearSessionPinMark,
+	getLastViewedSession,
 	messageRuntime,
 	notificationsBadge,
 	publishMarkNotice,
@@ -82,6 +85,14 @@ import { getGroupTags, setGroupTags } from "../lib/session-group-pref";
 import { groupByPrimaryTag, hasGroupedRows } from "../lib/session-grouping";
 import type { SessionSummary, TagCatalogueEntry } from "../types";
 import { cn } from "../lib/cn";
+import {
+	partitionTemporary,
+	readTemporary,
+	SESSION_TEMPORARY_CODE,
+	temporaryChatsEnabled,
+	temporaryGroupOpen,
+	temporaryRowLabel,
+} from "../lib/temporary";
 import { AvatarWithStatus, useAgentAvatar } from "../components/agent-avatar";
 
 /** What a successful bulk clear says it did — naming every bucket it missed.
@@ -226,9 +237,13 @@ function SessionCard({
 	pinned,
 	onLongPress,
 	ref,
+	temporaryLabel,
 }: {
 	s: SessionSummary;
 	home: string;
+	/** A temporary row's countdown or hold reason (`lib/temporary`), leading its
+	    meta line behind the dashed mark. Absent on every ordinary row. */
+	temporaryLabel?: { text: string; warning: boolean };
 	/* The pin as RENDERED — the user's unanswered mark over the daemon's
 	   confirmed flag. A separate input from `s.pinned` on purpose: a row may
 	   show its ★ long before the daemon confirms the pin, and the mark must
@@ -516,6 +531,12 @@ function SessionCard({
 			{/* The second line starts under the title: slot (12px) + gap = ps-5, or the
 			    24px picture + gap = ps-8 on a row that draws one. */}
 			<div className={cn("flex min-w-0 items-center gap-2 text-meta tabular-nums text-ink-dim", avatar.url ? "ps-8" : "ps-5")}>
+				{temporaryLabel ? (
+					<span data-temporary-label="" className={cn("flex shrink-0 items-center gap-1", temporaryLabel.warning && "text-warning")}>
+						<ChromeIcon name="temporary" size={12} />
+						<span>{temporaryLabel.text}</span>
+					</span>
+				) : null}
 				<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} className="max-w-[45%] shrink-0" />
 				<span dir={contentDir([
 					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,
@@ -858,6 +879,20 @@ export function SessionListScreen() {
 	const [questionsOpen, setQuestionsOpen] = useState(false);
 	const [usageOpen, setUsageOpen] = useState(false);
 	const [filter, setFilter] = useState("all");
+	/* The Temporary group's open state for this visit (null = follow the rule
+	   in `temporaryGroupOpen`), and the clock its countdowns read. The clock
+	   ticks only while a temporary row is listed; the deadline itself is the
+	   daemon's (`deletes_at`), so a late tick shows an older minute, never a
+	   wrong deletion. */
+	const [temporaryOpen, setTemporaryOpen] = useState<boolean | null>(null);
+	const [temporaryNow, setTemporaryNow] = useState(() => Date.now());
+	const listsTemporary = temporaryChatsEnabled(capabilities) && sessions.some((row) => readTemporary(row.temporary));
+	useEffect(() => {
+		if (!listsTemporary) return;
+		setTemporaryNow(Date.now());
+		const timer = setInterval(() => setTemporaryNow(Date.now()), 30000);
+		return () => clearInterval(timer);
+	}, [listsTemporary]);
 	const [fabCollapsed, setFabCollapsed] = useState(false);
 	const listScroll = useRef(0);
 	const searchRef = useRef<HTMLInputElement>(null);
@@ -886,6 +921,9 @@ export function SessionListScreen() {
 	const [pinRefusal, setPinRefusal] = useState<{
 		sessionId: string;
 		reason: string;
+		/* A temporary chat's pin refusal (409 `session_temporary`): the sheet
+		   offers Keep and pin beside the daemon's reason. */
+		keepAndPin?: boolean;
 	} | null>(null);
 	/* THE ROWS WITH A PIN REQUEST STILL IN FLIGHT, ONE ENTRY PER REQUEST. The
 	   sheet STAYS OPEN across that wait (design round 11, D25), so a row's action
@@ -1118,13 +1156,22 @@ export function SessionListScreen() {
 	   100% / −101.5px at 200% on a refused one (QA Q13/D18). Rows now move once,
 	   when the daemon confirms; a refusal reorders nothing because nothing ever
 	   moved. */
-	const pinned = visible.filter((session) => session.pinned);
-	const rest = visible.filter((session) => !session.pinned);
+	/* TEMPORARY CHATS LEAVE THE ORDINARY SECTIONS (contract §2.2): they are
+	   split off FIRST, so a temporary row is never also Pinned/Active/Previous
+	   (and a temporary chat cannot be pinned anyway). Without the capability
+	   the split is the identity and the group never renders. */
+	const temporaryEnabled = temporaryChatsEnabled(capabilities);
+	const { normal: ordinary, temporary: temporaryRows } = partitionTemporary(visible, temporaryEnabled);
+	const pinned = ordinary.filter((session) => session.pinned);
+	const rest = ordinary.filter((session) => !session.pinned);
 	const active = rest.filter((session) => session.section === "active");
 	const previous = rest.filter((session) => session.section === "previous");
 	const pinRow = pinTarget
 		? sessions.find((session) => session.session_id === pinTarget) ?? null
 		: null;
+	/* The group's open state: the reader's tap for this visit, else open
+	   exactly while it holds the chat last opened on this page. */
+	const temporaryGroupIsOpen = temporaryOpen ?? temporaryGroupOpen(getLastViewedSession(), temporaryRows);
 	/* LIVE row, and `null` when it is gone: the sheet is open only while the row
 	   exists, the same rule the pin sheet follows. */
 	const tagsRow = tagsTarget
@@ -1300,6 +1347,7 @@ export function SessionListScreen() {
 			setPinRefusal({
 				sessionId,
 				reason: pinRefusalReason(error),
+				keepAndPin: pinnedNext && error instanceof HttpError && error.code === SESSION_TEMPORARY_CODE,
 			});
 		} finally {
 			markPinPending(sessionId, false);
@@ -1345,11 +1393,23 @@ export function SessionListScreen() {
 	/* One card factory for all three sections, so a section cannot forget the FLIP
 	   ref or the long-press handler — the bug a fourth copy of this markup would
 	   eventually grow. */
+	const temporaryLabelFor = (s: SessionSummary) => {
+		const info = readTemporary(s.temporary);
+		if (!info) return undefined;
+		const label = temporaryRowLabel(info, temporaryNow);
+		return {
+			text: label.key === "relay.chrome.temporary_deletes_in"
+				? messageRuntime.t(label.key, { minutes: label.minutes })
+				: messageRuntime.t(label.key),
+			warning: label.warning,
+		};
+	};
 	const renderCard = (s: SessionSummary) => (
 		<div key={s.session_id} className="relative flex items-center">
 		<SessionCard
 			s={s}
 			home={home}
+			temporaryLabel={temporaryEnabled ? temporaryLabelFor(s) : undefined}
 			pinned={renderedPin(s)}
 			onLongPress={() => {
 				setPinTarget(s.session_id);
@@ -1537,6 +1597,20 @@ export function SessionListScreen() {
 					<h2 className="text-heading font-semibold">{messageRuntime.t("relay.chrome.list.empty")}</h2>
 					<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.chrome.list.empty_hint")}</p>
 				</div> : <div aria-label={messageRuntime.t("relay.chrome.list.connecting")} aria-busy="true" className="px-4 pt-4">{[0, 1, 2].map(i => <div key={i} className="flex h-14 flex-col justify-center gap-2"><div className="h-3 w-3/5 rounded-sm bg-surface" /><div className="h-2 w-[35%] rounded-sm bg-surface" /></div>)}</div> : <>
+					{temporaryRows.length > 0 ? <section data-section="temporary">
+						{/* COLLAPSED BY DEFAULT, at the head of the list (above Pinned), and
+						    open on its own while it holds the chat the reader just came
+						    from; a tap overrides that for this visit. */}
+						<h2 className={sectionClass}>
+							<button type="button" aria-expanded={temporaryGroupIsOpen} onClick={() => setTemporaryOpen(!temporaryGroupIsOpen)}
+								className="flex min-h-11 w-full items-center gap-1.5 text-start">
+								<ChromeIcon name="temporary" size={14} />
+								<span className="min-w-0 flex-1 truncate">{messageRuntime.t("relay.chrome.section_temporary", { count: temporaryRows.length })}</span>
+								<span aria-hidden className={cn("shrink-0 transition-transform", temporaryGroupIsOpen && "rotate-90")}>▸</span>
+							</button>
+						</h2>
+						{temporaryGroupIsOpen ? temporaryRows.map(renderCard) : null}
+					</section> : null}
 					{pinned.length > 0 ? <section><h2 className={sectionClass}>{messageRuntime.t("relay.chrome.list.section.pinned")}</h2>{pinned.map(renderCard)}</section> : null}
 					{showGroups ? groups.map(group => <section key={group.key}><h2 className={sectionClass}>{group.label}</h2>{group.rows.map(renderCard)}</section>) : <>
 						{active.length > 0 ? <section><h2 className={sectionClass}>{messageRuntime.t("relay.chrome.list.section.active")}</h2>{active.map(renderCard)}</section> : null}
@@ -1687,6 +1761,23 @@ export function SessionListScreen() {
 					>
 						{pinNotice}
 					</p>
+					{pinRow && pinRefusal?.keepAndPin && pinRefusal.sessionId === pinRow.session_id ? (
+						<button
+							type="button"
+							data-remedy="keep-and-pin"
+							onClick={() => {
+								const sessionId = pinRow.session_id;
+								setPinRefusal(null);
+								void setSessionTemporary(sessionId, false).then(
+									() => togglePin(sessionId, true),
+									(error: unknown) => setPinRefusal({ sessionId, reason: pinRefusalReason(error) }),
+								);
+							}}
+							className="mx-2 mb-2 flex min-h-11 items-center justify-center rounded-sm bg-accent-wash px-3 text-body font-medium text-accent"
+						>
+							{messageRuntime.t("relay.session.keep_and_pin")}
+						</button>
+					) : null}
 				</div>
 			</Sheet>
 			<SessionTagsSheet

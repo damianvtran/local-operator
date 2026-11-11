@@ -83,5 +83,18 @@
   "relay.chrome.composer.model_label": "Mô hình: {label}",
   "relay.chrome.composer.spend_label": "Chi phí & ngữ cảnh: {label}",
   "relay.chrome.spend.title": "Chi phí & ngữ cảnh",
-  "relay.chrome.model.effort": "Mức suy luận"
+  "relay.chrome.model.effort": "Mức suy luận",
+  "relay.chrome.section_temporary": "Tạm thời · {count, number}",
+  "relay.chrome.temporary_deletes_in": "{minutes, plural, other {Xóa sau # phút}}",
+  "relay.chrome.temporary_hold_running": "Được giữ khi đang chạy",
+  "relay.chrome.temporary_hold_on_screen": "Được giữ khi đang mở",
+  "relay.chrome.temporary_hold_open_ask": "Được giữ: có câu hỏi đang chờ",
+  "relay.chrome.temporary_hold_armed_wake": "Được giữ cho lần đánh thức đã hẹn",
+  "relay.chrome.temporary_hold_armed_monitor": "Được giữ: có trình theo dõi đang chạy",
+  "relay.chrome.temporary_hold_unread_mail": "Được giữ: có tin nhắn chưa đọc",
+  "relay.chrome.temporary_hold_operator_hold": "Được giữ: đang tạm giữ",
+  "relay.chrome.temporary_hold_unseen_result": "Được giữ đến khi bạn xem kết quả",
+  "relay.chrome.temporary_hold_unsaved_files": "Được giữ: có tệp chưa lưu",
+  "relay.chrome.temporary_hold_linked": "Được giữ: có mục liên kết tới nó",
+  "relay.chrome.temporary_hold_cannot_verify": "Được giữ: chưa kiểm tra được trạng thái"
 }

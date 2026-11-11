@@ -83,5 +83,18 @@
   "relay.chrome.composer.model_label": "Model: {label}",
   "relay.chrome.composer.spend_label": "Spend & context: {label}",
   "relay.chrome.spend.title": "Spend & context",
-  "relay.chrome.model.effort": "Reasoning effort"
+  "relay.chrome.model.effort": "Reasoning effort",
+  "relay.chrome.section_temporary": "Temporary · {count, number}",
+  "relay.chrome.temporary_deletes_in": "{minutes, plural, one {Deletes in # min} other {Deletes in # min}}",
+  "relay.chrome.temporary_hold_running": "Kept while it’s working",
+  "relay.chrome.temporary_hold_on_screen": "Kept while it’s open",
+  "relay.chrome.temporary_hold_open_ask": "Kept while a question is open",
+  "relay.chrome.temporary_hold_armed_wake": "Kept for a scheduled wake-up",
+  "relay.chrome.temporary_hold_armed_monitor": "Kept while a monitor is running",
+  "relay.chrome.temporary_hold_unread_mail": "Kept for unread messages",
+  "relay.chrome.temporary_hold_operator_hold": "Kept on hold",
+  "relay.chrome.temporary_hold_unseen_result": "Kept until you see the result",
+  "relay.chrome.temporary_hold_unsaved_files": "Kept for unsaved files",
+  "relay.chrome.temporary_hold_linked": "Kept while something links to it",
+  "relay.chrome.temporary_hold_cannot_verify": "Kept: can’t check its state yet"
 }

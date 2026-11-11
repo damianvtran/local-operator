@@ -83,5 +83,18 @@
   "relay.chrome.composer.model_label": "ماڈل: {label}",
   "relay.chrome.composer.spend_label": "خرچ اور سیاق و سباق: {label}",
   "relay.chrome.spend.title": "خرچ اور سیاق و سباق",
-  "relay.chrome.model.effort": "استدلال کی شدت"
+  "relay.chrome.model.effort": "استدلال کی شدت",
+  "relay.chrome.section_temporary": "عارضی · {count, number}",
+  "relay.chrome.temporary_deletes_in": "{minutes, plural, one {# منٹ میں حذف ہوگی} other {# منٹ میں حذف ہوگی}}",
+  "relay.chrome.temporary_hold_running": "کام جاری ہونے تک رکھی گئی",
+  "relay.chrome.temporary_hold_on_screen": "کھلی ہونے تک رکھی گئی",
+  "relay.chrome.temporary_hold_open_ask": "رکھی گئی: ایک سوال کھلا ہے",
+  "relay.chrome.temporary_hold_armed_wake": "طے شدہ بیداری کے لیے رکھی گئی",
+  "relay.chrome.temporary_hold_armed_monitor": "رکھی گئی: مانیٹر چل رہا ہے",
+  "relay.chrome.temporary_hold_unread_mail": "رکھی گئی: ناپڑھے پیغامات ہیں",
+  "relay.chrome.temporary_hold_operator_hold": "رکھی گئی: روکی گئی ہے",
+  "relay.chrome.temporary_hold_unseen_result": "نتیجہ دیکھنے تک رکھی گئی",
+  "relay.chrome.temporary_hold_unsaved_files": "رکھی گئی: غیر محفوظ فائلیں ہیں",
+  "relay.chrome.temporary_hold_linked": "رکھی گئی: کوئی چیز اس سے منسلک ہے",
+  "relay.chrome.temporary_hold_cannot_verify": "رکھی گئی: حالت ابھی جانچی نہیں جا سکی"
 }
