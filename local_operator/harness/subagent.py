@@ -2103,6 +2103,23 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
     )
 
 
+def _redact_child_result(parent_session: "Session", text: str) -> str:
+    """``text`` through the session store's redactor (known values, then shapes).
+
+    The child shares the parent's store, so a value either side registered is
+    caught here too. Fail closed: a filter that cannot vouch for the text must
+    not persist it.
+    """
+    redact = getattr(getattr(parent_session, "_variables", None), "redact", None)
+    if not text or not callable(redact):
+        return text
+    try:
+        return str(redact(text))
+    except Exception:  # noqa: BLE001 — see the docstring: withholding IS the guard
+        logger.warning("subagent result redaction failed", exc_info=True)
+        return "[subagent result withheld: the credential filter could not read it]"
+
+
 def _make_runner(
     *,
     label: str,
@@ -2401,7 +2418,11 @@ def _make_runner(
                 # must settle failed with it, not completed with the partial
                 # text.
                 raise RuntimeError(_describe_child_failure(str(final["error"]), model_spec))
-            result_text = final["text"]
+            # Scrubbed HERE, once, because this one string becomes the comms
+            # record, the job row (the checkpoint's ``result_text``) and the
+            # parent's ``job_result`` message — all persisted history (PR
+            # #3756, QA Q6: a child's own text quoting a value reached disk raw).
+            result_text = _redact_child_result(parent_session, final["text"])
             # Recorded on the comms record, not just the job row: the manager
             # sweeps settled rows after its retention window while comms
             # records outlive them so a child stays resumable, and without

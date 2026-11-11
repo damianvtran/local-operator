@@ -344,6 +344,18 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 #: exact values.
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 
+
+def _redact_nested_strings(value: Any, redact: Callable[[str], str]) -> Any:
+    """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``."""
+    if isinstance(value, str):
+        return redact(value) if value else value
+    if isinstance(value, dict):
+        return {key: _redact_nested_strings(item, redact) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_nested_strings(item, redact) for item in value]
+    return value
+
+
 # The producer caps diffs at 200 rows; this independent publication budget leaves
 # framing room, not permission to accept unbounded executor metadata. Refusal
 # still walks N slots to preserve container/nonstring identity (not O(cap)).
@@ -7886,7 +7898,8 @@ class AgentLoop:
         # to mask. See the block in ``_redact_content``.
         if tool_name in PUBLIC_COPY_TOOLS:
             return details
-        if not any(
+        has_server_result = details.get("server_result") is not None
+        if not has_server_result and not any(
             isinstance(details.get(key), str)
             or (
                 isinstance(details.get(key), (list, tuple))
@@ -7919,6 +7932,13 @@ class AgentLoop:
                             out[key] = tuple(masked) if isinstance(value, tuple) else masked
                         else:
                             out[key] = _redact_diff_detail(value, redact)
+                if has_server_result:
+                    # An MCP result's raw server payload
+                    # (``mcp/tool_bridge.py``) rides into the transcript
+                    # beside the masked text, so it was the copy that kept the
+                    # value (PR #3756, QA Q6). Every string in it is masked;
+                    # keys and non-string values keep theirs.
+                    out["server_result"] = _redact_nested_strings(details["server_result"], redact)
                 return out
 
         return await asyncio.to_thread(_run)
