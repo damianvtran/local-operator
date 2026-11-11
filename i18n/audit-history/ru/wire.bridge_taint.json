@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "wire.bridge_taint",
+  "history_sha256": "6f4645997360fe0a900f509e200aefa97e8ef6783a5b2dc1ed2f8cf99bacf204",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "wire.bridge_taint",
+      "source_sha256": "b1a7ea572ef3fcd5cec4a980daaa5d038977321171cff04971b3c6da9ab6a5c7",
+      "translator": {
+        "agent": "task lane (i18n translator), commit ed2d88c8d868",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "reviewer (radientdev) / independent i18n-auditor c1597c6444c3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "FIRST independent full 5-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/ru/bridge-taint-primary/record.json (sha256 bf7a7e230563eb87055c2d1e0587499dc592debcf4ea0766297b39ecdf6e649d). Non-gating findings [] deferred in PR #3796 thread; no wording changed. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
+    }
+  ]
+}
