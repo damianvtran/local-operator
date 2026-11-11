@@ -683,8 +683,13 @@ def _name_segments(name: str) -> list[str]:
 #: gone, so ``PROD_REGION`` or ``TEST_URL`` gain nothing. Deliberately an
 #: explicit list, not "any short segment": ``…_KEY_ID`` must stay judged as
 #: written, and ``id`` is a qualifier word elsewhere in this module.
-_ENV_QUALIFIER_SEGMENTS = frozenset(
-    {"prod", "production", "dev", "staging", "stg", "qa", "test", "live", "sandbox"}
+#:
+#: ONLY the ``_`` spelling, the environment-variable one (measured, FP pass on
+#: the 200 most recent sessions): a hyphenated ``minerva-nexus/secrets-prod`` is
+#: a Secret/store RESOURCE name, not a variable, and stripping its ``-prod`` made
+#: the prose after it (``secrets-prod: fail``) a "credential value".
+_ENV_QUALIFIER_SUFFIX = re.compile(
+    r"(?:_(?:prod|production|dev|staging|stg|qa|test|live|sandbox|[0-9]+))+$", re.IGNORECASE
 )
 
 #: Compound names whose last segment is a CONTAINER word (``json``/``url``), so
@@ -699,16 +704,14 @@ _CREDENTIAL_JSON_PREFIXES = (("service", "account"), ("credentials",), ("credent
 _WEBHOOK_VENDOR_SEGMENTS = frozenset({"slack", "discord", "teams", "msteams"})
 
 
-def _without_env_qualifiers(segments: list[str]) -> list[str]:
-    """``segments`` minus trailing environment qualifiers and numeric suffixes.
+def _qualified_segments(name: str) -> list[str]:
+    """``name``'s segments without trailing ``_``-joined environment qualifiers.
 
-    At least one segment is always kept, so ``PROD`` or ``2`` alone is judged
-    as itself (and is not a credential word).
+    The whole name is kept when it is nothing but qualifiers, so ``PROD`` or
+    ``_2`` is judged as itself (and is not a credential word).
     """
-    end = len(segments)
-    while end > 1 and (segments[end - 1] in _ENV_QUALIFIER_SEGMENTS or segments[end - 1].isdigit()):
-        end -= 1
-    return segments[:end]
+    bare = name.strip("_.-")
+    return _name_segments(_ENV_QUALIFIER_SUFFIX.sub("", bare) or bare)
 
 
 def _is_compound_credential_name(segments: list[str]) -> bool:
@@ -725,7 +728,7 @@ def _is_compound_credential_name(segments: list[str]) -> bool:
 
 def is_webhook_credential_name(name: str) -> bool:
     """Whether ``name`` is a chat incoming-webhook URL name (its URL is the secret)."""
-    segments = _without_env_qualifiers(_name_segments(name))
+    segments = _qualified_segments(name)
     return len(segments) > 2 and segments[-1] == "url" and _is_compound_credential_name(segments)
 
 
@@ -739,7 +742,7 @@ def is_credential_name(name: str) -> bool:
     is the separate judgement :func:`is_count_shaped` makes.
 
     Trailing environment qualifiers are stripped first (``API_KEY_PROD`` is
-    ``API_KEY``; see :data:`_ENV_QUALIFIER_SEGMENTS`), and a short list of
+    ``API_KEY``; see :data:`_ENV_QUALIFIER_SUFFIX`), and a short list of
     compound credential names ending in ``json``/``url`` is recognised (see
     :data:`_CREDENTIAL_JSON_PREFIXES`). The NAME is only ever a reason to judge
     the VALUE beside it: no rule masks a name itself.
@@ -749,7 +752,7 @@ def is_credential_name(name: str) -> bool:
         return False
     if lowered in _RUN_TOGETHER_NAMES:
         return True
-    segments = _without_env_qualifiers(_name_segments(lowered))
+    segments = _qualified_segments(lowered)
     if not segments:
         return False
     if len(segments) == 1 and segments[0] in _RUN_TOGETHER_NAMES:
@@ -1184,7 +1187,7 @@ def is_strong_credential_name(name: str) -> bool:
     depend on digits (an expression, a quoted path, a bare filesystem path, a
     credential-less URL, a value that repeats its own name) apply to both.
     """
-    segments = _without_env_qualifiers(_name_segments(name))
+    segments = _qualified_segments(name)
     if not segments:
         return False
     # Judged on the name WITHOUT its environment qualifiers, the same reading
@@ -6211,6 +6214,7 @@ def _scrub_plain_terraform_plan_json(text: str) -> str:
 # ``=`` binding, and a session-wide registration would multiply any miss.
 
 _INDIRECT_NAME_FIELDS = frozenset({"key", "name"})
+_INDIRECT_NAME_SHAPE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,127}")
 #: Live-stream lookbehind for this rule (see :func:`scrub_indirect_names_in_context`).
 _INDIRECT_CONTEXT_CHARS = 4096
 #: How many lines either side of a YAML ``value:`` its sibling name may sit. A COST
@@ -6228,6 +6232,12 @@ def _indirect_value_is_credential(name: Optional[str], value: str) -> bool:
     # The assignment rule's own value floor: below it a value is a word or a
     # flag (``"x"``, ``"true"``), and masking it hides data while protecting nothing.
     if not name or len(value) < _ASSIGNED_VALUE_MIN_CHARS or REDACTION_MARKER in value:
+        return False
+    # The name must be a VARIABLE name: every spelling this rule exists for (HCP
+    # and GitLab variables, ``env:`` entries) holds an identifier. A path such as
+    # ``opensearch/opensearch-admin-credentials`` names a Secret RESOURCE, and the
+    # ``value`` beside it in the FP pass was a sentinel phrase, not a credential.
+    if not _INDIRECT_NAME_SHAPE.fullmatch(name):
         return False
     if not is_credential_name(name) or is_count_shaped(name):
         return False

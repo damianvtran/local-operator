@@ -291,6 +291,16 @@ async def test_every_details_string_is_masked_and_other_fields_kept(tmp_path: An
     assert out["url"] == details["url"] and out["path"] == details["path"]
     assert out["job_ids"] == ("job-1", "job-2") and out["count"] == 3 and out["useless"] is False
     assert SECRET in details["rows"][0]["line"], "the executor's own details are untouched"
+    # A string with no whitespace, ``=`` or ``:`` is an IDENTIFIER its reader matches
+    # exactly (FP pass: ``questions[].id``/``model`` values were masked by the
+    # vendor-prefix rule); the same spelling inside prose is still scrubbed.
+    ident = "tvly" + "-" + "abcdefghijklmnop"
+    assert scrub_shapes(ident) != ident, "precondition: the table masks this spelling"
+    ids = {"question_ids": [ident], "model": ident, "text": f"saw {ident} here"}
+    kept = await AgentLoop._redact_details(ids, store.redact, "ask", None)
+    assert kept is not None
+    assert kept["question_ids"] == [ident] and kept["model"] == ident
+    assert ident not in kept["text"]
     # Nothing long enough to carry a credential: returned as is, no thread hop.
     small = {"job_id": "j1", "pid": 4}
     assert await AgentLoop._redact_details(small, store.redact, "jobs", None) is small
@@ -359,3 +369,22 @@ def test_the_yaml_walk_is_linear_on_a_log_of_value_lines() -> None:
     started = time.perf_counter()
     assert scrub_shapes(text) == text
     assert time.perf_counter() - started < 5
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # FP pass, 2026-11: a Secret RESOURCE path beside a sentinel phrase.
+        json.dumps(
+            {
+                "name": "opensearch/opensearch-admin-credentials",
+                "keys": ["OPENSEARCH_INITIAL_ADMIN_PASSWORD"],
+                "value": "VALUE-NEVER-PRINTED-HERE",
+            }
+        ),
+        # FP pass, 2026-11: a hyphenated ``-prod`` resource name is not stripped.
+        "- minerva-nexus/secrets-prod: failedSync\\nNeeds sync/roll both.",
+    ],
+)
+def test_resource_names_are_not_variable_names(text: str) -> None:
+    assert scrub_shapes(text) == text

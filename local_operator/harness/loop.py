@@ -345,21 +345,45 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 
 
-def _redact_nested_strings(value: Any, redact: Callable[[str], str]) -> Any:
+def _is_content_string(value: str) -> bool:
+    """Prose, output, a URL or a ``NAME=VALUE``/``name: value`` carrier — not a
+    bare identifier (see ``content_only``)."""
+    return "=" in value or ":" in value or any(char.isspace() for char in value)
+
+
+def _redact_nested_strings(
+    value: Any, redact: Callable[[str], str], *, content_only: bool = False
+) -> Any:
     """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``.
 
     Keys, numbers, booleans and container TYPES are kept (a tuple stays a
     tuple), so a reader comparing a field it did not expect to change — a
     counter, a flag, a ``job_ids`` tuple — sees exactly what it stored.
+
+    ``content_only`` leaves a string with no whitespace, ``=`` or ``:`` untouched:
+    that is an IDENTIFIER (a question id, a model name, a path, a handle) that its
+    reader matches exactly. Measured on the 200 most recent sessions before the
+    filter: the generic walk masked ``questions[].id``, ``question_ids[]`` and
+    ``model`` values through the vendor-prefix rule — an ask answer keyed by
+    that id could no longer be matched. Prose, command output, URLs and
+    ``KEY=value`` lines (where a credential actually travels in details:
+    ``rows``, ``text``, ``prompt``) are still scrubbed.
     """
     if isinstance(value, str):
-        return redact(value) if value else value
+        if not value or (content_only and not _is_content_string(value)):
+            return value
+        return redact(value)
     if isinstance(value, dict):
-        return {key: _redact_nested_strings(item, redact) for key, item in value.items()}
+        return {
+            key: _redact_nested_strings(item, redact, content_only=content_only)
+            for key, item in value.items()
+        }
     if isinstance(value, tuple):
-        return tuple(_redact_nested_strings(item, redact) for item in value)
+        return tuple(
+            _redact_nested_strings(item, redact, content_only=content_only) for item in value
+        )
     if isinstance(value, list):
-        return [_redact_nested_strings(item, redact) for item in value]
+        return [_redact_nested_strings(item, redact, content_only=content_only) for item in value]
     return value
 
 
@@ -7951,7 +7975,9 @@ class AgentLoop:
                     key: (
                         value
                         if key in _CONTENT_BEARING_DETAIL_KEYS
-                        else _redact_nested_strings(value, redact)
+                        else _redact_nested_strings(
+                            value, redact, content_only=key != "server_result"
+                        )
                     )
                     for key, value in details.items()
                 }
