@@ -447,22 +447,54 @@ def add_parser(
     # byte. A subparser rather than another `network sessions` flag: `sessions` is a
     # flag family over one address, and a verb that takes a SOURCE and a DESTINATION
     # path does not fit that shape (mesh-file-transfer.md, Decision 5).
+    # The help is the whole path from "I have a peer" to a working pull (#3794 UX U4):
+    # where the session id comes from, and where a scratchpad:// path comes from.
+    files_epilog = (
+        "Find the session id with `lop network sessions --peer PEER`. A scratchpad://\n"
+        "path or attachment:<id> is what that session reports when it saves a file;\n"
+        "read its replies with `lop network sessions --peer PEER --peek SESSION`.\n\n"
+        "  lop network files pull laptop 9f3ac1e0b7d2 scratchpad://shots/frame.png "
+        "--out frame.png"
+    )
     files_parser = actions.add_parser(
-        "files", help="Copy files out of sessions on other devices, verified"
+        "files",
+        help="Copy files out of sessions on other devices, verified",
+        description=(
+            "Copy a file a session on another device saved (its scratchpad, or an image "
+            "or file in its conversation) to this device, byte for byte, checked against "
+            "its sha256 before anything is written."
+        ),
+        epilog=files_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     file_actions = files_parser.add_subparsers(dest="files_command")
     file_pull = file_actions.add_parser(
         "pull",
         help="Pull one scratchpad file or referenced attachment from a peer's session",
+        description=(
+            "Pull one file out of a session on another device. It is verified end to end, "
+            "kept in this device's attachment store, and written to --out if given. A pull "
+            "cut off part-way resumes when the same command is run again."
+        ),
+        epilog=files_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     file_pull.add_argument("peer", help="The device that holds the session (name or id)")
-    file_pull.add_argument("session", help="The session id on that device")
+    file_pull.add_argument(
+        "session", help="The session id, from `lop network sessions --peer PEER`"
+    )
     file_pull.add_argument(
         "source",
-        help="scratchpad://<path> in that session, or an attachment digest "
-        "(32 hex, optionally written attachment:<digest>) its transcript references",
+        help="scratchpad://<path> the session saved, or attachment:<id> of an image or "
+        "file in its conversation",
     )
-    file_pull.add_argument("--out", help="Also write the verified file here (refused if it exists)")
+    file_pull.add_argument(
+        "--out",
+        metavar="PATH",
+        help="Write the verified file here too (it is always kept in this device's "
+        "attachment store). A directory receives it under its own name; an existing file "
+        "is refused without --force",
+    )
     file_pull.add_argument(
         "--force", action="store_true", help="Let --out replace an existing file"
     )
@@ -10879,11 +10911,56 @@ def _file_pull_source(raw: str) -> dict[str, str]:
     digest = text.removeprefix("attachment:")
     if re.fullmatch(r"[0-9a-f]{32}", digest):
         return {"attachment": digest}
+    hint = f"; did you mean scratchpad://{text}?" if text and "://" not in text else ""
     raise MeshRefusal(
         "bad_request",
-        f"{text!r} is neither a scratchpad:// path nor an attachment digest (32 hex); "
-        "only those two are pulled",
+        f"{text!r} is neither a scratchpad:// path nor an attachment:<id> (32 hex); "
+        f"only those two are pulled{hint}",
     )
+
+
+def _source_basename(source: dict[str, str]) -> str:
+    """The name a ``--out`` directory receives the file under, from the SOURCE.
+
+    Taken from what the person asked for, not from the owner's reply, so the
+    pre-transfer checks (exists? writable?) run on the real target before a byte
+    moves. An attachment has no name of its own; its id stands in, like the store's.
+    """
+    from urllib.parse import unquote, urlsplit
+
+    if "path" in source:
+        parts = urlsplit(source["path"])
+        name = unquote(parts.netloc + parts.path).rstrip("/").rsplit("/", 1)[-1]
+        return name or "file"
+    return f"{source['attachment']}.bin"
+
+
+def _out_target(out: Path, source: dict[str, str], *, force: bool) -> Path:
+    """Resolve ``--out`` and refuse, BEFORE the transfer, what landing would refuse.
+
+    #3794 QA Q2 / UX U1: these checks ran only after the whole transfer, and the
+    directory case's advice ("pass --force") led straight into a traceback. Like
+    ``cp``/``scp``, an existing directory receives the file under the source's name,
+    with the same no-overwrite rule applied to THAT file.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    target = out / _source_basename(source) if out.is_dir() else out
+    if target.is_dir():
+        raise MeshRefusal(
+            "out_invalid", f"{target} is a directory; give --out a file path or a directory"
+        )
+    parent = target.parent if str(target.parent) else Path(".")
+    if not parent.is_dir():
+        raise MeshRefusal("out_invalid", f"{parent} is not a directory, so nothing was pulled")
+    if not os.access(parent, os.W_OK | os.X_OK):
+        raise MeshRefusal("out_invalid", f"{parent} is not writable by you, so nothing was pulled")
+    if target.exists() and not force:
+        raise MeshRefusal(
+            "out_exists",
+            f"{target} already exists, so nothing was pulled; pass --force to replace it",
+        )
+    return target
 
 
 def _land_out(store_path: Path, out: Path, sha256: str, *, force: bool) -> None:
@@ -10947,14 +11024,11 @@ def _cmd_files_pull(args: argparse.Namespace) -> int:
     from local_operator.network.types import MeshRefusal
 
     source = _file_pull_source(args.source)
-    out = Path(args.out).expanduser() if getattr(args, "out", None) else None
-    if out is not None:
-        # Checked BEFORE the transfer as well as at the link: refusing an existing
+    out: Path | None = None
+    if getattr(args, "out", None):
+        # Resolved and checked BEFORE the transfer: refusing an existing or unwritable
         # --out after moving 256 MiB would spend the whole pull to say no.
-        if out.exists() and not args.force:
-            raise MeshRefusal("out_exists", f"{out} already exists; pass --force to replace it")
-        if not out.parent.is_dir():
-            raise MeshRefusal("out_invalid", f"{out.parent} is not a directory")
+        out = _out_target(Path(args.out).expanduser(), source, force=bool(args.force))
     detail = _relay_answer(
         "session_file_pull",
         timeout=files.FILE_PULL_CLIENT_TIMEOUT_S,
@@ -10963,20 +11037,43 @@ def _cmd_files_pull(args: argparse.Namespace) -> int:
         **source,
     )
     store_path = str(detail.get("path") or "")
+    attachment = str(detail.get("attachment") or "")
     if out is not None:
-        _land_out(Path(store_path), out, str(detail.get("sha256") or ""), force=bool(args.force))
+        try:
+            _land_out(
+                Path(store_path), out, str(detail.get("sha256") or ""), force=bool(args.force)
+            )
+        except OSError as error:
+            # NEVER A TRACEBACK (#3794 QA Q2): the bytes are already verified and kept,
+            # so the honest refusal says where they are as well as what went wrong.
+            raise MeshRefusal(
+                "out_invalid",
+                f"{out} could not be written ({error.strerror or error}); the verified copy "
+                f"is kept in this device's attachment store at {store_path}",
+            ) from None
     receipt = {
         **detail,
         "path": str(out) if out is not None else store_path,
         "landed": {"store": store_path, "out": str(out) if out is not None else None},
     }
+    size = int(receipt.get("bytes") or 0)
+    name = files._printable(str(receipt.get("name") or ""))  # noqa: SLF001 — one escaper
+    peer = files._printable(str(receipt.get("peer") or ""))  # noqa: SLF001
     lines = [
-        f"pulled {receipt.get('name')} from {receipt.get('peer')}: "
-        f"{receipt.get('bytes')} bytes, {receipt.get('sha256')}, verified",
-        f"saved to {receipt['path']}",
+        f"pulled {name} from {peer}: {files.human_bytes(size)} ({size} bytes), "
+        f"{receipt.get('sha256')}, verified",
     ]
-    if int(receipt.get("resumed_bytes") or 0) > 0:
-        lines.append(f"resumed after {receipt['resumed_bytes']} bytes already staged")
+    if out is not None:
+        lines.append(f"saved to {out}")
+        lines.append(f"also kept in this device's attachment store as attachment:{attachment}")
+    else:
+        lines.append(
+            f"saved in this device's attachment store as attachment:{attachment} ({store_path})"
+        )
+        lines.append(f"pass --out PATH to save it as {name}")
+    resumed = int(receipt.get("resumed_bytes") or 0)
+    if resumed > 0:
+        lines.append(f"resumed: {files.human_bytes(resumed)} was already here")
     return _emit(args, receipt, lines)
 
 

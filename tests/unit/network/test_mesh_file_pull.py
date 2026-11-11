@@ -34,7 +34,7 @@ import json
 import os
 from argparse import Namespace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -174,9 +174,12 @@ def test_no_view_and_a_session_not_owned_are_refused_with_nothing_staged(
     # A session that exists on B's side of the question only: A never owned it.
     rc, refused = _pull(capsys, "scratchpad://secret-plan.txt", session="0123456789ab")
     assert rc == 1, refused
-    # The chokepoint's codes deliberately do not cross the wire (wire.refusal_frame),
-    # so the owner's SENTENCE is the evidence of which rule fired.
-    assert "does not live on this device" in refused["message"], refused
+    # The chokepoint's codes deliberately do not cross the wire (wire.refusal_frame), so
+    # the requester maps the owner's sentence to the code an agent branches on, and
+    # re-voices it from where the person is typing (#3794 UX U6, QA Q5).
+    assert refused["code"] == "session_not_found", refused
+    assert "device-a has no session 0123456789ab" in refused["message"], refused
+    assert "lop network sessions --peer device-a" in refused["message"], refused
 
     record = store.list_networks(server_a.root)[0]
     with store.mutate(record.network_id, server_a.root) as mutable:
@@ -186,7 +189,11 @@ def test_no_view_and_a_session_not_owned_are_refused_with_nothing_staged(
         store.save(mutable, server_a.root)
     rc, refused = _pull(capsys, "scratchpad://secret-plan.txt")
     assert rc == 1, refused
-    assert "does not hold the 'view' capability" in refused["message"], refused
+    assert refused["code"] == "not_authorised", refused
+    assert "device-a refused: device-b lacks the 'view' capability there" in refused["message"]
+    assert (
+        "lop network member grant" in refused["message"] and "device-b view" in refused["message"]
+    )
     assert _staged(server_b) == [] and not _in_store(server_b, b"not for a list-only member")
 
 
@@ -305,7 +312,8 @@ def test_a_link_cut_mid_transfer_resumes_from_the_verified_prefix(
     out = tmp_path / "frame.png"
     rc, first = _pull(capsys, "scratchpad://frame.png", out=out)
     assert rc == 1 and first["code"] == "peer_unreachable", first
-    assert "staged and the next pull resumes" in first["message"], first
+    assert "1.5 MiB arrived intact and is kept" in first["message"], first
+    assert "run the same command again to resume" in first["message"], first
     sha = hashlib.sha256(PNG).hexdigest()
     assert _staged(server_b) == [f"{sha}.part"], "the verified prefix was not kept"
     assert not out.exists() and not _in_store(server_b, PNG)
@@ -420,3 +428,272 @@ def base64_encode(payload: bytes) -> str:
     import base64
 
     return base64.b64encode(payload).decode("ascii")
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation (#3794): review R1-1..R1-6, QA Q1..Q4, UX U1..U8, N1..N3.
+# Each cell below was RED on 95c655ec466d.
+# ---------------------------------------------------------------------------
+
+
+def _human(capsys: pytest.CaptureFixture[str], source: str, *extra: str) -> tuple[int, str]:
+    """The same pull in TEXT mode, through the real ``files pull`` argparse (R1-6)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["network", "files", "pull", PEER, SESSION, source, *extra])
+    capsys.readouterr()
+    rc = net_cli.main(args)
+    captured = capsys.readouterr()
+    return rc, captured.out + captured.err
+
+
+def test_a_missing_path_is_not_found_and_creates_nothing_on_the_owner(
+    mesh: Devices, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-1 (MAJOR) + U2: a read peer must not mkdir in the owner's pad, and a typo
+    is ``not_found`` in read words, not an ``unsafe_path`` write sentence."""
+    server_a, server_b, _host, _port = mesh
+    pad = _pad(server_a)
+    (pad / "notes.txt").write_text("a file, not a folder")
+    for source in ("scratchpad://nope/x", "scratchpad://a/b/c/x.png", "scratchpad://nope.txt"):
+        rc, refused = _pull(capsys, source)
+        assert rc == 1 and refused["code"] == "not_found", (source, refused)
+        assert f"{source} does not exist in session {SESSION} on device-a" in refused["message"]
+        assert "paths are case-sensitive" in refused["message"], refused
+        assert "Sync member" not in refused["message"] and "written" not in refused["message"]
+    rc, refused = _pull(capsys, "scratchpad://notes.txt/inner")  # ENOTDIR
+    assert rc == 1 and refused["code"] == "not_found", refused
+    assert not (pad / "nope").exists(), "a read peer created a directory in the owner's pad"
+    assert not (pad / "a").exists(), "a read peer created a directory in the owner's pad"
+    assert sorted(p.name for p in pad.iterdir()) == ["notes.txt"]
+    assert _staged(server_b) == []
+
+
+def test_a_hard_link_into_the_pad_is_refused_with_nothing_staged(
+    mesh: Devices, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q1 (MAJOR): QA's repro. A hard link to the owner's network secrets file passes
+    every NAME check inside the pad; the opened fd's link count is what refuses it."""
+    server_a, server_b, _host, _port = mesh
+    record = store.list_networks(server_a.root)[0]
+    secrets_file = store.networks_dir(server_a.root) / f"{record.network_id}.secrets.json"
+    assert secrets_file.is_file()
+    os.link(secrets_file, _pad(server_a) / "notes.txt")
+    rc, refused = _pull(capsys, "scratchpad://notes.txt")
+    assert rc == 1 and refused["code"] == "hard_linked", refused
+    assert "hard link" in refused["message"] and "save a copy" in refused["message"]
+    assert _staged(server_b) == [] and not _in_store(server_b, secrets_file.read_bytes())
+
+
+def test_special_files_and_a_linked_pad_refuse_in_read_words_without_owner_paths(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """R1-2 / Q3 / Q4 / U2: no "Sync member … was not written", and a symlinked pad
+    never leaks the owner's absolute path through the relay's generic error."""
+    server_a, server_b, _host, _port = mesh
+    os.mkfifo(_pad(server_a) / "pipe.log")
+    rc, refused = _pull(capsys, "scratchpad://pipe.log")
+    assert rc == 1 and refused["code"] == "unsafe_path", refused
+    assert "is not a regular file (a link, pipe or device)" in refused["message"], refused
+    assert "Sync member" not in refused["message"] and "written" not in refused["message"]
+
+    elsewhere = tmp_path / "padtarget"
+    elsewhere.mkdir()
+    (elsewhere / "x.txt").write_text("outside")
+    pad = _pad(server_a)
+    for entry in pad.iterdir():
+        entry.unlink()
+    pad.rmdir()
+    pad.symlink_to(elsewhere, target_is_directory=True)
+    rc, refused = _pull(capsys, "scratchpad://x.txt")
+    assert rc == 1 and refused["code"] in {"unsafe_path", "outside_scratchpad"}, refused
+    assert str(server_a.root) not in refused["message"], refused
+    assert "Sync member" not in refused["message"], refused
+    assert _staged(server_b) == []
+
+
+@pytest.mark.parametrize(
+    "name", ["id_rsa", "api_token.txt", "token-usage.log"], ids=["key", "token", "usage-log"]
+)
+def test_a_credential_name_refusal_reads_as_a_sentence_with_a_way_round(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    """U3: the denylist's rule ids ("name", "token-or-secret-name") are not copy."""
+    server_a, _server_b, _host, _port = mesh
+    (_pad(server_a) / name).write_text("x")
+    rc, refused = _pull(capsys, f"scratchpad://{name}")
+    assert rc == 1 and refused["code"] == "sensitive", refused
+    message = refused["message"]
+    assert not message.endswith((": name", ": token-or-secret-name")), message
+    assert "credential-looking files never leave a device" in message, message
+    assert "have the session save it under another name" in message, message
+
+
+def test_out_as_a_directory_lands_inside_it_and_every_out_check_runs_before_the_transfer(
+    mesh: Devices,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U1 / Q2 (MAJOR): a directory receives the file under the source's name (like
+    cp/scp); exists/unwritable refuse BEFORE a byte moves; a landing OSError is a
+    JSON refusal naming the kept store copy, never a traceback."""
+    server_a, _server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    asked: list[str] = []
+    serve = server_a._handlers["net_file_get"]  # noqa: SLF001
+    monkeypatch.setitem(
+        server_a._handlers,  # noqa: SLF001
+        "net_file_get",
+        lambda link, frame: (asked.append(str(frame.get("phase"))), serve(link, frame))[1],
+    )
+    downloads = tmp_path / "Downloads"
+    downloads.mkdir()
+    rc, receipt = _pull(capsys, "scratchpad://run.log", out=downloads)
+    assert rc == 0, receipt
+    assert (downloads / "run.log").read_text() == LOG
+    assert receipt["path"] == str(downloads / "run.log"), receipt
+
+    asked.clear()
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=downloads)
+    assert rc == 1 and refused["code"] == "out_exists", refused
+    assert asked == [], "the exists check ran after the transfer"
+
+    readonly = tmp_path / "ro"
+    readonly.mkdir()
+    readonly.chmod(0o555)
+    try:
+        if not os.access(readonly, os.W_OK):  # root ignores the mode bits
+            rc, refused = _pull(capsys, "scratchpad://run.log", out=readonly / "x.log")
+            assert rc == 1 and refused["code"] == "out_invalid", refused
+            assert asked == [], "the writable check ran after the transfer"
+    finally:
+        readonly.chmod(0o755)
+
+    def disk_full(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(net_cli, "_land_out", disk_full)
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=tmp_path / "late.log")
+    assert rc == 1 and refused["code"] == "out_invalid", refused
+    assert "No space left on device" in refused["message"], refused
+    assert "the verified copy is kept in this device's attachment store at" in refused["message"]
+
+
+def test_a_nested_frame_is_refused_by_the_handler(mesh: Devices) -> None:
+    """R1-3: the chokepoint scopes a nested frame's id; this handler serves the outer."""
+    server_a, server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    handler = server_a._handlers["net_file_get"]  # noqa: SLF001
+    frame = {
+        "op": "net_file_get",
+        "session_id": SESSION,
+        "path": "scratchpad://run.log",
+        "phase": "stat",
+        "frame": {"session_id": SESSION},
+    }
+    with pytest.raises(files.MeshRefusal) as refused:
+        handler(cast(Any, None), frame)
+    assert refused.value.code == "bad_request"
+
+
+def test_a_declared_active_content_mime_is_filed_as_octet_stream(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-4: the peer's mime is a label; only the servable/passive set is kept."""
+    server_a, server_b, _host, _port = mesh
+    (_pad(server_a) / "page.txt").write_text("<script>alert(1)</script>")
+    serve = server_a._handlers["net_file_get"]  # noqa: SLF001
+
+    def declares_html(link: Any, frame: dict[str, Any]) -> Any:
+        reply = serve(link, frame)
+        assert reply is not None
+        return {**reply, "mime": "text/html"} if frame.get("phase") == "stat" else reply
+
+    monkeypatch.setitem(server_a._handlers, "net_file_get", declares_html)  # noqa: SLF001
+    rc, receipt = _pull(capsys, "scratchpad://page.txt")
+    assert rc == 0, receipt
+    assert receipt["mime"] == "application/octet-stream", receipt
+    sidecar = json.loads(Path(receipt["path"]).with_suffix(".json").read_text())
+    assert sidecar["mime_type"] == "application/octet-stream"
+
+
+def test_the_text_receipt_names_the_store_human_sizes_and_escapes_peer_text(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U5 / U7 / R1-6, through the real argparse: where the file went, in words; sizes
+    a person reads; a peer-chosen name cannot write escape codes to the terminal."""
+    server_a, _server_b, _host, _port = mesh
+    (_pad(server_a) / "frame.png").write_bytes(PNG)
+    serve = server_a._handlers["net_file_get"]  # noqa: SLF001
+
+    def hostile_name(link: Any, frame: dict[str, Any]) -> Any:
+        reply = serve(link, frame)
+        assert reply is not None
+        return {**reply, "name": "frame\x1b[31m.png"} if frame.get("phase") == "stat" else reply
+
+    monkeypatch.setitem(server_a._handlers, "net_file_get", hostile_name)  # noqa: SLF001
+    rc, text = _human(capsys, "scratchpad://frame.png")
+    assert rc == 0, text
+    assert "\x1b[31m" not in text and "\\x1b[31m" in text, text
+    assert f"3.0 MiB ({len(PNG)} bytes)" in text, text
+    assert "saved in this device's attachment store as attachment:" in text, text
+    assert "pass --out PATH to save it as" in text, text
+
+
+def test_the_help_shows_where_the_session_and_the_source_come_from(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """U4 / N1: description, epilog with an example, and the help copy UX gave, read
+    through ``--help`` exactly as a person asks for it."""
+    import argparse
+
+    def help_for(*argv: str) -> str:
+        parser = argparse.ArgumentParser(prog="lop")
+        net_cli.add_parser(parser.add_subparsers(dest="command"))
+        capsys.readouterr()
+        with pytest.raises(SystemExit):
+            parser.parse_args([*argv, "--help"])
+        return capsys.readouterr().out
+
+    files_help, pull_raw = help_for("network", "files"), help_for("network", "files", "pull")
+    for text in (files_help, pull_raw):
+        assert "lop network sessions --peer PEER" in text, text
+        assert "lop network files pull laptop 9f3ac1e0b7d2 scratchpad://" in text, text
+    pull_help = " ".join(pull_raw.split())  # argparse wraps by terminal width
+    assert "--out PATH" in pull_help and "always kept in this device's attachment" in pull_help
+    assert "attachment:<id> of an image or" in pull_help, pull_help
+
+
+def test_unreachable_old_peer_too_large_and_a_bare_name_say_what_to_do_next(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U7 / U8 / N3: each refusal names the neighbouring command that fixes it."""
+    server_a, server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    cap = files.FILE_MAX_BYTES
+    # Set and restored by hand: ``monkeypatch.undo()`` would also revert the fixture's
+    # LOCAL_OPERATOR_CONFIG_DIR and point the CLI at no relay at all.
+    files.FILE_MAX_BYTES = 1024 * 1024
+    try:
+        rc, refused = _pull(capsys, "scratchpad://run.log")
+    finally:
+        files.FILE_MAX_BYTES = cap
+    assert rc == 1 and refused["code"] == "too_large", refused
+    assert "MiB" in refused["message"] and "Split or compress it" in refused["message"]
+
+    rc, refused = _pull(capsys, "run.log")
+    assert rc == 1 and "did you mean scratchpad://run.log?" in refused["message"], refused
+
+    link = server_b._ensure_link(server_a.identity.device_id)  # noqa: SLF001
+    assert link is not None
+    link.capabilities = frozenset(c for c in link.capabilities if c != wire.MESH_FILE_V1)
+    rc, refused = _pull(capsys, "scratchpad://run.log")
+    assert "`lop network update device-a`" in refused["message"], refused
+
+    monkeypatch.setattr(server_b, "_ensure_link", lambda _device: None)
+    rc, refused = _pull(capsys, "scratchpad://run.log")
+    assert rc == 1 and refused["code"] == "peer_unreachable", refused
+    assert "`lop network peers` or `lop network doctor`" in refused["message"], refused

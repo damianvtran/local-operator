@@ -107,6 +107,50 @@ def _refuse(code: str, message: str) -> MeshRefusal:
     return MeshRefusal(code, message)
 
 
+#: The credential-vocabulary rule ids (``supplements/denylist.py``) as sentences.
+#: The id itself is the denylist's internal name ("name", "token-or-secret-name"),
+#: which a person cannot read without the source (#3794 UX U3). The code stays
+#: ``sensitive``; the rule id does not cross the link (a refusal frame carries a
+#: code and a sentence only), so the sentence is what explains it.
+_SENSITIVE_WHY: dict[str, str] = {
+    "name": "it is named like a private key or credential file",
+    "name-prefix": "it is named like a private key or credential file",
+    "suffix": "its extension is one used for keys and certificates",
+    "component": "it sits in a folder used for credentials",
+    "credential-pattern": "its name looks like a credential file",
+    "database": "it looks like a local database, which can hold saved credentials",
+    "token-or-secret-name": "its name looks like a credential (token, secret, key)",
+    "compose-file": "it is a container compose file, which often carries secrets",
+    "gh-hosts": "it is a GitHub CLI login file",
+    "docker-config": "it is a Docker login file",
+    "gcloud": "it is a Google Cloud login file",
+    "terraform": "it is a Terraform login file",
+    "tool-credential-config": "it is a tool's credential file",
+    "browser-store": "it is a browser's cookie or password store",
+    "config-dir": "it is inside that device's own configuration",
+    "scratchpad": "it is in another session's scratchpad",
+}
+
+
+def _sensitive_sentence(path_ref: str, rule: str) -> str:
+    why = _SENSITIVE_WHY.get(rule, "its name looks like a credential")
+    return (
+        f"{path_ref} is not served: {why}, and credential-looking files never leave a "
+        "device over the mesh. If it is not a secret, have the session save it under "
+        "another name and pull that"
+    )
+
+
+def human_bytes(count: int) -> str:
+    """``3.0 MiB``: the text surfaces' size; exact integers stay in ``--json``."""
+    value = float(count)
+    for unit in ("bytes", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{int(value)} bytes" if unit == "bytes" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{count} bytes"  # pragma: no cover - the loop always returns
+
+
 def _mime_for(name: str) -> str:
     suffix = Path(name).suffix.lower()
     guessed, _encoding = mimetypes.guess_type(name, strict=False)
@@ -128,9 +172,14 @@ class _Source:
     mime: str
     #: The store digest the requester named, or ``""`` for a scratchpad path.
     attachment: str
+    #: What the requester asked for, as they wrote it: every refusal names THIS, never
+    #: the owner's absolute path.
+    label: str = ""
 
 
-def _resolve_source(root: Path, session_id: str, frame: dict[str, Any]) -> _Source:
+def _resolve_source(
+    root: Path, session_id: str, frame: dict[str, Any], owner: str = "this device"
+) -> _Source:
     """The one file ``frame`` names inside ``session_id``, or a refusal naming the rule.
 
     Called on EVERY phase, not once per pull: each request is authorised on its own
@@ -166,8 +215,8 @@ def _resolve_source(root: Path, session_id: str, frame: dict[str, Any]) -> _Sour
         if attachment not in sync.referenced_attachments_in(directory):
             raise _refuse(
                 "not_referenced",
-                f"attachment {attachment} is not referenced by session {session_id} on this "
-                "device, so it is not served",
+                f"attachment:{attachment} is not part of session {session_id} on {owner}, so "
+                "it is not served; only files that conversation references can be pulled",
             )
         store_root = Path(root) / ATTACHMENTS_DIRNAME
         mime = "application/octet-stream"
@@ -180,10 +229,11 @@ def _resolve_source(root: Path, session_id: str, frame: dict[str, Any]) -> _Sour
         extension = mimetypes.guess_extension(mime) or ".bin"
         return _Source(
             path=store_root / f"{attachment}.bin",
-            scope=sync.write_scope(Path(root), store_root),
+            scope=_read_scope(Path(root), store_root, f"attachment:{attachment}"),
             name=f"{attachment}{extension}",
             mime=mime,
             attachment=attachment,
+            label=f"attachment:{attachment}",
         )
     pad = scratchpad_root(directory)
     if pad is None or not pad.is_dir():
@@ -212,36 +262,97 @@ def _resolve_source(root: Path, session_id: str, frame: dict[str, Any]) -> _Sour
     for form in (written, target.path):
         reason = is_sensitive_for_supplements(form, session_scratchpad=str(pad))
         if reason:
-            raise _refuse("sensitive", f"{path_ref} is not served: {reason}")
+            raise _refuse("sensitive", _sensitive_sentence(path_ref, reason))
     return _Source(
         path=target.path,
-        scope=sync.write_scope(Path(root), pad),
+        scope=_read_scope(Path(root), pad, path_ref),
         name=target.path.name,
         mime=_mime_for(target.path.name),
         attachment="",
+        label=path_ref,
     )
 
 
-def _open_source(source: _Source) -> tuple[int, os.stat_result]:
-    """Open no-follow, non-blocking, regular-only; refuse a file over the cap."""
+def _read_scope(root: Path, allowed: Path, label: str) -> sync.WriteScope:
+    """The containment scope for a READ, its refusal in read words with no owner path.
+
+    ``sync.write_scope`` raises ``SyncRefused`` with the write side's sentence and the
+    absolute path ("Sync member '/…/scratchpad' was not written: …"). Escaping as-is it
+    reached the requester through the relay's generic error path, naming this device's
+    filesystem layout to a read member (#3794 QA Q3, review R1-2).
+    """
+    try:
+        return sync.write_scope(root, allowed)
+    except sync.SyncRefused:
+        raise _refuse(
+            "unsafe_path",
+            f"{label} is not served: the folder it is in is a link on that device, not a "
+            "plain folder",
+        ) from None
+
+
+def _not_found(label: str, session_id: str, owner: str) -> MeshRefusal:
+    return _refuse(
+        "not_found",
+        f"{label} does not exist in session {session_id} on {owner}; check the path the "
+        "session reported (paths are case-sensitive)",
+    )
+
+
+def _open_source(source: _Source, session_id: str, owner: str) -> tuple[int, os.stat_result]:
+    """Open no-follow, non-blocking, regular-only, single-link; refuse over the cap.
+
+    NOT FOUND IS ITS OWN ANSWER (#3794 UX U2): a typo or a file the agent has not
+    written yet is the refusal people meet most, and calling it ``unsafe_path`` sent
+    an agent branching on the code down the confinement-violation road. The ``lstat``
+    only CLASSIFIES; the open below is what decides, and it never creates a parent.
+    """
+    label = source.label
+    try:
+        os.lstat(source.path)
+    except (FileNotFoundError, NotADirectoryError):
+        raise _not_found(label, session_id, owner) from None
+    except OSError:
+        pass  # the open below gives the real answer
     try:
         fd = sync.open_for_read(source.path, source.scope, nonblock=True)
     except sync.SyncRefused as refusal:
-        raise _refuse("unsafe_path", refusal.message) from None
-    except OSError as error:
+        if refusal.code == "missing":
+            raise _not_found(label, session_id, owner) from None
         raise _refuse(
-            "missing", f"{source.name} is not readable on this device ({error})"
+            "unsafe_path",
+            f"{label} is not a regular file (a link, pipe or device), so it is not served",
         ) from None
+    except OSError:
+        raise _not_found(label, session_id, owner) from None
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode):  # pragma: no cover - opened_regular refuses first
         os.close(fd)
-        raise _refuse("unsafe_path", f"{source.name} is not a regular file")
+        raise _refuse(
+            "unsafe_path",
+            f"{label} is not a regular file (a link, pipe or device), so it is not served",
+        )
+    if not source.attachment and info.st_nlink > 1:
+        # A HARD LINK IS A SECOND NAME FOR SOMEONE ELSE'S BYTES (#3794 QA Q1). Every
+        # check above judges the NAME inside the pad; a hard link to the network's
+        # secrets file passes all of them and is a regular, no-follow file. Judged on
+        # the OPENED fd, so a link made between a stat and the open cannot slip past.
+        # Store blobs are exempt: the store writes them by rename, single-link, and a
+        # digest names their content rather than a place.
+        os.close(fd)
+        raise _refuse(
+            "hard_linked",
+            f"{label} is not served: it is a hard link, so its bytes may belong to a "
+            "file outside the session's scratchpad. Have the session save a copy rather "
+            "than a link, and pull that",
+        )
     if info.st_size > FILE_MAX_BYTES:
         os.close(fd)
         raise _refuse(
             "too_large",
-            f"{source.name} is {info.st_size} bytes; one pull carries at most "
-            f"{FILE_MAX_BYTES} bytes",
+            f"{label} is {human_bytes(info.st_size)}; one pull carries at most "
+            f"{human_bytes(FILE_MAX_BYTES)}. Split or compress it in that session, then "
+            "pull the parts",
         )
     return fd, info
 
@@ -283,15 +394,21 @@ def _stamp_matches(info: os.stat_result, frame: dict[str, Any]) -> bool:
         return False
 
 
-def serve_file(root: Path, session_id: str, frame: dict[str, Any]) -> dict[str, Any]:
-    """The owner's answer to one ``net_file_get`` phase. Raises :class:`MeshRefusal`."""
+def serve_file(
+    root: Path, session_id: str, frame: dict[str, Any], owner: str = "this device"
+) -> dict[str, Any]:
+    """The owner's answer to one ``net_file_get`` phase. Raises :class:`MeshRefusal`.
+
+    ``owner`` is this device's own NAME: these sentences are read on the requester,
+    where "this device" means the one the person is typing on (#3794 UX U6).
+    """
     phase = str(frame.get("phase") or "")
-    source = _resolve_source(Path(root), session_id, frame)
-    fd, info = _open_source(source)
+    source = _resolve_source(Path(root), session_id, frame, owner)
+    fd, info = _open_source(source, session_id, owner)
     try:
         if phase == "stat":
             if info.st_size == 0:
-                raise _refuse("empty_file", f"{source.name} is empty; there is nothing to pull")
+                raise _refuse("empty_file", f"{source.label} is empty; there is nothing to pull")
             digest = _hash_fd(fd, info.st_size)
             if source.attachment and digest[len("sha256:") :][:32] != source.attachment:
                 # The store's own name is a digest of its content; a file that no longer
@@ -299,7 +416,7 @@ def serve_file(root: Path, session_id: str, frame: dict[str, Any]) -> dict[str, 
                 # verified copy on the requester.
                 raise _refuse(
                     "corrupt_source",
-                    f"attachment {source.attachment} on this device no longer matches its "
+                    f"attachment:{source.attachment} on {owner} no longer matches its "
                     "digest, so it is not served",
                 )
             return {
@@ -317,7 +434,7 @@ def serve_file(root: Path, session_id: str, frame: dict[str, Any]) -> dict[str, 
         if not _stamp_matches(info, frame):
             raise _refuse(
                 "stale_file",
-                f"{source.name} changed while it was being pulled; pulling again picks up "
+                f"{source.label} changed while it was being pulled; pulling again picks up "
                 "the new version",
             )
         if phase == "fetch":
@@ -352,6 +469,13 @@ def make_handler(server: "RelayServer") -> Callable[["PeerLink", dict[str, Any]]
     """The ``net_file_get`` handler. It issues no request over the link it answers."""
 
     def _handle(_link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(frame.get("frame"), dict):
+            # ONE SESSION ID, THE ONE THE CHOKEPOINT CHECKED (#3794 review R1-3).
+            # ``_session_scope`` scopes a NESTED ``frame``'s session id when one is
+            # present, and this handler serves the OUTER one; a frame carrying both
+            # could name an owned session to the check and another directory here.
+            # This op never nests, so a nested frame is malformed, not a variant.
+            raise _refuse("bad_request", "a file pull carries no nested frame")
         session_id = str(frame.get("session_id") or "")
         # THE SESSION ID IS REQUIRED HERE, not only scoped by the chokepoint:
         # ``_session_scope`` checks ownership of a session the frame NAMES and
@@ -359,7 +483,13 @@ def make_handler(server: "RelayServer") -> Callable[["PeerLink", dict[str, Any]]
         # must not reach a path built from an empty id.
         if not session_id:
             raise _refuse("bad_request", "a file pull names the session it reads from")
-        return serve_file(server.root, session_id, frame)
+        try:
+            return serve_file(server.root, session_id, frame, server._own_label())  # noqa: SLF001
+        except sync.SyncRefused:
+            # Belt: a containment refusal this module did not translate must still
+            # leave as a named read refusal, never the relay's generic error with
+            # this device's absolute paths in it (#3794 QA Q3).
+            raise _refuse("unsafe_path", "that file is not served from this session") from None
 
     return _handle
 
@@ -406,7 +536,14 @@ def _open_part(root: Path, scope: sync.WriteScope, sha: str) -> tuple[int, Path]
     """Open (creating) ``<staging>/<sha256>.part`` no-follow, under the relay's root."""
     directory = staging_root(root)
     name = f"{sha[len('sha256:') :]}.part"
-    parent = sync.open_directory(scope, scope.relative_in(directory), name)
+    try:
+        parent = sync.open_directory(scope, scope.relative_in(directory), name)
+    except sync.SyncRefused:
+        raise _refuse(
+            "staging_failed",
+            "this device's staging folder for pulls is a link or not a folder, so nothing "
+            "was pulled",
+        ) from None
     try:
         try:
             fd = os.open(
@@ -467,22 +604,89 @@ class _Asker:
         )
         if reply is None:
             kept = (
-                f"; {self.staged} bytes are staged and the next pull resumes from there"
+                f"; {human_bytes(self.staged)} arrived intact and is kept — run the same "
+                "command again to resume"
                 if self.staged
-                else ""
+                else "; check it with `lop network peers` or `lop network doctor`"
             )
             raise _refuse(
                 "peer_unreachable", f"{self.label} stopped answering during the pull{kept}"
             )
         if reply.get("op") == "error":
-            raise _refuse(
-                str(reply.get("code") or "peer_refused"),
-                str(reply.get("message") or f"{self.label} refused the pull"),
-            )
+            raise self._owner_refusal(reply)
         detail = reply.get("detail")
         if reply.get("op") != "ack" or not isinstance(detail, dict):
             raise _refuse("peer_refused", f"{self.label} answered something this build cannot read")
         return detail
+
+    def _owner_refusal(self, reply: dict[str, Any]) -> MeshRefusal:
+        """The owner's refusal, re-voiced for the device the person is typing on.
+
+        The owner's sentences say "this device" about ITSELF, which read on the
+        requester as the device in front of the person (#3794 UX U6, QA Q5). The
+        chokepoint's two refusals also cross WITHOUT a code — deliberately
+        (``wire.refusal_frame``: the peer is not told which guard fired) — so their
+        sentence is the only evidence, and it is matched here to give an agent the
+        code the owner's audit log already recorded and a person the next step.
+        """
+        message = _printable(str(reply.get("message") or "it refused the pull"))
+        code = str(reply.get("code") or "")
+        own = _printable(self.server._own_label())  # noqa: SLF001 — this device's name
+        if not code and "does not hold the 'view' capability" in message:
+            record = self.server.store_view.network(self.link.network_id)
+            network = _printable(str(getattr(record, "name", "") or "<network>"))
+            return _refuse(
+                "not_authorised",
+                f"{self.label} refused: {own} lacks the 'view' capability there. An admin "
+                f"on {self.label} can grant it: lop network member grant {network} {own} "
+                "view",
+            )
+        if not code and "does not live on this device" in message:
+            return _refuse(
+                "session_not_found",
+                f"{self.label} has no session {self.session_id}; list its sessions with "
+                f"lop network sessions --peer {self.label}",
+            )
+        refusal = _refuse(code or "peer_refused", f"{self.label} refused: {message}")
+        return refusal
+
+
+def _printable(text: str) -> str:
+    """``text`` with control characters escaped: a peer chose it, a terminal shows it."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in str(text))
+
+
+#: Mime types this device files as the peer declared them (#3794 review R1-4): the
+#: media the attachment routes already serve, plus passive text formats. Anything
+#: else is filed as ``application/octet-stream``: the peer's word is a label, and a
+#: later reader may serve the sidecar as ``Content-Type`` (``text/html`` for
+#: arbitrary bytes is the case this closes).
+_FILED_MIME_TYPES: frozenset[str] = frozenset(
+    {
+        "text/plain",
+        "text/markdown",
+        "text/csv",
+        "application/json",
+        "application/x-ndjson",
+        "application/pdf",
+    }
+)
+
+
+def _filed_mime(declared: str) -> str:
+    from local_operator.media import (
+        SUPPORTED_AUDIO_MIME_TYPES,
+        SUPPORTED_IMAGE_MIME_TYPES,
+        SUPPORTED_VIDEO_MIME_TYPES,
+    )
+
+    allowed = (
+        _FILED_MIME_TYPES
+        | SUPPORTED_IMAGE_MIME_TYPES
+        | SUPPORTED_AUDIO_MIME_TYPES
+        | SUPPORTED_VIDEO_MIME_TYPES
+    )
+    return declared if declared in allowed else "application/octet-stream"
 
 
 def _validated_stat(detail: dict[str, Any], label: str) -> dict[str, Any]:
@@ -498,10 +702,13 @@ def _validated_stat(detail: dict[str, Any], label: str) -> dict[str, Any]:
         # The requester's own belt: the owner refuses this too, but a cap is only a
         # cap if the side that allocates the disk enforces it.
         raise _refuse(
-            "too_large", f"the file is {size} bytes; one pull carries at most {FILE_MAX_BYTES}"
+            "too_large",
+            f"the file is {human_bytes(size)}; one pull carries at most "
+            f"{human_bytes(FILE_MAX_BYTES)}. Split or compress it in that session, then pull "
+            "the parts",
         )
-    name = os.path.basename(str(detail.get("name") or "")) or "file"
-    mime = str(detail.get("mime") or "") or "application/octet-stream"
+    name = _printable(os.path.basename(str(detail.get("name") or ""))) or "file"
+    mime = _filed_mime(str(detail.get("mime") or ""))
     return {"sha256": sha, "bytes": size, "mtime_ns": mtime_ns, "name": name, "mime": mime}
 
 
@@ -582,26 +789,34 @@ def pull_file(
             "a file pull names exactly one source: a scratchpad:// path or an attachment digest",
         )
     device_id = server._resolve_peer(peer)  # noqa: SLF001 — the family's one name resolver
-    label = server._peer_label(peer)  # noqa: SLF001
+    label = _printable(server._peer_label(peer))  # noqa: SLF001
     link = server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
     if link is None:
         raise _refuse(
             "peer_unreachable",
-            f"{label} cannot be reached from this device right now, so no " "file was pulled",
+            f"{label} cannot be reached from this device right now, so no file was pulled; "
+            "check it with `lop network peers` or `lop network doctor`",
         )
     if wire.MESH_FILE_V1 not in link.capabilities:
         # NEVER A FALLBACK: the route this replaces (base64 through the model) is the
         # one that corrupted bytes, so an old peer gets a named remedy, not a detour.
         raise _refuse(
             "predates_file_transfer",
-            f"{label} does not support file transfer; update {label} (run `lop update` on "
-            "it) to pull files from its sessions",
+            f"{label} does not support file transfer yet; update it from here with "
+            f"`lop network update {label}` (or run `lop update` on it), then pull again",
         )
     source = {"path": path} if path else {"attachment": attachment}
     asker = _Asker(server, link, label, session_id, source)
     meta = _validated_stat(asker.ask(phase="stat"), label)
     root = Path(server.root)
-    scope = sync.write_scope(root, staging_root(root))
+    try:
+        scope = sync.write_scope(root, staging_root(root))
+    except sync.SyncRefused:
+        raise _refuse(
+            "staging_failed",
+            "this device's staging folder for pulls is a link or not a folder, so nothing "
+            "was pulled; remove network/staging/files under this device's config folder",
+        ) from None
     _sweep_stale_parts(root, scope)
     with _part_lock(root, meta["sha256"]):
         resumed = 0
