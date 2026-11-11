@@ -77,6 +77,11 @@ OPEN_TIMEOUT = 10.0
 #: window (C1.5/C1.6), so a supersede fight (each session ending within that
 #: window) always reads as consecutive failures.
 STABLE_SESSION_SECONDS = 120.0
+#: C1.3: the relay pools idle streams for HTTP keep-alive and closes them itself
+#: after this long. The gateway behind the pipe must keep an idle connection open
+#: LONGER than this, or it closes streams the relay still reuses (see
+#: ``tunnels.service.GATEWAY_KEEP_ALIVE_SECONDS``).
+RELAY_IDLE_CONN_TIMEOUT = 30.0
 #: The relay caps a session at 128 concurrent streams (C1.6); twice that bounds a
 #: misbehaving peer without ever refusing a legitimate request.
 MAX_PIPES = 256
@@ -195,17 +200,66 @@ def _refusal(failure: BaseException) -> HandshakeRefused | None:
     return HandshakeRefused(response.status_code, error, retry_after)
 
 
-async def pipe_to_gateway(stream: yamux.Stream, host: str, port: int) -> None:
+#: At most one device-reset line per this many seconds reaches the service log.
+RESET_LOG_SECONDS = 60.0
+
+
+class ResetLog:
+    """Name, rate-limited, every stream the DEVICE resets and why.
+
+    WHY. The relay logs a device RST as 502 ``relay_upstream_reset`` with only a
+    hashed tunnel id, and it logs a phone that abandoned its request the same
+    way, so its logs alone cannot say whether this device failed. Before this
+    the connector reset streams silently. One line per window, with the first
+    cause and a count of the rest, keeps a burst of resets diagnosable without
+    turning a bad minute into hundreds of log lines.
+    """
+
+    def __init__(self, announce: Announce, *, window: float = RESET_LOG_SECONDS) -> None:
+        self._announce = announce
+        self._window = window
+        self._last = -window
+        self._suppressed = 0
+
+    def __call__(self, cause: str) -> None:
+        now = time.monotonic()
+        if now - self._last < self._window:
+            self._suppressed += 1
+            return
+        extra = (
+            f" (+{self._suppressed} more in the previous {self._window:g} s)"
+            if self._suppressed
+            else ""
+        )
+        self._last, self._suppressed = now, 0
+        self._announce(f"relay stream reset by this device: {cause}{extra}")
+
+
+def _cause(failure: BaseException) -> str:
+    return f"{type(failure).__name__}: {failure}"[:200]
+
+
+async def pipe_to_gateway(
+    stream: yamux.Stream,
+    host: str,
+    port: int,
+    on_reset: Callable[[str], None] | None = None,
+) -> None:
     """One relay stream ⇄ one loopback gateway connection, bytes only (C1.3).
 
     Each direction half-closes independently: the relay's FIN becomes
     ``shutdown(SHUT_WR)`` on the gateway socket, and the gateway's EOF becomes
     our FIN. The stream is NOT closed when one response ends — the relay pools
-    idle streams for keep-alive and closes them itself.
+    idle streams for keep-alive and closes them itself, which is also why the
+    gateway's own keep-alive must outlast the relay's pool
+    (``RELAY_IDLE_CONN_TIMEOUT``). ``on_reset`` hears every reset THIS side
+    sends, with its cause; a reset the relay sent is not reported.
     """
     try:
         reader, writer = await asyncio.open_connection(host, port)
-    except OSError:
+    except OSError as failure:
+        if on_reset is not None:
+            on_reset(f"gateway dial failed: {_cause(failure)}")
         await stream.reset()
         return
 
@@ -225,9 +279,11 @@ async def pipe_to_gateway(stream: yamux.Stream, host: str, port: int) -> None:
     try:
         for finished in asyncio.as_completed(tasks):
             await finished
-    except (yamux.StreamReset, ConnectionError, OSError):
+    except (yamux.StreamReset, ConnectionError, OSError) as failure:
         # A reset on either side ends both: a half-dead pipe would hold a
         # gateway connection open with nobody left to answer.
+        if on_reset is not None and not stream.was_reset:
+            on_reset(f"gateway connection failed: {_cause(failure)}")
         await stream.reset()
     finally:
         for task in tasks:
@@ -433,10 +489,16 @@ class RelaySession:
         assert self.mux is not None
         while (stream := await self.mux.accept()) is not None:
             if len(self._pipes) >= MAX_PIPES:
+                self._connector.reset_log(f"{MAX_PIPES} pipes already open")
                 await stream.reset()
                 continue
             task = asyncio.create_task(
-                pipe_to_gateway(stream, self._connector.gateway_host, self._connector.gateway_port)
+                pipe_to_gateway(
+                    stream,
+                    self._connector.gateway_host,
+                    self._connector.gateway_port,
+                    self._connector.reset_log,
+                )
             )
             self._pipes.add(task)
             task.add_done_callback(self._pipes.discard)
@@ -469,6 +531,8 @@ class RelayConnector:
         self.gateway_host = gateway_host
         self.name = name[:64]
         self.announce = announce
+        #: Shared by every session, so rotation does not reset the rate limit.
+        self.reset_log = ResetLog(announce)
         self.ws_connect: Callable[..., Awaitable[Any]] = ws_connect
         self._refresh = refresh
         self._active: RelaySession | None = None
