@@ -1759,6 +1759,10 @@ class PendingGateState(BaseModel):
     #: The machine default the mode outranks; ``""`` when not stated. See
     #: ``mobile.types.PendingRequest`` for why it is not derivable.
     approval_global_mode: str = ""
+    #: Team Bridge flags (``mobile.types.PendingRequest``): a latched card is
+    #: person-only on every client path.
+    taint_raised: bool = False
+    bridge_latched: bool = False
 
 
 class PendingAskState(BaseModel):

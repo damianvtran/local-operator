@@ -3571,6 +3571,10 @@ class Session:
         # may return sync or async. A provider that ignores the argument is
         # still valid — the label is additive.
         system_blocks_provider: Callable[..., list[str]] | Callable[..., Awaitable[list[str]]],
+        # A ``task`` child spawned from a Team-Bridge-latched parent starts
+        # latched and writes its own latch row, so a resumed child stays
+        # latched (memo §3.2). Tighten-only.
+        inherited_bridge_taint: bool = False,
     ) -> None:
         self._model = model
         # Tri-state conversation choice: None follows the global setting/agent
@@ -3626,6 +3630,7 @@ class Session:
         #: inventory instead of the factory's gate-less view.
         self._knowledge_hooks: _KnowledgeHooks | None = None
         self._transcript = transcript
+        self._init_bridge_taint(inherited_bridge_taint)
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
         # its own). Anything raising here kills the runtime process before it
@@ -15147,9 +15152,17 @@ class Session:
             return base
 
         async def declared_gate(
-            tool_name: str, description: str, job_id: str | None = None
+            tool_name: str,
+            description: str,
+            job_id: str | None = None,
+            *,
+            taint_raised: bool = False,
+            bridge_latched: bool = False,
         ) -> bool:
             if tool_name in declared:
+                # A declared unattended inventory approves by declaration even
+                # in a Team-Bridge-latched session: the S-51 carve-out, left
+                # as is under Option C (accepted risk outside ask mode).
                 return True
             # Forwarded through the shared arity resolver rather than called
             # directly: the base gate may take two arguments or three, and which
@@ -15157,7 +15170,14 @@ class Session:
             # it here with three would ``TypeError`` inside every two-argument
             # host gate, and both call sites turn that into a silent denial — the
             # failure mode that module exists to stop.
-            return await ask_approval(base, tool_name, description, job_id)
+            return await ask_approval(
+                base,
+                tool_name,
+                description,
+                job_id,
+                taint_raised=taint_raised,
+                bridge_latched=bridge_latched,
+            )
 
         return declared_gate
 
@@ -21680,6 +21700,77 @@ class Session:
         """Record presence without I/O; serving updates publish this snapshot."""
         self._waiting_on = max(0, int(count))
 
+    # -- Team Bridge taint latch (finding S-38; harness/bridge_egress.py) -------
+
+    def _init_bridge_taint(self, inherited: bool) -> None:
+        """Own the session's taint latch and keep it fed from durable commits.
+
+        Every transcript commit is observed, whatever path appended it (a wake
+        card, a parked mid-turn card, a ``bridge`` tool result), so no source
+        can arrive by a route this hook does not see. The backstop scan reads
+        the in-memory journal from row 0, which a resume, a fork (it copies
+        ``transcript.jsonl``) and a ``/move`` replica all load. Only ``/new``
+        or a fresh session starts clean.
+        """
+        from local_operator.harness.bridge_egress import BridgeTaintLatch
+
+        transcript = self._transcript
+
+        def journal() -> list[tuple[str, dict[str, Any]]]:
+            return [(entry.type, entry.payload) for entry in transcript.entries()]
+
+        latch = BridgeTaintLatch(inherited=inherited, entries=journal)
+        self._bridge_taint = latch
+        self._bridge_latch_row_task: asyncio.Task[None] | None = None
+        subscribe = getattr(transcript, "subscribe_commits", None)
+        if subscribe is not None:
+            subscribe(self._on_bridge_taint_commit)
+
+    @property
+    def bridge_taint_latch(self) -> Any:
+        """The session's :class:`~local_operator.harness.bridge_egress.BridgeTaintLatch`."""
+        return self._bridge_taint
+
+    @property
+    def bridge_latched(self) -> bool:
+        """Whether this session holds Team Bridge content. Fail-closed."""
+        return self._bridge_taint.is_latched()
+
+    def _on_bridge_taint_commit(self, entries: Any, _source: Any = None) -> None:
+        latch = self._bridge_taint
+        latch.observe_entries((entry.type, entry.payload) for entry in entries)
+        if latch.latched and not latch.row_present:
+            self._schedule_bridge_latch_row()
+
+    def _schedule_bridge_latch_row(self) -> None:
+        """Persist the latch row once; a failure leaves the in-memory latch set."""
+        task = self._bridge_latch_row_task
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning("bridge taint latch row not written: no running loop")
+            return
+        self._bridge_latch_row_task = loop.create_task(self._write_bridge_latch_row())
+
+    async def _write_bridge_latch_row(self) -> None:
+        from local_operator.harness.bridge_egress import BRIDGE_TAINT_LATCH_TYPE
+
+        latch = self._bridge_taint
+        if latch.row_present:
+            return
+        if self._transcript.latest_custom_entry(BRIDGE_TAINT_LATCH_TYPE) is not None:
+            latch.row_present = True
+            return
+        try:
+            # The commit observer sees this row too and sets ``row_present``.
+            await self._transcript.append_custom(BRIDGE_TAINT_LATCH_TYPE, latch.latch_row_details())
+        except Exception:  # noqa: BLE001 - §3.6: the in-memory latch stays set; warned
+            logger.warning(
+                "bridge taint latch row write failed; latch held in memory", exc_info=True
+            )
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -21727,6 +21818,8 @@ class Session:
             injected_guidance=getattr(self._system_blocks_provider, "injected_guidance", ()),
             session_id=self._session_id,
             ancestor_session_ids=self._ancestor_session_ids(),
+            bridge_taint=self._bridge_taint,
+            inherited_bridge_taint=self._bridge_taint.inherited,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
             # On a CHILD this resolves to the parent's title (see

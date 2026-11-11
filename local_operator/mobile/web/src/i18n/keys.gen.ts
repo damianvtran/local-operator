@@ -464,6 +464,9 @@ export type MessageParams = {
   "relay.usage_reset.refused": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
+  "wire.bridge_taint.ack_refused": undefined;
+  "wire.bridge_taint.card_notice": undefined;
+  "wire.bridge_taint.grant_suspended": undefined;
   "wire.console.description": undefined;
   "wire.console.max_live.help": undefined;
   "wire.console.max_live.label": undefined;

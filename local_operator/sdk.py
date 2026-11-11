@@ -513,8 +513,19 @@ def _install_approval_policy(session: Any, policy: ApprovalPolicy) -> None:
     session.set_approval_handler(_make_refuse_gate(ApprovalUnavailableError))
 
 
-async def _auto_approve_gate(tool_name: str, description: str) -> bool:
-    """The ``auto()`` posture: every gated call is approved."""
+async def _auto_approve_gate(
+    tool_name: str,
+    description: str,
+    *,
+    taint_raised: bool = False,
+    bridge_latched: bool = False,
+) -> bool:
+    """The ``auto()`` posture: every gated call is approved.
+
+    Accepts the Team Bridge flags so a latched session keeps the auto posture
+    the embedder chose: closed for ask mode; accepted risk in auto/yolo
+    (memo §7, Option C).
+    """
     return True
 
 

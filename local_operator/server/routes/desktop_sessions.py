@@ -1397,6 +1397,13 @@ class Command(Input):
     command: str = Field(pattern=r"^/?[A-Za-z]+$", max_length=64)
     args: str = Field(default="", max_length=200_000)
     images: list[Image] = Field(default_factory=list, max_length=8)
+    #: Capability marker, not authority (memo §4.2.2): set by a desktop build
+    #: that knows Team Bridge taint, and only from the ``/approvals`` picker
+    #: after it rendered the latched sentence -- never from a card escape. A
+    #: loosening ``approvals auto`` for a latched conversation is refused
+    #: without it, which is what keeps an older build's "Set auto" from
+    #: re-loosening a latched session in one press.
+    bridge_ack: bool = False
 
     @model_validator(mode="after")
     def wire_budget(self):
@@ -4614,6 +4621,7 @@ async def command(session_id: str, body: Command, request: Request):
                 spec.name,
                 body.args,
                 images=slash_images,
+                bridge_ack=body.bridge_ack,
             )
             if outcome is None or outcome.get("kind") == "noop":
                 return {"command": spec.name, "result": native_action(spec, session_id, body.args)}

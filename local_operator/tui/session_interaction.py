@@ -208,6 +208,16 @@ class SessionDraft:
     aside_main_images: dict[int, Any] = field(default_factory=dict)
     aside_main_shell_mode: bool = False
     approve_all: bool | None = None
+    #: The SCOPE of ``approve_all`` and whether it was granted while the
+    #: conversation already held Team Bridge content (memo §4.2.1, S-57).
+    #: ``"global"`` only when the TUI adopted the machine default with no
+    #: conversation record; every other writer (``A``, the card's ``S``, a
+    #: typed ``/approvals auto``, a record read back) is ``"session"``. The
+    #: defaults are the fail-closed decode: an undetermined scope is a session
+    #: grant and an unknown stamp is False, so a pre-latch ``A`` restored from
+    #: an overflow-parked draft can never survive the latch.
+    approve_scope: str = "session"
+    approve_granted_while_latched: bool = False
     recoveries: list[SessionDraft] = field(default_factory=list)
     notices: list[tuple[str, NoticeKind]] = field(default_factory=list)
     #: Prompt-history recall position and the draft it displaced, so Up in

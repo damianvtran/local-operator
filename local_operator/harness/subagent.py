@@ -3972,6 +3972,11 @@ async def _construct_child_session(
     language_line = preferred_language_line()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
+    # A child of a Team-Bridge-latched parent is latched for life (memo §3.2):
+    # the task prompt the parent writes can carry the hostile text. Read
+    # through the fail-closed property; a parent without one is a host that
+    # does not track taint.
+    inherited_bridge_taint = bool(getattr(parent_session, "bridge_latched", False))
     # Whether this child runs on a role allowlist. Decided HERE, before the
     # ToolContext closes over the resolver, because the MCP surface is built
     # from it: a restricted child gets the read half (inherit + discover) and
@@ -4073,6 +4078,7 @@ async def _construct_child_session(
         job_label=label,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # The parent's variable store. DEFENSIVE PARITY, not a bug fix: no
         # current ``TOOL_BUILDERS`` entry reads ``context.variables`` at
         # construction time (the variables readers are all execute-time, and
@@ -4380,6 +4386,7 @@ async def _construct_child_session(
         # so the executor wraps every command the ``read``-tier schema admitted.
         shell_write_root=shell_write_root,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # Which job the child's approvals belong to, so a host can scope a
         # denial to the work that provoked it. Reaches the executor through
         # ``Session._build_tool_context``; the construction-time context above

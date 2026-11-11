@@ -2392,7 +2392,18 @@ async def _check_approval(context: ToolContext | None, tier: str, description: s
     request_approval = getattr(context, "request_approval", None) if context else None
     if request_approval is None:
         return True
-    return await ask_approval(request_approval, tier, description, getattr(context, "job_id", None))
+    # A self-gating tool's card in a Team-Bridge-latched session is as
+    # person-only as a tier-gated one (memo §4.2: every card, whatever raised
+    # it). The latch lookup fails closed.
+    from local_operator.harness.bridge_egress import context_is_latched
+
+    return await ask_approval(
+        request_approval,
+        tier,
+        description,
+        getattr(context, "job_id", None),
+        bridge_latched=context_is_latched(context),
+    )
 
 
 async def _run_with_abort(

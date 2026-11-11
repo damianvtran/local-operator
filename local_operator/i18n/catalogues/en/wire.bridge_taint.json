@@ -1,0 +1,5 @@
+{
+  "wire.bridge_taint.card_notice": "Requested while this conversation contains Team Bridge content — check the full target before you allow it.",
+  "wire.bridge_taint.grant_suspended": "Tool approvals: asking again — this conversation now contains Team Bridge content. Type /approvals auto to allow calls without asking.",
+  "wire.bridge_taint.ack_refused": "Approvals unchanged: this conversation contains Team Bridge content, so auto can only be turned on from /approvals."
+}

@@ -1,5 +1,90 @@
 {
   "schema": 1,
   "note": "Shrink-only coverage allowance. Each entry records the exact, sorted, duplicate-free set of English key IDs that its (locale, namespace) does not yet carry, plus the owner and payoff date for that debt. tests/unit/i18n/test_language_manifest.py fails on any missing key NOT listed here — including a new key added to an already-incomplete namespace — and on any listed key that is no longer missing, so this file can only shrink. Adding an entry is a reviewed decision: it must name an owner and a payoff (ticket reference or ISO date) and reviewers must reject growth not tied to a real plan.",
-  "pairs": []
+  "pairs": [
+    {
+      "locale": "es",
+      "namespace": "wire.bridge_taint",
+      "reason": "Security copy for the Team Bridge egress gate (S-38 slice 1). Carrying an unaudited namespace unships the locale (shipped.json drops all seven when the drafts are added), so the strings ship English-only until an independent i18n auditor passes the drafted translations.",
+      "owner": "radientdev coder lane, feat/cos-egress-taint-slice1",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.bridge_taint.ack_refused",
+        "wire.bridge_taint.card_notice",
+        "wire.bridge_taint.grant_suspended"
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.bridge_taint",
+      "reason": "Security copy for the Team Bridge egress gate (S-38 slice 1). Carrying an unaudited namespace unships the locale (shipped.json drops all seven when the drafts are added), so the strings ship English-only until an independent i18n auditor passes the drafted translations.",
+      "owner": "radientdev coder lane, feat/cos-egress-taint-slice1",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.bridge_taint.ack_refused",
+        "wire.bridge_taint.card_notice",
+        "wire.bridge_taint.grant_suspended"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.bridge_taint",
+      "reason": "Security copy for the Team Bridge egress gate (S-38 slice 1). Carrying an unaudited namespace unships the locale (shipped.json drops all seven when the drafts are added), so the strings ship English-only until an independent i18n auditor passes the drafted translations.",
+      "owner": "radientdev coder lane, feat/cos-egress-taint-slice1",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.bridge_taint.ack_refused",
+        "wire.bridge_taint.card_notice",
+        "wire.bridge_taint.grant_suspended"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.bridge_taint",
+      "reason": "Security copy for the Team Bridge egress gate (S-38 slice 1). Carrying an unaudited namespace unships the locale (shipped.json drops all seven when the drafts are added), so the strings ship English-only until an independent i18n auditor passes the drafted translations.",
+      "owner": "radientdev coder lane, feat/cos-egress-taint-slice1",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.bridge_taint.ack_refused",
+        "wire.bridge_taint.card_notice",
+        "wire.bridge_taint.grant_suspended"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.bridge_taint",
+      "reason": "Security copy for the Team Bridge egress gate (S-38 slice 1). Carrying an unaudited namespace unships the locale (shipped.json drops all seven when the drafts are added), so the strings ship English-only until an independent i18n auditor passes the drafted translations.",
+      "owner": "radientdev coder lane, feat/cos-egress-taint-slice1",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.bridge_taint.ack_refused",
+        "wire.bridge_taint.card_notice",
+        "wire.bridge_taint.grant_suspended"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.bridge_taint",
+      "reason": "Security copy for the Team Bridge egress gate (S-38 slice 1). Carrying an unaudited namespace unships the locale (shipped.json drops all seven when the drafts are added), so the strings ship English-only until an independent i18n auditor passes the drafted translations.",
+      "owner": "radientdev coder lane, feat/cos-egress-taint-slice1",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.bridge_taint.ack_refused",
+        "wire.bridge_taint.card_notice",
+        "wire.bridge_taint.grant_suspended"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.bridge_taint",
+      "reason": "Security copy for the Team Bridge egress gate (S-38 slice 1). Carrying an unaudited namespace unships the locale (shipped.json drops all seven when the drafts are added), so the strings ship English-only until an independent i18n auditor passes the drafted translations.",
+      "owner": "radientdev coder lane, feat/cos-egress-taint-slice1",
+      "payoff": "2026-11-25",
+      "missing": [
+        "wire.bridge_taint.ack_refused",
+        "wire.bridge_taint.card_notice",
+        "wire.bridge_taint.grant_suspended"
+      ]
+    }
+  ]
 }

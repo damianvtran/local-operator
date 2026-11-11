@@ -980,7 +980,9 @@ ALLOW_ALL_KEY = "A"
 ALLOW_ALL_ANSWER = "a"
 
 
-def approval_question(tool_name: str, description: str) -> "AskQuestion":
+def approval_question(
+    tool_name: str, description: str, *, person_only: bool = False, notice: str = ""
+) -> "AskQuestion":
     """The approval gate as a question the anchored picker can put to the user.
 
     Reusing the ``ask`` picker rather than growing a second list widget is what
@@ -1012,13 +1014,28 @@ def approval_question(tool_name: str, description: str) -> "AskQuestion":
             detail = f"{words}{detail[len(marker):].strip()}"
             break
     question = f"Allow {strip_control_sequences(tool_name)}? {detail}".rstrip()
+    clean_notice = " ".join(strip_control_sequences(notice).split()) if notice else ""
+    if clean_notice and clean_notice in detail:
+        # A runtime-raised card already carries the line in its detail (so an
+        # older desktop shows it too); lift it out rather than print it twice.
+        detail = " ".join(detail.replace(clean_notice, "", 1).split())
+        question = f"Allow {strip_control_sequences(tool_name)}? {detail}".rstrip()
+    if clean_notice:
+        # The host-owned Team Bridge line (S-46), ahead of the question so it
+        # is read before the target, never clipped behind a long one.
+        question = f"{clean_notice} {question}"
+    # ``person_only`` (host-computed: a profile save, or any card in a
+    # Team-Bridge-latched session -- memo §4.2) drops the "Allow all" row. The
+    # formatting branch above keys on the profile save alone (S-59): a latched
+    # card keeps ordinary single-paragraph formatting.
+    two_choice = profile_save or person_only
     return AskQuestion(
         id="approval",
         question=question,
         options=[
             AskOption(label=label, description=consequence)
             for label, _key, consequence in (
-                APPROVAL_CHOICES[:2] if profile_save else APPROVAL_CHOICES
+                APPROVAL_CHOICES[:2] if two_choice else APPROVAL_CHOICES
             )
         ],
     )
@@ -1189,14 +1206,24 @@ class ApprovalPrompt(AskPickerScreen):
         policy: ApprovalPolicy | None = None,
         on_set_session_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
         on_set_global_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
+        person_only: bool = False,
+        notice: str = "",
     ) -> None:
         from local_operator.harness.approval import never_auto_approved
 
+        #: Drives the profile-diff question LAYOUT only (``_question_lines``).
         self._profile_save = never_auto_approved(tool_name)
-        if self._profile_save:
+        #: Drives the answer and setting refusals and the chrome (S-59): a
+        #: profile save, or any card the host raised in a Team-Bridge-latched
+        #: session. ``A``, ``S`` and ``G`` are inert on such a card and only
+        #: Allow/Deny are offered: a fatigued one-press loosening on a reply
+        #: card is exactly how a pre-latch-style grant would come back
+        #: (memo §4.2, S-50).
+        self._person_only = self._profile_save or bool(person_only)
+        if self._person_only:
             self._ANSWER_KEYS = frozenset({"y", "n"})
         super().__init__(
-            [approval_question(tool_name, description)],
+            [approval_question(tool_name, description, person_only=person_only, notice=notice)],
             self._answered,
             allow_free_text=False,
             # A UNIQUE id per prompt, not the bare "approval-prompt".
@@ -1327,7 +1354,7 @@ class ApprovalPrompt(AskPickerScreen):
         can write a file; a second press while the first is running would be
         two writes of one gesture.
         """
-        if self._profile_save or self._answer is not None or self._policy.saving:
+        if self._person_only or self._answer is not None or self._policy.saving:
             return
         callback = self._on_set_session_auto if scope == "session" else self._on_set_global_auto
         if callback is None:
@@ -1422,7 +1449,7 @@ class ApprovalPrompt(AskPickerScreen):
         which is the spec's constraint 6.
         """
         plan = super()._layout(reveal=reveal)
-        if self._profile_save:
+        if self._person_only:
             # No session-auto chrome or compact three-answer rail: this is a
             # two-choice, always-human permission, regardless of tool policy.
             self._chrome_off = True
@@ -1717,7 +1744,7 @@ class ApprovalPrompt(AskPickerScreen):
         row moves and no budget changes.
         """
         text = super()._row_description(index)
-        if not self._profile_save and self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
+        if not self._person_only and self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
             return ALLOW_AUTO_CONSEQUENCE
         return text
 
@@ -2038,7 +2065,7 @@ class ApprovalPrompt(AskPickerScreen):
         authorised. It is also where ``A`` becomes ``a``: see
         :data:`ALLOW_ALL_ANSWER`.
         """
-        if self._profile_save and key not in {"y", "n"}:
+        if self._person_only and key not in {"y", "n"}:
             return
         if key == ALLOW_ALL_KEY:
             self.resolve(True, answer=ALLOW_ALL_ANSWER)

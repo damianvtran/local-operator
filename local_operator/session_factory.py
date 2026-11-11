@@ -989,6 +989,14 @@ def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
         return False
 
 
+def _bridge_notice_prefix(bridge_latched: bool) -> str:
+    if not bridge_latched:
+        return ""
+    from local_operator.harness.bridge_egress import bridge_card_notice
+
+    return bridge_card_notice() + "\n"
+
+
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 
@@ -1010,7 +1018,17 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """
     if yolo:
 
-        async def auto_approve(tool_name: str, description: str) -> bool:
+        async def auto_approve(
+            tool_name: str,
+            description: str,
+            *,
+            taint_raised: bool = False,
+            bridge_latched: bool = False,
+        ) -> bool:
+            # The Team Bridge flags are accepted and deliberately NOT honoured
+            # here: --yolo in a latched session is the operator's recorded
+            # accepted risk (memo §7, Option C). S-38 is closed for ask mode
+            # only; accepted risk in auto/yolo.
             # --yolo approves tool calls, never an account profile save: that
             # card must reach a person (``never_auto_approved``), so it takes
             # the interactive path — a y/N on a tty, a typed refusal without.
@@ -1022,7 +1040,13 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
 
         return auto_approve
 
-    async def prompt_approval(tool_name: str, description: str) -> bool:
+    async def prompt_approval(
+        tool_name: str,
+        description: str,
+        *,
+        taint_raised: bool = False,
+        bridge_latched: bool = False,
+    ) -> bool:
         # ``sys.stdin`` is checked for ``None`` BEFORE ``isatty()`` is called
         # because a launcher or daemoniser may start the process with fd 0
         # CLOSED, and Python leaves ``sys.stdin`` as ``None`` for that shape
@@ -1083,7 +1107,10 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
             # to block on human input anyway.
             answer = await asyncio.to_thread(
                 input,
-                "Allow tool '{}' ({})? [y/N] ".format(
+                "{}Allow tool '{}' ({})? [y/N] ".format(
+                    # The y/N prompt has no allow-all to suppress; it carries
+                    # the same latched-session notice every card does (S-46).
+                    _bridge_notice_prefix(bridge_latched),
                     sanitize_prompt_line(tool_name, limit=120),
                     sanitize_prompt_line(description),
                 ),

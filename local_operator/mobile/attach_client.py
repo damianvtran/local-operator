@@ -2368,6 +2368,8 @@ class AttachClient:
         command: str,
         args: str,
         images: list[dict[str, str]] | None = None,
+        *,
+        bridge_ack: bool = False,
     ) -> Any:
         """Run one shared slash command on the owner; return its typed outcome.
 
@@ -2376,8 +2378,9 @@ class AttachClient:
         the follower's terminal with a transport message while the real answer
         painted in the owner's.
         """
+        extra: dict[str, Any] = {"bridge_ack": True} if bridge_ack else {}
         return await self._request_payload(
-            "slash_result", command=command, args=args, images=images or []
+            "slash_result", command=command, args=args, images=images or [], **extra
         )
 
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:

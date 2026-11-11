@@ -40,6 +40,7 @@ from pydantic import SecretStr, TypeAdapter, ValidationError
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalUnavailableError, ask_approval
+from local_operator.harness.bridge_egress import escalate_for_bridge_taint, full_target_line
 from local_operator.harness.degeneration import (
     DegenerationTrip,
     StreamDegenerationGuard,
@@ -6130,12 +6131,33 @@ class AgentLoop:
             if tool.call_approval_tier is not None
             else tool.approval_tier
         )
+        # Team Bridge taint (finding S-38, ``harness/bridge_egress.py``): the
+        # ONE place a tier is chosen is the one place it is raised. In a
+        # session that has ever held bridge content, the egress-capable read
+        # tools and the durable writers' mutating ops move to ``write``; a
+        # search an approval could not make meaningful is refused here with no
+        # card, in every mode (S-58). Closed for ask mode; accepted risk in
+        # auto/yolo (operator decision, Option C): the gate below still
+        # answers by mode there. The nested eval ``tool()`` path reaches this
+        # same method, so the seam stays singular.
+        egress = escalate_for_bridge_taint(
+            tool.name, tier, call.arguments, tool_context, context.messages
+        )
+        if egress.refusal is not None:
+            return self._synthetic_result(call, egress.refusal, details={FAULT_KEY: FAULT_DENIED})
+        tier = egress.tier
         if (
             tier in ("write", "exec")
             and tool_context is not None
             and tool_context.request_approval is not None
         ):
             summary = self._approval_summary(tool, call, tool_context.cwd, tool_context)
+            if egress.bridge_latched:
+                # S-46: the full target, untruncated, on a latched card -- the
+                # ordinary summary's clip is where a hostile URL hides its tail.
+                full = full_target_line(tool.name, call.arguments)
+                if full:
+                    summary = f"{summary} — {full}"
             if context.one_turn_secret_leases:
                 try:
                     if config.redact_tool_result is None:
@@ -6156,6 +6178,8 @@ class AgentLoop:
                     sanitize_prompt_line(call.name, limit=120),
                     summary,
                     tool_context.job_id,
+                    taint_raised=egress.taint_raised,
+                    bridge_latched=egress.bridge_latched,
                 )
             except asyncio.CancelledError:
                 raise

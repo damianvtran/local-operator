@@ -1,0 +1,17 @@
+{
+  "wire.bridge_taint.card_notice": {
+    "role": "one host-owned line on every approval card raised in a conversation that holds Team Bridge content",
+    "tone": "plain, cautionary, operator-facing; keep the em dash",
+    "note": "Team Bridge is a product name: never translate it. Rendered on TUI, desktop (via the pending description) and the y/N terminal prompt."
+  },
+  "wire.bridge_taint.grant_suspended": {
+    "role": "one-time transcript notice when a session-scoped auto approval stops covering calls because Team Bridge content arrived",
+    "tone": "terse status line",
+    "note": "Keep `/approvals auto` verbatim: it is a command. Team Bridge is a product name."
+  },
+  "wire.bridge_taint.ack_refused": {
+    "role": "receipt detail when an 'approvals auto' command from an approval card is refused in a conversation holding Team Bridge content",
+    "tone": "terse receipt",
+    "note": "Keep `/approvals` verbatim: it is a command. Team Bridge is a product name."
+  }
+}
