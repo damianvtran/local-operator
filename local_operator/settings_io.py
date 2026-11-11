@@ -435,6 +435,11 @@ class Setting:
     #: a desktop row with the rules that own it. Never authored twice — an
     #: empty string means "not a hotkey row".
     hotkey_scope: str = ""
+    #: Whether this HOTKEY row may be CLEARED to ``"none"`` (keymap.UNBOUND),
+    #: DERIVED from ``keymap.KeyAction.clearable`` like ``hotkey_scope`` —
+    #: never authored twice. Projected on the wire so the desktop app can
+    #: offer the Clear affordance only on rows that accept the sentinel.
+    clearable: bool = False
     #: SEARCH VOCABULARY for this row, never rendered: a query may match these
     #: words, but no surface ever draws them as a sentence — the settings page
     #: paints the row and, when it explains a match, names the word that hit.
@@ -3258,6 +3263,7 @@ SETTINGS: tuple[Setting, ...] = (
             default=action.default,
             help=_keymap_copy(action, "help"),
             hotkey_scope=action.scope,
+            clearable=action.clearable,
             synonyms=_HOTKEY_SYNONYMS,
         )
         for action in _keymap.KEY_ACTIONS
