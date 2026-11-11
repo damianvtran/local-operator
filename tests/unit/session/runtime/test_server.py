@@ -7449,6 +7449,38 @@ def test_only_outcome_publishing_handles_are_deferred() -> None:
         assert server_mod._switch_reports_outcome(serving, frame) is True, frame
 
 
+def test_a_switch_probe_never_consults_the_slash_sink() -> None:
+    """``set_model``/``set_effort`` are decided by their own methods only.
+
+    The probe's arms are flat ``if``s so the authority-seam pin attributes the
+    ``run_slash_authoritative`` probe to ``slash_result`` alone; this pins the
+    behavioural half: a handle offering ONLY an outcome-publishing slash sink
+    must not make a model/effort switch read as "will publish", and an op the
+    probe does not know stays ``False`` now that no ``else`` arm returns it.
+    """
+    from local_operator.session.runtime import server as server_mod
+
+    class _SlashOnly:
+        async def run_slash_authoritative(self, *_a: Any, request_id: str = "") -> str:
+            return ""
+
+        async def set_model(self, *_a: Any) -> str:
+            return ""
+
+        async def set_effort(self, *_a: Any) -> str:
+            return ""
+
+    handle = _SlashOnly()
+    for frame in (
+        {"op": "set_model", "provider": "p", "model_id": "m"},
+        {"op": "set_model", "provider": "p", "model_id": "m", "effort": "high"},
+        {"op": "set_effort", "effort": "high"},
+        {"op": "slash", "command": "model"},
+    ):
+        assert server_mod._switch_reports_outcome(handle, frame) is False, frame
+    assert server_mod._switch_reports_outcome(handle, {"op": "slash_result"}) is True
+
+
 @pytest.mark.asyncio
 async def test_a_tui_hosted_owner_answers_a_deferred_switch_on_landing() -> None:
     handle = _TuiBackedHandle()

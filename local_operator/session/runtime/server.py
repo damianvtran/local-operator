@@ -1753,19 +1753,26 @@ def _switch_reports_outcome(handle: Any, frame: dict[str, Any]) -> bool:
     ``slash_result`` arms; probed with the same ``_accepts_kw`` that decides
     whether ``request_id`` is passed, so "acked queued" and "will publish" can
     never disagree.
+
+    Independent ``if`` arms, NOT an ``elif`` chain: an ``elif`` is nested in the
+    previous arm's ``orelse``, so the authority-seam pin
+    (``test_the_authority_op_set_matches_the_dispatch_source``), which walks
+    each ``if op == ...`` body, would credit ``set_model``/``set_effort`` with
+    the ``slash_result`` arm's ``run_slash_authoritative`` probe. Kept flat so
+    each op is attributed only what its own arm touches: a switch never reaches
+    the slash sink, and this function only probes, never calls.
     """
     op = frame.get("op")
+    target: Any = None
     if op == "set_model":
         if frame.get("offered_only") is True or frame.get("effort"):
             target = getattr(handle, "set_model_effort", None) or getattr(handle, "set_model", None)
         else:
             target = getattr(handle, "set_model", None)
-    elif op == "set_effort":
+    if op == "set_effort":
         target = getattr(handle, "set_effort", None)
-    elif op == "slash_result":
+    if op == "slash_result":
         target = getattr(handle, "run_slash_authoritative", None)
-    else:
-        return False
     return callable(target) and _accepts_kw(target, "request_id")
 
 
