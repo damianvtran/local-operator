@@ -2794,7 +2794,7 @@ async def _dispose_child(child: "Session") -> None:
     await _settle_child_cleanup(asyncio.create_task(child.dispose()))
 
 
-async def _settle_child_cleanup(dispose_task: asyncio.Task[None]) -> None:
+async def _settle_child_cleanup(dispose_task: asyncio.Task[Any]) -> None:
     """Finish child teardown even while the runner itself is being cancelled.
 
     Shielding alone is insufficient here: it lets teardown continue but returns
