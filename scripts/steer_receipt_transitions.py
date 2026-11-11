@@ -27,8 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from local_operator.tui.app import (  # noqa: E402
     DEFERRED_SENT_STEER_NOTICE,
     DEFERRED_STEER_NOTICE,
-    STEER_NOTICE,
     SENT_STEER_NOTICE,
+    STEER_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.widgets.transcript import NoticeBlock  # noqa: E402

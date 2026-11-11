@@ -24259,7 +24259,7 @@ class Session:
         Emits :class:`SteeringDeliveredEvent` when it actually takes something.
         This is the one place that knows a queued message stopped being queued:
         the loop calls it at the boundary where the messages join the context,
-        so a front end showing "queued — sends when this step finishes" can
+        so a front end showing "steering — may stop a running tool" can
         settle that row to a delivered one instead of leaving the promise up for
         the rest of the session. Silent when the queue is empty, which is the
         overwhelmingly common case — this is called at EVERY tool and message

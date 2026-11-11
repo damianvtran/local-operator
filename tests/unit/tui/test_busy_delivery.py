@@ -15,7 +15,8 @@ What this file pins:
   keyword, ``steer`` keeps the legacy call shape byte for byte;
 * the per-mode notice text (each mode's receipt is the string it settles
   from), the joined state a waiting steer puts the older queue/both rows
-  into, and the revert when that steer is recalled;
+  into, and the revert when that steer leaves the queue — recalled by Esc or
+  handed back by the undeliverable lift;
 * the probe-fail refusal: a mode the handle cannot honour is refused with
   the text kept on a failure record, never queued as an urgent steer under a
   "queued — waits" row;
@@ -263,6 +264,77 @@ async def test_recalling_the_steer_reverts_the_row_it_joined() -> None:
         # again. Derived from the queue, never remembered per row.
         assert [message.text for message in session.queued_steering()] == ["wait for me"]
         assert _notice_texts(app) == [QUEUED_WAIT_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_the_undeliverable_lift_reverts_the_row_the_steer_joined() -> None:
+    """The lift is the SECOND way a steer leaves the queue (R-2).
+
+    Esc recall reverts the rows a steer had joined, and the undeliverable
+    hand-back removes the same steer for a different reason: the owner refused
+    the bind. The joined wording promises "goes out with your steer", so
+    leaving it after the steer is lifted would promise a ride-along that is
+    not coming — the receipt has to be derived again from what is actually
+    queued.
+    """
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        _set_mode(app, "queue")
+        await _submit(pilot, app, "wait for me")
+        _set_mode(app, "steer")
+        await _submit(pilot, app, "cut in now")
+        assert _notice_texts(app) == [STEER_JOINED_NOTICE, STEER_NOTICE]
+        # The STEER's held row, not the queue-mode one: both modes hold their
+        # entry, so the list is in submit order and the steer is the newest.
+        steer = next(held for held in app._held_steer_blocks if held[0].text == "cut in now")
+
+        app._on_steer_undeliverable(app._session, str(steer[0].id))
+        await pilot.pause()
+
+        # The queue row is back to its own mode's promise, and the steer's own
+        # row is gone with the hand-back.
+        assert STEER_JOINED_NOTICE not in _notice_texts(app), _notice_texts(app)
+        assert QUEUED_WAIT_NOTICE in _notice_texts(app), _notice_texts(app)
+
+
+@pytest.mark.asyncio
+async def test_two_waiting_rows_with_no_steer_keep_their_own_text() -> None:
+    """Joined is a fact about a STEER, not about how many rows are waiting (R-3).
+
+    Two waiting rows and no steer in the queue means nothing is urgent: each
+    row keeps its own mode's promise. Deriving joined from the row COUNT would
+    tell a user their queued message rides a steer that does not exist.
+    """
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        _set_mode(app, "queue")
+        await _submit(pilot, app, "wait for me")
+        _set_mode(app, "both")
+        await _submit(pilot, app, "wait, then steer")
+
+        assert _notice_texts(app) == [QUEUED_WAIT_NOTICE, BOTH_WAIT_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_a_both_row_beside_a_waiting_steer_reads_the_joined_notice() -> None:
+    """`both` joins like `queue` when a steer waits (R-3).
+
+    The drain takes the whole queue at the next boundary, so a `both` message
+    is urgent beside a steer exactly as a `queue` one is; keeping its own
+    wording would leave the least urgent-looking of the two rows promising a
+    wait this turn will not see out.
+    """
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        _set_mode(app, "both")
+        await _submit(pilot, app, "wait, then steer")
+        _set_mode(app, "steer")
+        await _submit(pilot, app, "cut in now")
+
+        assert _notice_texts(app) == [STEER_JOINED_NOTICE, STEER_NOTICE]
 
 
 @pytest.mark.asyncio

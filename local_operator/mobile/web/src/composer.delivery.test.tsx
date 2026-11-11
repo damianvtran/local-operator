@@ -53,6 +53,18 @@ function mount(streaming: boolean) {
 const chip = () => document.querySelector<HTMLButtonElement>('[aria-label^="delivery"]');
 const sheetDoor = () =>
 	document.querySelector<HTMLButtonElement>('[aria-label="delivery"]');
+/* The chip's VISIBLE text, excluding the aria-hidden `‹` glyph: that span is
+   decoration and is deliberately outside the accessible name. */
+const visibleChipText = (button: HTMLButtonElement) =>
+	button.querySelector<HTMLSpanElement>("span:not([aria-hidden])")?.textContent ?? "";
+/* WCAG 2.5.3 (label in name): whatever the chip SHOWS has to appear in its
+   accessible name, or a voice-control user saying the chip's own words cannot
+   reach it. Asserted for every mode, because `both` is the one that shortens. */
+function expectNameContainsVisibleText() {
+	const button = chip()!;
+	expect(visibleChipText(button).length).toBeGreaterThan(0);
+	expect(button.getAttribute("aria-label")).toContain(visibleChipText(button));
+}
 
 beforeEach(() => {
 	capabilitySlot = { features: { busy_delivery: 1 } } as Capabilities;
@@ -95,15 +107,22 @@ describe("the delivery chip", () => {
 	it("defaults to steer and cycles queue → queue, then steer → steer", () => {
 		mount(true);
 		expect(chip()!.textContent).toContain("steer");
+		expectNameContainsVisibleText();
 		fireEvent.click(chip()!);
 		expect(chip()!.textContent).toContain("queue");
+		expectNameContainsVisibleText();
 		fireEvent.click(chip()!);
 		/* The chip's VISIBLE text is the short form (the full label clips the
-		   composer row at 280 px); its accessible name keeps the full one. */
+		   composer row at 280 px); its accessible name keeps the full one AND
+		   repeats the short one after it, so the name contains what the chip
+		   shows (WCAG 2.5.3, D4) while the full label still says what the mode
+		   does. */
 		expect(chip()!.textContent).toContain("queue→steer");
 		expect(chip()!.getAttribute("aria-label")).toContain("queue, then steer");
+		expectNameContainsVisibleText();
 		fireEvent.click(chip()!);
 		expect(chip()!.textContent).toContain("steer");
+		expectNameContainsVisibleText();
 	});
 
 	it("persists per device and reads back", () => {

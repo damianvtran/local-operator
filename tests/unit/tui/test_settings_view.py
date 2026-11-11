@@ -162,6 +162,47 @@ async def test_enum_expansion_selects_a_choice(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(tmp_path: Path) -> None:
+    """Q-1: `both` is a stored word the page never explains.
+
+    ``delivery.busy_default`` holds ``both``, and the collapsed row showed that
+    token while the picker one keypress away spelled the mode out as
+    ``queue, then steer``. Both now read one source (``_choices_for``), so the
+    two surfaces cannot describe the same value two different ways — and the
+    value WRITTEN stays ``both``, which is what the wire carries.
+    """
+    ConfigManager(tmp_path).update_config({"delivery": {"busy_default": "both"}})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        index = _select(view, "delivery.busy_default")
+        collapsed = view._row_text(view._rows[index], index, 120).plain
+        assert "queue, then steer" in collapsed, collapsed
+        assert " both" not in collapsed, collapsed
+
+        # The picker paints the same label: one source, one answer.
+        view.action_activate()
+        await pilot.pause()
+        labels = [
+            view._row_text(row, position, 120).plain
+            for position, row in enumerate(view._rows)
+            if row.kind == "choice"
+            and row.setting is not None
+            and row.setting.key == "delivery.busy_default"
+        ]
+        assert any("queue, then steer" in label for label in labels), labels
+
+        # DISPLAY only: what is stored is still the wire value.
+        from local_operator import settings_io
+
+        stored = settings_io.read_setting(
+            view._manager, settings_io.BY_KEY["delivery.busy_default"]
+        )
+        assert stored == "both", stored
+
+
+@pytest.mark.asyncio
 async def test_text_edit_saves_on_enter(tmp_path: Path) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 32)) as pilot:

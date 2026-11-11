@@ -32,8 +32,8 @@ from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
     DEFERRED_SENT_STEER_NOTICE,
     DEFERRED_STEER_NOTICE,
-    STEER_NOTICE,
     SENT_STEER_NOTICE,
+    STEER_NOTICE,
     UNSENT_RUNTIME_NOTICE,
     OperatorApp,
 )

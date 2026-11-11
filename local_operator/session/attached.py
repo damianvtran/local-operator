@@ -8353,8 +8353,8 @@ class AttachedSession:
             # because every other writer of that flag is fed by the owner
             # whose socket just closed — so the spinner never stops and the
             # next message routes into the steer branch, is dropped on the
-            # floor, and is receipted as "sends when this step finishes" for a
-            # step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
+            # floor, and is receipted as "steering — may stop a running tool"
+            # for a step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
             # on the prompt path, and this is what lets a message reach it.
             self._end_turn_locally()
             self._notify_stopped()

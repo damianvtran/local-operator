@@ -33,11 +33,11 @@ from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
     DEFERRED_STEER_NOTICE,
-    STEER_NOTICE,
     RECALL_AMBIGUOUS_NOTICE,
     RECALL_DECLINE_NOTICE,
     RECALL_UNCONFIRMED_NOTICE,
     SENT_STEER_NOTICE,
+    STEER_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.events import SteeringDelivered, TurnEnded

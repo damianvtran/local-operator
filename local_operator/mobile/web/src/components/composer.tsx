@@ -905,6 +905,17 @@ export function Composer({
 	   label; only the glyph-sized chip shortens. */
 	const deliveryChipKey: typeof deliveryLabelKey | "relay.composer.delivery.both_chip" =
 		delivery === "both" ? "relay.composer.delivery.both_chip" : deliveryLabelKey;
+	const deliveryVisibleText = messageRuntime.t(deliveryChipKey);
+	/* WCAG 2.5.3, label in name: the accessible name must CONTAIN the text on
+	   the chip. For `both` the chip reads `queue→steer` while the name carried
+	   only the full label, so a voice-control user saying what the chip shows
+	   could not reach it. Both parts are existing keys — the full mode label
+	   first, the chip's own text after it — so no third string is authored and
+	   the shortened chip stays a display-only decision. */
+	const deliveryAriaLabel =
+		delivery === "both"
+			? `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}: ${deliveryVisibleText}`
+			: `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}`;
 	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
 	   where the insertion left it. A ref because it is an instruction to an
 	   effect, not rendered state. */
@@ -2442,11 +2453,11 @@ export function Composer({
 									setDelivery(next);
 									setDeliveryMode(next);
 								}}
-								aria-label={`${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}`}
+								aria-label={deliveryAriaLabel}
 								className={cn(COMPOSER_CHIP(delivery !== "steer"), "shrink-0 gap-1 px-2")}
 							>
 									<span aria-hidden data-delivery-glyph>‹</span>
-									<span>{messageRuntime.t(deliveryChipKey)}</span>
+									<span>{deliveryVisibleText}</span>
 								</button>
 								<button
 									type="button"

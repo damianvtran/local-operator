@@ -808,9 +808,11 @@ SENT_STEER_NOTICE = "sent — the agent has it now"
 #:
 #: HEIGHT baseline: the string these replace, ``queued — sends when this step
 #: finishes`` (38 cells of body), is the shipped height every waiting receipt
-#: is still measured against. None of the five states may render TALLER than
-#: it at a supported width (40 up), which is the direction that pushes the
-#: transcript below down; some render a row shorter, which is harmless because
+#: is still measured against. None of the four waiting states may render
+#: TALLER than it at a supported width (40 up), which is the direction that
+#: pushes the transcript below down; the deferred row is pinned separately (one
+#: row taller at 48-52 columns), since this change does not touch its copy.
+#: Some render a row shorter, which is harmless because
 #: the transcript spaces blocks by a gap rather than pinning rows. The submit
 #: swap and the in-place restate both happen under the user's eyes, so the
 #: changed row must not grow. Below 40 columns nothing is pinned: the app
