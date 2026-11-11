@@ -22,8 +22,8 @@ import pytest
 
 from local_operator.tui.app import (
     BOTH_WAIT_NOTICE,
-    STEER_NOTICE,
     QUEUED_WAIT_NOTICE,
+    STEER_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.widgets.editor import Editor, EditorSubmitted
@@ -452,6 +452,7 @@ async def test_stored_spelling_fires_on_raw_bytes(
     that chord, so it can never be stored — a row for it would assert a
     chord map that cannot exist.
     """
+    from textual import events
     from textual._xterm_parser import XTermParser
 
     session = _DeliveryStreaming()
@@ -463,14 +464,15 @@ async def test_stored_spelling_fires_on_raw_bytes(
         editor = app.query_one(Editor)
         await _type(app, pilot, "payload")
         parser = XTermParser()
-        # ``feed`` returns a GENERATOR, and reading it twice (once for the
-        # assert, once for the dispatch) consumes it — materialise once.
-        messages = list(parser.feed(sequence))
+        # ``feed`` is typed ``Iterable[Message]``, but a key sequence parses to
+        # ``Key`` — the one type ``Editor._on_key`` accepts. Materialise once:
+        # the generator is single-pass and feeding the dispatch consumes it.
+        key_events = [event for event in parser.feed(sequence) if isinstance(event, events.Key)]
         if sequence.startswith("\x1b["):
             # Raw kitty bytes: the parser's event is the real one.
-            assert [m.key for m in messages] == [event_key]
-            for message in messages:
-                await editor._on_key(message)
+            assert [event.key for event in key_events] == [event_key]
+            for event in key_events:
+                await editor._on_key(event)
         else:
             await pilot.press(event_key)
         await pilot.pause()
