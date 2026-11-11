@@ -252,6 +252,11 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # the record sits unjoined in analytics (design §4.2's fallback exists so
     # the case is visible, and a move must not be the thing that hides it).
     "channel_pending.jsonl",
+    # THE TEMPORARY-CHAT MARK (``session/temporary.MARK_NAME``). It must travel:
+    # a moved temporary chat that arrived unmarked would be RETAINED silently,
+    # breaking the deletion the user asked for, and an unlisted file makes a
+    # deleting move refuse with ``unlisted_content``.
+    "temporary.json",
 )
 
 #: Directories a session directory may hold whose FILES are the user's own

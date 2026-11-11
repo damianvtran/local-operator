@@ -83,6 +83,7 @@ def _entry_owners() -> dict[str, str]:
         TRANSCRIPT_FILENAME,
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
+    from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session.runtime.journal import EXIT_RECORD_NAME, RUN_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
@@ -118,6 +119,9 @@ def _entry_owners() -> dict[str, str]:
         RUN_RECORD_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
+        # The temporary-chat mark travels: a moved temporary chat must still be
+        # deleted on its new device, not silently retained there.
+        TEMPORARY_MARK_NAME: "session.temporary",
         DESKTOP_MARKER_NAME: "session.retention",
         MESH_STAMP_NAME: "session.placement",
         LIVE_MARKER_NAME: "session.retention",
@@ -288,6 +292,14 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/session/temporary.py": (
+        2,
+        "``TOMBSTONES_NAME`` ('.temporary-tombstones.json') and ``STATE_NAME`` "
+        "('.temporary-state.json') are STORE-level records beside the session "
+        "directories (sessions/<file>), written by the cleanup pass on this device, "
+        "never an entry of a session directory. The per-session mark (``MARK_NAME``) "
+        "is in sync.COPY_SET_NAMES and travels.",
+    ),
     "local_operator/vault_agent/eligibility.py": (
         2,
         "``ELIGIBILITY_NAME`` ('eligibility.json') and ``GRANT_NAME`` "

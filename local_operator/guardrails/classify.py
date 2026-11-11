@@ -308,8 +308,16 @@ def _pattern_reaches(pattern: str, protected: str) -> bool:
 #: ``provenance.py``): a session's transcript, its lineage and its ask store,
 #: matched per ``<state>/sessions/<id>/``. Any write to them — including an
 #: append — could forge a creating call, a child, or an operator's answer
-#: (review R1-MAJOR-1), so every op on them is CRITICAL.
-_EVIDENCE_FILES = ("transcript.jsonl", "origin.json", "asks.jsonl", "subagent-roster*.json")
+#: (review R1-MAJOR-1), so every op on them is CRITICAL. ``temporary.json`` is
+#: the temporary-chat mark the cleanup pass DELETES on: a shell that could plant
+#: one in another session could get that conversation deleted.
+_EVIDENCE_FILES = (
+    "transcript.jsonl",
+    "origin.json",
+    "asks.jsonl",
+    "subagent-roster*.json",
+    "temporary.json",
+)
 #: Matched case-insensitively (APFS/HFS+ are case-insensitive, so
 #: ``ORIGIN.JSON`` is the same file) and with sqlite's side files (review
 #: round 7, MINOR-2).
