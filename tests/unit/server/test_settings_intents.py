@@ -311,6 +311,227 @@ async def test_delete_cancels_and_a_stale_generation_is_409(api) -> None:
     assert missing.json()["detail"]["code"] == "session_unknown"
 
 
+PEER_SID = "beefcafe0001"
+
+
+def _peer_owned(monkeypatch, sid: str = PEER_SID, name: str = "cloud-node-1") -> None:
+    """Make ``sid`` a conversation a mesh PEER holds, the way the sidebar sees it.
+
+    Patched at ``desktop_mesh.remote_owner`` — the one owner lookup every desktop
+    route asks (archive, receipts, remote writes) — so this exercises the same
+    seam as production without a relay. Every other id answers ``None``.
+    """
+    from local_operator.server.utils import desktop_mesh
+
+    monkeypatch.setattr(
+        desktop_mesh,
+        "remote_owner",
+        lambda root, session_id: ("dev-peer-1", name) if session_id == sid else None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_peer_owned_session_accepts_a_pick_without_a_local_directory(
+    api, tmp_path, monkeypatch
+) -> None:
+    """Operator report: the effort chip on a session running on a mesh peer said
+    "Couldn't set effort to Medium: Requested session ... not found". The POST's
+    existence door only knew ``sessions/<id>/`` on THIS disk, which a peer's
+    conversation never has. The pick must be recorded (202) and the applier must
+    drive it through the pool's peer bridge — WITHOUT creating a local
+    ``sessions/<id>`` directory, which every reader would take for a LOCAL
+    conversation wearing the peer's id (the two-writer case)."""
+    client, app, driver = api
+    _peer_owned(monkeypatch)
+    url = f"/v1/desktop/sessions/{PEER_SID}/settings-intents"
+    posted = await client.post(url, json={"request_id": "e1", "kind": "effort", "value": "medium"})
+    assert posted.status_code == 202, posted.text
+    assert posted.json()["result"]["intent"]["value"] == "medium"
+    assert not (tmp_path / "sessions" / PEER_SID).exists()
+    listed = await client.get("/v1/desktop/settings-intents", params={"session_id": PEER_SID})
+    assert listed.json()["result"]["intents"][PEER_SID]["effort"]["request_id"] == "e1"
+    # The applier reaches the runtime side for the peer id (the driver is gated,
+    # so it is parked inside ``apply``: the call was made).
+    await _until(lambda: any(call[0] == PEER_SID for call in driver.calls))
+    assert driver.calls[-1][1:3] == ("effort", "medium")
+    generation = posted.json()["result"]["intent"]["generation"]
+    dismissed = await client.delete(f"{url}/effort", params={"generation": generation})
+    assert dismissed.status_code == 204, dismissed.text
+    # A restarted process resumes the peer's slot too: the store lists it.
+    assert PEER_SID in app.state.settings_applier.store.sessions_with_intents()
+    # The OWNER is the catalogue authority: a model this device's catalogue
+    # refuses (the fixture's "nope/missing" is 422 for a local session) is
+    # recorded for a peer and left to the owner to accept or refuse.
+    model = await client.post(
+        url, json={"request_id": "m1", "kind": "model", "value": "nope/missing"}
+    )
+    assert model.status_code == 202, model.text
+
+
+@pytest.mark.asyncio
+async def test_a_peer_owned_session_refuses_a_cwd_pick_by_device_name(
+    api, tmp_path, monkeypatch
+) -> None:
+    """A working directory is a path on the OWNER's disk; this device validates
+    cwd targets against its own filesystem, so the pick is refused with the
+    family's named 409, never the shared 404 about a conversation on screen."""
+    client, _, _ = api
+    _peer_owned(monkeypatch)
+    refused = await client.post(
+        f"/v1/desktop/sessions/{PEER_SID}/settings-intents",
+        json={"request_id": "c1", "kind": "cwd", "value": "/"},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "session_is_remote"
+    assert "cloud-node-1" in refused.json()["detail"]["text"]
+    assert not (tmp_path / "sessions" / PEER_SID).exists()
+    # An id nobody holds is still the 404.
+    missing = await client.post(
+        "/v1/desktop/sessions/ffffffffffff/settings-intents",
+        json={"request_id": "r", "kind": "effort", "value": "high"},
+    )
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_reads_a_peer_sessions_selection_from_its_owner_state(
+    tmp_path,
+) -> None:
+    """With no local journal, ``current`` must not answer THIS machine's configured
+    model as the peer's selection: that would validate an effort against the wrong
+    ladder and never confirm an applied pick. It reads the attached peer bridge's
+    frontend state (the owner's own), and "no reading" when the bridge is cold."""
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.settings_intents import BridgeDriver
+
+    spec = SimpleNamespace(
+        provider="anthropic",
+        model_id="claude-opus-5-5",
+        reasoning_effort="medium",
+        fast_mode=False,
+    )
+    state = SimpleNamespace(selected_model=spec, effective_model=spec, cwd="/home/ec2-user")
+    bridges: dict[str, Any] = {}
+
+    class Pool:
+        root = tmp_path
+
+        def __init__(self) -> None:
+            self.bridges = bridges
+
+    driver = BridgeDriver(Pool)
+    assert await driver.current(PEER_SID) == Current()
+    bridges[PEER_SID] = SimpleNamespace(
+        remote_row=object(), remote=SimpleNamespace(frontend_state=state)
+    )
+    reading = await driver.current(PEER_SID)
+    assert (reading.model, reading.effort, reading.fast) == (
+        "anthropic/claude-opus-5-5",
+        "medium",
+        False,
+    )
+    # cwd stays "no reading": the owner's path is not comparable with a pick
+    # validated here, and cwd picks are refused for peers anyway.
+    assert reading.cwd is None
+
+
+@pytest.mark.asyncio
+async def test_a_vanished_peer_session_fails_at_once(tmp_path, monkeypatch) -> None:
+    """Review m4's terminal arm, for a peer: ``pool.session`` raises KeyError when
+    the peer stopped listing the id, and no owner answers for it any more."""
+    _peer_owned(monkeypatch, sid="someoneelse1")
+    gone = await _bridge(None, root=tmp_path, raises=KeyError("Unknown session")).apply(
+        PEER_SID, "effort", "high", None, request_id="r"
+    )
+    assert (gone.status, gone.code) == ("terminal", "session_unknown")
+    _peer_owned(monkeypatch)  # still listed: an unrelated KeyError stays transient
+    live = await _bridge(None, root=tmp_path, raises=KeyError("x")).apply(
+        PEER_SID, "effort", "high", None, request_id="r"
+    )
+    assert live.status == "retry"
+
+
+@pytest.mark.asyncio
+async def test_a_peer_switch_waits_for_the_owners_landed_answer() -> None:
+    """A peer's conversation has no journal here and its facade is released
+    between acts, so a ``queued`` ack could never be confirmed (the two-relay rig
+    measured 60 s of polling then a resend). The peer arm sends WITHOUT
+    ``defer_ok`` and the owner's landed reply is the confirmation."""
+    import contextlib
+    from types import SimpleNamespace
+
+    from local_operator.server.utils.settings_intents import BridgeDriver
+
+    sent: list[tuple[str, tuple, dict]] = []
+
+    class Client:
+        async def set_effort(self, effort, *, defer_ok=False, request_id=None):
+            sent.append(("effort", (effort,), {"defer_ok": defer_ok, "request_id": request_id}))
+            return "effort: " + effort
+
+        async def set_model(
+            self, provider, model_id, effort=None, *, defer_ok=False, request_id=None
+        ):
+            sent.append(("model", (provider, model_id, effort), {"defer_ok": defer_ok}))
+            return "ok"
+
+    async def bound():
+        pass
+
+    async def shared(name, args):
+        return {"kind": "notice", "style": "info", "text": "fast mode: on", "data": {}}
+
+    class Pool:
+        root = Path("/nonexistent-root")
+
+        @contextlib.asynccontextmanager
+        async def session(self, sid):
+            yield SimpleNamespace(
+                remote_row=object(),
+                remote=SimpleNamespace(
+                    _client=Client(),
+                    bind_runtime=bound,
+                    _require_routed_model_admission=lambda target: None,
+                    route_shared_slash=shared,
+                ),
+            )
+
+    driver = BridgeDriver(Pool)
+    effort = await driver.apply(PEER_SID, "effort", "medium", None, request_id="r1")
+    assert (effort.status, effort.owner_confirmed) == ("applied", True)
+    model = await driver.apply(PEER_SID, "model", "a/b", "high", request_id="r2")
+    assert (model.status, model.owner_confirmed) == ("applied", True)
+    fast = await driver.apply(PEER_SID, "fast", True, None, request_id="r3")
+    assert (fast.status, fast.owner_confirmed) == ("applied", True)
+    assert sent == [
+        ("effort", ("medium",), {"defer_ok": False, "request_id": None}),
+        ("model", ("a", "b", "high"), {"defer_ok": False}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_owner_confirmed_apply_settles_without_a_local_reading(
+    tmp_path,
+) -> None:
+    """The applier's half: with no reading at all (a peer's ``current``), an
+    ``owner_confirmed`` apply is ``applied`` at once, never ``queued_next_step``."""
+    driver = FakeDriver({"effort": [Outcome("applied", owner_confirmed=True)]})
+    driver.reading = Current()
+
+    async def no_reading(session_id: str) -> Current:
+        return Current()
+
+    driver.current = no_reading  # type: ignore[method-assign]
+    _session(tmp_path)
+    applier = _applier(tmp_path, driver, FakeClock())
+    await _submit(applier, "effort", "medium", "e1", base=None)
+    await _until(lambda: any(i and i["state"] == "applied" for _, _, i in applier.frames))
+    states = [i["state"] for _, k, i in applier.frames if k == "effort" and i]
+    assert "queued_next_step" not in states, states
+    await applier.close()
+
+
 def test_the_capability_is_advertised() -> None:
     from local_operator.server.features import static_feature_flags
 
