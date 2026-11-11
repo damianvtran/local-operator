@@ -257,12 +257,40 @@ def _critical_text(verdict: Verdict) -> str:
     )
 
 
+#: Appended to a reviewed refusal ONLY when a flagged target is a linked git
+#: worktree. WHY (operator request, 2026-11-11): an approval to delete a
+#: worktree should show the live PR/MR state and whether the owning session
+#: runs, not just git ancestry. The guard already has those facts (branch,
+#: PR/MR state and newest PR, owning session); the ask is the agent's to
+#: write, so the refusal tells it to carry them over verbatim rather than the
+#: host annotating asks. Model-facing English, like ``BLOCK_MARKER``; every
+#: other refusal stays byte-identical.
+WORKTREE_ASK_CLAUSE = (
+    "If you ask the operator about removing this worktree, quote its worktree facts above "
+    "verbatim in the `ask`."
+)
+#: The reason fragments ``classify`` writes for a linked git worktree target.
+_WORKTREE_REASON_MARKERS = ("linked worktree state:", "linked git worktree")
+
+
+def worktree_flagged(verdict: Verdict) -> bool:
+    """Does any flagged target carry a linked-worktree reason (see ``classify``)?"""
+    flagged = verdict.flagged_targets or verdict.targets
+    return any(m in (t.reason or "") for t in flagged for m in _WORKTREE_REASON_MARKERS)
+
+
 #: ``judge.run_judge``/``parse_answer`` prefix every no-verdict reason with this.
 JUDGE_UNAVAILABLE = "judge unavailable"
 
 
 def review_text(
-    rule: str, reason: str, targets: str, *, no_verdict: bool = False, paths: bool = True
+    rule: str,
+    reason: str,
+    targets: str,
+    *,
+    no_verdict: bool = False,
+    paths: bool = True,
+    worktree: bool = False,
 ) -> str:
     """The refusal text of a reviewed call.
 
@@ -270,7 +298,9 @@ def review_text(
     reason's wording (review R2-n2). ``paths`` is False when ``targets``
     names the call itself (a user rule), so the remedy asks for an
     instruction naming this call rather than "these paths" (R2-n1).
+    ``worktree`` (from :func:`worktree_flagged`) appends ``WORKTREE_ASK_CLAUSE``.
     """
+    clause = f" {WORKTREE_ASK_CLAUSE}" if worktree else ""
     if no_verdict:
         # Issue #3613: a timeout, an exception, a host with no judge model or
         # an off-contract answer is NO verdict. The call still fails closed,
@@ -284,6 +314,7 @@ def review_text(
             f"but a call that cannot be checked is not run. Targets: {targets}. Nothing was "
             "run. Retry later, or settle it with a store-verified `ask` answer or an "
             f"explicit operator instruction naming {'these paths' if paths else 'this call'}."
+            f"{clause}"
         )
     tail = (
         SUPPORTED_DELETE_PATHS
@@ -292,7 +323,7 @@ def review_text(
     )
     return (
         f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. "
-        f"{tail} {REFUSAL_SCOPE}"
+        f"{tail} {REFUSAL_SCOPE}{clause}"
     )
 
 
@@ -810,6 +841,7 @@ async def _dangerous_delete(
             targets,
             # A verification failure after an ALLOW is a real refusal.
             no_verdict=result.no_verdict and reason == result.reason,
+            worktree=worktree_flagged(verdict),
         ),
         rule=DANGEROUS_DELETE_RULE,
         risk=risk_name,
