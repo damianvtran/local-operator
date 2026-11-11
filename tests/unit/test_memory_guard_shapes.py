@@ -607,13 +607,97 @@ def test_spelling_guard_skips_only_the_opaque_rule():
         guard_spelling(json.dumps({"body": SYNTH_GITHUB}))
 
 
+
+# --- Issue #3573: public URL locators and attachment extensions -------------------------
+# Om Patil's original cases, remediated per agent review round 1 (B1, M1, M2, m1) and
+# QA round 1 (Q1-Q4): GitHub locators are host-anchored and exempt only the run the
+# prefix ends at; ``/runs/<hex>`` on an arbitrary host is out of scope (refused).
+LOCATOR_HEX = "a1b2c3d4e5f6789012345678901234567890abcd"
+UNRELATED_HEX = "9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc"
+PUBLIC_URL_LOCATORS = [
+    f"https://github.com/org/repo/pull/42/files#diff-{DIGEST64}",
+    f"https://github.com/org/repo/pull/42/commits/{LOCATOR_HEX}",
+    f"https://github.com/org/repo/commit/{LOCATOR_HEX}",
+    f"see https://github.com/org/repo/commits/{LOCATOR_HEX} for the fix",
+    f"github.com/org/repo/commit/{LOCATOR_HEX}#diff-{DIGEST64}",
+    f"https://gist.github.com/user/{LOCATOR_HEX}",
+    f"https://gist.github.com/{LOCATOR_HEX}",
+    f"(https://github.com/org/repo/commit/{LOCATOR_HEX})",
+] + [
+    f"screenshot ~/.local-operator/attachments/{DIGEST64}.{ext}"
+    for ext in ("bin", "png", "jpg", "jpeg", "gif", "webp", "heic", "pdf", "json", "txt")
+]
+NOT_A_PUBLIC_LOCATOR = [
+    # Arbitrary hosts: webhook / signed-URL secrets live under these paths (B1, Q1, Q4).
+    f"https://hooks.example.com/attachments/{DIGEST64}",
+    f"https://hooks.example.com/attachments/{DIGEST64}.bin",
+    f"https://cdn.example.com/attachments/{DIGEST64}.png?sig=1",
+    f"CI run https://example.com/actions/runs/{LOCATOR_HEX}",  # m1: runs deferred
+    f"https://hooks.example.com/services/runs/{LOCATOR_HEX}",
+    f"https://evil.example/runs/{LOCATOR_HEX}",
+    f"https://evil.example/commits/{LOCATOR_HEX}",
+    f"https://evil.example/x#diff-{DIGEST64}",
+    # Host-suffix / embedding tricks. (``/commits/``: a bare ``commit/<hex>`` is already
+    # stored on any host by the pre-existing "commit" id-word rule, out of scope here.)
+    f"https://github.com.evil.example/o/r/commits/{LOCATOR_HEX}",
+    f"https://evilgithub.com/o/r/commits/{LOCATOR_HEX}",
+    f"https://evil.example/github.com/o/r/commits/{LOCATOR_HEX}",
+    f"https://evil.example/?u=gist.github.com/{LOCATOR_HEX}",
+    f"https://evil.example/?u=https://gist.github.com/{LOCATOR_HEX}",
+    # The anchor may not cross whitespace.
+    f"https://github.com/o/r/pull/1/files#diff- {DIGEST64}",
+    # M1 / Q2: only the run the locator prefix ends at is exempt.
+    f"see https://github.com/o/r/commits/{LOCATOR_HEX} and also {UNRELATED_HEX}",
+    f"https://github.com/o/r/commit/{LOCATOR_HEX} {UNRELATED_HEX}",
+    # A secret name in the clause still wins.
+    f"api_key https://github.com/org/repo/commits/{LOCATOR_HEX}",
+    # M2: the extension must be the FINAL suffix, and the name a direct store child.
+    f"x ~/.local-operator/attachments/{DIGEST64}.png.env",
+    f"x ~/.local-operator/attachments/{DIGEST64}.pngx",
+    f"x ~/.local-operator/attachments/{DIGEST64}.sh",
+    f"x ~/.local-operator/attachments/../{DIGEST64}.png",
+    f"x ~/.local-operator/attachments/../{DIGEST64}",
+]
+
+
+def _every_path_refusals(text: str) -> tuple[bool, ...]:
+    """``_verdicts`` plus the tool path with a real ``reported`` source (Q-agreement)."""
+    try:
+        validate_fact({"title": "T", "body": text, "source": {"kind": "reported"}})
+        reported = False
+    except SensitiveValueError:
+        reported = True
+    except MemoryError:
+        reported = False  # non-privacy metadata complaint; only privacy matters here
+    return (*_verdicts(text), reported)
+
+
+@pytest.mark.parametrize("text", PUBLIC_URL_LOCATORS)
+def test_public_url_locators_store_on_every_path(text):
+    assert _every_path_refusals(text) == (False,) * 7, text
+
+
+@pytest.mark.parametrize("text", NOT_A_PUBLIC_LOCATOR)
+def test_non_locator_url_and_attachment_rows_are_refused_on_every_path(text):
+    assert _every_path_refusals(text) == (True,) * 7, text
+
+
+def test_live_attachment_store_accepts_named_extensions_only():
+    from local_operator.session.attachments import attachments_dir
+
+    for ext in ("png", "json", "pdf"):
+        assert not refused(f"screenshot {attachments_dir() / DIGEST64}.{ext}"), ext
+    assert refused(f"see {attachments_dir() / DIGEST64}.png.env")
+    assert refused(f"see {attachments_dir() / DIGEST64}.exe")
+
+
 def test_public_url_identifiers_are_storable():
     """Issue #3573: public IDs inside known URL structures must not be refused."""
     cases = [
         "https://github.com/org/repo/pull/42/files#diff-a1b2c3d4e5f6789012345678901234567890abcd",
         "https://github.com/org/repo/pull/42/commits/a1b2c3d4e5f6789012345678901234567890abcd",
         "https://gist.github.com/user/a1b2c3d4e5f6789012345678901234567890abcd",
-        "CI run https://example.com/actions/runs/a1b2c3d4e5f6789012345678901234567890abcd",
+        "fix https://github.com/org/repo/commits/a1b2c3d4e5f6789012345678901234567890abcd",
         "~/.local-operator/attachments/a1b2c3d4e5f6789012345678901234567890abcd.png",
         "~/.local-operator/attachments/a1b2c3d4e5f6789012345678901234567890abcd.json",
     ]
