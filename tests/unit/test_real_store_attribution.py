@@ -181,8 +181,16 @@ def _break(store: Path, how: str) -> None:
         with open(log, "r+b") as handle:
             handle.write(b"X")
     elif how == "rotated":
-        log.unlink()
-        log.write_bytes(data)
+        # Byte-identical replacement, so ONLY the inode identity check can catch
+        # it. The new file is created while the old one is still live and then
+        # renamed over it (how a rotation or atomic rewrite lands): two live
+        # files on one device never share an inode, so the identity differs on
+        # every filesystem. ``unlink()`` then ``write_bytes()`` let Linux ext4
+        # hand the freed inode straight back (main run 43010912496, gw1), which
+        # made the replacement undetectable by any stat and the case flake.
+        fresh = log.with_name(log.name + ".rotating")
+        fresh.write_bytes(data)
+        os.replace(fresh, log)
     elif how == "removed":
         log.unlink()
     elif how == "malformed":
