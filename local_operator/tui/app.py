@@ -100,6 +100,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.harness.bridge_egress import (
     bridge_card_notice,
+    card_options_off_notice,
     requires_person,
     session_grant_covers,
 )
@@ -31264,12 +31265,17 @@ class OperatorApp(App[None]):
         source._bridge_watch_installed = True  # type: ignore[attr-defined]
 
         def announce() -> None:
-            if not self._draft_grant_suspended(source):
-                return
+            suspended = self._draft_grant_suspended(source)
             from local_operator.harness.bridge_egress import grant_suspended_notice
 
             def paint() -> None:
-                if source is self._interaction:
+                # A card parked while the session was clean was built with
+                # Allow all and the S/G escapes; it becomes the latched card
+                # now (QA Q-11). The press-time refusal in the two setters is
+                # the guarantee; this keeps the card from offering keys it
+                # would refuse.
+                self._latch_parked_cards(source)
+                if suspended and source is self._interaction:
                     self._append_block(NoticeBlock(grant_suspended_notice(), "warning"))
                     self._set_approve_all(self._approve_all, scope="keep")
 
@@ -31279,6 +31285,53 @@ class OperatorApp(App[None]):
                 logger.warning("could not schedule the Team Bridge approvals notice", exc_info=True)
 
         latch.on_latched.append(announce)
+
+    def _latch_parked_cards(self, source: SessionInteraction) -> None:
+        """Re-render ``source``'s pending card(s) as latched cards (Q-11).
+
+        Only cards bound to ``source`` (``source_binding[0]`` is its token): a
+        latch in one conversation must not restyle another's card.
+        """
+        for card in (self._approval, self._prearmed_approval):
+            binding = getattr(card, "source_binding", None)
+            if card is None or not binding or binding[0] != source.token:
+                continue
+            enter = getattr(card, "enter_latched", None)
+            if enter is None:
+                continue
+            try:
+                enter(bridge_card_notice())
+            except Exception:  # noqa: BLE001 - the setters still refuse; logged
+                logger.warning("could not re-render a parked card as latched", exc_info=True)
+
+    def _card_setting_refused_while_latched(
+        self, source: SessionInteraction
+    ) -> ApprovalSettingOutcome | None:
+        """The press-time refusal of a card's ``S``/``G`` in a latched session.
+
+        Why at PRESS time (QA Q-11): the callbacks are bound when a card is
+        built (``None`` on a latched card), so a card parked before the latch
+        still holds them. Pressing one then reached ``_set_approve_all`` while
+        latched, which stamps ``granted_while_latched`` -- the marker only a
+        typed ``/approvals auto`` may carry -- and the next egress ran with no
+        card. Mirrors the ``A`` check in ``_latch_approval_answer``. Writes
+        nothing; the card is turned into the latched card in the same gesture.
+        """
+        card = self._approval
+        card_latched = (
+            card is not None
+            and bool(getattr(card, "bridge_latched", False))
+            and (getattr(card, "source_binding", None) or (None,))[0] == source.token
+        )
+        if not (self._source_bridge_latched(source) or card_latched):
+            return None
+        self._latch_parked_cards(source)
+        return ApprovalSettingOutcome(
+            kind="refused",
+            mode="auto" if self._approve_all else "ask",
+            provenance="session",
+            reason=card_options_off_notice(),
+        )
 
     def _draft_grant(self, source: SessionInteraction) -> Any:
         from local_operator.harness.bridge_egress import ApprovalGrant
@@ -31976,6 +32029,9 @@ class OperatorApp(App[None]):
         card mirrors only the owner's acknowledgement (``None`` means "in
         flight"; the route calls :meth:`ApprovalPrompt.show_setting_outcome`).
         """
+        refused = self._card_setting_refused_while_latched(source)
+        if refused is not None:
+            return refused
         if self._gate_is_owned_elsewhere():
             card = self._approval
             if card is None:
@@ -32015,6 +32071,9 @@ class OperatorApp(App[None]):
         Owned gate: the global write and the live move happen here. Attached
         gate: routed to the owner, whose acknowledgement is mirrored.
         """
+        refused = self._card_setting_refused_while_latched(source)
+        if refused is not None:
+            return refused
         if self._gate_is_owned_elsewhere():
             card = self._approval
             if card is None:

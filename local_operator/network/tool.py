@@ -1610,6 +1610,11 @@ def _stamp_mesh_reply(
     No peer reports whether that session holds a teammate's agent message
     (Team Bridge), so a reply counts as one: fail closed, see
     ``harness/bridge_egress.py``.
+
+    A future "peer reports clean" flag may narrow this ONLY for peers the
+    operator controls -- the same account, or a device the operator admitted
+    as its own (review S-69). Any other mesh member is another person, and a
+    "clean" flag it sends is attacker-chosen: its replies stay sources.
     """
     from local_operator.harness.bridge_egress import stamp_details
 

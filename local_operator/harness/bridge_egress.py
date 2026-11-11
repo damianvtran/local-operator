@@ -446,41 +446,133 @@ def _sessions_root() -> Any:
     return (config_dir() / "sessions").resolve()
 
 
-def cross_session_read_latched(tool_name: str, arguments: Any, tool_context: Any) -> bool:
-    """Whether a ``read``/``grep`` call pulls a latched session's files.
+def _session_dir_latched(session_id: str) -> bool:
+    """Whether the store session ``session_id`` is latched. Fail-closed.
 
-    A transcript (or a spill file) under ``<config>/sessions/<id>/`` is that
-    session's content as surely as a ``sessions`` peek is: a clean session
-    reading a latched one's journal must latch. Naming the sessions root
-    itself (a recursive grep over every session) is undecidable without
-    scanning all of them, so it counts as latched. A path that names no
-    session is not a pull. Never raises: an unresolvable path is judged by
-    its literal spelling and, if that names the sessions tree, counts.
+    An id that cannot name a directory directly under the sessions root (empty,
+    a separator, ``..``) is not a known owner, so it counts as latched.
+    """
+    from pathlib import PurePath
+
+    if not session_id or PurePath(session_id).name != session_id or session_id in (".", ".."):
+        return True
+    return session_directory_latched(_sessions_root() / session_id)
+
+
+def _spill_digest_latched(digest: str, reader_id: str = "") -> bool:
+    """Whether the spill entry ``digest`` came from a latched session.
+
+    The spill store is shared by every session (``tools/spill.py``) and
+    ``_read_spill`` has no owner check, so a spill is judged by the session
+    its metadata names (``SpillMeta.session_id``). FAIL-CLOSED on an unknown
+    owner (review S-68): an evicted entry, missing or unreadable metadata, or
+    an empty ``session_id`` (entries written by a host with no session) all
+    count as latched -- the content's provenance is what is unknown, and
+    "unknown" is the case the latch exists for. The cost is that a clean
+    session reading an ownerless spill asks on its next egress. A spill the
+    READER itself wrote is not a pull (this is only asked while the reader is
+    clean), which keeps a session's ordinary read-back of its own output free.
+    """
+    try:
+        from local_operator.tools.spill import SPILL_SCHEME, get_store
+
+        meta = get_store().stat(f"{SPILL_SCHEME}{digest}")
+        if meta is None:
+            return True
+        owner = str(meta.session_id or "")
+        if owner and owner == reader_id:
+            return False
+        return _session_dir_latched(owner)
+    except Exception:  # noqa: BLE001 - §3.6: an undeterminable owner means latched
+        logger.warning("spill owner of %s could not be determined", digest, exc_info=True)
+        return True
+
+
+def _above_without_hidden(resolved: Any, tree: Any) -> bool:
+    """Whether a recursive search rooted at ``resolved`` walks into ``tree``.
+
+    ``resolved`` is a strict ancestor of ``tree``. The search tools skip hidden
+    directories they were not named into (rg's default), so a dot-component on
+    the way down means the walk never reaches ``tree``: ``grep ~`` with the
+    default ``~/.local-operator`` is not a pull. A non-hidden custom config dir
+    loses that protection, and an ancestor of it then counts (review X1).
+    """
+    return not any(part.startswith(".") for part in tree.relative_to(resolved).parts)
+
+
+def cross_session_read_latched(tool_name: str, arguments: Any, tool_context: Any) -> bool:
+    """Whether a ``read``/``grep`` call pulls a latched session's content.
+
+    A session's content is reachable through four file spellings, and each is
+    that session's content as surely as a ``sessions`` peek is (reviews S-60,
+    X1, S-68):
+
+    - ``<config>/sessions/<id>/...`` -- its journal and its own files;
+    - ``<config>/cache/decompressed/<id>/...`` -- the byte-identical copy
+      ``transcript_for_read`` materialises for an archived session
+      (``session/compression._cache_root``), judged as ``sessions/<id>``;
+    - the shared spill store, ``<config>/spill/<digest>.*`` or
+      ``spill://<digest>``, judged by the owner its metadata names
+      (fail-closed on an unknown owner, :func:`_spill_digest_latched`);
+    - any of those three trees' ROOT, or an ANCESTOR of one (the config dir
+      itself, ``<config>/cache``, or a non-hidden path above the config dir):
+      a recursive search over many sessions' content is undecidable without
+      scanning all of them, so it counts as latched, unconditionally. That is
+      a superset of "a latched session exists under that root"; the cost is
+      a card on the next egress after such a search in a clean store.
+
+    ``grep`` with no ``path`` searches ``"."``, so the effective path is
+    judged. A path naming none of these is not a pull. Never raises: a path
+    that will not resolve is judged by its literal spelling and counts if
+    that names one of the stores.
     """
     if tool_name not in _CONTENT_READ_TOOLS or not isinstance(arguments, Mapping):
         return False
     raw = arguments.get("path")
-    if not isinstance(raw, str) or not raw.strip() or "://" in raw:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raw = "."
+    if not isinstance(raw, str):
+        return False
+    raw = raw.strip()
+    reader = str(getattr(tool_context, "session_id", "") or "")
+    if raw.startswith("spill://"):
+        digest = raw[len("spill://") :].split("?", 1)[0].strip()
+        return _spill_digest_latched(digest, reader)
+    if "://" in raw:
         return False
     from pathlib import Path
 
     try:
-        root = _sessions_root()
-        candidate = Path(raw.strip()).expanduser()
+        from local_operator.paths import config_dir
+
+        config = config_dir().resolve()
+        candidate = Path(raw).expanduser()
         if not candidate.is_absolute():
             cwd = getattr(tool_context, "cwd", None)
             candidate = Path(cwd or ".") / candidate
         resolved = candidate.resolve()
-        if resolved == root:
-            return True
-        relative = resolved.relative_to(root)
-    except ValueError:
-        return False
     except Exception:  # noqa: BLE001 - §3.6: undecidable; judged by its spelling
         logger.warning("cross-session read path could not be resolved", exc_info=True)
-        return "sessions" in raw
-    session_dir = root / relative.parts[0]
-    return session_directory_latched(session_dir)
+        return any(word in raw for word in ("sessions", "decompressed", "spill"))
+    sessions = config / "sessions"
+    decompressed = config / "cache" / "decompressed"
+    spills = config / "spill"
+    for tree in (sessions, decompressed, spills):
+        if resolved == tree:
+            return True
+        if tree.is_relative_to(resolved):
+            # ``resolved`` is an ancestor. At or below the config dir it was
+            # named into explicitly, so nothing hidden is skipped on the way.
+            if resolved.is_relative_to(config) or _above_without_hidden(resolved, tree):
+                return True
+    for tree in (sessions, decompressed):
+        if resolved.is_relative_to(tree):
+            return _session_dir_latched(resolved.relative_to(tree).parts[0])
+    if resolved.is_relative_to(spills):
+        # ``<digest>.txt`` (content) or ``<digest>.json`` (metadata); a stray
+        # file there names no entry and has no owner, so it counts.
+        return _spill_digest_latched(Path(resolved.relative_to(spills).parts[0]).stem, reader)
+    return False
 
 
 def latch_of(tool_context: Any) -> BridgeTaintLatch | None:
@@ -578,6 +670,13 @@ class EgressDecision:
     taint_raised: bool = False
     bridge_latched: bool = False
     refusal: str | None = None
+    #: True when THIS call latched the session by pulling a latched session's
+    #: content (``cross_session_read_latched``). The loop stamps the call's
+    #: result with it (review S-70): the in-memory latch writes its own row
+    #: only on the next commit, and a crash in that window -- or a third
+    #: session peeking this one first -- would otherwise see the pulled text
+    #: with no source row. A stamped result row IS a source row.
+    pulled: bool = False
 
 
 _TIER_RANK = {"read": 0, "write": 1, "exec": 2}
@@ -653,6 +752,7 @@ def escalate_for_bridge_taint(
     the classifier escalates to ``write`` (§3.6).
     """
     latched = context_is_latched(tool_context, live_messages)
+    pulled = False
     if not latched and cross_session_read_latched(tool_name, arguments, tool_context):
         # A PULL: this call reads a latched session's files. Latch before it
         # runs (one call early is the safe side); the session writes its own
@@ -661,6 +761,7 @@ def escalate_for_bridge_taint(
         if latch is not None:
             latch.mark()
         latched = True
+        pulled = True
     if latched and tool_name in ("web_search", "web_read") and latch_of(tool_context) is None:
         # A host with no latch object is judged by its live messages here,
         # but the search-provider filter (``web_search/tool.py``) sees no
@@ -678,7 +779,7 @@ def escalate_for_bridge_taint(
         return EgressDecision(tier=tier)
     if tier != "read":
         # Already gated; only the card policy (bridge_latched) changes.
-        return EgressDecision(tier=tier, bridge_latched=True)
+        return EgressDecision(tier=tier, bridge_latched=True, pulled=pulled)
     try:
         args = arguments if isinstance(arguments, Mapping) else {}
         if not isinstance(arguments, Mapping):
@@ -690,10 +791,12 @@ def escalate_for_bridge_taint(
             tool_name,
             exc_info=True,
         )
-        return EgressDecision(tier="write", taint_raised=True, bridge_latched=True)
+        return EgressDecision(tier="write", taint_raised=True, bridge_latched=True, pulled=pulled)
     if refusal is not None:
-        return EgressDecision(tier=tier, bridge_latched=True, refusal=refusal)
-    return EgressDecision(tier=raised, taint_raised=raised != tier, bridge_latched=True)
+        return EgressDecision(tier=tier, bridge_latched=True, refusal=refusal, pulled=pulled)
+    return EgressDecision(
+        tier=raised, taint_raised=raised != tier, bridge_latched=True, pulled=pulled
+    )
 
 
 # -- the card and grant rules ------------------------------------------------------

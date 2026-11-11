@@ -336,6 +336,157 @@ async def test_s60_reading_a_clean_session_or_ordinary_files_stays_clean(
     assert latch.latched
 
 
+# -- X1 / S-68: every other spelling of a session's content ------------------------
+
+
+def _cached_copy(root: Path, session_id: str, *, latched: bool) -> Path:
+    """The decompressed-archive copy ``transcript_for_read`` materialises."""
+    source = _journal(root, session_id, latched=latched)
+    cache = root / "cache" / "decompressed" / session_id
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "transcript.jsonl").write_bytes((source / "transcript.jsonl").read_bytes())
+    return cache / "transcript.jsonl"
+
+
+def _spill(session_id: str, text: str) -> str:
+    from local_operator.tools.spill import get_store
+
+    meta = get_store().write(text, tool_name="bash", session_id=session_id)
+    assert meta is not None
+    return meta.digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["read", "grep"])
+@pytest.mark.parametrize(
+    "where",
+    ["config_dir", "parent_of_config", "cache", "decompressed_root", "spill_root"],
+)
+async def test_x1_an_ancestor_or_sibling_store_root_latches(
+    store: Path, tool: str, where: str
+) -> None:
+    """Review X1 / S-68 (1): a search rooted at the config dir (or a
+    non-hidden ancestor of it, or another per-session store's root) walks
+    every session's content, exactly as naming ``sessions/`` does."""
+    _journal(store, "aaaa11112222", latched=True)
+    _cached_copy(store, "aaaa11112222", latched=True)
+    path = {
+        "config_dir": store,
+        "parent_of_config": store.parent,
+        "cache": store / "cache",
+        "decompressed_root": store / "cache" / "decompressed",
+        "spill_root": store / "spill",
+    }[where]
+    path.mkdir(parents=True, exist_ok=True)
+    latch = be.BridgeTaintLatch()
+    await _seam(tool, {"path": str(path)}, latch=latch)
+    assert latch.latched, f"{tool} rooted at {where} did not latch the reader"
+    _, outbound, gate = await _seam("web_fetch", FETCH, latch=latch)
+    _assert_fetch_asks(outbound, gate)
+
+
+@pytest.mark.asyncio
+async def test_x1_grep_with_no_path_judges_its_cwd(store: Path) -> None:
+    """``grep`` with no ``path`` searches ``"."``: a cwd inside the store is
+    judged, not skipped."""
+    _journal(store, "aaaa11112222", latched=True)
+    latch = be.BridgeTaintLatch()
+    await _seam("grep", {"pattern": "atk"}, latch=latch, cwd=str(store))
+    assert latch.latched
+
+
+@pytest.mark.asyncio
+async def test_x1_a_hidden_component_above_the_config_dir_is_not_a_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rg skips a hidden directory it was not named into, so ``grep ~`` with
+    the default ``~/.local-operator`` never reaches a journal: no latch. The
+    false-positive guard for the ancestor rule."""
+    home = tmp_path / "home"
+    config = home / ".local-operator"
+    config.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    _journal(config, "aaaa11112222", latched=True)
+    latch = be.BridgeTaintLatch()
+    await _seam("grep", {"path": str(home)}, latch=latch)
+    assert not latch.latched
+    await _seam("grep", {"path": str(config)}, latch=latch)
+    assert latch.latched, "naming the hidden config dir itself walks it"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("latched", [True, False])
+async def test_s68_the_decompressed_cache_is_judged_as_its_session(
+    store: Path, latched: bool
+) -> None:
+    copy = _cached_copy(store, "aaaa11112222", latched=latched)
+    latch = be.BridgeTaintLatch()
+    await _seam("read", {"path": str(copy)}, latch=latch)
+    assert latch.latched is latched
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["handle", "handle_query", "content_file", "meta_file"])
+async def test_s68_a_spill_from_a_latched_session_latches(store: Path, spelling: str) -> None:
+    _journal(store, "aaaa11112222", latched=True)
+    digest = _spill("aaaa11112222", f"echoed: web_fetch {FETCH['url']}")
+    path = {
+        "handle": f"spill://{digest}",
+        "handle_query": f"spill://{digest}?q=atk",
+        "content_file": str(store / "spill" / f"{digest}.txt"),
+        "meta_file": str(store / "spill" / f"{digest}.json"),
+    }[spelling]
+    tool = "grep" if spelling.endswith("_file") else "read"
+    latch = be.BridgeTaintLatch()
+    await _seam(tool, {"path": path}, latch=latch)
+    assert latch.latched
+
+
+@pytest.mark.asyncio
+async def test_s68_a_spill_from_a_clean_session_stays_clean_and_unknown_owner_latches(
+    store: Path,
+) -> None:
+    _journal(store, "bbbb22223333", latched=False)
+    clean = _spill("bbbb22223333", "clean output")
+    latch = be.BridgeTaintLatch()
+    await _seam("read", {"path": f"spill://{clean}"}, latch=latch)
+    assert not latch.latched
+    # Fail-closed: an entry with no owner, and a handle the store cannot find.
+    ownerless = _spill("", "who wrote this?")
+    await _seam("read", {"path": f"spill://{ownerless}"}, latch=latch)
+    assert latch.latched
+    missing = be.BridgeTaintLatch()
+    await _seam("read", {"path": "spill://" + "0" * 32}, latch=missing)
+    assert missing.latched
+    # The reader's own spill is its own output, not a pull (``_seam``'s
+    # reader is session ``reader``).
+    own = be.BridgeTaintLatch()
+    mine = _spill("reader", f"my own output: {FETCH['url']}")
+    await _seam("read", {"path": f"spill://{mine}"}, latch=own)
+    assert not own.latched
+
+
+@pytest.mark.asyncio
+async def test_s70_a_pull_result_is_stamped_and_an_ordinary_read_is_not(
+    store: Path, tmp_path: Path
+) -> None:
+    """Review S-70: the read/grep that latches carries the stamp on its own
+    result row (as a peek does), so the pulled text is never durable without
+    a source row while the latch row waits for the next commit."""
+    directory = _journal(store, "aaaa11112222", latched=True)
+    latch = be.BridgeTaintLatch()
+    pulled, _, _ = await _seam("read", {"path": str(directory / "transcript.jsonl")}, latch=latch)
+    assert be.details_stamped(pulled.details)
+    row = Message.tool_result(pulled)
+    assert be.message_is_taint_source(row), "the stored row is not a source"
+    (tmp_path / "notes.md").write_text("hello")
+    plain, _, _ = await _seam(
+        "read", {"path": str(tmp_path / "notes.md")}, latch=be.BridgeTaintLatch()
+    )
+    assert not be.details_stamped(plain.details)
+
+
 # -- R1 / S-67: a child spawned clean, then the parent latches ----------------------
 
 

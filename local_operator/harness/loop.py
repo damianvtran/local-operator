@@ -43,6 +43,7 @@ from local_operator.harness.approval import ApprovalUnavailableError, ask_approv
 from local_operator.harness.bridge_egress import (
     escalate_for_bridge_taint,
     latched_card_summary,
+    stamp_details,
 )
 from local_operator.harness.degeneration import (
     DegenerationTrip,
@@ -6547,6 +6548,14 @@ class AgentLoop:
                 and (result.details or {}).get(QUIET_TURN_KEY) is True
             ):
                 context.quiet_request_roots.add(item.quiet_root_id)
+            if egress.pulled:
+                # Review S-70: this read/grep latched the session by pulling
+                # a latched session's content. Its result row carries the
+                # stamp, as a ``sessions`` peek's does, so the pulled text is
+                # never durable without a source row -- the latch's own row
+                # lands only on the next commit. Stamped last, after the hooks
+                # and the public copy, so no copy can drop it.
+                result = result.model_copy(update={"details": stamp_details(result.details, True)})
             return result
         except asyncio.CancelledError:
             # A CANCELLED call's result never reaches ``_append_results``, so the

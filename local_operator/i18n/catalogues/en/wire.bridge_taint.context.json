@@ -22,6 +22,6 @@
   "wire.bridge_taint.ack_refused": {
     "role": "receipt when an 'approvals auto' request from the desktop, the phone or an approval card is refused in a latched conversation",
     "tone": "plain receipt with the one next step that works",
-    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` verbatim: it is a command."
+    "note": "Agent messages is the product name of Team Bridge (match wire.settings.team_bridge.title): keep it untranslated and capitalised. \"A teammate's agent\" is another person's agent, never the user's own agent team or subagents. A latched conversation is one that has received such a message. Keep `/approvals auto` and `/new` verbatim: they are commands."
   }
 }

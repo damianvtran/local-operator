@@ -58,9 +58,19 @@ The latch follows bridge text wherever it is carried.
     can hold a restatement without the source row.
   - A mesh peek, a mesh `send` reply, a `sessions` resume-with-prompt reply on
     a peer, and a `network sessions` send reply. No peer reports its latch
-    today, so these count as latched (fail closed).
-  - `read` or `grep` of a file under another session's directory
-    (`<config>/sessions/<id>/`); naming the sessions root itself counts.
+    today, so these count as latched (fail closed). A future peer-reported
+    "clean" flag may narrow this only for peers the operator controls (same
+    account, or a device admitted as the operator's own); from any other
+    member that flag is attacker-chosen.
+  - `read` or `grep` of a latched session's content, in every spelling:
+    its directory (`<config>/sessions/<id>/`), the decompressed archive copy
+    (`<config>/cache/decompressed/<id>/`), and a spill it owns
+    (`<config>/spill/<digest>.*` or `spill://<digest>`; a spill with no known
+    owner counts). A search rooted at any of those stores' roots, or at an
+    ancestor of one (the config directory itself, `<config>/cache`, or a
+    non-hidden path above the config directory), counts unconditionally.
+    `grep` with no `path` is judged at its working directory. The pulling
+    call's own result is stamped too.
   The stamp is `details["bridge_taint"] = True` on the result. It feeds the
   same latch; it is not a second gate.
 
@@ -141,8 +151,9 @@ The T-rows are pinned in `tests/unit/harness/test_bridge_egress.py`,
   `read`; none reaches an attacker-chosen host today. A guard test fails when
   a new static read-tier tool appears so it is classified deliberately.
 - Pull paths not closed: a confined `bash` command reading another session's
-  files, a recursive `grep` from an ancestor of the config directory (hidden
-  directories are skipped by default but not guaranteed), and session titles
-  in `sessions list`/`info`.
+  files, and session titles in `sessions list`/`info`. A recursive `grep`
+  from above a HIDDEN config directory (the default `~/.local-operator`) is
+  not counted, because the search skips hidden directories it was not named
+  into.
 - Stored injection through files and memory, a quarantined reader, and the
   preview CSP.

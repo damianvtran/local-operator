@@ -1321,6 +1321,48 @@ class ApprovalPrompt(AskPickerScreen):
         self._invalidate_description_wraps()
         self._repaint()
 
+    def enter_latched(self, notice: str) -> None:
+        """Turn a card raised BEFORE the latch into the latched card, in place.
+
+        Why (QA Q-11): the ``S``/``G`` callbacks and the "Allow all" row are
+        bound when the card is BUILT. A card parked while the session was clean
+        kept them after a teammate's-agent message latched the session, and a
+        press then reached ``_set_approve_all`` while latched -- which stamps
+        ``granted_while_latched``, the marker reserved for a TYPED
+        ``/approvals auto``. The app's setters refuse at press time too; this is
+        the visible half, so the card stops offering what it will refuse.
+
+        In place rather than rebuilt: the parked future, its binding and the
+        reader's place on the card are the gate's single answer path
+        (``request_tool_approval``'s adoption rule), and a replacement card
+        would be a second one. A settled card is a receipt and is left alone,
+        as is a profile-save card (already two-choice, and never latched-styled).
+        """
+        if self._answer is not None or self._profile_save:
+            return
+        clean = " ".join(strip_control_sequences(notice).split()) if notice else ""
+        if self._person_only and self._latched_notice == clean:
+            return
+        self._person_only = True
+        self._ANSWER_KEYS = frozenset({"y", "n"})
+        self._on_set_session_auto = None
+        self._on_set_global_auto = None
+        self._latched_notice = clean
+        self._latched_take = 0
+        self._latched_rows_cache = None
+        self.bridge_latched = True
+        question = self._questions[0]
+        # Allow and Deny are the first two choices (``approval_question``), so
+        # the latched card's options are exactly the head of the clean card's.
+        self._questions[0] = question.model_copy(update={"options": list(question.options[:2])})
+        state = self._states[0]
+        if state.selected > 1:
+            # The cursor sat on the row that no longer exists; Deny is the
+            # nearest row and the safe one for a stray Enter.
+            state.selected = 1
+        self._invalidate_description_wraps()
+        self._repaint()
+
     def show_setting_outcome(self, scope: str, outcome: ApprovalSettingOutcome) -> None:
         """Acknowledge a setting gesture in the callout's reserved slot.
 
