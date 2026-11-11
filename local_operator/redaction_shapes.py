@@ -5586,72 +5586,77 @@ _GOMAP_DATA_RE = re.compile(r"(?<![\w.-])(data|stringData):map\[")
 _GOMAP_ENTRY_RE = re.compile(r"(?:(?<=\[)|(?<= ))([A-Za-z0-9_.-]+):")
 
 
-def _gomap_close(text: str, pos: int) -> int:
-    """Offset of the ``]`` closing the map whose body starts at ``pos``, else -1."""
-    depth = 0
-    for index in range(pos, len(text)):
-        char = text[index]
+#: One token stream per line: brackets, and a ``kind:Secret`` entry (preceded
+#: by a space or its map's ``[``, followed by a space or its map's ``]``).
+_GOMAP_TOKEN_RE = re.compile(r"[\[\]]|(?<=[ \[])kind:Secret(?=[ \]])")
+
+
+def _gomap_line_brackets(
+    text: str, start: int, end: int
+) -> tuple[dict[int, int], dict[int, int], set[int]]:
+    """Bracket structure of the line ``text[start:end]`` in ONE pass.
+
+    Returns ``(close_of, parent_of, secret)``: the ``]`` pairing each ``[``
+    (unclosed ones are absent), the ``[`` directly enclosing each ``[``, and
+    the ``[`` offsets whose OWN level holds ``kind:Secret``.
+
+    WHY one stack pass (round-3 review R3-1): the first cut walked forward to
+    the close and back to the owner for every ``data:map[`` and re-walked the
+    owner for ``kind:Secret`` per sibling, so crafted input such as
+    ``map[kind:Secret `` + ``data:map[a:b] ``*n took 18 s at 54 KB and an
+    unclosed ``data:map[ ``*n never finished at 200 KB — on the path of every
+    tool result. Pairing once makes every lookup O(1); a stray ``]`` with
+    nothing open is ignored, as the backward walk ignored it.
+    """
+    close_of: dict[int, int] = {}
+    parent_of: dict[int, int] = {}
+    secret: set[int] = set()
+    stack: list[int] = []
+    for token in _GOMAP_TOKEN_RE.finditer(text, start, end):
+        char = token.group(0)
         if char == "[":
-            depth += 1
+            if stack:
+                parent_of[token.start()] = stack[-1]
+            stack.append(token.start())
         elif char == "]":
-            if depth == 0:
-                return index
-            depth -= 1
-        elif char == "\n":
-            return -1  # fmt prints a map on one line
-    return -1
-
-
-def _gomap_open(text: str, pos: int) -> int:
-    """Offset just after the ``map[`` enclosing ``pos``, else -1."""
-    depth = 0
-    for index in range(pos - 1, -1, -1):
-        char = text[index]
-        if char == "]":
-            depth += 1
-        elif char == "[":
-            if depth == 0:
-                return index + 1 if text.endswith("map", 0, index) else -1
-            depth -= 1
-        elif char == "\n":
-            return -1
-    return -1
-
-
-def _gomap_is_secret(text: str, start: int, end: int) -> bool:
-    """Whether the map body ``text[start:end]`` has ``kind:Secret`` at its own level."""
-    depth = 0
-    index = start
-    while index < end:
-        char = text[index]
-        if char == "[":
-            depth += 1
-        elif char == "]":
-            depth -= 1
-        elif (
-            depth == 0
-            and (index == start or text[index - 1] == " ")
-            and text.startswith("kind:Secret", index)
-            and (index + 11 == end or text[index + 11] in " ]")
-        ):
-            return True
-        index += 1
-    return False
+            if stack:
+                close_of[stack.pop()] = token.start()
+        elif stack:
+            secret.add(stack[-1])
+    return close_of, parent_of, secret
 
 
 def _k8s_secret_gomap_spans(text: str) -> list[_Span]:
     if "map[" not in text or "kind:Secret" not in text:
         return []
     spans: list[_Span] = []
+    # fmt prints a map on one line, so the structure is computed once per line
+    # holding a ``data:map[`` and reused by every match on it.
+    line_start = line_end = -1
+    close_of: dict[int, int] = {}
+    parent_of: dict[int, int] = {}
+    secret: set[int] = set()
+    #: End of the last masked data map: a ``data:map[`` nested inside it is
+    #: already covered by that map's values, and re-reading its body per nesting
+    #: level would make a crafted ``data:map[kind:Secret data:map[`` chain quadratic.
+    covered = -1
     for match in _GOMAP_DATA_RE.finditer(text):
+        if match.start() < covered:
+            continue
+        if match.start() >= line_end:
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            close_of, parent_of, secret = _gomap_line_brackets(text, line_start, line_end)
         body = match.end()
-        close = _gomap_close(text, body)
-        owner = _gomap_open(text, match.start())
-        if close < 0 or owner < 0:
+        close = close_of.get(body - 1, -1)
+        owner_bracket = parent_of.get(body - 1, -1)
+        if close < 0 or owner_bracket < 0 or not text.endswith("map", 0, owner_bracket):
             continue
-        owner_end = _gomap_close(text, owner)
-        if owner_end < 0 or not _gomap_is_secret(text, owner, owner_end):
+        if owner_bracket not in close_of or owner_bracket not in secret:
             continue
+        covered = close
         keys = list(_GOMAP_ENTRY_RE.finditer(text, body, close))
         for index, key in enumerate(keys):
             value_end = keys[index + 1].start() - 1 if index + 1 < len(keys) else close
@@ -5899,20 +5904,40 @@ def _scrub_guttered_plan(text: str) -> Optional[str]:
     new_lines = masked.splitlines(keepends=True)
     if len(new_lines) == len(lines):
         return "".join(gutter + line for gutter, line in zip(gutters, new_lines))
-    # The re-render changed the line count (an unusual source layout): keep
-    # the unchanged leading lines' gutters and number the rest on from there,
-    # at the first gutter's width.
+    # The re-render changed the line count (a masked multi-line value collapses
+    # to one marker; a source-inline array expands). Every line keeps its
+    # ORIGINAL gutter and the output keeps the original line count (round-3
+    # review R3-3): a later ``read`` by range or an edit by line number lands
+    # where the file says. Unchanged lines are aligned from both ends; the
+    # changed middle is laid onto the original middle's slots — padded with
+    # empty lines when it shrank, its overflow joined onto the last slot when
+    # it grew.
     lead = 0
-    while lead < len(new_lines) and new_lines[lead] == stripped_lines[lead]:
+    limit = min(len(new_lines), len(lines))
+    while lead < limit and new_lines[lead] == stripped_lines[lead]:
         lead += 1
-    first_index, first = next((i, g) for i, g in enumerate(gutters) if g)
-    width = len(first) - 2
-    number = int(first[:width]) - first_index
-    out = []
-    for index, line in enumerate(new_lines):
-        gutter = gutters[index] if index < lead else f"{number + index:>{width}}| "
-        out.append(gutter + line)
-    return "".join(out)
+    tail = 0
+    while (
+        tail < limit - lead
+        and new_lines[len(new_lines) - 1 - tail] == stripped_lines[len(lines) - 1 - tail]
+    ):
+        tail += 1
+    middle = new_lines[lead : len(new_lines) - tail]
+    slots = len(lines) - tail - lead
+    if slots <= 0:
+        return None  # nothing to lay the change onto; leave it to the plain rules
+    middle = [line.rstrip("\r\n") for line in middle]
+    if len(middle) > slots:
+        middle = middle[: slots - 1] + [" ".join(line.strip() for line in middle[slots - 1 :])]
+    else:
+        middle = middle + [""] * (slots - len(middle))
+    # Each slot keeps its original line ending (the last line may have none).
+    middle = [
+        line + lines[lead + index][len(lines[lead + index].rstrip("\r\n")) :]
+        for index, line in enumerate(middle)
+    ]
+    laid = new_lines[:lead] + middle + new_lines[len(new_lines) - tail :]
+    return "".join(gutter + line for gutter, line in zip(gutters, laid))
 
 
 def _scrub_plain_terraform_plan_json(text: str) -> str:
@@ -5931,9 +5956,13 @@ def _scrub_plain_terraform_plan_json(text: str) -> str:
                 masked = _tf_mask_plan(plan)
             except RecursionError:
                 masked = False
-            if not masked:
-                return text
-            return text[:start] + _render_like(plan, text[start:end]) + text[end:]
+            if masked:
+                # Keep going: ``for ws in …; do terraform show -json …; done``
+                # prints several plans, and each is judged on its own (round-3
+                # review R3-4 — the first cut returned after the first plan).
+                rendered = _render_like(plan, text[start:end])
+                text = text[:start] + rendered + text[end:]
+                end = start + len(rendered)
         if end > start:
             start = text.find("{", end)  # a whole object that is not a plan: skip it
         else:
@@ -6249,6 +6278,15 @@ class StructureStreamGuard:
         return line_start
 
     def _hold_plan(self, text: str, cut: int) -> tuple[int, int]:
+        # A loop, not recursion: one read can carry hundreds of small plans.
+        while True:
+            held = self._hold_plan_once(text, cut)
+            if held[1] >= 0:
+                return held
+            cut = held[0]
+
+    def _hold_plan_once(self, text: str, cut: int) -> tuple[int, int]:
+        """One step of :meth:`_hold_plan`; ``(cut, -1)`` asks it to look again."""
         if self._plan is None and '"terraform_version"' in text:
             match = _TF_PLAN_OPEN_RE.search(text, self._plan_search)
             if match is not None:
@@ -6256,7 +6294,8 @@ class StructureStreamGuard:
         if self._plan is None:
             # A pretty plan's ``{`` line can arrive a read before its
             # ``"format_version"``; once released, no later read can parse the plan.
-            brace = text.rfind("{", max(0, cut - 160), cut)
+            # Never inside a plan just released (``_plan_search`` is its end).
+            brace = text.rfind("{", max(self._plan_search, cut - 160), cut)
             if brace >= 0 and (brace == 0 or text[brace - 1] == "\n"):
                 if _could_open_a_plan(text[brace:cut]):
                     return brace, len(text)
@@ -6272,7 +6311,11 @@ class StructureStreamGuard:
             # end — the only place this guard releases MORE than it was offered).
             self._plan = None
             self._plan_search = end
-            return max(cut, end), len(text)
+            # Re-arm at once (round-3 review R3-4): a second plan right behind
+            # this one in the same read would otherwise ride out inside the
+            # release before any later read could hold it. The search starts
+            # past this plan, so the loop ends after the last plan.
+            return max(cut, end), -1
         return min(cut, start), start
 
     def park(self, pending: str) -> str:
@@ -8884,7 +8927,18 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # secret's VALUE is better steered to its name or to its consumer than
         # to a temporary credential (operator, 2026-11).
         "aws-secret-value",
-        re.compile(r"(?i)\baws\s+secretsmanager\s+get-secret-value\b"),
+        # Fires only when the value reaches the terminal (round-3 QA Q9: 55 of 62
+        # real fires already redirected, piped or captured it, one session got
+        # 51 identical notices). Same quiet rule as ``kubectl-secret-decode``: a
+        # further ``|``, a ``>`` redirect (other than stderr into stdout or
+        # ``/dev/null``) or a ``$( )`` capture is the safe form this hint
+        # recommends. ``)`` is not an argument character, so a capture never
+        # reaches the end-of-command lookahead.
+        re.compile(
+            r"(?i)\baws\s+secretsmanager\s+get-secret-value\b"
+            r"(?:\s+[^\s|;&>)]+)*?"
+            r"(?:\s+(?:[0-9]?>&[0-9]|2>\s*/dev/null))*\s*(?=$|;|&&|\|\||\n)"
+        ),
         "check it exists by name: `aws secretsmanager describe-secret --secret-id NAME`; "
         "pipe the value straight into its consumer, never echo it: "
         "`$(aws secretsmanager get-secret-value --secret-id NAME --query SecretString "
@@ -8898,7 +8952,9 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # the safer-form column for it would be noise.
         re.compile(
             r"(?i)\baws\s+(?:configure\s+(?:list|get)(?:\s|$)|"
-            r"secretsmanager\s+get-secret-value|"
+            # ``secretsmanager get-secret-value`` is ``aws-secret-value``'s alone:
+            # left here it would steer the redirected/captured safe form that
+            # rule deliberately keeps quiet (round-3 QA Q9).
             r"sts\s+get-(?:session|federation|delegation)-token|"
             r"iam\s+list-access-keys|"
             r"configure\s+export-credentials)\b"

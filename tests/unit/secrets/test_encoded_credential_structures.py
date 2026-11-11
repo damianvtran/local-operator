@@ -756,7 +756,10 @@ def test_a_plan_over_4_mib_with_a_sensitive_value_settles_masked(indent: int | N
     data = (text + "PLAN-TRAILER-LINE\n").encode()
     settled, _ = _settle(data)
     assert SENSITIVE not in settled
-    assert '"address": "aws_ssm_parameter.p0"' in settled or '"address":"aws_ssm_parameter.p0"' in settled
+    assert (
+        '"address": "aws_ssm_parameter.p0"' in settled
+        or '"address":"aws_ssm_parameter.p0"' in settled
+    )
     last = text.count('"address"') - 1
     assert f"aws_ssm_parameter.p{last}" in settled  # the tail survives too
     assert settled.endswith("PLAN-TRAILER-LINE\n")
@@ -1103,7 +1106,9 @@ def test_go_map_rule_reads_only_the_owning_object() -> None:
 def test_live_stream_masks_the_go_template_dump_at_every_split_point() -> None:
     data = _template_error_dump().encode()
     leaks = [
-        p for p in range(1, len(data)) if any(v in _stream([data[:p], data[p:]]) for v in GOMAP_VALUES)
+        p
+        for p in range(1, len(data))
+        if any(v in _stream([data[:p], data[p:]]) for v in GOMAP_VALUES)
     ]
     assert leaks == []
 
@@ -1125,12 +1130,18 @@ def test_live_stream_masks_a_go_map_line_longer_than_the_8k_cap(size: int) -> No
     ("command", "fires"),
     [
         ("""kubectl get secret X -o go-template='{{index .data "K" | base64decode}}' 2>&1""", True),
-        ("""kubectl -n jobs get secret X -o go-template='{{index .data "K" | base64decode}}'""", True),
+        (
+            """kubectl -n jobs get secret X -o go-template='{{index .data "K" | base64decode}}'""",
+            True,
+        ),
         ("kubectl get secret X -o jsonpath='{.data.K}' | base64 -d", True),
         ("kubectl get secret X -o jsonpath='{.data.K}' | base64 --decode; echo", True),
         ("kubectl get secret X -o jsonpath='{.data.K}' | base64 -d | psql", False),
         ("kubectl get secret X -o jsonpath='{.data.K}' | base64 -d > /tmp/k", False),
-        ("""kubectl get secret X -o go-template='{{index .data "K" | base64decode}}' | wc -c""", False),
+        (
+            """kubectl get secret X -o go-template='{{index .data "K" | base64decode}}' | wc -c""",
+            False,
+        ),
         ("export PW=$(kubectl get secret X -o jsonpath='{.data.K}' | base64 -d)", False),
         ("kubectl get secret X -o jsonpath='{.data}' | jq 'keys'", False),
         ("kubectl get secret X -o go-template='{{.metadata.name}}'", False),
@@ -1272,3 +1283,81 @@ def test_project_rows_scrub_free_text_and_keep_identifiers(tmp_path: Any) -> Non
     assert '"name": "jobs-rotation"' in row
     assert "cluster0.example.mongodb.net" in row
     assert registry.get_project(project.id) is not None
+
+
+# --- Round 3: linear Go-map rule, gutter numbering, several plans, aws quiet ----
+def _cpu_seconds(call: Any) -> float:
+    started = time.process_time()
+    call()
+    return time.process_time() - started
+
+
+@pytest.mark.parametrize(
+    "crafted",
+    [
+        # R3-1: sibling maps under a Secret owner (18.5 s at 54 KB before).
+        "map[kind:Secret " + "data:map[a:b] " * 16_000 + "]",
+        # R3-1: an unclosed run of data maps (never finished at 200 KB before).
+        "map[kind:Secret " + "data:map[ " * 22_000,
+        # Nested Secret-owned data maps: each body would be re-read per level.
+        "map[kind:Secret " + "data:map[kind:Secret " * 10_000 + "]" * 10_001,
+    ],
+    ids=["siblings", "unclosed", "nested"],
+)
+def test_go_map_rule_is_linear_on_crafted_input(crafted: str) -> None:
+    from local_operator.redaction_shapes import _k8s_secret_gomap_spans
+
+    assert len(crafted) >= 200_000
+    # Linear work here is ~0.1 s; the quadratic cut took minutes. The bound is
+    # generous for a loaded CI runner and still far below the regression.
+    assert _cpu_seconds(lambda: _k8s_secret_gomap_spans(crafted)) < 3.0
+    # The incident dump is still masked by the same code path.
+    out = scrub_shapes(_template_error_dump())
+    assert [v for v in GOMAP_VALUES if v in out] == []
+
+
+def test_a_guttered_plan_keeps_its_line_numbers_when_a_value_collapses() -> None:
+    # ``labels`` is sensitive as a whole: its 4-line object becomes one marker.
+    plan = terraform_plan()
+    plan["resource_changes"][0]["change"]["after_sensitive"] = {"password": True, "labels": True}
+    source = json.dumps(plan, indent=2) + "\n"
+    text = _gutter(source)
+    out = scrub_shapes(text)
+    assert TF_DB_PASSWORD not in out and TF_TOKEN not in out
+    lines, original = out.splitlines(), text.splitlines()
+    assert len(lines) == len(original)
+    assert all(line.startswith(f"{i + 1:>6}| ") for i, line in enumerate(lines))
+    # Lines past the collapsed object still say what the file says on that line.
+    closing = source.splitlines().index('  "configuration": {')
+    assert lines[closing] == original[closing]
+
+
+def test_every_plan_in_one_output_is_masked_settled_and_streamed() -> None:
+    first, second = terraform_plan(), terraform_plan()
+    second["variables"]["db_password"]["value"] = "second-" + TF_DB_PASSWORD
+    text = json.dumps(first) + "\n" + json.dumps(second) + "\ntrailer\n"
+    assert "second-" not in scrub_shapes(text) and TF_DB_PASSWORD not in scrub_shapes(text)
+    data = text.encode()
+    for size in (40, 4096, 65536):
+        out = _stream([data[k : k + size] for k in range(0, len(data), size)])
+        assert TF_DB_PASSWORD not in out and TF_TOKEN not in out, size
+        # Both plans whole (``region`` is a variable and a declaration in each).
+        assert out.endswith("trailer\n") and out.count('"region"') == 4
+
+
+@pytest.mark.parametrize(
+    ("command", "fires"),
+    [
+        ("aws secretsmanager get-secret-value --secret-id prod/db", True),
+        ("aws secretsmanager get-secret-value --secret-id prod/db --query SecretString 2>&1", True),
+        ("aws secretsmanager get-secret-value --secret-id x; echo done", True),
+        ('aws secretsmanager get-secret-value --secret-id prod/db > "$TMP"', False),
+        ("aws secretsmanager get-secret-value --secret-id x | jq -r .SecretString | app", False),
+        ("X=$(aws secretsmanager get-secret-value --secret-id x --query SecretString)", False),
+    ],
+)
+def test_aws_secret_value_steer_is_quiet_once_the_value_is_consumed(
+    command: str, fires: bool
+) -> None:
+    # Round-3 QA Q9: the same quiet rule as ``kubectl-secret-decode``.
+    assert (credential_dump_notice(command) is not None) is fires

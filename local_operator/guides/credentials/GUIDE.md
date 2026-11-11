@@ -339,8 +339,9 @@ history, not as a signal about this session.
   code that names the safer form: key names only (`kubectl get secret NAME -o
   jsonpath='{.data}' | jq 'keys'`), or one key piped straight into the command
   that consumes it (`-o jsonpath='{.data.KEY}' | base64 -d | <consumer>`).
-  The same steer covers `aws secretsmanager get-secret-value` (check the name
-  with `describe-secret`), Terraform Cloud's `/plans/<id>/json-output` (read
+  The same steer covers `aws secretsmanager get-secret-value` printed to the
+  terminal (check the name with `describe-secret`; redirected, piped or
+  `$( )`-captured, it stays quiet), Terraform Cloud's `/plans/<id>/json-output` (read
   `json-output-redacted`) and `terraform show -json` (the human view masks
   sensitive values). The
   line steers; it never blocks. A Secret's `data`/`stringData` values, and any
