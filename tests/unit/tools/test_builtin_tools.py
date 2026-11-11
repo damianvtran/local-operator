@@ -339,8 +339,8 @@ async def test_bash_live_view_says_a_terraform_plan_is_held(tools, context) -> N
     # check kept the card at "no output yet"; it now says why, live only.
     script = (
         "import sys, time\n"
-        "sys.stdout.write('before\\n{\\n  \"format_version\": \"1.2\",\\n"
-        "  \"terraform_version\": \"1.9.5\",\\n  \"resource_changes\": [\\n')\n"
+        'sys.stdout.write(\'before\\n{\\n  "format_version": "1.2",\\n'
+        '  "terraform_version": "1.9.5",\\n  "resource_changes": [\\n\')\n'
         "sys.stdout.flush(); time.sleep(1.2)\n"
         "sys.stdout.write('  ],\\n  \"planned_values\": {}\\n}\\nafter\\n')\n"
     )
