@@ -779,35 +779,49 @@ RESTORED_COST_PREFIX = LOWER_BOUND_MARK
 #: things internally — a turn contains several steps, which is exactly why the
 #: deferred case exists — and the UI teaches neither, so a pair that used both
 #: made the reader translate. All four now describe what the user observes.
-QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
+#:
+#: The waiting text names its MODE, because one line for every mode was false
+#: for two of the three: a steer does not wait for the step to finish (it
+#: interrupts the turn at its next boundary), and a `both` send may steer
+#: instead of waiting. Each mode's row says what that message will actually do.
+#:
+#: "may stop a running tool" rather than "stops" for the steer: a streaming
+#: model or a tool the runtime cannot interrupt is not actually stopped, and the
+#: row must not promise more than the interrupt does.
+STEER_NOTICE = _t_busy(_busy_keys.steer_notice())
+#: Not a mode: what a QUEUE or BOTH row becomes once a steer waits BESIDE it.
+#: Any waiting steer makes every waiting queue/both message urgent — the drain
+#: takes the whole queue together at the next boundary (`_has_urgent_steering`
+#: tests the whole queue, not the newest entry) — so those rows stop promising
+#: a wait this turn will not see out and say where the message is going
+#: instead. Derived from the queue on every append and recall
+#: (`_refresh_busy_receipts`) rather than stored event by event, so recalling
+#: the steer reverts the rows it had joined.
+STEER_JOINED_NOTICE = _t_busy(_busy_keys.steer_joined_notice())
 SENT_STEER_NOTICE = "sent — the agent has it now"
 #: The post-send receipts for the two non-urgent delivery modes (``queue``
 #: and ``both``). One string per mode, both in the same family: from the
 #: reader's side both are one fact while the message waits — the tools are
 #: NOT interrupted. What differs is what the wait promises: ``queue``
-#: promises it forever, ``both`` promises it may interrupt if the wait runs
+#: promises it forever, ``both`` promises it may steer if the wait runs
 #: long, and each notice says which.
 #:
-#: Height-matched to `QUEUED_STEER_NOTICE` at every width from 40 up except
-#: 44-47 (measured on a mounted `NoticeBlock` through `App.run_test`, the
-#: same protocol as the cross-turn height test, and pinned by
-#: `tests/unit/tui/test_busy_delivery.py`, which asserts the 44-47
-#: difference as measured rather than hiding it): at 44-47 columns both
-#: wait notices render one row SHORTER than the classic. The swap from the
-#: classic notice to this one happens at submit time, before the user has
-#: scrolled, so a height change there would still be a visible jump in the
-#: transcript the user is watching. Below 40 columns the strings are NOT
-#: matched — the designer measured the ``both`` wording one row taller at
-#: several narrow widths and the ``queue`` wording shorter at one — and the
-#: app supports widths from 40 up, so only that range is pinned. "queued"
-#: leads because the row's job is to say the message is waiting, so it must
-#: read as the same family as the notice it replaces rather than a
-#: different kind of row.
+#: HEIGHT baseline: the string these replace, ``queued — sends when this step
+#: finishes`` (38 cells of body), is the shipped height every waiting receipt
+#: is still measured against. None of the five states may render TALLER than
+#: it at a supported width (40 up), which is the direction that pushes the
+#: transcript below down; some render a row shorter, which is harmless because
+#: the transcript spaces blocks by a gap rather than pinning rows. The submit
+#: swap and the in-place restate both happen under the user's eyes, so the
+#: changed row must not grow. Below 40 columns nothing is pinned: the app
+#: supports widths from 40 up. `tests/unit/tui/test_busy_delivery.py` measures
+#: each string against that baseline per width. "queued" leads because the
+#: row's job is to say the message is waiting, so it must read as the same
+#: family as the row it replaces rather than a different kind of row.
 QUEUED_WAIT_NOTICE = _t_busy(_busy_keys.queue_notice())
-#: Same height as `QUEUED_WAIT_NOTICE`, for the same reason: a `both` send
-#: that escalates settles through the same `SENT_STEER_NOTICE` on delivery,
-#: so the queue notice each mode starts with must occupy the same rows or
-#: the submit itself reflows the transcript.
+#: Its own family member for the same reason: a `both` send that steers
+#: settles through the same `SENT_STEER_NOTICE` on delivery, and while it
+#: waits it says it waits first.
 BOTH_WAIT_NOTICE = _t_busy(_busy_keys.both_notice())
 #: Printed under a ``/model`` switch made WHILE a turn is running, and only
 #: then. The request already streaming cannot be re-targeted, so for a few
@@ -4680,10 +4694,13 @@ def _reload_setup_cues() -> None:
     global at call time and therefore sees the moved text.
     """
     global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE, QUEUED_WAIT_NOTICE, BOTH_WAIT_NOTICE
+    global STEER_NOTICE, STEER_JOINED_NOTICE
     SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
     AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
     QUEUED_WAIT_NOTICE = _t_busy(_busy_keys.queue_notice())
     BOTH_WAIT_NOTICE = _t_busy(_busy_keys.both_notice())
+    STEER_NOTICE = _t_busy(_busy_keys.steer_notice())
+    STEER_JOINED_NOTICE = _t_busy(_busy_keys.steer_joined_notice())
 
 
 register_refresh(_reload_setup_cues)
@@ -20930,7 +20947,32 @@ class OperatorApp(App[None]):
             return QUEUED_WAIT_NOTICE
         if mode == "both":
             return BOTH_WAIT_NOTICE
-        return QUEUED_STEER_NOTICE
+        return STEER_NOTICE
+
+    def _refresh_busy_receipts(self) -> None:
+        """Bring every WAITING receipt's text up to date with the queue's state.
+
+        Derived, never event-driven: the one fact that changes an already
+        painted row is "a steer is waiting beside it", and that fact is read
+        from ``_queued_steer_notices`` itself. A steer row makes every waiting
+        queue/both row say it goes out with the steer (the engine drains the
+        whole queue at the next boundary, so that is what happens); removing
+        the steer — Esc recall, or the undeliverable lift — reverts them to
+        their own mode's promise. Restating only on a text CHANGE keeps the
+        no-op calls from re-building every row on each submit.
+
+        A steer row never restates here: its own receipt already says it
+        interrupts, and the joined wording describes where the WAITING message
+        goes, not what the steer does.
+        """
+        joined = any(block.busy_mode == "steer" for block in self._queued_steer_notices)
+        for block in self._queued_steer_notices:
+            if block.busy_mode == "steer":
+                continue
+            own = BOTH_WAIT_NOTICE if block.busy_mode == "both" else QUEUED_WAIT_NOTICE
+            text = STEER_JOINED_NOTICE if joined else own
+            if block.text() != text:
+                block.restate(text, "note")
 
     class _DeliverySteer(Protocol):
         # The delivery-aware twin of SessionProtocol.steer_message. The protocol
@@ -35614,8 +35656,16 @@ class OperatorApp(App[None]):
             # boundary — all of them, together. Settling only the newest would
             # leave the earlier rows lying.
             queued = NoticeBlock(self._busy_notice(mode), "note")
+            # The mode rides ON the row (`NoticeBlock.busy_mode`) so a later
+            # steer's arrival can restate it: the joined wording depends on a
+            # fact that does not exist when the row is built.
+            queued.busy_mode = mode
             self._append_block(queued)
             self._queued_steer_notices.append(queued)
+            # A queue/both row submitted WHILE a steer waits starts joined, and
+            # a steer arriving beside existing rows joins them: both are the
+            # same derivation over the list this row just joined.
+            self._refresh_busy_receipts()
             # The session will announce this steer as a user MessageStartEvent
             # when the drain actually takes it (the mobile→TUI echo channel).
             # The row is already on screen — registered here so that event is
@@ -63598,6 +63648,10 @@ class OperatorApp(App[None]):
             if held is notice:
                 self._deferred_steer_notices.remove(held)
                 break
+        # Recalling the steer that had joined the older waiting rows reverts
+        # their text: the fact that made them joined has just been removed from
+        # the queue. Derived, so the revert cannot be forgotten here.
+        self._refresh_busy_receipts()
         editor.focus()
 
     def _on_recall_rejected(self, session: Any, command_id: str) -> None:
@@ -63745,6 +63799,9 @@ class OperatorApp(App[None]):
             if held is notice:
                 self._deferred_steer_notices.remove(held)
                 break
+        # The lift removes a steer the owner refused, so the older rows it had
+        # joined go back to their own mode's promise, exactly as on recall.
+        self._refresh_busy_receipts()
         source = self._interaction
         # The row's text, not `message.text`, for the reason the recall gives:
         # a `$skill` steer sends the expanded body while the row keeps the short

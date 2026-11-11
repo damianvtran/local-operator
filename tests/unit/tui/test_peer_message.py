@@ -1801,7 +1801,7 @@ class TestQuietGroupFold:
         """A steer the user queues mid-run paints a notice row — the boundary
         vocabulary's own splitter (a row the reader must see), exactly like the
         user row it stands in for; later receipts form their own group."""
-        from local_operator.tui.app import QUEUED_STEER_NOTICE
+        from local_operator.tui.app import STEER_NOTICE
 
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
@@ -1811,7 +1811,7 @@ class TestQuietGroupFold:
             await _deliver(pilot, app, session, "two", "p2")
             await _settle_for_quiet_bars(pilot, app)
             (first,) = _quiet_bars(app)
-            app._append_block(NoticeBlock(QUEUED_STEER_NOTICE, "note"))
+            app._append_block(NoticeBlock(STEER_NOTICE, "note"))
             await pilot.pause()
             assert first.group.open is False, "a steer notice closes the run"
             await _deliver(pilot, app, session, "three", "p3")

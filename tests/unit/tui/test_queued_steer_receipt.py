@@ -32,7 +32,7 @@ from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
     DEFERRED_SENT_STEER_NOTICE,
     DEFERRED_STEER_NOTICE,
-    QUEUED_STEER_NOTICE,
+    STEER_NOTICE,
     SENT_STEER_NOTICE,
     UNSENT_RUNTIME_NOTICE,
     OperatorApp,
@@ -168,7 +168,7 @@ async def test_a_queued_message_says_queued_until_it_is_delivered() -> None:
         await _submit(pilot, app, "also check the images")
 
         assert session.steers == ["also check the images"]
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
         assert SENT_STEER_NOTICE not in _notice_texts(app), "nothing has been delivered yet"
 
         app.post_message(SteeringDelivered(1))
@@ -178,7 +178,7 @@ async def test_a_queued_message_says_queued_until_it_is_delivered() -> None:
         assert SENT_STEER_NOTICE in texts
         # UPDATED, not appended: the stale promise must be gone, and the
         # transcript must not have grown a row to say so.
-        assert QUEUED_STEER_NOTICE not in texts
+        assert STEER_NOTICE not in texts
         assert texts.count(SENT_STEER_NOTICE) == 1
 
 
@@ -196,14 +196,14 @@ async def test_every_message_queued_against_one_boundary_settles_together() -> N
         for text in ("one", "two", "three"):
             await _submit(pilot, app, text)
 
-        assert _notice_texts(app).count(QUEUED_STEER_NOTICE) == 3
+        assert _notice_texts(app).count(STEER_NOTICE) == 3
 
         app.post_message(SteeringDelivered(3))
         await pilot.pause()
 
         texts = _notice_texts(app)
         assert texts.count(SENT_STEER_NOTICE) == 3
-        assert QUEUED_STEER_NOTICE not in texts
+        assert STEER_NOTICE not in texts
 
 
 @pytest.mark.asyncio
@@ -268,14 +268,14 @@ async def test_an_interrupted_turn_retires_the_promise_it_can_no_longer_keep() -
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "steered into a turn about to be stopped")
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
 
         app.post_message(TurnEnded(True, None))
         await pilot.pause()
 
         texts = _notice_texts(app)
         assert DEFERRED_STEER_NOTICE in texts
-        assert QUEUED_STEER_NOTICE not in texts
+        assert STEER_NOTICE not in texts
         assert SENT_STEER_NOTICE not in texts, "nothing was delivered"
         assert app._queued_steer_notices == []
         # Retired from the CURRENT turn's list, but still held: the message is
@@ -315,14 +315,14 @@ async def test_a_clean_turn_that_never_drained_says_the_message_is_still_queued(
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "a steer the model answers without tools")
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
 
         app.post_message(TurnEnded(False, None))
         await pilot.pause()
 
         texts = _notice_texts(app)
         assert DEFERRED_STEER_NOTICE in texts
-        assert QUEUED_STEER_NOTICE not in texts
+        assert STEER_NOTICE not in texts
         # Not the delivered row: nothing was sent. The waiting row is the same
         # one an interrupted turn shows, deliberately — from the user's side the
         # two are one fact (the message is queued and goes with their next
@@ -368,7 +368,7 @@ async def test_a_deferred_row_is_settled_by_the_delivery_it_was_waiting_for() ->
         assert texts.count(DEFERRED_SENT_STEER_NOTICE) == 1
         assert SENT_STEER_NOTICE not in texts
         assert DEFERRED_STEER_NOTICE not in texts, "the kept promise still reads as waiting"
-        assert QUEUED_STEER_NOTICE not in texts
+        assert STEER_NOTICE not in texts
         assert app._deferred_steer_notices == []
 
 
@@ -393,14 +393,14 @@ async def test_a_deferred_row_settles_before_one_queued_against_the_new_turn() -
 
         blocks = _notice_blocks(app)
         older = next(block for block in blocks if block._text == DEFERRED_STEER_NOTICE)
-        newer = next(block for block in blocks if block._text == QUEUED_STEER_NOTICE)
+        newer = next(block for block in blocks if block._text == STEER_NOTICE)
 
         # The boundary took ONE message.
         app.post_message(SteeringDelivered(1))
         await pilot.pause()
 
         assert older._text == DEFERRED_SENT_STEER_NOTICE, "the older message was the one that went"
-        assert newer._text == QUEUED_STEER_NOTICE, "the newer row must keep promising"
+        assert newer._text == STEER_NOTICE, "the newer row must keep promising"
         assert app._deferred_steer_notices == []
         assert app._queued_steer_notices == [newer]
 
@@ -588,7 +588,7 @@ async def test_an_unusable_delivery_count_does_not_take_the_app_down() -> None:
         # Each unusable value degraded to ONE delivery, so the two rows settled
         # one at a time rather than all at once or not at all.
         assert texts.count(SENT_STEER_NOTICE) == 2
-        assert QUEUED_STEER_NOTICE not in texts
+        assert STEER_NOTICE not in texts
 
 
 @pytest.mark.asyncio
@@ -607,7 +607,7 @@ async def test_only_the_messages_that_went_are_settled() -> None:
         await pilot.pause()
         for text in ("first", "second raced in late"):
             await _submit(pilot, app, text)
-        assert _notice_texts(app).count(QUEUED_STEER_NOTICE) == 2
+        assert _notice_texts(app).count(STEER_NOTICE) == 2
 
         # The drain took ONE of them.
         app.post_message(SteeringDelivered(1))
@@ -615,7 +615,7 @@ async def test_only_the_messages_that_went_are_settled() -> None:
 
         texts = _notice_texts(app)
         assert texts.count(SENT_STEER_NOTICE) == 1
-        assert texts.count(QUEUED_STEER_NOTICE) == 1, "the undelivered row still promises"
+        assert texts.count(STEER_NOTICE) == 1, "the undelivered row still promises"
         assert len(app._queued_steer_notices) == 1
 
         # The next boundary takes the straggler.
@@ -623,7 +623,7 @@ async def test_only_the_messages_that_went_are_settled() -> None:
         await pilot.pause()
 
         assert _notice_texts(app).count(SENT_STEER_NOTICE) == 2
-        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert STEER_NOTICE not in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -783,7 +783,7 @@ async def test_a_dead_sessions_delivery_cannot_settle_the_new_sessions_row() -> 
 
         # The user steers into the REPLACEMENT session, so a row is held again.
         await _submit(pilot, app, "an instruction for the new session")
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
         (new_row,) = app._queued_steer_notices
 
         # NOW the dying session's drain is handled. This is the ordering the
@@ -800,7 +800,7 @@ async def test_a_dead_sessions_delivery_cannot_settle_the_new_sessions_row() -> 
         # The dead session's receipt must not settle it: that message went into
         # a conversation the user cannot see, and this row is still promising a
         # delivery that has not happened.
-        assert new_row._text == QUEUED_STEER_NOTICE
+        assert new_row._text == STEER_NOTICE
         assert SENT_STEER_NOTICE not in _notice_texts(app)
         assert DEFERRED_SENT_STEER_NOTICE not in _notice_texts(app)
         assert app._queued_steer_notices == [new_row]
@@ -951,7 +951,7 @@ async def test_a_takeover_still_settles_the_rows_it_deliberately_kept() -> None:
         outgoing_controller = app._controller
 
         await _submit(pilot, app, "steered just before the lease changed hands")
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
         (row,) = app._queued_steer_notices
 
         # The takeover: a new session object, same conversation, transcript and
@@ -994,7 +994,7 @@ async def test_a_steer_that_could_not_be_delivered_is_handed_back() -> None:
     async with app.run_test(size=(100, 24)) as pilot:
         await pilot.pause()
         await _submit(pilot, app, "are you there?")
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
         assert len(app._held_steer_blocks) == 1
         message = app._held_steer_blocks[0][0]
 
@@ -1005,7 +1005,7 @@ async def test_a_steer_that_could_not_be_delivered_is_handed_back() -> None:
         assert editor.text == "are you there?", "the message did not come back to the user"
         assert app._held_steer_blocks == []
         assert _user_blocks(app) == [], "the row for a message nobody sent is still standing"
-        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert STEER_NOTICE not in _notice_texts(app)
         assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE]
 
 
@@ -1058,5 +1058,5 @@ async def test_a_hand_back_for_another_session_touches_nothing() -> None:
         await pilot.pause()
 
         assert len(app._held_steer_blocks) == 1, "another session's report lifted this row"
-        assert _notice_texts(app) == [QUEUED_STEER_NOTICE]
+        assert _notice_texts(app) == [STEER_NOTICE]
         assert app.query_one(Editor).text == ""

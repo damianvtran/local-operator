@@ -14,17 +14,18 @@ What this file pins:
 * the submit branch per mode: ``queue``/``both`` ride the ``delivery``
   keyword, ``steer`` keeps the legacy call shape byte for byte;
 * the per-mode notice text (each mode's receipt is the string it settles
-  from);
+  from), the joined state a waiting steer puts the older queue/both rows
+  into, and the revert when that steer is recalled;
 * the probe-fail refusal: a mode the handle cannot honour is refused with
   the text kept on a failure record, never queued as an urgent steer under a
   "queued — waits" row;
 * Esc-recall of a ``queue``/``both`` held steer, and the re-materialisation
-  of the two notices under ``_reload_setup_cues``;
-* notice height parity: the two wait notices settle to the same rendered
-  height as the classic notice at every width from 40 up, so the submit
-  itself never reflows the transcript. Widths below 40 are NOT pinned: the
-  designer measured the old strings taller/shorter there, and the new en
-  strings were chosen for the widths this app supports.
+  of the four notices under ``_reload_setup_cues``;
+* receipt height: no receipt renders TALLER than the shipped baseline row at
+  any supported width from 40 up, so a submit or an in-place restate never
+  rolls the transcript below it. Some render one row shorter, which is
+  harmless in a gap-spaced transcript and pinned as measured. Widths below
+  40 are NOT pinned: the app supports widths from 40 up.
 """
 
 from __future__ import annotations
@@ -37,8 +38,10 @@ import pytest
 from local_operator.session.runtime.types import BUSY_DELIVERY_UNSUPPORTED
 from local_operator.tui.app import (
     BOTH_WAIT_NOTICE,
-    QUEUED_STEER_NOTICE,
+    DEFERRED_STEER_NOTICE,
     QUEUED_WAIT_NOTICE,
+    STEER_JOINED_NOTICE,
+    STEER_NOTICE,
     OperatorApp,
 )
 from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY, busy_delivery_mode
@@ -156,7 +159,7 @@ async def test_a_queue_mode_rides_the_keyword_and_says_so() -> None:
 
         assert session.delivery_steers == [("hold this", "queue")]
         assert QUEUED_WAIT_NOTICE in _notice_texts(app)
-        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert STEER_NOTICE not in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -169,7 +172,7 @@ async def test_a_both_mode_rides_the_keyword_and_says_so() -> None:
 
         assert session.delivery_steers == [("hold then cut", "both")]
         assert BOTH_WAIT_NOTICE in _notice_texts(app)
-        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert STEER_NOTICE not in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -184,7 +187,7 @@ async def test_a_steer_mode_keeps_the_legacy_call_shape() -> None:
         # The delivery-aware fake records ``delivery=None`` on the legacy
         # shape; the app must not have passed a mode at all.
         assert session.delivery_steers == [("cut now", None)]
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -196,7 +199,85 @@ async def test_an_unset_setting_is_steer() -> None:
         await _submit(pilot, app, "plain")
 
         assert session.delivery_steers == [("plain", None)]
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
+
+
+# --- Mode-aware receipts and the joined state --------------------------------
+
+
+def test_the_five_receipts_are_distinct_and_none_promises_the_old_wait() -> None:
+    """The receipt names what the message will do, so no two states share text.
+
+    One row for every mode was the defect this fixes: a steer does not wait for
+    the step to finish, so the queue row's sentence was false for it. The swept
+    baseline sentence is the one that shipped, and no state may bring it back
+    through a copy edit.
+    """
+    receipts = {
+        "steer": STEER_NOTICE,
+        "queue": QUEUED_WAIT_NOTICE,
+        "both": BOTH_WAIT_NOTICE,
+        "joined": STEER_JOINED_NOTICE,
+        "deferred": DEFERRED_STEER_NOTICE,
+    }
+    assert len(set(receipts.values())) == len(receipts), receipts
+    for name, text in receipts.items():
+        assert "sends when this step finishes" not in text, name
+
+
+@pytest.mark.asyncio
+async def test_a_steer_after_a_queue_row_restates_the_earlier_row_to_joined() -> None:
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        _set_mode(app, "queue")
+        await _submit(pilot, app, "wait for me")
+        assert _notice_texts(app) == [QUEUED_WAIT_NOTICE]
+
+        _set_mode(app, "steer")
+        await _submit(pilot, app, "cut in now")
+
+        # ONE row per message, the earlier one RESTATED in place: the engine
+        # drains the whole queue at the next boundary, so the waiting message
+        # really does go out with the steer.
+        assert _notice_texts(app) == [STEER_JOINED_NOTICE, STEER_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_recalling_the_steer_reverts_the_row_it_joined() -> None:
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        _set_mode(app, "queue")
+        await _submit(pilot, app, "wait for me")
+        _set_mode(app, "steer")
+        await _submit(pilot, app, "cut in now")
+        assert _notice_texts(app) == [STEER_JOINED_NOTICE, STEER_NOTICE]
+
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # The steer left the queue, so the wait the queue row promised is true
+        # again. Derived from the queue, never remembered per row.
+        assert [message.text for message in session.queued_steering()] == ["wait for me"]
+        assert _notice_texts(app) == [QUEUED_WAIT_NOTICE]
+
+
+@pytest.mark.asyncio
+async def test_a_queue_row_submitted_while_a_steer_waits_starts_joined() -> None:
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        _set_mode(app, "steer")
+        await _submit(pilot, app, "cut in now")
+        _set_mode(app, "queue")
+        await _submit(pilot, app, "wait for me")
+
+        # It starts in the state that is true when it is painted: the steer
+        # ahead of it ships at the next boundary, and this message goes too.
+        assert _notice_texts(app) == [STEER_NOTICE, STEER_JOINED_NOTICE]
 
 
 # --- The probe-fail refusal (F5) ---------------------------------------------
@@ -228,7 +309,7 @@ async def test_a_mode_the_handle_cannot_honour_is_refused_never_downgraded(mode:
         texts = _notice_texts(app)
         assert QUEUED_WAIT_NOTICE not in texts
         assert BOTH_WAIT_NOTICE not in texts
-        assert QUEUED_STEER_NOTICE not in texts
+        assert STEER_NOTICE not in texts
         # One failure record, carrying the refusal sentence, with ``edit``
         # only: a resend of the same mode against the same legacy handle
         # fails identically, so ``can_send_again=False`` (D9) — the text is
@@ -262,7 +343,7 @@ async def test_a_steer_mode_on_a_legacy_handle_still_sends() -> None:
         await _submit(pilot, app, "cut in")
 
         assert session.steers == ["cut in"]
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
         assert app._interaction.turn.failed_sends == []
 
 
@@ -326,6 +407,8 @@ async def test_reload_setup_cues_rematerialises_both_notices() -> None:
         app_module._reload_setup_cues()
         assert app_module.QUEUED_WAIT_NOTICE == before
         assert app_module.BOTH_WAIT_NOTICE == BOTH_WAIT_NOTICE
+        assert app_module.STEER_NOTICE == STEER_NOTICE
+        assert app_module.STEER_JOINED_NOTICE == STEER_JOINED_NOTICE
 
         await _submit(pilot, app, "after reload")
         assert app_module.QUEUED_WAIT_NOTICE in _notice_texts(app)
@@ -333,55 +416,77 @@ async def test_reload_setup_cues_rematerialises_both_notices() -> None:
 
 # --- Height parity -------------------------------------------------------------
 
+#: The sentence this change replaces, exactly as it shipped. It is the height
+#: baseline the new receipts are measured against, not a live constant.
+SHIPPED_BASELINE = "queued — sends when this step finishes"
+
+#: Widths where a receipt renders one row SHORTER than the baseline; measured
+#: on a mounted `NoticeBlock` through `App.run_test` at 40-120 columns. Shorter
+#: is harmless — the transcript spaces blocks by a gap, not by fixed rows — so
+#: these are pinned as measured rather than treated as failures.
+SHORTER_THAN_BASELINE = {
+    "steer": {44, 45, 46, 47},
+    "queue": {44, 45, 46, 47},
+    "both": {45, 46, 47},
+    "joined": {45, 46, 47},
+}
+
+#: The one receipt that renders TALLER than the baseline, and the only one this
+#: change does not touch: `DEFERRED_STEER_NOTICE` is 43 cells, so at 48-52
+#: columns (where the 38-cell baseline already fits on one row) it wraps to two.
+#: Pinned as measured so a copy edit that moves it fails here rather than
+#: silently reflowing the transcript; changing it is outside this rename.
+DEFERRED_TALLER_THAN_BASELINE = {48, 49, 50, 51, 52}
+
 
 @pytest.mark.asyncio
-async def test_the_wait_notices_settle_to_the_classic_height_from_40_up() -> None:
-    """The submit must not reflow the transcript: same rows at every width.
+async def test_no_receipt_is_taller_than_the_shipped_baseline_from_40_up() -> None:
+    """A submit or a restate must not push the rows below it down.
 
-    Each notice is rendered in its OWN app through ``_settled_notice_height``
+    The width-parity pin, rewritten around the claim that actually holds. The
+    old test required the two wait notices to match the classic row exactly and
+    pinned the widths where they did not; with the copy now naming the mode,
+    the honest invariant is "no taller than the shipped baseline", because a
+    SHORTER row costs nothing in a gap-spaced transcript while a TALLER one
+    moves everything under it — the visible jump, and the one a reader sees
+    while watching a submit land or a row restate in place.
+
+    Each string is rendered in its OWN app through ``_settled_notice_height``
     (the protocol ``test_queued_steer_receipt.py`` proved for the cross-turn
-    settle) and compared as a row count. Widths 44-47 are MEASURED to differ
-    with the current en strings (both wait notices render one row SHORTER
-    than the classic there) and are pinned as that measured difference, so a
-    copy edit that moves them fails here rather than silently reintroducing a
-    jump. Every other width from 40 up is required to match. Widths below 40
-    are not pinned: the app supports widths from 40 up, and the designer
-    already measured the old strings mismatched there.
+    settle) and compared as a row count. The widths are the step boundaries
+    the wrap can move at (every width up to 60, where all five strings are
+    shorter than a body line, plus the two extremes); the height is a step
+    function of the wrap, so an interior width would only re-render the same
+    step. Widths below 40 are not pinned: the app supports widths from 40 up.
     """
-    # Representative set, not the full 40-120 sweep: the height is a step
-    # function of the wrap, so the boundary widths where a wrap moves (39-48)
-    # plus the extremes (55/80/120) pin the copy; interior widths would only
-    # re-render the same step. Includes 39 and 40 as the support floor.
-    known_shorter = {44, 45, 46, 47}
-    for cols in (39, 40, 41, 43, 44, 45, 46, 47, 48, 55, 80, 120):
-        classic = await _settled_notice_height(cols, QUEUED_STEER_NOTICE, "note")
-        queued = await _settled_notice_height(cols, QUEUED_WAIT_NOTICE, "note")
-        both = await _settled_notice_height(cols, BOTH_WAIT_NOTICE, "note")
-        if cols in known_shorter:
-            assert queued == classic - 1, (
-                f"at {cols} columns the queue notice renders to {queued} rows, "
-                f"the classic {classic} (measured one shorter). The copy was "
-                f"edited and its wrap moved:\n"
-                f"  classic={QUEUED_STEER_NOTICE!r}\n"
-                f"  queue  ={QUEUED_WAIT_NOTICE!r}"
+    waiting = {
+        "steer": STEER_NOTICE,
+        "queue": QUEUED_WAIT_NOTICE,
+        "both": BOTH_WAIT_NOTICE,
+        "joined": STEER_JOINED_NOTICE,
+    }
+    widths = [*range(40, 61), 80, 120]
+    for cols in widths:
+        baseline = await _settled_notice_height(cols, SHIPPED_BASELINE, "note")
+        for name, text in waiting.items():
+            rows = await _settled_notice_height(cols, text, "note")
+            expected = baseline - 1 if cols in SHORTER_THAN_BASELINE[name] else baseline
+            assert rows == expected, (
+                f"at {cols} columns the {name} receipt renders to {rows} rows, "
+                f"the shipped baseline {baseline} (measured expectation "
+                f"{expected}). The copy was edited and its wrap moved:\n"
+                f"  baseline={SHIPPED_BASELINE!r}\n"
+                f"  {name}={text!r}"
             )
-            assert both == classic - 1, (
-                f"at {cols} columns the both notice renders to {both} rows, "
-                f"the classic {classic} (measured one shorter). The copy was "
-                f"edited and its wrap moved:\n"
-                f"  classic={QUEUED_STEER_NOTICE!r}\n"
-                f"  both   ={BOTH_WAIT_NOTICE!r}"
+            assert rows <= baseline, (
+                f"at {cols} columns the {name} receipt is TALLER than the "
+                f"shipped row ({rows} vs {baseline}), so a submit or restate "
+                f"moves the transcript below it:\n  {text!r}"
             )
-            continue
-        assert queued == classic, (
-            f"at {cols} columns the queue notice renders to {queued} rows, "
-            f"the classic {classic}. The copy was edited and its wrap moved:\n"
-            f"  classic={QUEUED_STEER_NOTICE!r}\n"
-            f"  queue  ={QUEUED_WAIT_NOTICE!r}"
-        )
-        assert both == classic, (
-            f"at {cols} columns the both notice renders to {both} rows, "
-            f"the classic {classic}. The copy was edited and its wrap moved:\n"
-            f"  classic={QUEUED_STEER_NOTICE!r}\n"
-            f"  both   ={BOTH_WAIT_NOTICE!r}"
+        deferred = await _settled_notice_height(cols, DEFERRED_STEER_NOTICE, "note")
+        expected = baseline + 1 if cols in DEFERRED_TALLER_THAN_BASELINE else baseline
+        assert deferred == expected, (
+            f"at {cols} columns the deferred receipt renders to {deferred} rows, "
+            f"the shipped baseline {baseline} (measured expectation {expected}):\n"
+            f"  {DEFERRED_STEER_NOTICE!r}"
         )

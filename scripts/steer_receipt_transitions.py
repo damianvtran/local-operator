@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from local_operator.tui.app import (  # noqa: E402
     DEFERRED_SENT_STEER_NOTICE,
     DEFERRED_STEER_NOTICE,
-    QUEUED_STEER_NOTICE,
+    STEER_NOTICE,
     SENT_STEER_NOTICE,
     OperatorApp,
 )
@@ -40,7 +40,7 @@ async def _heights(cols: int) -> dict[str, int]:
     async with app.run_test(size=(cols, 24)) as pilot:
         await pilot.pause()
         blocks = {
-            "queued": NoticeBlock(QUEUED_STEER_NOTICE, "note"),
+            "queued": NoticeBlock(STEER_NOTICE, "note"),
             "sent": NoticeBlock(SENT_STEER_NOTICE, "success"),
             "deferred": NoticeBlock(DEFERRED_STEER_NOTICE, "note"),
             "deferred_sent": NoticeBlock(DEFERRED_SENT_STEER_NOTICE, "success"),

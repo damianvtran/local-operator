@@ -22,7 +22,7 @@ import pytest
 
 from local_operator.tui.app import (
     BOTH_WAIT_NOTICE,
-    QUEUED_STEER_NOTICE,
+    STEER_NOTICE,
     QUEUED_WAIT_NOTICE,
     OperatorApp,
 )
@@ -295,7 +295,7 @@ async def test_a_chorded_queue_against_a_legacy_handle_is_refused() -> None:
         await pilot.press("ctrl+enter")
         await pilot.pause()
         assert session.steers == []
-        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert STEER_NOTICE not in _notice_texts(app)
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,7 @@ async def test_each_chord_against_each_default_mode(
         expected = delivery if delivery != "steer" else None
         assert session.delivery_steers[-1] == ("payload", expected)
         notices = {
-            "steer": QUEUED_STEER_NOTICE,
+            "steer": STEER_NOTICE,
             "queue": QUEUED_WAIT_NOTICE,
             "both": BOTH_WAIT_NOTICE,
         }

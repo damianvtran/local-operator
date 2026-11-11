@@ -92,13 +92,16 @@ describe("the delivery chip", () => {
 		expect(chip()).toBeNull();
 	});
 
-	it("defaults to steer and cycles queue → both → steer", () => {
+	it("defaults to steer and cycles queue → queue, then steer → steer", () => {
 		mount(true);
 		expect(chip()!.textContent).toContain("steer");
 		fireEvent.click(chip()!);
 		expect(chip()!.textContent).toContain("queue");
 		fireEvent.click(chip()!);
-		expect(chip()!.textContent).toContain("both");
+		/* The chip's VISIBLE text is the short form (the full label clips the
+		   composer row at 280 px); its accessible name keeps the full one. */
+		expect(chip()!.textContent).toContain("queue→steer");
+		expect(chip()!.getAttribute("aria-label")).toContain("queue, then steer");
 		fireEvent.click(chip()!);
 		expect(chip()!.textContent).toContain("steer");
 	});
@@ -147,7 +150,13 @@ describe("the delivery sheet's hints (D1)", () => {
 	const HINTS = {
 		steer: "Interrupt a running tool now",
 		queue: "Wait; never interrupt tools",
-		both: "Wait, then interrupt if slow",
+		both: "Wait, then steer if slow",
+	} as const;
+	/* The sheet row keeps the FULL label; only the chip shortens it. */
+	const ROW_LABELS = {
+		steer: "steer",
+		queue: "queue",
+		both: "queue, then steer",
 	} as const;
 
 	it("every mode row shows its muted hint line beside the bare word", async () => {
@@ -163,7 +172,7 @@ describe("the delivery sheet's hints (D1)", () => {
 			/* the row keeps the 44 px floor and holds both lines in ONE button */
 			const row = hint.closest("button")!;
 			expect(row.className).toMatch(/min-h-11/);
-			expect(row.textContent).toContain(mode);
+			expect(row.textContent).toContain(ROW_LABELS[mode]);
 			expect(row.textContent).toContain(HINTS[mode]);
 		}
 	});

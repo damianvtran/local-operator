@@ -1,7 +1,9 @@
 """Esc lifts the newest still-queued mid-turn steer back into the composer.
 
-The report: a message sent while the agent is working is queued ("queued —
-sends when this step finishes"), and the only way to change one's mind was to
+The report: a message sent while the agent is working is queued (the row read
+"queued — sends when this step finishes" at the time; a steer's own receipt now
+says "steering — may stop a running tool"), and the only way to change one's mind
+was to
 wait for it to land and steer again — or retype it. Esc is the app's cancel
 key, so Esc with a queued steer now UNSENDS the newest one: the message leaves
 the engine's steering queue, its rows (the user row, its images, the queued
@@ -31,7 +33,7 @@ from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import (
     DEFERRED_STEER_NOTICE,
-    QUEUED_STEER_NOTICE,
+    STEER_NOTICE,
     RECALL_AMBIGUOUS_NOTICE,
     RECALL_DECLINE_NOTICE,
     RECALL_UNCONFIRMED_NOTICE,
@@ -101,7 +103,7 @@ async def test_esc_recalls_the_newest_queued_steer_into_the_composer() -> None:
         editor = await _boot(pilot, app)
         await _submit(pilot, editor, "use 0.75 for the direct API")
         assert len(session.queued_steering()) == 1
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
         assert "use 0.75 for the direct API" in _user_texts(app)
 
         await pilot.press("escape")
@@ -112,7 +114,7 @@ async def test_esc_recalls_the_newest_queued_steer_into_the_composer() -> None:
         # The composer holds the text, cursor-ready for a resend.
         assert editor.text == "use 0.75 for the direct API"
         # The transcript lost the steer's rows: no promise, no user row.
-        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert STEER_NOTICE not in _notice_texts(app)
         assert DEFERRED_STEER_NOTICE not in _notice_texts(app)
         assert SENT_STEER_NOTICE not in _notice_texts(app)
         assert _user_texts(app) == []
@@ -139,7 +141,7 @@ async def test_a_resend_after_recall_is_a_fresh_steer() -> None:
 
         assert [m.text for m in session.queued_steering()] == ["second wording"]
         assert _user_texts(app) == ["second wording"]
-        assert _notice_texts(app).count(QUEUED_STEER_NOTICE) == 1
+        assert _notice_texts(app).count(STEER_NOTICE) == 1
 
 
 @pytest.mark.asyncio
@@ -159,7 +161,7 @@ async def test_only_the_newest_queued_steer_is_recalled() -> None:
         assert editor.text == "newer steer"
         assert [m.text for m in session.queued_steering()] == ["older steer"]
         assert _user_texts(app) == ["older steer"]
-        assert _notice_texts(app).count(QUEUED_STEER_NOTICE) == 1
+        assert _notice_texts(app).count(STEER_NOTICE) == 1
 
 
 @pytest.mark.asyncio
@@ -274,7 +276,7 @@ async def test_recall_declines_over_a_half_typed_draft() -> None:
         # The draft survives, the steer stays queued, the rows stay up.
         assert editor.text == "half typed"
         assert [m.text for m in session.queued_steering()] == ["queued steer"]
-        assert QUEUED_STEER_NOTICE in _notice_texts(app)
+        assert STEER_NOTICE in _notice_texts(app)
         # And the decline is not silent: the one row names the obstacle and
         # the recovery (design round 1, D1).
         assert any("esc again to recall" in text for text in _notice_texts(app))
@@ -497,7 +499,7 @@ async def test_esc_recalls_a_steer_from_a_session_that_rebuilds_its_queue() -> N
         # boundary and be delivered a second time.
         assert session.queued_steering() == []
         assert editor.text == "Ok after you did that, it seems to work now"
-        assert QUEUED_STEER_NOTICE not in _notice_texts(app)
+        assert STEER_NOTICE not in _notice_texts(app)
         assert _user_texts(app) == []
 
 

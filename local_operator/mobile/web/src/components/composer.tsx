@@ -437,9 +437,9 @@ function DeliverySheet({
 							onChoose(mode);
 							onClose();
 						}}
-						/* The muted hint names what the mode DOES (D1): the bare
-						   words steer/queue/both do not say that queue never
-						   interrupts tools, or that both escalates after waiting.
+						/* The muted hint names what the mode DOES (D1): a bare
+						   word does not say that queue never interrupts tools,
+						   and "queue, then steer" does not say when it steers.
 						   `min-h-11` is the 44 px touch floor; the hint wraps to
 						   two lines at 280 px without pushing the row taller
 						   (sheet padding absorbs it). */
@@ -899,6 +899,12 @@ export function Composer({
 	const [delivery, setDelivery] = useState<DeliveryMode>(() => getDeliveryMode());
 	const [deliveryOpen, setDeliveryOpen] = useState(false);
 	const deliveryLabelKey = (delivery === "queue" ? "relay.composer.delivery.queue" : delivery === "both" ? "relay.composer.delivery.both" : "relay.composer.delivery.steer") as "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both";
+	/* The chip's VISIBLE text for queue-then-steer: the full label ("queue,
+	   then steer") runs the composer row past 280 px, so this one mode shows the
+	   short form. The accessible name above and the sheet row keep the full
+	   label; only the glyph-sized chip shortens. */
+	const deliveryChipKey: typeof deliveryLabelKey | "relay.composer.delivery.both_chip" =
+		delivery === "both" ? "relay.composer.delivery.both_chip" : deliveryLabelKey;
 	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
 	   where the insertion left it. A ref because it is an instruction to an
 	   effect, not rendered state. */
@@ -2440,7 +2446,7 @@ export function Composer({
 								className={cn(COMPOSER_CHIP(delivery !== "steer"), "shrink-0 gap-1 px-2")}
 							>
 									<span aria-hidden data-delivery-glyph>‹</span>
-									<span>{messageRuntime.t(deliveryLabelKey)}</span>
+									<span>{messageRuntime.t(deliveryChipKey)}</span>
 								</button>
 								<button
 									type="button"
