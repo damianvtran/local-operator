@@ -414,10 +414,10 @@ function DeliverySheet({
 	value: DeliveryMode;
 	onChoose: (mode: DeliveryMode) => void;
 }) {
-	const modes: Array<{ mode: DeliveryMode; labelKey: "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both" }> = [
-		{ mode: "steer", labelKey: "relay.composer.delivery.steer" },
-		{ mode: "queue", labelKey: "relay.composer.delivery.queue" },
-		{ mode: "both", labelKey: "relay.composer.delivery.both" },
+	const modes: Array<{ mode: DeliveryMode; labelKey: "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both"; hintKey: "relay.composer.delivery.steer_hint" | "relay.composer.delivery.queue_hint" | "relay.composer.delivery.both_hint" }> = [
+		{ mode: "steer", labelKey: "relay.composer.delivery.steer", hintKey: "relay.composer.delivery.steer_hint" },
+		{ mode: "queue", labelKey: "relay.composer.delivery.queue", hintKey: "relay.composer.delivery.queue_hint" },
+		{ mode: "both", labelKey: "relay.composer.delivery.both", hintKey: "relay.composer.delivery.both_hint" },
 	];
 	return (
 		<Sheet
@@ -426,7 +426,7 @@ function DeliverySheet({
 			title={messageRuntime.t("relay.composer.delivery.label")}
 		>
 			<div className="flex flex-col p-2">
-				{modes.map(({ mode, labelKey }) => (
+				{modes.map(({ mode, labelKey, hintKey }) => (
 					<button
 						key={mode}
 						type="button"
@@ -434,7 +434,13 @@ function DeliverySheet({
 							onChoose(mode);
 							onClose();
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
+						/* The muted hint names what the mode DOES (D1): the bare
+						   words steer/queue/both do not say that queue never
+						   interrupts tools, or that both escalates after waiting.
+						   `min-h-11` is the 44 px touch floor; the hint wraps to
+						   two lines at 280 px without pushing the row taller
+						   (sheet padding absorbs it). */
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 py-1 text-start active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -443,8 +449,13 @@ function DeliverySheet({
 							)}
 							aria-hidden
 						/>
-						<span className="text-body text-ink">
-							{messageRuntime.t(labelKey)}
+						<span className="min-w-0 flex-1">
+							<span className="block text-body text-ink">
+								{messageRuntime.t(labelKey)}
+							</span>
+							<span className="block text-body-sm text-ink-dim">
+								{messageRuntime.t(hintKey)}
+							</span>
 						</span>
 					</button>
 				))}
@@ -613,7 +624,11 @@ const COMPOSER_LEADING = "-ms-1.5";
    (`SessionStatus` compact), so nothing on the line needs to wrap. */
 const COMPOSER_CHIP_ROW =
 	"order-last flex min-w-0 basis-full items-center gap-1 overflow-x-clip short-column:order-none short-column:basis-0 short-column:flex-1";
-const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
+/* The chip's colour is ONE class, never a stacked override (D4): the
+   generated stylesheet's order let `text-ink-dim` win over an appended
+   `text-accent`, so the non-default mode never looked accent. */
+const COMPOSER_CHIP = (accent: boolean) =>
+	cn("flex min-h-11 min-w-11 items-center text-meta tabular-nums", accent ? "text-accent" : "text-ink-dim");
 
 /** The composer's box, empty, for the frames before a session's projection.
 
@@ -666,7 +681,7 @@ export function ComposerFrame() {
 		<div className={COMPOSER_INPUT_ROW}>
 			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={placeholder} dir={textDirection(placeholder)} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
-			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
+			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP(false)} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
 				{/* The mic's box is held whenever the live composer will hold or draw it
 				    (`micSlot`, the same rule): a browser or daemon that cannot dictate
@@ -2239,7 +2254,23 @@ export function Composer({
 						</span>
 					) : queuedLabel ? <span data-queued-moved className="sr-only">{queuedLabel}</span> : null}
 					<div data-foot="cwd" className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
-					{/* The busy-send delivery-mode chip (busy-delivery-v1). Visible ONLY
+					{/* The model chip is the model sheet's only door, so it never
+					   yields, and it never shows a bare glyph either: a lone ◇ did not
+					   say "model" (design D10), the label's first characters (`Cl…`)
+					   do. L3 pins it at its 44 px floor (`w-11 shrink-0`; without the
+					   width a `shrink-0` chip would take the whole label's width); every
+					   other level lets it grow into what is left. The mic is an action
+					   and keeps its full touch target at every level. */}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP(false), foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
+						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
+						<span data-ltr className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
+					</button>
+					{/* The busy-send delivery-mode chips (busy-delivery-v1) render AFTER
+					   the model chip (D5): a streaming-only chip ahead of the model
+					   pushed its left edge from x=64 idle to x=170 streaming at
+					   375 px and clipped the label to `claude-sonne…` at 280 px;
+					   after the model, the label keeps its edge and the chips take
+					   what is left. Visible ONLY
 					   while the agent is working AND the relay advertised the feature:
 					   an older relay or an idle session never offers a control whose
 					   send would be refused. One tap cycles steer → queue → both and
@@ -2256,7 +2287,7 @@ export function Composer({
 									setDeliveryMode(next);
 								}}
 								aria-label={`${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}`}
-								className={cn(COMPOSER_CHIP, "shrink-0 gap-1 px-2", delivery !== "steer" && "text-accent")}
+								className={cn(COMPOSER_CHIP(delivery !== "steer"), "shrink-0 gap-1 px-2")}
 							>
 									<span aria-hidden data-delivery-glyph>‹</span>
 									<span>{messageRuntime.t(deliveryLabelKey)}</span>
@@ -2265,23 +2296,12 @@ export function Composer({
 									type="button"
 									onClick={() => setDeliveryOpen(true)}
 									aria-label={messageRuntime.t("relay.composer.delivery.label")}
-									className={cn(COMPOSER_CHIP, "shrink-0 px-1")}
+									className={cn(COMPOSER_CHIP(false), "shrink-0 px-1")}
 								>
 									<span aria-hidden>⋯</span>
 								</button>
 							</>
 					) : null}
-					{/* The model chip is the model sheet's only door, so it never
-					   yields, and it never shows a bare glyph either: a lone ◇ did not
-					   say "model" (design D10), the label's first characters (`Cl…`)
-					   do. L3 pins it at its 44 px floor (`w-11 shrink-0`; without the
-					   width a `shrink-0` chip would take the whole label's width); every
-					   other level lets it grow into what is left. The mic is an action
-					   and keeps its full touch target at every level. */}
-					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
-						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
-						<span data-ltr className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
-					</button>
 					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>
 

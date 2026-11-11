@@ -51,6 +51,8 @@ function mount(streaming: boolean) {
 }
 
 const chip = () => document.querySelector<HTMLButtonElement>('[aria-label^="delivery"]');
+const sheetDoor = () =>
+	document.querySelector<HTMLButtonElement>('[aria-label="delivery"]');
 
 beforeEach(() => {
 	capabilitySlot = { features: { busy_delivery: 1 } } as Capabilities;
@@ -134,5 +136,88 @@ describe("the delivery chip", () => {
 		fireEvent.change(screen.getByPlaceholderText("Steer the agent…"), { target: { value: "hi" } });
 		await act(async () => { fireEvent.click(screen.getByRole("button", { name: "steer" })); });
 		expect(await screen.findByText("this session's runtime predates delivery modes")).not.toBeNull();
+	});
+});
+
+describe("the delivery sheet's hints (D1)", () => {
+	/* The hint copy is keyed, so the sheet must render the GENERATED bundle's
+	   sentences, not a reopened English fallback: these are the exact en strings
+	   in bundled.gen.ts (`messageRuntime.t` resolves key → en where no locale
+	   bundle is loaded in the test). */
+	const HINTS = {
+		steer: "Interrupt now (today's behaviour)",
+		queue: "Wait; never interrupt tools",
+		both: "Wait, then interrupt if slow",
+	} as const;
+
+	it("every mode row shows its muted hint line beside the bare word", async () => {
+		mount(true);
+		fireEvent.click(sheetDoor()!);
+		for (const mode of ["steer", "queue", "both"] as const) {
+			const hint = await screen.findByText(HINTS[mode]);
+			expect(hint).not.toBeNull();
+			/* muted second line: dim ink, smaller type, on its own block */
+			expect(hint.className).toMatch(/text-ink-dim/);
+			expect(hint.className).toMatch(/text-body-sm/);
+			expect(hint.className).toMatch(/block/);
+			/* the row keeps the 44 px floor and holds both lines in ONE button */
+			const row = hint.closest("button")!;
+			expect(row.className).toMatch(/min-h-11/);
+			expect(row.textContent).toContain(mode);
+			expect(row.textContent).toContain(HINTS[mode]);
+		}
+	});
+
+	it("choosing a hinted row still picks that mode and closes", async () => {
+		mount(true);
+		fireEvent.click(sheetDoor()!);
+		const queueRow = (await screen.findByText(HINTS.queue)).closest("button")!;
+		fireEvent.click(queueRow);
+		expect(chip()!.textContent).toContain("queue");
+		expect(localStorage.getItem("lo-mobile-delivery-mode")).toBe("queue");
+	});
+});
+
+describe("the delivery chip's accent (D4)", () => {
+	it("non-default modes carry text-accent and NOT text-ink-dim (one colour class)", () => {
+		mount(true);
+		/* steer is the default: dim, no accent */
+		expect(chip()!.className).toMatch(/text-ink-dim/);
+		expect(chip()!.className).not.toMatch(/text-accent/);
+		fireEvent.click(chip()!); // queue
+		expect(chip()!.className).toMatch(/text-accent(?!-)/);
+		expect(chip()!.className).not.toMatch(/text-ink-dim/);
+		fireEvent.click(chip()!); // both
+		expect(chip()!.className).toMatch(/text-accent(?!-)/);
+		expect(chip()!.className).not.toMatch(/text-ink-dim/);
+		fireEvent.click(chip()!); // back to steer
+		expect(chip()!.className).toMatch(/text-ink-dim/);
+		expect(chip()!.className).not.toMatch(/text-accent/);
+	});
+});
+
+describe("the footer order (D5)", () => {
+	const row = () => document.querySelector<HTMLElement>("[data-foot-level]")!;
+	const model = () => document.querySelector<HTMLElement>('[data-foot="model"]')!;
+
+	it("the delivery chips render AFTER the model chip, so its left edge holds", () => {
+		mount(true);
+		const children = [...row().children];
+		const modelIndex = children.indexOf(model());
+		const chipIndex = children.indexOf(chip()!);
+		const doorIndex = children.indexOf(sheetDoor()!);
+		expect(modelIndex).toBeGreaterThan(-1);
+		expect(chipIndex).toBeGreaterThan(modelIndex);
+		expect(doorIndex).toBeGreaterThan(modelIndex);
+	});
+
+	it("idle has no delivery chips and the model keeps its place", () => {
+		mount(false);
+		expect(chip()).toBeNull();
+		expect(sheetDoor()).toBeNull();
+		const children = [...row().children];
+		const modelIndex = children.indexOf(model());
+		/* the model is the last foot item before the reading on idle */
+		expect(modelIndex).toBeGreaterThan(-1);
 	});
 });
