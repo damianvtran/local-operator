@@ -37,9 +37,10 @@
  */
 import { contentDir } from "../lib/content-direction";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
-import { ASK_QUESTION_FRACTION, columnCap } from "../lib/column";
+import { ASK_QUESTION_FRACTION, ASK_QUESTION_LIST_FRACTION, columnCap } from "../lib/column";
 import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
@@ -222,6 +223,30 @@ function QuestionText({ text }: { text: string }) {
 		>
 			{text}
 		</span>
+	);
+}
+
+/**
+ * The question stack of a multi-question card, capped as a whole
+ * (`ASK_QUESTION_LIST_FRACTION`) and scrolling inside itself (PR #3777 code
+ * review M2). Each question's text is already capped at
+ * `ASK_QUESTION_FRACTION`, but three long questions at 0.3 each, plus their
+ * options, still exceed the column and push the card's shared send/decline
+ * (or dismiss) row off screen. A single question is left unwrapped so its
+ * options stay directly under its excerpt, as before; the card's answer row
+ * always renders outside this region.
+ */
+function QuestionList({ count, children }: { count: number; children: ReactNode }) {
+	if (count <= 1) return <>{children}</>;
+	return (
+		<div
+			data-testid="ask-question-list"
+			tabIndex={0}
+			style={columnCap(ASK_QUESTION_LIST_FRACTION)}
+			className="lo-scroll flex min-w-0 flex-col gap-3 overflow-y-auto overflow-x-hidden"
+		>
+			{children}
+		</div>
 	);
 }
 
@@ -760,6 +785,7 @@ export function AskCard({
 					    the queue's own rule are the same statement. It stays apart from any
 					    Decline: declining ANSWERS the agent, dismissing answers nobody and
 					    buys no turn (the agent is told on its next run — §14). */}
+					<QuestionList count={questions.length}>
 					{questions.map((question, index) => (
 						<span
 							key={String(question.id ?? index)}
@@ -773,6 +799,7 @@ export function AskCard({
 							<QuestionText text={question.question} />
 						</span>
 					))}
+					</QuestionList>
 					{dismissible ? (
 						<>
 							<button
@@ -813,6 +840,7 @@ export function AskCard({
 				</>
 			) : offered ? (
 				<>
+					<QuestionList count={open_questions.length}>
 					{open_questions.map((question, index) => {
 						const id = String(question.id);
 						return (
@@ -866,6 +894,7 @@ export function AskCard({
 							</div>
 						);
 					})}
+					</QuestionList>
 
 					{/* R6 (agent review round 1): an answerable ask whose questions are all
 					    already taken elsewhere used to render no fields and a permanently

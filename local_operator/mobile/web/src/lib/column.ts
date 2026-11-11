@@ -76,6 +76,17 @@ export const PANEL_FRACTION = 0.4;
 export const ASK_QUESTION_FRACTION = 0.3;
 
 /**
+ * A multi-question ask card's whole question stack, as a share of the column
+ * (PR #3777 code review M2). The per-question cap alone lets three long
+ * questions take ~90% of the column before their options, so the card's
+ * shared send/decline row fell off screen. Capping the stack at half the
+ * column leaves room for the sheet chrome and that row below it, while one
+ * question's capped excerpt (0.3) plus its options still fit without the
+ * stack scrolling for a typical two-question card.
+ */
+export const ASK_QUESTION_LIST_FRACTION = 0.5;
+
+/**
  * The `$skill` tray's share of the column.
  *
  * Shown while the keyboard is up by definition, so a `vh` cap measured the

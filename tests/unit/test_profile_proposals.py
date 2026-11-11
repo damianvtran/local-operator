@@ -8,6 +8,7 @@ records are byte-identical to what an older runtime files.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -414,8 +415,11 @@ def test_long_brief_card_is_bounded_with_correct_counts():
     assert "NEW 1" not in card and "keep" not in card
     match = re.match(_CARD_HEAD, card)
     assert match and match.groups() == ("pp_7abf6b3116c87a99", "team", "minervadev")
-    assert card.splitlines()[1] == "instructions: +200 −10 lines"
-    assert card.splitlines()[-1] == "Origin: agent. Review changes in Agents → minervadev."
+    assert card.splitlines() == [
+        "Apply proposal pp_7abf6b3116c87a99 to team 'minervadev'?",
+        "Changes: instructions +200 −10 lines",
+        "Origin: agent. Review changes in Agents → minervadev.",
+    ]
 
 
 def test_scalar_and_create_fields_report_status_not_line_counts():
@@ -425,17 +429,74 @@ def test_scalar_and_create_fields_report_status_not_line_counts():
         ["model", "label", "instructions"],
     )
     lines = PP.approval_card_text(_card_record(kind="agent", name="reviewer"), rows).splitlines()
-    assert lines[1:4] == ["model: changed", "label: set", "instructions: +3 −0 lines"]
+    assert lines[1] == "Changes: model changed; label set; instructions +3 −0 lines"
     created = PP.changes(None, {"instructions": "a\nb"}, ["instructions"])
-    assert PP.summarize_changes(created)[0]["added"] == 2
-    assert PP.structured_summary(_card_record(), created)["fields"][0]["removed"] == 0
+    [item] = PP.summarize_changes(created)
+    assert (item["added"], item["removed"]) == (2, 0)
 
 
-def test_many_fields_truncate_with_an_ellipsis_line_under_the_cap():
+def test_many_fields_collapse_into_n_more_on_one_changes_line():
     fields = [f"field_{i:02d}_" + "y" * 60 for i in range(40)]
     rows = PP.changes({}, {f: f"v{i}" for i, f in enumerate(fields)}, fields)
     card = PP.approval_card_text(_card_record(), rows)
     assert len(card) <= PP.APPROVAL_CARD_MAX_CHARS
     lines = card.splitlines()
-    assert any(line.startswith("… ") and "more changed fields" in line for line in lines)
-    assert all(len(line) <= 80 for line in card.splitlines()[1:-1])
+    assert len(lines) == 3 and lines[1].startswith("Changes: ")
+    assert len(lines[1]) <= PP.CHANGES_LINE_MAX_CHARS
+    assert re.search(r"; … \d+ more$", lines[1]), lines[1]
+
+
+def test_whitespace_only_change_is_not_reported_as_zero_lines():
+    """M3: "+0 −0 lines" on an apply card reads as "nothing changed"."""
+    rows = PP.changes({"instructions": "a\nb"}, {"instructions": "a\nb\n"}, ["instructions"])
+    [item] = PP.summarize_changes(rows)
+    assert item["status"] == "whitespace"
+    assert PP.summary_line(item) == "instructions: whitespace only"
+    assert "instructions whitespace only" in PP.approval_card_text(_card_record(), rows)
+
+
+def test_json_list_field_counts_items_not_pretty_printed_lines():
+    """N2: adding one item to ``["a"]`` used to read ``+3 −1 lines``."""
+    rows = PP.changes({"members": ["a"]}, {"members": ["a", "b"]}, ["members"])
+    [item] = PP.summarize_changes(rows)
+    assert (item["added"], item["removed"], item["status"]) == (1, 0, "items")
+    assert PP.summary_line(item) == "members: +1 −0 items"
+    reordered = PP.summarize_changes(
+        PP.changes({"members": ["a", "b"]}, {"members": ["b", "a"]}, ["members"])
+    )
+    assert reordered[0]["status"] in {"items", "reordered"}
+
+
+def test_apostrophe_name_card_uses_python_repr_quoting():
+    """M1: the UI parses both repr forms; core keeps ``!r`` quoting."""
+    card = PP.approval_card_text(_card_record(name="Damian's team"), [])
+    assert card.splitlines()[0] == 'Apply proposal pp_7abf6b3116c87a99 to team "Damian\'s team"?'
+    assert card.splitlines()[1] == "Changes: none listed"
+
+
+def test_direct_save_summary_text_is_counted_not_echoed():
+    """L1: the non-proposal save card used to append this text verbatim."""
+    body = "\n".join(f"line {i}: MARKER" for i in range(300))
+    summary = "\n".join(
+        [
+            "model/effort: a -> b",
+            "instructions:",
+            "--- before",
+            "+++ after",
+            "@@ -1,2 +1,3 @@",
+            " keep",
+            "-old",
+            "+new one",
+            "+new two",
+            "SKILL.md:",
+            body,
+            "Remove: refs/old.md",
+        ]
+    )
+    items = PP.summarize_save_text(summary, {"model/effort", "instructions", "SKILL.md"})
+    line = PP.changes_line(items)
+    assert line.startswith(
+        "Changes: model/effort changed; instructions +2 −1 lines; SKILL.md +300 −0 lines"
+    ), line
+    assert "refs/old.md removed" in line or "more" in line
+    assert "MARKER" not in line and len(line) <= PP.CHANGES_LINE_MAX_CHARS

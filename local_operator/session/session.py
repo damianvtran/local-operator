@@ -14870,15 +14870,26 @@ class Session:
             from local_operator.harness.approval import ApprovalUnavailableError
 
             raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface is attached")
-        changed = (
-            ", ".join(profile_field_label(field) for field in intent.changes) or "(no fields named)"
-        )
+        from local_operator import profile_proposals
+
+        # The first line is unchanged (TUI/mobile show the card raw). The
+        # second line used to be followed by ``intent.summary`` verbatim — a
+        # whole instructions diff or new skill file — so a direct save of a
+        # long brief reproduced the unbounded ask card. It now carries only
+        # per-field counts, in the same ``Changes:`` shape as a proposal card;
+        # the exact change is what the tool's receipt and Agents show.
+        labels = {profile_field_label(field) for field in intent.changes}
+        items = profile_proposals.summarize_save_text(intent.summary, labels | set(intent.changes))
+        if not items:
+            items = [
+                {"label": label, "added": 0, "removed": 0, "status": "changed"}
+                for label in (profile_field_label(field) for field in intent.changes)
+            ]
+        changed = profile_proposals.changes_line(items) if items else "Changes: (no fields named)"
         card = (
             f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
-            f"Changes: {changed}."
+            f"{changed}."
         )
-        if intent.summary:
-            card += f"\n{intent.summary}"
         if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
             return f"approval:{intent.base_revision or 'new'}"
         return None

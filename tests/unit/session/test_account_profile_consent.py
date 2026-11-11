@@ -1038,3 +1038,33 @@ async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) ->
         for record in caplog.records
     ), "the fault type must also be in the log line"
     assert any(record.exc_info for record in caplog.records), "the traceback must stay logged"
+
+
+@pytest.mark.asyncio
+async def test_direct_save_card_counts_changes_instead_of_echoing_the_summary(stores):
+    """L1 (PR #3777): the non-proposal save card appended ``intent.summary``
+    verbatim, so a direct save of a long brief or skill file filled the ask
+    card. It now keeps its first line and carries per-field counts only."""
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    body = "\n".join(f"+brief line {i} MARKER-{i}" for i in range(400))
+    try:
+        _start_run(session, Message.user("look at the reviewer"))
+        origin = await session._authorize_account_profile_write(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions", "effort"),
+                summary=f"instructions:\n--- before\n+++ after\n{body}\nmodel/effort: a -> b",
+            )
+        )
+        assert origin is None and len(gate.cards) == 1
+        card = gate.cards[0][1]
+        assert card.splitlines() == [
+            "Save agent 'reviewer' in your account (update).",
+            "Changes: instructions +400 −0 lines; model/effort changed.",
+        ], card
+        assert "MARKER-" not in card and len(card) <= 600
+    finally:
+        await session.dispose()
