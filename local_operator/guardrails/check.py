@@ -433,12 +433,21 @@ def ledger_record(path: str, session_id: str, stop: tuple[str, ...]) -> Any:
 
     if not session_id:
         return None
-    real = os.path.realpath(path)
-    if real in stop:
-        return None
     try:
         state_root = str(prov.ledger_path().parent.parent)
     except Exception:  # noqa: BLE001 — no state root resolvable: prove nothing
+        return None
+    if os.path.islink(path):
+        # ``build_delete_case`` passes a symlink ENTRY only when ``link_entry``
+        # proved just the link goes (#3793). Its own ``symlink`` row must
+        # prove it: resolving to the pointee let this session's row for the
+        # pointed-to tree vouch for a link someone else made.
+        link = prov.link_path(path)
+        if link in stop or _under(link, os.path.realpath(state_root)):
+            return None
+        return prov.owned_link(link, session_id)
+    real = os.path.realpath(path)
+    if real in stop:
         return None
     if _under(real, os.path.realpath(state_root)):
         return None

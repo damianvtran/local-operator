@@ -1157,7 +1157,9 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             # predicate would destroy.
             return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
         owned = _owned_by_session(target, path, prot, session_id)
-        if owned is not None and target.pattern is None:
+        # Not for a link entry (#3793): ``rm <own link>`` removes only the
+        # link, so the pointee's uncommitted work is never at stake.
+        if owned is not None and target.pattern is None and link_entry(target) is None:
             # ``rm -rf <own linked worktree>`` is held to the same bar as
             # ``git worktree remove --force`` of it (2026-11-11): ignored
             # output never counts, real uncommitted work goes to the judge.

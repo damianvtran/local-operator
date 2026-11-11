@@ -496,3 +496,51 @@ async def test_live_ask_shape_paths_only_in_a_description_do_not_name_them(
     assert "could not be verified" in outcome.text
     assert "names the full path" in outcome.text
     assert "only in an option's description, names nothing" in outcome.text
+
+
+# -- convergence with #3793 (owned-symlink removal) ----------------------------------
+
+
+def _own_link(home: Path, link: Path, pointee: Path, sid: str = S) -> None:
+    """``ln -s <pointee> <link>`` run for real between the loop's plan/commit hooks."""
+    command = f"ln -s {pointee} {link}"
+    pending = prov.plan_creations(command, cwd=str(home), env=_env(home))
+    subprocess.run(["bash", "-c", command], cwd=home, check=True)
+    assert pending is not None
+    prov.commit_creations(pending, session_id=sid, env=_env(home), scratchpad=None)
+
+
+def test_rm_of_own_link_to_a_dirty_own_worktree_removes_only_the_link(
+    home: Path, mobile: Path
+) -> None:
+    """The own-worktree dirty bar must not read THROUGH an own link.
+
+    ``rm <link>`` removes the link entry only (#3793), so the pointee's
+    uncommitted work cannot be lost and the call stays LOW.
+    """
+    wt = mobile / ".worktrees" / "markdown-tables"
+    (wt / "App.tsx").write_text("export const unfinished = 1\n")
+    link = home / "mt"
+    _own_link(home, link, wt)
+    v = classify_bash(f"rm {link}", cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
+    assert v.risk is Risk.LOW, v.targets[0].reason
+    assert "only the link is removed" in v.targets[0].reason
+    assert (wt / "App.tsx").exists()
+
+
+@pytest.mark.asyncio
+async def test_allow_ledger_for_a_link_checks_the_link_row_not_the_pointee(
+    home: Path, mobile: Path
+) -> None:
+    """A link this session did NOT create to a tree it did is not ``ledger``-settled.
+
+    ``ledger_record`` used to resolve the link to its pointee, so S's worktree
+    row "proved" an operator-made link that S never created.
+    """
+    wt = mobile / ".worktrees" / "markdown-tables"
+    link = home / "mt"
+    _own_link(home, link, wt, sid=S2)  # someone else's link to S's own tree
+    judge = _Judge("ALLOW ledger")
+    outcome = await _check(home, f"rm {link}", judge)
+    assert outcome is not None and outcome.blocked, outcome.text
+    assert "ledger: no row for this session" in judge.prompts[0]
