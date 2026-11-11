@@ -305,5 +305,15 @@
     "note": "Three claims to preserve. (1) The choice is tried FIRST, so it RE-ORDERS the tested list (Sonnet first, then Opus) and never narrows it. (2) Empty means the tested order, which is the safest default — say that, because an unset row is a real recommendation, not a missing value. (3) A choice can never block delivery: if the chosen model is unavailable or out of quota, this machine's own configured model and its fallbacks still screen. Do not transliterate model ids or numbers into this copy. No ICU arguments.",
     "role": "Settings row help",
     "tone": "concise, neutral"
+  },
+  "wire.settings.composer.title": {
+    "role": "settings section title",
+    "tone": "plain",
+    "note": "Section heading for the busy-send delivery mode. The section holds the default for a message sent while the agent is working; it is not a screen and not a button."
+  },
+  "wire.settings.composer.description": {
+    "role": "settings section description",
+    "tone": "plain, precise",
+    "note": "Says the change applies immediately in the terminal and the desktop app (one shared config, read at send time). It must not name a restart, and it must not promise the phone: the mobile web chip stays per-device and does not read this row."
   }
 }

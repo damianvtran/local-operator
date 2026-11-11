@@ -581,6 +581,18 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         _t(_ns.description()),
     ),
+    # The busy-send delivery default (``delivery.busy_default``). Its own
+    # section rather than leaving the row under ``appearance``, where it was
+    # born under its old TUI-only name: the row is neutral between the TUI
+    # and the desktop app (one shared config.yml, one LIVE read per send),
+    # and an ``appearance`` header on a ``delivery`` path says nothing. The
+    # section TITLE is the contract's "Message sending" (architect D1).
+    Section(
+        "composer",
+        _t(_ws.composer_title()),
+        Scope.LIVE,
+        _t(_ws.composer_description()),
+    ),
     # Its own section rather than a pair of rows under ``appearance``. Scope
     # does not force the split — ``appearance`` is LIVE too — but the section
     # DESCRIPTION is where this page teaches the capture gesture, and
@@ -3236,30 +3248,32 @@ SETTINGS: tuple[Setting, ...] = (
         ),
     ),
     Setting(
-        key="tui.busy_delivery",
-        path=("tui", "busy_delivery"),
-        section="appearance",
+        key="delivery.busy_default",
+        path=("delivery", "busy_default"),
+        section="composer",
         # LIVE: read at submit time (``_busy_delivery_mode``), so a /settings
-        # write changes the next send in this session with no relaunch.
-        label=_t(_ws.tui_busy_delivery_label()),
+        # write changes the next send in this session with no relaunch. The
+        # desktop reads the same row at send time, so a write made in the TUI
+        # reaches it at its next focus.
+        label=_t(_ws.delivery_busy_default_label()),
         kind=Kind.ENUM,
         default="steer",
-        help=_t(_ws.tui_busy_delivery_help()),
+        help=_t(_ws.delivery_busy_default_help()),
         choices=(
             Choice(
                 "steer",
-                _t(_ws.tui_busy_delivery_choice_steer_label()),
-                _t(_ws.tui_busy_delivery_choice_steer_description()),
+                _t(_ws.delivery_busy_default_choice_steer_label()),
+                _t(_ws.delivery_busy_default_choice_steer_description()),
             ),
             Choice(
                 "queue",
-                _t(_ws.tui_busy_delivery_choice_queue_label()),
-                _t(_ws.tui_busy_delivery_choice_queue_description()),
+                _t(_ws.delivery_busy_default_choice_queue_label()),
+                _t(_ws.delivery_busy_default_choice_queue_description()),
             ),
             Choice(
                 "both",
-                _t(_ws.tui_busy_delivery_choice_both_label()),
-                _t(_ws.tui_busy_delivery_choice_both_description()),
+                _t(_ws.delivery_busy_default_choice_both_label()),
+                _t(_ws.delivery_busy_default_choice_both_description()),
             ),
         ),
     ),

@@ -2,7 +2,7 @@
 notices, and the refusal when the owner cannot honour the mode.
 
 Design D6 (the shipped default): a busy send behaves exactly as it always has
-— ``steer``, urgent — until the operator changes ``tui.busy_delivery``. The
+— ``steer``, urgent — until the operator changes ``delivery.busy_default``. The
 setting is read at SUBMIT time (``OperatorApp._busy_delivery_mode``), through
 the predicate in ``local_operator.tui.busy_delivery``, so a LIVE-scope edit
 takes effect on the very next send and a hand-edited bad value reads as the
@@ -108,7 +108,7 @@ def _set_mode(app: OperatorApp, mode: str) -> None:
     ``_busy_delivery_mode`` reads ``_config_values()`` at submit time, so the
     stub is the config itself: the setting row exactly as a LIVE edit lands.
     """
-    app._config_values = lambda: {"tui": {"busy_delivery": mode}}  # type: ignore[method-assign]
+    app._config_values = lambda: {"delivery": {"busy_default": mode}}  # type: ignore[method-assign]
 
 
 # --- The predicate -----------------------------------------------------------
@@ -118,16 +118,19 @@ def _set_mode(app: OperatorApp, mode: str) -> None:
     ("values", "expected"),
     [
         ({}, "steer"),
-        ({"tui": {}}, "steer"),
-        ({"tui": {"busy_delivery": "steer"}}, "steer"),
-        ({"tui": {"busy_delivery": "queue"}}, "queue"),
-        ({"tui": {"busy_delivery": "both"}}, "both"),
+        ({"delivery": {}}, "steer"),
+        ({"delivery": {"busy_default": "steer"}}, "steer"),
+        ({"delivery": {"busy_default": "queue"}}, "queue"),
+        ({"delivery": {"busy_default": "both"}}, "both"),
         # A hand-edited bad value reads as the default, never reaches the
         # engine as an unknown value the wire would refuse.
-        ({"tui": {"busy_delivery": "sometimes"}}, "steer"),
-        ({"tui": {"busy_delivery": ""}}, "steer"),
-        ({"tui": {"busy_delivery": None}}, "steer"),
-        ({"tui": "not-a-mapping"}, "steer"),
+        ({"delivery": {"busy_default": "sometimes"}}, "steer"),
+        ({"delivery": {"busy_default": ""}}, "steer"),
+        ({"delivery": {"busy_default": None}}, "steer"),
+        ({"delivery": "not-a-mapping"}, "steer"),
+        # The old TUI-only path is inert: nothing shipped under it (architect
+        # D2), so a stale ``tui.busy_delivery`` never changes the answer.
+        ({"tui": {"busy_delivery": "queue"}}, "steer"),
     ],
 )
 def test_busy_delivery_mode_parsing(values: dict[str, Any], expected: str) -> None:

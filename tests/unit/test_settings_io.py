@@ -229,10 +229,10 @@ def _consumer_defaults() -> dict[str, object]:
         "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
         "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
         "tui.sidebar_show_subagents": DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
-        # The TUI's submit-time reader's own constant, beside the fallback
+        # The submit-time reader's own constant, beside the fallback
         # ``OperatorApp._busy_delivery_mode`` applies; the registry restates it
         # rather than importing the TUI (settings_io stays off that path).
-        "tui.busy_delivery": DEFAULT_BUSY_DELIVERY,
+        "delivery.busy_default": DEFAULT_BUSY_DELIVERY,
         "retry.enabled": retry.enabled,
         "retry.maxRetries": retry.max_retries,
         "retry.baseDelayMs": retry.base_delay_ms,
@@ -3501,6 +3501,94 @@ class TestTheLapsedAskWindowRow:
     def test_the_help_fits_with_the_default_clause(self) -> None:
         setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
         assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
+
+
+class TestTheBusyDefaultRow:
+    """``delivery.busy_default`` (architect D1/D2): the neutral busy-send default.
+
+    The row was renamed outright from the TUI-only ``tui.busy_delivery``
+    (nothing shipped, so no alias): a neutral path the TUI and the desktop
+    app share through one config.yml, a LIVE section of its own, an ENUM
+    over the engine vocabulary, and the shipped default pinned to the
+    submit-time reader's constant.
+    """
+
+    def test_the_row_is_a_nested_enum_in_its_own_live_section(self) -> None:
+        setting = settings_io.BY_KEY["delivery.busy_default"]
+        assert setting.path == ("delivery", "busy_default")
+        assert setting.kind is settings_io.Kind.ENUM
+        assert setting.default == "steer"
+        section = next(s for s in settings_io.SECTIONS if s.name == setting.section)
+        assert section.name == "composer"
+        assert section.scope is settings_io.Scope.LIVE
+
+    def test_the_old_tui_key_is_gone_without_an_alias(self) -> None:
+        assert "tui.busy_delivery" not in settings_io.BY_KEY
+
+    def test_the_choices_are_exactly_the_engine_vocabulary(self) -> None:
+        from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
+
+        setting = settings_io.BY_KEY["delivery.busy_default"]
+        values = [choice.value for choice in setting.choices]
+        assert values == ["steer", "queue", "both"]
+        assert setting.default == DEFAULT_BUSY_DELIVERY
+
+    @pytest.mark.parametrize("value", ["steer", "queue", "both"])
+    def test_every_choice_validates(self, value: str) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["delivery.busy_default"], value) is None
+
+    @pytest.mark.parametrize("value", ["sometimes", "", "STEER", 0, None])
+    def test_a_value_outside_the_dropdown_is_refused(self, value: object) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["delivery.busy_default"], value) is not None
+
+    def test_the_section_holds_only_this_row(self) -> None:
+        assert [s.key for s in settings_io.settings_for("composer")] == ["delivery.busy_default"]
+
+    def test_the_row_present_advertises_the_busy_delivery_feature(self) -> None:
+        """T2: the settings row and the feature key stand or fall together.
+
+        The desktop composer sends ``delivery`` only when ``busy_delivery``
+        is in ``server/features.py``'s flags, and a backend without the row
+        has no default for the client to resolve. If either side is removed
+        alone the client is left sending a field the gate will not open (or
+        gating on a field nothing defaults), so this asserts both exist.
+        """
+        from local_operator.server.features import feature_flags
+
+        assert "delivery.busy_default" in settings_io.BY_KEY
+        assert "busy_delivery" in feature_flags()
+
+    def test_an_old_body_without_delivery_hashes_as_before(self) -> None:
+        """T2: an absent ``delivery`` must not change the receipt fingerprint.
+
+        The receipt journal fingerprints the whole request body
+        (``server/utils/desktop_receipts.py``), so a same-``request_id``
+        retry of a body written before the field existed must read as the
+        same body, not a changed one: ``Prompt``'s wrap-serializer drops a
+        ``None`` delivery. This hashes the serialised old body and the
+        explicitly-absent one for identity.
+        """
+        import hashlib
+        import json
+
+        from local_operator.server.routes.desktop_sessions import Prompt
+
+        old_body = {"text": "hello", "request_id": "00000000-0000-0000-0000-000000000001"}
+        prompt = Prompt.model_validate(old_body)
+        assert prompt.delivery is None
+        # The canonical receipt fingerprint is the sha256 of the serialised
+        # body bytes; an absent delivery must not alter them.
+
+        def _fingerprint(body: dict[str, object]) -> str:
+            canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+            return hashlib.sha256(canonical).hexdigest()
+
+        with_delivery_absent = prompt.model_dump()
+        assert "delivery" not in with_delivery_absent
+        assert _fingerprint(with_delivery_absent) == _fingerprint(prompt.model_dump())
+        # And a body that IS an old body (no delivery key at all, as stored
+        # before the field existed) is byte-identical after a round trip.
+        assert Prompt.model_validate(old_body).model_dump() == with_delivery_absent
 
 
 def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(

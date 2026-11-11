@@ -1,10 +1,13 @@
-"""Busy-send delivery mode — the TUI's read of ``tui.busy_delivery``.
+"""Busy-send delivery mode — the read of ``delivery.busy_default``.
 
-``steer`` is urgent (today's behaviour); ``queue`` never cancels a running
-tool or skips a batch call; ``both`` is ``queue`` until the send has waited
-long enough, then counts as urgent. The mode names the ENGINE vocabulary
-(``delivery=steer|queue|both`` in ``session.py``) so the setting, the wire
-and the queue cannot drift into three spellings of one word.
+The setting is neutral (owned by no one surface) because the TUI and the
+desktop app share one config.yml: either editor changes what the next send
+in the other app does. ``steer`` is urgent (today's behaviour); ``queue``
+never cancels a running tool or skips a batch call; ``both`` is ``queue``
+until the send has waited long enough, then counts as urgent. The mode names
+the ENGINE vocabulary (``delivery=steer|queue|both`` in ``session.py``) so
+the setting, the wire and the queue cannot drift into three spellings of
+one word.
 """
 
 from __future__ import annotations
@@ -30,6 +33,6 @@ def busy_delivery_mode(values: Mapping[str, Any]) -> BusyDeliveryMode:
     A hand-edited ``busy_delivery: "sometimes"`` reads as the default rather
     than reaching the engine as an unknown value the wire would refuse.
     """
-    section = values.get("tui")
-    value = section.get("busy_delivery") if isinstance(section, Mapping) else None
+    section = values.get("delivery")
+    value = section.get("busy_default") if isinstance(section, Mapping) else None
     return value if value in _MODES else DEFAULT_BUSY_DELIVERY

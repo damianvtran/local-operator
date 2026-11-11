@@ -598,12 +598,52 @@ def compaction_wire_bytes_trigger_label() -> Msg:
     return Msg("wire.settings.compaction_wire_bytes_trigger.label", {})
 
 
+def composer_description() -> Msg:
+    return Msg("wire.settings.composer.description", {})
+
+
+def composer_title() -> Msg:
+    return Msg("wire.settings.composer.title", {})
+
+
 def conversation_length_help() -> Msg:
     return Msg("wire.settings.conversation_length.help", {})
 
 
 def conversation_length_label() -> Msg:
     return Msg("wire.settings.conversation_length.label", {})
+
+
+def delivery_busy_default_choice_both_description() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.both.description", {})
+
+
+def delivery_busy_default_choice_both_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.both.label", {})
+
+
+def delivery_busy_default_choice_queue_description() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.queue.description", {})
+
+
+def delivery_busy_default_choice_queue_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.queue.label", {})
+
+
+def delivery_busy_default_choice_steer_description() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.steer.description", {})
+
+
+def delivery_busy_default_choice_steer_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.choice.steer.label", {})
+
+
+def delivery_busy_default_help() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.help", {})
+
+
+def delivery_busy_default_label() -> Msg:
+    return Msg("wire.settings.delivery_busy_default.label", {})
 
 
 def desktop_description() -> Msg:
@@ -3064,38 +3104,6 @@ def tools_search_interception_rg_excludes_help() -> Msg:
 
 def tools_search_interception_rg_excludes_label() -> Msg:
     return Msg("wire.settings.tools_search_interception_rg_excludes.label", {})
-
-
-def tui_busy_delivery_choice_both_description() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.choice.both.description", {})
-
-
-def tui_busy_delivery_choice_both_label() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.choice.both.label", {})
-
-
-def tui_busy_delivery_choice_queue_description() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.choice.queue.description", {})
-
-
-def tui_busy_delivery_choice_queue_label() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.choice.queue.label", {})
-
-
-def tui_busy_delivery_choice_steer_description() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.choice.steer.description", {})
-
-
-def tui_busy_delivery_choice_steer_label() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.choice.steer.label", {})
-
-
-def tui_busy_delivery_help() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.help", {})
-
-
-def tui_busy_delivery_label() -> Msg:
-    return Msg("wire.settings.tui_busy_delivery.label", {})
 
 
 def tui_sidebar_position_choice_left_description() -> Msg:
