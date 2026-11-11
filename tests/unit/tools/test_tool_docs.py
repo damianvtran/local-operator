@@ -316,7 +316,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # yourself", "subagent" and "approved that action", which test_ask_tool.py
     # pins as the last-resort and irreversible-trigger contract; restoring them
     # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
-    "ask": 1083,
+    # 1083 -> 1112 (+29, multi-select recommendation set): `recommended` is
+    # now `int | list[int]` (an extra `array` arm in the schema) and the notes
+    # drop the false "preselected" and say a multi-select may recommend several.
+    # `recommended_all` is derived and hidden (SkipJsonSchema), so it costs 0.
+    "ask": 1112,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only

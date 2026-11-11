@@ -62,6 +62,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -1897,6 +1898,21 @@ class AskOption(BaseModel):
 #
 # The marker indexes `options` AS CARRIED, never the authored order: a consumer
 # that re-sorts the list and keeps the index moves the badge to the wrong row.
+#
+# A MULTI-select may recommend several rows, so the AUTHORED `recommended` is
+# `int | list[int]`. The wire keeps the old contract anyway: after validation
+# `recommended` is ALWAYS `int | None` (0 or None, never a list), so every
+# client and every stored row that only knows the int still shows the first
+# pick correctly. The rest of the set rides a second, derived field,
+# `recommended_all`, which is `[0..k-1]` and present only when k >= 2 — the
+# listed rows are hoisted to the top IN THE ORDER THE MODEL LISTED THEM (that
+# order is its ranking), then everything else in authored order. It is declared
+# (so `model_dump()` -> `model_validate()` is a fixed point; the model forbids
+# extras) but hidden from the published tool schema with `SkipJsonSchema`,
+# because it is derived output, not something the model should author. Nothing
+# is PRE-TICKED: on a multi-select the visible ticks are the answer, and the
+# user builds them (see the pinned picker test). Consumers read
+# `recommended_rows`, never `recommended`, so a set cannot be half-drawn.
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -1914,12 +1930,15 @@ class AskQuestion(BaseModel):
     multi: bool = Field(
         default=False, description="True lets the user pick several options instead of one."
     )
-    recommended: int | None = Field(
+    recommended: int | list[int] | None = Field(
         default=None,
         description=(
-            "0-based index of the option you recommend; it is moved to the top and preselected."
+            "0-based index you recommend (multi-select: a list, best first); "
+            "moved to top, badged, not ticked."
         ),
     )
+    # Derived, never authored: see the comment above the class.
+    recommended_all: SkipJsonSchema[list[int] | None] = None
     secret: bool = Field(
         default=False,
         description=(
@@ -1946,7 +1965,7 @@ class AskQuestion(BaseModel):
                 raise ValueError("a secret question has no options; the answer is a pasted value")
             if self.multi:
                 raise ValueError("a secret question cannot be multi-select")
-            if self.recommended is not None:
+            if self.recommended is not None or self.recommended_all is not None:
                 raise ValueError("a secret question has no options to recommend")
             from local_operator.variables import normalize_credential_key
 
@@ -1963,21 +1982,63 @@ class AskQuestion(BaseModel):
             raise ValueError("persist only applies to a secret question")
         if len(self.options) < 2:
             raise ValueError("at least two answers to pick from")
-        if self.recommended is not None and not 0 <= self.recommended < len(self.options):
-            raise ValueError(
-                f"recommended must index options (0..{len(self.options) - 1}), "
-                f"got {self.recommended}"
-            )
-        if self.recommended is not None:
+        if self.recommended_all is not None:
+            # A previously normalised dump being re-validated. Only the exact
+            # shape `_shape` itself emits is accepted, so a hand-built row
+            # cannot smuggle in a set that disagrees with the hoisted order.
+            if (
+                self.recommended != 0
+                or len(self.recommended_all) < 2
+                or self.recommended_all != list(range(len(self.recommended_all)))
+            ):
+                raise ValueError(
+                    "recommended_all is derived: it must be [0..k-1] (k >= 2) with recommended 0"
+                )
+            picks = list(self.recommended_all)
+        elif isinstance(self.recommended, list):
+            picks = list(self.recommended)
+        elif self.recommended is not None:
+            picks = [self.recommended]
+        else:
+            picks = []
+        if isinstance(self.recommended, list) and not picks:
+            raise ValueError("recommended is an empty list; omit it instead")
+        if len(set(picks)) != len(picks):
+            raise ValueError(f"recommended lists an option twice: {picks}")
+        # Bounds first, before any reordering: see the comment above the class.
+        for pick in picks:
+            if not 0 <= pick < len(self.options):
+                raise ValueError(
+                    f"recommended must index options (0..{len(self.options) - 1}), got {pick}"
+                )
+        if len(picks) > 1 and not self.multi:
+            raise ValueError("several recommendations need multi=true; give one index")
+        if picks:
             # Rotate rather than swap: the authored order of everything the
             # model did NOT recommend is still its ranking, and a swap would
             # promote whatever happened to sit at index 0 over the rest of it.
-            # Rotating by 0 is the identity, so an already-normalised question
-            # passes through untouched however many times it is re-validated.
-            hoisted = self.options.pop(self.recommended)
-            self.options.insert(0, hoisted)
+            # Hoisting an already-normalised [0..k-1] set is the identity, so
+            # a question passes through untouched however many times it is
+            # re-validated.
+            hoisted = [self.options[pick] for pick in picks]
+            rest = [option for index, option in enumerate(self.options) if index not in picks]
+            self.options[:] = hoisted + rest
             self.recommended = 0
+            self.recommended_all = list(range(len(picks))) if len(picks) > 1 else None
         return self
+
+    @property
+    def recommended_rows(self) -> tuple[int, ...]:
+        """Every recommended row index, first pick first; ``()`` when none.
+
+        The one accessor consumers read, so a multi-select's set is drawn whole
+        and pyright never sees ``recommended``'s authored ``list`` arm.
+        """
+        if self.recommended_all:
+            return tuple(self.recommended_all)
+        if isinstance(self.recommended, int):
+            return (self.recommended,)
+        return ()
 
 
 # THE ROW SHAPE. The ask the TOOL takes and the ask a ROW stores are two shapes,
