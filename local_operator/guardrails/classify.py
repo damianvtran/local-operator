@@ -35,6 +35,7 @@ import os
 import re
 import stat
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -1340,8 +1341,11 @@ _MAX_FOREIGN_STATES = 16
 #: - a lookup unfinished at the deadline: "not checked in time", HIGH.
 #:
 #: The deadline is one tree's own worst case (``_WORKTREE_STATUS_TIMEOUT_S``
-#: + ``_GH_TIMEOUT_S``, both measured bounds in provenance), so a glob over N
-#: trees never waits longer than a literal delete of ONE may. Workers: 4
+#: + ``_GH_TIMEOUT_S``, both measured bounds in provenance), and it is ONE
+#: deadline per classification, shared by the own-tree/foreign-state round
+#: and the later foreign-activity round (R2-MINOR-2, PR #3802: each had its
+#: own, so a delete reaching both waited up to ~2×), so a glob over N trees
+#: never waits longer than a literal delete of ONE may. Workers: 4
 #: keeps 16 trees at ~4 lookup rounds (~8 s at the measured 1.3–1.8 s per
 #: ``gh``) without fanning out more ``gh`` processes than a laptop shrugs off.
 _MAX_OWN_CHECKED = 16
@@ -1351,10 +1355,11 @@ _REACH_LOOKUP_BUDGET_S = 68.0
 REACH_TOO_WIDE = "too many entries to rule out a linked worktree under it"
 
 
-def _bounded_lookups(jobs: dict[str, Any]) -> dict[str, Any]:
+def _bounded_lookups(jobs: dict[str, Any], deadline: float) -> dict[str, Any]:
     """Run ``jobs`` (key → zero-arg callable) on the pool under one deadline.
 
-    Keys whose call raised or did not finish by ``_REACH_LOOKUP_BUDGET_S`` are
+    ``deadline`` is a ``time.monotonic()`` instant, shared by every round of
+    one classification. Keys whose call raised or did not finish by it are
     ABSENT from the result: every caller treats absent as unknown → HIGH. An
     unfinished thread is abandoned, not joined — each lookup carries its own
     subprocess timeout, so it ends on its own.
@@ -1368,7 +1373,7 @@ def _bounded_lookups(jobs: dict[str, Any]) -> dict[str, Any]:
     )
     try:
         futures = {pool.submit(fn): key for key, fn in jobs.items()}
-        done, _ = cf.wait(futures, timeout=_REACH_LOOKUP_BUDGET_S)
+        done, _ = cf.wait(futures, timeout=max(0.0, deadline - time.monotonic()))
         results: dict[str, Any] = {}
         for fut in done:
             try:
@@ -1450,7 +1455,8 @@ def _reached_worktrees(
         jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
     for root in foreign[:_MAX_FOREIGN_STATES]:
         jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
-    looked = _bounded_lookups(jobs)
+    deadline = time.monotonic() + _REACH_LOOKUP_BUDGET_S
+    looked = _bounded_lookups(jobs, deadline)
     held: list[str] = []
     for root in checked:
         state = looked.get(f"state:{root}")
@@ -1489,7 +1495,8 @@ def _reached_worktrees(
     foreign.sort(key=lambda r: states.get(r, "not read") == "clean")
     shown = foreign[:_MAX_FOREIGN_SHOWN]
     activities = _bounded_lookups(
-        {root: (lambda r=root: prov.worktree_activity(r, session_id)) for root in shown}
+        {root: (lambda r=root: prov.worktree_activity(r, session_id)) for root in shown},
+        deadline,
     )
     for root in shown:
         state = states.get(root, "not read")

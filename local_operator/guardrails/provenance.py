@@ -587,11 +587,23 @@ def _holds_git(directory: str) -> bool:
     return _git_inside(directory) is not None
 
 
-def _git_inside(directory: str) -> str | None:
-    """Where a ``.git`` sits in ``directory``: its parent's path, ``directory``
-    itself when the bounded walk ran out (unknown counts as holding one), or
-    ``None``. The path is for the judge (MINOR-3, PR #3802): a tree held back
-    for a nested repository must say WHICH one."""
+class GitInside(NamedTuple):
+    """What :func:`_git_inside` found: ``path`` holds a ``.git`` when
+    ``exhausted`` is False; when True the bounded walk ran out under ``path``
+    and a nested repository could NOT be ruled out (R2-MAJOR-1, PR #3802: the
+    two were one bare path, so a 20k-file ignored ``.expo/cache`` reached the
+    judge as "nested repository … commits may exist nowhere else")."""
+
+    path: str
+    exhausted: bool
+
+
+def _git_inside(directory: str) -> GitInside | None:
+    """Where a ``.git`` sits in ``directory`` (its parent's path), or that the
+    bounded walk ran out first (unknown: callers count it as holding one, so
+    it fails closed), or ``None``. The path is for the judge (MINOR-3, PR
+    #3802): a tree held back for a nested repository must say WHICH one —
+    and must not claim one it never saw."""
     if not os.path.isdir(directory) or os.path.islink(directory):
         return None
     seen = 0
@@ -604,10 +616,10 @@ def _git_inside(directory: str) -> str | None:
             continue
         seen += len(entries)
         if seen > _WALK_ENTRIES:
-            return directory
+            return GitInside(directory, exhausted=True)
         for entry in entries:
             if entry.name == ".git":
-                return current
+                return GitInside(current, exhausted=False)
             if depth < _WALK_DEPTH and entry.is_dir(follow_symlinks=False):
                 stack.append((entry.path, depth + 1))
     return None
@@ -1136,16 +1148,25 @@ def worktree_state(path: str, *, own: bool = False) -> str:
 #: Bounds on :func:`linked_worktrees_reached`. ``_REACH_MAX_LEVELS``:
 #: ancestor levels climbed to find an enclosing repository or to match a
 #: registered root (deeper than any real path). ``_REACH_MAX_ENTRIES``:
-#: directory entries the WHOLE call may visit while probing targets' children
-#: — one budget per call, not per target (MINOR-4, PR #3802: a per-match
+#: DIRECTORIES the whole call may inspect (each a ``_common_dir`` probe) —
+#: one budget per call, not per target (MINOR-4, PR #3802: a per-match
 #: 2000-child probe took a 200×200 ``big/*/*`` from 0.011 s to 9.5 s). The
 #: same value as ``_WALK_ENTRIES`` and ``classify._GLOB_WALK_CAP``, the
 #: guard's existing per-call walk bound. Past it the scan cannot rule a
 #: linked worktree out, so it answers ``None`` (unknown) and the caller ranks
 #: the target HIGH — fail closed, where the old per-target child cap stopped
 #: and reported only what it had found.
+#:
+#: Only directories are charged (R2-MINOR-1 / QA Q2, PR #3802): a plain file
+#: can neither be nor hold a linked worktree (that takes a ``.git`` file in
+#: a directory, or a ``worktrees/`` registry), and charging files turned
+#: ``rm -rf logs/`` of 25k log files from LOW into a judge call.
+#: ``_REACH_MAX_LISTED`` still bounds the raw listing: 50× the directory
+#: budget, so only a pathological single directory (a million entries) fails
+#: closed on listing cost alone.
 _REACH_MAX_LEVELS = 64
 _REACH_MAX_ENTRIES = 20_000
+_REACH_MAX_LISTED = 1_000_000
 
 
 def _common_dir(root: str) -> str | None:
@@ -1250,6 +1271,7 @@ def linked_worktrees_reached(paths: Iterable[str], *, resolved: bool = False) ->
     # everything above it was climbed when it was first seen.
     probed: set[str] = set()
     budget = _REACH_MAX_ENTRIES
+    listed = 0
     for raw in paths:
         try:
             if not resolved and os.path.islink(raw) and not raw.endswith("/"):
@@ -1262,10 +1284,18 @@ def linked_worktrees_reached(paths: Iterable[str], *, resolved: bool = False) ->
         deleted.add((st.st_dev, st.st_ino))
         real = os.path.normpath(raw) if resolved else os.path.realpath(raw)
         # The target's own listing answers "is it a work tree?" (a ``.git``
-        # entry) and yields its children: one ``scandir``, no extra stat.
+        # entry) and yields its child directories: one ``scandir``, no extra
+        # stat — ``is_dir(follow_symlinks=False)`` reads d_type. Files are
+        # dropped here and never charged to ``budget`` (R2-MINOR-1).
+        listing: list[os.DirEntry[str]] | None = []
         try:
             with os.scandir(real) as it:
-                listing = list(itertools.islice(it, budget + 1))
+                for entry in it:
+                    listed += 1
+                    if listed > _REACH_MAX_LISTED:
+                        return None
+                    if entry.name == ".git" or entry.is_dir(follow_symlinks=False):
+                        listing.append(entry)
         except OSError:
             listing = None
         if listing is not None:
@@ -1298,8 +1328,6 @@ def linked_worktrees_reached(paths: Iterable[str], *, resolved: bool = False) ->
                 break
             here = parent
         for entry in listing or ():
-            # ``is_dir`` reads the entry's d_type: no syscall, so files cost
-            # only their budget slot.
             if entry.path in probed or not entry.is_dir(follow_symlinks=False):
                 continue
             probed.add(entry.path)
@@ -1417,20 +1445,32 @@ def _hidden_work(path: str) -> list[str]:
     paid only where the judge is asked anyway.
     """
     real = os.path.realpath(path)
+    # ``-z``: paths verbatim, NUL-terminated. Without it git C-quotes a
+    # non-ASCII name (``"\303\251…"``), which never resolved, so that entry
+    # silently dropped out of the brief (R2-NIT-1, PR #3802).
     out = _git(
-        ["status", "--porcelain", "--ignored", "--untracked-files=normal"],
+        ["status", "--porcelain", "-z", "--ignored", "--untracked-files=normal"],
         real,
         timeout=_WORKTREE_STATUS_TIMEOUT_S,
     )
     facts: list[str] = []
-    for line in (out or "").splitlines():
-        if not line.startswith("!! "):
+    records = iter((out or "").split("\0"))
+    for record in records:
+        if len(record) > 3 and record[2] == " " and ("R" in record[:2] or "C" in record[:2]):
+            next(records, None)  # a rename/copy's source path is its own record
+        if not record.startswith("!! "):
             continue
-        entry = line[3:].strip().strip('"').rstrip("/")
+        entry = record[3:].rstrip("/")
         inside = _git_inside(os.path.join(real, entry))
-        if inside is not None:
+        if inside is None:
+            continue
+        if inside.exhausted:
+            # Unknown, not found: the tree stays dirty (fail closed), but the
+            # judge must not be told a repository exists (R2-MAJOR-1).
+            facts.append(f"ignored entry too large to rule out a nested repository: {inside.path}")
+        else:
             facts.append(
-                f"nested repository (ignored, its commits may exist nowhere else): {inside}"
+                f"nested repository (ignored, its commits may exist nowhere else): {inside.path}"
             )
         if len(facts) >= _MAX_DIRTY_SHOWN:
             break

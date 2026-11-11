@@ -486,3 +486,136 @@ def test_creating_command_fence_is_case_and_space_insensitive(close: str) -> Non
     )
     fact = rec.ledger_fact()
     assert len(re.findall(r"<\s*/", fact)) == 1 and fact.endswith("</command>"), fact
+
+
+# --- 6. round-2 remediation (PR #3802): honest briefs, a per-directory reach
+# budget and one lookup deadline per classification
+
+
+def test_exhausted_walk_is_not_reported_as_a_nested_repo(
+    home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-MAJOR-1: a large ignored cache with NO ``.git`` stays dirty (the walk
+    could not rule one out: fail closed) but the brief must not claim a
+    nested repository exists. The walk bound is scaled down (the real one is
+    20k entries, e.g. an ``.expo/cache``) so the fixture stays small."""
+    monkeypatch.setattr(prov, "_WALK_ENTRIES", 50)
+    wt = mobile / ".worktrees" / "keyboard-bound"
+    with (mobile / ".git" / "info" / "exclude").open("a") as fh:
+        fh.write(".expo/\n")
+    cache = wt / ".expo" / "cache"
+    cache.mkdir(parents=True)
+    for i in range(80):
+        (cache / f"c{i}").write_text("")
+    assert prov.worktree_state(str(wt), own=True) == "dirty"
+    phrase = prov.describe_changes(str(wt))
+    assert "nested repository (ignored" not in phrase, phrase
+    assert "too large to rule out a nested repository" in phrase and ".expo" in phrase, phrase
+    v = _rank(home, f"rm -rf {WT}/keyboard-bound", S)
+    assert v.risk is Risk.HIGH
+    assert "its commits may exist nowhere else" not in v.targets[0].reason, v.targets[0].reason
+
+
+def test_non_ascii_ignored_nested_repo_is_named_in_the_brief(home: Path, mobile: Path) -> None:
+    """R2-NIT-1: git C-quotes a non-ASCII porcelain path (``"\\303\\251…"``);
+    the entry must still resolve and be named, not silently drop out."""
+    wt = mobile / ".worktrees" / "keyboard-bound"
+    with (mobile / ".git" / "info" / "exclude").open("a") as fh:
+        fh.write("vendör-clone/\n")
+    nested = wt / "vendör-clone"
+    nested.mkdir()
+    _git("init", "-q", cwd=nested)
+    phrase = prov.describe_changes(str(wt))
+    assert "nested repository" in phrase and "vendör-clone" in phrase, phrase
+
+
+def test_reach_budget_ignores_plain_files(
+    home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-MINOR-1 / QA Q2: files can neither be nor hold a linked worktree,
+    so a flat directory of more files than the budget, literal or globbed,
+    stays LOW. Scaled: budget 100 stands for the real 20k (QA's 25k-file
+    ``flat/logs`` repro is the full-size case)."""
+    monkeypatch.setattr(prov, "_REACH_MAX_ENTRIES", 100)
+    logs = home / "wide" / "flat" / "logs"
+    logs.mkdir(parents=True)
+    for i in range(150):
+        (logs / f"l{i}").write_text("")
+    assert prov.linked_worktrees_reached([str(logs)]) == []
+    for cmd in (f"rm -rf {logs}", f"rm -rf {logs.parent}/*"):
+        v = _rank(home, cmd, S2)
+        assert v.risk is Risk.LOW, (cmd, [t.reason for t in v.targets])
+
+
+def test_reach_budget_wide_glob_of_file_dirs_stays_low(
+    home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA 7a, scaled: ``big/*`` over 20 directories of 20 files each charges 20
+    directories, not 420 entries, against a budget of 100."""
+    monkeypatch.setattr(prov, "_REACH_MAX_ENTRIES", 100)
+    big = home / "wide" / "big"
+    for d in range(20):
+        (big / f"d{d}").mkdir(parents=True)
+        for f in range(20):
+            (big / f"d{d}" / f"f{f}").write_text("")
+    v = _rank(home, f"rm -rf {big}/*", S2)
+    assert v.risk is Risk.LOW, [t.reason for t in v.targets]
+
+
+def test_reach_budget_still_fails_closed_on_directories(
+    home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The directory budget itself still holds: more child directories than it
+    allows (each could be a worktree) is HIGH, literal and globbed. A guard
+    that holds on base too: the fix must not open this side."""
+    monkeypatch.setattr(prov, "_REACH_MAX_ENTRIES", 10)
+    big = home / "wide" / "dirs"
+    for d in range(12):
+        for c in range(2):
+            (big / f"d{d}" / f"c{c}").mkdir(parents=True)
+    for cmd in (f"rm -rf {big}", f"rm -rf {big}/*"):
+        v = _rank(home, cmd, S2)
+        assert v.risk is Risk.HIGH and "too many entries" in v.targets[0].reason, cmd
+
+
+def test_reach_listing_cap_fails_closed(
+    home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The raw listing stays bounded even though files are free of the
+    directory budget: past ``_REACH_MAX_LISTED`` the answer is unknown."""
+    monkeypatch.setattr(prov, "_REACH_MAX_LISTED", 20)
+    logs = home / "wide" / "huge"
+    logs.mkdir(parents=True)
+    for i in range(30):
+        (logs / f"l{i}").write_text("")
+    assert prov.linked_worktrees_reached([str(logs)]) is None
+
+
+def test_reach_lookups_share_one_deadline(
+    home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-MINOR-2: a delete reaching own AND foreign trees runs two lookup
+    rounds; both must draw on ONE deadline, not a fresh budget each."""
+    from local_operator.guardrails import classify
+
+    deadlines: list[float] = []
+    real = classify._bounded_lookups
+
+    def spy(jobs: dict[str, Any], *args: Any) -> dict[str, Any]:
+        deadlines.extend(args)
+        return real(jobs, *args)
+
+    monkeypatch.setattr(classify, "_bounded_lookups", spy)
+    v = _rank(home, f"rm -rf {WT}/*", S)  # five own trees + one nobody records
+    assert v.risk is Risk.HIGH
+    assert len(deadlines) == 2 and deadlines[0] == deadlines[1], deadlines
+
+
+def test_bounded_lookups_past_the_deadline_do_not_wait() -> None:
+    """The second round gets only what is LEFT: a spent deadline waits for nothing."""
+    from local_operator.guardrails import classify
+
+    started = time.monotonic()
+    out = classify._bounded_lookups({"slow": lambda: time.sleep(2)}, started - 1.0)
+    assert out == {}
+    assert time.monotonic() - started < 1.5
