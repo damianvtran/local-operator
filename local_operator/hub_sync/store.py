@@ -294,6 +294,7 @@ def apply_check(
     remote_fp: str | None,
     reason: str = "",
     detail: str = "",
+    reason_subclass: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Fold one check result into the document; returns the item."""
@@ -309,6 +310,7 @@ def apply_check(
         if previous_remote and previous_remote != remote_fp:
             # A new remote text re-arms everything a human/attempt cap had stopped (B4.3).
             item["attempts"], item["auto_retry"], item["next_retry_at"] = 0, True, None
+            item.pop(RETIRED_ORIGIN, None)
         item["remote_fingerprint"] = remote_fp
     if verdict == "unavailable":
         if reason == "no-credential":
@@ -320,8 +322,19 @@ def apply_check(
             # otherwise be dropped from the list with no way to learn why nothing
             # updates (UX round 2, U11). ONE derivation: the UI reads this field and
             # never re-derives "needs the login" from the credential or the tenant.
-            item["error_class"], item["last_error"] = "no-credential", None
-            item["error_subclass"] = None
+            # A plain "no login" keeps no sentence (the class says it all); a
+            # ``rejected`` one (HTTP 401: a credential was sent and refused) keeps
+            # the hub's reason, because "sign in" alone would contradict a person
+            # who IS signed in -- the tooltip has to say what was refused.
+            rejected = reason_subclass == "rejected"
+            # The origin below overwrites the one that may have RETIRED the row:
+            # pin who retired it first, or the next 200 would re-arm an apply's
+            # retirement (agent review round 1, M1).
+            _pin_retirement(item)
+            item["error_class"] = "no-credential"
+            item["last_error"] = scrub(detail) if rejected and detail else None
+            item["error_subclass"] = "rejected" if rejected else None
+            item["error_origin"] = "check"
             item[NO_CREDENTIAL_AT] = _iso(now)
             # It also RETIRES the schedule the class it replaced had armed (agent review
             # round 4, M2): an apply this item could not do is not worth retrying, and a
@@ -332,7 +345,12 @@ def apply_check(
             item["next_retry_at"] = None
         else:
             record_failure(
-                item, reason or "hub-error", detail, now=now, keep_state=reason == "hub-error"
+                item,
+                reason or "hub-error",
+                detail,
+                now=now,
+                keep_state=reason == "hub-error",
+                origin="check",
             )
     elif verdict == "up-to-date":
         # ``applied`` is kept for exactly ONE check cycle ("Updated just now"), so
@@ -361,6 +379,9 @@ def apply_check(
             state="applied" if keep_applied else "up-to-date",
             classification="local-only" if local_only else None,
             error_class=None,
+            # The sub-class belongs to the class it qualified; leaving it made a
+            # healed row read ``None/rejected`` in the links projection.
+            error_subclass=None,
             last_error=None,
             attempts=0,
             next_retry_at=None,
@@ -368,15 +389,158 @@ def apply_check(
             first_seen_available_at=None,
             summary={},
         )
+        item.pop("error_origin", None)
+        item.pop(RETIRED_ORIGIN, None)
         item["baseline"] = baseline
     else:
         item.update(state="available", classification=classification, baseline=baseline)
         item["first_seen_available_at"] = item.get("first_seen_available_at") or _iso(now)
-        # A successful fetch retires the two classes a fetch can leave behind.
-        if item.get("error_class") in ("hub-item-missing", "no-credential"):
-            item["error_class"], item["last_error"] = None, None
+        # A SUCCESSFUL FETCH RETIRES EVERY FAILURE A FETCH RECORDED. It used to
+        # retire only ``hub-item-missing`` / ``no-credential``, so a fetch-time
+        # ``hub-error`` on a both-changed row (radientdev, 2026-11-11: a startup
+        # 401, attempts 11, ``auto_retry`` False) outlived every later 200: the
+        # up-to-date arm above clears errors, but a row that stays ``available``
+        # never reaches it, and status/links kept deriving ``failed`` forever.
+        # The attempt count and the retirement go too, because they counted
+        # FETCHES that now succeed; leaving ``auto_retry`` False would keep the
+        # update itself unreachable without a manual Retry. A failure the APPLY
+        # recorded (merge-refused, provider-error, a write error) is not this
+        # check's to clear: the fetch says nothing about whether the merge works.
+        #
+        # The DISPLAYED error and the RETIREMENT are separate facts. A fetch
+        # failure can overwrite an apply's error (``error_origin`` has one slot),
+        # so "the shown error was a fetch's" does not mean "a fetch retired the
+        # row": apply merge-refused -> startup 401 -> 200 would otherwise put a
+        # needs-a-human row back into unattended auto-apply on every restart
+        # (agent review round 1, M1). The error is cleared either way (the 200
+        # disproves it); attempts/auto_retry are re-armed only when the
+        # retirement was not the apply's (``RETIRED_ORIGIN``).
+        #
+        # An UNSTAMPED retired row (written before ``RETIRED_ORIGIN`` existed)
+        # is attributed first, from its counters, before the stamp is read: with
+        # no stamp it would otherwise always re-arm, and a legacy apply
+        # retirement whose class a later fetch overwrote (the operator's
+        # qa-tester row: ``could not reach the hub:``, attempts 2, auto_retry
+        # False) would go back to unattended auto-apply (agent review round 2,
+        # R2-M1).
+        if fetch_recorded_failure(item):
+            _pin_retirement(item)
+            item.update(error_class=None, error_subclass=None, last_error=None)
+            item.pop("error_origin", None)
+            if item.get(RETIRED_ORIGIN) != "apply":
+                item.update(attempts=0, next_retry_at=None, auto_retry=True)
+                item.pop(RETIRED_ORIGIN, None)
     items[key] = item
     return item
+
+
+#: The sentences a CHECK wrote as a ``hub-error`` before ``error_origin``
+#: existed. Read only to recognise those rows (the operator's radientdev and
+#: qa-tester rows, 2026-11-11), which would otherwise stay latched until a
+#: manual Retry. Every entry is cited to the writer:
+#:
+#: - ``check._failure_reason``, the general fetch-failure writer. Since e944377
+#:   (2026-09-29) its fallback has been ``f"could not reach the hub: {text}"``,
+#:   so a client's generic sentence ("Could not pull the team from the Radient
+#:   Agent Hub") was always stored behind that prefix, never bare -- the bare
+#:   sentence is NOT listed, because no check path ever stored it and an
+#:   apply-time ``LinkError`` text could carry one. f3a2449 (2026-10-28) added
+#:   "the hub refused the request (" and "the hub returned an error (".
+#: - The check's tenant-mismatch arm (``check.py`` team arm, "the hub now reports
+#:   this team under organization {owner}"), which writes ``reason="hub-error"``
+#:   directly rather than through ``_failure_reason`` (agent review round 2,
+#:   R2-m1). A 200 means the mismatch is gone, so its legacy row heals too.
+#: - The check's local reads (``check.py`` agent and team arms, also since
+#:   e944377): "could not read the local row:" / "could not read the local
+#:   team:". Rows stamped today get ``error_origin="check"`` for the same
+#:   writes and heal on a 200, so their legacy twins heal too.
+#:
+#: No apply path writes these prefixes: apply failures say "could not write the
+#: update", "the result was refused", or a merge/provider class.
+_LEGACY_FETCH_SENTENCES = (
+    "the hub refused the request (",
+    "the hub returned an error (",
+    "could not reach the hub:",
+    "the hub now reports this team under organization ",
+    "could not read the local row:",
+    "could not read the local team:",
+)
+
+#: Who RETIRED the row's automatic retry (``auto_retry`` False): ``"apply"`` or
+#: ``"check"``. Kept apart from ``error_origin``, which names whoever wrote the
+#: CURRENT error and is overwritten by every later failure -- see
+#: ``_pin_retirement``. Removed wherever ``auto_retry`` is re-armed.
+RETIRED_ORIGIN = "retired_origin"
+
+#: Item keys already logged as unrecognised legacy rows (one line per row per
+#: process, not one per 15-minute check).
+_UNRECOGNISED_LOGGED: set[str] = set()
+
+
+def fetch_recorded_failure(item: Mapping[str, Any]) -> bool:
+    """Whether the row's error was recorded by a CHECK's fetch (so a 200 heals it)."""
+
+    cls = item.get("error_class")
+    if not cls:
+        return False
+    if cls in ("hub-item-missing", "no-credential"):
+        return True
+    origin = item.get("error_origin")
+    if origin is not None:
+        return origin == "check"
+    if cls != "hub-error":
+        return False
+    if str(item.get("last_error") or "").startswith(_LEGACY_FETCH_SENTENCES):
+        return True
+    # An origin-less ``hub-error`` we cannot attribute stays latched (healing an
+    # apply's failure on a fetch would be worse); say so once so a row stuck this
+    # way is findable in the log rather than silent (agent review round 1, m2).
+    key = item_key(str(item.get("kind") or "?"), str(item.get("local_id") or "?"))
+    if key not in _UNRECOGNISED_LOGGED:
+        _UNRECOGNISED_LOGGED.add(key)
+        logger.info(
+            "hub status row %s has a hub-error with no recorded origin and an "
+            "unrecognised sentence; it stays until a manual Retry or a settled check",
+            key,
+        )
+    return False
+
+
+def _pin_retirement(item: dict[str, Any]) -> None:
+    """Before a new failure overwrites ``error_origin``, record who retired the row.
+
+    Only acts on a retired row with no stamp: a row retired before
+    ``RETIRED_ORIGIN`` existed, or one whose stamp was never written. The current
+    error alone is NOT enough evidence: a later fetch failure can overwrite an
+    apply's class. The counters are. Only two writers ever set ``auto_retry``
+    False -- ``NO_AUTO_RETRY`` classes (apply-only) and the ``MAX_ATTEMPTS`` cap
+    -- and every ``attempts`` reset re-arms it, so a retired row below the cap
+    can only have been retired by the apply (agent review round 2, R2-M1). The
+    check is credited only for a fetch-recorded error AT the cap (the operator's
+    radientdev row: legacy 401 sentence, attempts 11). Anything else goes to the
+    apply, the conservative side: it keeps a needs-a-human row out of unattended
+    auto-apply; a Retry or a new remote fingerprint still re-arms it.
+    """
+
+    if item.get("auto_retry", True) or item.get(RETIRED_ORIGIN):
+        return
+    attempts = int(item.get("attempts") or 0)
+    fetch_at_cap = fetch_recorded_failure(item) and attempts >= MAX_ATTEMPTS
+    item[RETIRED_ORIGIN] = "check" if fetch_at_cap else "apply"
+
+
+def _retire(item: dict[str, Any], origin: str) -> None:
+    """Stop the automatic retry and stamp who stopped it.
+
+    An apply's retirement always wins the stamp (a merge that needs a human
+    outranks a fetch that merely failed); a check's retirement only fills an
+    empty stamp, so a fetch failure on an already apply-retired row cannot
+    launder it into a re-armable one.
+    """
+
+    item["auto_retry"] = False
+    if origin == "apply" or not item.get(RETIRED_ORIGIN):
+        item[RETIRED_ORIGIN] = origin
 
 
 def settle_applied(
@@ -414,6 +578,9 @@ def settle_applied(
         first_seen_available_at=None,
     )
     item.pop("updating_since", None)
+    # The write settles both the error and the retirement it caused.
+    item.pop("error_origin", None)
+    item.pop(RETIRED_ORIGIN, None)
 
 
 def settle_unchanged(item: dict[str, Any], *, remote_differs: bool = False) -> None:
@@ -451,6 +618,9 @@ def settle_unchanged(item: dict[str, Any], *, remote_differs: bool = False) -> N
     # independent inbound interval advances and the item is not re-integrated.
     item["last_pulled_at"] = _iso(datetime.now(timezone.utc))
     item.pop("updating_since", None)
+    # A completed pass settles the error and the retirement alike (see settle_applied).
+    item.pop("error_origin", None)
+    item.pop(RETIRED_ORIGIN, None)
 
 
 def mark_updating(item: dict[str, Any], now: datetime | None = None) -> None:
@@ -502,13 +672,22 @@ def record_failure(
     keep_state: bool = False,
     summary: Mapping[str, int] | None = None,
     rng: Callable[[float, float], float] = random.uniform,
+    origin: str = "apply",
 ) -> None:
-    """Set ``error_class``/``last_error``, the state and the retry schedule per B4.3."""
+    """Set ``error_class``/``last_error``, the state and the retry schedule per B4.3.
+
+    ``origin`` is WHO recorded it: ``"check"`` (a failed fetch, which the next
+    successful fetch retires -- ``fetch_recorded_failure``) or ``"apply"`` (a
+    merge or write, which only a later apply, a manual Retry or a settled check
+    clears).
+    """
 
     now = now or datetime.now(timezone.utc)
     cls, _, sub = error_class.partition("/")
     item.pop("updating_since", None)
+    _pin_retirement(item)  # before ``error_origin`` below is overwritten (M1)
     item["error_class"], item["error_subclass"] = cls, sub or None
+    item["error_origin"] = origin
     item["last_error"] = scrub(message)
     if cls == "no-credential":
         # A merge/apply refusal lands here without touching ``last_checked_at``
@@ -529,7 +708,8 @@ def record_failure(
             item["state"] = "available"
     delay: float | None
     if cls in NO_AUTO_RETRY:
-        item["auto_retry"], delay = False, None
+        _retire(item, origin)
+        delay = None
     elif cls == "prompt-too-long":
         # A cheap SCHEDULED eligibility retry, never a permanent retirement: the
         # next due time is recorded, but the request itself is only re-sent when
@@ -551,7 +731,8 @@ def record_failure(
         and cls not in UNCOUNTED
         and cls != "prompt-too-long"
     ):
-        item["auto_retry"], delay = False, None
+        _retire(item, origin)
+        delay = None
     item["next_retry_at"] = _iso(now + timedelta(seconds=delay)) if delay is not None else None
 
 
@@ -567,6 +748,9 @@ def clear_failure(item: dict[str, Any]) -> None:
     """
 
     item.update(error_class=None, error_subclass=None, last_error=None, next_retry_at=None)
+    # ``RETIRED_ORIGIN`` is NOT popped here: it describes ``auto_retry``, which
+    # this does not touch (``clear_retry`` re-arms it and drops the stamp).
+    item.pop("error_origin", None)
     if item.get("state") == "failed":
         item["state"] = "available"
 
@@ -575,6 +759,7 @@ def clear_retry(item: dict[str, Any]) -> None:
     """Manual Retry: user intent outranks the schedule (B4.3)."""
 
     item.update(attempts=0, next_retry_at=None, auto_retry=True)
+    item.pop(RETIRED_ORIGIN, None)
 
 
 def prompt_too_long_eligible(item: Mapping[str, Any], current_fingerprint: str) -> bool:
