@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "c5276fadd76ad7eaf25284478b72bbe910b159f6c58cf33b5e28eec98b06031d",
+  "history_sha256": "8c9c14d0aa7d0998f7bdcdf9c088e8fd2aeac8f364c60513b3be643fdb99f72e",
   "entries": [
     {
       "locale": "es",
@@ -129,6 +129,27 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'y volver a completa no los recupera' checked for accuracy, glossary (choice label 'completa' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). No blocker/major. F1 minor accuracy: label 'Reanudación' dropped 'replay' -> 'Reproducción al reanudar' (precedent cli.global_help.resume 'reproduciendo'). F2 minor idiom: help 'Tarjeta es mucho más pequeña' lacked the article -> 'La tarjeta es…'. F3 minor idiom: card.description 'la cola reciente' (cola reads as queue) and 'turnos anteriores no literales' (reads as non-literal/figurative) -> 'las entradas recientes; sin turnos anteriores literales'. compactación/sesión/operador/turno/tarjeta match glossary and shipped es. No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "206f2b124405f689f1f953755f384c8c3ab0e00036f079afa12006d3b42024e4",
+      "translator": {
+        "agent": "coder agent (radientdev team subagent, screening-pref implementer)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08"
+      },
+      "auditor": {
+        "agent": "verifier",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Delta review (NOT a full re-audit of the namespace) of the two new keys team_bridge_screening_model.label/.help added by the screening-preference change, en wire.settings sha 206f2b12. Audit by the independent verifier specialist (fallback disclosed: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol -> deepseek/deepseek-flash); verdict: 0 blockers, 4 major, 7 minor across the seven locales. This locale PASSED with no required change (options offered by the auditor were not required and were not taken). Source copy written by the coder agent, itself served on deepseek/deepseek-flash (same fallback chain). read_route_verified false: the audit read the catalogue, not a live surface."
     }
   ]
 }
