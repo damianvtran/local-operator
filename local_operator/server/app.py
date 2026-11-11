@@ -36,6 +36,7 @@ from local_operator.logger import (
 )
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import early_paint_hold
+from local_operator.server import loop_watchdog as serve_loop_watchdog
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
@@ -545,6 +546,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 reload_task.add_done_callback(serve_reload.observe_reload)
                 app.state.serve_reload = reload_task
 
+    # THE EVENT-LOOP WATCHDOG (serve wedges of pids 11196 and 9633, 2026-11-11):
+    # a thread that dumps every thread's traceback when the loop stops beating
+    # and, past a hard bound, re-execs this daemon in place (``loop_watchdog``
+    # carries the thresholds' measurement and the drain invariants). Only on an
+    # ANNOUNCED daemon: an unannounced boot (tests, ad-hoc apps) has no record a
+    # client relies on and no address a re-exec could re-serve.
+    loop_beat: asyncio.Task[None] | None = None
+    loop_guard: serve_loop_watchdog.LoopWatchdog | None = None
+    if announced is not None:
+        try:
+            loop_guard, loop_beat = serve_loop_watchdog.install(app, config_dir)
+        except Exception:  # noqa: BLE001 — a diagnostic must never fail startup
+            logger.warning("serve loop watchdog could not start", exc_info=True)
+
     # THE HUB UPDATE RUNNER: one asyncio task per daemon, started AFTER the serve
     # record and the reload task so readiness is never delayed by it (its first
     # tick waits ~45 s; see ``hub_sync.runner``). It runs for a bare-uvicorn daemon
@@ -694,6 +709,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # on the way out with a handover that the shutdown then makes. `stop`
         # ends a poll parked in its notice wait; the cancel covers one parked in
         # its check sleep, where the event is not what it awaits.
+        # The loop watchdog stops FIRST: a teardown can legitimately hold the
+        # loop for longer than the stall bound, and a re-exec mid-teardown would
+        # resurrect a daemon its operator just stopped.
+        if loop_guard is not None:
+            loop_guard.stop()
+        if loop_beat is not None:
+            loop_beat.cancel()
         if retire_stop is not None:
             retire_stop.set()
         if reload_stop is not None:
