@@ -609,6 +609,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — a resume failure must never fail startup
         logger.warning("settings intents could not be resumed", exc_info=True)
 
+    # ONE HUB CONNECTION POOL FOR THE SERVER LOOP. Every desktop Team Bridge
+    # read used to open its own TLS connection to the hub (41-124 ms each,
+    # bridge-instant-load); binding a pool here lets them reuse sockets. The
+    # lifespan OWNS it — closed in the ``finally`` below — because only an owned
+    # loop may hold long-lived sockets (``team_bridge/http_pool.py``). Bound
+    # last before ``yield`` so boot work above keeps its per-request shape.
+    from local_operator.team_bridge.http_pool import bind_hub_pool, unbind_hub_pool
+
+    bind_hub_pool()
     yield
     try:
         # Stop the settings-intent workers before the session pool closes under
@@ -674,6 +683,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.env_config = None
         app.state.scheduler_service = None
     finally:
+        # Close the hub pool even when the teardown above raised: a socket left
+        # open past the loop's exit can never be closed. Never raises.
+        try:
+            await unbind_hub_pool()
+        except Exception:  # noqa: BLE001 — teardown of a socket pool must never be the failure
+            logger.debug("hub http pool close failed at shutdown", exc_info=True)
         # The record outlives nothing: it is removed here, LAST, and under
         # `finally:` so that no exit path can leave a file behind claiming a
         # live daemon at a port nothing listens on. The heartbeat keeps running

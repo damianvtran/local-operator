@@ -152,6 +152,22 @@ class DummyOperator:
 
 
 @pytest.fixture(autouse=True)
+def _fresh_connector_state_cache():
+    """Start and end every server test with an empty connector-state cache.
+
+    The status route reads the connector state through a per-process 5 s
+    cache (``install.cached_connector_state``); a test that patches
+    ``connector_state`` must not be answered by a previous test's entry.
+    """
+
+    from local_operator.team_bridge.connector.install import invalidate_connector_state_cache
+
+    invalidate_connector_state_cache()
+    yield
+    invalidate_connector_state_cache()
+
+
+@pytest.fixture(autouse=True)
 def _no_live_api_key_check(monkeypatch):
     """Keep ``PUT /v1/auth/providers/{id}/key`` off the network in unit tests.
 
