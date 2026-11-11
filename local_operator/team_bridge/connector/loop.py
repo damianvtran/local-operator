@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -149,6 +150,8 @@ _RETRY_ALONE_HOLD_CODES = frozenset(
         "model_refused",
         "reply_truncated",
         "parse_failed",
+        # A blank reply on every hop may be the body's doing too (2026-11-09).
+        "empty_reply",
         "bounce_without_category",
         # B4b: a converted work-scope bounce is the message's own doing too.
         "work_scope_hold",
@@ -257,6 +260,24 @@ _DIAGNOSTIC_FAILURE_CODES = frozenset(
 )
 
 
+#: A store refusal's ``code`` is a closed, machine-readable tag (snake_case)
+#: by contract; only that shape may ride a log line. Anything else could
+#: carry peer content, so it is dropped rather than written.
+_STORE_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def _store_code_suffix(failure: BaseException) -> str:
+    """`` store_code=<code>`` for a store refusal with a safe code, else ``"``."""
+    from local_operator.team_bridge.store import StoreRefused
+
+    if not isinstance(failure, StoreRefused):
+        return ""
+    code = getattr(failure, "code", None)
+    if isinstance(code, str) and _STORE_CODE_PATTERN.fullmatch(code):
+        return f" store_code={code}"
+    return ""
+
+
 def _log_delivery_failure(stage: str, failure: Exception) -> None:
     """Content-free diagnostic; the original exception still drives backoff."""
     code = getattr(failure, "code", None)
@@ -265,7 +286,8 @@ def _log_delivery_failure(stage: str, failure: Exception) -> None:
         if isinstance(code, str) and code in _DIAGNOSTIC_FAILURE_CODES
         else "unexpected_failure"
     )
-    logger.warning("bridge connector failure: stage=%s code=%s", stage, safe_code)
+    suffix = _store_code_suffix(failure) if safe_code == "unexpected_failure" else ""
+    logger.warning("bridge connector failure: stage=%s code=%s%s", stage, safe_code, suffix)
 
 
 def _iteration_failure_code(failure: BaseException) -> str:
@@ -1113,6 +1135,18 @@ async def run_forever(
             raise
         except Exception:  # noqa: BLE001
             logger.info("bridge connector: long-hold alert skipped code=hold_alert_failed")
+        # Retire the per-message review-hold inbox rows #3714 wrote, once per
+        # process per endpoint, so an inbox flooded before the upgrade clears
+        # without waiting for a new hold (operator report 2026-11-10). Here, not
+        # in the iteration, for the same reason as the alert: it needs no hub.
+        try:
+            from local_operator.team_bridge import hold_release
+
+            await asyncio.to_thread(hold_release.retire_review_notices_once, owner, config_dir)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — chrome; never stops the receiver
+            logger.info("bridge connector: review notice retire skipped code=failed")
         started = _time.monotonic()
         try:
             access = await access_provider()
@@ -1167,7 +1201,13 @@ async def run_forever(
                     budget=_failure_delay(failure, OWNER_RECHECK_S),
                 )
                 continue
-            logger.warning("bridge connector failure: stage=iteration code=%s", code)
+            # A store refusal outside the closed set names only its class
+            # above; its closed-shape code rides as ``store_code=`` so the
+            # refusal is diagnosable without ever logging the message. A
+            # code already in the closed set is the classification itself;
+            # repeating it as ``store_code=`` would only restate the line.
+            suffix = "" if code in _DIAGNOSTIC_FAILURE_CODES else _store_code_suffix(failure)
+            logger.warning("bridge connector failure: stage=iteration code=%s%s", code, suffix)
             await _pause(stop, _failure_delay(failure, backoff))
             backoff = min(backoff * 2.0, BACKOFF_MAX_S)
     return None

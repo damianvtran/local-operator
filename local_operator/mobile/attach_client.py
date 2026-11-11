@@ -278,6 +278,42 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     owner_alive = True
 
 
+class OwnerWelcomeTimeout(ConnectionError):
+    """The owner ACCEPTED the dial and did not send its welcome in time.
+
+    WHY THIS IS TYPED (the Aida incident, 2026-11-09): a busy owner — a long
+    session mid-turn with a backlog of peer wakes — answered a desktop model pick
+    with ``503 runtime_unreachable`` ("Session owner is unavailable. Reconnect
+    and reconcile…") while it was live and a hand retry switched it. A bind
+    whose welcome read expired on THIS client's own timer surfaced as a bare
+    ``ConnectionError``, and the desktop control ladder
+    (``server/routes/desktop_sessions.py::errors``) maps a bare one to
+    unreachable. Only the ``attach_existing(control_budget=...)`` branch
+    converted a welcome expiry into the busy disposition, and only when ITS
+    outer deadline fired first; every other bind path (``_ensure_bound`` /
+    ``bind_runtime``, recovery, ``attach_existing`` without a control budget)
+    waits on this timer and so reported a live owner as gone.
+
+    WHY IT CANNOT MISLABEL A DEAD OWNER: this is raised only after
+    ``open_connection`` to the record's port SUCCEEDED and the auth frame was
+    written, i.e. a process holds that listening socket. A dead owner's port
+    refuses the connect (``owner socket unreachable``, raised above), and an
+    owner that closes the socket makes ``readline`` return ``b""`` (a different
+    refusal below); both stay plain ``ConnectionError`` and keep
+    ``runtime_unreachable``. Nothing has been sent to the session yet — the
+    welcome precedes every request frame — so resending is safe.
+
+    ``ConnectionError`` ONLY, deliberately not ``TimeoutError`` like
+    :class:`OwnerAckTimeout`: every caller of ``connect`` already catches
+    ``ConnectionError`` and none of their control flow changes; the class
+    exists solely to carry ``owner_alive`` to the ladder. The message is the
+    historical one, which the TUI's resume retry and its tests match.
+    """
+
+    #: Same disposition and duck-checked name as :class:`OwnerAckTimeout`.
+    owner_alive = True
+
+
 class _RefitReport(NamedTuple):
     """What the wire refit did to ONE image, for the surface that must say so.
 
@@ -1310,7 +1346,9 @@ class AttachClient:
         try:
             first = await asyncio.wait_for(reader.readline(), timeout=ACK_TIMEOUT_S)
         except TimeoutError as exc:
-            raise ConnectionError("owner did not send its state") from exc
+            # Typed so a live-but-busy owner is retryable, not "unavailable";
+            # see ``OwnerWelcomeTimeout`` for why that cannot mislabel a dead one.
+            raise OwnerWelcomeTimeout("owner did not send its state") from exc
         except ValueError as exc:
             # The same overrun the pump handles, on the WELCOME frame — the one
             # read that happens before the pump exists. Named rather than left

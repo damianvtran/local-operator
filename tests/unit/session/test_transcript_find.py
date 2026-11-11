@@ -338,7 +338,14 @@ async def test_find_view_ready_then_resident_reuse(tmp_path, monkeypatch):
         tmp_path,
         [user("u1", 1.0, "deploy the target"), assistant("a1", 1.1, "deploying now")],
     )
-    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    # wait_s=5, not the default 0.2 s (CI job 129582824094: ``'building' ==
+    # 'ready'``): with the default, ``ready`` also required the cold build's
+    # worker-thread ``refresh_index`` to land inside 200 ms of wall time, and on a
+    # loaded runner the first-paint wager answers ``building`` by design. What
+    # this test pins is that the cold answer is the ready index's hits and that
+    # the warm path below reuses it resident -- not host speed. Same convention
+    # as the cold-build test further down (``wait_s=5``).
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=5)
     assert view["state"] == "ready"
     assert view["partial"] is False
     assert [h["id"] for h in view["hits"]] == ["u1", "a1"]

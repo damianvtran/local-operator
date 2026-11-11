@@ -211,10 +211,8 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
     import subprocess
     import sys
 
-    from local_operator import profile_approval as P
+    from local_operator import profile_proposals as PP
     from local_operator.harness.types import CustomMessage
-    from local_operator.server.utils.desktop_approvals import approval_rows
-    from tests.unit.session.test_account_profile_consent import _approve_queued
 
     session = _session(stores)
     context = _context(session, stores)
@@ -228,15 +226,13 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
             None,
             context,
         )
+        # An unrequested (wake-run) edit is an Agents proposal, accepted here
+        # the way the desktop Agents route accepts it (no mesh signature).
         assert queued.details is not None
-        assert queued.details["status"] == "queued"
-        rows = approval_rows(stores["account"].config_dir)
-        from local_operator.network import approvals as A
-
-        assert queued.details is not None
-        record = A._load_raw(queued.details["approval_id"], stores["account"].config_dir)
-        _approve_queued(stores["account"].config_dir, record)
-        signed = P.apply(record["approval_id"], P.expected(record), stores["account"].config_dir)
+        assert queued.details["status"] == "proposed"
+        root = stores["account"].config_dir
+        rows = [PP.summary(row) for row in PP.list_proposals(root)]
+        signed = PP.apply(root, queued.details["proposal_id"], actor="desktop")
         _start_run(
             session, Message.user("Update reviewer instructions to public fixture guidance.")
         )
@@ -289,11 +285,9 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
                     "-p no:cacheprovider tests/unit/session/test_profile_actions.py "
                     "-k export_golden_profile_wires"
                 ),
-                "assurance": (
-                    "synthetic ES256 signatures; test-only presence stand-in; " "no OS signing"
-                ),
                 "list_row_proof": (
-                    "actual approval_rows(root), function serialization only; " "not HTTP"
+                    "actual profile_proposals.list_proposals(root) summaries, "
+                    "function serialization only; not HTTP"
                 ),
             },
             "saved_agent_tool_result": agent.model_dump(mode="json"),
@@ -301,8 +295,8 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
             "queued_tool_result": queued.model_dump(mode="json"),
             "readonly_agent_tool_result": read_agent.model_dump(mode="json"),
             "readonly_team_tool_result": read_team.model_dump(mode="json"),
-            "approval_rows": rows,
-            "signed_applied_receipt": signed,
+            "profile_proposal_rows": rows,
+            "accepted_proposal_receipt": signed,
         }
     finally:
         await session.dispose()
@@ -443,7 +437,8 @@ async def test_actual_queued_receipt_has_one_canonical_diff(stores):
             _context(session, stores),
         )
         assert result.details is not None
-        assert result.details["status"] == "queued"
+        # Unrequested (wake-run) edits are filed as Agents proposals now.
+        assert result.details["status"] == "proposed"
         card = ToolCard("queued-diff", "agent", {"op": "update", "name": "reviewer"})
         card.mark_done(
             "\n".join(item.text for item in result.content if isinstance(item, TextContent)),
@@ -452,6 +447,7 @@ async def test_actual_queued_receipt_has_one_canonical_diff(stores):
         card._expanded = True
         body = card._build_content(110).plain
         assert body.count("+Demand tests.") == 1
-        assert "Queued" in body and "instructions: +1/-1 lines" in body
+        # The receipt line now uses the approval card's own summary vocabulary.
+        assert "Proposed" in body and "instructions: +1 −1 lines" in body
     finally:
         await session.dispose()

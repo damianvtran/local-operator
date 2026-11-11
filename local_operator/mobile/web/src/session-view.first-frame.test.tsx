@@ -149,6 +149,31 @@ describe("the relay's first frame reserves the settled layout", () => {
 		expect(live.getAttribute("dir")).toBe(beforeDir);
 	});
 
+	it("draws skeleton rows in the transcript box, above the sentence that names the wait", () => {
+		/* A column of one dim sentence reads as "did it break?". The rows are
+		   decorative (aria-hidden) and live INSIDE the same `min-h-0 flex-1` box, so
+		   nothing below the header moves when the first frame lands. */
+		const { container } = render(<SessionScreen sessionId="s1" />);
+		const sketch = container.querySelector("[data-transcript-skeleton]") as HTMLElement;
+		expect(sketch).not.toBeNull();
+		expect(sketch.getAttribute("aria-hidden")).toBe("true");
+		const box = sketch.closest("div.min-h-0.flex-1.flex-col.px-3") as HTMLElement;
+		expect(box).not.toBeNull();
+		expect(box.querySelector("p")?.textContent).toBe("waiting for projection…");
+	});
+
+	it("keeps the skeleton for a first frame with no rows but a turn running", () => {
+		slot = { projection: { ...projection(), streaming: true }, connected: true };
+		const { container } = render(<SessionScreen sessionId="s1" />);
+		expect(container.querySelector("[data-transcript-skeleton]")).not.toBeNull();
+	});
+
+	it("shows the empty-session placeholder, not a skeleton, when nothing is running", () => {
+		slot = { projection: projection(), connected: true };
+		const { container } = render(<SessionScreen sessionId="s1" />);
+		expect(container.querySelector("[data-transcript-skeleton]")).toBeNull();
+	});
+
 	it("reports a dropped link in its own sentence, with no ladder rung stacked on it", () => {
 		// The reserved frame's sentence IS the link report, and with no data on
 		// screen a "last synced view" strip would be noise about noise — the rule

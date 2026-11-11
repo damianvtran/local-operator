@@ -181,6 +181,22 @@ class TestPrompt:
         assert "1. Wait (recommended) — until Monday" in prompt
         assert "2. Ship it — after the freeze" in prompt
 
+    def test_a_multi_select_set_marks_every_recommended_row(self) -> None:
+        prompt = build_clearance_prompt(
+            [
+                _question(
+                    options=[("A", "one"), ("B", "two"), ("C", "three")],
+                    multi=True,
+                    recommended=[2, 0],
+                )
+            ]
+        )
+        # Hoisted in the listed order: C, A lead; B is not recommended.
+        assert "1. C (recommended) — three" in prompt
+        assert "2. A (recommended) — one" in prompt
+        assert "3. B — two" in prompt
+        assert prompt.count("(recommended)") == 2
+
     def test_multi_select_marker(self) -> None:
         assert "[multi-select]" in build_clearance_prompt([_question(multi=True)])
         assert "[multi-select]" not in build_clearance_prompt([_question(multi=False)])

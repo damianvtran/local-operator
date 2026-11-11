@@ -7,8 +7,14 @@ description: "Guardrail rules: block, warn or review a tool call before it runs,
 
 Two layers run at ONE checkpoint — `guardrails/check.py::check_tool_call`, from
 `harness/loop.py` after the approval gate and before the tool executes. A refusal is
-the call's own result and starts with `BLOCKED by guardrail`; never reword or retry
-a refused call — report it.
+the call's own result and starts with `BLOCKED by guardrail`. It is final for THAT
+action: the same effect on the same targets, by any spelling, tool or path — never
+reword, retry or reroute it; report it. It does not taint later work: a NEW artifact
+from your own fresh work, written to your own worktree's mandated location (a repo's
+`i18n/receipts/`, say), is a different action and needs no approval; a reader
+child's `evidence` tool (create-only, content-only) is the sanctioned path for it,
+so using it is fresh work, not a reroute. Copying or importing the blocked material
+there by another route is still a reroute.
 
 **Order, first refusal wins:** (1) the **built-in dangerous-delete** (bash only):
 CRITICAL is refused with no model call, HIGH goes to a forked judge, LOW runs with
@@ -63,7 +69,15 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   untracked change, no ignored entry beyond regenerable output (`node_modules`,
   `.venv`, `__pycache__`, `build`, `dist` …) and no repository nested inside
   that output, and HEAD on a branch or in some
-  ref. Anything else takes the ordinary ranking. Prefer this to
+  ref — AND it is idle: no running session other than yours owns it (created
+  it, or has its cwd inside) and its branch has no open PR (GitHub) or MR (GitLab) on the
+  repo's remote. An open PR or MR is refused outright, at any state and even with an earlier
+  answered ask: finish or close it first. A running owner, or a PR state
+  nobody could read (no GitHub or GitLab remote, `gh`/`glab` failed or timed out), goes to the
+  judge with those facts. An interrupted delete can leave a half-removed tree
+  (tracked files gone, registration still present), so treat a failed
+  removal as damage to report, not a step to retry. Anything else takes the
+  ordinary ranking. Prefer this to
   `rm -rf .worktrees/<name>`. A worktree this session created is its own:
   through the ledger it ranks LOW even dirty or with `--force`, so commit or
   push what you want to keep before removing your own tree.

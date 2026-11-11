@@ -730,10 +730,12 @@ class AskPickerScreen(Container):
         self._answers: dict[str, list[str]] = {}
         self._states = [_QuestionState() for _ in self._questions]
         for state, question in zip(self._states, self._questions):
-            # A recommendation is preselected as well as marked: the whole point
-            # of recommending is that Enter alone should take it.
-            if question.recommended is not None:
-                state.selected = question.recommended
+            # The CURSOR starts on the first recommended row (row 0 after the
+            # hoist). On a single-select that makes Enter alone take it; on a
+            # multi-select NOTHING is ticked — the ticks are the answer, and the
+            # user builds them — so a whole recommended set is badged, not taken.
+            if question.recommended_rows:
+                state.selected = question.recommended_rows[0]
             elif question.secret:
                 # The only row. Parking the cursor anywhere else would be a
                 # destination that does not exist.
@@ -1671,7 +1673,17 @@ class AskPickerScreen(Container):
         clips it and marks the cut, which is the card's existing discipline and
         the honest answer on a terminal with nothing left to give.
         """
-        lines = wrap_cells(self.question.question, width) or [""]
+        # A newline is a ROW BREAK here, never a character (PR #3693 design D1).
+        # ``wrap_cells`` splits on " " only, so "a\nb" was one word: a host- or
+        # model-authored multi-line question counted 4 rows the terminal painted
+        # as 7, which squeezed the options and clipped the question's tail.
+        # Wrapped per paragraph here, not in the shared wrapper, because its 38
+        # callers (and its oracle tests) pin the space-only contract.
+        lines = [
+            row
+            for paragraph in self.question.question.split("\n")
+            for row in wrap_cells(paragraph, width)
+        ] or [""]
         if reveal:
             return lines
         cap = self._question_bound(width, len(lines))
@@ -2152,7 +2164,7 @@ class AskPickerScreen(Container):
         for index in rows:
             line_start_by_row.append(len(line_list))
             line_list.append((index, "label"))
-            if self.question.recommended == index:
+            if index in self.question.recommended_rows:
                 line_list.append((index, "badge"))
             row_cap = self._cap_for_row(index, revealed, selected, cap)
             desc = self._description_lines(index, width)
@@ -2990,7 +3002,7 @@ class AskPickerScreen(Container):
             # as it is for prose: at the budget-1 band the badge line is clipped
             # and :meth:`_row_text` rides the tag on the label instead, so the
             # badge is drawn once either way.
-            draws_badge = self.question.recommended == index
+            draws_badge = index in self.question.recommended_rows
             if granted or draws_badge:
                 # `fg` for the TAG and `muted` for the separator and the prose.
                 # Passed `muted` for both, the badge was the identical style to
@@ -3378,7 +3390,7 @@ class AskPickerScreen(Container):
             row.append(FIELD_CARET, style=accent if taken else ground + dim)
         else:
             row.append(truncate_cells(text, budget), style=accent if taken else ground + fg)
-        if self.question.recommended == index and not layout.row_draws_badge_line(index):
+        if index in self.question.recommended_rows and not layout.row_draws_badge_line(index):
             # No SECOND line to carry the tag, so it rides here — but only
             # when it fits AFTER the label, rather than out of the label's own
             # budget. Charged to the budget it made the promoted option the
@@ -3387,7 +3399,7 @@ class AskPickerScreen(Container):
             # of the floor anyway, pushing the card two cells past the terminal
             # (D2/D6). A badge that truncates what it promotes, or that
             # overflows the screen to fit, is worth less than no badge: the
-            # recommendation is PRESELECTED too, so the cursor is already there.
+            # cursor already starts on the first recommended row.
             #
             # This is the budget-1 degradation, and it is keyed on the FRAME
             # rather than on the question. The old guard asked
@@ -3519,7 +3531,7 @@ class AskPickerScreen(Container):
         # is no empty prose line left to invent.
         kept = wrapped[:granted]
         rows: list[Text] = []
-        if self.question.recommended == index:
+        if index in self.question.recommended_rows:
             # The badge's OWN line, ahead of the prose — the order
             # :meth:`_build_line_list` charges it in, because under viewport
             # clipping line order is priority (see there). The ink is unchanged

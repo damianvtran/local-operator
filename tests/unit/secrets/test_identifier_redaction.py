@@ -795,6 +795,10 @@ async def test_a_spill_read_back_re_marks_identifiers(tmp_path) -> None:
     on_disk = spill_store._content_path(digest).read_text(encoding="utf-8")
     sidecar = json.loads(spill_store._meta_path(digest).read_text(encoding="utf-8"))
     assert SLUG in on_disk
+    # PR #3756 (QA Q6) shape-scrubs a project's free text before the row is
+    # saved, so the credential in the description never reaches the store or
+    # the spill built from ``show``: only its mask does.
+    assert HEX_32 not in on_disk and "token: [redacted]" in on_disk
     assert IDENTIFIER_SPAN_OPEN not in on_disk and IDENTIFIER_SPAN_CLOSE not in on_disk
     assert store._span_token not in on_disk and store._span_token not in str(sidecar)
     assert _has_private_use(on_disk) is False
@@ -805,7 +809,10 @@ async def test_a_spill_read_back_re_marks_identifiers(tmp_path) -> None:
     scrubbed, report = store.redact_with_report(read.text)
     assert SLUG in scrubbed
     assert HEX_32 not in scrubbed
-    assert report.labels == ("credential-assignment",)
+    # Nothing is left to mask on read-back: the value was masked at persistence
+    # (see above), so the read-back pass reports no hit. Before #3756 this
+    # pinned ("credential-assignment",) because the raw value was persisted.
+    assert report.labels == ()
     assert report.reached_model is False
     _assert_no_marker_text(scrubbed)
     assert "\ufffd" not in scrubbed

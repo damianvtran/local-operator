@@ -44,5 +44,8 @@
   "tui.app.providers.stale_all": "устаревший список: все провайдеры",
   "tui.app.providers.stale_named": "устаревший список: {names}",
   "tui.app.providers.stale_all_error": "устаревший список: все провайдеры — {error}",
-  "tui.app.providers.no_live_list": "нет актуального списка: {names}"
+  "tui.app.providers.no_live_list": "нет актуального списка: {names}",
+  "tui.app.compaction.idle_receipt": "контекст сжат в простое · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "контекст сжат в простое",
+  "tui.app.compaction.idle_skipped": "сжатие в простое пропущено · ничего не изменилось"
 }

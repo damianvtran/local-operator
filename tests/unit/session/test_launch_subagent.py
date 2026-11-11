@@ -961,16 +961,30 @@ class FakeMcpManager:
     session, so the fake carries exactly the lookup surface both consume.
     """
 
-    def __init__(self, tools: dict[str, list[str]]) -> None:
+    def __init__(self, tools: dict[str, list[str]], *, oversized: bool = False) -> None:
+        """``oversized`` pads every schema past ``MAX_INLINE_TOOL_SCHEMA_CHARS``.
+
+        A per-tool read inlines and DEFERS an ordinary schema; only an over-cap
+        one is published into the reading session's tools array. Tests about
+        that publication path (which session it lands on, rebinding around a
+        rebuilt base, reconnect convergence) set it.
+        """
+        from local_operator.mcp.resources import MAX_INLINE_TOOL_SCHEMA_CHARS
+
         async def never_called(tool_call_id, args, signal, on_update, context):
             raise AssertionError("these tests never dispatch an MCP call")
+
+        self._oversized = oversized
+        schema: dict[str, object] = {"type": "object", "properties": {}}
+        if oversized:
+            schema["description"] = "x" * (MAX_INLINE_TOOL_SCHEMA_CHARS + 1)
 
         self._by_server = {
             server: [
                 AgentTool(
                     name=f"mcp__{server}_{raw}",
                     description=f"{raw} on {server}",
-                    parameters={"type": "object", "properties": {}},
+                    parameters=dict(schema),
                     execute=never_called,
                 )
                 for raw in raws
@@ -1009,7 +1023,8 @@ class FakeMcpManager:
             {
                 s: [self._meta[t.name]["mcp_tool_name"] for t in ts]
                 for s, ts in self._by_server.items()
-            }
+            },
+            oversized=self._oversized,
         )
 
     def get_tools(self) -> list[AgentTool]:
@@ -1153,7 +1168,7 @@ async def test_child_activation_keeps_the_rebuilt_effort_tier_tools(tmp_path, mo
     from local_operator.config_watch import ConfigWatcher
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    manager = FakeMcpManager({"linear": ["list_teams"]})
+    manager = FakeMcpManager({"linear": ["list_teams"]}, oversized=True)
     parent = make_session(tmp_path, OneShotStream())
     attach_manager(parent, manager)
 
@@ -1218,14 +1233,19 @@ async def test_child_activation_lands_on_the_child_not_the_parent(tmp_path, monk
     rendered = resolve(child, "mcp://linear/list_issues")
 
     assert rendered is not None and "mcp__linear_list_issues" in rendered
-    assert [t.name for t in child._tools if t.name.startswith("mcp__")] == [
-        "mcp__linear_list_issues"
-    ]
+    # The default per-tool read is cache-safe: schema inline, origin DEFERRED on
+    # the child, nothing published into the child's tools array either.
+    assert "Input schema:" in rendered
+    assert [t.name for t in child._tools if t.name.startswith("mcp__")] == []
+    resolved = child._resolve_tool_outside_inventory("mcp__linear_list_issues")
+    assert resolved is not None and resolved.name == "mcp__linear_list_issues"
     # The parent is untouched: a delegated read must not spend the parent's
-    # prompt budget on a schema the parent never asked for, and its activate()
-    # must not have been reached at all.
+    # prompt budget on a schema the parent never asked for, its activate()
+    # must not have been reached at all, and the child's deferral is the
+    # child's own (its set is a copy), so the parent does not resolve it.
     assert parent_activations == []
     assert [t.name for t in parent._tools] == parent_tools_before
+    assert ("linear", "list_issues") not in getattr(parent, "_mcp_deferred_origins", set())
     await child.dispose()
     await parent.dispose()
 
@@ -1846,7 +1866,7 @@ async def test_an_unrestricted_lineage_still_activates_at_depth_two(tmp_path, mo
     from local_operator.harness import subagent as subagent_mod
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    manager = FakeMcpManager({"linear": ["list_issues"]})
+    manager = FakeMcpManager({"linear": ["list_issues"]}, oversized=True)
     parent = make_session(tmp_path, OneShotStream())
     attach_manager(parent, manager)
 
@@ -2224,7 +2244,7 @@ async def test_a_reconnect_swaps_the_managers_tools_under_a_running_child(tmp_pa
     NEXT activation picks up the fresh schemas. Both pinned here; confirmed
     live against the real Linear server before this test existed."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
-    manager = FakeMcpManager({"linear": ["list_teams", "list_issues"]})
+    manager = FakeMcpManager({"linear": ["list_teams", "list_issues"]}, oversized=True)
     parent = make_session(tmp_path, OneShotStream())
     attach_manager(parent, manager)
     child = await build_child(parent)

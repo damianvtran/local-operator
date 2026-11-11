@@ -1606,6 +1606,20 @@ class TeamRegistry:
         if time.time() - self._last_refresh_time > self._refresh_interval:
             self._load()
 
+    def refresh(self, *, recovery_wait: float | None = None) -> None:
+        """Re-read the store NOW, ignoring the ``refresh_interval`` snapshot.
+
+        WHY: another writer (the desktop Agents Accept route, or the
+        ``profile_proposal`` apply, both of which write through a fresh
+        registry) can change a row inside this instance's 5 s cache window.
+        A caller that builds a before-image for a CAS-protected proposal must
+        see disk, or the proposal is stale at birth and can never be accepted.
+        Cheap (one directory scan); call it only before such a write.
+        """
+        self._raise_if_recovery_failed()
+        self._recover_for_read_if_needed(wait=recovery_wait)
+        self._load()
+
     def _raise_if_recovery_failed(self) -> None:
         """Re-raise a construction-time recovery failure at the first real use.
 
