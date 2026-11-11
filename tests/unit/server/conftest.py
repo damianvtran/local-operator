@@ -160,7 +160,9 @@ def _fresh_connector_state_cache():
     ``connector_state`` must not be answered by a previous test's entry.
     """
 
-    from local_operator.team_bridge.connector.install import invalidate_connector_state_cache
+    from local_operator.team_bridge.connector.install import (
+        invalidate_connector_state_cache,
+    )
 
     invalidate_connector_state_cache()
     yield
