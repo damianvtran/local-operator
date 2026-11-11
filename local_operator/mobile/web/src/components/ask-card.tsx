@@ -241,6 +241,11 @@ function QuestionList({ count, children }: { count: number; children: ReactNode 
 	return (
 		<div
 			data-testid="ask-question-list"
+			// A focusable scroller needs a name or a screen reader announces a
+			// bare stop (PR #3777 R2-5); the dock's existing "N questions
+			// waiting" string names it without a new catalogue entry.
+			role="region"
+			aria-label={messageRuntime.t("relay.asks.dock.waiting", { count })}
 			tabIndex={0}
 			style={columnCap(ASK_QUESTION_LIST_FRACTION)}
 			className="lo-scroll flex min-w-0 flex-col gap-3 overflow-y-auto overflow-x-hidden"

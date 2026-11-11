@@ -500,3 +500,47 @@ def test_direct_save_summary_text_is_counted_not_echoed():
     ), line
     assert "refs/old.md removed" in line or "more" in line
     assert "MARKER" not in line and len(line) <= PP.CHANGES_LINE_MAX_CHARS
+
+
+def test_direct_save_plain_skill_file_counts_bullets_as_added():
+    """R2-1: a new SKILL.md body is not a diff; its ``- `` bullets are content."""
+    summary = (
+        "SKILL.md:\n---\nname: x\ndescription: y\n---\n# X\n\n"
+        "- step one\n- step two\n- step three\nprose"
+    )
+    items = PP.summarize_save_text(summary, {"SKILL.md"})
+    assert PP.changes_line(items) == "Changes: SKILL.md +10 −0 lines"
+
+
+def test_direct_save_replaced_instructions_body_counts_all_lines_added():
+    """R2-1: ``instructions (replaced; new text)`` carries a whole body."""
+    summary = (
+        "instructions (replaced; new text):\nYou are a reviewer.\n- be brief\n"
+        "- cite files\n- no padding"
+    )
+    items = PP.summarize_save_text(summary, {"instructions"})
+    assert PP.changes_line(items) == "Changes: instructions +4 −0 lines"
+
+
+def test_direct_save_diff_counts_removed_double_dash_line_inside_hunk():
+    """R2-4: removing ``-- a rule`` renders ``--- a rule`` inside a hunk."""
+    summary = "instructions:\n--- before\n+++ after\n@@ -1,2 +1,2 @@\n keep\n--- a rule\n+new rule"
+    items = PP.summarize_save_text(summary, {"instructions"})
+    assert PP.changes_line(items) == "Changes: instructions +1 −1 lines"
+
+
+def test_direct_save_multi_line_skill_edit_counts_each_side():
+    """R2-3: ``path: old → new`` continuation lines are split per side."""
+    items = PP.summarize_save_text("SKILL.md: old line\nold2 → new line\nnew2", {"SKILL.md"})
+    assert PP.changes_line(items) == "Changes: SKILL.md +2 −2 lines"
+
+
+def test_clip_save_detail_keeps_whole_lines_and_names_the_hidden_count():
+    """R2-2: the direct-save card's content excerpt is bounded with a tail."""
+    text = "\n".join(f"line {i:04d}" for i in range(1000))  # 9 chars + newline each
+    clipped = PP.clip_save_detail(text, limit=100)
+    lines = clipped.splitlines()
+    assert lines[:-1] == [f"line {i:04d}" for i in range(10)]
+    assert lines[-1] == "… 990 more lines not shown"
+    assert PP.clip_save_detail("short\ntext") == "short\ntext"
+    assert PP.clip_save_detail("x" * 50, limit=10).splitlines()[0] == "x" * 9 + "…"

@@ -1002,6 +1002,8 @@ describe("a multi-question card stays bounded as a whole", () => {
 		const list = screen.getByTestId("ask-question-list");
 		expect(list.style.maxHeight).toBe("calc(var(--lo-vvh, 100dvh) * 0.5)");
 		expect(list.className).toContain("overflow-y-auto");
+		// R2-5: the focusable scroller is a named region.
+		expect(screen.getByRole("region", { name: "3 questions waiting" })).toBe(list);
 		const texts = screen.getAllByTestId("ask-question-text");
 		expect(texts).toHaveLength(3);
 		for (const text of texts) expect(list.contains(text)).toBe(true);

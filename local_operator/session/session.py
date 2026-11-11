@@ -14875,9 +14875,12 @@ class Session:
         # The first line is unchanged (TUI/mobile show the card raw). The
         # second line used to be followed by ``intent.summary`` verbatim — a
         # whole instructions diff or new skill file — so a direct save of a
-        # long brief reproduced the unbounded ask card. It now carries only
-        # per-field counts, in the same ``Changes:`` shape as a proposal card;
-        # the exact change is what the tool's receipt and Agents show.
+        # long brief reproduced the unbounded ask card. It now leads with
+        # per-field counts, in the same ``Changes:`` shape as a proposal card,
+        # then — after a blank line — the change content clipped to
+        # SAVE_DETAIL_MAX_CHARS: a direct save has no review page (skills have
+        # no proposal path), so the card is the only place the approver can
+        # read what they approve (PR #3777 R2-2). Proposal cards stay 3 lines.
         labels = {profile_field_label(field) for field in intent.changes}
         items = profile_proposals.summarize_save_text(intent.summary, labels | set(intent.changes))
         if not items:
@@ -14890,6 +14893,8 @@ class Session:
             f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
             f"{changed}."
         )
+        if intent.summary.strip():
+            card += "\n\n" + profile_proposals.clip_save_detail(intent.summary)
         if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
             return f"approval:{intent.base_revision or 'new'}"
         return None

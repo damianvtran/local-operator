@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from local_operator import profile_proposals as PP
 from local_operator.agent_profiles import profile_from_agent
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness.approval import (
@@ -1041,10 +1043,12 @@ async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) ->
 
 
 @pytest.mark.asyncio
-async def test_direct_save_card_counts_changes_instead_of_echoing_the_summary(stores):
-    """L1 (PR #3777): the non-proposal save card appended ``intent.summary``
+async def test_direct_save_card_counts_changes_then_shows_clipped_content(stores):
+    """L1/R2-2 (PR #3777): the non-proposal save card appended ``intent.summary``
     verbatim, so a direct save of a long brief or skill file filled the ask
-    card. It now keeps its first line and carries per-field counts only."""
+    card. It keeps its first line, then per-field counts, then — because a
+    direct save has no review page — the content clipped to ~4 KB with a
+    ``… N more lines not shown`` tail."""
     gate = Gate(answer=False)
     session = _session(stores, gate=gate)
     body = "\n".join(f"+brief line {i} MARKER-{i}" for i in range(400))
@@ -1061,10 +1065,18 @@ async def test_direct_save_card_counts_changes_instead_of_echoing_the_summary(st
         )
         assert origin is None and len(gate.cards) == 1
         card = gate.cards[0][1]
-        assert card.splitlines() == [
+        lines = card.splitlines()
+        assert lines[:3] == [
             "Save agent 'reviewer' in your account (update).",
             "Changes: instructions +400 −0 lines; model/effort changed.",
+            "",
         ], card
-        assert "MARKER-" not in card and len(card) <= 600
+        assert lines[3:6] == ["instructions:", "--- before", "+++ after"]
+        assert "+brief line 0 MARKER-0" in lines
+        assert "MARKER-399" not in card, "the tail past the cap is not shown"
+        assert re.fullmatch(r"… \d+ more lines not shown", lines[-1]), lines[-1]
+        shown = len(lines) - 4  # head, changes, blank, tail
+        assert int(lines[-1].split()[1]) == 404 - shown, "tail counts the hidden lines"
+        assert len(card) <= 200 + PP.SAVE_DETAIL_MAX_CHARS
     finally:
         await session.dispose()

@@ -512,6 +512,44 @@ def changes_line(items: list[dict[str, Any]]) -> str:
     return prefix + "; ".join(kept)
 
 
+def _diff_counts(body: list[str]) -> tuple[int, int] | None:
+    """``(added, removed)`` when ``body`` is a unified diff, else ``None``.
+
+    WHY a structural test rather than "any line starts with +/-": direct-save
+    producers also send plain bodies (a new skill file, an ``instructions
+    (replaced; new text)`` body), whose markdown bullets would otherwise count
+    as removed lines (R2-1). A body is a diff only when it opens with the
+    ``--- ``/``+++ `` header pair or carries an ``@@`` hunk header, which is
+    what ``difflib.unified_diff`` always emits. Inside a hunk every ``+``/``-``
+    line counts, including a removed ``-- rule`` rendered as ``--- rule``
+    (R2-4); the ``---``/``+++`` pair is skipped only as the file header.
+    """
+    lines = [line for line in body if line.strip()] or body
+    headed = len(lines) >= 2 and lines[0].startswith("--- ") and lines[1].startswith("+++ ")
+    hunked = any(line.startswith("@@") for line in body)
+    if not (headed or hunked):
+        return None
+    added = removed = 0
+    # With hunks, everything before the first ``@@`` is header; without them
+    # (a header-only rendering), only the leading header pair is.
+    in_hunk = not hunked
+    skip = 2 if headed and not hunked else 0
+    for line in body:
+        if skip and line.startswith(("--- ", "+++ ")):
+            skip -= 1
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
 def summarize_save_text(summary: str, labels: Iterable[str]) -> list[dict[str, Any]]:
     """Per-field counts recovered from a direct-save ``DurableWriteIntent.summary``.
 
@@ -527,21 +565,29 @@ def summarize_save_text(summary: str, labels: Iterable[str]) -> list[dict[str, A
     heads = sorted({str(label) for label in labels if label}, key=len, reverse=True)
     items: list[dict[str, Any]] = []
     body: list[str] = []
+    # The text after ``<label>: `` on a head line; a skill edit's old text
+    # starts there (``path: old → new``) and may continue onto body lines.
+    inline = ""
 
     def close() -> None:
         if not items or items[-1]["status"] == "removed":
             return
-        marked = [
-            line
-            for line in body
-            if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
-        ]
         item = items[-1]
-        if marked:
-            item["added"] = sum(line.startswith("+") for line in marked)
-            item["removed"] = len(marked) - item["added"]
+        counts = _diff_counts(body)
+        if counts is not None:
+            item["added"], item["removed"] = counts
+            item["status"] = "lines"
+        elif body and " → " in "\n".join([inline, *body]):
+            # R2-3: a multi-line skill edit, ``path: old → new`` spread over
+            # several lines. Count each side's lines instead of reading every
+            # continuation line as an addition.
+            old, new = "\n".join([inline, *body]).split(" → ", 1)
+            item["removed"], item["added"] = len(old.splitlines()), len(new.splitlines())
             item["status"] = "lines"
         elif body:
+            # Not a diff: a whole new file or a replaced body, where every line
+            # is an addition — a markdown bullet (``- step``) is content, not a
+            # removal (R2-1).
             item["added"], item["status"] = len(body), "lines"
 
     for line in summary.splitlines():
@@ -558,6 +604,7 @@ def summarize_save_text(summary: str, labels: Iterable[str]) -> list[dict[str, A
         if head is not None:
             close()
             body = []
+            inline = line[len(head) + 2 :] if line.startswith(f"{head}: ") else ""
             items.append(
                 {"field": head, "label": head, "added": 0, "removed": 0, "status": "changed"}
             )
@@ -575,6 +622,40 @@ def summarize_save_text(summary: str, labels: Iterable[str]) -> list[dict[str, A
             }
         )
     return items
+
+
+#: Cap on the change content a DIRECT (non-proposal) save card carries below
+#: its summary. WHY it is shown at all: a direct save has no review page —
+#: skills have no proposal path and no Agents diff — so the card is the only
+#: place the approver can read what they approve (R2-2). WHY a cap: an
+#: unbounded body was the original "card fills the conversation" report; ask
+#: cards are now height-bounded and scroll on every surface, so ~4 KB reads
+#: as a scrollable excerpt rather than a layout hazard.
+SAVE_DETAIL_MAX_CHARS = 4000
+
+
+def clip_save_detail(text: str, limit: int = SAVE_DETAIL_MAX_CHARS) -> str:
+    """``text`` cut at a line boundary within ``limit`` chars, plus a tail line.
+
+    The tail ``… N more lines not shown`` says how much was dropped, so a
+    clipped excerpt is never mistaken for the whole change. A single first
+    line longer than ``limit`` is clipped mid-line rather than dropped.
+    """
+    lines = text.splitlines()
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > limit:
+            break
+        kept.append(line)
+        used += cost
+    if not kept and lines:
+        kept = [_clip(lines[0], limit)]
+    hidden = len(lines) - len(kept)
+    if hidden:
+        kept.append(f"… {hidden} more line{'s' if hidden != 1 else ''} not shown")
+    return "\n".join(kept)
 
 
 def approval_card_text(record: dict[str, Any], rows: Iterable[dict[str, Any]]) -> str:
