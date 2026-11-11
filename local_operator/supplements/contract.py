@@ -141,6 +141,9 @@ class SupplementSound(TypedDict):
     #: into the AttachmentStore so every existing player plays it. ABSENT for generated
     #: sounds, so a generated row stays byte-identical. ``path`` is the display path
     #: (cwd- or ``~``-relative, never absolute) and ``pinned`` mirrors the file entry.
+    #: ``"music"`` for a background music job's track merged in when the job settled
+    #: (``trigger.music_sounds``); surfaces render it like a generated sound, and the
+    #: runner reads it to keep those tracks when it rewrites the anchor's row.
     origin: NotRequired[str]
     path: NotRequired[str]
     pinned: NotRequired[bool]

@@ -657,7 +657,16 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
 #: ``classify._evidence_reason``) would otherwise be forgeable with one
 #: ``write`` call (round-1 follow-up to R1-MAJOR-1). Only those files are
 #: refused here; every other write/edit keeps its existing behaviour.
-FILE_DESTINATION_TOOLS: Mapping[str, str] = {"write": "path", "edit": "path", "browser": "path"}
+#: ``evidence`` (``tools/evidence_tool.py``) is a reader child's create-only
+#: receipt writer; its ``path`` is relative to the bound worktree rather than
+#: ``cwd``, so the tool also runs this verdict on its own resolved target —
+#: this row is the checkpoint's half of that, never the only check.
+FILE_DESTINATION_TOOLS: Mapping[str, str] = {
+    "write": "path",
+    "edit": "path",
+    "browser": "path",
+    "evidence": "path",
+}
 
 
 def evidence_write_verdict(

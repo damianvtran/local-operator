@@ -25,7 +25,7 @@ class ProfileProposalParams(BaseModel):
 
 async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=None, context=None):
     from local_operator import profile_proposals as P
-    from local_operator.profile_scope import profile_diff_summary
+    from local_operator.tools.agent_tool import PROPOSAL_ASK_GUIDANCE
 
     try:
         params = ProfileProposalParams(**args)
@@ -87,11 +87,18 @@ async def execute_profile_proposal(tool_call_id, args, signal=None, on_update=No
                 )
                 for c in rows
             )
+            # Per-field line counts, not the diff: the model relays this text
+            # into its ask, and a full brief there filled the user's screen.
+            # The diff stays in ``details`` for surfaces that render it.
+            summary = "\n".join(
+                P.summary_line(item) for item in P.summarize_changes(detail["changes"])
+            )
             return _text(
                 tool_call_id,
                 "profile_proposal",
                 f"{params.id}: {proposal['state']}. Agents → {proposal['name']}\n"
-                + profile_diff_summary(diff),
+                + summary
+                + f"\n{PROPOSAL_ASK_GUIDANCE.format(pid=params.id)}",
                 details={
                     "proposal_id": params.id,
                     "profile_kind": proposal["kind"],
@@ -158,6 +165,7 @@ def build_profile_proposal_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "List/show proposed account agent or team changes in Agents. After the user "
             "agrees, apply the specific displayed proposal; reject unwanted proposals. "
+            "Ask with a short summary plus the proposal id, never the full text. "
             "The host verifies consent; child sessions cannot apply."
         ),
         parameters=ProfileProposalParams.model_json_schema(),

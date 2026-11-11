@@ -1397,6 +1397,10 @@ class ServingSessionHandle(SessionHandle):
         # and disposal reaps it (``SupplementRunner.cancel``). Scheduling is a no-op when
         # the feature is disabled.
         self._supplements.schedule_sweep(loop)
+        # Settled background music joins its producing turn's highlights (the runner's
+        # ``on_music_settled``). Owner-only, like ``_maybe_supplement``: a follower must
+        # never write a supplement row.
+        session.music_settled_listener = self._on_music_settled
         # Same shape as ``on_turn_settled``: the session flips the record's
         # ``started`` bit the first time a real turn runs (see
         # ``_run_turn_pipeline``), and the registrant owns the publish.
@@ -2218,6 +2222,12 @@ class ServingSessionHandle(SessionHandle):
                     return True
             except Exception:  # noqa: BLE001 — uncertainty must fail closed
                 return True
+        # A parked wake is owed work: its deadline task is already a session
+        # background task (tracked below), and the batch is the keep-alive
+        # signal even before that read. Exiting under it would destroy a
+        # reminder the operator is still due.
+        if getattr(session, "_parked_wakes", None):
+            return True
         if any(not task.done() for task in self._background_tasks):
             return True
         return False
@@ -3330,6 +3340,24 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             return None
         due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
+        # A parked wake is a fired occurrence the pump already retired from the
+        # scheduler: without this leg the warmth signal reads None and the
+        # runtime can exit under a reminder the operator is still owed. Its
+        # earliest delivery is the parked batch's quiet-window end, capped at
+        # first_park + D — the same target the deadline task sleeps to.
+        parked = getattr(self._session, "_parked_wakes", None)
+        if parked:
+            import time as _time
+
+            from local_operator.session import session as _session_mod
+
+            first_park = getattr(self._session, "_parked_wakes_first_park", None) or _time.time()
+            last_end = getattr(self._session, "_last_operator_turn_end", None)
+            quiet_target = (
+                first_park if last_end is None else last_end + _session_mod.WAKE_OPERATOR_QUIET_S
+            )
+            cap_target = first_park + _session_mod.WAKE_PARK_CAP_S
+            due.append(int(min(quiet_target, cap_target) * 1000))
         return min(due) if due else None
 
     def next_monitor_due_at(self) -> int | None:
@@ -4613,6 +4641,12 @@ class ServingSessionHandle(SessionHandle):
             )
         except Exception:  # noqa: BLE001 — the event path never fails on the judge
             logger.debug("goal judge trigger failed", exc_info=True)
+
+    async def _on_music_settled(self, receipt: Mapping[str, Any]) -> None:
+        from local_operator.session.goal_judge import owns_the_session
+
+        if owns_the_session(self._session):
+            await self._supplements.on_music_settled(receipt)
 
     def _maybe_supplement(self, event: AgentEndEvent) -> None:
         """Schedule a turn supplement off a turn's end (docs/design/turn-supplements.md §2.1).

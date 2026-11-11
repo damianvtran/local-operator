@@ -311,6 +311,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # backup_id) shortened to win back the start-context budget the deferred
     # ``skill``/``profile_proposal`` inventory entries cost; the full
     # action_class/kind rationale stays in this tool's notes. Same printed table.
+    # RE-MEASURED (proposal ask summary): 1471 -> 1500 (+29), the notes line
+    # telling the agent to ask with a 1-3 line summary + proposal id, never
+    # the full instructions (a pasted brief filled the ask card).
     # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1471 -> 1562
     # (+91). The ``edits``/``base_revision``/``replace`` params (and the shared
     # ``TextEdit`` item) plus the notes line on clean-local autonomy and
@@ -699,7 +702,9 @@ MEASURED_TOKENS: dict[str, int] = {
     "project_delete": 91,
     # NEW (profile proposals, PR #3704): the deferred list/show/apply/reject
     # tool for Agents proposals; 116 tokens through this test's printed table.
-    "profile_proposal": 116,
+    # RE-MEASURED (proposal ask summary): 116 -> 131 (+15), the description's
+    # "ask with a short summary plus the proposal id" sentence.
+    "profile_proposal": 131,
     "read": 345,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
@@ -795,6 +800,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # per-slot ``saver`` member field; the same printed table as ``agent``.
     # RE-MEASURED (profile proposals, PR #3704): 1464 -> 1500 (+36), the same
     # Agents-proposal notes line as ``agent``.
+    # RE-MEASURED (proposal ask summary): 1500 -> 1529 (+29), the same
+    # summary-plus-id notes line as ``agent``.
     # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1500 -> 1574
     # (+74), the same params and notes line as ``agent``.
     "team": 1574,
@@ -852,6 +859,8 @@ MEASURED_TOKENS: dict[str, int] = {
 #: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
 #: -27 field-description trim as the canonical arm; ``task`` stays 764.
+#: RE-MEASURED (proposal ask summary): agent 1500 -> 1529, the same +29
+#: summary-plus-id notes line as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): agent
 #: 1500 -> 1591, the same +91 params/notes as the canonical arm; ``task`` 764.
 TIER_ARM_TOKENS: dict[str, int] = {"agent": 1591, "task": 764}
