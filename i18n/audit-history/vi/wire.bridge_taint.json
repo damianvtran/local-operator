@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.bridge_taint",
-  "history_sha256": "eb76832173601504ce4cd7eddda0b3b6411a56501b863b2f8781bf033f74f829",
+  "history_sha256": "4ecdba47a1bf72c7d246bc6b2f95b37227a684df0d706670df9c9374b8bfd8cb",
   "entries": [
     {
       "locale": "vi",
@@ -23,6 +23,26 @@
       },
       "status": "passed",
       "note": "FIRST independent full 5-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/vi/bridge-taint-primary/record.json (sha256 46834d6d0ecae558131b238bd1410287011bb180365fc33e17b4e3d8bd063819). Non-gating findings [] deferred in PR #3796 thread; no wording changed. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.bridge_taint",
+      "source_sha256": "330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9",
+      "translator": {
+        "agent": "coder lane (radientdev, i18n translator), commit 08e7c649eaca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "reviewer (radientdev) / independent i18n-auditor b854fe58034a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "FIRST independent audit at re-frozen English 330a1116 (8 keys: 5 changed/new read, 3 byte-equal to 635f122e065a). 0 unresolved blocker/major. Evidence: i18n/audits/evidence/vi/bridge-taint-primary-r2/record.json (sha256 17f42c7840934591b1eda479db03fb8aada88428996f8d234f0454df6831f14f). Non-gating findings ['N4'] deferred in PR #3796 thread; no wording changed. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
     }
   ]
 }

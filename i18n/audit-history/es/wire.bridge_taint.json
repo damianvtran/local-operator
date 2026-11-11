@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.bridge_taint",
-  "history_sha256": "2cb92c29edd7d43affe29f3ade08e2200335bc4eedfdf0f25722cebcd0ab5f89",
+  "history_sha256": "b95b833db8b0993721e6a4b378a562116799eaa27fee6b22c0b9cda16e1c48e0",
   "entries": [
     {
       "locale": "es",
@@ -23,6 +23,26 @@
       },
       "status": "passed",
       "note": "FIRST independent full 5-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/bridge-taint-primary/record.json (sha256 915bfceda926a335814240b633d77e2c024e28433813d86f90f7664697b616ec). Non-gating findings ['N2'] deferred in PR #3796 thread; no wording changed. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.bridge_taint",
+      "source_sha256": "330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9",
+      "translator": {
+        "agent": "coder lane (radientdev, i18n translator), commit 08e7c649eaca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "reviewer (radientdev) / independent i18n-auditor b854fe58034a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "FIRST independent audit at re-frozen English 330a1116 (8 keys: 5 changed/new read, 3 byte-equal to 635f122e065a). 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/bridge-taint-primary-r2/record.json (sha256 96b9f3b07a87478b8e8666ad22a429caaa5b9b49865769664e41b5489c3be57e). No findings. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
     }
   ]
 }

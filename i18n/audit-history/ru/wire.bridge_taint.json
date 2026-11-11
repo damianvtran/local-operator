@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.bridge_taint",
-  "history_sha256": "6f4645997360fe0a900f509e200aefa97e8ef6783a5b2dc1ed2f8cf99bacf204",
+  "history_sha256": "c7229ee64f20e16c920e239db3b4910be7dcc55ff7066487f881c5b81534e3d9",
   "entries": [
     {
       "locale": "ru",
@@ -23,6 +23,26 @@
       },
       "status": "passed",
       "note": "FIRST independent full 5-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/ru/bridge-taint-primary/record.json (sha256 bf7a7e230563eb87055c2d1e0587499dc592debcf4ea0766297b39ecdf6e649d). Non-gating findings [] deferred in PR #3796 thread; no wording changed. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.bridge_taint",
+      "source_sha256": "330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9",
+      "translator": {
+        "agent": "coder lane (radientdev, i18n translator), commit 08e7c649eaca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "reviewer (radientdev) / independent i18n-auditor b854fe58034a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "FIRST independent audit at re-frozen English 330a1116 (8 keys: 5 changed/new read, 3 byte-equal to 635f122e065a). 0 unresolved blocker/major. Evidence: i18n/audits/evidence/ru/bridge-taint-primary-r2/record.json (sha256 c2afff4a94d7c525ccc5e6fd2077489ce34e640ad258aeb49059388ed1484480). No findings. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
     }
   ]
 }

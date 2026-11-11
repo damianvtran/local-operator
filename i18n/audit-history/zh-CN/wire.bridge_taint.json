@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.bridge_taint",
-  "history_sha256": "a974d1af908493f737dd40b1f613a6ad19725b52f1f0c686fc9cc71b1c1c5fa7",
+  "history_sha256": "cee5c58e30ccf7e24cb876ddc1d07d1ea687a100f384ca1bcd2a0cd092ec3505",
   "entries": [
     {
       "locale": "zh-CN",
@@ -23,6 +23,26 @@
       },
       "status": "passed",
       "note": "FIRST independent full 5-key namespace audit; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/zh-CN/bridge-taint-primary/record.json (sha256 030edc6725cda5050c06f10f64abae1b8a36418c6a2f6aac503bb80a38056979). Non-gating findings ['N3'] deferred in PR #3796 thread; no wording changed. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.bridge_taint",
+      "source_sha256": "330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9",
+      "translator": {
+        "agent": "coder lane (radientdev, i18n translator), commit 08e7c649eaca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "reviewer (radientdev) / independent i18n-auditor b854fe58034a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "FIRST independent audit at re-frozen English 330a1116 (8 keys: 5 changed/new read, 3 byte-equal to 635f122e065a). 0 unresolved blocker/major. Evidence: i18n/audits/evidence/zh-CN/bridge-taint-primary-r2/record.json (sha256 99ab1f06d9d91f252765f5386eab388b9700386ba67522648af6db4fd82c4d2e). Non-gating findings ['N3'] deferred in PR #3796 thread; no wording changed. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
     }
   ]
 }
