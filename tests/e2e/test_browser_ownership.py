@@ -517,3 +517,225 @@ async def test_serialized_extension_refusals_reach_python_recovery(
     assert _control(protocol_peer)["tabs"] == 1
     await client.call("owner_finish", {**owner, "outcome": "completed"})
     assert _control(protocol_peer)["tabs"] == 0
+
+
+# --- Child → parent browser handoff (2026-11-11, session 363d303f3e48) -------
+#
+# A subagent opened a tab for the operator to sign in, said "the tab is open",
+# and its teardown closed it — twice. These run a REAL child through
+# `_launch_subagent` against the real extension ownership code, so the handoff
+# is proven over the same owner_* wire the hosts enforce, not a stub of it.
+
+
+def _child_browser_stream(
+    peer: tuple[int, str], *, retain: str, final: str
+) -> tuple[Any, list[int]]:
+    """A child that opens one tab, optionally retains it, then finishes."""
+    calls = 0
+    tab_counts: list[int] = []
+
+    async def stream(request: Any, signal: Any = None) -> AsyncIterator[Any]:
+        nonlocal calls
+        if not any("BROWSER_CHILD" in getattr(message, "text", "") for message in request.messages):
+            yield StreamTextDelta(delta="Acknowledged")
+            yield StreamEndEvent(stop_reason="stop")
+            return
+        calls += 1
+        steps: list[dict[str, Any]] = [
+            {"action": "open", "url": "https://example.test/", "i": "Opening sign-in page"}
+        ]
+        if retain:
+            steps.append({"action": "retain", "text": retain, "i": "Holding tab for human"})
+        if calls <= len(steps):
+            yield StreamToolCallDelta(
+                index=0,
+                id=f"synthetic-child-{calls}",
+                name="browser",
+                argument_delta=json.dumps(steps[calls - 1]),
+            )
+            yield StreamEndEvent(stop_reason="toolUse")
+            return
+        tab_counts.append(_control(peer)["tabs"])
+        yield StreamTextDelta(delta=final)
+        yield StreamEndEvent(stop_reason="stop")
+
+    return stream, tab_counts
+
+
+def _parent(root: Path, stream: Any) -> Session:
+    async def approve(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    return Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=100000),
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(root / "sessions" / "synthetic-parent"),
+        system_blocks_provider=lambda *_: [],
+        yolo=True,
+        cwd=str(root),
+        request_approval=approve,
+    )
+
+
+async def _run_child(owner: Session) -> Any:
+    job_id = owner._launch_subagent("browser-child", "BROWSER_CHILD")
+    await asyncio.wait_for(owner.jobs.settled_event(job_id).wait(), 25)
+    row = owner.jobs.get(job_id)
+    assert row is not None and row.status == "completed", row
+    return row
+
+
+@pytest.mark.asyncio
+async def test_retained_child_tab_is_handed_to_parent_which_closes_it(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    stream, during = _child_browser_stream(
+        protocol_peer, retain="pending human sign-in", final="The tab is open for you."
+    )
+    owner = _parent(headless_tui_env, stream)
+    try:
+        row = await _run_child(owner)
+        assert during == [1]
+        # The child ended; the tab did NOT (the reported bug closed it here).
+        assert _control(protocol_peer)["tabs"] == 1
+        handed = owner._browser.handed
+        assert len(handed) == 1
+        label = ":".join(handed[0].surface_id.split(":")[:2])
+        # Authoritative fate line, appended by the runner after the settle.
+        assert f"Browser: handed {label} to parent {owner.session_id}" in row.result_text
+        assert handed[0].surface_id not in row.result_text, "capability must not leak"
+        # The parent's listing marks it as its own, with where it came from.
+        listing = await execute_browser(
+            "parent-tabs", {"action": "tabs"}, None, None, owner._build_tool_context()
+        )
+        assert not listing.is_error, listing.text
+        assert "(yours — handed from child" in listing.text
+        assert "pending human sign-in" in listing.text
+        # And the parent can close it.
+        closed = await execute_browser(
+            "parent-close",
+            {"action": "close", "tab": label},
+            None,
+            None,
+            owner._build_tool_context(),
+        )
+        assert not closed.is_error, closed.text
+        assert f"Browser: closed {label}" in closed.text
+        assert _control(protocol_peer)["tabs"] == 0
+        assert owner._browser.handed == []
+    finally:
+        await owner.dispose()
+
+
+@pytest.mark.asyncio
+async def test_handed_child_tab_is_closed_by_parent_dispose(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    stream, _during = _child_browser_stream(
+        protocol_peer, retain="pending human sign-in", final="Handed."
+    )
+    owner = _parent(headless_tui_env, stream)
+    try:
+        await _run_child(owner)
+        assert _control(protocol_peer)["tabs"] == 1
+    finally:
+        await owner.dispose()
+    # The parent was the last owner: its teardown closes what it was handed.
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_unretained_child_tab_is_closed_and_fate_says_so(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    stream, during = _child_browser_stream(
+        protocol_peer, retain="", final="The tab is open for the human to sign in."
+    )
+    owner = _parent(headless_tui_env, stream)
+    try:
+        row = await _run_child(owner)
+        assert during == [1]
+        assert _control(protocol_peer)["tabs"] == 0
+        assert owner._browser.handed == []
+        # The child's prose claims "open"; the harness line contradicts it.
+        assert "\n\nBrowser: closed bridge:" in row.result_text
+        assert "handed" not in row.result_text
+    finally:
+        await owner.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_child_tab_is_handed(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    """A pending `request_access` writes retention "pending site approval".
+
+    The fixture peer serves no approval flow, so the retention the tool writes
+    on a `pending` access state is set directly on a real child's record after
+    a real open; everything after that is the production settle.
+    """
+    from local_operator.harness import subagent
+
+    parent = _parent(headless_tui_env, _child_browser_stream(protocol_peer, retain="", final="")[0])
+    child = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
+        stream_fn=lambda *_: None,
+        tools=[],
+        transcript=Transcript(headless_tui_env / "sessions" / "synthetic-child"),
+        system_blocks_provider=lambda *_: [],
+        parent_session=parent,
+        parent_session_id=parent.session_id,
+    )
+    try:
+        opened = await execute_browser(
+            "child-open",
+            {"action": "open", "url": "https://example.test/"},
+            None,
+            None,
+            child._build_tool_context(),
+        )
+        assert not opened.is_error, opened.text
+        # The subagent is told its tab's fate at the moment it opens one.
+        assert f"retain' it, which hands it to your parent session {parent.session_id}" in (
+            opened.text
+        )
+        child._browser.resource.record["retention"] = "pending site approval"
+        fates = await subagent._finish_child_browser(
+            child, None, "job", "completed", parent_session=parent
+        )
+        assert len(fates) == 1 and fates[0].startswith("Browser: handed bridge:")
+        assert parent._browser.handed[0].reason == "pending site approval"
+        await child.dispose()
+        assert _control(protocol_peer)["tabs"] == 1, "child dispose must not close a handed tab"
+    finally:
+        await parent.dispose()
+    assert _control(protocol_peer)["tabs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_retain_in_child_names_parent_handoff(
+    protocol_peer: tuple[int, str], headless_tui_env: Path
+) -> None:
+    parent = _parent(headless_tui_env, _child_browser_stream(protocol_peer, retain="", final="")[0])
+    child = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
+        stream_fn=lambda *_: None,
+        tools=[],
+        transcript=Transcript(headless_tui_env / "sessions" / "synthetic-child"),
+        system_blocks_provider=lambda *_: [],
+        parent_session=parent,
+        parent_session_id=parent.session_id,
+    )
+    try:
+        for args in (
+            {"action": "open", "url": "https://example.test/"},
+            {"action": "retain", "text": "pending login"},
+        ):
+            result = await execute_browser("c", args, None, None, child._build_tool_context())
+            assert not result.is_error, result.text
+        assert f"HANDED to your parent session {parent.session_id}" in result.text
+        assert "never as 'left open'" in result.text
+    finally:
+        await child.dispose()
+        await parent.dispose()

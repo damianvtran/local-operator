@@ -1774,9 +1774,16 @@ class BrowserSurface:
     own one without importing the tool layer.
     """
 
-    __slots__ = ("surface_id", "resource", "extension_update_notified")
+    __slots__ = (
+        "surface_id",
+        "resource",
+        "extension_update_notified",
+        "parent_session_id",
+        "handed",
+        "handed_to",
+    )
 
-    def __init__(self, resource: Any = None) -> None:
+    def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
@@ -1790,6 +1797,50 @@ class BrowserSurface:
         # new member would make every other implementor fail its isinstance
         # check for a purely advisory flag.
         self.extension_update_notified = False
+        # CHILD → PARENT BROWSER HANDOFF (2026-11-11, session 363d303f3e48).
+        #
+        # A subagent that opened a tab for a HUMAN (a sign-in, a site approval)
+        # used to end, have its teardown close that tab, and still tell the
+        # operator "the tab is open" — twice in one evening the operator was sent
+        # to a tab that no longer existed. A child's lifetime is one task; a
+        # human's sign-in is not bounded by it. So a child's RETAINED surface is
+        # not closed when the child ends: it is handed to the parent session,
+        # which owns it from then on (lists it as its own, closes it, and closes
+        # it on its own teardown, or hands it further up if it is a child too).
+        #
+        # * ``parent_session_id`` — the session a retained tab is handed to when
+        #   this (child) session ends; "" for a top-level session, whose
+        #   teardown simply closes. The browser tool reads it to tell a child,
+        #   at open/retain time, exactly what will happen to its tab.
+        # * ``handed`` — surfaces children handed to THIS session: a list of
+        #   :class:`HandedBrowserSurface`. Each keeps the CHILD's ownership
+        #   resource, because the host fences owner calls on the scope's
+        #   ``requester``/``owner_proof``/``owner_generation`` params, not on the
+        #   connection, so the parent speaking with the child's record is
+        #   byte-identical to the child speaking — no host protocol change.
+        # * ``handed_to`` — set on the CHILD once its surface was handed, so its
+        #   own disposal does not close the tab the parent now owns.
+        self.parent_session_id = parent_session_id
+        self.handed: list[HandedBrowserSurface] = []
+        self.handed_to = ""
+
+
+@dataclass
+class HandedBrowserSurface:
+    """One browser surface a finished child handed to this (parent) session.
+
+    ``surface_id`` is the full capability token (never printed whole — see
+    ``public_surface_label``); ``resource`` is the child's
+    ``BrowserResource``, the only identity the host will accept owner calls
+    for this scope from; ``from_session`` is the child that opened it, named
+    in the parent's listing so the parent knows why it holds a tab it never
+    opened; ``reason`` is the retention reason the child recorded.
+    """
+
+    surface_id: str
+    resource: Any
+    from_session: str
+    reason: str = ""
 
 
 @runtime_checkable

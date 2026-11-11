@@ -470,7 +470,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb="Stop and save the recording; returns its path and size.",
             ),
             ToolDocOp(op="recover", blurb="Recover YOUR tab."),
-            ToolDocOp(op="retain", blurb="Hold it."),
+            ToolDocOp(op="retain", blurb="Hold it (in a subagent: hand it to the parent on finish)."),
             ToolDocOp(op="release", blurb="End that hold."),
             ToolDocOp(op="close", blurb="End YOUR tab."),
         ),

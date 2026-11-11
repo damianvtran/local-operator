@@ -5678,7 +5678,12 @@ class Session:
         # the agent could never close. dispose() closes whatever is still open.
         from local_operator.browser_bridge.resources import BrowserResource
 
-        self._browser = BrowserSurface(BrowserResource(transcript.directory, self._session_id))
+        self._browser = BrowserSurface(
+            BrowserResource(transcript.directory, self._session_id),
+            # A child's retained tab is handed to this id when it ends (see
+            # ``BrowserSurface.handed``); "" for a top-level session.
+            parent_session_id=self._parent_session_id,
+        )
         # Connections and overlapping read requests are owned by the conversation.
         # This avoids rebuilding pools for every tool call without allowing one
         # child's disposal to close a sibling's active transport.
@@ -34240,6 +34245,19 @@ class Session:
         ``CancelledError``), so the timeout does not trade a stranded tab for an
         orphaned process.
         """
+        # Tabs children handed to this session are this session's to close now:
+        # a top-level session ending is the last owner that could, and a child
+        # parent hands them further up in ``_finish_child_browser`` BEFORE its
+        # dispose, which empties this list. Settled first and independently, so
+        # a fault in this session's own surface cannot strand a handed one.
+        from local_operator.browser_bridge.handoff import close_handed_browser_surfaces
+
+        await close_handed_browser_surfaces(self._browser, outcome="disposed")
+        if self._browser.handed_to:
+            # This session's own surface now belongs to its parent: closing it
+            # here would recreate the bug the handoff fixes (the human is sent
+            # to a tab disposal already closed).
+            return
         resource = self._browser.resource
         if resource.generation or resource.path.exists():
             # Disposal is a fallback for process exit, not a claim that an idle
