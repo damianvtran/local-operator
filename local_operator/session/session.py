@@ -5287,6 +5287,12 @@ class Session:
         #: Read by ``ServingSessionHandle`` (the supplement runner's seam). Public like
         #: ``title_fit_check`` because the runtime handle holds the session, not the hooks.
         self.supplement_seam = supplement_seam
+        #: Set by ``ServingSessionHandle`` to its ``SupplementRunner.on_music_settled``:
+        #: the turn highlights must learn when a background music job settles, and the
+        #: runner lives on the handle, not here. ``None`` (exec, children, tests) = no-op.
+        self.music_settled_listener: Callable[[Mapping[str, Any]], Awaitable[None]] | None = (
+            None
+        )
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
@@ -23507,6 +23513,21 @@ class Session:
         except Exception:  # noqa: BLE001 — a boot conversion must not fail the open
             logger.warning("video boot conversion failed", exc_info=True)
 
+    def _notify_music_settled(self, job: Any) -> None:
+        """Hand a settled music job's receipt to the highlights listener, detached.
+
+        Detached through ``_spawn_background`` so the merge (a journal walk under the
+        supplement write lock) can never delay the job's own delivery, and so dispose
+        reaps it. The receipt is the runner's ``music_receipt`` progress field
+        (``music/jobs.py``); a job that failed before reporting one has nothing to show.
+        """
+        listener = self.music_settled_listener
+        latest = getattr(job, "latest_details", None)
+        receipt = latest.get("music_receipt") if isinstance(latest, dict) else None
+        if listener is None or not isinstance(receipt, dict):
+            return
+        self._spawn_background(listener(dict(receipt)))
+
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
 
@@ -23532,6 +23553,10 @@ class Session:
         # consume nested work deliberately through its own jobs/wait tools.
         if self._job_id is not None:
             return
+        if getattr(job, "type", "") == "music":
+            # BEFORE the consumed gate: a track the model collected with ``wait`` is still
+            # one the operator made and must see in the producing turn's highlights.
+            self._notify_music_settled(job)
         # ``video`` rides this gate as of the video phase (media wave-2): a
         # settled video job delivers its review result exactly like a child,
         # and its cancellations never reach here (the manager's task-cancel

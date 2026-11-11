@@ -68,6 +68,7 @@ from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Sequence, 
 from local_operator.supplements import generator, policy, sweep
 from local_operator.supplements.candidates import TIER_COMMAND, Candidate, prefilter
 from local_operator.supplements.contract import (
+    SOUNDS_MAX,
     SUPERSEDED_ERROR,
     SUPPLEMENT_CUSTOM_TYPE,
     SupplementDetails,
@@ -84,7 +85,13 @@ from local_operator.supplements.persistence import (
     superseded,
 )
 from local_operator.supplements.prompt import MAX_INSTRUCTION_CHARS
-from local_operator.supplements.trigger import final_answer, refusal, turn_sounds
+from local_operator.supplements.trigger import (
+    final_answer,
+    music_sounds,
+    refusal,
+    turn_music_jobs,
+    turn_sounds,
+)
 from local_operator.supplements.validate import Component
 
 logger = logging.getLogger(__name__)
@@ -96,6 +103,10 @@ FILE_SOUND_MAX_BYTES: Final = 25 * 1024 * 1024
 #: Written sounds per row. Bounded like files are (a sweep keeps at most 8 per directory);
 #: the excess stays in the file pool, where ``files_more`` discloses it.
 FILE_SOUNDS_MAX: Final = 50
+#: Settled music receipts kept for a producing turn that has not written its row yet. A turn
+#: queues a handful of music jobs at most; 64 outlives any realistic settle-to-turn-end gap
+#: without letting a long session grow the map.
+_MUSIC_SETTLED_MAX: Final = 64
 #: Suffix -> MIME for written audio, matching ``candidates._KIND_BY_EXT``'s audio set.
 _AUDIO_MIME: Final[dict[str, str]] = {
     ".mp3": "audio/mpeg",
@@ -159,6 +170,31 @@ def _is_terminal(details: Mapping[str, Any] | None) -> bool:
     return isinstance(details, Mapping) and str(details.get("state", "")) in _TERMINAL_STATES
 
 
+def _merge_sounds(row: dict[str, Any], extra: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """``row`` with ``extra`` sounds appended, deduplicated by digest, under ``SOUNDS_MAX``.
+
+    The overflow is DISCLOSED in ``sounds_more`` exactly as ``build_details`` does, never
+    dropped silently (the persistence module's "sounds are artifacts" rule).
+    """
+    current = [dict(s) for s in row.get("sounds") or () if isinstance(s, Mapping)]
+    seen = {str(s.get("attachment", "")) for s in current}
+    more = int(row.get("sounds_more") or 0)
+    for sound in extra:
+        digest = str(sound.get("attachment", ""))
+        if not digest or digest in seen:
+            continue
+        seen.add(digest)
+        if len(current) >= SOUNDS_MAX:
+            more += 1
+            continue
+        current.append(dict(sound))
+    if current:
+        row["sounds"] = current
+    if more:
+        row["sounds_more"] = more
+    return row
+
+
 class _OpsLock:
     """The supplement write lock: task-scoped re-entrant (round-3 review R3-1).
 
@@ -218,6 +254,8 @@ class _JobInputs:
     answer_text: str
     sounds: tuple[SupplementSound, ...] = ()
     withheld: tuple[tuple[str, str], ...] = ()
+    #: Music jobs the turn queued (``trigger.turn_music_jobs``); see ``_with_music``.
+    music_jobs: tuple[str, ...] = ()
     instruction: str = ""
     version: int = 1
     #: The job's newest row, as the write path published it after its append landed (a plain
@@ -291,6 +329,14 @@ class SupplementRunner:
         #: critical section, so an op can never settle from a row staler than the journal --
         #: a terminal append in flight is atomic with the decision that must see it.
         self._ops_lock = _OpsLock()
+        #: Playable tracks of music jobs that SETTLED in this process, by job id, newest
+        #: last. Written by ``on_music_settled`` under ``_ops_lock`` and read by the row
+        #: builders under the same lock, which is what closes the settle-vs-turn-end race:
+        #: a job settling before its producing turn's row exists is picked up by that row's
+        #: build; one settling after finds the row (``music_jobs``) and merges into it.
+        #: Bounded (``_MUSIC_SETTLED_MAX``): it only has to outlive the gap between a
+        #: settle and its turn's end, and after a restart the journal row is the link.
+        self._music_settled: dict[str, tuple[SupplementSound, ...]] = {}
 
     # -- the synchronous trigger ----------------------------------------------------------
 
@@ -569,6 +615,9 @@ class SupplementRunner:
         # Generated audio already passed the tool delivery boundary; unlike a
         # file candidate it has no path for the prefilter/classifier to discover.
         sounds = turn_sounds(provenance.items)
+        # Music is queued, not delivered, at turn end: record the jobs so the row exists
+        # to merge their tracks into (``on_music_settled``), even when it shows nothing yet.
+        music_jobs = tuple(turn_music_jobs(provenance.items))
         want_files = settings.files
         want_graphics = settings.graphics and GENERATOR_AVAILABLE
         started = time.perf_counter()
@@ -618,7 +667,7 @@ class SupplementRunner:
             pre.rejected,
             pre.elapsed_ms,
         )
-        if pre.skipped and not sounds and not withheld:
+        if pre.skipped and not sounds and not withheld and not music_jobs:
             return
         components: list[Component] = []
         prepared_detail: list[str] = []
@@ -681,6 +730,7 @@ class SupplementRunner:
                 detail=prepared_detail,
                 sounds=sounds,
                 withheld=withheld,
+                music_jobs=music_jobs,
             )
             return
         if decision.graphics and want_graphics:
@@ -698,9 +748,12 @@ class SupplementRunner:
                 # Only when present: the keyword is additive, and a turn with nothing
                 # withheld keeps the exact call shape the render seam always had.
                 **({"withheld": withheld} if withheld else {}),
+                **({"music_jobs": music_jobs} if music_jobs else {}),
             )
             return
-        await self._write(answer.id, decision, sounds=sounds, withheld=withheld)
+        await self._write(
+            answer.id, decision, sounds=sounds, withheld=withheld, music_jobs=music_jobs
+        )
 
     async def _write(
         self,
@@ -711,6 +764,7 @@ class SupplementRunner:
         detail: Sequence[str] = (),
         sounds: Sequence[SupplementSound] = (),
         withheld: Sequence[tuple[str, str]] = (),
+        music_jobs: Sequence[str] = (),
     ) -> None:
         """Journal the decision. A decision with nothing to show writes NOTHING.
 
@@ -726,6 +780,10 @@ class SupplementRunner:
             # A withheld-only row IS written: it is the notice that a pinned or answer-named
             # file was refused, and skipping it would make that refusal silent.
             and not withheld
+            # A turn that queued music writes its row now even if it is empty (an empty
+            # ``done`` row renders nothing): it is the durable turn->job link a later
+            # settle -- possibly after a restart -- merges the tracks into.
+            and not music_jobs
         ):
             return
         job = new_job_id()
@@ -754,7 +812,7 @@ class SupplementRunner:
                     final["components"] = stored
                 if detail:
                     final["detail"] = list(detail)
-                return final
+                return self._with_music(final, base, music_jobs)
 
             final = await self._commit_row(anchor=anchor, build=build_done)
             if final is not None:
@@ -783,6 +841,7 @@ class SupplementRunner:
         *,
         sounds: Sequence[SupplementSound] = (),
         withheld: Sequence[tuple[str, str]] = (),
+        music_jobs: Sequence[str] = (),
     ) -> None:
         """Schedule the fork for a graphics "yes" (memo §2.5).
 
@@ -799,6 +858,7 @@ class SupplementRunner:
             answer_text=answer_text,
             sounds=tuple(sounds),
             withheld=tuple(withheld),
+            music_jobs=tuple(music_jobs),
         )
         self._remember(inputs)
         previous = self._task
@@ -876,7 +936,7 @@ class SupplementRunner:
         def build_decided(base: Mapping[str, Any] | None) -> Mapping[str, Any]:
             version = int(base.get("version", 0) or 0) + 1 if base is not None else inputs.version
             inputs.version = version
-            return dict(
+            decided = dict(
                 build_details(
                     anchor=inputs.anchor,
                     job=inputs.job,
@@ -887,6 +947,9 @@ class SupplementRunner:
                     withheld=inputs.withheld,
                 )
             )
+            # The terminal row is ``next_version`` of this one, so music merged here (or
+            # into any later version) is carried to ``done`` without its own step.
+            return self._with_music(decided, base, inputs.music_jobs)
 
         try:
             # The runtime's half of the reader rule: the job is LIVE from before its first
@@ -1400,6 +1463,108 @@ class SupplementRunner:
             return None
         _at, anchor, job = max(candidates)
         return anchor, job
+
+    # -- settled music (background generation) ---------------------------------------------
+
+    def _with_music(
+        self,
+        row: dict[str, Any],
+        base: Mapping[str, Any] | None,
+        music_jobs: Sequence[str],
+    ) -> dict[str, Any]:
+        """``row`` plus its anchor's music: the ``music_jobs`` link and every settled track.
+
+        Called INSIDE ``_commit_row``'s critical section by every builder that writes a
+        FRESH row for an anchor (``build_done``, ``build_decided``); ``next_version`` rows
+        copy the keys verbatim and need nothing. Two sources, deduplicated by digest against
+        what the row already shows (identical bytes are one sound): the tracks of this
+        turn's jobs that already settled in this process (``_music_settled``), and any
+        ``origin: "music"`` track an earlier version of the anchor carried -- a fresh row is
+        built from the decision, not from ``base``, so without the carry a re-decided anchor
+        would silently drop a song that already arrived.
+        """
+        jobs = list(music_jobs)
+        if base is not None:
+            for job in base.get("music_jobs") or ():
+                if isinstance(job, str) and job not in jobs:
+                    jobs.append(job)
+        if not jobs:
+            return row
+        row["music_jobs"] = jobs
+        extra: list[Mapping[str, Any]] = []
+        if base is not None:
+            extra.extend(
+                s
+                for s in base.get("sounds") or ()
+                if isinstance(s, Mapping) and s.get("origin") == "music"
+            )
+        for job in jobs:
+            extra.extend(self._music_settled.get(job, ()))
+        return _merge_sounds(row, extra)
+
+    def _music_anchor(self, job: str) -> str | None:
+        """The anchor whose highlights row recorded music ``job`` (newest such row wins)."""
+        anchor: str | None = None
+        try:
+            for entry in self._session.transcript.entries():
+                if entry.type != "custom":
+                    continue
+                payload = entry.payload if isinstance(entry.payload, dict) else {}
+                if payload.get("custom_type") != SUPPLEMENT_CUSTOM_TYPE:
+                    continue
+                details = payload.get("details")
+                if isinstance(details, dict) and job in (details.get("music_jobs") or ()):
+                    anchor = str(details.get("anchor", "")) or anchor
+        except Exception:  # noqa: BLE001 -- an unreadable journal is a missing callout
+            logger.debug("supplement rows could not be read for a music settle", exc_info=True)
+            return None
+        return anchor
+
+    async def on_music_settled(self, receipt: Mapping[str, Any]) -> None:
+        """Put a settled music job's tracks into its PRODUCING turn's highlights row.
+
+        WHY. Highlights are decided once, at turn end, and a music tool result is only
+        ``{"stage": "queued", "job_id": ...}`` then -- the tracks exist minutes later, when
+        the job settles (``music/jobs.py`` reports a ``music_receipt``). So the turn's row
+        records ``music_jobs`` and this merges the tracks in when they land, through the one
+        write path, and beats ``supplement_progress`` so a live surface paints the players
+        without a reload (the files-only beat's reasoning, ``_write``).
+
+        IDEMPOTENT by digest: a replayed settle, a recovered observer after a restart, or a
+        reconnect re-delivering the same receipt finds every track already in the row and
+        writes nothing. A failed job (no artifacts) writes nothing. A settle that beats its
+        own turn's end is parked in ``_music_settled`` and folded in by that turn's build --
+        both sides run under ``_ops_lock``, so exactly one of them does the merge.
+        Never raises: a missing callout must not fail the job's delivery.
+        """
+        try:
+            job = str(receipt.get("job") or "")
+            sounds = tuple(music_sounds(receipt))
+            if not job or not sounds:
+                return
+            async with self._ops_lock:
+                self._music_settled.pop(job, None)
+                self._music_settled[job] = sounds
+                while len(self._music_settled) > _MUSIC_SETTLED_MAX:
+                    self._music_settled.pop(next(iter(self._music_settled)))
+                anchor = await asyncio.to_thread(self._music_anchor, job)
+                if not anchor:
+                    return  # the producing turn has not written its row: its build merges
+
+                def build_merge(base: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+                    if base is None:
+                        return None
+                    merged = _merge_sounds(dict(base), sounds)
+                    if merged.get("sounds") == base.get("sounds"):
+                        return None  # every track already shown: replay is a no-op
+                    # Same state: a merge adds players, it never moves the job's lifecycle.
+                    return next_version(merged, state=str(base.get("state", "done")))
+
+                final = await self._commit_row(anchor=anchor, build=build_merge)
+            if final is not None and final.get("state") in ("decided", "done"):
+                await self._progress(final, str(final["state"]))
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.debug("settled music could not reach the highlights row", exc_info=True)
 
     # -- the one write path (round-3 review R3-1) -------------------------------------------
 

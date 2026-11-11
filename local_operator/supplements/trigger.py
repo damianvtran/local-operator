@@ -87,6 +87,15 @@ class TurnItem:
     is_error: bool = False
     #: Bounded durable audio facts survive text reduction/compaction; no second inventory.
     artifacts: tuple[Mapping[str, Any], ...] = ()
+    #: The background job a ``generate_music``/``modify_music`` result queued. Music is the
+    #: one sound source whose bytes do NOT exist at turn end (the tool result is only
+    #: ``{"stage": "queued", "job_id": ...}``), so the turn's highlights row records this id
+    #: (``music_jobs``) and the runner merges the tracks into it when the job settles.
+    job_id: str = ""
+
+
+#: Tools whose result is a queued music job rather than playable audio.
+MUSIC_TOOLS: Final = frozenset({"generate_music", "modify_music"})
 
 
 @dataclass(frozen=True)
@@ -259,6 +268,14 @@ def snapshot_message(
             )
         )
     artifacts: list[Mapping[str, Any]] = []
+    music_job = ""
+    if getattr(message, "tool_name", "") in MUSIC_TOOLS and not getattr(
+        message, "is_error", False
+    ):
+        payload = getattr(message, "provider_payload", None)
+        details = payload.get("details") if isinstance(payload, Mapping) else None
+        raw_job = details.get("job_id") if isinstance(details, Mapping) else None
+        music_job = _clip(raw_job, 64) if isinstance(raw_job, str) else ""
     if getattr(message, "tool_name", "") in {"generate_voiceover", "generate_sound_effect"}:
         import math
 
@@ -299,7 +316,64 @@ def snapshot_message(
         tool_name=str(getattr(message, "tool_name", "") or ""),
         is_error=bool(getattr(message, "is_error", False)),
         artifacts=tuple(artifacts),
+        job_id=music_job,
     )
+
+
+def turn_music_jobs(items: Iterable[TurnItem]) -> list[str]:
+    """The music job ids this turn queued, in call order, deduplicated (continuations)."""
+    jobs: list[str] = []
+    for item in items:
+        if item.role == "tool" and item.tool_name in MUSIC_TOOLS and item.job_id:
+            if item.job_id not in jobs:
+                jobs.append(item.job_id)
+    return jobs
+
+
+def music_sounds(receipt: Mapping[str, Any]) -> list[SupplementSound]:
+    """The playable tracks of a SETTLED music job's receipt, as highlight ``sounds[]``.
+
+    ``receipt`` is the runner's ``music_receipt`` (``music/jobs.py``): ``artifacts[]``
+    holds one ``artifact_details`` entry per track whose bytes reached the
+    AttachmentStore. That list is the whole filter: a failed or zero-artifact track never
+    gets an entry, while a track that finished before a cancellation does (it was charged
+    and it plays), so neither needs a status check here. Same shape as a generated
+    voiceover entry plus ``origin: "music"``, which surfaces ignore (they special-case only
+    ``"file"``) and the runner uses to carry merged tracks across later rewrites of the row.
+    """
+    import math
+
+    from local_operator.supplements.contract import is_digest
+
+    sounds: list[SupplementSound] = []
+    seen: set[str] = set()
+    raw = receipt.get("artifacts")
+    for item in raw if isinstance(raw, (list, tuple)) else ():
+        if not isinstance(item, Mapping) or item.get("kind") != "audio":
+            continue
+        digest = item.get("digest")
+        if not is_digest(digest) or digest in seen:
+            continue
+        seen.add(str(digest))
+        duration = item.get("duration_s")
+        duration = (
+            float(duration)
+            if isinstance(duration, (int, float))
+            and not isinstance(duration, bool)
+            and math.isfinite(duration)
+            and duration >= 0
+            else 0.0
+        )
+        sounds.append(
+            SupplementSound(
+                attachment=str(digest),
+                mime=_clip(item.get("content_type"), 128) or "audio/mpeg",
+                title=_clip(item.get("name"), 2048) or "Generated music",
+                duration_s=duration,
+                origin="music",
+            )
+        )
+    return sounds
 
 
 def turn_sounds(items: Iterable[TurnItem]) -> list["SupplementSound"]:
