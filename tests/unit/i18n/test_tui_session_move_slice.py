@@ -67,18 +67,32 @@ def _assert_no_english(value: str) -> None:
         assert fragment not in value, fragment
 
 
+def _refusal(arg: str) -> str:
+    """The refusal sentence for ``arg``; fails if the parse accepted it.
+
+    ``parse_move_to`` returns ``None`` for the path form and a ``MoveTo`` with an
+    empty ``error`` for an accepted request, so narrowing here keeps each
+    assertion below discriminating: a regression that stops refusing fails on
+    the ``is not None`` / non-empty check rather than comparing against ``None``.
+    """
+    parsed = parse_move_to(arg)
+    assert parsed is not None
+    assert parsed.error
+    return parsed.error
+
+
 def test_english_source_keeps_the_pre_extraction_bytes() -> None:
     """Control: English is byte-identical to the literals these keys replaced."""
     assert ambiguous_move() == (
         "Use /move <path> for a working directory, "
         "or /move <session> --to <peer> to move a session."
     )
-    assert parse_move_to("--to").error == "--to needs a device: /move --to <peer|local>"
-    assert parse_move_to("--to x --wait 30").error == (
+    assert _refusal("--to") == "--to needs a device: /move --to <peer|local>"
+    assert _refusal("--to x --wait 30") == (
         "this view cannot wait — from a shell: "
         "`lop sessions move <id> --to <to> --wait <seconds>`"
     )
-    assert parse_move_to("--to x --force").error == (
+    assert _refusal("--to x --force") == (
         "/move --to takes only --keep, --queue and --drop-session-roles, not '--force'"
     )
 
