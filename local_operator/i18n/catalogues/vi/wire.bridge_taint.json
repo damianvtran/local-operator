@@ -1,0 +1,7 @@
+{
+  "wire.bridge_taint.card_notice": "Cuộc trò chuyện này có tin nhắn từ tác nhân của một đồng đội (Tin nhắn tác nhân). Hãy kiểm tra thao tác này gửi gì và gửi đến đâu trước khi cho phép.",
+  "wire.bridge_taint.card_options_off": "“Allow all” và auto đã tắt trong cuộc trò chuyện này. Để bật auto, hãy gõ /approvals auto trong terminal, hoặc dùng /new để bắt đầu cuộc trò chuyện mới.",
+  "wire.bridge_taint.full_request": "Yêu cầu đầy đủ: {request}",
+  "wire.bridge_taint.grant_suspended": "Phê duyệt tự động đã tạm dừng trong cuộc trò chuyện này vì giờ đây nó có tin nhắn từ tác nhân của một đồng đội (Tin nhắn tác nhân). Mỗi lệnh gọi công cụ sẽ hỏi bạn trước. Để quay lại auto, hãy gõ /approvals auto trong terminal.",
+  "wire.bridge_taint.ack_refused": "Phê duyệt tự động vẫn đang tắt. Cuộc trò chuyện này có tin nhắn từ tác nhân của một đồng đội (Tin nhắn tác nhân), nên không thể bật auto từ đây. Để bật, hãy gõ /approvals auto trong terminal, hoặc dùng /new để bắt đầu cuộc trò chuyện mới."
+}

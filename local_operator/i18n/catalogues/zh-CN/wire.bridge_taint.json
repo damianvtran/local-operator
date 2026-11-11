@@ -1,0 +1,7 @@
+{
+  "wire.bridge_taint.card_notice": "此对话包含一位队友的智能体发来的消息（智能体消息）。允许之前，请先检查这项操作会发送什么内容、发往何处。",
+  "wire.bridge_taint.card_options_off": "此对话中已关闭“Allow all”和auto。要开启auto，请在终端中输入/approvals auto，或使用/new开始新对话。",
+  "wire.bridge_taint.full_request": "完整请求：{request}",
+  "wire.bridge_taint.grant_suspended": "此对话现已包含一位队友的智能体发来的消息（智能体消息），因此自动审批已暂停。每次工具调用都会先征求你的同意。要恢复auto，请在终端中输入/approvals auto。",
+  "wire.bridge_taint.ack_refused": "自动审批仍处于关闭状态。此对话包含一位队友的智能体发来的消息（智能体消息），因此无法在这里开启auto。要开启，请在终端中输入/approvals auto，或使用/new开始新对话。"
+}

@@ -1,0 +1,7 @@
+{
+  "wire.bridge_taint.card_notice": "Esta conversación incluye un mensaje del agente de un compañero de equipo (Mensajes de agentes). Revisa qué envía esto y a dónde antes de permitirlo.",
+  "wire.bridge_taint.card_options_off": "“Allow all” y el modo auto están desactivados en esta conversación. Para activar el modo auto, escribe /approvals auto en la terminal, o usa /new para empezar una conversación nueva.",
+  "wire.bridge_taint.full_request": "Solicitud completa: {request}",
+  "wire.bridge_taint.grant_suspended": "La aprobación automática está en pausa en esta conversación porque ahora incluye un mensaje del agente de un compañero de equipo (Mensajes de agentes). Cada llamada a herramientas te pedirá permiso primero. Para volver al modo auto, escribe /approvals auto en la terminal.",
+  "wire.bridge_taint.ack_refused": "La aprobación automática sigue desactivada. Esta conversación incluye un mensaje del agente de un compañero de equipo (Mensajes de agentes), así que el modo auto no se puede activar desde aquí. Para activarlo, escribe /approvals auto en la terminal, o usa /new para empezar una conversación nueva."
+}
