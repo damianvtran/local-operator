@@ -1,0 +1,4 @@
+{
+  "tui.boot_prompt.returned_to_composer": "Tu prompt de inicio no se envió — está en el campo de texto.",
+  "tui.boot_prompt.not_sent_kept_draft": "Tu prompt de inicio no se envió: {prompt}"
+}
