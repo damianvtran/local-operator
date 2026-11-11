@@ -29827,7 +29827,9 @@ class Session:
         # Parked wakes are already fired occurrences with no schedule left to
         # re-arm: hand them durably to the successor the same way a draining
         # fire is spooled, so retiring the runtime cannot drop them.
-        if self._parked_wakes:
+        # ``getattr`` like the hook read above: the cell harnesses borrow this
+        # method onto a host that has no park batch, and that is an empty one.
+        if getattr(self, "_parked_wakes", None):
             _parked = self._take_parked_wakes()
             for _msg in _parked:
                 _wid = str(_msg.details.get("wake_id", ""))
@@ -34290,7 +34292,9 @@ class Session:
             # graceful dispose cannot lose a one-shot reminder the operator
             # is still owed. Awaiting the hold before the cancel block is the
             # ordering the deferred-job-results flush uses for the same reason.
-            if self._parked_wakes:
+            # ``getattr``: a host that borrows ``Session`` methods without the
+            # park batch reads as an empty one.
+            if getattr(self, "_parked_wakes", None):
                 _parked = self._take_parked_wakes()
                 if _parked:
                     held: list[AgentMessage] = list(_parked)
