@@ -217,6 +217,78 @@ def test_a_legacy_fetch_failure_row_without_an_origin_is_healed_too() -> None:
     assert item["error_class"] is None and item["auto_retry"] is True and item["attempts"] == 0
 
 
+def _legacy_retired_below_the_cap(doc: dict[str, Any], **error: Any) -> dict[str, Any]:
+    """A pre-``retired_origin`` row the APPLY retired, whose class a later fetch
+    overwrote: no ``error_origin``, no stamp, ``auto_retry`` False, attempts < cap."""
+
+    item = _apply(doc, classification="both-changed")
+    item.update(auto_retry=False, **error)
+    item.pop("error_origin", None)
+    item.pop(st.RETIRED_ORIGIN, None)
+    return item
+
+
+def test_a_legacy_hub_error_row_retired_below_the_cap_stays_manual_after_a_200() -> None:
+    """Agent review round 2, R2-M1 (S13; the operator's qa-tester row). Only the
+    ``MAX_ATTEMPTS`` cap and the apply-only ``NO_AUTO_RETRY`` ever set
+    ``auto_retry`` False, so retired at attempts 2 means the apply retired it. The
+    200 clears the shown fetch error but must not re-arm unattended auto-apply."""
+
+    doc: dict[str, Any] = {"items": {}}
+    _legacy_retired_below_the_cap(
+        doc,
+        error_class="hub-error",
+        last_error="could not reach the hub: Could not pull the team",
+        attempts=2,
+    )
+    item = _apply(doc, classification="both-changed")
+    assert item["error_class"] is None and item["last_error"] is None
+    assert "error_origin" not in item
+    assert item["auto_retry"] is False and item[st.RETIRED_ORIGIN] == "apply"
+    assert item["attempts"] == 2 and st.auto_apply_due(item, FIXED) is False
+    # A new remote text still re-arms it (the documented way out besides Retry).
+    item = _apply(doc, classification="both-changed", remote="fp2")
+    assert item["auto_retry"] is True and st.RETIRED_ORIGIN not in item
+
+
+def test_a_legacy_no_credential_row_retired_below_the_cap_stays_manual_after_a_200() -> None:
+    """R2-M1 (S6): ``no-credential`` is uncounted and never retires, so a legacy
+    retired row carrying it was retired by an apply -- with or without a startup
+    401 in between, the 200 clears the sign-in error and keeps it manual."""
+
+    for with_401 in (False, True):
+        doc: dict[str, Any] = {"items": {}}
+        _legacy_retired_below_the_cap(
+            doc,
+            error_class="no-credential",
+            last_error="sign in to the Radient Agent Hub",
+            attempts=1,
+        )
+        if with_401:
+            _startup_401(doc)
+        item = _apply(doc, classification="both-changed")
+        assert item["error_class"] is None, with_401
+        assert item["auto_retry"] is False and item[st.RETIRED_ORIGIN] == "apply", with_401
+        assert st.auto_apply_due(item, FIXED) is False, with_401
+
+
+def test_a_legacy_tenant_mismatch_row_heals_on_a_200() -> None:
+    """R2-m1: the check's tenant-mismatch arm writes ``hub-error`` directly (not
+    through ``_failure_reason``); its origin-less legacy row heals once the hub
+    serves the team again, instead of staying latched behind a log line."""
+
+    doc: dict[str, Any] = {"items": {}}
+    item = _apply(doc, classification="both-changed")
+    item.update(
+        error_class="hub-error",
+        last_error="the hub now reports this team under organization org-2",
+    )
+    item.pop("error_origin", None)
+    assert st.fetch_recorded_failure(item) is True
+    item = _apply(doc, classification="both-changed")
+    assert item["error_class"] is None and item["last_error"] is None
+
+
 def test_an_apply_failure_survives_a_successful_fetch() -> None:
     """The fetch says nothing about whether the MERGE works: an apply-recorded
     failure is not the check's to clear (the next apply or a Retry decides)."""

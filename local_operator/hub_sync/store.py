@@ -415,7 +415,16 @@ def apply_check(
         # (agent review round 1, M1). The error is cleared either way (the 200
         # disproves it); attempts/auto_retry are re-armed only when the
         # retirement was not the apply's (``RETIRED_ORIGIN``).
+        #
+        # An UNSTAMPED retired row (written before ``RETIRED_ORIGIN`` existed)
+        # is attributed first, from its counters, before the stamp is read: with
+        # no stamp it would otherwise always re-arm, and a legacy apply
+        # retirement whose class a later fetch overwrote (the operator's
+        # qa-tester row: ``could not reach the hub:``, attempts 2, auto_retry
+        # False) would go back to unattended auto-apply (agent review round 2,
+        # R2-M1).
         if fetch_recorded_failure(item):
+            _pin_retirement(item)
             item.update(error_class=None, error_subclass=None, last_error=None)
             item.pop("error_origin", None)
             if item.get(RETIRED_ORIGIN) != "apply":
@@ -430,13 +439,17 @@ def apply_check(
 #: qa-tester rows, 2026-11-11), which would otherwise stay latched until a
 #: manual Retry. Every entry is cited to the writer:
 #:
-#: - ``check._failure_reason``, the only fetch-failure writer. Since e944377
+#: - ``check._failure_reason``, the general fetch-failure writer. Since e944377
 #:   (2026-09-29) its fallback has been ``f"could not reach the hub: {text}"``,
 #:   so a client's generic sentence ("Could not pull the team from the Radient
 #:   Agent Hub") was always stored behind that prefix, never bare -- the bare
 #:   sentence is NOT listed, because no check path ever stored it and an
 #:   apply-time ``LinkError`` text could carry one. f3a2449 (2026-10-28) added
 #:   "the hub refused the request (" and "the hub returned an error (".
+#: - The check's tenant-mismatch arm (``check.py`` team arm, "the hub now reports
+#:   this team under organization {owner}"), which writes ``reason="hub-error"``
+#:   directly rather than through ``_failure_reason`` (agent review round 2,
+#:   R2-m1). A 200 means the mismatch is gone, so its legacy row heals too.
 #: - The check's local reads (``check.py`` agent and team arms, also since
 #:   e944377): "could not read the local row:" / "could not read the local
 #:   team:". Rows stamped today get ``error_origin="check"`` for the same
@@ -448,6 +461,7 @@ _LEGACY_FETCH_SENTENCES = (
     "the hub refused the request (",
     "the hub returned an error (",
     "could not reach the hub:",
+    "the hub now reports this team under organization ",
     "could not read the local row:",
     "could not read the local team:",
 )
@@ -497,15 +511,22 @@ def _pin_retirement(item: dict[str, Any]) -> None:
 
     Only acts on a retired row with no stamp: a row retired before
     ``RETIRED_ORIGIN`` existed, or one whose stamp was never written. The current
-    error is the best evidence of who retired it -- a fetch-recorded error means
-    the check did (the operator's radientdev row: legacy 401 sentence, attempts
-    11), anything else is attributed to the apply, which is the conservative side:
-    it keeps a needs-a-human row out of unattended auto-apply.
+    error alone is NOT enough evidence: a later fetch failure can overwrite an
+    apply's class. The counters are. Only two writers ever set ``auto_retry``
+    False -- ``NO_AUTO_RETRY`` classes (apply-only) and the ``MAX_ATTEMPTS`` cap
+    -- and every ``attempts`` reset re-arms it, so a retired row below the cap
+    can only have been retired by the apply (agent review round 2, R2-M1). The
+    check is credited only for a fetch-recorded error AT the cap (the operator's
+    radientdev row: legacy 401 sentence, attempts 11). Anything else goes to the
+    apply, the conservative side: it keeps a needs-a-human row out of unattended
+    auto-apply; a Retry or a new remote fingerprint still re-arms it.
     """
 
     if item.get("auto_retry", True) or item.get(RETIRED_ORIGIN):
         return
-    item[RETIRED_ORIGIN] = "check" if fetch_recorded_failure(item) else "apply"
+    attempts = int(item.get("attempts") or 0)
+    fetch_at_cap = fetch_recorded_failure(item) and attempts >= MAX_ATTEMPTS
+    item[RETIRED_ORIGIN] = "check" if fetch_at_cap else "apply"
 
 
 def _retire(item: dict[str, Any], origin: str) -> None:
