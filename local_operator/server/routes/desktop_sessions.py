@@ -12,7 +12,7 @@ import sqlite3
 import time
 from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing, asynccontextmanager
-from typing import Annotated, Any, Callable, Literal, NamedTuple
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal, NamedTuple, cast
 
 from fastapi import (
     APIRouter,
@@ -155,6 +155,11 @@ from local_operator.supplements.contract import (
     STEER_TEXT_MAX_CHARS,
     supplement_read_options,
 )
+
+if TYPE_CHECKING:
+    # Type-only: the ``cast`` on each ``diff_bindings`` unpack names it as a string, so
+    # this route module keeps its lazy ``tools.diff_archive`` import at runtime.
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 logger = logging.getLogger(__name__)
 
@@ -3665,7 +3670,7 @@ async def snapshot(
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=bool(peer_journal_source),
                 **supplement_read_options(bool(supplements)),
-                **({"diff_bindings": True} if diff_bindings else {}),
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
             )
         )
 
@@ -3792,7 +3797,7 @@ async def history(
                 source_read=source_read,
                 expected_journal_generation=expected_journal_generation,
                 **supplement_read_options(bool(supplements)),
-                **({"diff_bindings": True} if diff_bindings else {}),
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
             )
         )
 

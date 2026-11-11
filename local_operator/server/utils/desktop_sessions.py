@@ -186,6 +186,7 @@ if TYPE_CHECKING:
     # (see ``DesktopSessionBridge._owner_connection``), and ``AttachedSession``
     # already reaches this module's graph through ``session.attached``.
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.tools.diff_archive import DiffBindingReadOptions
 
 #: The page ceiling one child read may ask for, in ONE place. The route declares
 #: it on the wire (FastAPI answers a bigger ``limit`` with 422 before the
@@ -3721,7 +3722,7 @@ class DesktopSessionBridge:
                 **supplement_read_options(supplements),
                 # Only when declared, like supplements: a forwarding path that
                 # predates the flag keeps its exact call shape.
-                **({"diff_bindings": True} if diff_bindings else {}),
+                **cast("DiffBindingReadOptions", {"diff_bindings": True} if diff_bindings else {}),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
@@ -6527,7 +6528,10 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(sub.supplements),
-                **({"diff_bindings": True} if sub.diff_bindings else {}),
+                **cast(
+                    "DiffBindingReadOptions",
+                    {"diff_bindings": True} if sub.diff_bindings else {},
+                ),
             )
             if open_trace.enabled():
                 open_trace.mark(

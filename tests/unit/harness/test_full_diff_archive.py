@@ -241,7 +241,9 @@ async def test_write_over_preview_archives_complete_diff_live_and_persisted(tmp_
     assert len(desc["digest"]) == 32
     # Live: the end event already carries the same descriptor (no refresh).
     ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
-    assert ends[0].result.details[diff_archive.DIFF_FULL_KEY] == desc
+    end_details = ends[0].result.details
+    assert end_details is not None
+    assert end_details[diff_archive.DIFF_FULL_KEY] == desc
     rows = _all_rows(tmp_path, "w-big")
     assert len(rows) == 503
     assert rows[:3] == ["--- ", "+++ ", "@@ -0,0 +1,500 @@"]
@@ -362,7 +364,9 @@ async def test_duplicate_of_literal_line_inside_preview_is_masked(tmp_path):
     assert "+row_0" in diff and "+row_59" in diff and diff[2] == "@@ -0,0 +1,61 @@"
 
 
-def _r2_rows(tmp_path: Path, parts: list[str], before: list[str], after: list[str]):
+def _r2_rows(
+    tmp_path: Path, parts: list[str], before: list[str], after: list[str]
+) -> tuple[Path, list[tuple[str, str, dict[str, Any]] | None]]:
     """Shared F1 round-2 shape: a >200-row diff whose preview cuts the tail."""
     target = tmp_path / "r2.txt"
     target.write_text("\n".join(before) + "\n")
@@ -686,7 +690,9 @@ async def test_first_and_only_huge_line_is_archived_not_lost(tmp_path, tool):
     huge = "Z" * (200 * 1024)
     target = tmp_path / "one.txt"
     if tool == "write":
-        calls = [("h-1", "write", {"path": str(target), "content": huge + "\n"})]
+        calls: list[tuple[str, str, dict[str, Any]] | None] = [
+            ("h-1", "write", {"path": str(target), "content": huge + "\n"})
+        ]
     else:
         target.write_text("old-line\n")
         calls = [("h-1", "edit", {"path": str(target), "old_text": "old-line", "new_text": huge})]
@@ -701,7 +707,9 @@ async def test_first_and_only_huge_line_is_archived_not_lost(tmp_path, tool):
     desc = details[diff_archive.DIFF_FULL_KEY]
     assert desc["state"] == "archived", desc
     ends = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
-    assert ends[0].result.details[diff_archive.DIFF_FULL_KEY] == desc
+    end_details = ends[0].result.details
+    assert end_details is not None
+    assert end_details[diff_archive.DIFF_FULL_KEY] == desc
     rows, pages = _reconstruct(_session_dir(tmp_path), "h-1")
     assert "+" + huge in rows
     assert any(page["next_offset"] for page in pages), "the huge row spans pages"

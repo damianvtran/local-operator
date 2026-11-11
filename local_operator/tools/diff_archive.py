@@ -53,13 +53,29 @@ import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from local_operator.paths import config_dir
 from local_operator.tools.spill import SPILL_ENTRY_LIMIT_BYTES, SpillStore
 
 #: ``details`` key of the small descriptor. Never carries diff content.
 DIFF_FULL_KEY = "diff_full"
+
+
+class DiffBindingReadOptions(TypedDict, total=False):
+    """The optional ``diff_bindings`` reader keyword, typed for ``**`` forwarding.
+
+    Callers forward the flag as ``**({"diff_bindings": True} if declared else {})``
+    so a reader that never declared it keeps its exact pre-flag call shape (the key
+    is OMITTED, not passed as ``False``). A bare dict literal there infers
+    ``dict[str, bool]``, which pyright then matches against EVERY remaining keyword
+    of the callee (``order_ids``, ``before_id``, ...); naming this shape via
+    ``cast`` scopes the unpack to the one key. Type-only: callers import it under
+    ``TYPE_CHECKING`` and cast with a string, so nothing changes at runtime. Mirrors
+    ``supplements.contract.SupplementReadOptions``.
+    """
+
+    diff_bindings: bool
 
 #: Descriptor/artifact format version (the UI's frozen v1 contract).
 DIFF_ARCHIVE_VERSION = 1
@@ -514,7 +530,13 @@ def load_page(
         state = desc.get("state")
         if state not in _STORED_STATES:
             state = STATE_UNAVAILABLE
-    rows = _load_rows(desc, session_id, call_id, config_root) if state == STATE_ARCHIVED else None
+    # ``STATE_ARCHIVED`` is reachable only from the ``isinstance(desc, dict)``
+    # branch above, so the cast restates that proof for the checker; no new check.
+    rows = (
+        _load_rows(cast("dict[str, Any]", desc), session_id, call_id, config_root)
+        if state == STATE_ARCHIVED
+        else None
+    )
     if state == STATE_ARCHIVED and rows is None:
         state = STATE_EVICTED
     if rows is None:
