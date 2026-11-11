@@ -1,0 +1,9 @@
+{
+  "tui.session_move.ambiguous": "Use /move <path> for a working directory, or /move <session> --to <peer> to move a session.",
+  "tui.session_move.to_needs_device": "--to needs a device: /move --to <peer|local>",
+  "tui.session_move.cannot_wait": "this view cannot wait — from a shell: `lop sessions move <id> --to <to> --wait <seconds>`",
+  "tui.session_move.unsupported_flag": "/move --to takes only --keep, --queue and --drop-session-roles, not {flag}",
+  "tui.session_move.cli_unavailable": "could not start the CLI ({reason})",
+  "tui.session_move.deadline_exceeded": "the move did not finish in time; `lop sessions move {session} --to {to}` again reports where it got to",
+  "tui.session_move.cli_no_answer": "the CLI exited {code} with no answer"
+}
