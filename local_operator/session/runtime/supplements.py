@@ -175,9 +175,17 @@ def _merge_sounds(row: dict[str, Any], extra: Sequence[Mapping[str, Any]]) -> di
 
     The overflow is DISCLOSED in ``sounds_more`` exactly as ``build_details`` does, never
     dropped silently (the persistence module's "sounds are artifacts" rule).
+
+    The held-back digests are recorded in ``music_overflow`` (review R4, PR #3780): a
+    counter alone cannot recognise a replayed receipt, so a reconnect or a recovered
+    observer would count the same held-back song again. The list is bounded by the
+    number of music tracks a turn produced, and only ever non-empty in the pathological
+    ``SOUNDS_MAX`` case.
     """
     current = [dict(s) for s in row.get("sounds") or () if isinstance(s, Mapping)]
     seen = {str(s.get("attachment", "")) for s in current}
+    overflow = [str(d) for d in row.get("music_overflow") or () if d]
+    seen.update(overflow)
     more = int(row.get("sounds_more") or 0)
     for sound in extra:
         digest = str(sound.get("attachment", ""))
@@ -186,12 +194,15 @@ def _merge_sounds(row: dict[str, Any], extra: Sequence[Mapping[str, Any]]) -> di
         seen.add(digest)
         if len(current) >= SOUNDS_MAX:
             more += 1
+            overflow.append(digest)
             continue
         current.append(dict(sound))
     if current:
         row["sounds"] = current
     if more:
         row["sounds_more"] = more
+    if overflow:
+        row["music_overflow"] = overflow
     return row
 
 
@@ -1540,6 +1551,13 @@ class SupplementRunner:
         own turn's end is parked in ``_music_settled`` and folded in by that turn's build --
         both sides run under ``_ops_lock``, so exactly one of them does the merge.
         Never raises: a missing callout must not fail the job's delivery.
+
+        LIMITATION (review R5, deferred on PR #3780): a producing turn that writes NO row
+        (refused by ``refusal()`` -- aborted, errored, goal loop running -- no final answer,
+        or its decision cut by the next turn's end before ``_write``) leaves no
+        ``music_jobs`` link, so its tracks are never merged; the parked receipt ages out of
+        the bounded ``_music_settled`` hold. The receipt carries no turn anchor to write a
+        row against, and the chat delivery still shows the job's result.
         """
         try:
             job = str(receipt.get("job") or "")
@@ -1559,12 +1577,30 @@ class SupplementRunner:
                     if base is None:
                         return None
                     merged = _merge_sounds(dict(base), sounds)
-                    if merged.get("sounds") == base.get("sounds"):
-                        return None  # every track already shown: replay is a no-op
-                    # Same state: a merge adds players, it never moves the job's lifecycle.
-                    return next_version(merged, state=str(base.get("state", "done")))
+                    if (merged.get("sounds"), merged.get("sounds_more")) == (
+                        base.get("sounds"),
+                        base.get("sounds_more"),
+                    ):
+                        return None  # every track already shown or counted: replay no-op
+                    state = str(base.get("state", "done"))
+                    if state in _TERMINAL_STATES and state != "done" and not base.get("dismissed"):
+                        # Review R1 (PR #3780): the graphics job this row tracked was cut
+                        # (superseded by the next turn's end, cancelled, failed) or skipped
+                        # -- but the songs are real, finished artifacts of the turn. Kept in
+                        # that state they would be journaled into a row every reader renders
+                        # as nothing (superseded) or behind a Retry line. Settle it ``done``:
+                        # the error and cause go, files and sounds stay, and the cut job's
+                        # components are never revived (they were never completed).
+                        # A DISMISSED row is the operator's choice and stays hidden.
+                        for key in ("error", "cause", "components"):
+                            merged.pop(key, None)
+                        state = "done"
+                    # Otherwise the same state: a live ``decided`` job owns its lifecycle.
+                    return next_version(merged, state=state)
 
-                final = await self._commit_row(anchor=anchor, build=build_merge)
+                # register=False (review R2): this anchor is an OLDER turn's; the open-row
+                # register names the NEWEST turn's live job, which this merge must not clear.
+                final = await self._commit_row(anchor=anchor, build=build_merge, register=False)
             if final is not None and final.get("state") in ("decided", "done"):
                 await self._progress(final, str(final["state"]))
         except Exception:  # noqa: BLE001 -- see the docstring
@@ -1579,8 +1615,13 @@ class SupplementRunner:
         build: Callable[[Mapping[str, Any] | None], Mapping[str, Any] | None],
         job: str | None = None,
         inputs: _JobInputs | None = None,
+        register: bool = True,
     ) -> dict[str, Any] | None:
         """THE supplement write path: read the journal, decide, append, publish (R3-1).
+
+        ``register=False`` leaves the supersede register (``_open_row``) untouched: for a
+        write into an anchor that is not the current turn's (a late music merge), where
+        moving the register would orphan the newest turn's open row (PR #3780 review R2).
 
         Under the one ``_OpsLock`` -- the same lock the control ops hold across a cut -- this
         reads the anchor's newest journal row (``job`` narrows the read to one job's rows),
@@ -1606,7 +1647,8 @@ class SupplementRunner:
             # row is the leftover a future turn may need to close, a terminal one leaves
             # nothing open. The journal still decides whether a close is owed (R3-1); the
             # register only names the anchor for `_close_superseded`.
-            self.set_open_row(None if _is_terminal(row) else row)
+            if register:
+                self.set_open_row(None if _is_terminal(row) else row)
             await append_row(self._session.transcript, row)
             if inputs is not None:
                 inputs.details = dict(row)

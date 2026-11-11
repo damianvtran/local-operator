@@ -275,3 +275,113 @@ async def test_graphics_path_links_music_and_carries_merged_tracks_to_its_termin
     finally:
         await handle.dispose()
         await session.dispose()
+
+
+# -- agent review round 1 (PR #3780): late merges into older anchors -------------------------
+
+
+def _row(anchor: str, job: str, state: str, version: int = 1, **extra: Any) -> dict[str, Any]:
+    return {"v": 1, "anchor": anchor, "job": job, "version": version, "state": state, **extra}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state, extra",
+    [
+        ("cancelled", {"error": "superseded"}),
+        ("cancelled", {"error": "cancelled by operator"}),
+        ("failed", {"error": "renderer crashed", "components": [{"kind": "chart"}]}),
+    ],
+)
+async def test_music_merged_into_a_cut_row_settles_it_done_and_beats_live(tmp_path, state, extra):
+    """R1/R3: the next turn's end supersedes the music turn's graphics row before the song
+    lands. The merge must make the songs visible (``done``, error cleared, files kept, no
+    revived components) and publish them, not journal them into a row that renders nothing."""
+    from local_operator.supplements.contract import SUPERSEDED_ERROR
+
+    if extra.get("error") == "superseded":
+        extra = {**extra, "error": SUPERSEDED_ERROR}
+    session = _make_session(tmp_path / "s", ScriptedStream([]), [], tmp_path)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    runner = SupplementRunner(session, cwd=str(tmp_path))
+    files = [{"path": "notes.md", "attachment": "f" * 32}]
+    try:
+        await runner._commit_row(
+            anchor="T1",
+            build=lambda _b: _row(
+                "T1", "j1", state, version=2, music_jobs=[JOB], files=files, **extra
+            ),
+        )
+        await runner.on_music_settled(receipt(track_artifact(0, "a.mp3")))
+        last = _rows(session.transcript)[-1]
+        assert last["state"] == "done" and "error" not in last and "components" not in last
+        assert last["files"] == files and [s["title"] for s in last["sounds"]] == ["a.mp3"]
+        assert reader_disposition(last, job_live=False) == "block"
+        beats = [e for e in events if e.type == "supplement_progress"]
+        assert beats and beats[-1].anchor == "T1" and beats[-1].sounds == last["sounds"]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_music_merged_into_a_dismissed_row_stays_hidden(tmp_path):
+    """R1: dismissal is the operator's choice -- a late song never resurrects the row."""
+    session = _make_session(tmp_path / "s", ScriptedStream([]), [], tmp_path)
+    runner = SupplementRunner(session, cwd=str(tmp_path))
+    try:
+        await runner._commit_row(
+            anchor="T1",
+            build=lambda _b: _row(
+                "T1", "j1", "skipped", version=2, music_jobs=[JOB], dismissed=True
+            ),
+        )
+        await runner.on_music_settled(receipt(track_artifact(0, "a.mp3")))
+        last = _rows(session.transcript)[-1]
+        assert last["state"] == "skipped" and last["dismissed"] is True
+        assert reader_disposition(last, job_live=False) == "nothing"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_late_music_merge_keeps_the_newer_turns_open_row_registered(tmp_path):
+    """R2: T1's late merge must not clear T2's registered open row, or T3's end never
+    supersedes it and T2 later paints "Highlights cancelled · Retry"."""
+    session = _make_session(tmp_path / "s", ScriptedStream([]), [], tmp_path)
+    runner = SupplementRunner(session, cwd=str(tmp_path))
+    try:
+        await runner._commit_row(
+            anchor="T1", build=lambda _b: _row("T1", "j1", "done", music_jobs=[JOB])
+        )
+        await runner._commit_row(anchor="T2", build=lambda _b: _row("T2", "j2", "decided"))
+        await runner.on_music_settled(receipt(track_artifact(0, "a.mp3")))
+        assert _rows(session.transcript)[-1]["anchor"] == "T1"
+        assert runner._open_row is not None and runner._open_row["anchor"] == "T2"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_merge_into_a_full_row_discloses_the_overflow_once(tmp_path):
+    """R4: a full row still discloses the held-back song in ``sounds_more`` -- and a replay
+    of the same receipt does not count it twice."""
+    from local_operator.supplements.contract import SOUNDS_MAX
+
+    session = _make_session(tmp_path / "s", ScriptedStream([]), [], tmp_path)
+    runner = SupplementRunner(session, cwd=str(tmp_path))
+    full = [{"attachment": f"{n + 1000:032x}", "title": f"s{n}"} for n in range(SOUNDS_MAX)]
+    try:
+        await runner._commit_row(
+            anchor="T1", build=lambda _b: _row("T1", "j1", "done", music_jobs=[JOB], sounds=full)
+        )
+        settled = receipt(track_artifact(0, "a.mp3"))
+        await runner.on_music_settled(settled)
+        last = _rows(session.transcript)[-1]
+        assert (
+            last["version"] == 2 and last["sounds_more"] == 1 and len(last["sounds"]) == SOUNDS_MAX
+        )
+        await runner.on_music_settled(settled)
+        assert len(_rows(session.transcript)) == 2
+    finally:
+        await session.dispose()
