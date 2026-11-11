@@ -21,7 +21,7 @@ import hashlib
 import json
 import time
 import urllib.parse
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -36,6 +36,9 @@ from local_operator.redaction_shapes import (
     scrub_shapes_for_arguments,
     scrub_shapes_with_hits,
 )
+
+if TYPE_CHECKING:
+    from local_operator.session.session import Session
 
 PASSWORD = "Zx9fake" + "Passw0rdQ"
 DSN = f"mongodb+srv://fakeuser:{PASSWORD}@cluster0.example.mongodb.net/db?retryWrites=true"
@@ -1258,15 +1261,17 @@ def test_subagent_result_is_scrubbed_before_it_is_persisted(tmp_path: Any) -> No
     from local_operator.harness.subagent import _redact_child_result
     from local_operator.variables import VariableStore
 
-    parent = SimpleNamespace(_variables=VariableStore(cwd=str(tmp_path)))
+    # The helper reads only ``parent_session._variables``; a namespace stub is
+    # enough at runtime, cast so pyright accepts it as the ``Session`` param.
+    parent = cast("Session", SimpleNamespace(_variables=VariableStore(cwd=str(tmp_path))))
     text = "child found:\n" + secret_yaml().replace(b64(DSN), OPAQUE)
     assert OPAQUE not in _redact_child_result(parent, text)
-    assert _redact_child_result(SimpleNamespace(), "plain") == "plain"
+    assert _redact_child_result(cast("Session", SimpleNamespace()), "plain") == "plain"
 
     def broken(_: str) -> str:
         raise RuntimeError("sink")
 
-    failing = SimpleNamespace(_variables=SimpleNamespace(redact=broken))
+    failing = cast("Session", SimpleNamespace(_variables=SimpleNamespace(redact=broken)))
     assert OPAQUE not in _redact_child_result(failing, text)
 
 
