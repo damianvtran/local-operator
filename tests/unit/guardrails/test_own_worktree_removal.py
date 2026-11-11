@@ -69,7 +69,15 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # (the live case's PRs were all merged), no running owner.
     monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
     monkeypatch.setattr(prov, "_github_repo", lambda _: "damianvtran/local-operator-mobile")
+    # ``worktree_activity`` asks the PR-history lookup (``_gh_prs``) first and
+    # the open-only one only on a full page (#3782), so "no open PR" needs BOTH
+    # stubbed: stubbing only ``_gh_open_prs`` let the real ``gh`` run, which
+    # read "PR state unknown" (HIGH) on CI's merge of this branch with main.
+    # GitLab is stubbed too so the fixture stays forge-neutral.
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_mrs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_open_mrs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_running_owners", lambda real, sid: ())
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     monkeypatch.setenv("HOME", str(home))
@@ -122,18 +130,34 @@ def mobile(home: Path) -> Path:
             (wt / ".expo" / "settings.json").write_text("{}")
         if name == "refused-connect":
             (wt / ".pnpm-store" / "v3").mkdir(parents=True)
-        creator, owners = (C, [C, S]) if name == "composer-ios-wrap" else (S, [S])
-        prov.write_records(
-            [(os.path.realpath(wt), "worktree")],
-            owners=owners,
-            creator=creator,
-            command=(
-                "cd ~/local-operator-mobile && "
-                f"git worktree add -q -b fix/{name} .worktrees/{name} origin/main"
-            ),
-            state_root=state,
-        )
+        _record(home, wt)
     return repo
+
+
+def _record(home: Path, wt: Path) -> None:
+    """Write (or refresh) the creation-ledger row the live session wrote for ``wt``.
+
+    Tests that dirty a tree's ROOT after the fixture recorded it call this again.
+    WHY: on Linux ``creation_stamp`` is the directory's ``st_ctime_ns`` (no birth
+    time there), and adding an entry to the root moves it, so the row stops
+    matching and the tree reads as not-own: deliberate fail-closed, pinned in
+    ``creation_stamp``'s docstring. macOS stamps birth time and keeps matching,
+    which is why these tests passed locally and failed on CI's Ubuntu runners
+    (run 43062213742). Refreshing the row keeps the ownership path under test on
+    both platforms; ``INSERT OR REPLACE`` makes it idempotent.
+    """
+    name = wt.name
+    creator, owners = (C, [C, S]) if name == "composer-ios-wrap" else (S, [S])
+    prov.write_records(
+        [(os.path.realpath(wt), "worktree")],
+        owners=owners,
+        creator=creator,
+        command=(
+            "cd ~/local-operator-mobile && "
+            f"git worktree add -q -b fix/{name} .worktrees/{name} origin/main"
+        ),
+        state_root=home / ".local-operator",
+    )
 
 
 class _Judge:
@@ -212,6 +236,7 @@ def test_own_worktree_with_unregenerable_ignored_output_is_own_clean(
         fh.write("local-notes/\n")
     (wt / "local-notes").mkdir()
     (wt / "local-notes" / "todo.txt").write_text("x")
+    _record(home, wt)  # the root changed after recording (Linux ctime stamp)
     assert prov.worktree_state(str(wt)) == "dirty"
     assert prov.worktree_state(str(wt), own=True) == "clean"
     v = classify_bash(
@@ -291,6 +316,7 @@ async def test_real_untracked_work_goes_to_the_judge_with_the_ledger_and_the_ent
     """(d) Own but holding unfinished work: the judge decides, with every fact."""
     wt = mobile / ".worktrees" / "connect-diagnostics"
     (wt / "notes-unfinished.md").write_text("wip")
+    _record(home, wt)  # the root changed after recording (Linux ctime stamp)
     judge = _Judge("BLOCK: uncommitted work")
     outcome = await _check(
         home, f"cd ~/local-operator-mobile && git worktree remove --force {wt}", judge
@@ -312,6 +338,7 @@ async def test_judge_may_settle_own_dirty_worktree_by_citing_the_ledger(
     """The judge's ``ALLOW ledger`` is re-verified against the ledger, not trusted."""
     wt = mobile / ".worktrees" / "composer-ios-wrap"
     (wt / "scratch.txt").write_text("throwaway")
+    _record(home, wt)  # the root changed after recording (Linux ctime stamp)
     judge = _Judge("ALLOW ledger")
     outcome = await _check(home, f"git worktree remove --force {wt}", judge)
     assert outcome is not None
@@ -359,9 +386,10 @@ def test_own_worktree_with_open_pr_or_running_owner_is_not_settled(
     def rank(command: str) -> Any:
         return classify_bash(command, cwd=str(home), env=_env(home), scratchpad=None, session_id=S)
 
-    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [42])
+    # The open PR arrives through the history lookup, the one main consults first.
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [prov.ForgeChange(42, "open", "")])
     assert rank(f"git worktree remove --force {wt}").risk is Risk.CRITICAL
-    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_running_owners", lambda real, sid: ("qa0000000000",))
     assert rank(f"git worktree remove {wt}").risk is Risk.HIGH
 
