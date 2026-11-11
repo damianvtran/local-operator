@@ -56,8 +56,8 @@
   },
   "wire.settings.keymap.send_steer.help": {
     "role": "Settings row help for the send-as-steer composer shortcut",
-    "tone": "plain, two sentences; second teaches the terminal limit",
-    "note": "EN-only context sidecar. Keep the limit sentence verbatim: Ctrl/Alt/Cmd+Enter needs enhanced-key terminals, Alt+letter works everywhere, and macOS needs Option-as-Meta. No ICU arguments."
+    "tone": "plain, two short sentences",
+    "note": "EN-only context sidecar. The terminal limit moved to the recorder prompt (it is taught where the chord is bound); this row only says the chord overrides the Delivery when busy default for one message. No ICU arguments."
   },
   "wire.settings.keymap.send_queue.label": {
     "role": "Settings row label for the composer shortcut that queues the message for after the current step",
@@ -66,8 +66,8 @@
   },
   "wire.settings.keymap.send_queue.help": {
     "role": "Settings row help for the send-as-queue composer shortcut",
-    "tone": "plain, two sentences; second teaches the terminal limit",
-    "note": "EN-only context sidecar. Keep the limit sentence verbatim: Ctrl/Alt/Cmd+Enter needs enhanced-key terminals, Alt+letter works everywhere, and macOS needs Option-as-Meta. No ICU arguments."
+    "tone": "plain, two short sentences",
+    "note": "EN-only context sidecar. The terminal limit moved to the recorder prompt (it is taught where the chord is bound); this row only says the chord overrides the Delivery when busy default for one message. No ICU arguments."
   },
   "wire.settings.keymap.send_both.label": {
     "role": "Settings row label for the composer shortcut that sends now and again after the step",
@@ -76,7 +76,7 @@
   },
   "wire.settings.keymap.send_both.help": {
     "role": "Settings row help for the send-as-both composer shortcut",
-    "tone": "plain, two sentences; second teaches the terminal limit",
-    "note": "EN-only context sidecar. Keep the limit sentence verbatim: Ctrl/Alt/Cmd+Enter needs enhanced-key terminals, Alt+letter works everywhere, and macOS needs Option-as-Meta. No ICU arguments."
+    "tone": "plain, two short sentences",
+    "note": "EN-only context sidecar. The terminal limit moved to the recorder prompt (it is taught where the chord is bound); this row only says the chord overrides the Delivery when busy default for one message. No ICU arguments."
   }
 }

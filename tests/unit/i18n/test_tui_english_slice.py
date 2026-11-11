@@ -236,21 +236,15 @@ KEYMAP_ENGLISH = {
     ),
     "keymap.send_steer": (
         "Send as steer",
-        "Sends the message now and interrupts the running step. Ctrl/Alt/Cmd+Enter only "
-        "work in terminals that support enhanced keys; Alt+letter works everywhere "
-        "(macOS terminals need Option-as-Meta).",
+        "Send now, interrupting the step. Overrides Delivery when busy.",
     ),
     "keymap.send_queue": (
         "Send as queue",
-        "Waits for the current step to finish and never interrupts running tools. "
-        "Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; "
-        "Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+        "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
     ),
     "keymap.send_both": (
         "Send as both",
-        "Waits like queue, then interrupts like steer if the message has waited too long. "
-        "Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; "
-        "Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+        "Wait, then interrupt if slow. Overrides Delivery when busy.",
     ),
 }
 

@@ -253,7 +253,7 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.composer.delivery.queue": "queue",
       "relay.composer.delivery.queue_hint": "Wait; never interrupt tools",
       "relay.composer.delivery.steer": "steer",
-      "relay.composer.delivery.steer_hint": "Interrupt now (today's behaviour)",
+      "relay.composer.delivery.steer_hint": "Interrupt a running tool now",
     },
   },
   "relay.health": {

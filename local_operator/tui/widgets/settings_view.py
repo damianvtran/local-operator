@@ -2460,7 +2460,11 @@ class SettingsView(Vertical):
         normalized = (
             keymap_mod.normalize_desktop_key(key, action_id=capture.setting_key)
             if scope == "desktop"
-            else keymap_mod.normalize_key(key)
+            else (
+                keymap_mod.normalize_composer_key(key)
+                if scope == "composer"
+                else keymap_mod.normalize_key(key)
+            )
         )
         self._capture = capture._replace(key=normalized, refused="")
         self._repaint()
@@ -4199,13 +4203,19 @@ class SettingsView(Vertical):
                 else:
                     line.append(_t(_x.settings_view_press_key()), style=accent)
                 return line
-            # `display_key`, not `format_key_display`: a desktop value maps its
-            # platform tokens for display in its OWN scope (primary reads
-            # cmd/ctrl), where the app vocabulary would show it verbatim.
-            line.append(
-                keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
-                style=value_style,
-            )
+            # An unbound hotkey (the composer-scope send rows ship unbound)
+            # has an empty value: paint the page's "nothing to show" glyph
+            # in dim ink rather than a blank cell, which reads as an unset
+            # row the user has broken or never opened (D4). The empty string
+            # is the omission encoding of unbound, so it is the only case
+            # that paints this.
+            if not str(value):
+                line.append("—", style=dim)
+            else:
+                line.append(
+                    keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
+                    style=value_style,
+                )
             if selected:
                 # The same cursor-row-only affordance glyph the bool/enum rows
                 # carry, answering "what does `enter` do here?" before the
@@ -4724,14 +4734,31 @@ class SettingsView(Vertical):
                 # something stopped working. So it is named, and the user
                 # presses enter having read it.
                 reason = self._capture_conflict()
+                # A kitty-only chord needs its terminal limit stated where
+                # it is bound, not only in row help the user may never open
+                # (UX round 1, U1): without it a legacy terminal silently
+                # receives plain Enter for the very press that was bound.
+                if keymap_mod.scope_of(capture.setting_key) == "composer" and (
+                    keymap_mod.composer_chord_needs_enhanced_keys(capture.key)
+                ):
+                    need = "needs enhanced keys"
+                    reason = f"{need} — {reason}" if reason else need
                 contract_text = "enter confirms · esc cancels"
             else:
                 # Leads with the CONTRACT rather than restating the value
                 # column's `press a key…`; carrying both phrasings made a user
                 # check whether the difference was meaningful (design round 1,
                 # D7). The value column keeps the prompt, this line explains
-                # the way out.
-                lead, lead_style, reason = "listening for a key", dim + Style(bold=True), ""
+                # the way out. On a composer-scope row the lead teaches the
+                # chord grammar instead: a send chord that only works in
+                # kitty terminals must say so where the user binds it, and a
+                # legacy terminal would otherwise receive plain Enter for
+                # the very press the user believed was bound (UX round 1, U1).
+                if keymap_mod.scope_of(capture.setting_key) == "composer":
+                    lead = "alt+<letter> works anywhere, ctrl+enter needs enhanced keys"
+                else:
+                    lead = "listening for a key"
+                lead_style, reason = dim + Style(bold=True), ""
                 contract_text = "esc cancels"
 
             width = self._detail_width()

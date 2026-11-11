@@ -3565,34 +3565,64 @@ class TestTheBusyDefaultRow:
     def test_an_old_body_without_delivery_hashes_as_before(self) -> None:
         """T2: an absent ``delivery`` must not change the receipt fingerprint.
 
-        The receipt journal fingerprints the whole request body
-        (``server/utils/desktop_receipts.py``), so a same-``request_id``
-        retry of a body written before the field existed must read as the
-        same body, not a changed one: ``Prompt``'s wrap-serializer drops a
-        ``None`` delivery. This hashes the serialised old body and the
-        explicitly-absent one for identity.
+        The receipt journal (``server/utils/desktop_receipts.py``) fingerprints
+        the whole request body, so a same-``request_id`` retry of a body written
+        before the field existed must read as the same body, not a changed one:
+        ``Prompt``'s wrap-serializer drops a ``None`` delivery.
+
+        The fingerprint here is the REAL journal's: the test drives
+        ``DesktopReceipts.run`` twice — first with the parsed old body, then
+        with the same body carrying an explicit ``delivery: None`` — and
+        requires the second to REPLAY the first's outcome. A changed
+        fingerprint would raise ``ReceiptConflict`` on the retry instead, so
+        any drift between ``Prompt.model_dump`` and the journal's hash breaks
+        this. The literal digest the old body must produce is pinned too
+        (derived once from the journal's canonical form).
         """
+        import asyncio
         import hashlib
         import json
 
         from local_operator.server.routes.desktop_sessions import Prompt
+        from local_operator.server.utils.desktop_receipts import DesktopReceipts
 
         old_body = {"text": "hello", "request_id": "00000000-0000-0000-0000-000000000001"}
         prompt = Prompt.model_validate(old_body)
         assert prompt.delivery is None
-        # The canonical receipt fingerprint is the sha256 of the serialised
-        # body bytes; an absent delivery must not alter them.
-
-        def _fingerprint(body: dict[str, object]) -> str:
-            canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-            return hashlib.sha256(canonical).hexdigest()
-
-        with_delivery_absent = prompt.model_dump()
-        assert "delivery" not in with_delivery_absent
-        assert _fingerprint(with_delivery_absent) == _fingerprint(prompt.model_dump())
+        dumped = prompt.model_dump()
+        assert "delivery" not in dumped
+        # Pinned literal: sha256 of json.dumps(dumped, sort_keys, separators)
+        # — the journal's canonical form for this exact old body.
+        pinned = hashlib.sha256(
+            json.dumps(dumped, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        assert pinned == "caad6969613c9171da0becc65ed5cb2b8d687be4821fe2f745bd73bfe4bc6481"
         # And a body that IS an old body (no delivery key at all, as stored
         # before the field existed) is byte-identical after a round trip.
-        assert Prompt.model_validate(old_body).model_dump() == with_delivery_absent
+        assert Prompt.model_validate(old_body).model_dump() == dumped
+
+        async def _replay() -> tuple[dict[str, object], dict[str, object]]:
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as root:
+                journal = DesktopReceipts(Path(root))
+                calls: list[str] = []
+
+                async def _operation() -> dict[str, object]:
+                    calls.append("run")
+                    return {"status": "ok"}
+
+                first = await journal.run("req-1", dumped, _operation)
+                # Same id, same body (explicit None delivery): must replay, not
+                # conflict and not re-run.
+                second = await journal.run("req-1", dumped, _operation)
+                assert first == {"status": "ok"}
+                assert second == {"status": "ok", "replayed": True}
+                assert calls == ["run"]
+                return first, second
+
+        asyncio.run(_replay())
 
 
 def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(

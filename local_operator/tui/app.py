@@ -20919,7 +20919,7 @@ class OperatorApp(App[None]):
         ``_config_values`` holds: a LIVE-scope edit must take effect on the very
         next send in this session. The fallback lives in
         :mod:`local_operator.tui.busy_delivery` beside the predicate, so a
-        hand-edited ``busy_delivery: "sometimes"`` reads as the default rather
+        hand-edited ``delivery.busy_default: "sometimes"`` reads as the default rather
         than reaching the engine as an unknown value the wire would refuse.
         """
         return busy_delivery_mode(self._config_values())
@@ -35584,7 +35584,11 @@ class OperatorApp(App[None]):
                     failure_class="busy-delivery-unsupported",
                     sentence=BUSY_DELIVERY_UNSUPPORTED,
                     kind="warning",
-                    can_send_again=True,
+                    # No resend: re-pushing the same mode against the same
+                    # legacy handle fails identically — a resend here cannot
+                    # succeed, so it is not offered (D9). `edit` alone returns
+                    # the text, where a plain Enter (steer) can still send it.
+                    can_send_again=False,
                 )
                 return
             if mode != "steer":
@@ -48624,7 +48628,7 @@ class OperatorApp(App[None]):
                     continue
                 if _keymap.validate_key(raw, scope="composer", action_id=action_id) is not None:
                     continue
-                for part in _keymap.normalize_key(str(raw)).split(","):
+                for part in _keymap.normalize_composer_key(str(raw)).split(","):
                     if part:
                         chords[part] = mode
             try:

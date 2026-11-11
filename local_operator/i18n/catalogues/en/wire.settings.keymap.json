@@ -10,9 +10,9 @@
   "wire.settings.keymap.start_recording.label": "Start recording",
   "wire.settings.keymap.start_recording.help": "Starts speech-to-text recording in the desktop window.",
   "wire.settings.keymap.send_steer.label": "Send as steer",
-  "wire.settings.keymap.send_steer.help": "Sends the message now and interrupts the running step. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+  "wire.settings.keymap.send_steer.help": "Send now, interrupting the step. Overrides Delivery when busy.",
   "wire.settings.keymap.send_queue.label": "Send as queue",
-  "wire.settings.keymap.send_queue.help": "Waits for the current step to finish and never interrupts running tools. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+  "wire.settings.keymap.send_queue.help": "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
   "wire.settings.keymap.send_both.label": "Send as both",
-  "wire.settings.keymap.send_both.help": "Waits like queue, then interrupts like steer if the message has waited too long. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta)."
+  "wire.settings.keymap.send_both.help": "Wait, then interrupt if slow. Overrides Delivery when busy."
 }

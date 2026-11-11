@@ -145,7 +145,7 @@ describe("the delivery sheet's hints (D1)", () => {
 	   in bundled.gen.ts (`messageRuntime.t` resolves key → en where no locale
 	   bundle is loaded in the test). */
 	const HINTS = {
-		steer: "Interrupt now (today's behaviour)",
+		steer: "Interrupt a running tool now",
 		queue: "Wait; never interrupt tools",
 		both: "Wait, then interrupt if slow",
 	} as const;

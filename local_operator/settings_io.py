@@ -6640,6 +6640,8 @@ def coerce(setting: Setting, text: str) -> Any:
         # a desktop value is an accelerator, not a Textual key string.
         if setting.hotkey_scope == "desktop":
             return _keymap.normalize_desktop_key(text, action_id=setting.key)
+        if setting.hotkey_scope == "composer":
+            return _keymap.normalize_composer_key(text)
         return _keymap.normalize_key(text)
     if setting.kind is Kind.CASCADE:
         # JSON, because the value is a two-level structure and the page's own
@@ -6979,6 +6981,8 @@ def write_setting(
         # Textual key string).
         if setting.hotkey_scope == "desktop":
             value = _keymap.normalize_desktop_key(value, action_id=setting.key)
+        elif setting.hotkey_scope == "composer":
+            value = _keymap.normalize_composer_key(value)
         else:
             value = _keymap.normalize_key(value)
     if setting.validate_value is validate_tier_value:

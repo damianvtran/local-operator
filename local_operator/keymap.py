@@ -568,6 +568,67 @@ def alternates(text: str) -> frozenset[str]:
     return frozenset(part for part in normalize_key(text).split(",") if part)
 
 
+def normalize_composer_key(text: str) -> str:
+    """Textual's spelling of a composer-scope value, in Textual's own order.
+
+    ``_normalize_key_list`` preserves the typed order (``ctrl+alt+b`` stays
+    ``ctrl+alt+b``), but the parser never emits that order: it sorts the
+    modifier tokens alphabetically (``alt+ctrl+b``, ``ctrl+shift+enter``,
+    ``alt+shift+enter`` — measured against textual 8.2.8's ``XTermParser``).
+    A value stored in the typed order would therefore never match the
+    event's key and never fire, so this is the ONE spelling the composer
+    rows store, compare and push into the editor — the same write-boundary
+    rule :func:`normalize_key` states for app rows, applied to this scope's
+    grammar. Modifiers are also de-duplicated before sorting (``ctrl+ctrl+
+    enter`` reads as ``ctrl+enter`` when compared), which is safe here
+    because the validator refuses a repeated modifier outright rather than
+    storing the collapsed form.
+
+    Comma-separated alternates are preserved per element, matching
+    :func:`normalize_key`.
+    """
+    normalized = normalize_key(text)
+    parts = []
+    for part in normalized.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = [token for token in part.split("+") if token]
+        if len(tokens) < 2:
+            parts.append(part)
+            continue
+        key_token = tokens[-1]
+        modifiers = sorted(set(tokens[:-1]))
+        parts.append("+".join([*modifiers, key_token]))
+    return ",".join(parts)
+
+
+def _canonical_composer_variants(text: str) -> frozenset[str]:
+    """The individual chords ``text`` binds, in :func:`normalize_composer_key` form."""
+    return frozenset(part for part in normalize_composer_key(text).split(",") if part)
+
+
+def composer_chord_needs_enhanced_keys(value: Any) -> bool:
+    """Whether ``value`` only arrives under the kitty keyboard protocol.
+
+    True for every modified Enter and for ``ctrl+alt+<letter>``: on a
+    legacy terminal the first collapses to plain Enter and the second to
+    the same bytes as Enter/Tab/Backspace/LF (for ``m|i|h|j``) or never
+    arrives at all. ``alt+<letter>`` is False — it arrives as ``alt+q`` in
+    both protocols (measured).
+    """
+    if not isinstance(value, str):
+        return False
+    for part in _canonical_composer_variants(value):
+        tokens = [token for token in part.split("+") if token]
+        if len(tokens) < 2:
+            continue
+        key_token, modifiers = tokens[-1], frozenset(tokens[:-1])
+        if key_token == "enter" or modifiers == frozenset({"ctrl", "alt"}):
+            return True
+    return False
+
+
 def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
     """Whether ``key`` names something a terminal can actually send."""
     if not key:
@@ -622,10 +683,21 @@ _COMPOSER_LETTER_MODIFIERS: frozenset[frozenset[str]] = frozenset(
 _COMPOSER_MODIFIER_TOKENS = frozenset({"ctrl", "alt", "super", "shift"})
 
 _COMPOSER_REFUSALS: dict[str, str] = {
-    "enter": "enter submits — pick a chord, like ctrl+enter",
+    # A legacy terminal sends this press as plain Enter (Ctrl+Enter), so the
+    # refusal names what the terminal actually did rather than the chord the
+    # operator meant to press — pointing them at ctrl+enter repeats the press.
+    "enter": "your terminal sends that as plain enter — try alt+<letter>",
     "shift+enter": "shift+enter makes a newline — pick ctrl, alt or super with enter",
-    "ctrl+j": "ctrl+j is the same byte as a newline — it cannot be bound",
+    "ctrl+j": "your terminal sends that as plain enter — try alt+<letter>",
     "ctrl+m": "ctrl+m is the same byte as enter — it cannot be bound",
+    # ctrl+alt+letter: on a legacy terminal these are the same bytes as
+    # enter/tab/backspace/LF, so binding one silently binds the other
+    # (the RESERVED_KEYS legend, applied to the chord). Canonical form
+    # (alt before ctrl), which is what the validator compares.
+    "alt+ctrl+m": "alt+ctrl+m is the same byte as enter — it cannot be bound",
+    "alt+ctrl+i": "alt+ctrl+i is the same byte as tab — it cannot be bound",
+    "alt+ctrl+h": "alt+ctrl+h is the same byte as backspace — it cannot be bound",
+    "alt+ctrl+j": "alt+ctrl+j is the same byte as a newline — it cannot be bound",
 }
 
 
@@ -641,6 +713,15 @@ def _validate_composer_key(value: Any) -> str | None:
     normalized = normalize_key(value)
     if not normalized:
         return "expected a key, like ctrl+enter or alt+s"
+    # A repeated modifier collapses in normalize_composer_key, so the
+    # duplicate is judged on the RAW spelling: ctrl+ctrl+enter is a typo,
+    # not a chord — silently storing ctrl+enter would claim a binding the
+    # operator never asked for.
+    for raw_part in normalized.split(","):
+        raw_tokens = [token for token in raw_part.split("+") if token]
+        if len(raw_tokens) >= 3 and len(raw_tokens[:-1]) != len(set(raw_tokens[:-1])):
+            return "the same modifier twice — pick one, like ctrl+enter"
+    normalized = normalize_composer_key(value)
     for part in normalized.split(","):
         if part in _COMPOSER_REFUSALS:
             return _COMPOSER_REFUSALS[part]
@@ -661,6 +742,15 @@ def _validate_composer_key(value: Any) -> str | None:
             return "not a key this terminal can send — try ctrl+enter or alt+s"
         if key_token == "enter":
             if modifiers not in _COMPOSER_ENTER_MODIFIERS:
+                # ctrl+alt+enter / super+shift+enter LOOK like the send chords
+                # but are not among them — say what is wrong and name the
+                # three that are, rather than the generic modifier sentence
+                # this arm uses for the other invalid sets.
+                if modifiers in (
+                    frozenset({"ctrl", "alt"}),
+                    frozenset({"super", "shift"}),
+                ):
+                    return f"{part} isn't a send chord — use ctrl+enter, alt+enter or super+enter"
                 return (
                     "a send chord needs ctrl, alt or super with enter "
                     "(ctrl+shift/alt+shift also work) — like ctrl+enter"
@@ -1043,6 +1133,11 @@ def _canonical_variants(action_id: str | None, text: str) -> frozenset[str]:
     if scope_of(action_id) == "desktop":
         normalized = normalize_desktop_key(text, action_id=action_id)
         return frozenset({normalized}) if normalized else frozenset()
+    if scope_of(action_id) == "composer":
+        # Composer chords compare in :func:`normalize_composer_key` form, so
+        # ``ctrl+alt+b`` and ``alt+ctrl+b`` are one chord (measured: the
+        # parser only ever emits the second).
+        return _canonical_composer_variants(text)
     return alternates(text)
 
 
@@ -1199,7 +1294,11 @@ def resolved_keymap(values: Mapping[str, Any]) -> tuple[dict[str, str], list[str
         key = (
             normalize_desktop_key(str(raw), action_id=action.id)
             if action.scope == "desktop"
-            else normalize_key(str(raw))
+            else (
+                normalize_composer_key(str(raw))
+                if action.scope == "composer"
+                else normalize_key(str(raw))
+            )
         )
         if key and key != action.default:
             resolved[action.id] = key
@@ -1288,6 +1387,8 @@ __all__ = [
     "display_key",
     "effective_key",
     "format_key_display",
+    "normalize_composer_key",
+    "composer_chord_needs_enhanced_keys",
     "normalize_desktop_key",
     "normalize_key",
     "resolved_keymap",

@@ -784,6 +784,136 @@ def test_composer_grammar_same_string_differs_by_scope() -> None:
     assert keymap.validate_key("ctrl+enter", scope="app") is not None
 
 
+@pytest.mark.parametrize(
+    ("spelling", "canonical"),
+    [
+        ("ctrl+alt+b", "alt+ctrl+b"),
+        ("alt+ctrl+b", "alt+ctrl+b"),
+        ("shift+ctrl+enter", "ctrl+shift+enter"),
+        ("ctrl+shift+enter", "ctrl+shift+enter"),
+        ("shift+alt+enter", "alt+shift+enter"),
+        ("alt+shift+enter", "alt+shift+enter"),
+        ("CTRL+ALT+B", "alt+ctrl+b"),
+    ],
+)
+def test_composer_canonicalises_to_textuals_alphabetical_order(
+    spelling: str, canonical: str
+) -> None:
+    """Every spelling variant stores as the ONE spelling the parser emits.
+
+    Measured against textual 8.2.8's ``XTermParser``: kitty ``ESC[98;7u``
+    arrives as ``alt+ctrl+b`` (the parser sorts modifier tokens), so a
+    stored ``ctrl+alt+b`` never matched any event and never fired. The
+    resolver is the consumer's view of the persisted value: it must return
+    the canonical spelling for every variant.
+    """
+    assert keymap.normalize_composer_key(spelling) == canonical
+    resolved, rejected = keymap.resolved_keymap({"keymap.send_queue": spelling})
+    assert resolved == {"keymap.send_queue": canonical}
+    assert rejected == []
+
+
+@pytest.mark.parametrize(
+    ("sequence", "event_key"),
+    [
+        ("\x1b[98;7u", "alt+ctrl+b"),
+        ("\x1b[13;6u", "ctrl+shift+enter"),
+        ("\x1b[13;4u", "alt+shift+enter"),
+        ("\x1b[98;3u", "alt+b"),
+    ],
+)
+def test_raw_kitty_bytes_land_on_the_stored_chord(sequence: str, event_key: str) -> None:
+    """Raw bytes through the REAL ``XTermParser`` fire the stored chord.
+
+    The end-to-end half of the canonicalisation fix: the parser emits
+    ``event_key``; ``_apply_keymap``'s chord map is built by the same
+    canonicaliser the validator stores with; the lookup must hit. A stored
+    ``ctrl+alt+b`` (the way a human types it) must therefore fire on the
+    ``ESC[98;7u`` bytes. On ``b3dffe1a3`` the map held ``ctrl+alt+b`` and
+    this lookup missed — the chord never fired.
+    """
+    from textual._xterm_parser import XTermParser
+
+    parser = XTermParser()
+    emitted = [getattr(message, "key") for message in parser.feed(sequence)]
+    assert emitted == [event_key]
+    # The chord map's keys are the canonical stored forms; the stored chord
+    # must be one of them, so the editor's `_send_chords` lookup hits.
+    chords = {
+        keymap.normalize_composer_key(spelling): "queue"
+        for spelling in ("ctrl+alt+b", "shift+ctrl+enter", "shift+alt+enter", "alt+b")
+    }
+    assert event_key in chords
+    assert chords == {
+        "alt+ctrl+b": "queue",
+        "ctrl+shift+enter": "queue",
+        "alt+shift+enter": "queue",
+        "alt+b": "queue",
+    }
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ctrl+ctrl+enter",
+        "alt+alt+enter",
+        "ctrl+ctrl+s",
+        "shift+shift+enter",
+    ],
+)
+def test_composer_grammar_refuses_a_repeated_modifier(key: str) -> None:
+    """A repeated modifier is a typo, not a chord — refused, not collapsed."""
+    reason = keymap.validate_key(key, scope="composer")
+    assert reason is not None and "twice" in reason, (key, reason)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["ctrl+alt+m", "alt+ctrl+m", "ctrl+alt+i", "ctrl+alt+h", "ctrl+alt+j"],
+)
+def test_composer_grammar_refuses_ctrl_alt_letter_byte_collisions(key: str) -> None:
+    """ctrl+alt+m|i|h|j are enter/tab/backspace/LF bytes on legacy terminals."""
+    reason = keymap.validate_key(key, scope="composer")
+    assert reason is not None and "same byte" in reason, (key, reason)
+
+
+@pytest.mark.parametrize(
+    ("key", "truth"),
+    [
+        ("ctrl+enter", True),
+        ("alt+enter", True),
+        ("super+enter", True),
+        ("ctrl+shift+enter", True),
+        ("alt+shift+enter", True),
+        ("alt+ctrl+b", True),
+        ("alt+q", False),
+        ("ctrl+alt+s", True),
+        ("enter", False),
+    ],
+)
+def test_composer_chord_needs_enhanced_keys(key: str, truth: bool) -> None:
+    """Kitty-only except alt+letter, which arrives in both protocols."""
+    assert keymap.composer_chord_needs_enhanced_keys(key) is truth
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["ctrl+alt+enter", "alt+ctrl+enter", "super+shift+enter", "shift+super+enter"],
+)
+def test_composer_grammar_names_non_send_enter_chords(key: str) -> None:
+    """ctrl+alt+enter / super+shift+enter are not send chords: say so and name the three."""
+    reason = keymap.validate_key(key, scope="composer")
+    assert reason is not None and "isn't a send chord" in reason
+    assert "ctrl+enter" in reason and "alt+enter" in reason and "super+enter" in reason
+
+
+def test_composer_group_conflict_compares_canonical_forms() -> None:
+    """``ctrl+alt+b`` vs ``alt+ctrl+b`` is ONE chord: the conflict must name it."""
+    values = {"keymap.send_queue": "ctrl+alt+b"}
+    conflict = keymap.group_conflict("keymap.send_steer", "alt+ctrl+b", values)
+    assert conflict is not None and "alt+ctrl+b" in conflict
+
+
 def test_unbound_default_survives_resolved_keymap() -> None:
     """Omission is the encoding of unbound: no override means no chord."""
     resolved, rejected = keymap.resolved_keymap({})
@@ -818,8 +948,8 @@ def test_send_chord_copy_is_catalogued_and_survives_a_locale_move() -> None:
     try:
         i18n_text.set_active_locale("en")
         assert keymap.BY_ID["keymap.send_queue"].label == "Send as queue"
-        assert keymap.BY_ID["keymap.send_steer"].help.startswith(
-            "Sends the message now and interrupts"
+        assert keymap.BY_ID["keymap.send_steer"].help == (
+            "Send now, interrupting the step. Overrides Delivery when busy."
         )
         # The settings row and the registry agree: one catalogue, two readers.
         assert settings_io.BY_KEY["keymap.send_queue"].label == "Send as queue"

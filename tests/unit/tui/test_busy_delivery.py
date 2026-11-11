@@ -229,12 +229,15 @@ async def test_a_mode_the_handle_cannot_honour_is_refused_never_downgraded(mode:
         assert QUEUED_WAIT_NOTICE not in texts
         assert BOTH_WAIT_NOTICE not in texts
         assert QUEUED_STEER_NOTICE not in texts
-        # One failure record, carrying the refusal sentence, with ``edit``.
+        # One failure record, carrying the refusal sentence, with ``edit``
+        # only: a resend of the same mode against the same legacy handle
+        # fails identically, so ``can_send_again=False`` (D9) — the text is
+        # recoverable via ``edit``, where a plain Enter (steer) can send it.
         (record,) = app._interaction.turn.failed_sends
         assert record.text == "do not interrupt"
         assert record.sentence == BUSY_DELIVERY_UNSUPPORTED
         assert record.failure_class == "busy-delivery-unsupported"
-        assert record.can_send_again is True
+        assert record.can_send_again is False
         # The notice states the fate and offers the keys.
         (notice,) = [
             block

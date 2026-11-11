@@ -30,7 +30,7 @@ _MODES: tuple[str, ...] = ("steer", "queue", "both")
 def busy_delivery_mode(values: Mapping[str, Any]) -> BusyDeliveryMode:
     """The configured mode from a config ``values`` mapping, ``steer`` if unset.
 
-    A hand-edited ``busy_delivery: "sometimes"`` reads as the default rather
+    A hand-edited ``delivery.busy_default: "sometimes"`` reads as the default rather
     than reaching the engine as an unknown value the wire would refuse.
     """
     section = values.get("delivery")

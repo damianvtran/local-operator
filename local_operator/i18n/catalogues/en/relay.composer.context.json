@@ -62,7 +62,7 @@
   "relay.composer.delivery.steer_hint": {
     "role": "busy-send mode hint, sheet row",
     "tone": "One short sentence fragment under the option label; no terminal period.",
-    "note": "Muted hint line under the 'steer' row of the delivery sheet: interrupts the running turn at once, today's behaviour. Same meaning as the settings description."
+    "note": "Muted hint line under the 'steer' row of the delivery sheet: interrupts a running tool now. Same meaning as the settings description."
   },
   "relay.composer.delivery.queue_hint": {
     "role": "busy-send mode hint, sheet row",

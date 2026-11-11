@@ -958,9 +958,9 @@
  "wire.settings.delivery_busy_default.choice.both.label": "both",
  "wire.settings.delivery_busy_default.choice.queue.description": "Wait; never interrupt tools",
  "wire.settings.delivery_busy_default.choice.queue.label": "queue",
- "wire.settings.delivery_busy_default.choice.steer.description": "Interrupt now (today's behaviour)",
+ "wire.settings.delivery_busy_default.choice.steer.description": "Interrupt a running tool now",
  "wire.settings.delivery_busy_default.choice.steer.label": "steer",
- "wire.settings.delivery_busy_default.help": "How a message sent while the agent is working is delivered.",
+ "wire.settings.delivery_busy_default.help": "What Enter does while the agent works. A Send as … key overrides it.",
  "wire.settings.delivery_busy_default.label": "Delivery when busy",
  "wire.settings.tui_sidebar_position.choice.left.description": "sessions to the left of the conversation",
  "wire.settings.tui_sidebar_position.choice.left.label": "left",
@@ -1073,9 +1073,9 @@
  "wire.settings.composer.title": "Message sending",
  "wire.settings.composer.description": "How a message you send while the agent is working is delivered. A change applies at once in the terminal and the desktop app.",
  "wire.settings.keymap_send_steer.label": "Send as steer",
- "wire.settings.keymap_send_steer.help": "Sends the message now and interrupts the running step. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+ "wire.settings.keymap_send_steer.help": "Send now, interrupting the step. Overrides Delivery when busy.",
  "wire.settings.keymap_send_queue.label": "Send as queue",
- "wire.settings.keymap_send_queue.help": "Waits for the current step to finish and never interrupts running tools. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+ "wire.settings.keymap_send_queue.help": "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
  "wire.settings.keymap_send_both.label": "Send as both",
- "wire.settings.keymap_send_both.help": "Waits like queue, then interrupts like steer if the message has waited too long. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta)."
+ "wire.settings.keymap_send_both.help": "Wait, then interrupt if slow. Overrides Delivery when busy."
 }

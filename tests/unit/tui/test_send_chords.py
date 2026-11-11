@@ -60,27 +60,91 @@ async def _type(app: OperatorApp, pilot: Any, text: str) -> None:
 
 @pytest.mark.asyncio
 async def test_chord_with_picker_open_sends_nothing() -> None:
-    """A chord is Enter, so an open slash picker accepts the row."""
+    """A chord is Enter, so an open slash picker accepts the row.
+
+    The assertion is the ACCEPT, not the absence of a prompt: ``/he``
+    highlights ``help`` unambiguously, so the chord must complete that row
+    and submit the completed word — the buffer empties, the picker closes,
+    and the app dispatches the slash command (no chat prompt). A picker
+    that ignored the chord would leave ``/he`` in the buffer with the list
+    still open and this would fail.
+    """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         await _wait_session(pilot, app)
         app._apply_keymap({"keymap.send_queue": "ctrl+enter"}, announce=False)
+        editor = app.query_one(Editor)
         await _type(app, pilot, "/he")
         await pilot.pause()
-        submitted: list[EditorSubmitted] = []
+        submitted_dispatch: list[str] = []
+        submits: list[str] = []
+        original_submit = editor._submit
+
+        def spy_submit() -> None:
+            submits.append(editor.text)
+            original_submit()
+
+        editor._submit = spy_submit  # type: ignore[method-assign]
         original = app.on_editor_submitted
 
         async def capture(message: EditorSubmitted) -> None:
-            submitted.append(message)
+            submitted_dispatch.append(message.text)
             await original(message)
 
         app.on_editor_submitted = capture  # type: ignore[method-assign]
         await pilot.press("ctrl+enter")
         await pilot.pause()
-        # The picker consumed Enter before _submit: no EditorSubmitted.
-        assert submitted == []
+        await pilot.pause()
+        # Unambiguous row accepted and its completed word submitted. (A
+        # ``app.on_editor_submitted`` instance override does not intercept
+        # Textual's ``post_message`` dispatch — measured here — so the
+        # dispatch leg is proved by the ``_submit`` spy on the editor,
+        # which the picker path calls, not by the capture wrapper.)
+        assert submits == ["/help "]
+        assert editor.text == ""
+        assert not editor._picker.is_open()
+        # The completed word is a slash command: dispatched, never prompted.
         assert session.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_picker_held_chord_mode_never_leaks_to_the_next_send() -> None:
+    """The picker-consume leak: a chord the picker holds must not steer the next send.
+
+    An AMBIGUOUS prefix (``/lo`` -> ``loop``/``logout`` …) takes Enter as
+    "extend to the common prefix" WITHOUT submitting, so ``_submit`` never
+    runs to consume the chord mode and it stays set — the one path where the
+    reset at the top of ``_on_key`` is the only thing standing between a
+    stale ``queue`` and the next plain-Enter send. Delete that reset and
+    the next send carries ``queue`` instead of the default ``steer`` here.
+    Plain text typed between the chord and the send goes through ``_on_key``
+    (a real ``pilot.press``), so the reset is what clears it — setting
+    ``editor.text`` directly would bypass the very line under test.
+    """
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _wait_session(pilot, app)
+        _set_mode(app, "steer")
+        app._apply_keymap({"keymap.send_queue": "ctrl+enter"}, announce=False)
+        editor = app.query_one(Editor)
+        await _type(app, pilot, "/lo")
+        await pilot.pause()
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        # Ambiguous Enter: no submit, the mode is still parked on the editor.
+        assert editor._chord_delivery == "queue"
+        assert session.delivery_steers == []
+        editor.text = "second"
+        await pilot.pause()
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        # Default (steer — the legacy call shape, delivery=None), not queue.
+        assert session.delivery_steers == [("xsecond", None)]
 
 
 @pytest.mark.asyncio
@@ -90,6 +154,14 @@ async def test_chord_in_credential_capture_confirms_only() -> None:
     The masked capture is armed directly (``_credential_typing``): the
     picker route to it needs a mounted runtime, which the fake does not
     supply, so staging it here tests the Enter-owner branch, not the picker.
+
+    Real effect, not just "no prompt": a typed canary must mint its
+    ``[Credential #1, 6 chars]`` marker and land in the editor's attachments
+    as a ``PastedCredential`` — the confirm actually captured something.
+    (``_mint_typed_credential`` is editor-local and needs no runtime.)
+    The chord mode is NOT consumed by a mint (``_submit`` never runs), so
+    the test deliberately does not assert it is ``None`` here — that is
+    the next key's reset, pinned by the picker leak test.
     """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
@@ -101,11 +173,18 @@ async def test_chord_in_credential_capture_confirms_only() -> None:
         await pilot.pause()
         # Stage the masked-capture state directly: `_credential_typing` is
         # the branch the chord must confirm, not re-derive.
-        editor._credential_typing = 0  # type: ignore[attr-defined]
+        editor.text = "/credential " + "\u2022" * 6
+        editor._credential_typing = 12  # type: ignore[attr-defined]
+        editor._credential_typed = "canary"  # type: ignore[attr-defined]
+        await pilot.pause()
         await pilot.press("ctrl+enter")
         await pilot.pause()
+        await pilot.pause()
+        # Capture confirmed: marker minted, capture closed, nothing sent.
+        assert editor._credential_typing is None
+        assert editor.text == "/credential [Credential #1, 6 chars] "
+        assert [getattr(a, "value") for a in editor._attachments.values()] == ["canary"]
         assert session.prompts == []
-        assert editor._chord_delivery is None
 
 
 @pytest.mark.asyncio
@@ -124,6 +203,13 @@ async def test_idle_session_sends_a_normal_prompt() -> None:
 
 @pytest.mark.asyncio
 async def test_shell_mode_ignores_the_chord_mode() -> None:
+    """A chord in shell mode runs the command; it never takes a delivery mode.
+
+    Real effect: ``echo hi`` must EXECUTE — a ``! echo hi`` user row and a
+    settled ``ToolResult`` — and produce no chat prompt. (The old assertion
+    checked ``"echo hi" not in user_texts`` where the row is ``"! echo hi"``:
+    an exact-membership check that passed whether or not anything ran.)
+    """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
@@ -136,11 +222,15 @@ async def test_shell_mode_ignores_the_chord_mode() -> None:
         editor.text = "echo hi"
         await pilot.pause()
         await pilot.press("ctrl+enter")
-        await pilot.pause()
-        # Shell mode runs the command locally; it is not a prompt and the
-        # chord mode is ignored (the command runs, the prompt never appears).
+        # The command runs through the real execute_bash path: wait for it.
+        for _ in range(100):
+            await pilot.pause()
+            if app._interaction.shell.result is not None:
+                break
+        assert _user_texts(app) == ["! echo hi"]
+        assert app._interaction.shell.result is not None
         assert session.prompts == []
-        assert "echo hi" not in _user_texts(app)
+        assert editor._chord_delivery is None
 
 
 @pytest.mark.asyncio
@@ -271,12 +361,23 @@ async def test_each_chord_against_each_default_mode(
 
 @pytest.mark.asyncio
 async def test_chord_while_approval_prompt_is_live_behaves_as_enter() -> None:
-    """Documented: the chord reaches the live prompt as Enter, like ctrl+j.
+    """The REAL router is under test, not a stub: a held answer key + chord answers it.
 
-    The editor rewrites the event to ``enter`` before the router re-reads
-    it, so the chord is indistinguishable from Enter at that seam. The
-    mode is consumed by ``_submit`` on the same key, so nothing leaks past
-    it; what this pins is the rewrite reaching the router.
+    The editor rewrites the chord to ``enter`` BEFORE ``route_key_to_live_prompt``
+    runs, so a chord arriving while an answer key is held must take the
+    router's held-Enter branch and ANSWER the question — not restore ``y``
+    into the buffer and submit it as a chat prompt (the exact leak the
+    ``ctrl+j`` event rewrite closed, before this chord existed). Without the
+    event rewrite this test fails: the router would see ``ctrl+enter``,
+    restore ``y`` and the editor would submit it.
+
+    Why the prompt object is a stub while the router is real: a mounted
+    approval card needs a live session gate (an approval only exists mid-tool
+    call on a real runtime), and the fake here supplies none. The router is
+    reached through the real ``editor._on_key`` ->
+    ``app.route_key_to_live_prompt`` path either way; the stub only has to
+    offer the advertised-key surface the router reads (``answer_keys``,
+    ``question_index``, ``answer_from_key``).
     """
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
@@ -288,23 +389,31 @@ async def test_chord_while_approval_prompt_is_live_behaves_as_enter() -> None:
         editor = app.query_one(Editor)
         editor.focus()
         await pilot.pause()
-        seen: list[str] = []
+        answered: list[str] = []
 
         class _Prompt:
-            def answer(self, value: str) -> None:
-                seen.append(value)
+            question_index = 0
+            passive = False
 
-        app._live_prompt = lambda: _Prompt()  # type: ignore[method-assign]
-        editor.text = "draft"
+            def answer_keys(self):  # type: ignore[no-untyped-def]
+                return ("y",)
+
+            def answer_from_key(self, character: str) -> None:  # type: ignore[no-untyped-def]
+                answered.append(character)
+
+        prompt = _Prompt()
+        app._live_prompt = lambda: prompt  # type: ignore[method-assign]
+        # Park ``y`` via the real router (empty buffer + advertised key).
+        y_event = events.Key("y", "y")
+        y_event.set_sender(editor)
+        assert app.route_key_to_live_prompt(y_event) is True
+        assert app._held_answer_key is not None
+        # The chord: rewritten to Enter, then answered by the held branch.
+        await pilot.press("ctrl+enter")
         await pilot.pause()
-        event = events.Key("ctrl+enter", None)
-        event.set_sender(editor)
-        await editor._on_key(event)
         await pilot.pause()
-        assert event.key == "enter"
-        # The fake prompt never engaged, so the Enter submitted the draft
-        # as a normal idle prompt (the chord rewrote the event before any
-        # router read it).
-        assert session.prompts == ["draft"]
-        # _submit consumed the chord on this same key.
-        assert editor._chord_delivery is None
+        assert answered == ["y"]
+        # Answered, not submitted: no prompt, no restored character.
+        assert session.prompts == []
+        assert editor.text == ""
+        assert app._held_answer_key is None
