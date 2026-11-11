@@ -83,5 +83,15 @@
     "role": "model catalogue in-flight placeholder",
     "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
     "note": "Owned relay SPA session copy. Shown while the catalogue response has not landed; the error and empty states are separate keys or daemon copy."
+  },
+  "relay.session.model.queued": {
+    "role": "phone composer status line",
+    "tone": "Preserve current lowercase style of the sheet copy; neutral, reassuring, not an error.",
+    "note": "Owned relay SPA session copy. Shown above the composer while a model/effort pick is accepted but the session is still running a turn: the change takes effect before the agent's next model call ('step'), not the next user message. Must not claim the change already applied."
+  },
+  "relay.session.model.refused": {
+    "role": "phone composer error line",
+    "tone": "Plain, operator-facing error; keep lowercase-sheet style where the language allows.",
+    "note": "Owned relay SPA session copy. The session refused a model/effort pick the phone made (e.g. no credential for that provider). {model} is a provider/model label or an effort rung; {reason} is the session's own sentence and may stay English. Shown until dismissed."
   }
 }

@@ -186,6 +186,28 @@ BIND_FAILED_REASON = "owner could not prepare this view; the session is alive �
 #: this client cannot read.
 _READ_LIMIT_BYTES = 1 << 20
 
+#: The ``detail`` a current runtime answers EVERY ``defer_ok`` switch with,
+#: before the switch runs (``server._run_deferrable_switch``): accepted, not yet
+#: applied. Not success and not an error — the outcome arrives later as state
+#: ``settings_result``/``settings_results`` keyed by ``request_id``. A caller
+#: that must report a refusal on the reply itself must not send ``defer_ok``.
+QUEUED_DETAIL = "queued"
+
+
+def _settings_defer_fields(defer_ok: bool, request_id: str | None) -> dict[str, Any]:
+    """The optional ``defer_ok``/``request_id`` keys, omitted when unset.
+
+    Omitted rather than sent as ``false``/``null`` so a caller that does not opt
+    in sends the byte-identical frame it always has.
+    """
+    fields: dict[str, Any] = {}
+    if defer_ok:
+        fields["defer_ok"] = True
+    if request_id:
+        fields["request_id"] = request_id
+    return fields
+
+
 #: Disconnect reason for a frame too large to read. Distinct from owner death
 #: because the remedy is different in kind: the owner is alive and healthy, and
 #: what failed is our ability to parse what it sent. Kept a named constant so a
@@ -2406,17 +2428,32 @@ class AttachClient:
         command: str,
         args: str,
         images: list[dict[str, str]] | None = None,
+        *,
+        defer_ok: bool = False,
+        request_id: str | None = None,
     ) -> Any:
-        """Run one shared slash command on the owner; return its typed outcome.
+        """Run a shared slash, optionally accepting a deferred settings receipt.
 
-        The ``result`` frame carries a :class:`SlashResult` payload the invoker
-        renders locally, replacing the synthetic ``ran /…`` receipt that left
-        the follower's terminal with a transport message while the real answer
-        painted in the owner's.
+        ``queued`` is an explicit typed notice, never ``None``: callers must
+        distinguish acceptance from the later applied/refused outcome on state.
+        Legacy calls omit both new keys and keep their original result shape.
         """
-        return await self._request_payload(
-            "slash_result", command=command, args=args, images=images or []
+        fields = _settings_defer_fields(defer_ok, request_id)
+        if not defer_ok:
+            return await self._request_payload(
+                "slash_result", command=command, args=args, images=images or [], **fields
+            )
+        reply = await self._request_frame(
+            "slash_result", command=command, args=args, images=images or [], **fields
         )
+        self._raise_for_reply_error(reply)
+        if reply.get("queued") is True:
+            return {
+                "kind": "notice",
+                "text": QUEUED_DETAIL,
+                "data": {"queued": True, "request_id": request_id},
+            }
+        return reply.get("data")
 
     async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
         """Copy the authenticated owner's committed history, without interrupting it."""
@@ -2576,21 +2613,42 @@ class AttachClient:
             **fields,
         )
 
-    async def set_model(self, provider: str, model_id: str, effort: str | None = None) -> str:
+    async def set_model(
+        self,
+        provider: str,
+        model_id: str,
+        effort: str | None = None,
+        *,
+        defer_ok: bool = False,
+        request_id: str | None = None,
+    ) -> str:
         """Select a model on the owner, at ``effort`` when one was chosen.
 
         The key is OMITTED when no level was chosen rather than sent as null, so
         to an owner that predates it the frame is byte-identical to the one it
         has always received (the dispatch reads the key it knows and ignores
         the rest, and there is no protocol bump for an optional field).
+
+        ``defer_ok``/``request_id`` follow the same omit-when-unset rule. With
+        ``defer_ok`` a current runtime ALWAYS answers :data:`QUEUED_DETAIL`
+        immediately, idle or busy, before the switch body (and any refusal)
+        runs; the outcome arrives as state ``settings_result``/
+        ``settings_results`` keyed by ``request_id``. An older runtime ignores
+        both and answers on landing.
         """
         fields: dict[str, Any] = {"provider": provider, "model_id": model_id}
         if effort:
             fields["effort"] = effort
+        fields.update(_settings_defer_fields(defer_ok, request_id))
         return await self._request("set_model", **fields)
 
-    async def set_effort(self, effort: str) -> str:
-        return await self._request("set_effort", effort=effort)
+    async def set_effort(
+        self, effort: str, *, defer_ok: bool = False, request_id: str | None = None
+    ) -> str:
+        """Set the owner's reasoning level; ``defer_ok`` as :meth:`set_model`."""
+        return await self._request(
+            "set_effort", effort=effort, **_settings_defer_fields(defer_ok, request_id)
+        )
 
     async def rehome_if_current(self, expected: str, provider: str, model_id: str) -> str:
         """Move the owner off ``expected`` only if it is STILL exactly ``expected``.

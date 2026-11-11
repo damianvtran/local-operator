@@ -532,6 +532,12 @@ ControlOp = Literal[
     # ``mode: "immediate"`` is the explicit opt-in to ``abort`` semantics, so a
     # caller only cuts a tool in half by asking for it in those words.
     "cancel",  # {mode?: graceful|immediate}
+    # Both switches also take {defer_ok?: true, request_id?: str}: with
+    # ``defer_ok`` a current runtime acks ``queued`` at once, before the switch
+    # (or any refusal) runs, and the outcome arrives on the projection's
+    # ``settings_results`` keyed by ``request_id`` (see
+    # ``server._run_deferrable_switch``). Additive: an older runtime ignores
+    # both and answers when the switch lands.
     "set_model",  # {provider, model_id} — the model sheet's choice
     "set_effort",  # {effort} — one rung from the model's ladder
     # A sign-in moving a session off a model whose provider has no credential:
@@ -1296,9 +1302,22 @@ class SessionProjection:
     #: Emitted only when non-empty (see ``to_json``): an empty map is absence,
     #: and the frame pin holds a supplement-free frame to the parent's bytes.
     supplements: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: The latest identified settings outcome PER KIND (``model``/``effort``/
+    #: ``fast``), each ``{request_id, ok, code, message}`` — the phone's copy of
+    #: ``FrontendSessionState.settings_results``. WHY: a ``defer_ok`` switch is
+    #: acked ``queued`` before it runs, so the only place its refusal can reach
+    #: the phone is this repaint, and the phone matches ``request_id`` against
+    #: the picks it sent (PR #3697 review R1-M2). Keyed by kind rather than a
+    #: list because settings are last-wins: an older outcome of the same kind
+    #: is moot once a newer one lands, so the map is bounded by the number of
+    #: kinds without a tuned cap. SPARSE like ``supplements``: an empty map is
+    #: popped so a frame without switches stays byte-identical.
+    settings_results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        if not self.settings_results:
+            data.pop("settings_results", None)
         # THE ROWS SERIALISE THROUGH THEIR OWN ``to_json``, not through
         # ``asdict``'s walk of them. Every dataclass field survives ``asdict``
         # with its DEFAULT, so the condensation facts came out on every row of
