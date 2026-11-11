@@ -308,6 +308,37 @@ async def test_a_chained_snapcompact_pass_folds_the_previous_archive_once(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_session_snapcompact_sizes_the_archive_against_the_threshold(tmp_path, monkeypatch):
+    """The session pass hands ``compact_to_archive`` the resolved trigger.
+
+    The archive must land under ``T_eff`` (``resolve_threshold_tokens``), not
+    the raw window; forwarding ``None`` here silently restores the legacy
+    window sizing, whose 0.5 x 1M budget sat above the 400k trigger.
+    """
+    from local_operator.compaction import snapcompact
+    from local_operator.compaction.thresholds import resolve_threshold_tokens
+
+    stream = ScriptedStream(["reply"] * 8)
+    session = make_session(tmp_path, stream, model=VISION_MODEL)
+    await talk(session, turns=6)
+    seen = {}
+    original = snapcompact.compact_to_archive
+
+    def observe(messages, provider, model_id, previous_text=None, **kwargs):
+        seen.update(kwargs)
+        return original(messages, provider, model_id, previous_text, **kwargs)
+
+    monkeypatch.setattr(snapcompact, "compact_to_archive", observe)
+    assert (await session.compact_now()).ran
+    expected = resolve_threshold_tokens(
+        VISION_MODEL.context_window, CompactionSettings(keep_recent_tokens=KEEP_RECENT)
+    )
+    assert seen["threshold_tokens"] == expected
+    assert seen["threshold_tokens"] < VISION_MODEL.context_window
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_text_only_model_compacts_into_a_language_summary(tmp_path):
     """The same history on a model that cannot read images back: a written
     summary, and NO archive — rendering frames it could never see would spend
