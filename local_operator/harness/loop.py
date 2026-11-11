@@ -59,6 +59,10 @@ from local_operator.harness.intent import (
 from local_operator.harness.provider_empty import is_provider_empty
 from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.tool_names import (
+    near_miss_tool,
+    normalise_replay_tool_names,
+)
 from local_operator.harness.types import (
     FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
@@ -4671,7 +4675,7 @@ class AgentLoop:
             # compaction's own render
             # or the token estimators, which must keep seeing the transcript as
             # it is: the bound is a property of the request, not of the session.
-            converted = bound_replay_payloads(converted)
+            converted = normalise_replay_tool_names(bound_replay_payloads(converted), context.tools)
             if effort_ceiling is not None:
                 # A retreat is in force -- an empty-truncation step-down, or the
                 # reasoning-echo recovery's switch to thinking off. The host's
@@ -5717,12 +5721,31 @@ class AgentLoop:
         if tool is None and config.resolve_fallback_tool is not None:
             tool = config.resolve_fallback_tool(call.name)
         if tool is None:
+            # No length clip here: the never-run compose frame already bounds
+            # the reason to NOT_RUN_REASON_MAX_CHARS (200), and a pre-clip
+            # would make a long name read as fully spelled while the frame
+            # says it was clipped. The analytics-recorded name is the one
+            # place a 64-char clip survives (see _report_tool_call).
+            near = near_miss_tool(call.name, context.tools)
+            text = f"Tool not found: {call.name}"
+            details: dict[str, object] = {FAULT_KEY: FAULT_UNKNOWN_TOOL}
+            if near is not None:
+                text += f". Did you mean `{near}`?"
+                details["near_miss"] = near
+                # Provider-controlled name: log the real tool and the junk
+                # length only, never the junk itself (it can carry a credential).
+                logger.warning(
+                    "unknown tool name was a near-miss of %s "
+                    "(junk remainder %d chars); call rejected",
+                    near,
+                    len(call.name) - len(near),
+                )
             return _PlannedCall(
                 call=call,
                 failure=self._synthetic_result(
                     call,
-                    f"Tool not found: {call.name}",
-                    details={FAULT_KEY: FAULT_UNKNOWN_TOOL},
+                    text,
+                    details=details,
                 ),
             )
 
@@ -7464,7 +7487,7 @@ class AgentLoop:
                 session_id = getattr(tool_context, "session_id", "") or ""
             if not session_id:
                 return
-            name = item.tool.name if item.tool is not None else item.call.name
+            name = item.tool.name if item.tool is not None else item.call.name[:64]
             duration = result.duration_s
             callback(
                 name,
