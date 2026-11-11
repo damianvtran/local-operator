@@ -2576,9 +2576,9 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
     )
     # The pyright step's recorded cap must match the NODE_OPTIONS it measures against.
     pyright_step = next(s for s in _steps("type-check") if s.get("name") == "Run pyright")
-    assert f"heap_mb={ci_heaps[0].group(1)}\n" in pyright_step["run"], (
-        "the pyright step's heap_mb warning threshold drifted from its NODE_OPTIONS"
-    )
+    assert (
+        f"heap_mb={ci_heaps[0].group(1)}\n" in pyright_step["run"]
+    ), "the pyright step's heap_mb warning threshold drifted from its NODE_OPTIONS"
     assert job_tokens[-1] == ".", "both spellings stay whole-tree"
 
 
