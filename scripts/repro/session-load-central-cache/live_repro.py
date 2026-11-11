@@ -105,6 +105,13 @@ def server_env(home: Path, config: Path) -> dict[str, str]:
             "TERM": "xterm-256color",
             "PYTHONUNBUFFERED": "1",
             "LOCAL_OPERATOR_DESKTOP_TOKEN": TOKEN,
+            # A throwaway server whose sessions nobody watches must never put a
+            # banner on the operator's screen. Spelled as the literal switch
+            # (``local_operator.tui.notify.ENV_DISABLE``) rather than via
+            # ``harness_child_env``: ``--tree`` may be an older base checkout,
+            # and this module runs under that tree's interpreter, so it cannot
+            # rely on the current package's helper existing there.
+            "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
         }
     )
     return env
