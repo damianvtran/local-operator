@@ -35,7 +35,11 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   `$HOME`, `/`, an ancestor of those, and a glob reaching such a name
   (`rm -rf ~/.local-op*`). Refused outright.
 - **HIGH** — another session's directory, any other path in the state root, a direct
-  child of `$HOME`, a repo root, `git clean` of untracked work, and **every target
+  child of `$HOME`, a repo root, `git clean` of untracked work, every linked
+  worktree a delete reaches that this session's ledger does not record — by its
+  path, a glob match (`rm -rf <repo>/.worktrees/*`, or a loop over one) or an
+  ancestor (`rm -rf <repo>/.worktrees`); the judge sees each tree's state,
+  uncommitted entries, branch, PR, running owner and recorded creator — and **every target
   the resolver could not pin down** (opaque substitution, empty expansion, unknown
   cwd) — unless it lands on something already critical, as an empty expansion
   collapsing to `/` does. Goes to the judge.
@@ -89,17 +93,23 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   unmerged, or none found), and whether an owning session is running. The newest
   PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **Your own worktree.** A linked worktree the ledger records for this session
-  (or a subagent it launched) is yours to remove: `git worktree remove [--force]
-  <exact path>` or `rm -rf <exact path>` ranks LOW, with no judge call, when it
-  holds no tracked or untracked change and is idle (no other running session
-  in it, no open PR). A PR state `gh`/`glab` cannot read (failed, timed out)
-  does not hold your own clean tree: removal keeps the branch, so nothing is
-  lost and neither the forge nor the judge is asked. A KNOWN open PR still
-  refuses. Ignored entries (`.expo/`, `.pnpm-store/`, a
-  `node_modules` symlink) never count against your own tree — `git worktree
-  remove` deletes them itself. Real uncommitted work goes to the judge, whose
-  brief carries the ledger row (creator, kind, time, creating command) and the
-  exact `git status` entries; it may answer `ALLOW ledger`, which the
+  (or a subagent it launched) is yours to remove, by `git worktree remove
+  [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
+  reaches only your own trees. It ranks LOW, with no judge call, only when it is
+  clean — no tracked or untracked change, not locked, no live process cwd in
+  it, no repository nested in its ignored entries, HEAD on a branch or in some
+  ref, and `git status` answered — and idle: no other running session owns it
+  and no KNOWN open PR or MR. A PR state `gh`/`glab` cannot read (failed, timed
+  out) does not hold your own clean tree: removal keeps the branch, so nothing
+  is lost and neither the forge nor the judge is asked. A known open PR or MR is
+  refused outright; any other shortfall (dirty, locked, busy, `git status`
+  failed or timed out, another running session) goes to the judge. Ignored
+  entries (`.expo/`, `.pnpm-store/`, a `node_modules` symlink, an ignored `.env`
+  or local config) never count against your own tree: removing it deletes them
+  with no judge call, exactly as `git worktree remove` does — move a secret you
+  need out first. Real uncommitted work goes to the judge,
+  whose brief carries the ledger row (creator, kind, time, creating command)
+  and the exact `git status` entries; it may answer `ALLOW ledger`, which the
   checkpoint re-verifies against the ledger. Never ask the operator about your
   own worktrees or scratch; commit or push what you want to keep, then remove
   it by exact path. `ask` is for paths you did not create, and it names a path

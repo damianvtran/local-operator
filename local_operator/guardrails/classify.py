@@ -1230,6 +1230,10 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             # ranking applies, but the state stays in whatever reason it gives.
             worktree_note = f"linked worktree state: {state}; {facts}"
             notes.append(worktree_note)
+    if not target.worktree_remove and target.op == "delete" and not target.selected:
+        reached = _reached_worktrees(target, path, prot, session_id)
+        if reached is not None:
+            return reached
     # Every spelling is ranked, not just the first with a reason: the verdict
     # must not hinge on which spelling is looked at first. The most severe
     # outcome wins (the selecting-find exemption applies only when EVERY
@@ -1255,21 +1259,8 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             # predicate would destroy.
             return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
         owned = _owned_by_session(target, path, prot, session_id)
-        # Not for a link entry (#3793): ``rm <own link>`` removes only the
-        # link, so the pointee's uncommitted work is never at stake.
-        if owned is not None and target.pattern is None and link_entry(target) is None:
-            # ``rm -rf <own linked worktree>`` is held to the same bar as
-            # ``git worktree remove --force`` of it (2026-11-11): ignored
-            # output never counts, real uncommitted work goes to the judge.
-            from local_operator.guardrails.provenance import worktree_state
-
-            spelling = reasons[0][0]
-            if worktree_state(spelling, own=True) == "dirty":
-                return RankedTarget(
-                    target,
-                    Risk.HIGH,
-                    f"{owned[0]}; linked worktree state: dirty; {_changes_phrase(spelling)}",
-                )
+        # An own linked worktree reached here already passed
+        # ``_reached_worktrees`` (clean, idle, no open PR).
         if owned is not None:
             reason, matches = owned
             shown = ""
@@ -1291,6 +1282,104 @@ def _changes_phrase(path: str) -> str:
     from local_operator.guardrails.provenance import describe_changes
 
     return describe_changes(path)
+
+
+#: Foreign worktrees whose state, PR and owner a reason spells out in full
+#: (one PR lookup each, ~1.3–1.8 s measured for ``worktree_activity``); the
+#: rest are counted. States are read for up to ``_MAX_FOREIGN_STATES`` (one
+#: ``git status`` each) so trees holding work are the ones shown, not
+#: whichever sort first. Both bounds only shape the brief: the rank is HIGH
+#: for any foreign tree regardless.
+_MAX_FOREIGN_SHOWN = 4
+_MAX_FOREIGN_STATES = 16
+
+
+def _reached_worktrees(
+    target: Target, path: str, prot: _Protected, session_id: str
+) -> RankedTarget | None:
+    """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
+
+    WHY (security review of PR #3800): a linked worktree is ranked as one
+    however the delete reaches it — its literal path, a glob match
+    (``rm -rf <repo>/.worktrees/*``, or a loop over one) or an ancestor
+    (``rm -rf <repo>/.worktrees``). Before, only a literal path met the
+    repo-root test, so an unrelated session's glob ranked LOW and deleted
+    another session's uncommitted work unjudged.
+
+    - A tree this session's ledger does NOT record (``_owned_by_session``'s
+      bar) is HIGH: only the judge can weigh history evidence or an operator
+      answer, and it sees the tree's state, branch, PR, running owner and
+      recorded creator in the reason (``build_delete_case`` passes it on).
+    - An OWN tree is held to ``git worktree remove``'s bar (review M1): an
+      open PR/MR is CRITICAL; any state but clean (dirty, locked, busy,
+      unknown), another running session in it, or an unknown PR state is
+      HIGH. Only own, clean and idle trees fall through to the ordinary
+      ranking — the ledger LOW for a literal path, ``ordinary path`` for a
+      container.
+    """
+    import glob as _glob
+
+    from local_operator.guardrails import provenance as prov
+
+    if target.pattern is not None:
+        try:
+            candidates = _glob.glob(target.pattern)
+        except (OSError, ValueError):
+            return None
+    else:
+        candidates = [path]
+    roots = prov.linked_worktrees_reached(candidates)
+    if not roots:
+        return None
+    foreign: list[str] = []
+    held: list[str] = []
+    for root in roots:
+        owned = (
+            session_id
+            and not any(_under(root, st) for st in prot.state_roots)
+            and prov.owned_record(root, session_id) is not None
+        )
+        if not owned:
+            foreign.append(root)
+            continue
+        state = prov.worktree_state(root, own=True)
+        activity = prov.worktree_activity(root, session_id)
+        facts = activity.facts()
+        if activity.pr_state == "open":
+            return RankedTarget(
+                target,
+                Risk.CRITICAL,
+                f"{root}: branch {activity.branch} has open {activity.pr_ref}; "
+                f"finish or close it first ({facts})",
+            )
+        idle = activity.pr_state == "none" and not activity.owners_running
+        # Strictly ``clean``: a stale ``initializing`` lock is LOW only for
+        # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
+        if state != "clean" or not idle:
+            changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
+            held.append(
+                f"{root}: created by this session; linked worktree state: {state}{changes}; {facts}"
+            )
+    if not foreign and not held:
+        return None
+    parts = list(held)
+    states = {root: prov.worktree_state(root) for root in foreign[:_MAX_FOREIGN_STATES]}
+    # Work at risk first: a dirty/locked/busy tree is what the judge must see.
+    foreign.sort(key=lambda r: states.get(r, "not read") == "clean")
+    for root in foreign[:_MAX_FOREIGN_SHOWN]:
+        state = states.get(root, "not read")
+        changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
+        creators = prov.recorded_creators(root)
+        who = "recorded creator: " + ", ".join(creators) if creators else "not in the ledger"
+        facts = prov.worktree_activity(root, session_id).facts()
+        parts.append(
+            f"{root}: not created by this session ({who}); "
+            f"linked worktree state: {state}{changes}; {facts}"
+        )
+    if len(foreign) > _MAX_FOREIGN_SHOWN:
+        parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
+    head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
+    return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
 
 
 def _owned_by_session(

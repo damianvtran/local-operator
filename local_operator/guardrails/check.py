@@ -417,13 +417,18 @@ class _Approved:
     text: str
 
 
-def ledger_record(path: str, session_id: str, stop: tuple[str, ...]) -> Any:
+def ledger_record(
+    path: str, session_id: str, stop: tuple[str, ...], state_roots: tuple[str, ...] = ()
+) -> Any:
     """The creation-ledger row proving this session (or its subagent) made ``path``.
 
     The same bar as the classifier's ledger LOW (``classify._owned_by_session``):
     realpath AND inode generation match a row owned by this session, no other
     session's row or unrecorded repository sits inside, nothing in the state
     root, and a primary checkout only when this session cloned exactly it.
+    "The state root" is EVERY root the classifier protects (``state_roots``,
+    from ``_protected(...).state_roots``; security review N1, PR #3800), plus
+    the ledger's own, so the two bars cannot drift apart.
     Only harness-written tool-call records reach the ledger (and writing it is
     CRITICAL), so no message text — Team Bridge, peer, hub, web, file content
     — can make a path pass here.
@@ -443,13 +448,14 @@ def ledger_record(path: str, session_id: str, stop: tuple[str, ...]) -> Any:
         # prove it: resolving to the pointee let this session's row for the
         # pointed-to tree vouch for a link someone else made.
         link = prov.link_path(path)
-        if link in stop or _under(link, os.path.realpath(state_root)):
+        roots = (state_root, *state_roots)
+        if link in stop or any(_under(link, os.path.realpath(r)) for r in roots):
             return None
         return prov.owned_link(link, session_id)
     real = os.path.realpath(path)
     if real in stop:
         return None
-    if _under(real, os.path.realpath(state_root)):
+    if any(_under(real, os.path.realpath(r)) for r in (state_root, *state_roots)):
         return None
     record = prov.owned_record(real, session_id)
     if record is None:
@@ -485,6 +491,8 @@ class DeleteCase:
     cwd: str | None
     #: Whose creation ledger an ``ALLOW ledger`` citation is checked against.
     session_id: str = ""
+    #: Every protected state root (``ledger_record``'s refusal bar).
+    state_roots: tuple[str, ...] = ()
 
     def _named_by(self, path: str, words: Any) -> bool:
         from local_operator.guardrails.provenance import names_path
@@ -597,7 +605,7 @@ class DeleteCase:
                 # Re-read, never trusted from the answer: the row must cover
                 # this path for THIS session (rows are written under the
                 # creator and every ancestor) with the same inode generation.
-                record = ledger_record(path, self.session_id, self.stop)
+                record = ledger_record(path, self.session_id, self.stop, self.state_roots)
                 if record is not None:
                     basis.append(f"{path} in the creation ledger ({record.creator}, {record.kind})")
                     continue
@@ -720,7 +728,11 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
             ),
             "",
         )
-        record = None if path in operator_only else ledger_record(path, ctx.session_id, stop)
+        record = (
+            None
+            if path in operator_only
+            else ledger_record(path, ctx.session_id, stop, tuple(prot.state_roots))
+        )
         tree = ""
         if not os.path.islink(path) and os.path.exists(os.path.join(path, ".git")):
             tree = f"; git: {prov.worktree_state(path, own=record is not None)}"
@@ -745,9 +757,19 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
     if len(paths) > _MAX_FACTS:
         facts.append(f"… and {len(paths) - _MAX_FACTS} more paths")
     facts.extend(f"{u}: cannot be verified (unresolved, opaque or critical)" for u in unverifiable)
+    # A glob's reason is not keyed by any one match, so it is listed once,
+    # here: it carries each reached linked worktree's state, PR and creator
+    # (``classify._reached_worktrees``), the facts the judge needs to tell
+    # another session's live work from leftovers.
+    facts.extend(
+        f"{r.target.pattern}: ranked because: {r.reason}"
+        for r in verdict.flagged_targets
+        if r.target.pattern is not None and r.target.path is not None
+    )
     excluded = ", ".join(f"{n} {kind}" for kind, n in sorted(operator.excluded.items()))
     return DeleteCase(
         session_id=ctx.session_id,
+        state_roots=tuple(prot.state_roots),
         paths=[*paths, *operator_only],
         operator_only=frozenset(operator_only),
         unverifiable=unverifiable,
