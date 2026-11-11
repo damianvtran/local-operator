@@ -22,12 +22,15 @@ from typing import Any, cast
 import pytest
 
 from local_operator.harness.types import (
+    AgentTool,
     ModelSpec,
     StreamEndEvent,
     StreamTextDelta,
     StreamToolCallDelta,
+    TextContent,
     ToolContext,
     ToolExecutionEndEvent,
+    ToolResult,
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -76,6 +79,7 @@ async def _run(
     *,
     secrets: tuple[str, ...] = (),
     redact: bool = True,
+    extra_tools: tuple[Any, ...] = (),
 ) -> tuple[Session, list[Any]]:
     variables = VariableStore(cwd=str(tmp_path))
     for value in secrets:
@@ -83,7 +87,7 @@ async def _run(
     session = Session(
         model=ModelSpec(provider="test", model_id="synthetic", context_window=100000),
         stream_fn=_provider(calls),
-        tools=[build_write_tool(), build_edit_tool()],
+        tools=[build_write_tool(), build_edit_tool(), *extra_tools],
         transcript=Transcript(tmp_path / "sessions" / SESSION_ID),
         system_blocks_provider=lambda *_: [],
         yolo=True,
@@ -153,10 +157,17 @@ def _all_rows(tmp_path: Path, call_id: str) -> list[str]:
 
 
 def _details(session: Session) -> list[dict[str, Any]]:
+    """Every persisted tool row's details, read from the history UNION.
+
+    ``build_llm_history`` yields ``Message`` and ``CustomMessage`` items; a
+    200 KiB result compacts the 100k-token test window and inserts a
+    ``compaction_summary`` ``CustomMessage`` that has no ``role`` (QA F2 on
+    #3762). Compaction stays exercised; only non-tool items are skipped.
+    """
     return [
         cast(dict[str, Any], m.provider_payload)["details"]
         for m in session.transcript.build_llm_history()
-        if m.role == "tool"
+        if getattr(m, "role", None) == "tool"
     ]
 
 
@@ -224,8 +235,18 @@ async def test_write_over_preview_archives_complete_diff_live_and_persisted(tmp_
     assert rows[3] == "+FIRST_SENTINEL = 1"
     assert "+MIDDLE_SENTINEL = 2" in rows
     assert rows[-1] == "+FINAL_SENTINEL = 3"
-    # The preview is unchanged in shape: still capped, still a prefix of the whole.
-    assert details["diff"] == rows[: len(details["diff"])]
+    # The preview keeps its base geometry: still capped, and its hunk header is
+    # RECOUNTED to the rows it holds (``_truncate_diff_rows``), so it is not a
+    # literal prefix of the archive (QA F3 on #3762). Each header is checked
+    # against its own rows, and the body rows are the archive's exact prefix.
+    preview = details["diff"]
+    shown = len(preview) - 3
+    assert 0 < shown < 500
+    assert preview[:2] == rows[:2]
+    assert preview[2] == f"@@ -0,0 +1,{shown} @@"
+    assert sum(r.startswith("+") for r in preview[3:]) == shown
+    assert sum(r.startswith("+") for r in rows[3:]) == 500
+    assert preview[3:] == rows[3 : 3 + shown]
     assert "_diff_source" not in session.transcript.path.read_text()
 
 
@@ -283,6 +304,9 @@ async def test_tall_registered_literal_at_preview_and_page_seams_never_stored(tm
     assert [i for i, part in enumerate(parts) if part in blob] == []
     rows = _all_rows(tmp_path, "s-1")
     assert len(rows) == len(lines) + 3  # header pair + one hunk header
+    # Credential-free rows stay exact: only the literal and its copy are masked.
+    assert sum(r.startswith("+line_") for r in rows) == 590
+    assert rows[-1] != "+" + parts[3]
     assert all(r[:1] in ("-", "+", " ", "@") for r in rows)
 
 
@@ -302,6 +326,27 @@ async def test_edit_inside_tall_literal_archive_publishes_no_fragment(tmp_path):
     blob = _every_stored_byte(tmp_path, session, events)
     assert [i for i, part in enumerate(parts) if part in blob] == []
     assert _details(session)[0][diff_archive.DIFF_FULL_KEY]["state"] == "archived"
+    # The changed ordinary rows stay readable on both sides, signs kept.
+    rows = _all_rows(tmp_path, "c-1")
+    assert "-filler 0" in rows and "+FILLER 0" in rows and "+FILLER 449" in rows
+
+
+async def test_duplicate_of_literal_line_inside_preview_is_masked(tmp_path):
+    """QA F1's duplicate shape, but INSIDE the 200-row preview: one shared proof."""
+    parts = _literal(10, "Q")
+    lines = [f"row_{index}" for index in range(60)]
+    lines[10:20] = parts
+    lines.insert(40, parts[3])
+    target = tmp_path / "q.txt"
+    session, events = await _run(
+        tmp_path,
+        [("q-1", "write", {"path": str(target), "content": "\n".join(lines) + "\n"})],
+        secrets=("\n".join(parts),),
+    )
+    blob = _every_stored_byte(tmp_path, session, events)
+    assert [i for i, part in enumerate(parts) if part in blob] == []
+    diff = _details(session)[0]["diff"]
+    assert "+row_0" in diff and "+row_59" in diff and diff[2] == "@@ -0,0 +1,61 @@"
 
 
 @pytest.mark.parametrize("separator", ["\r\n", "\f"])
@@ -598,3 +643,161 @@ async def test_non_diff_tool_and_digest_from_another_call_are_not_found(tmp_path
     _fake_row(tmp_path, "c", desc)
     with pytest.raises(diff_archive.DiffArchiveNotFound):
         diff_archive.load_page(session_dir, SESSION_ID, "c")
+
+
+# -- nested eval -> tool('write'|'edit') (QA F5 on #3762) ---------------------
+
+
+def _eval_tool(
+    calls: list[tuple[str, dict[str, Any]]], captured: list[dict[str, Any]], forge=None
+):
+    """A stand-in ``eval`` whose cell drives ``tool(...)`` through the real bridge.
+
+    ``forge`` lets the CELL return arbitrary metadata in its own result -- the
+    untrusted channel a binding must never be read from.
+    """
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        for name, arguments in calls:
+            captured.append(await context.dispatch_tool(name, arguments))
+        details = forge(captured) if forge is not None else None
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="eval",
+            content=[TextContent(text="cell done")],
+            details=details,
+        )
+
+    return AgentTool(name="eval", parameters={"type": "object", "properties": {}}, execute=execute)
+
+
+async def _nested(
+    tmp_path: Path, tool: str, *, forge=None
+) -> tuple[Path, list[dict[str, Any]], Path]:
+    target = tmp_path / "n.py"
+    if tool == "write":
+        calls = [("write", {"path": str(target), "content": _big(260)})]
+    else:
+        original = _big(260)
+        target.write_text(original)
+        body = "".join(original.splitlines(keepends=True)[1:-1])
+        new_text = body.replace(" = ", " := ")
+        calls = [("edit", {"path": str(target), "old_text": body, "new_text": new_text})]
+    captured: list[dict[str, Any]] = []
+    await _run(
+        tmp_path,
+        [("ev-1", "eval", {})],
+        extra_tools=(_eval_tool(calls, captured, forge),),
+    )
+    return _session_dir(tmp_path), captured, target
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_nested_eval_write_and_edit_archive_is_served_whole(tmp_path, tool):
+    session_dir, captured, target = await _nested(tmp_path, tool)
+    (nested,) = captured
+    nested_id = nested["tool_call_id"]
+    assert nested_id.startswith("ev-1:")
+    desc = nested["details"][diff_archive.DIFF_FULL_KEY]
+    assert desc["state"] == "archived", desc
+    rows, _ = _reconstruct(session_dir, nested_id)
+    assert len(rows) == desc["rows"]
+    if tool == "write":
+        assert rows[3] == "+FIRST_SENTINEL = 1" and "+MIDDLE_SENTINEL = 2" in rows
+        assert rows[-1] == "+FINAL_SENTINEL = 3"
+    else:
+        assert "-MIDDLE_SENTINEL = 2" in rows and "+MIDDLE_SENTINEL := 2" in rows
+        assert rows[-1] == " FINAL_SENTINEL = 3"
+    # Later mutation, and a "restart" (a fresh read of the same journal and
+    # store; nothing is held in memory), leave the capture exact.
+    target.write_text("mutated\n")
+    assert _reconstruct(session_dir, nested_id)[0] == rows
+    # The outer eval id is not a write/edit capture.
+    with pytest.raises(diff_archive.DiffArchiveNotFound):
+        diff_archive.load_page(session_dir, SESSION_ID, "ev-1")
+
+
+async def test_nested_binding_denies_forged_prefix_session_and_cell_metadata(tmp_path):
+    def forge(captured):
+        # The cell claims a binding for a made-up nested id under its own outer.
+        return {
+            "diff_full": captured[0]["details"][diff_archive.DIFF_FULL_KEY],
+            "call_id": "ev-1:" + "f" * 32,
+            "custom_type": diff_archive.NESTED_DIFF_BINDING_TYPE,
+        }
+
+    session_dir, captured, _ = await _nested(tmp_path, "write", forge=forge)
+    nested_id = captured[0]["tool_call_id"]
+    assert diff_archive.load_page(session_dir, SESSION_ID, nested_id)["state"] == "archived"
+    for forged in ("ev-1:" + "f" * 32, "ev-2:" + nested_id.split(":", 1)[1], "ev-1"):
+        with pytest.raises(diff_archive.DiffArchiveNotFound):
+            diff_archive.load_page(session_dir, SESSION_ID, forged)
+    # The same journal read as ANOTHER session proves nothing.
+    with pytest.raises(diff_archive.DiffArchiveNotFound):
+        diff_archive.load_page(session_dir, "fd0000000002", nested_id)
+    # A binding whose outer id is not the nested id's own prefix is ignored.
+    desc = captured[0]["details"][diff_archive.DIFF_FULL_KEY]
+    journal = session_dir / "transcript.jsonl"
+    entry = {
+        "id": "forged-binding",
+        "ts": 0,
+        "type": "custom",
+        "payload": {
+            "custom_type": diff_archive.NESTED_DIFF_BINDING_TYPE,
+            "details": diff_archive.nested_binding(
+                session_id=SESSION_ID,
+                outer_call_id="other",
+                call_id="ev-9:" + "a" * 32,
+                tool_name="write",
+                desc=desc,
+            ),
+        },
+    }
+    with journal.open("a") as handle:
+        handle.write(json.dumps(entry) + "\n")
+    with pytest.raises(diff_archive.DiffArchiveNotFound):
+        diff_archive.load_page(session_dir, SESSION_ID, "ev-9:" + "a" * 32)
+
+
+async def test_nested_binding_duplicates_fail_closed(tmp_path):
+    session_dir, captured, _ = await _nested(tmp_path, "write")
+    nested_id = captured[0]["tool_call_id"]
+    desc = captured[0]["details"][diff_archive.DIFF_FULL_KEY]
+    journal = session_dir / "transcript.jsonl"
+    original = journal.read_text()
+    # A second, DIFFERENT binding for the same nested id.
+    entry = {
+        "id": "second-binding",
+        "ts": 0,
+        "type": "custom",
+        "payload": {
+            "custom_type": diff_archive.NESTED_DIFF_BINDING_TYPE,
+            "details": diff_archive.nested_binding(
+                session_id=SESSION_ID,
+                outer_call_id="ev-1",
+                call_id=nested_id,
+                tool_name="write",
+                desc={**desc, "digest": "0" * 32},
+            ),
+        },
+    }
+    journal.write_text(original + json.dumps(entry) + "\n")
+    page = diff_archive.load_page(session_dir, SESSION_ID, nested_id)
+    assert page["state"] == "unavailable" and page["rows"] == []
+    # An ordinary tool row reusing the nested id collides with the binding too,
+    # whichever is older: neither capture is served.
+    journal.write_text(original)
+    _fake_row(tmp_path, nested_id, desc)
+    page = diff_archive.load_page(session_dir, SESSION_ID, nested_id)
+    assert page["state"] == "unavailable" and page["rows"] == []
+
+
+async def test_nested_archive_without_a_binding_is_unavailable_not_advertised(
+    tmp_path, monkeypatch
+):
+    async def refuse(self, *args):
+        return False
+
+    monkeypatch.setattr(Session, "_bind_nested_diff", refuse)
+    _session_dir_, captured, _ = await _nested(tmp_path, "write")
+    assert captured[0]["details"][diff_archive.DIFF_FULL_KEY] == {"v": 1, "state": "unavailable"}

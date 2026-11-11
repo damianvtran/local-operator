@@ -453,8 +453,38 @@ def _source_affected_lines(text: str, redact: Callable[[str], str]) -> set[int]:
     return affected
 
 
+#: Character budget for the changed-counterpart containment checks in
+#: :func:`_mask_by_source_evidence`. Each check is one C-level ``in`` over two
+#: row bodies, linear in their combined length, so the total work of the pass
+#: is bounded by this figure, not by rows squared. 32 Mi characters covers a
+#: full-ceiling archive's change blocks (``ARCHIVE_REDACT_BYTES`` is 4 MiB)
+#: several times over; past it, the rest of a block that already holds masked
+#: evidence is masked whole -- the over-masking direction, never a leak.
+_COUNTERPART_CHECK_BUDGET = 32 * 1024 * 1024
+
+
+def _sensitive_line_texts(text: str, affected: set[int]) -> set[str]:
+    """The source TEXT of every line the whole-side judgement masked.
+
+    Index evidence proves a line position; this is what lets a COPY of that
+    line elsewhere in the diff (QA F1 on #3762: a duplicate of one line of a
+    registered 10-line literal, which the redactor alone does not match) be
+    recognised by :func:`_mask_by_source_evidence`. Whitespace-only lines are
+    left out: they carry no value bytes, and an over-masked gap often holds a
+    blank line, which would otherwise mask every blank row in the file.
+    Local to one settlement -- never registered with the redactor or stored.
+    """
+    if not affected:
+        return set()
+    lines = text.splitlines()
+    return {lines[index] for index in affected if index < len(lines) and lines[index].strip()}
+
+
 def _mask_by_source_evidence(
-    rows: Sequence[str], affected_old: set[int], affected_new: set[int]
+    rows: Sequence[str],
+    affected_old: set[int],
+    affected_new: set[int],
+    sensitive: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     """Mask every diff row whose source line the whole-side redaction touched.
 
@@ -464,33 +494,75 @@ def _mask_by_source_evidence(
     ``sign + REDACTION_MARKER``, the seam's own masked-row form, so counts and
     geometry are unchanged. Anything that is not a well-formed diff raises
     ``ValueError`` (the caller withholds).
+
+    Index evidence alone under-masks two shapes once the diff is long enough
+    that they leave the hunk that holds the value (QA F1 on #3762; the preview
+    hid them only because they fell past its 200 rows):
+
+    * a DUPLICATE -- a row whose text equals a masked source line (``sensitive``,
+      from :func:`_sensitive_line_texts` over the ORIGINAL sides) is masked
+      wherever it appears, on either side; and
+    * a CHANGED COUNTERPART -- inside one contiguous ``-``/``+`` change block, a
+      row that contains, or is contained in, a masked row's original body
+      (``SECRET-LINE`` edited to ``SECRET-LINE-X``) is masked too.
+
+    One pass, not transitive: only rows masked by index or duplicate evidence
+    seed the counterpart check, so a masked counterpart never spreads further.
+    Work is bounded by :data:`_COUNTERPART_CHECK_BUDGET`. Nothing is re-diffed.
     """
     from local_operator.redaction_shapes import REDACTION_MARKER
 
     if len(rows) < 2 or not rows[0].startswith("--- ") or not rows[1].startswith("+++ "):
         raise ValueError
     out = list(rows[:2])
+    masked = [False] * len(rows)
     old_line = new_line = -1
-    for row in rows[2:]:
+    for at in range(2, len(rows)):
+        row = rows[at]
         frame = _DIFF_HUNK.fullmatch(row)
         if frame is not None:
             old_count = int(frame[2]) if frame[2] is not None else 1
             new_count = int(frame[4]) if frame[4] is not None else 1
             old_line = int(frame[1]) - (1 if old_count else 0)
             new_line = int(frame[3]) - (1 if new_count else 0)
-            out.append(row)
             continue
         tag = row[:1]
         if old_line < 0 or new_line < 0 or tag not in (" ", "-", "+"):
             raise ValueError
-        hit = (tag in " -" and old_line in affected_old) or (
-            tag in " +" and new_line in affected_new
+        masked[at] = (
+            (tag in " -" and old_line in affected_old)
+            or (tag in " +" and new_line in affected_new)
+            or row[1:] in sensitive
         )
-        out.append(tag + REDACTION_MARKER if hit else row)
         if tag in " -":
             old_line += 1
         if tag in " +":
             new_line += 1
+    budget = _COUNTERPART_CHECK_BUDGET
+    at = 2
+    while at < len(rows):
+        if rows[at][:1] not in ("-", "+") or _DIFF_HUNK.fullmatch(rows[at]):
+            at += 1
+            continue
+        end = at
+        while (
+            end < len(rows) and rows[end][:1] in ("-", "+") and not _DIFF_HUNK.fullmatch(rows[end])
+        ):
+            end += 1
+        seeds = [rows[i][1:] for i in range(at, end) if masked[i] and rows[i][1:].strip()]
+        if seeds:
+            for i in range(at, end):
+                body = rows[i][1:]
+                if masked[i] or not body.strip():
+                    continue
+                for seed in seeds:
+                    budget -= len(seed) + len(body)
+                    if budget < 0 or seed in body or body in seed:
+                        masked[i] = True
+                        break
+        at = end
+    for at in range(2, len(rows)):
+        out.append(rows[at][:1] + REDACTION_MARKER if masked[at] else rows[at])
     return out
 
 
@@ -6403,6 +6475,7 @@ class AgentLoop:
                         arguments=planned.args,
                         verdict=nested_verdict,
                     )
+                    await self._bind_nested_diff(config, call.id, nested.id, name, result)
                     if config.redact_tool_result is not None:
                         # The same off-loop seam the history path uses: this
                         # result crosses back into arbitrary Python, and the
@@ -7818,7 +7891,7 @@ class AgentLoop:
 
         tool_context = context.tool_context
         session_id = (tool_context.session_id if tool_context is not None else "") or ""
-        affected: list[tuple[set[int], set[int]]] = []
+        affected: list[tuple[set[int], set[int], set[str]]] = []
 
         def _run() -> list[str]:
             with (
@@ -7830,14 +7903,18 @@ class AgentLoop:
                 # preview and every archived page share one judgement.
                 old = _source_affected_lines(before, redact)
                 new = _source_affected_lines(after, redact)
-                affected.append((old, new))
+                # The masked lines' original TEXT travels with their indices so
+                # a copy or an edited counterpart of one inherits the mask in
+                # the preview AND the archive alike (QA F1 on #3762).
+                sensitive = _sensitive_line_texts(before, old) | _sensitive_line_texts(after, new)
+                affected.append((old, new, sensitive))
                 if tuple(preview) == (_DIFF_DETAIL_WITHHELD,):
                     # The producer had no preview row that fit (only the
                     # archive can show this change); the receipt is already
                     # the safe public form, and the projection above still
                     # feeds the archive.
                     return list(preview)
-                masked = _mask_by_source_evidence(preview, old, new)
+                masked = _mask_by_source_evidence(preview, old, new, sensitive)
                 out = _redact_diff_detail(masked, redact)
             if not isinstance(out, list):
                 raise ValueError
@@ -7863,9 +7940,49 @@ class AgentLoop:
         result.details = details
 
     @staticmethod
+    async def _bind_nested_diff(
+        config: LoopConfig,
+        outer_call_id: str,
+        call_id: str,
+        tool_name: str,
+        result: ToolResult,
+    ) -> None:
+        """Make a NESTED call's archived diff reachable, or stop advertising it.
+
+        Only the outer ``eval`` row is persisted, so a nested write/edit has no
+        tool row for the diff routes to prove membership with (QA F5 on #3762:
+        archived descriptor live and in the cell, GET 404). The host binding is
+        awaited HERE -- after the settle wrote the descriptor and before the
+        end event or the cell sees it -- so whatever later happens to the outer
+        call, nothing was offered that the journal cannot serve. The binding is
+        built from this host-settled result only, never from what the cell
+        returns. No binding (no host hook, a write failure) downgrades the
+        descriptor to ``unavailable``: an honest state, never a dead link.
+        """
+        if tool_name not in ("write", "edit") or result.is_error:
+            return
+        details = result.details or {}
+        desc = details.get(DIFF_FULL_KEY)
+        if not isinstance(desc, dict) or desc.get("state") != diff_archive.STATE_ARCHIVED:
+            return
+        bound = False
+        if config.bind_nested_diff is not None:
+            try:
+                bound = bool(
+                    await config.bind_nested_diff(outer_call_id, call_id, tool_name, dict(desc))
+                )
+            except Exception:  # noqa: BLE001 - an unbound archive is reported unavailable
+                logger.warning("nested diff binding raised for %s", tool_name)
+        if not bound:
+            result.details = {
+                **details,
+                DIFF_FULL_KEY: diff_archive.descriptor(diff_archive.STATE_UNAVAILABLE),
+            }
+
+    @staticmethod
     async def _archive_full_diff(
         full: tuple[str, ...] | str,
-        affected: tuple[set[int], set[int]] | None,
+        affected: tuple[set[int], set[int], set[str]] | None,
         redact: Callable[[str], str],
         *,
         tool_name: str,
@@ -7892,14 +8009,14 @@ class AgentLoop:
             return diff_archive.descriptor(diff_archive.STATE_WITHHELD)
         if not session_id:
             return diff_archive.descriptor(diff_archive.STATE_UNAVAILABLE)
-        old, new = affected
+        old, new, sensitive = affected
 
         def _run() -> dict[str, Any]:
             with (
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, cwd, verdict),
             ):
-                masked = _mask_by_source_evidence(full, old, new)
+                masked = _mask_by_source_evidence(full, old, new, sensitive)
                 out = _redact_diff_detail(
                     masked,
                     redact,

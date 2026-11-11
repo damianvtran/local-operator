@@ -117,6 +117,61 @@ _STORED_STATES = frozenset({STATE_ARCHIVED, STATE_OVERSIZED, STATE_WITHHELD, STA
 _DIGEST = re.compile(r"[0-9a-f]{32}")
 _DIFF_TOOLS = frozenset({"write", "edit"})
 
+#: Journal ``custom`` entry type binding a NESTED write/edit (``eval`` ->
+#: ``tool('write', ...)``) to its archive. A nested call has no ``role:"tool"``
+#: row of its own -- only the OUTER ``eval`` row is persisted -- so without
+#: this the advertised ``archived`` descriptor led nowhere (QA F5 on #3762:
+#: nested id GET 404 in parent and child). The HOST loop appends it, awaited,
+#: through ``LoopConfig.bind_nested_diff`` BEFORE the descriptor reaches the
+#: nested end event or the eval cell, so a later failed/interrupted outer
+#: ``eval`` (or a crash) cannot strand a capture the UI was already offered.
+#: Nothing the cell returns, nor the outer row's details, is ever read as a
+#: binding: only this host-written entry is, matched on the exact nested id.
+#: Custom entries never enter LLM context; unknown types are ignored by every
+#: replay/projection reader.
+NESTED_DIFF_BINDING_TYPE = "tool_call_diff_binding_v1"
+
+
+def nested_binding(
+    *, session_id: str, outer_call_id: str, call_id: str, tool_name: str, desc: dict[str, Any]
+) -> dict[str, Any]:
+    """The ``details`` of one :data:`NESTED_DIFF_BINDING_TYPE` entry."""
+    return {
+        "v": DIFF_ARCHIVE_VERSION,
+        "session_id": session_id,
+        "outer_call_id": outer_call_id,
+        "call_id": call_id,
+        "tool": tool_name,
+        DIFF_FULL_KEY: dict(desc),
+    }
+
+
+def _binding_details(payload: dict[str, Any], call_id: str, session_id: str | None) -> Any:
+    """``(tool, details)`` when ``payload`` is a valid binding for ``call_id``.
+
+    Every field must agree: the exact nested id, THIS session, and an outer id
+    that is the nested id's own ``<outer>:`` prefix (the shape the bridge
+    mints). The prefix is a consistency check on the host entry, never proof
+    on its own -- a request id that merely carries a prefix has no binding.
+    """
+    if payload.get("custom_type") != NESTED_DIFF_BINDING_TYPE:
+        return None
+    details = payload.get("details")
+    if not isinstance(details, dict) or session_id is None:
+        return None
+    outer = details.get("outer_call_id")
+    if (
+        details.get("v") != DIFF_ARCHIVE_VERSION
+        or details.get("call_id") != call_id
+        or details.get("session_id") != session_id
+        or not isinstance(outer, str)
+        or not outer
+        or not call_id.startswith(outer + ":")
+        or not isinstance(details.get(DIFF_FULL_KEY), dict)
+    ):
+        return None
+    return str(details.get("tool") or ""), {DIFF_FULL_KEY: details[DIFF_FULL_KEY]}
+
 
 class DiffArchiveNotFound(LookupError):
     """Unknown session, call, or a call that is not a write/edit result.
@@ -184,7 +239,8 @@ def fits_archive(rows: Sequence[str]) -> bool:
 
 def _encode(rows: Sequence[str], *, session_id: str, call_id: str, tool_name: str) -> str:
     # One JSON string per line: exact for every character (a row's own
-    # separators, lone surrogates escaped by ``ensure_ascii``), so the reader
+    # separators included; lone surrogates are refused by ``write_archive``
+    # before this runs), so the reader
     # gets the stored rows back byte for byte instead of re-splitting text.
     header = json.dumps(
         {
@@ -235,7 +291,9 @@ class AmbiguousToolCall(LookupError):
     """Two or more DISTINCT persisted tool-result rows carry the same call id."""
 
 
-def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, Any]] | None:
+def find_tool_details(
+    session_dir: Path, call_id: str, session_id: str | None = None
+) -> tuple[str, dict[str, Any]] | None:
     """``(tool_name, details)`` of THE persisted tool row for ``call_id``.
 
     Call ids are provider-minted and nothing proves them unique within one
@@ -251,8 +309,15 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
     different ids. A byte prefilter on the JSON-encoded id keeps
     the walk from parsing unrelated rows; the parsed payload is the authority.
     Read-only: never creates the journal.
+
+    With ``session_id``, a host-written :data:`NESTED_DIFF_BINDING_TYPE` entry
+    for ``call_id`` is a match too, under the SAME duplicate rule: an ordinary
+    tool row and a binding (or two bindings) for one id are two captures and
+    fail closed -- the walk always reaches the journal start, so neither kind
+    can shadow the other.
     """
     from local_operator.session.transcript import (
+        ENTRY_CUSTOM,
         TranscriptEntry,
         _iter_complete_lines_backward,
         _resolved_transcript_path,
@@ -281,18 +346,24 @@ def find_tool_details(session_dir: Path, call_id: str) -> tuple[str, dict[str, A
                 if entry is None:
                     continue
                 payload = entry.payload
-                if payload.get("role") != "tool" or payload.get("tool_call_id") != call_id:
+                if entry.type == ENTRY_CUSTOM:
+                    match = _binding_details(payload, call_id, session_id)
+                    if match is None:
+                        continue
+                elif payload.get("role") != "tool" or payload.get("tool_call_id") != call_id:
                     continue
+                else:
+                    provider = payload.get("provider_payload")
+                    details = provider.get("details") if isinstance(provider, dict) else None
+                    match = (
+                        str(payload.get("tool_name") or ""),
+                        details if isinstance(details, dict) else {},
+                    )
                 if found is not None:
                     if raw.rstrip(b"\r\n") == found_raw:
                         continue
                     raise AmbiguousToolCall(call_id)
-                provider = payload.get("provider_payload")
-                details = provider.get("details") if isinstance(provider, dict) else None
-                found = (
-                    str(payload.get("tool_name") or ""),
-                    details if isinstance(details, dict) else {},
-                )
+                found = match
                 found_raw = raw.rstrip(b"\r\n")
     return found
 
@@ -421,7 +492,7 @@ def load_page(
     if start < 0 or offset < 0 or not 1 <= limit <= PAGE_MAX_ROWS:
         raise DiffPageRangeError("start/limit/offset out of range")
     try:
-        found = find_tool_details(session_dir, call_id)
+        found = find_tool_details(session_dir, call_id, session_id)
     except AmbiguousToolCall:
         found = None
         ambiguous = True

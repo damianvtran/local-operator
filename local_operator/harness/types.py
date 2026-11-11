@@ -3900,6 +3900,18 @@ class LoopConfig(BaseModel):
     #: should hold to; anything that touches disk, a lock or a socket belongs on
     #: the far side of a queue, not here.
     capture_prepared_write: Callable[[ToolCall, ToolResult], None] | None = None
+    #: Durably bind a NESTED (``eval`` -> ``tool('write'|'edit')``) archived
+    #: full diff to this session as ``(outer_call_id, call_id, tool_name,
+    #: descriptor)``; returns ``True`` only once the binding is written. AWAITED
+    #: by the eval bridge before the descriptor reaches the nested end event or
+    #: the cell (see ``tools.diff_archive.NESTED_DIFF_BINDING_TYPE``): a nested
+    #: call has no tool row of its own, so this host-written journal entry is
+    #: what the diff routes prove membership with. ``None`` (a host without a
+    #: journal) or ``False`` downgrades the descriptor to ``unavailable``
+    #: rather than advertise an archive no route could serve.
+    bind_nested_diff: (
+        Callable[[str, str, str, dict[str, Any]], Awaitable[bool]] | None
+    ) = None
     #: The session's divergence observer (``local_operator.divergence.
     #: DivergenceJudge``), or ``None`` for a host that does not wire one.
     #:
