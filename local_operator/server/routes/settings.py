@@ -152,6 +152,13 @@ class SettingView(BaseModel):
     #: that ignores it sees the previous response, and an app that predates it
     #: keeps rendering hotkeys by the rules it already shipped.
     hotkey_scope: str = ""
+    #: Whether this HOTKEY row may be CLEARED. DERIVED in ``settings_io``'s
+    #: registry from ``keymap.KEY_ACTIONS`` (like ``hotkey_scope``), so the
+    #: wire cannot disagree with what the writers enforce. When true the
+    #: client offers a Clear affordance and stores the exact string `"none"`
+    #: via PATCH; reset deletes the key and restores the default. Additive in
+    #: the same sense: an older app ignores it, an older server omits it.
+    clearable: bool = False
     #: What an INT/FLOAT row counts ("hours"), so a UI can render a bounded
     #: control from ``minimum``/``maximum``/``unit`` without parsing the help.
     #: The stored value is always in this unit. Additive on the same terms as
@@ -223,6 +230,7 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         placeholder=setting.placeholder,
         gated_by=setting.gated_by,
         hotkey_scope=setting.hotkey_scope,
+        clearable=setting.clearable,
         unit=setting.unit,
         synonyms=list(setting.synonyms),
         state_note=state_note,

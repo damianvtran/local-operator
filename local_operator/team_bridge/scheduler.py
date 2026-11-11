@@ -745,6 +745,9 @@ class _CyclePolicy:
     provider: str
     # Render option only (``PolicySnapshot.addressed_version``); never published.
     addressed_version: str = ""
+    # A8: the privacy-pass control generation this policy was published under
+    # while ENABLED (0 = off). Read FRESH at publication; see privacy_pass.
+    privacy_generation: int = 0
 
 
 async def verified_status_capture(
@@ -857,8 +860,15 @@ async def run_screening_cycle(
     accepted_capture: "AcceptedCapture | None" = None,
     status_fetcher: "Callable[[], Awaitable[Any]] | None" = None,
     batch: bool = False,
+    privacy_runner_factory: Any = None,
 ) -> Any:
     """The SHIPPED THIN production composition (R6/Q3).
+
+    ``privacy_runner_factory`` is the A8 injection point at THIS composition
+    boundary (``privacy_pass.PrivacyRunnerFactory``): offline tests pass a
+    factory of scripted runners; production passes none today, so an enabled
+    privacy pass holds before any second-stage send (slice 1 ships no paid
+    privacy route). Answering provenance still comes only from the chain.
 
     ``batch=True`` screens EVERY item in one model call and returns a list of
     results in item order (``None`` when the account turn is busy); the
@@ -1033,6 +1043,20 @@ async def run_screening_cycle(
     # fallback configured sees no revision change (and no epoch churn) from
     # the upgrade.
     serving = sorted({(hop.provider, hop.model_id) for hop in chain})
+    # A8 / S-2 AT PUBLICATION: one FRESH authority read (never a retained
+    # ConfigManager). Enabled binds rule, template digest and control
+    # generation into the revision, so a disable/re-enable always moves it;
+    # off appends nothing, so a machine that never enables A8 publishes the
+    # byte-identical revision it always did. The publish transaction re-checks
+    # the generation against the durable control row (a stale publisher
+    # cannot republish enabled after a disable).
+    from local_operator.team_bridge import privacy_pass as _privacy_pass
+
+    try:
+        privacy_authority = _privacy_pass.read_authority(config_dir, store)
+    except _privacy_pass.PrivacyAuthorityUnavailable as unavailable:
+        raise StoreRefused("policy_stale", "privacy authority unavailable") from unavailable
+    privacy_part = _privacy_pass.revision_suffix(privacy_authority)
     chain_part = (
         "|chain=" + ",".join(f"{provider}/{model}" for provider, model in serving)
         if len(chain) > 1
@@ -1045,6 +1069,7 @@ async def run_screening_cycle(
                 f"{version}|{template_hash}|{selection.provider}|{selection.model_id}|"
                 + ",".join(sorted(selection.approved_identities))
                 + chain_part
+                + privacy_part
             ).encode("utf-8")
         ).hexdigest()[:32]
     )
@@ -1082,6 +1107,7 @@ async def run_screening_cycle(
                 # The receipt fences accept a model in THIS set (B1/S-3); a
                 # single hop stores NULL, which reads as {default_model}.
                 approved_serving=serving if len(chain) > 1 else None,
+                privacy_generation=privacy_authority.policy_generation,
             )
         except StoreRefused:
             # A competing publisher moved authority; screen nothing rather
@@ -1106,6 +1132,7 @@ async def run_screening_cycle(
         # Re-checked against the template it names: a capture is only ever minted
         # with "" or a version whose embedded bytes the status read matched.
         addressed_version=str(getattr(capture, "addressed_version", "") or ""),
+        privacy_generation=privacy_authority.policy_generation,
     )
     cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
 
@@ -1137,6 +1164,7 @@ async def run_screening_cycle(
                 config_dir=config_dir,
                 policy=cast("ScreeningPolicy", policy),
                 runner=chain_runner,
+                privacy_runner_factory=privacy_runner_factory,
             )
 
         # ONE turn, ONE call: the cycle's single-target selection only picks
@@ -1172,6 +1200,7 @@ async def run_screening_cycle(
             # re-captures them into its own immutable snapshot.
             policy=cast("ScreeningPolicy", policy),
             runner=runner,
+            privacy_runner_factory=privacy_runner_factory,
         )
 
     return await cycle.run_once(items, _screen)

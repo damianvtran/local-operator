@@ -376,6 +376,238 @@ def detail(root: Path, record: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+#: Hard cap on the approval card body. WHY: the card used to carry every
+#: changed field's full before → after text, so a team brief of a few KB made
+#: the "The agent is asking" card fill the conversation and hide its own
+#: answer options. The full diff lives in Agents → <name>; the card only has to
+#: say what changes and where to review it.
+APPROVAL_CARD_MAX_CHARS = 600
+#: Per summary line cap (contract: "truncated to ~80 chars").
+_SUMMARY_LINE_MAX_CHARS = 80
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _item_counts(before: list[str], after: list[str]) -> tuple[int, int]:
+    """Added/removed counts of an ordered sequence, via a difflib opcode walk."""
+    import difflib
+
+    added = removed = 0
+    matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in {"replace", "delete"}:
+            removed += i2 - i1
+        if tag in {"replace", "insert"}:
+            added += j2 - j1
+    return added, removed
+
+
+def _json_items(text: str) -> list[str] | None:
+    """A JSON list field's items as canonical strings, or ``None`` if not a list.
+
+    WHY: a pretty-printed JSON list re-flows its brackets and trailing commas,
+    so adding one tool to ``["a"]`` diffs as ``+3 −1 lines``. Counting items
+    says what actually changed.
+    """
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(value, list):
+        return None
+    return [json.dumps(item, sort_keys=True, ensure_ascii=False) for item in value]
+
+
+def summarize_changes(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Count what changed per field from :func:`changes` rows.
+
+    ``status`` says how to read ``added``/``removed``:
+
+    - ``lines``: multi-line free text (and newline-joined list fields), counted
+      over ``splitlines()`` — the lines the Agents diff viewer shows.
+    - ``items``: a JSON list field, counted in list items (see
+      :func:`_json_items`).
+    - ``whitespace``/``reordered``: both counts are 0 yet the text differs;
+      "+0 −0" would read as "nothing changed" on an apply card.
+    - ``set``/``cleared``/``changed``: a single-line value on both sides, where
+      "+1 −1 lines" says nothing useful about a model or label switch.
+
+    Pure: no I/O, safe to call from any surface.
+    """
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        before = str(row.get("before_text") or "")
+        after = str(row.get("after_text") or "")
+        before_lines, after_lines = before.splitlines(), after.splitlines()
+        before_items = _json_items(before) if row.get("format") == "json" else None
+        after_items = _json_items(after) if before_items is not None else None
+        if before_items is not None and after_items is not None:
+            added, removed = _item_counts(before_items, after_items)
+            status = "items" if added or removed else "reordered"
+        else:
+            added, removed = _item_counts(before_lines, after_lines)
+            scalar = len(before_lines) <= 1 and len(after_lines) <= 1
+            if scalar:
+                status = "set" if not before else "cleared" if not after else "changed"
+            elif added or removed:
+                status = "lines"
+            else:
+                status = "whitespace"
+        out.append(
+            {
+                "field": row.get("field") or "",
+                "label": row.get("label") or row.get("field") or "",
+                "added": added,
+                "removed": removed,
+                "status": status,
+            }
+        )
+    return out
+
+
+_STATUS_TEXT = {"whitespace": "whitespace only", "reordered": "order changed"}
+
+
+def _counts_text(item: dict[str, Any]) -> str:
+    # ``status`` is always one of the str literals set above; typing it as
+    # ``str`` (not ``Any``) lets ``.get(status, status)`` resolve to the
+    # ``str`` overload instead of ``str | None``.
+    status: str = str(item["status"])
+    if status in {"lines", "items"}:
+        return f"+{item['added']} −{item['removed']} {status}"
+    return _STATUS_TEXT.get(status, status)
+
+
+def summary_line(item: dict[str, Any]) -> str:
+    """One ``<label>: +N −M lines`` (or ``<label>: changed``) receipt line."""
+    return _clip(f"{item['label']}: {_counts_text(item)}", _SUMMARY_LINE_MAX_CHARS)
+
+
+#: Cap on the card's ``Changes:`` line (contract line 2).
+CHANGES_LINE_MAX_CHARS = 160
+
+
+def changes_line(items: list[dict[str, Any]]) -> str:
+    """Contract line 2: ``Changes: <label> +A −R lines; <label> changed; …``.
+
+    One line, at most :data:`CHANGES_LINE_MAX_CHARS`; fields that do not fit
+    collapse into a trailing ``… N more``. local-operator-ui parses this line
+    (``Changes: `` prefix, ``; `` separator) to render its own compact
+    summary, so keep the shape stable.
+    """
+    prefix = "Changes: "
+    if not items:
+        return prefix + "none listed"
+    phrases = [_clip(f"{i['label']} {_counts_text(i)}", _SUMMARY_LINE_MAX_CHARS) for i in items]
+    kept: list[str] = []
+    for index, phrase in enumerate(phrases):
+        remaining = len(phrases) - index - 1
+        reserve = len(f"; … {remaining} more") if remaining else 0
+        candidate = "; ".join([*kept, phrase])
+        if len(prefix) + len(candidate) + reserve > CHANGES_LINE_MAX_CHARS:
+            kept.append(f"… {len(phrases) - index} more")
+            break
+        kept.append(phrase)
+    return prefix + "; ".join(kept)
+
+
+def save_changes_line(labels: Iterable[str]) -> str:
+    """Line 2 of a DIRECT (non-proposal) save card: ``Changes: a, b, … N more``.
+
+    WHY names only, no ``+N −M`` counts: a direct save carries no before/after
+    images — :class:`~local_operator.harness.types.DurableWriteIntent` exposes
+    only the changed field/path names and ``summary``, a human-readable prose
+    with several producer formats (a unified instructions diff, a replaced
+    body, a whole new skill file, ``path: old → new`` edits, ``Remove:``
+    lines). Every heuristic that recovered counts from that prose mis-counted
+    some shape (PR #3777 R2-1, R2-3, R3-1: bullets read as removals, a ``→``
+    inside a new file split into fake old/new halves). The card shows the
+    clipped content below this line (:func:`clip_save_detail`), so the
+    approver reads the change itself; this line only says what it touches.
+    Proposal cards, which do have structured images, keep
+    :func:`changes_line`'s counts.
+
+    Same bound as :data:`CHANGES_LINE_MAX_CHARS`; names that do not fit
+    collapse into ``… N more``. Duplicate names are listed once, in order.
+    """
+    prefix = "Changes: "
+    names = list(dict.fromkeys(str(label) for label in labels if label))
+    if not names:
+        return prefix + "(no fields named)"
+    phrases = [_clip(name, _SUMMARY_LINE_MAX_CHARS) for name in names]
+    kept: list[str] = []
+    for index, phrase in enumerate(phrases):
+        remaining = len(phrases) - index - 1
+        reserve = len(f", … {remaining} more") if remaining else 0
+        candidate = ", ".join([*kept, phrase])
+        if len(prefix) + len(candidate) + reserve > CHANGES_LINE_MAX_CHARS:
+            kept.append(f"… {len(phrases) - index} more")
+            break
+        kept.append(phrase)
+    return prefix + ", ".join(kept)
+
+
+#: Cap on the change content a DIRECT (non-proposal) save card carries below
+#: its summary. WHY it is shown at all: a direct save has no review page —
+#: skills have no proposal path and no Agents diff — so the card is the only
+#: place the approver can read what they approve (R2-2). WHY a cap: an
+#: unbounded body was the original "card fills the conversation" report; ask
+#: cards are now height-bounded and scroll on every surface, so ~4 KB reads
+#: as a scrollable excerpt rather than a layout hazard.
+SAVE_DETAIL_MAX_CHARS = 4000
+
+
+def clip_save_detail(text: str, limit: int = SAVE_DETAIL_MAX_CHARS) -> str:
+    """``text`` cut at a line boundary within ``limit`` chars, plus a tail line.
+
+    The tail ``… N more lines not shown`` says how much was dropped, so a
+    clipped excerpt is never mistaken for the whole change. A single first
+    line longer than ``limit`` is clipped mid-line rather than dropped.
+    """
+    lines = text.splitlines()
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > limit:
+            break
+        kept.append(line)
+        used += cost
+    if not kept and lines:
+        kept = [_clip(lines[0], limit)]
+    hidden = len(lines) - len(kept)
+    if hidden:
+        kept.append(f"… {hidden} more line{'s' if hidden != 1 else ''} not shown")
+    return "\n".join(kept)
+
+
+def approval_card_text(record: dict[str, Any], rows: Iterable[dict[str, Any]]) -> str:
+    """The ACCOUNT_PROFILE_GATE card for one proposal: exactly three lines.
+
+    CONTRACT (shared with local-operator-ui, which parses it; TUI and mobile
+    show it raw):
+
+    1. ``Apply proposal <pp_id> to <kind> <name-repr>?`` — the name is
+       Python-repr quoted (``'name'``, or ``"name"`` when it holds an
+       apostrophe), so the UI links ``/agents?kind=…&name=…&proposal=…`` from
+       the text alone and the proposal id stays visible: a spoken
+       "apply pp_…" in chat binds by ``proposal_id in text``.
+    2. :func:`changes_line` — per-field counts, never before/after text.
+    3. ``Origin: <trust>. Review changes in Agents → <name>.``
+
+    The full diff lives in Agents → <name>; the card stays under
+    :data:`APPROVAL_CARD_MAX_CHARS` (names are capped at 128 chars).
+    """
+    head = f"Apply proposal {record['id']} to {record['kind']} {record['name']!r}?"
+    origin = (record.get("origin") or {}).get("trust") or "agent"
+    tail = _clip(f"Origin: {origin}. Review changes in Agents → {record['name']}.", 200)
+    return "\n".join([head, changes_line(summarize_changes(rows)), tail])
+
+
 def counts(rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, int]]:
     out: dict[str, dict[str, int]] = {"agent": {}, "team": {}}
     for row in rows:

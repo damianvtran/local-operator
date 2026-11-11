@@ -158,6 +158,7 @@ from local_operator.harness.subagent import (
     run_subagent,
     team_slot_name,
 )
+from local_operator.harness.tool_names import normalise_replay_tool_names
 from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     FAULT_INVALID_ARGUMENTS,
@@ -795,6 +796,58 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
 #: runtime cannot stand behind, and every surface already treats absence as "no
 #: line".
 _USER_MESSAGE_STAMP_CAP = 256
+
+#: How long after an operator turn ends a firing wake is PARKED instead of
+#: opening its own turn below the operator's exchange. Measured over the
+#: fleet's transcripts (2816 sessions, 7298 operator messages, 2563 wake
+#: fires): median gap between operator messages 228 s, 36.8% of follow-ups
+#: within 120 s; idle wakes falling within 30/60/120/300 s of an operator
+#: message: 49/85/116/247. W=120 catches the bulk of the "just after the
+#: operator" cases without swallowing overnight monitoring. Read at call
+#: time (module attribute) so tests can patch it.
+WAKE_OPERATOR_QUIET_S = 120
+
+#: The longest a parked wake may wait, measured from its FIRST park. Bounds
+#: the re-arm loop: a wake parks in the milliseconds between the fold point
+#: and ``_is_streaming`` flipping, and that operator turn then runs longer
+#: than D — at D the batch delivers as its own turn rather than waiting for
+#: the conversation to end. A continuing conversation never reaches D:
+#: every operator ``prompt()`` folds the batch at its start. Read at call time.
+WAKE_PARK_CAP_S = 600
+
+#: Wakes that must never be parked: cadence-family check-in rows from BOTH
+#: engines (``aida-cadence``/``aida-extra-*`` and ``librarian-cadence``/
+#: ``librarian-extra-*``). The greeting/cadence stamps
+#: (``_aida_cadence_delivered``/``_librarian_cadence_delivered``) are set at a
+#: fire BEFORE the park branch, so parking one would spend the stamp without
+#: ever delivering it; cadence checks are the product surface and must open
+#: their own turn immediately. An operator-armed ``wN`` on a duty session
+#: still parks normally (the cadence-family predicate, not the duty flag,
+#: is the gate).
+
+_PARKED_WAKE_FOLD_NOTE = (
+    "(This wake fired while you were talking to the operator, so it was held and "
+    "folded into your current answer instead of opening its own turn below the "
+    "operator's messages. Answer the operator first; mention this wake only if "
+    "it has news for them; otherwise add nothing.)"
+)
+
+
+def _is_cadence_family_wake(wake_id: str) -> bool:
+    """Whether ``wake_id`` is a cadence-family check-in row from either engine.
+
+    Cadence deliveries must never park: the greeting/cadence stamps are set
+    at a fire before the park branch, so parking one would spend the stamp
+    without delivering it. One predicate for both engines — a duty flag
+    would exempt an operator-armed wake on her session too.
+    """
+    from local_operator.aida import proactive as _aida_proactive
+    from local_operator.librarian import proactive as _librarian_proactive
+
+    return _aida_proactive.is_cadence_family_row(
+        wake_id
+    ) or _librarian_proactive.is_cadence_family_row(wake_id)
+
 
 #: How many open asks the reminder NAMES (design §16/SA-D3). Deliberately NOT
 #: ``asks.policy.OPEN_ASK_CAP``: that is the model's asking budget, and bridge
@@ -5171,6 +5224,40 @@ class Session:
         self._profile_result_waiters: dict[str, asyncio.Task[Any]] = {}
         self._signal: AbortSignal | None = None
         self._is_streaming = False
+        #: True from ``prompt()`` acquiring ``_turn_lock`` (before
+        #: ``_is_streaming`` flips) until the turn's ``finally``. Covers the
+        #: window between lock acquire and streaming start, where an idle-path
+        #: wake would otherwise spawn a turn that queues on the lock directly
+        #: below the operator's row.
+        self._operator_turn_open = False
+        #: Set True when the CURRENT turn admitted an operator message (the
+        #: ``_note_admitted_user_message`` admission sites in ``_run_turn``
+        #: and the steer drain — set only when the helper actually stamps),
+        #: reset in ``_run_turn``'s ``finally``. Read in that same ``finally``
+        #: to stamp ``_last_operator_turn_end`` — the end of this turn, not
+        #: its admission, so a long turn cannot consume the quiet window. A
+        #: wake-initiated turn never sets it, so wake chains never open the
+        #: window.
+        self._turn_admitted_operator = False
+        #: Epoch seconds when the last turn that admitted an operator message
+        #: ended (``None`` before the first). Wake-defer evidence: a wake
+        #: firing while ``now < last_end + WAKE_OPERATOR_QUIET_S`` parks. Only
+        #: operator-admitted turns stamp it (see ``_note_admitted_user_message``
+        #: call sites), so wake-initiated turns never open the window.
+        self._last_operator_turn_end: float | None = None
+        #: Parked idle wakes awaiting the quiet-window deadline, keyed by
+        #: wake id. A newer fire of the same id replaces the older parked one
+        #: (one delivery per id while parked), mirroring transcript dedup.
+        self._parked_wakes: dict[str, CustomMessage] = {}
+        #: First park time (epoch s) of the CURRENT park batch; the cap
+        #: deadline is ``first_park + WAKE_PARK_CAP_S``. Reset when the batch
+        #: is taken (fold or deadline delivery).
+        self._parked_wakes_first_park: float | None = None
+        #: The ONE tracked deadline task for the park batch, via
+        #: ``_spawn_background`` so dispose cancels it (no pending task after
+        #: dispose). Re-armed by the deadline runner when an operator turn is
+        #: still open at wake time.
+        self._parked_wake_task: asyncio.Task[Any] | None = None
         #: Bang-mode receipts that completed while a turn or manual compaction
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
@@ -5409,6 +5496,12 @@ class Session:
         #: Read by ``ServingSessionHandle`` (the supplement runner's seam). Public like
         #: ``title_fit_check`` because the runtime handle holds the session, not the hooks.
         self.supplement_seam = supplement_seam
+        #: Set by ``ServingSessionHandle`` to its ``SupplementRunner.on_music_settled``:
+        #: the turn highlights must learn when a background music job settles, and the
+        #: runner lives on the handle, not here. ``None`` (exec, children, tests) = no-op.
+        self.music_settled_listener: (
+            Callable[[Mapping[str, Any]], Coroutine[Any, Any, None]] | None
+        ) = None
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
@@ -7335,11 +7428,14 @@ class Session:
         # symbols this seam always has — ``test_read_only_prompt_bound``'s stub
         # session mirrors exactly those, and routing through an instance method
         # it cannot know about broke the aside-equals-turn equality it pins.
-        return blocks, bound_replay_payloads(
-            with_attachment_hints(
-                self._render_history([*history, *turns]),
-                world_root=self._confinement_root,
-            )
+        return blocks, normalise_replay_tool_names(
+            bound_replay_payloads(
+                with_attachment_hints(
+                    self._render_history([*history, *turns]),
+                    world_root=self._confinement_root,
+                )
+            ),
+            self._tools,
         )
 
     @property
@@ -10164,6 +10260,14 @@ class Session:
             # paints its notices, from its own call in `_aside_worker`.
             text = expansion.sent
             await self._turn_lock.acquire()
+            # An operator turn is OPEN from here, before ``_is_streaming``
+            # flips: an idle-path wake landing in that window would otherwise
+            # spawn a turn that queues on the lock directly below the
+            # operator's row (brief case (b)). Cleared in the ``finally``.
+            # Only a genuine operator prompt opens it: a harness-injected
+            # row (goal loop, serving chrome) is not the operator's words,
+            # so it must not park a wake either.
+            self._operator_turn_open = not harness_injected
         try:
             # A USER TURN IS A REPLY (R34): retire every pending patience row
             # before anything else in this turn. Over-cancel is deliberate —
@@ -10247,6 +10351,40 @@ class Session:
                 # See `docs/DESKTOP_API.md` for what a viewer does with it.
                 user.provider_payload = {RENDERED_INJECTION_KEY: True}
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
+            # PARKED WAKES FOLD HERE, beside the catch-up fold above: a wake that
+            # fired during the operator's conversation was held rather than
+            # opening its own turn below the operator's exchange. It joins the
+            # SAME turn, ahead of the user's message, so the model reads it
+            # before answering; the folded text says to answer the operator
+            # first and mention the wake only if it has news. Taking the batch
+            # cancels the deadline task (the fold IS the delivery now).
+            # The ``WakeDeliveredEvent`` receipt is emitted HERE, at delivery — not
+            # at park time: a parked wake must not paint a wake line below the
+            # operator's exchange before it has actually run. The dedup key
+            # (wake_id, occurrence) is the same one replay uses, so the live
+            # card and the persisted row still dedup to one line.
+            parked = self._take_parked_wakes()
+            if parked:
+                for wake_message in parked:
+                    wake_message.details["text"] = (
+                        f"{wake_message.details['text']}\n\n{_PARKED_WAKE_FOLD_NOTE}"
+                    )
+                # The receipt at delivery (QA Q5): the fold is the common path
+                # and was silent — the wake shaped the answer but the live
+                # transcript showed nothing until a later replay. Emitting here
+                # puts the line under the operator's echo and before the answer,
+                # so the answer stays last.
+                for wake_message in parked:
+                    if not wake_message.details.get("hidden"):
+                        await self._emit(
+                            WakeDeliveredEvent(
+                                text=str(wake_message.details["text"]),
+                                catchup=False,
+                                wake_id=str(wake_message.details.get("wake_id", "")),
+                                occurrence=int(wake_message.details.get("occurrence", 0) or 0),
+                            )
+                        )
+                initial = [*initial[:-1], *parked, *initial[-1:]]
             await self._run_turn_pipeline(
                 initial,
                 admitted=admitted,
@@ -10265,6 +10403,10 @@ class Session:
         finally:
             # A body this person's turn left pending is served by its own turn.
             self._rearm_pending_body_followup()
+            # The operator turn is CLOSED: wake-defer now measures the quiet
+            # window from ``_last_operator_turn_end``, stamped when the
+            # operator's message was admitted in ``_run_turn``.
+            self._operator_turn_open = False
             # D8: anything queued after the pipeline's own flush (or on an
             # early exit before it) lands before the lock goes free.
             # Release in its own ``finally`` (R2-1): see the helper.
@@ -13709,7 +13851,7 @@ class Session:
         since = sum(1 for _, at in self._user_messages if at > asked_at_ms)
         return since, self._user_messages[-1][1]
 
-    def _note_admitted_user_message(self, message: AgentMessage) -> None:
+    def _note_admitted_user_message(self, message: AgentMessage) -> bool:
         """Stamp one message as an ADMITTED operator message (SA-D7).
 
         Called at the two points that hand a user row to the model — the turn's
@@ -13723,23 +13865,27 @@ class Session:
         marker (``RENDERED_INJECTION_KEY``) and the shared text predicate together
         are the same two rules every surface uses to decide what to paint as the
         operator's own words, so the count and the transcript agree.
+
+        Returns True only when the stamp landed, so the wake-defer flag can
+        follow the same operator-only filter without re-checking it.
         """
         if not isinstance(message, Message) or message.role != "user":
-            return
+            return False
         if (message.provider_payload or {}).get(RENDERED_INJECTION_KEY):
-            return
+            return False
         from local_operator.harness.rows import is_harness_chrome
 
         if is_harness_chrome(message.text):
-            return
+            return False
         key = str(getattr(message, "id", "") or "")
         # A row handed to two admission sites in one runtime must count once. The
         # scan is over the bounded stamp, so it is O(cap) per admitted message.
         if key and any(existing == key for existing, _ in self._user_messages):
-            return
+            return False
         if len(self._user_messages) == _USER_MESSAGE_STAMP_CAP:
             self._user_message_stamp_truncated = True
         self._user_messages.append((key, self._operator_message_stamp_ms(message)))
+        return True
 
     def _operator_message_stamp_ms(self, message: AgentMessage) -> int:
         """The ONE clock an admitted operator message is stamped from.
@@ -14996,21 +15142,42 @@ class Session:
                 profile_name=record["name"],
                 changes=intent.changes,
                 diff=tuple(intent.summary.splitlines()),
+                summary=tuple(
+                    profile_proposals.summary_line(item)
+                    for item in profile_proposals.summarize_changes(
+                        profile_proposals.changes(
+                            record.get("before"), record["after"], record.get("fields") or []
+                        )
+                    )
+                ),
             )
         gate = self._request_approval
         if gate is None:
             from local_operator.harness.approval import ApprovalUnavailableError
 
             raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface is attached")
-        changed = (
-            ", ".join(profile_field_label(field) for field in intent.changes) or "(no fields named)"
+        from local_operator import profile_proposals
+
+        # The first line is unchanged (TUI/mobile show the card raw). The
+        # second line used to be followed by ``intent.summary`` verbatim — a
+        # whole instructions diff or new skill file — so a direct save of a
+        # long brief reproduced the unbounded ask card. Line 2 is now a bounded
+        # list of the fields/paths the save touches (names only: the intent
+        # has no structured before/after, and counts parsed from its prose
+        # summary mis-counted — PR #3777 R3-1), then — after a blank line —
+        # the change content clipped to SAVE_DETAIL_MAX_CHARS: a direct save
+        # has no review page (skills have no proposal path), so the card is
+        # the only place the approver can read what they approve (R2-2).
+        # Proposal cards stay 3 lines with structured counts.
+        changed = profile_proposals.save_changes_line(
+            profile_field_label(field) for field in intent.changes
         )
         card = (
             f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
-            f"Changes: {changed}."
+            f"{changed}."
         )
-        if intent.summary:
-            card += f"\n{intent.summary}"
+        if intent.summary.strip():
+            card += "\n\n" + profile_proposals.clip_save_detail(intent.summary)
         if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
             return f"approval:{intent.base_revision or 'new'}"
         return None
@@ -15065,13 +15232,12 @@ class Session:
             return "granted"
         if self._request_approval is None:
             return "refused"
-        card = (
-            f"Apply proposal {proposal_id} to {proposal['kind']} {proposal['name']!r}?\n"
-            f"Origin: {proposal['origin']['trust']}. Review in Agents → {proposal['name']}.\n"
-            + "\n".join(
-                f"{c['label']}: {c['before_text']} → {c['after_text']}"
-                for c in P.detail(Path(registry.config_dir), proposal)["changes"]
-            )
+        # A bounded summary, never the full before → after text: a multi-KB
+        # team brief inline made the ask card fill the conversation and hide
+        # its own options. The diff is reviewed in Agents → <name>; the first
+        # line's form is a contract with the UI (see approval_card_text).
+        card = P.approval_card_text(
+            proposal, P.detail(Path(registry.config_dir), proposal)["changes"]
         )
         return (
             "card"
@@ -20524,7 +20690,8 @@ class Session:
                     # ask card counts, so an ask raised in this turn says how much
                     # the operator has said since it was asked. The helper applies
                     # the structural harness marker on top of this predicate.
-                    self._note_admitted_user_message(message)
+                    if self._note_admitted_user_message(message):
+                        self._turn_admitted_operator = True
                     await self._emit(MessageStartEvent(message=message))
 
             # Belt-and-braces for peer delivery: consume any inbox rows spooled
@@ -21102,6 +21269,13 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
+            # WAKE-DEFERRAL end stamp: only a turn that admitted an operator
+            # message opens the quiet window. Set here (turn END), not at
+            # admission, so a long turn cannot consume the window before it
+            # ends — the brief measures from turn end.
+            if self._turn_admitted_operator:
+                self._last_operator_turn_end = time.time()
+            self._turn_admitted_operator = False
             # A ONE-SHOT HOST'S HOLD, armed one host-hop earlier (v3,
             # 2026-09-30): ``run_print_mode`` will dispose this session the
             # moment its prompt returns, and its own arming of the departure
@@ -23662,6 +23836,21 @@ class Session:
         except Exception:  # noqa: BLE001 — a boot conversion must not fail the open
             logger.warning("video boot conversion failed", exc_info=True)
 
+    def _notify_music_settled(self, job: Any) -> None:
+        """Hand a settled music job's receipt to the highlights listener, detached.
+
+        Detached through ``_spawn_background`` so the merge (a journal walk under the
+        supplement write lock) can never delay the job's own delivery, and so dispose
+        reaps it. The receipt is the runner's ``music_receipt`` progress field
+        (``music/jobs.py``); a job that failed before reporting one has nothing to show.
+        """
+        listener = self.music_settled_listener
+        latest = getattr(job, "latest_details", None)
+        receipt = latest.get("music_receipt") if isinstance(latest, dict) else None
+        if listener is None or not isinstance(receipt, dict):
+            return
+        self._spawn_background(listener(dict(receipt)))
+
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
 
@@ -23687,6 +23876,10 @@ class Session:
         # consume nested work deliberately through its own jobs/wait tools.
         if self._job_id is not None:
             return
+        if getattr(job, "type", "") == "music":
+            # BEFORE the consumed gate: a track the model collected with ``wait`` is still
+            # one the operator made and must see in the producing turn's highlights.
+            self._notify_music_settled(job)
         # ``video`` rides this gate as of the video phase (media wave-2): a
         # settled video job delivers its review result exactly like a child,
         # and its cancellations never reach here (the manager's task-cancel
@@ -24469,7 +24662,8 @@ class Session:
                     # hands it to the model — so the card's count follows the same
                     # rule a typed prompt follows. The helper drops harness chrome
                     # (a spooled owner prompt, a goal continuation).
-                    self._note_admitted_user_message(message)
+                    if self._note_admitted_user_message(message):
+                        self._turn_admitted_operator = True
                     await self._emit(MessageStartEvent(message=message))
             self.refresh_frontend_state()
         # §14.3: a drained message became part of THIS run's inputs the moment
@@ -28052,6 +28246,17 @@ class Session:
         :meth:`_offloaded`, at a call site that cannot use it (this is not a
         ruler on the module).
         """
+        # The compaction span is a model request in both strategies (the text
+        # summarizer serializes it into the prompt; the archive renders back
+        # into later requests), so it takes the same wire sanitiser as the
+        # turn and the aside — before ``split_leading_marker`` — and the garbled
+        # name never reaches the compaction model, where a summary that kept it
+        # would write it back into durable history through the compaction
+        # marker. Copy-only: the caller's span stays untouched. Other history
+        # builders need no cover: the eval runner's history carries no tool
+        # calls, the mobile relay sends no model request of its own, and a
+        # subagent seeds no parent history.
+        to_summarize = normalise_replay_tool_names(list(to_summarize), self._tools)
         if strategy == "snapcompact":
             try:
                 from local_operator.compaction import snapcompact
@@ -30307,6 +30512,17 @@ class Session:
         previous = getattr(self, "_wake_deliver_hook", None)
         if previous != self._spool_wake_to_inbox:
             self._wake_hook_before_drain: Callable[[DueWake], Awaitable[None]] | None = previous
+        # Parked wakes are already fired occurrences with no schedule left to
+        # re-arm: hand them durably to the successor the same way a draining
+        # fire is spooled, so retiring the runtime cannot drop them.
+        # ``getattr`` like the hook read above: the cell harnesses borrow this
+        # method onto a host that has no park batch, and that is an empty one.
+        if getattr(self, "_parked_wakes", None):
+            _parked = self._take_parked_wakes()
+            for _msg in _parked:
+                _wid = str(_msg.details.get("wake_id", ""))
+                if _wid:
+                    self._spawn_background(self._spool_parked_wake(_msg))
         # NO per-session re-arm queue any more. The one-shot a retiring fire
         # owes the successor is RESERVED in the scheduler that owns the handle
         # (``WakeScheduler.hold_pending``), so a create in this still-serving
@@ -30361,6 +30577,44 @@ class Session:
         except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
             logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
             return False
+
+    async def _spool_parked_wake(self, wake_message: CustomMessage) -> None:
+        """Spool one parked wake for the successor on retire. Never raises.
+
+        A parked wake is already a fired occurrence with no schedule left to
+        re-arm (the pump advanced it before parking), so the inbox write is
+        the durable handoff — the same vehicle ``_spool_wake_to_inbox`` uses
+        for a fire arriving while draining. The text is the delivery text
+        the parked row carries, so the successor runs the same occurrence.
+        """
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        wake_id = str(wake_message.details.get("wake_id", ""))
+        text = str(wake_message.details.get("text", ""))
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None or not text:
+            logger.warning("parked wake %s could not be spooled (no session dir)", wake_id)
+            return
+        try:
+            written = await asyncio.to_thread(
+                append_inbox,
+                Path(directory),
+                InboxLine(
+                    text=text,
+                    sender={},
+                    mode="mailbox",
+                    written_at=time.time(),
+                    wake=True,
+                    wake_id=wake_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — a drain must not die on a spool write
+            logger.warning(
+                "parked wake %s could not be spooled while draining", wake_id, exc_info=True
+            )
+            return
+        if not written:
+            logger.warning("parked wake %s could not be spooled while draining", wake_id)
 
     async def _spool_wake_to_inbox(self, due: DueWake) -> None:
         """The draining hook: hand one fired wake to the successor. Never raises.
@@ -32260,7 +32514,22 @@ class Session:
         # to their own delivery, so this gate is defence in depth rather than
         # the only guard: any row that ever carries ``hidden`` reaches the
         # model and no front end, whichever path it arrives by.
-        if not due.schedule.hidden:
+        # A PARKED wake emits NOTHING here: the receipt is emitted at DELIVERY
+        # (the ``prompt()`` fold, or the deadline task just before
+        # ``_prompt_messages``). Emitting at park time painted a wake line
+        # below the operator's exchange for up to W — the reported symptom
+        # minus the model turn — and asserted a delivery that, if the runtime
+        # died in the window, never happened.
+        _will_park = (
+            not busy
+            and not due.schedule.hidden
+            and not self._disposed
+            and not self._leaving_deliveries
+            and not self._one_shot_exit
+            and not _is_cadence_family_wake(due.schedule.id)
+            and self._operator_active()
+        )
+        if not due.schedule.hidden and not _will_park:
             await self._emit(
                 WakeDeliveredEvent(
                     text=text,
@@ -32269,6 +32538,18 @@ class Session:
                     occurrence=due.occurrence,
                 )
             )
+        # WAKE-DEFERRAL: an idle wake landing right after an operator turn
+        # must not open its own turn below the operator's exchange. The
+        # transcript row and the receipt event persist only when the wake is
+        # actually DELIVERED: a parked wake paints nothing at park time, and
+        # materializes as a transcript row + receipt + turn only on fold into
+        # the next operator prompt, or on the deadline.
+        # Leaving arms never park: a disposed/leaving/one-shot session would
+        # never reach the deadline, so the wake must deliver (or be retired
+        # by the leaving path) now.
+        if _will_park:
+            self._park_wake(due.schedule.id, wake_message)
+            return
         if busy:
             # Busy: ride the next successful tool boundary instead of racing
             # the turn — and mark the message COURTESY so the immediate-
@@ -32289,6 +32570,111 @@ class Session:
             self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
+
+    # -- wake deferral --------------------------------------------------------
+
+    def _operator_active(self) -> bool:
+        """Whether an operator conversation is active enough to park a wake.
+
+        Either an operator turn is OPEN (``prompt()`` holds the turn lock,
+        before streaming starts — brief case (b)) or less than
+        ``WAKE_OPERATOR_QUIET_S`` has passed since the last operator-admitted
+        turn ended. Wake-initiated turns never stamp
+        ``_last_operator_turn_end`` (only operator-admitted messages do),
+        so overnight wake chains leave this False and surface unchanged.
+        """
+        if self._operator_turn_open:
+            return True
+        if self._last_operator_turn_end is None:
+            return False
+        return (time.time() - self._last_operator_turn_end) < WAKE_OPERATOR_QUIET_S
+
+    def _park_wake(self, wake_id: str, wake_message: CustomMessage) -> None:
+        """Park an idle wake until the quiet window closes or the cap hits.
+
+        The newest fire of a wake id replaces the older parked one (one
+        delivery per id while parked). The ONE deadline task sleeps until
+        ``last_end + W`` capped at ``first_park + D``; if an operator turn is
+        still open when it wakes, it re-arms. Delivery itself goes through
+        the existing idle arm (``_prompt_messages``).
+        """
+        now = time.time()
+        if self._parked_wakes_first_park is None or not self._parked_wakes:
+            self._parked_wakes_first_park = now
+        self._parked_wakes[wake_id] = wake_message
+        if self._parked_wake_task is not None and not self._parked_wake_task.done():
+            # An armed deadline already covers this batch; a newer fire only
+            # replaced the message, it does not move the deadline. The cap
+            # is anchored to first_park, so re-arming here would extend the
+            # wait past D.
+            return
+        self._parked_wake_task = self._spawn_background(self._parked_wake_deadline())
+
+    async def _parked_wake_deadline(self) -> None:
+        """Deliver the parked batch at ``min(last_end + W, first_park + D)``.
+
+        Re-arms while an operator turn is open, so a conversation that
+        continues past the quiet window still holds the batch — but the cap
+        bounds the total wait: at ``first_park + D`` the batch delivers even
+        with the operator still active, so no wake starves.
+        """
+        while not self._disposed and self._parked_wakes:
+            first_park = self._parked_wakes_first_park or time.time()
+            last_end = self._last_operator_turn_end
+            if last_end is None:
+                quiet_target = first_park
+            else:
+                quiet_target = last_end + WAKE_OPERATOR_QUIET_S
+            cap_target = first_park + WAKE_PARK_CAP_S
+            target = min(quiet_target, cap_target)
+            wait_s = max(0.0, target - time.time())
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            if self._operator_turn_open and time.time() < cap_target:
+                # Still mid-conversation (brief case (b): the operator's turn
+                # opened after this batch parked). Wait for it to end, then
+                # re-evaluate the quiet window from the new last_end.
+                await asyncio.sleep(0.05)
+                continue
+            break
+        if self._disposed or not self._parked_wakes:
+            return
+        parked = self._take_parked_wakes()
+        if parked:
+            # The receipt event at DELIVERY (see the ``prompt()`` fold for the
+            # other half): the parked wakes painted nothing until now, so the
+            # live wake line lands with the turn that actually runs it.
+            for wake_message in parked:
+                if not wake_message.details.get("hidden"):
+                    await self._emit(
+                        WakeDeliveredEvent(
+                            text=str(wake_message.details["text"]),
+                            catchup=False,
+                            wake_id=str(wake_message.details.get("wake_id", "")),
+                            occurrence=int(wake_message.details.get("occurrence", 0) or 0),
+                        )
+                    )
+            initial: list[AgentMessage] = list(parked)
+            self._spawn_background(self._prompt_messages(initial))
+
+    def _take_parked_wakes(self) -> list[CustomMessage]:
+        """Take (and clear) the parked batch; cancel the deadline task.
+
+        Shared by the ``prompt()`` fold and the deadline delivery — the two
+        delivery points are mutually exclusive, so no wake delivers twice.
+        Cancelling the deadline here is what makes the fold the delivery.
+        Skips the cancel when the caller IS the deadline task (it is already
+        running the delivery).
+        """
+        if not self._parked_wakes:
+            return []
+        parked = list(self._parked_wakes.values())
+        self._parked_wakes = {}
+        self._parked_wakes_first_park = None
+        task, self._parked_wake_task = self._parked_wake_task, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        return parked
 
     # -- monitor checks and delivery ----------------------------------------
 
@@ -34589,6 +34975,18 @@ class Session:
             self._coalesced_notes.clear()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
+            # A parked wake must not die with the deadline task: take the batch
+            # first and hold it durable (the held-delivery precedent) so a
+            # graceful dispose cannot lose a one-shot reminder the operator
+            # is still owed. Awaiting the hold before the cancel block is the
+            # ordering the deferred-job-results flush uses for the same reason.
+            # ``getattr``: a host that borrows ``Session`` methods without the
+            # park batch reads as an empty one.
+            if getattr(self, "_parked_wakes", None):
+                _parked = self._take_parked_wakes()
+                if _parked:
+                    held: list[AgentMessage] = list(_parked)
+                    await self._hold_deliveries_at_admission(held)
             for task in list(self._background_tasks):
                 if not task.done():
                     task.cancel()

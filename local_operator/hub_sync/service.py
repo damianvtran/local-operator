@@ -337,6 +337,7 @@ def record_checks(
                 remote_fp=c.remote_fp,
                 reason=c.reason,
                 detail=c.detail,
+                reason_subclass=c.reason_subclass,
             )
             # A response that carried the server's sync_contract is an OBSERVATION
             # of the deployed source -- the only honest way the per-source
@@ -2465,6 +2466,25 @@ def _refresh_config(ctx: HubSyncContext) -> None:
         logger.warning("could not refresh the process config view", exc_info=True)
 
 
+def _unresolved_detail(record: Any) -> str:
+    """The reason code for an identity-less link (see ``attach_served_origin``).
+
+    * ``legacy-scope-ambiguous`` -- a known-scope record with a tenant id: the
+      hub serves it, but an authenticated read cannot tell a public pull (which
+      stored the PUBLISHER's tenant) from an organization one, so it stays
+      unresolved until the scope is confirmed rather than guessed;
+    * ``scope-unknown`` -- the record never knew its scope;
+    * ``no-origin`` -- a tenant-free record no anonymous check has served yet
+      (the next successful check attaches the public origin).
+    """
+
+    if not getattr(record, "scope_known", True):
+        return "scope-unknown"
+    if getattr(record, "tenant_id", None):
+        return "legacy-scope-ambiguous"
+    return "no-origin"
+
+
 def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -> dict[str, Any]:
     """The ``GET /v1/desktop/hub/links`` payload: EVERY link, healthy or not.
 
@@ -2515,6 +2535,16 @@ def links_snapshot(ctx: HubSyncContext, *, kinds: Sequence[str] | None = None) -
                     "name": name,
                     "hub_id": record.hub_id,
                     "reason": "source-unresolved",
+                    # WHY it is unresolved, as a machine code a client words in
+                    # its own catalogue (operator report, 2026-11-11: two teams
+                    # sat behind a bare "?" with nothing saying the dead end is
+                    # deliberate). ``legacy-scope-ambiguous`` is the case
+                    # ``attach_served_origin`` refuses on purpose: the record
+                    # carries a tenant id, and pre-origin PUBLIC pulls stored
+                    # the publisher's tenant, so certifying it as an org link
+                    # would bypass public-egress consent. Additive: the
+                    # ``reason`` every client already reads is unchanged.
+                    "detail": _unresolved_detail(record),
                 }
             )
             continue

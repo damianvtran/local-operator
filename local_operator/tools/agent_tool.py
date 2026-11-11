@@ -2037,6 +2037,16 @@ class _AccountSave:
     post_revision: str | None = None
 
 
+#: How an agent should put a filed proposal to the user. WHY: an agent once
+#: pasted a whole proposed team brief into ``ask``; the card then filled the
+#: conversation and hid its own options. The diff is reviewed in Agents.
+PROPOSAL_ASK_GUIDANCE = (
+    "When asking the user, send a 1-3 line summary (what changes, which profile, "
+    "lines added/removed) plus the id {pid}; never paste the full instructions — "
+    "they review the diff in Agents."
+)
+
+
 def _proposed_profile_receipt(tool_call_id: str, tool_name: str, proposed: Any) -> ToolResult:
     """The receipt for a write the host filed as a proposal instead of applying.
 
@@ -2067,8 +2077,14 @@ def _proposed_profile_receipt(tool_call_id: str, tool_name: str, proposed: Any) 
             f"was already proposed as {pid} and is {state}; nothing changed and it was not "
             "re-opened. Ask the user before proposing it again with different content."
         )
-    if proposed.diff:
+    if getattr(proposed, "summary", ()):
+        text += "\n" + "\n".join(proposed.summary)
+    elif proposed.diff:
         text += "\n" + profile_diff_summary("\n".join(proposed.diff))
+    if state == "pending":
+        # Producer-side half of the bounded ask card: the model relays what
+        # it was told, so tell it what a good ask looks like.
+        text += f"\n{PROPOSAL_ASK_GUIDANCE.format(pid=pid)}"
     return _text(
         tool_call_id,
         tool_name,

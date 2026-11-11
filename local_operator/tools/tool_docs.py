@@ -206,7 +206,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
         notes=(
             "Account edits the owner explicitly requested apply directly. Otherwise "
             "the change is proposed in Agents → <name>; after their agreement use "
-            "profile_proposal op=apply with the displayed proposal ID.\n"
+            "profile_proposal op=apply with the displayed proposal ID. When asking "
+            "them, send a 1-3 line summary plus the proposal ID, never the full "
+            "instructions (they review the diff in Agents).\n"
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
             "- ``action_class``: 'proactive' lets a profile attach hidden "
@@ -280,7 +282,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
         notes=(
             "Account edits the owner explicitly requested apply directly. Otherwise "
             "the change is proposed in Agents → <name>; after their agreement use "
-            "profile_proposal op=apply with the displayed proposal ID.\n"
+            "profile_proposal op=apply with the displayed proposal ID. When asking "
+            "them, send a 1-3 line summary plus the proposal ID, never the full "
+            "instructions (they review the diff in Agents).\n"
             "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
             "when one covers the work; otherwise create it WITH NO ``scope`` so, "
             "where this host has a conversation store, it lives in THIS "

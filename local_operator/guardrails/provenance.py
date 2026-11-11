@@ -64,7 +64,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +403,9 @@ def write_records(
     now = time.time()
     for path, kind in entries:
         try:
-            st = os.stat(path)
+            # A link row identifies the link ENTRY, so it is lstat'ed: its
+            # pointee may be an old directory nobody here made.
+            st = os.lstat(path) if kind == "symlink" else os.stat(path)
         except OSError:
             continue
         written.append(path)
@@ -470,6 +472,10 @@ def owned_record(
     best: CreationRecord | None = None
     for row in rows:
         rec = CreationRecord(*row)
+        if rec.kind == "symlink":
+            # A link row vouches for removing that link entry only
+            # (``owned_link``), never for its pointee or anything under it.
+            continue
         if not (real == rec.path or real.startswith(rec.path.rstrip("/") + "/")):
             continue
         try:
@@ -485,6 +491,66 @@ def owned_record(
     if best is not None and _foreign_inside(real, session_id, state_root=state_root):
         return None
     return best
+
+
+def link_path(path: str) -> str:
+    """The canonical path of the link ENTRY at ``path``: its parent resolved, its
+    own last component kept, so the link itself is never followed."""
+    parent, name = os.path.split(os.path.abspath(path))
+    return os.path.join(os.path.realpath(parent), name)
+
+
+def _link_identity(path: str) -> tuple[int, int, int] | None:
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, creation_stamp(st))
+
+
+def owned_link(
+    path: str, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> CreationRecord | None:
+    """The ledger row for the symlink ENTRY at ``path`` this session made, or ``None``.
+
+    WHY A SEPARATE LOOKUP (q1029 incident). ``rm LINK`` unlinks the link and
+    leaves its pointee alone, so ownership of the link is a question about
+    the link entry: matched EXACTLY on its canonical path (``link_path``) and
+    its lstat identity (dev, ino, ``creation_stamp``), never by realpath
+    and never as a prefix — a path under a link lives in the pointee.
+
+    WHY IT MUST STILL BE A SYMLINK. A link the session made and someone then
+    replaced with a real directory (same name, ``rm link && mkdir link``)
+    holds that someone's data; the identity check already rejects a new
+    inode, and the ``islink`` check keeps the rule explicit even where an
+    inode number is reused. Any error means "not owned".
+    """
+    if not session_id or not path or not os.path.islink(path):
+        return None
+    canonical = link_path(path)
+    identity = _link_identity(canonical)
+    if identity is None:
+        return None
+    try:
+        conn = _connect(ledger_path(state_root), create=False)
+        if conn is None:
+            return None
+        try:
+            rows = conn.execute(
+                "SELECT path, dev, ino, created_at, creator, kind, command, stamp FROM created"
+                " WHERE owner = ? AND path = ? AND kind = 'symlink'",
+                (session_id, canonical),
+            ).fetchall()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        logger.debug("guardrail ledger unreadable", exc_info=True)
+        return None
+    for row in rows:
+        rec = CreationRecord(*row)
+        if rec.stamp is not None and (rec.dev, rec.ino, rec.stamp) == identity:
+            return rec
+    return None
 
 
 def _holds_git(directory: str) -> bool:
@@ -575,9 +641,13 @@ class PendingCreations:
     exact: list[tuple[str, str, str]] = field(default_factory=list)
     #: ``(parent, pattern, matches that already existed)`` for ``mktemp -d``.
     patterned: list[tuple[str, str, frozenset[str]]] = field(default_factory=list)
+    #: ``(link path, lstat identity before the call or None)`` for ``ln -s``.
+    #: ``ln -sf`` REPLACES an existing link, so "did not exist yet" (the
+    #: ``exact`` rule) would miss it; a changed identity is the creation.
+    links: list[tuple[str, tuple[int, int, int] | None]] = field(default_factory=list)
 
     def __bool__(self) -> bool:
-        return bool(self.exact or self.patterned)
+        return bool(self.exact or self.patterned or self.links)
 
 
 def _topmost_new(path: str) -> str | None:
@@ -601,7 +671,11 @@ def plan_creations(
     resolution = resolve_command(command, cwd=cwd_n, env=env, home=home)
     pending = PendingCreations(command=command)
     for created in resolution.created:
-        if created.path is not None:
+        if created.kind == "symlink" and created.path is not None:
+            if os.path.isdir(created.path) and not os.path.islink(created.path):
+                continue  # ln would put the link INSIDE this directory
+            pending.links.append((created.path, _link_identity(created.path)))
+        elif created.path is not None:
             top = _topmost_new(created.path)
             if top is not None:
                 pending.exact.append((created.kind, created.path, top))
@@ -667,6 +741,12 @@ def commit_creations(
             for match in now:
                 if match not in before and os.path.isdir(match):
                     entries.append((os.path.realpath(match), "mktemp"))
+        for path, before in pending.links:
+            # Recorded only if the call left a NEW link entry at that exact
+            # path: an ``ln -sf`` that dereferenced an existing link to a
+            # directory made its link inside the pointee instead.
+            if os.path.islink(path) and _link_identity(path) != before:
+                entries.append((link_path(path), "symlink"))
         entries = [
             (p, k)
             for p, k in dict(entries).items()
@@ -995,7 +1075,8 @@ def worktree_state(path: str) -> str:
     return "stale-initializing" if stale_initializing else "clean"
 
 
-#: Bound on the ONE ``gh pr list`` that :func:`worktree_activity` runs: the
+#: Bound on each ``gh pr list`` that :func:`worktree_activity` runs (one, or
+#: two for a branch with a full history page — see ``_FORGE_HISTORY_LIMIT``): the
 #: manager's allocation for this lookup (~8 s). Measured 2026-11-09 on this
 #: machine, n=5 against damianvtran/local-operator: 1.29–1.81 s. A timeout is
 #: "PR state unknown", which never ranks LOW. The ``glab mr list`` lookup shares
@@ -1015,6 +1096,23 @@ _GITLAB_URL_RE = re.compile(
 )
 
 
+class ForgeChange(NamedTuple):
+    """One PR (GitHub) or MR (GitLab) headed by a branch, as the guard reads it."""
+
+    number: int
+    #: ``open`` / ``merged`` / ``closed`` (GitLab may also say ``locked``).
+    state: str
+    #: ``YYYY-MM-DD`` of the merge/close (or last update while open); may be "".
+    date: str
+
+
+#: Rows the one history lookup asks for. A branch with more changes than this
+#: (``release-next`` had 10+ on damianvtran/local-operator, 2026-11-11) may hide
+#: an older OPEN one past the page, so a full page with no open row falls back
+#: to the open-only listing the guard used before — ``pr_state`` stays exact.
+_FORGE_HISTORY_LIMIT = 10
+
+
 @dataclass(frozen=True)
 class WorktreeActivity:
     """Is anyone still working in a linked worktree? Facts for the guard.
@@ -1030,7 +1128,7 @@ class WorktreeActivity:
     """
 
     branch: str | None
-    #: ``open`` / ``none`` / ``unknown``.
+    #: ``open`` / ``none`` / ``unknown`` — the ONLY PR fact ranking reads.
     pr_state: str
     pr_number: int | None = None
     #: How the forge names it: ``PR #`` (GitHub) or ``MR !`` (GitLab).
@@ -1039,13 +1137,35 @@ class WorktreeActivity:
     pr_detail: str = ""
     #: Running sessions other than the caller that own the tree.
     owners_running: tuple[str, ...] = ()
+    #: The newest PR/MR ever headed by the branch, open or not. DISPLAY ONLY:
+    #: ranking rests on ``pr_state`` alone. WHY shown at all (operator request,
+    #: 2026-11-11): "no open PR" read the same for merged, closed-unmerged and
+    #: never-proposed branches, so an ``ask`` to delete a worktree carried git
+    #: ancestry but not the forge history the operator decides on. WHY not
+    #: ranked: a merged PR proves the branch landed once, not that nobody is
+    #: still working in the tree (head-branch names are reused — hence the
+    #: date), so it must never lower a rank the open/owner signals set.
+    newest: ForgeChange | None = None
+    #: False when the lookup could only see OPEN changes, so the facts never
+    #: claim merged/closed history nobody checked.
+    history_checked: bool = True
 
     def facts(self) -> str:
         branch = self.branch or "(detached HEAD)"
+        noun = "PR" if self.pr_label == "PR #" else "MR"
         if self.pr_state == "open":
             pr = f"open {self.pr_ref}"
         elif self.pr_state == "none":
-            pr = "no open PR" if self.pr_label == "PR #" else "no open MR"
+            pr = f"no open {noun}"
+            if not self.history_checked:
+                pr += f"; merged/closed {noun}s not checked"
+            elif self.newest is None:
+                pr += f"; no {noun} found for this branch"
+            else:
+                n = self.newest
+                state = "closed unmerged" if n.state == "closed" else n.state
+                when = f" {n.date}" if n.date else ""
+                pr += f"; newest {self.pr_label}{n.number} {state}{when}"
         else:
             pr = f"PR state unknown ({self.pr_detail})"
         owner = (
@@ -1096,8 +1216,8 @@ def _gitlab_repo(real: str) -> str | None:
 def _gh_open_prs(repo: str, branch: str) -> list[int] | None:
     """Open PR numbers whose head is ``branch`` on ``repo``; ``None`` if unknown.
 
-    The injection point tests replace. ``GH_PROMPT_DISABLED`` keeps gh from
-    ever prompting inside a guard check.
+    The open-only fallback behind :func:`_gh_prs` (tests replace it).
+    ``GH_PROMPT_DISABLED`` keeps gh from ever prompting inside a guard check.
     """
     env = dict(os.environ, GH_PROMPT_DISABLED="1")
     try:
@@ -1161,6 +1281,108 @@ def _glab_open_mrs(repo: str, branch: str) -> list[int] | None:
         return None
 
 
+def _day(*stamps: object) -> str:
+    """The first ISO timestamp's ``YYYY-MM-DD``, or "" when none is a string."""
+    for stamp in stamps:
+        if isinstance(stamp, str) and len(stamp) >= 10:
+            return stamp[:10]
+    return ""
+
+
+def _gh_prs(repo: str, branch: str) -> list[ForgeChange] | None:
+    """Every PR (any state, newest page) headed by ``branch``; ``None`` if unknown.
+
+    ONE bounded call replaces the open-only listing: same ``_GH_TIMEOUT_S``
+    bound, measured 2026-11-11 at 0.47–0.55 s (n=3, ``--head release-next
+    --state all --limit 10`` on damianvtran/local-operator). Tests replace it.
+    """
+    env = dict(os.environ, GH_PROMPT_DISABLED="1")
+    argv = [
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        repo,
+        "--head",
+        branch,
+        "--state",
+        "all",
+        "--json",
+        "number,state,mergedAt,closedAt,updatedAt",
+        "--limit",
+        str(_FORGE_HISTORY_LIMIT),
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_GH_TIMEOUT_S, env=env, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+        out: list[ForgeChange] = []
+        for r in rows:
+            state = str(r["state"]).lower()  # OPEN / MERGED / CLOSED
+            date = (
+                _day(r.get("mergedAt"))
+                if state == "merged"
+                else _day(r.get("closedAt")) if state == "closed" else _day(r.get("updatedAt"))
+            )
+            out.append(ForgeChange(int(r["number"]), state, date))
+        return out
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
+def _glab_mrs(repo: str, branch: str) -> list[ForgeChange] | None:
+    """Every MR (any state, newest page) sourced from ``branch``; ``None`` if unknown.
+
+    glab 1.91's ``mr list`` takes ``--all`` (any state) and ``--per-page``
+    (checked from ``--help``), so GitLab gets the same history as GitHub.
+    GitLab's open state is ``opened``; it is normalised to ``open`` here.
+    """
+    env = dict(os.environ, GLAB_NO_PROMPT="1")
+    argv = [
+        "glab",
+        "mr",
+        "list",
+        "--repo",
+        repo,
+        "--source-branch",
+        branch,
+        "--all",
+        "--per-page",
+        str(_FORGE_HISTORY_LIMIT),
+        "-F",
+        "json",
+    ]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=_GH_TIMEOUT_S, env=env, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        rows = json.loads(proc.stdout or "[]")
+        out: list[ForgeChange] = []
+        for r in rows:
+            state = str(r["state"])
+            state = "open" if state == "opened" else state
+            date = (
+                _day(r.get("merged_at"))
+                if state == "merged"
+                else _day(r.get("closed_at")) if state == "closed" else _day(r.get("updated_at"))
+            )
+            out.append(ForgeChange(int(r["iid"]), state, date))
+        return out
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+
+
 def _running_owners(real: str, session_id: str) -> tuple[str, ...]:
     """Running sessions (not the caller) that own the worktree at ``real``.
 
@@ -1214,28 +1436,43 @@ def worktree_activity(path: str, session_id: str = "") -> WorktreeActivity:
         # Detached: no branch, so no PR can be headed by it.
         return WorktreeActivity(None, "none", owners_running=owners)
     repo = _github_repo(real)
-    tool, label, lookup = "gh", "PR #", _gh_open_prs
+    tool, label, lookup, open_lookup = "gh", "PR #", _gh_prs, _gh_open_prs
     if repo is None:
         repo = _gitlab_repo(real)
-        tool, label, lookup = "glab", "MR !", _glab_open_mrs
+        tool, label, lookup, open_lookup = "glab", "MR !", _glab_mrs, _glab_open_mrs
     if repo is None:
         return WorktreeActivity(
             branch, "unknown", pr_detail="no GitHub or GitLab remote", owners_running=owners
         )
-    prs = lookup(repo, branch)
-    if prs is None:
+    unknown = WorktreeActivity(
+        branch,
+        "unknown",
+        pr_label=label,
+        pr_detail=f"{tool} lookup on {repo} failed or timed out",
+        owners_running=owners,
+    )
+    changes = lookup(repo, branch)
+    if changes is None:
+        return unknown
+    opened = [c.number for c in changes if c.state == "open"]
+    newest = max(changes, key=lambda c: c.number, default=None)
+    if not opened and len(changes) >= _FORGE_HISTORY_LIMIT:
+        # A full page may hide an older open change (see _FORGE_HISTORY_LIMIT):
+        # only the open-only listing can prove "none". Reused branches only.
+        fallback = open_lookup(repo, branch)
+        if fallback is None:
+            return unknown
+        opened = fallback
+    if opened:
         return WorktreeActivity(
             branch,
-            "unknown",
+            "open",
+            pr_number=min(opened),
             pr_label=label,
-            pr_detail=f"{tool} lookup on {repo} failed or timed out",
             owners_running=owners,
+            newest=newest,
         )
-    if prs:
-        return WorktreeActivity(
-            branch, "open", pr_number=min(prs), pr_label=label, owners_running=owners
-        )
-    return WorktreeActivity(branch, "none", pr_label=label, owners_running=owners)
+    return WorktreeActivity(branch, "none", pr_label=label, owners_running=owners, newest=newest)
 
 
 def _ignored_unregenerable(real: str) -> bool:

@@ -115,7 +115,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from local_operator.harness.derived_ids import DERIVED_ID_SUFFIXES
+from local_operator.harness.derived_ids import derived_copy_ids
 from local_operator.harness.document_limits import (
     DOCUMENT_CHARS_PER_TOKEN,
     DOCUMENT_WINDOW_SHARE,
@@ -1550,9 +1550,11 @@ def invalidate_message_cache(message: Message) -> None:
 
     Also evicts the estimates of the message's DERIVED copies
     (``harness.derived_ids``): the request is built from those copies, and each
-    is memoized under ``"<id><suffix>"``. Evicting only the source id left the
-    copy's old estimate in place, so a document swapped for its reference line
-    kept being charged as the document and the client refused every turn.
+    is memoized under ``"<id><suffix>"`` — or a composed form like
+    ``"<id>~rb~nm"`` when a copy went through two rewriters. Evicting only
+    the source id left the copy's old estimate in place, so a document
+    swapped for its reference line kept being charged as the document and
+    the client refused every turn.
 
     The pop is locked for the same reason the LRU sequences in
     :func:`estimate_tokens` are: a worker thread may be mid-eviction on the
@@ -1562,7 +1564,7 @@ def invalidate_message_cache(message: Message) -> None:
     """
     with _CACHE_LOCK:
         _ESTIMATE_CACHE.pop(message.id, None)
-        derived_ids = {f"{message.id}{suffix}" for suffix in DERIVED_ID_SUFFIXES}
+        derived_ids = derived_copy_ids(message.id)
         for derived_id in derived_ids:
             _ESTIMATE_CACHE.pop(derived_id, None)
         # Flag even when nothing was cached: the entry this invalidation is
