@@ -162,6 +162,10 @@ async def test_routes_are_bearer_gated_no_store_and_follow_the_contract(tmp_path
         ):
             bad = client.get(parent + "?" + query, headers=auth)
             assert bad.status_code == 422, (query, bad.text)
+        # Archive-range refusals carry the localized cursor envelope, not English.
+        for query in ("start=6", "start=3&offset=5"):
+            detail = client.get(parent + "?" + query, headers=auth).json()["detail"]
+            assert detail["code"] == "wire.errors.desktop.session_files_bad_cursor", detail
         long_id = client.get(
             f"/v1/desktop/sessions/{PARENT_ID}/tool-calls/{'a' * 257}/diff", headers=auth
         )

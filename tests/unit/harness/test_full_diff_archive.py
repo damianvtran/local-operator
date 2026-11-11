@@ -379,8 +379,10 @@ async def test_edited_copy_of_unchanged_literal_in_separate_hunk_is_masked(tmp_p
     parts = _literal(10, "R")
     pad = [f"filler {index}" for index in range(590)]
     before = pad[:100] + parts + pad[100:]
-    after = [line.replace("filler ", "FILLER ") if 300 <= i < 560 else line
-             for i, line in enumerate(before)] + [parts[3] + "-X"]
+    after = [
+        line.replace("filler ", "FILLER ") if 300 <= i < 560 else line
+        for i, line in enumerate(before)
+    ] + [parts[3] + "-X"]
     target, calls = _r2_rows(tmp_path, parts, before, after)
     session, events = await _run(tmp_path, calls, secrets=("\n".join(parts),))
     blob = _every_stored_byte(tmp_path, session, events)
@@ -409,8 +411,10 @@ async def test_derived_copy_on_unchanged_context_row_is_masked(tmp_path):
     pad = [f"filler {index}" for index in range(590)]
     before = pad[:100] + parts + pad[100:]
     before[560] = parts[3] + "-X"
-    after = [line.replace("filler ", "FILLER ") if 300 <= i < 560 else line
-             for i, line in enumerate(before)]
+    after = [
+        line.replace("filler ", "FILLER ") if 300 <= i < 560 else line
+        for i, line in enumerate(before)
+    ]
     _, calls = _r2_rows(tmp_path, parts, before, after)
     session, events = await _run(tmp_path, calls, secrets=("\n".join(parts),))
     blob = _every_stored_byte(tmp_path, session, events)
@@ -741,9 +745,7 @@ async def test_non_diff_tool_and_digest_from_another_call_are_not_found(tmp_path
 # -- nested eval -> tool('write'|'edit') (QA F5 on #3762) ---------------------
 
 
-def _eval_tool(
-    calls: list[tuple[str, dict[str, Any]]], captured: list[dict[str, Any]], forge=None
-):
+def _eval_tool(calls: list[tuple[str, dict[str, Any]]], captured: list[dict[str, Any]], forge=None):
     """A stand-in ``eval`` whose cell drives ``tool(...)`` through the real bridge.
 
     ``forge`` lets the CELL return arbitrary metadata in its own result -- the

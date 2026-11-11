@@ -521,9 +521,7 @@ class StripMemo:
         hit = self._seen.get(id(row))
         if hit is not None and hit[0] is row:
             return hit[1]
-        stripped = strip_entry(
-            row, supplements=self.supplements, diff_bindings=self.diff_bindings
-        )
+        stripped = strip_entry(row, supplements=self.supplements, diff_bindings=self.diff_bindings)
         self._seen[id(row)] = (row, stripped)
         return stripped
 
@@ -648,9 +646,15 @@ def late_index_stop(
         taken += rows
         if (
             taken
-            and len(paintable(
-                collected[-taken:], supplements=supplements, memo=memo, diff_bindings=diff_bindings
-            )) >= limit
+            and len(
+                paintable(
+                    collected[-taken:],
+                    supplements=supplements,
+                    memo=memo,
+                    diff_bindings=diff_bindings,
+                )
+            )
+            >= limit
         ):
             return pages
     return None

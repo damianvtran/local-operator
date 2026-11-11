@@ -329,6 +329,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "creation ledger pins this device's inodes and the lineage registry is written "
         "by this device's spawn sites, so neither may travel with a session copy.",
     ),
+    "local_operator/tools/diff_archive.py": (
+        1,
+        "``DIFF_ARCHIVE_DIRNAME`` ('diff-archive') is the per-DEVICE full-diff archive "
+        "root, <config>/diff-archive (``config_dir() / DIFF_ARCHIVE_DIRNAME``), a bounded "
+        "LRU spill store shared by every session on this device -- never an entry of a "
+        "session directory, so no session copy carries it.",
+    ),
     "local_operator/guardrails/classify.py": (
         6,
         "_CONFIG_FILE, _SECRETS_DIRNAME, _SESSIONS_DIRNAME, _STATE_DIRNAME, "

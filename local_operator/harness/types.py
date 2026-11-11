@@ -3909,9 +3909,7 @@ class LoopConfig(BaseModel):
     #: what the diff routes prove membership with. ``None`` (a host without a
     #: journal) or ``False`` downgrades the descriptor to ``unavailable``
     #: rather than advertise an archive no route could serve.
-    bind_nested_diff: (
-        Callable[[str, str, str, dict[str, Any]], Awaitable[bool]] | None
-    ) = None
+    bind_nested_diff: Callable[[str, str, str, dict[str, Any]], Awaitable[bool]] | None = None
     #: The session's divergence observer (``local_operator.divergence.
     #: DivergenceJudge``), or ``None`` for a host that does not wire one.
     #:

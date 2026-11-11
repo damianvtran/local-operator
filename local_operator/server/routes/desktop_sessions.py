@@ -4037,7 +4037,9 @@ async def _diff_page_or_422(load: Any) -> dict[str, Any]:
     except DiffPageRangeError:
         # A start past the last row is the caller's request being wrong, not
         # the resource being absent, so it is not folded into the uniform 404.
-        raise HTTPException(422, "Requested diff page is out of range.") from None
+        # The page is addressed by the server-issued (next_start, next_offset)
+        # cursor, so the audited paging-cursor refusal is the localized body.
+        raise HTTPException(422, _wd.session_files_bad_cursor().envelope()) from None
 
 
 @router.get(
