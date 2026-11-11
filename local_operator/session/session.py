@@ -796,6 +796,38 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
 #: line".
 _USER_MESSAGE_STAMP_CAP = 256
 
+#: How long after an operator turn ends a firing wake is PARKED instead of
+#: opening its own turn below the operator's exchange. Measured over the
+#: fleet's transcripts (2816 sessions, 7298 operator messages, 2563 wake
+#: fires): median gap between operator messages 228 s, 36.8% of follow-ups
+#: within 120 s; idle wakes falling within 30/60/120/300 s of an operator
+#: message: 49/85/116/247. W=120 catches the bulk of the "just after the
+#: operator" cases without swallowing overnight monitoring. Read at call
+#: time (module attribute) so tests can patch it.
+WAKE_OPERATOR_QUIET_S = 120
+
+#: The longest a parked wake may wait, measured from its FIRST park. Above
+#: the longest contiguous conversation found at W=120 (840 s observed across
+#: all sessions; the brief's two-session spot-check saw 532 s/440 s), so an
+#: operator who keeps talking never starves a wake: it is delivered at
+#: first_park + D even while the conversation continues. Read at call time.
+WAKE_PARK_CAP_S = 600
+
+#: Wakes that must never be parked: Aida/Librarian cadence deliveries and any
+#: wake whose session is on duty. The banner veto reads ``_run_triggers`` of
+#: the turn the delivery opens — a parked cadence delivery folded into an
+#: operator prompt would tag the operator's run as cadence-family and could
+#: veto the operator's own banner. Duty sessions' cadence checks are the
+#: product surface: they must open their own turn immediately.
+_AIDA_DUTY_WAKE_IDS = frozenset({"aida-cadence", "librarian-cadence"})
+
+_PARKED_WAKE_FOLD_NOTE = (
+    "(This wake fired while you were talking to the operator, so it was held and "
+    "folded into your current answer instead of opening its own turn below the "
+    "operator's messages. Answer the operator first; mention this wake only if "
+    "it has news for them; otherwise add nothing.)"
+)
+
 #: How many open asks the reminder NAMES (design §16/SA-D3). Deliberately NOT
 #: ``asks.policy.OPEN_ASK_CAP``: that is the model's asking budget, and bridge
 #: requests and relays ride their own eight each, so a session can hold more open
@@ -5046,6 +5078,39 @@ class Session:
         self._profile_result_waiters: dict[str, asyncio.Task[Any]] = {}
         self._signal: AbortSignal | None = None
         self._is_streaming = False
+        #: True from ``prompt()`` acquiring ``_turn_lock`` (before
+        #: ``_is_streaming`` flips) until the turn's ``finally``. Covers the
+        #: window between lock acquire and streaming start, where an idle-path
+        #: wake would otherwise spawn a turn that queues on the lock directly
+        #: below the operator's row.
+        self._operator_turn_open = False
+        #: Set True when the CURRENT turn admitted an operator message (the
+        #: ``_note_admitted_user_message`` admission sites in ``_run_turn``
+        #: and the steer drain), reset at turn start. Read in ``_run_turn``'s
+        #: ``finally`` to stamp ``_last_operator_turn_end`` — the end of this
+        #: turn, not its admission, so a long turn cannot consume the quiet
+        #: window. A wake-initiated turn never sets it, so wake chains never
+        #: open the window.
+        self._turn_admitted_operator = False
+        #: Epoch seconds when the last turn that admitted an operator message
+        #: ended (``None`` before the first). Wake-defer evidence: a wake
+        #: firing while ``now < last_end + WAKE_OPERATOR_QUIET_S`` parks. Only
+        #: operator-admitted turns stamp it (see ``_note_admitted_user_message``
+        #: call sites), so wake-initiated turns never open the window.
+        self._last_operator_turn_end: float | None = None
+        #: Parked idle wakes awaiting the quiet-window deadline, keyed by
+        #: wake id. A newer fire of the same id replaces the older parked one
+        #: (one delivery per id while parked), mirroring transcript dedup.
+        self._parked_wakes: dict[str, CustomMessage] = {}
+        #: First park time (epoch s) of the CURRENT park batch; the cap
+        #: deadline is ``first_park + WAKE_PARK_CAP_S``. Reset when the batch
+        #: is taken (fold or deadline delivery).
+        self._parked_wakes_first_park: float | None = None
+        #: The ONE tracked deadline task for the park batch, via
+        #: ``_spawn_background`` so dispose cancels it (no pending task after
+        #: dispose). Re-armed by the deadline runner when an operator turn is
+        #: still open at wake time.
+        self._parked_wake_task: asyncio.Task[Any] | None = None
         #: Bang-mode receipts that completed while a turn or manual compaction
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
@@ -10028,6 +10093,11 @@ class Session:
             # paints its notices, from its own call in `_aside_worker`.
             text = expansion.sent
             await self._turn_lock.acquire()
+            # An operator turn is OPEN from here, before ``_is_streaming``
+            # flips: an idle-path wake landing in that window would otherwise
+            # spawn a turn that queues on the lock directly below the
+            # operator's row (brief case (b)). Cleared in the ``finally``.
+            self._operator_turn_open = True
         try:
             # A USER TURN IS A REPLY (R34): retire every pending patience row
             # before anything else in this turn. Over-cancel is deliberate —
@@ -10111,6 +10181,20 @@ class Session:
                 # See `docs/DESKTOP_API.md` for what a viewer does with it.
                 user.provider_payload = {RENDERED_INJECTION_KEY: True}
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
+            # PARKED WAKES FOLD HERE, beside the catch-up fold above: a wake that
+            # fired during the operator's conversation was held rather than
+            # opening its own turn below the operator's exchange. It joins the
+            # SAME turn, ahead of the user's message, so the model reads it
+            # before answering; the folded text says to answer the operator
+            # first and mention the wake only if it has news. Taking the batch
+            # cancels the deadline task (the fold IS the delivery now).
+            parked = self._take_parked_wakes()
+            if parked:
+                for wake_message in parked:
+                    wake_message.details["text"] = (
+                        f"{wake_message.details['text']}\n\n{_PARKED_WAKE_FOLD_NOTE}"
+                    )
+                initial = [*initial[:-1], *parked, *initial[-1:]]
             await self._run_turn_pipeline(
                 initial,
                 admitted=admitted,
@@ -10129,6 +10213,10 @@ class Session:
         finally:
             # A body this person's turn left pending is served by its own turn.
             self._rearm_pending_body_followup()
+            # The operator turn is CLOSED: wake-defer now measures the quiet
+            # window from ``_last_operator_turn_end``, stamped when the
+            # operator's message was admitted in ``_run_turn``.
+            self._operator_turn_open = False
             # D8: anything queued after the pipeline's own flush (or on an
             # early exit before it) lands before the lock goes free.
             # Release in its own ``finally`` (R2-1): see the helper.
@@ -20364,6 +20452,7 @@ class Session:
                     # the operator has said since it was asked. The helper applies
                     # the structural harness marker on top of this predicate.
                     self._note_admitted_user_message(message)
+                    self._turn_admitted_operator = True
                     await self._emit(MessageStartEvent(message=message))
 
             # Belt-and-braces for peer delivery: consume any inbox rows spooled
@@ -20941,6 +21030,13 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
+            # WAKE-DEFERRAL end stamp: only a turn that admitted an operator
+            # message opens the quiet window. Set here (turn END), not at
+            # admission, so a long turn cannot consume the window before it
+            # ends — the brief measures from turn end.
+            if self._turn_admitted_operator:
+                self._last_operator_turn_end = time.time()
+            self._turn_admitted_operator = False
             # A ONE-SHOT HOST'S HOLD, armed one host-hop earlier (v3,
             # 2026-09-30): ``run_print_mode`` will dispose this session the
             # moment its prompt returns, and its own arming of the departure
@@ -31641,6 +31737,32 @@ class Session:
                     occurrence=due.occurrence,
                 )
             )
+        # WAKE-DEFERRAL: an idle wake landing right after an operator turn
+        # must not open its own turn below the operator's exchange. The
+        # transcript row persists only when the wake is actually DELIVERED:
+        # the receipt event above fires at PARK time too, so the live TUI
+        # paints the expandable line immediately, and replay dedups it by
+        # (wake_id, occurrence) against the eventual row via
+        # ``_live_wake_receipts`` ("session_presentation" skips a persisted row
+        # whose key is already live). A parked wake therefore shows as its
+        # receipt line right after the operator's exchange — a half-disclosed
+        # line, not a full wake turn — and materializes as a transcript row +
+        # turn only on fold into the next operator prompt, or on the deadline.
+        # Leaving arms never park: a disposed/leaving/one-shot session would
+        # never reach the deadline, so the wake must deliver (or be retired
+        # by the leaving path) now.
+        if (
+            not busy
+            and not due.schedule.hidden
+            and not self._disposed
+            and not self._leaving_deliveries
+            and not self._one_shot_exit
+            and due.schedule.id not in _AIDA_DUTY_WAKE_IDS
+            and not getattr(self, "_aida_duty", False)
+            and self._operator_active()
+        ):
+            self._park_wake(due.schedule.id, wake_message)
+            return
         if busy:
             # Busy: ride the next successful tool boundary instead of racing
             # the turn — and mark the message COURTESY so the immediate-
@@ -31661,6 +31783,96 @@ class Session:
             self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
+
+    # -- wake deferral --------------------------------------------------------
+
+    def _operator_active(self) -> bool:
+        """Whether an operator conversation is active enough to park a wake.
+
+        Either an operator turn is OPEN (``prompt()`` holds the turn lock,
+        before streaming starts — brief case (b)) or less than
+        ``WAKE_OPERATOR_QUIET_S`` has passed since the last operator-admitted
+        turn ended. Wake-initiated turns never stamp
+        ``_last_operator_turn_end`` (only operator-admitted messages do),
+        so overnight wake chains leave this False and surface unchanged.
+        """
+        if self._operator_turn_open:
+            return True
+        if self._last_operator_turn_end is None:
+            return False
+        return (time.time() - self._last_operator_turn_end) < WAKE_OPERATOR_QUIET_S
+
+    def _park_wake(self, wake_id: str, wake_message: CustomMessage) -> None:
+        """Park an idle wake until the quiet window closes or the cap hits.
+
+        The newest fire of a wake id replaces the older parked one (one
+        delivery per id while parked). The ONE deadline task sleeps until
+        ``last_end + W`` capped at ``first_park + D``; if an operator turn is
+        still open when it wakes, it re-arms. Delivery itself goes through
+        the existing idle arm (``_prompt_messages``).
+        """
+        now = time.time()
+        if self._parked_wakes_first_park is None or not self._parked_wakes:
+            self._parked_wakes_first_park = now
+        self._parked_wakes[wake_id] = wake_message
+        if self._parked_wake_task is not None and not self._parked_wake_task.done():
+            # An armed deadline already covers this batch; a newer fire only
+            # replaced the message, it does not move the deadline. The cap
+            # is anchored to first_park, so re-arming here would extend the
+            # wait past D.
+            return
+        self._parked_wake_task = self._spawn_background(self._parked_wake_deadline())
+
+    async def _parked_wake_deadline(self) -> None:
+        """Deliver the parked batch at ``min(last_end + W, first_park + D)``.
+
+        Re-arms while an operator turn is open, so a conversation that
+        continues past the quiet window still holds the batch — but the cap
+        bounds the total wait: at ``first_park + D`` the batch delivers even
+        with the operator still active, so no wake starves.
+        """
+        while not self._disposed and self._parked_wakes:
+            first_park = self._parked_wakes_first_park or time.time()
+            last_end = self._last_operator_turn_end
+            if last_end is None:
+                quiet_target = first_park
+            else:
+                quiet_target = last_end + WAKE_OPERATOR_QUIET_S
+            cap_target = first_park + WAKE_PARK_CAP_S
+            target = min(quiet_target, cap_target)
+            wait_s = max(0.0, target - time.time())
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            if self._operator_turn_open and time.time() < cap_target:
+                # Still mid-conversation (brief case (b): the operator's turn
+                # opened after this batch parked). Wait for it to end, then
+                # re-evaluate the quiet window from the new last_end.
+                await asyncio.sleep(0.05)
+                continue
+            break
+        if self._disposed or not self._parked_wakes:
+            return
+        parked = self._take_parked_wakes()
+        if parked:
+            initial: list[AgentMessage] = list(parked)
+            self._spawn_background(self._prompt_messages(initial))
+
+    def _take_parked_wakes(self) -> list[CustomMessage]:
+        """Take (and clear) the parked batch; cancel the deadline task.
+
+        Shared by the ``prompt()`` fold and the deadline delivery — the two
+        delivery points are mutually exclusive, so no wake delivers twice.
+        Cancelling the deadline here is what makes the fold the delivery.
+        """
+        if not self._parked_wakes:
+            return []
+        parked = list(self._parked_wakes.values())
+        self._parked_wakes = {}
+        self._parked_wakes_first_park = None
+        task, self._parked_wake_task = self._parked_wake_task, None
+        if task is not None and not task.done():
+            task.cancel()
+        return parked
 
     # -- monitor checks and delivery ----------------------------------------
 
