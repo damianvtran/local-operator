@@ -447,6 +447,7 @@ async def test_actual_queued_receipt_has_one_canonical_diff(stores):
         card._expanded = True
         body = card._build_content(110).plain
         assert body.count("+Demand tests.") == 1
-        assert "Proposed" in body and "instructions: +1/-1 lines" in body
+        # The receipt line now uses the approval card's own summary vocabulary.
+        assert "Proposed" in body and "instructions: +1 −1 lines" in body
     finally:
         await session.dispose()

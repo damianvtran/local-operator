@@ -64,6 +64,16 @@ export const SHORT_COLUMN_PX = 480;
  */
 export const PENDING_CARD_FRACTION = 0.6;
 export const PANEL_FRACTION = 0.4;
+/**
+ * The share of the column one ask QUESTION's text may take in an `AskCard`
+ * (asks sheet, notifications) before it scrolls inside itself. WHY: an agent
+ * once put a whole proposed team brief in a question; the card's options and
+ * free-text field then sat a screenful below it. Bounding the question text,
+ * not the card, keeps the answer controls directly beneath a short visible
+ * excerpt, whatever the question's length — the PendingCard lesson (content
+ * may scroll, the control that answers may not) applied per question.
+ */
+export const ASK_QUESTION_FRACTION = 0.3;
 
 /**
  * The `$skill` tray's share of the column.

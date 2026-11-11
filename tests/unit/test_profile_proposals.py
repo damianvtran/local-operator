@@ -380,3 +380,62 @@ def test_legacy_import_skips_lapsed_request_stored_as_requested(root):
     assert PP.import_legacy(root) == 0
     assert PP.list_proposals(root) == []
     assert PP.list_proposals(root, state=None) == []
+
+
+# --- approval card summary (operator report 2026-11-10) --------------------
+#: The UI's contract regex for the card's first line (local-operator-ui links
+#: Agents → <name> from it); kept verbatim so a drift fails here first.
+_CARD_HEAD = r"^Apply proposal (pp_[0-9a-f]+) to (agent|team|skill) '([^']+)'\?"
+
+
+def _card_record(**over: Any) -> dict[str, Any]:
+    record = {
+        "id": "pp_7abf6b3116c87a99",
+        "kind": "team",
+        "name": "minervadev",
+        "origin": {"trust": "agent"},
+    }
+    record.update(over)
+    return record
+
+
+def test_long_brief_card_is_bounded_with_correct_counts():
+    import re
+
+    before = "\n".join(f"keep {i}" for i in range(50))
+    after = "\n".join(
+        [*(f"keep {i}" for i in range(40)), *(f"NEW {i} " + "x" * 60 for i in range(200))]
+    )
+    rows = PP.changes({"instructions": before}, {"instructions": after}, ["instructions"])
+    [item] = PP.summarize_changes(rows)
+    assert (item["added"], item["removed"], item["status"]) == (200, 10, "lines")
+    card = PP.approval_card_text(_card_record(), rows)
+    assert len(after) > 10_000 and len(card) <= PP.APPROVAL_CARD_MAX_CHARS
+    assert "NEW 1" not in card and "keep" not in card
+    match = re.match(_CARD_HEAD, card)
+    assert match and match.groups() == ("pp_7abf6b3116c87a99", "team", "minervadev")
+    assert card.splitlines()[1] == "instructions: +200 −10 lines"
+    assert card.splitlines()[-1] == "Origin: agent. Review changes in Agents → minervadev."
+
+
+def test_scalar_and_create_fields_report_status_not_line_counts():
+    rows = PP.changes(
+        {"model": "a", "label": ""},
+        {"model": "b", "label": "Lead", "instructions": "one\ntwo\nthree"},
+        ["model", "label", "instructions"],
+    )
+    lines = PP.approval_card_text(_card_record(kind="agent", name="reviewer"), rows).splitlines()
+    assert lines[1:4] == ["model: changed", "label: set", "instructions: +3 −0 lines"]
+    created = PP.changes(None, {"instructions": "a\nb"}, ["instructions"])
+    assert PP.summarize_changes(created)[0]["added"] == 2
+    assert PP.structured_summary(_card_record(), created)["fields"][0]["removed"] == 0
+
+
+def test_many_fields_truncate_with_an_ellipsis_line_under_the_cap():
+    fields = [f"field_{i:02d}_" + "y" * 60 for i in range(40)]
+    rows = PP.changes({}, {f: f"v{i}" for i, f in enumerate(fields)}, fields)
+    card = PP.approval_card_text(_card_record(), rows)
+    assert len(card) <= PP.APPROVAL_CARD_MAX_CHARS
+    lines = card.splitlines()
+    assert any(line.startswith("… ") and "more changed fields" in line for line in lines)
+    assert all(len(line) <= 80 for line in card.splitlines()[1:-1])

@@ -376,6 +376,118 @@ def detail(root: Path, record: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+#: Hard cap on the approval card body. WHY: the card used to carry every
+#: changed field's full before → after text, so a team brief of a few KB made
+#: the "The agent is asking" card fill the conversation and hide its own
+#: answer options. The full diff lives in Agents → <name>; the card only has to
+#: say what changes and where to review it.
+APPROVAL_CARD_MAX_CHARS = 600
+#: Per summary line cap (contract: "truncated to ~80 chars").
+_SUMMARY_LINE_MAX_CHARS = 80
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def summarize_changes(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Count changed lines per field from :func:`changes` rows.
+
+    Multi-line (free text, list, JSON) fields report ``added``/``removed``
+    line counts from a difflib opcode walk over ``splitlines()``, the same
+    lines the Agents diff viewer shows. A single-line value on both sides is a
+    scalar: it reports ``status`` ``set`` (no before), ``cleared`` (no after)
+    or ``changed`` instead, because "+1 −1 lines" says nothing useful about a
+    model or label switch. Pure: no I/O, safe to call from any surface.
+    """
+    import difflib
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        before = str(row.get("before_text") or "")
+        after = str(row.get("after_text") or "")
+        before_lines, after_lines = before.splitlines(), after.splitlines()
+        added = removed = 0
+        matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag in {"replace", "delete"}:
+                removed += i2 - i1
+            if tag in {"replace", "insert"}:
+                added += j2 - j1
+        scalar = len(before_lines) <= 1 and len(after_lines) <= 1
+        status = (
+            ("set" if not before else "cleared" if not after else "changed") if scalar else "lines"
+        )
+        out.append(
+            {
+                "field": row.get("field") or "",
+                "label": row.get("label") or row.get("field") or "",
+                "added": added,
+                "removed": removed,
+                "status": status,
+            }
+        )
+    return out
+
+
+def summary_line(item: dict[str, Any]) -> str:
+    """One ``<label>: +N −M lines`` (or ``<label>: changed``) card line."""
+    if item["status"] == "lines":
+        text = f"{item['label']}: +{item['added']} −{item['removed']} lines"
+    else:
+        text = f"{item['label']}: {item['status']}"
+    return _clip(text, _SUMMARY_LINE_MAX_CHARS)
+
+
+def approval_card_text(record: dict[str, Any], rows: Iterable[dict[str, Any]]) -> str:
+    """The ACCOUNT_PROFILE_GATE card for one proposal: first line + summary.
+
+    CONTRACT (shared with local-operator-ui, which parses it): the FIRST line
+    is exactly ``Apply proposal <pp_id> to <kind> '<name>'?`` (name
+    repr-quoted), so the UI can link ``/agents?kind=…&name=…&proposal=…`` from
+    the text alone, and so the proposal id stays visible to the person — a
+    spoken "apply pp_…" in chat binds by ``proposal_id in text``. Then one
+    line per changed field, then ``Origin: <trust>. Review changes in Agents →
+    <name>.`` Never the full before/after text; the whole card is capped at
+    :data:`APPROVAL_CARD_MAX_CHARS` with an ellipsis line naming how many
+    field lines were left out.
+    """
+    head = f"Apply proposal {record['id']} to {record['kind']} {record['name']!r}?"
+    origin = (record.get("origin") or {}).get("trust") or "agent"
+    tail = _clip(f"Origin: {origin}. Review changes in Agents → {record['name']}.", 200)
+    lines = [summary_line(item) for item in summarize_changes(rows)]
+    # Budget for the head, the tail, the newlines joining them and a possible
+    # "… N more" line; the head itself is never clipped (it is the contract).
+    budget = APPROVAL_CARD_MAX_CHARS - len(head) - len(tail) - 2
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        remaining = len(lines) - index - 1
+        reserve = len(f"\n… {remaining} more changed fields") if remaining else 0
+        if sum(len(x) + 1 for x in kept) + len(line) + 1 + reserve > budget:
+            kept.append(f"… {len(lines) - index} more changed fields")
+            break
+        kept.append(line)
+    return "\n".join([head, *kept, tail])
+
+
+def structured_summary(record: dict[str, Any], rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Machine-readable twin of :func:`approval_card_text` for UI surfaces."""
+    return {
+        "id": record["id"],
+        "kind": record["kind"],
+        "name": record["name"],
+        "fields": [
+            {
+                "label": item["label"],
+                "added": item["added"],
+                "removed": item["removed"],
+                "status": item["status"],
+            }
+            for item in summarize_changes(rows)
+        ],
+    }
+
+
 def counts(rows: Iterable[dict[str, Any]]) -> dict[str, dict[str, int]]:
     out: dict[str, dict[str, int]] = {"agent": {}, "team": {}}
     for row in rows:

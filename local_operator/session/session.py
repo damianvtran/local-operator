@@ -14856,6 +14856,14 @@ class Session:
                 profile_name=record["name"],
                 changes=intent.changes,
                 diff=tuple(intent.summary.splitlines()),
+                summary=tuple(
+                    profile_proposals.summary_line(item)
+                    for item in profile_proposals.summarize_changes(
+                        profile_proposals.changes(
+                            record.get("before"), record["after"], record.get("fields") or []
+                        )
+                    )
+                ),
             )
         gate = self._request_approval
         if gate is None:
@@ -14925,13 +14933,12 @@ class Session:
             return "granted"
         if self._request_approval is None:
             return "refused"
-        card = (
-            f"Apply proposal {proposal_id} to {proposal['kind']} {proposal['name']!r}?\n"
-            f"Origin: {proposal['origin']['trust']}. Review in Agents → {proposal['name']}.\n"
-            + "\n".join(
-                f"{c['label']}: {c['before_text']} → {c['after_text']}"
-                for c in P.detail(Path(registry.config_dir), proposal)["changes"]
-            )
+        # A bounded summary, never the full before → after text: a multi-KB
+        # team brief inline made the ask card fill the conversation and hide
+        # its own options. The diff is reviewed in Agents → <name>; the first
+        # line's form is a contract with the UI (see approval_card_text).
+        card = P.approval_card_text(
+            proposal, P.detail(Path(registry.config_dir), proposal)["changes"]
         )
         return (
             "card"

@@ -311,7 +311,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # backup_id) shortened to win back the start-context budget the deferred
     # ``skill``/``profile_proposal`` inventory entries cost; the full
     # action_class/kind rationale stays in this tool's notes. Same printed table.
-    "agent": 1471,
+    # RE-MEASURED (proposal ask summary): 1471 -> 1500 (+29), the notes line
+    # telling the agent to ask with a 1-3 line summary + proposal id, never
+    # the full instructions (a pasted brief filled the ask card).
+    "agent": 1500,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -690,7 +693,9 @@ MEASURED_TOKENS: dict[str, int] = {
     "project_delete": 91,
     # NEW (profile proposals, PR #3704): the deferred list/show/apply/reject
     # tool for Agents proposals; 116 tokens through this test's printed table.
-    "profile_proposal": 116,
+    # RE-MEASURED (proposal ask summary): 116 -> 131 (+15), the description's
+    # "ask with a short summary plus the proposal id" sentence.
+    "profile_proposal": 131,
     "read": 345,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
@@ -786,7 +791,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # per-slot ``saver`` member field; the same printed table as ``agent``.
     # RE-MEASURED (profile proposals, PR #3704): 1464 -> 1500 (+36), the same
     # Agents-proposal notes line as ``agent``.
-    "team": 1500,
+    # RE-MEASURED (proposal ask summary): 1500 -> 1529 (+29), the same
+    # summary-plus-id notes line as ``agent``.
+    "team": 1529,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -841,7 +848,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
 #: -27 field-description trim as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1500, "task": 764}
+#: RE-MEASURED (proposal ask summary): agent 1500 -> 1529, the same +29
+#: summary-plus-id notes line as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1529, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

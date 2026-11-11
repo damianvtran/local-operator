@@ -2062,6 +2062,12 @@ class ProposedProfileWrite:
     profile_name: str
     changes: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    #: Bounded per-field lines (``instructions: +12 −3 lines``) computed by the
+    #: host from the filed record (``profile_proposals.summary_line``). The
+    #: receipt shows THESE, never ``diff``: a replaced brief's ``diff`` is the
+    #: whole new text, and an agent that saw it echoed it into its ask to the
+    #: user, which filled the conversation (operator report 2026-11-10).
+    summary: tuple[str, ...] = ()
     #: The record's real state. ``pending`` for a fresh filing; an identical
     #: re-filing of an already-decided or expired proposal reports that state
     #: so the receipt never claims a pending proposal that does not exist.

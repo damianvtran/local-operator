@@ -967,3 +967,20 @@ describe("AskCard", () => {
 		expect(screen.getByRole("status")).toBeTruthy();
 	});
 });
+
+describe("a long question stays bounded", () => {
+	/* The operator's screenshot: a proposal ask carrying a whole team brief
+	   filled the card and pushed its options off screen. The question text is
+	   its own capped scroller, and the answer controls are NOT inside it, so
+	   they stay directly under a visible excerpt whatever the length. */
+	it("caps the question text in column units and keeps options outside the scroller", () => {
+		const long = Array.from({ length: 400 }, (_, i) => `line ${i}: brief text`).join("\n");
+		renderCard(ask({ questions: [question({ question: long })] }));
+		const text = screen.getByTestId("ask-question-text");
+		expect(text.style.maxHeight).toBe("calc(var(--lo-vvh, 100dvh) * 0.3)");
+		expect(text.className).toContain("overflow-y-auto");
+		expect(text.className).toContain("whitespace-pre-line");
+		const yes = screen.getByRole("button", { name: /yes/ });
+		expect(text.contains(yes)).toBe(false);
+	});
+});

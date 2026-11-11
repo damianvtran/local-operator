@@ -39,6 +39,7 @@ import { contentDir } from "../lib/content-direction";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
+import { ASK_QUESTION_FRACTION, columnCap } from "../lib/column";
 import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
@@ -202,6 +203,28 @@ function answerValues(cell: readonly string[]): string[] {
 }
 
 /** One question's control, plus whether it currently holds a complete answer. */
+/**
+ * A question's text, capped at a share of the column and scrolling inside
+ * itself (`ASK_QUESTION_FRACTION`), so a paragraph- or brief-length question
+ * can never push this question's options and free-text field off screen.
+ * `whitespace-pre-line` keeps an agent's line breaks (a proposal summary is
+ * three lines); `break-words` stops a long token from widening the card.
+ * `tabIndex` makes the scroller keyboard-reachable once it overflows.
+ */
+function QuestionText({ text }: { text: string }) {
+	return (
+		<span
+			dir={contentDir(text)}
+			data-testid="ask-question-text"
+			tabIndex={0}
+			style={columnCap(ASK_QUESTION_FRACTION)}
+			className="lo-scroll block min-w-0 overflow-y-auto overflow-x-hidden break-words whitespace-pre-line"
+		>
+			{text}
+		</span>
+	);
+}
+
 function QuestionField({
 	question,
 	value,
@@ -747,7 +770,7 @@ export function AskCard({
 									{index + 1}/{questions.length}
 								</span>
 							) : null}
-							<span className="min-w-0">{question.question}</span>
+							<QuestionText text={question.question} />
 						</span>
 					))}
 					{dismissible ? (
@@ -800,7 +823,7 @@ export function AskCard({
 											{index + 1}/{questions.length}
 										</span>
 									) : null}
-									<span className="min-w-0">{question.question}</span>
+									<QuestionText text={question.question} />
 								</span>
 								<QuestionField
 									question={question}
