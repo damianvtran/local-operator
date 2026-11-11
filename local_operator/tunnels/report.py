@@ -152,6 +152,8 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
     served = False
     reason = ""
     detail = ""
+    transport = ""
+    cloudflared = False
     try:
         async with httpx.AsyncClient(trust_env=False) as client:
             reply = await client.get(
@@ -166,6 +168,12 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
                 payload = {}
             healthy = served and payload.get("ok") is True
             connected = healthy and payload.get("connected") is True
+            # Older gateways (and foreign listeners) send no transport; those
+            # only ever ran cloudflared, and "" keeps the status line silent
+            # rather than guessing.
+            if payload.get("transport") in ("relay", "cloudflare"):
+                transport = str(payload["transport"])
+                cloudflared = payload.get("cloudflared") is True
             if not healthy:
                 # The gateway names why it is refusing relayed requests, and
                 # this is the surface where a command can be offered at all.
@@ -192,7 +200,17 @@ async def probe(value: dict[str, Any]) -> dict[str, Any]:
         word = "not serving"
     else:
         word = "stopped"
-    return {"state": word, "reason": reason, "detail": detail, "since": None, "remedy": None}
+    result: dict[str, Any] = {
+        "state": word,
+        "reason": reason,
+        "detail": detail,
+        "since": None,
+        "remedy": None,
+    }
+    if transport:
+        result["transport"] = transport
+        result["cloudflared"] = cloudflared
+    return result
 
 
 async def connector_state(value: dict[str, Any], *, reachable: bool = True) -> dict[str, Any]:

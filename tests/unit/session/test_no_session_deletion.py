@@ -2655,7 +2655,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
-    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
+    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 2),
+    (
+        "local_operator/tunnels/service.py::run.start_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid FILE",
+    ),
+    (
+        "local_operator/tunnels/service.py::run.reconcile_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid/.token FILEs",
+        2,
+    ),
+    (
+        "local_operator/tunnels/config.py::record_relay_offer",
+        "<path>.unlink",
+        "tunnel relay-offered marker FILE",
+    ),
     # The generation layout's own trees and pointer. Every path in this block is
     # built from ``stable_root()`` (``~/.local/share/lop``, from ``Path.home()``)
     # plus a timestamped generation id this module chose, or from
