@@ -463,7 +463,7 @@ async def test_a_peer_switch_waits_for_the_owners_landed_answer() -> None:
 
     from local_operator.server.utils.settings_intents import BridgeDriver
 
-    sent: list[tuple[str, tuple, dict]] = []
+    sent: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
     class Client:
         async def set_effort(self, effort, *, defer_ok=False, request_id=None):
