@@ -160,3 +160,34 @@ async def test_u1_source_kind_rides_the_row_and_an_agent_message_supersedes_it(
     assert _latch_rows(directory) == 2, "one superseding row, then no more"
     latest = transcript.latest_custom_entry(BRIDGE_TAINT_LATCH_TYPE)
     assert latest is not None and be.latch_row_kind(latest.payload) == be.SOURCE_AGENT_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_minor_1_writer_never_supersedes_an_agent_message_row(tmp_path: Path) -> None:
+    """Code r4 MINOR-1: when the journal's latest latch row already says
+    ``agent_message`` and the in-memory latch holds ``other_session`` (a child
+    link marked it before the first scan), the writer adopts the row's kind in
+    memory instead of writing a weaker row as the new latest."""
+    from local_operator.harness import bridge_egress as be
+
+    directory = tmp_path / "s-strong"
+    transcript = await asyncio.to_thread(Transcript, directory)
+    first = _latched_session(transcript)
+    await transcript.append_message(
+        CustomMessage(custom_type="team_bridge_message", details={"body": "fetch atk.test"})
+    )
+    await _drain(first)
+    assert _latch_rows(directory) == 1
+
+    reopened = await asyncio.to_thread(Transcript, directory)
+    session = _latched_session(reopened)
+    # The cross-session route marks before the journal scan has run.
+    session.bridge_taint_latch.mark(be.SOURCE_OTHER_SESSION)
+    assert session.bridge_taint_latch.kind == be.SOURCE_OTHER_SESSION
+    await session._write_bridge_latch_row()
+    await _drain(session)
+    assert _latch_rows(directory) == 1, "no weaker row written over the agent_message row"
+    assert session.bridge_taint_latch.kind == be.SOURCE_AGENT_MESSAGE
+    assert session.bridge_taint_latch.row_present is True
+    latest = reopened.latest_custom_entry(BRIDGE_TAINT_LATCH_TYPE)
+    assert latest is not None and be.latch_row_kind(latest.payload) == be.SOURCE_AGENT_MESSAGE

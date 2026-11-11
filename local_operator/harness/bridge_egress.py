@@ -246,10 +246,12 @@ def message_is_taint_source(message: Any) -> bool:
 def message_source_kind(message: Any) -> SourceKind | None:
     """The source kind of one live message, or ``None`` when it is no source.
 
-    Only called on the latching path and the (rare) kind upgrade, never on a
-    clean session's hot path, so the duck-typed reads cost nothing that
-    matters. A Bridge card or ``bridge`` result is an Agent message; any other
-    source is a stamp, which only cross-session routes write.
+    :meth:`BridgeTaintLatch.observe` calls this for every live message, a
+    clean session's included, but it delegates to
+    :func:`message_is_taint_source` first and returns ``None`` for a
+    non-source, so it only costs more than that check on a source. A Bridge
+    card or ``bridge`` result is an Agent message; any other source is a
+    stamp, which only cross-session routes write.
     """
     if not message_is_taint_source(message):
         return None
@@ -264,10 +266,18 @@ def message_source_kind(message: Any) -> SourceKind | None:
 
 
 def latch_row_kind(payload: Mapping[str, Any]) -> SourceKind:
-    """The kind a latch row records; an old row (or an unknown value) is ``agent_message``."""
+    """The kind a latch row records; an old row (or an unknown value) is ``agent_message``.
+
+    Only a ``str`` is looked up (S-R5-1): a forged list or dict value would
+    raise ``TypeError`` on the set lookup, and a raise here used to stop the
+    durable scan before ``mark()``. Anything else reads as the stronger
+    ``agent_message`` wording.
+    """
     details = payload.get("details")
     kind = details.get(LATCH_ROW_KIND_KEY) if isinstance(details, Mapping) else None
-    return kind if kind in _SOURCE_KINDS else SOURCE_AGENT_MESSAGE  # type: ignore[return-value]
+    if isinstance(kind, str) and kind in _SOURCE_KINDS:
+        return kind  # type: ignore[return-value]
+    return SOURCE_AGENT_MESSAGE
 
 
 def entry_source_kind(entry_type: str, payload: Mapping[str, Any]) -> SourceKind | None:
@@ -383,9 +393,19 @@ class BridgeTaintLatch:
         """Latch on any source among durable rows (commit observer / scan)."""
         row_kind: SourceKind | None = None
         for entry_type, payload in rows:
-            kind = entry_source_kind(entry_type, payload)
-            if kind is None:
+            if not entry_is_taint_source(entry_type, payload):
                 continue
+            # S-R5-1: the row IS a source, so the latch sets whatever the kind
+            # lookup does. The kind is wording only; a lookup that raises on a
+            # tampered row falls back to the stronger wording instead of
+            # skipping ``mark()`` and leaving the cached state unlatched.
+            try:
+                kind = entry_source_kind(entry_type, payload) or SOURCE_AGENT_MESSAGE
+            except Exception:  # noqa: BLE001 - wording only; the latch is still set below
+                logger.warning(
+                    "bridge taint source kind unreadable; using agent_message", exc_info=True
+                )
+                kind = SOURCE_AGENT_MESSAGE
             if entry_type == "custom":
                 if row_kind != SOURCE_AGENT_MESSAGE:
                     row_kind = kind

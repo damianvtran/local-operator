@@ -785,3 +785,32 @@ def test_u1_kind_never_changes_the_decision(tool: str, tier: str, arguments: Any
         )
     assert decisions[0] == decisions[1]
     assert decisions[0][0].bridge_latched is True
+
+
+@pytest.mark.parametrize("forged", [["other_session"], {"kind": "other_session"}])
+def test_s_r5_1_unhashable_forged_kind_still_marks_and_caches(forged: Any) -> None:
+    """Security r5 S-R5-1: a tampered latch row whose ``source_kind`` is a list
+    or dict must not raise out of the kind lookup before ``mark()``.
+
+    Before the fix the backstop still answered latched, but the cached state
+    stayed False and the scan never completed, so every call re-scanned the
+    journal. Now the row latches the cache, the scan completes, and the
+    unreadable kind reads as the stronger ``agent_message`` wording.
+    """
+    row = (
+        "custom",
+        {
+            "custom_type": be.BRIDGE_TAINT_LATCH_TYPE,
+            "details": {"version": 1, be.LATCH_ROW_KIND_KEY: forged},
+        },
+    )
+    assert be.latch_row_kind(row[1]) == be.SOURCE_AGENT_MESSAGE
+    latch = be.BridgeTaintLatch(entries=lambda: [row])
+    assert latch.is_latched() is True
+    assert latch.latched is True, "the cached state must latch, not only the backstop"
+    assert latch._scanned is True
+    assert latch.kind == be.SOURCE_AGENT_MESSAGE
+    # The commit-observer path takes the same rows and must not raise either.
+    observer = be.BridgeTaintLatch()
+    assert observer.observe_entries([row]) is True
+    assert observer.kind == be.SOURCE_AGENT_MESSAGE

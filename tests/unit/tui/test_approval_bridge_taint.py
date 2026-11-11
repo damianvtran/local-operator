@@ -303,7 +303,11 @@ async def test_u1_u4_latched_card_names_its_source_and_flashes_withdrawn_keys(
     from local_operator.harness import bridge_egress as be
     from local_operator.tui.widgets import approval as approval_mod
 
-    monkeypatch.setattr(approval_mod, "LATCHED_FLASH_SECONDS", 0.2)
+    # The flash length is read when a press arms the timer. Hold it long while
+    # the presses are asserted (a 0.2 s flash expired before the assertion on
+    # a loaded host, failing at the base too), then shorten it for one last
+    # press to prove the flash settles.
+    monkeypatch.setattr(approval_mod, "LATCHED_FLASH_SECONDS", 30.0)
     session = _LatchingSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -324,19 +328,28 @@ async def test_u1_u4_latched_card_names_its_source_and_flashes_withdrawn_keys(
         assert ("(Agent messages)" in expected) is (kind == "agent_message")
 
         options = " ".join(be.card_options_off_notice().split())
+        # MINOR-2: the flash swaps a row's text in place; it must never add or
+        # drop a row (a wrapped flash line would shift the card's layout).
+        rest_rows = len(card._callout_rows(96, two_row=True)[0])
         for key in ("A", "S", "G"):
             await pilot.press(key)
             await pilot.pause()
             assert card._options_flash is True, f"{key} gave no feedback"
             assert not pending.done(), f"{key} answered a latched card"
             rows, _spans = card._callout_rows(96, two_row=True)
+            assert len(rows) == rest_rows, f"{key} flash changed the row count"
             flashed = " ".join(row.plain for row in rows)
             assert options.split()[0] in flashed
             assert any(
                 span.style and "bold" in str(span.style) for row in rows for span in row.spans
             )
-        await asyncio.sleep(0.4)
+        monkeypatch.setattr(approval_mod, "LATCHED_FLASH_SECONDS", 0.2)
+        await pilot.press("A")
         await pilot.pause()
+        for _ in range(50):
+            if not card._options_flash:
+                break
+            await asyncio.sleep(0.1)
         assert card._options_flash is False, "the flash did not settle"
         assert app._approve_all is False
         await pilot.press("n")

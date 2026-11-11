@@ -21912,6 +21912,7 @@ class Session:
     async def _write_bridge_latch_row(self) -> None:
         from local_operator.harness.bridge_egress import (
             BRIDGE_TAINT_LATCH_TYPE,
+            SOURCE_AGENT_MESSAGE,
             latch_row_kind,
         )
 
@@ -21919,6 +21920,13 @@ class Session:
         if latch.row_present:
             return
         existing = self._transcript.latest_custom_entry(BRIDGE_TAINT_LATCH_TYPE)
+        if existing is not None and latch_row_kind(existing.payload) == SOURCE_AGENT_MESSAGE:
+            # MINOR-1: the durable row is already the strongest kind. Writing an
+            # ``other_session`` row over it would make the weaker wording the
+            # latest; adopt the row's kind in memory instead (no downgrade).
+            latch.mark(SOURCE_AGENT_MESSAGE)
+            latch.row_present = True
+            return
         if existing is not None and latch_row_kind(existing.payload) == latch.kind:
             # A row with a weaker kind (``other_session`` while the latch now
             # holds ``agent_message``) is superseded by a new one: the kind
