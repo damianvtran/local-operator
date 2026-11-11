@@ -417,3 +417,68 @@ async def test_chord_while_approval_prompt_is_live_behaves_as_enter() -> None:
         assert session.prompts == []
         assert editor.text == ""
         assert app._held_answer_key is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "sequence", "event_key", "mode", "expected_delivery"),
+    [
+        # Every spelling variant of the same chord must fire the same mode.
+        # Storing ``ctrl+alt+b`` (the way a human types it) while the parser
+        # emits ``alt+ctrl+b`` (alphabetical modifier order) is the round-1
+        # F1/Q1 defect: the chord never fired. Each row drives the REAL
+        # ``_apply_keymap`` (which builds the editor's chord map from the
+        # stored spelling), the REAL ``XTermParser`` (which decodes the
+        # raw bytes to the event key) and the REAL ``Editor._on_key`` —
+        # so replacing any of the three canonicalisation sites with plain
+        # ``normalize_key`` fails the corresponding row.
+        ("ctrl+alt+b", "\x1b[98;7u", "alt+ctrl+b", "queue", "queue"),
+        ("alt+ctrl+b", "\x1b[98;7u", "alt+ctrl+b", "queue", "queue"),
+        ("shift+ctrl+enter", "\x1b[13;6u", "ctrl+shift+enter", "both", "both"),
+        ("ctrl+shift+enter", "\x1b[13;6u", "ctrl+shift+enter", "both", "both"),
+        ("shift+alt+enter", "\x1b[13;4u", "alt+shift+enter", "steer", None),
+        ("alt+shift+enter", "\x1b[13;4u", "alt+shift+enter", "steer", None),
+        # A legacy-family chord that works in both protocols.
+        ("alt+s", "alt+s", "alt+s", "queue", "queue"),
+    ],
+)
+async def test_stored_spelling_fires_on_raw_bytes(
+    stored: str, sequence: str, event_key: str, mode: str, expected_delivery: Any
+) -> None:
+    """The reviewer's probe, as a real test: stored spelling → raw bytes → steered mode.
+
+    ``\x1b[13;5u`` (``ctrl+alt+enter``) is not in this table on purpose: the
+    parser emits ``ctrl+enter`` for it (measured), and the grammar refuses
+    that chord, so it can never be stored — a row for it would assert a
+    chord map that cannot exist.
+    """
+    from textual._xterm_parser import XTermParser
+
+    session = _DeliveryStreaming()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _wait_session(pilot, app)
+        _set_mode(app, "steer")
+        app._apply_keymap({f"keymap.send_{mode}": stored}, announce=False)
+        editor = app.query_one(Editor)
+        await _type(app, pilot, "payload")
+        parser = XTermParser()
+        # ``feed`` returns a GENERATOR, and reading it twice (once for the
+        # assert, once for the dispatch) consumes it — materialise once.
+        messages = list(parser.feed(sequence))
+        if sequence.startswith("\x1b["):
+            # Raw kitty bytes: the parser's event is the real one.
+            assert [m.key for m in messages] == [event_key]
+            for message in messages:
+                await editor._on_key(message)
+        else:
+            await pilot.press(event_key)
+        await pilot.pause()
+        await pilot.pause()
+        # The chord fired: its mode rode the steer, not the default.
+        assert session.delivery_steers == [("payload", expected_delivery)], (
+            stored,
+            event_key,
+            session.delivery_steers,
+        )
+        assert session.prompts == []

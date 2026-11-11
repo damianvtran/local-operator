@@ -750,7 +750,10 @@ def _validate_composer_key(value: Any) -> str | None:
                     frozenset({"ctrl", "alt"}),
                     frozenset({"super", "shift"}),
                 ):
-                    return f"{part} isn't a send chord — use ctrl+enter, alt+enter or super+enter"
+                    # 59 cells: the echoed chord is dropped so the
+                    # sentence fits the 74-cell detail at 80 columns with
+                    # the three chord names still named in full.
+                    return "not a send chord — use ctrl+enter, alt+enter or super+enter"
                 return (
                     "a send chord needs ctrl, alt or super with enter "
                     "(ctrl+shift/alt+shift also work) — like ctrl+enter"

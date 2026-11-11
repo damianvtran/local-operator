@@ -902,16 +902,40 @@ def test_composer_chord_needs_enhanced_keys(key: str, truth: bool) -> None:
 )
 def test_composer_grammar_names_non_send_enter_chords(key: str) -> None:
     """ctrl+alt+enter / super+shift+enter are not send chords: say so and name the three."""
+    from rich.cells import cell_len
+
     reason = keymap.validate_key(key, scope="composer")
-    assert reason is not None and "isn't a send chord" in reason
+    assert reason is not None and "not a send chord" in reason
     assert "ctrl+enter" in reason and "alt+enter" in reason and "super+enter" in reason
+    # Fits the 74-cell detail row at 80 columns (``_detail_width``), so the
+    # sentence the recorder paints is never clipped unmarked.
+    assert cell_len(reason) <= 74, (key, cell_len(reason), reason)
 
 
 def test_composer_group_conflict_compares_canonical_forms() -> None:
-    """``ctrl+alt+b`` vs ``alt+ctrl+b`` is ONE chord: the conflict must name it."""
-    values = {"keymap.send_queue": "ctrl+alt+b"}
-    conflict = keymap.group_conflict("keymap.send_steer", "alt+ctrl+b", values)
+    """``ctrl+alt+b`` vs ``alt+ctrl+b`` is ONE chord: the conflict must name it.
+
+    The PROPOSED key is deliberately the uncanonical spelling (``ctrl+alt+b``,
+    the way a human types it). Without the composer arm of
+    ``_canonical_variants`` the comparison falls back to ``alternates`` and
+    sees two different strings — so this test fails if that arm is removed.
+    The stored value goes through ``effective_key``/``resolved_keymap``
+    (which canonicalises it), so the arm-critical side is the proposed key,
+    not the stored one. The live check through ``settings_io.validate`` (the
+    path ``group_conflict`` actually guards) is asserted too.
+    """
+    values = {"keymap.send_queue": "alt+ctrl+b"}
+    conflict = keymap.group_conflict("keymap.send_steer", "ctrl+alt+b", values)
     assert conflict is not None and "alt+ctrl+b" in conflict
+    # The live check path: an uncanonical PROPOSED value must also be caught
+    # when the conflict goes through ``settings_io.validate``.
+    steer_setting = settings_io.BY_KEY["keymap.send_steer"]
+    assert settings_io.validate(steer_setting, "ctrl+alt+b", values) is not None
+    # And through the resolver: an uncanonical stored value resolves to the
+    # canonical spelling the parser emits.
+    resolved, rejected = keymap.resolved_keymap({"keymap.send_queue": "ctrl+alt+b"})
+    assert resolved == {"keymap.send_queue": "alt+ctrl+b"}
+    assert rejected == []
 
 
 def test_unbound_default_survives_resolved_keymap() -> None:

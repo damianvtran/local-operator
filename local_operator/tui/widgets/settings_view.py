@@ -4714,6 +4714,9 @@ class SettingsView(Vertical):
             lead: str
             lead_style: Style
             reason: str
+            # Bound on every path so the style line below reads a definite
+            # value; only the pending arm ever sets it True.
+            enhanced_hint = False
             if capture.refused:
                 # A refusal is a report that the press did not land, so it
                 # takes the danger ink: the one thing here that must not read
@@ -4738,11 +4741,15 @@ class SettingsView(Vertical):
                 # it is bound, not only in row help the user may never open
                 # (UX round 1, U1): without it a legacy terminal silently
                 # receives plain Enter for the very press that was bound.
+                # Painted as a hint (dim), not a refusal: it warns and
+                # stores, so the error ink would read as a rejection the
+                # capture never made.
                 if keymap_mod.scope_of(capture.setting_key) == "composer" and (
                     keymap_mod.composer_chord_needs_enhanced_keys(capture.key)
                 ):
                     need = "needs enhanced keys"
                     reason = f"{need} — {reason}" if reason else need
+                    enhanced_hint = not self._capture_conflict()
                 contract_text = "enter confirms · esc cancels"
             else:
                 # Leads with the CONTRACT rather than restating the value
@@ -4764,7 +4771,7 @@ class SettingsView(Vertical):
             width = self._detail_width()
             contract_part = (contract_text, dim, False)
             lead_part = (lead, lead_style, False)
-            reason_style = error if reason else dim
+            reason_style = error if reason and not enhanced_hint else dim
             capture_rungs: list[list[tuple[str, Style, bool]]] = []
             if reason:
                 capture_rungs.append([lead_part, (reason, reason_style, False), contract_part])

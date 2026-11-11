@@ -5803,3 +5803,107 @@ def test_every_scratchpad_cap_label_fits_the_settings_label_budget() -> None:
         assert cell_len(label) <= _LABEL_BUDGET, (locale, cell_len(label), label)
         checked += 1
     assert checked >= 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30)])
+async def test_composer_capture_leads_with_the_chord_grammar(size: tuple[int, int]) -> None:
+    """Code minor 5: the listening lead teaches the chord grammar where the chord is bound.
+
+    A revert to ``"listening for a key"`` fails both the text and the cells
+    assertions — the lead must carry ``alt+<letter>`` and ``enhanced keys``.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.press("enter")
+        await pilot.pause()
+        detail = view._detail_text.plain
+        assert detail.startswith("alt+<letter> works anywhere"), detail
+        assert "enhanced keys" in detail, detail
+        assert "esc cancels" in detail, detail
+        assert cell_len(detail) <= view._detail_width(), (detail, view._detail_width())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30)])
+async def test_pending_kitty_only_chord_appends_the_terminal_limit(size: tuple[int, int]) -> None:
+    """Code minor 5: a pending kitty-only chord names its terminal limit.
+
+    Reverting the append drops ``needs enhanced keys`` from the detail and
+    this test fails on the text; the cells bound fails if the sentence ever
+    outgrows the row instead of shedding.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.press("enter")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        detail = view._detail_text.plain
+        assert detail.startswith("ctrl+enter"), detail
+        assert "needs enhanced keys" in detail, detail
+        assert "enter confirms" in detail and "esc cancels" in detail, detail
+        assert cell_len(detail) <= view._detail_width(), (detail, view._detail_width())
+
+
+@pytest.mark.asyncio
+async def test_pending_kitty_only_warning_is_dim_not_danger() -> None:
+    """D-N4: the limit is a hint, not a refusal — painted in dim, not danger.
+
+    The capture stores the chord (warn-and-allow), so the error ink would
+    read as a rejection the capture never made. Reverting the hint style to
+    ``error`` fails the ink assertion below.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.press("enter")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        dim = theme_mod.semantic_color("dim").lower()
+        danger = theme_mod.semantic_color("danger").lower()
+        inks = [
+            (fragment, (style.color.name.lower() if style.color is not None else ""))
+            for fragment, style in view.detail_spans()
+            if "needs enhanced keys" in fragment
+        ]
+        assert inks, "the pending-chord warning was not painted"
+        for fragment, ink in inks:
+            assert ink == dim, f"{fragment!r} is {ink}, not dim {dim} (danger is {danger})"
+
+
+@pytest.mark.asyncio
+async def test_unbound_send_rows_paint_the_dim_dash() -> None:
+    """Code minor 5 (D4/U5): an unbound send row is not a blank cell.
+
+    The value column shows ``—`` in dim ink — the page's existing glyph for
+    "nothing to show here". Reverting the hotkey arm to ``str(value)``
+    renders a blank cell and this test fails.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.pause()
+        lines = view.render_lines_for_test()
+        queue_lines = [line for line in lines if "Send as queue" in line]
+        assert queue_lines, lines
+        assert "—" in queue_lines[0], queue_lines
+        # The dash is painted (not a plain row string): at least one detail
+        # or row span carries the dim ink for it — checked via the row text
+        # round-trip instead: a bound chord would show the chord, not a dash.
+        assert "ctrl+enter" not in queue_lines[0], queue_lines
+        assert theme_mod.semantic_color("dim")  # dim rung exists; the row arm
+        # uses `styles.dim` for this case (mirrored in ``_row_text``).

@@ -3571,13 +3571,13 @@ class TestTheBusyDefaultRow:
         ``Prompt``'s wrap-serializer drops a ``None`` delivery.
 
         The fingerprint here is the REAL journal's: the test drives
-        ``DesktopReceipts.run`` twice — first with the parsed old body, then
-        with the same body carrying an explicit ``delivery: None`` — and
-        requires the second to REPLAY the first's outcome. A changed
-        fingerprint would raise ``ReceiptConflict`` on the retry instead, so
-        any drift between ``Prompt.model_dump`` and the journal's hash breaks
-        this. The literal digest the old body must produce is pinned too
-        (derived once from the journal's canonical form).
+        ``DesktopReceipts.run`` twice — first with the parsed old body,
+        then with the same body again — and requires the second to REPLAY
+        the first's outcome. A changed fingerprint would raise
+        ``ReceiptConflict`` on the retry instead, so any drift between
+        ``Prompt.model_dump`` and the journal's hash breaks this. The
+        literal digest the old body must produce is pinned too (derived
+        once from the journal's canonical form).
         """
         import asyncio
         import hashlib
@@ -3614,7 +3614,8 @@ class TestTheBusyDefaultRow:
                     return {"status": "ok"}
 
                 first = await journal.run("req-1", dumped, _operation)
-                # Same id, same body (explicit None delivery): must replay, not
+                # Same id, same body (an explicit None delivery round-trips
+                # to the same dumped dict asserted above): must replay, not
                 # conflict and not re-run.
                 second = await journal.run("req-1", dumped, _operation)
                 assert first == {"status": "ok"}
@@ -3623,6 +3624,46 @@ class TestTheBusyDefaultRow:
                 return first, second
 
         asyncio.run(_replay())
+
+
+class TestComposerHotkeyRawValidation:
+    """Q-r2-1: a repeated modifier is refused on the RAW spelling.
+
+    ``coerce`` and ``write_setting`` receive the raw string from the wire
+    (``lop config edit`` / ``PATCH /v1/settings``); canonicalising first
+    would collapse ``ctrl+ctrl+enter`` to ``ctrl+enter`` before the
+    validator sees it and store a chord the operator never asked for.
+    """
+
+    def test_coerce_refuses_a_repeated_modifier(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.coerce(setting, "ctrl+ctrl+enter")
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.coerce(setting, "alt+alt+enter")
+
+    def test_coerce_still_canonicalises_a_valid_spelling(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        assert settings_io.coerce(setting, "ctrl+alt+b") == "alt+ctrl+b"
+
+    def test_write_setting_refuses_a_repeated_modifier(self, manager: ConfigManager) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.write_setting(manager, setting, "ctrl+ctrl+enter")
+        # Nothing was stored: the row still reads as unbound.
+        assert settings_io.read_setting(manager, setting) == ""
+
+    def test_write_setting_stores_a_valid_spelling_canonicalised(
+        self, manager: ConfigManager
+    ) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        settings_io.write_setting(manager, setting, "ctrl+alt+b")
+        assert settings_io.read_setting(manager, setting) == "alt+ctrl+b"
+
+    def test_validate_is_the_same_sentence_as_coerce(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        assert settings_io.validate(setting, "ctrl+ctrl+enter", {}) is not None
+        assert "twice" in (settings_io.validate(setting, "ctrl+ctrl+enter", {}) or "")
 
 
 def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(
