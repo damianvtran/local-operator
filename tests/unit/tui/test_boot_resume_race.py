@@ -315,6 +315,58 @@ async def test_stepped_aside_aida_stash_for_boot_session_is_returned(monkeypatch
         assert rig.submitted == []
 
 
+@pytest.mark.asyncio
+async def test_stepped_aside_aida_stash_for_other_session_is_left_alone(
+    monkeypatch, tmp_path
+) -> None:
+    """A stash keyed to ANOTHER id belongs to a transition still in flight.
+
+    The other half of the docstring above: boot's step-aside must neither hand
+    it back (it is not boot's prompt) nor clear it (its own transition would
+    then land without it).
+    """
+    rig = _Rig(monkeypatch, tmp_path, live=True)
+    stash = ("someone-else", "plan my day", None)
+    rig.app._pending_aida_prompt = stash
+    async with rig.app.run_test(size=(100, 30)) as pilot:
+        await _step_aside(rig, pilot, "sidebar")
+        await pilot.pause()
+        assert rig.app._pending_aida_prompt == stash
+        assert rig.app._editor().text == ""
+        assert rig.notices() == []
+        assert rig.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_kept_draft_notice_quotes_long_prompt_in_full(monkeypatch, tmp_path) -> None:
+    """The notice is the prompt's ONLY remaining copy, so it is never truncated.
+
+    With the user's draft in the composer and the sidecar consumed, any cap on
+    the quote would lose the prompt's tail for good — the silent drop the
+    product rule forbids (design D1 on PR #3787). ~3000 characters over
+    several paragraphs, so a cap anywhere near the old 500 shows up.
+    """
+    paragraphs = [
+        f"Paragraph {n}: " + " ".join(f"word{n}-{i}" for i in range(40)) for n in range(1, 9)
+    ]
+    paragraphs.append("LAST LINE: ship it only after the smoke test passes.")
+    prompt = "\n\n".join(paragraphs)
+    assert len(prompt) > 2500
+    rig = _Rig(monkeypatch, tmp_path, live=True)
+    _stash_boot_prompt(rig, tmp_path, prompt)
+    async with rig.app.run_test(size=(100, 30)) as pilot:
+        app = rig.app
+        await settle(pilot, lambda: app._session is None, what="boot held")
+        app._sidebar_navigation.generation += 1
+        app._editor().load_text("my own words")
+        rig.gate.set()
+        await settle(pilot, lambda: bool(rig.notices()), what="notice shown", workers=("session",))
+        assert app._editor().text == "my own words"
+        assert rig.notices() == [KEPT_PREFIX + prompt]
+        assert rig.notices()[0].endswith("LAST LINE: ship it only after the smoke test passes.")
+        assert rig.submitted == []
+
+
 # The in-process swap (`_reload_session`) has its own sidebar step-aside, and
 # the requester's decision covers every branch of that class: the prompt its
 # replacement carried (a switch-mode `/fork <message>` sidecar, or an `/aida

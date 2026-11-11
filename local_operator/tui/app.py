@@ -14335,22 +14335,17 @@ class OperatorApp(App[None]):
         if text.strip():
             self._submit_prompt(text)
 
-    #: Longest stretch of a startup prompt quoted back in the step-aside notice
-    #: when the composer is already taken. Generous because the notice is the
-    #: prompt's ONLY remaining copy in that case (the sidecar is consumed);
-    #: bounded so a pasted wall of text cannot bury the transcript.
-    _UNSENT_BOOT_PROMPT_QUOTE_LIMIT = 500
-
     def _return_unsent_boot_prompts(self, session: Any) -> None:
         """Hand back the prompts a stepped-aside boot would have sent.
 
         Boot steps aside (see `_boot_session`) when the user navigated or
         resumed elsewhere while it was building; an in-process swap
         (`_reload_session`) steps aside the same way on a sidebar click, and
-        hands its replacement's prompts back through here too. Its stashed prompts — a
-        ``/fork``'s opening message (the sidecar `_submit_boot_prompt`
-        consumes) and an ``/aida <request>`` stashed for boot's own session —
-        were written for a conversation that is no longer on screen.
+        hands its replacement's prompts back through here too. Its stashed
+        prompts — a ``/fork``'s opening message (the sidecar
+        `_submit_boot_prompt` consumes) and an ``/aida <request>`` stashed for
+        boot's own session — were written for a conversation that is no
+        longer on screen.
 
         PRODUCT DECISION (Team Bridge manager, session 2c6111e02b16): NEVER
         send such a prompt — sending into the conversation the user switched
@@ -14392,11 +14387,14 @@ class OperatorApp(App[None]):
             self._load_editor_draft(SessionDraft(text=text))
             self._system_notice(_boot_prompt_t(_boot_prompt_keys.returned_to_composer()), "warning")
             return
-        quoted = text
-        if len(quoted) > self._UNSENT_BOOT_PROMPT_QUOTE_LIMIT:
-            quoted = quoted[: self._UNSENT_BOOT_PROMPT_QUOTE_LIMIT].rstrip() + "…"
+        # Quoted in FULL, never truncated: the sidecar is already consumed and
+        # the user's draft wins the composer, so this notice is the prompt's
+        # ONLY remaining copy. Any cap would drop its tail for good — exactly
+        # the silent loss the product rule forbids. A long notice scrolls in
+        # the transcript like any other long row; that cost is recoverable,
+        # lost text is not.
         self._system_notice(
-            _boot_prompt_t(_boot_prompt_keys.not_sent_kept_draft(prompt=quoted)), "warning"
+            _boot_prompt_t(_boot_prompt_keys.not_sent_kept_draft(prompt=text)), "warning"
         )
 
     async def _preflight_usage(self, session: Any) -> None:
