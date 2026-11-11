@@ -294,6 +294,7 @@ def apply_check(
     remote_fp: str | None,
     reason: str = "",
     detail: str = "",
+    reason_subclass: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Fold one check result into the document; returns the item."""
@@ -320,8 +321,15 @@ def apply_check(
             # otherwise be dropped from the list with no way to learn why nothing
             # updates (UX round 2, U11). ONE derivation: the UI reads this field and
             # never re-derives "needs the login" from the credential or the tenant.
-            item["error_class"], item["last_error"] = "no-credential", None
-            item["error_subclass"] = None
+            # A plain "no login" keeps no sentence (the class says it all); a
+            # ``rejected`` one (HTTP 401: a credential was sent and refused) keeps
+            # the hub's reason, because "sign in" alone would contradict a person
+            # who IS signed in -- the tooltip has to say what was refused.
+            rejected = reason_subclass == "rejected"
+            item["error_class"] = "no-credential"
+            item["last_error"] = scrub(detail) if rejected and detail else None
+            item["error_subclass"] = "rejected" if rejected else None
+            item["error_origin"] = "check"
             item[NO_CREDENTIAL_AT] = _iso(now)
             # It also RETIRES the schedule the class it replaced had armed (agent review
             # round 4, M2): an apply this item could not do is not worth retrying, and a
@@ -332,7 +340,12 @@ def apply_check(
             item["next_retry_at"] = None
         else:
             record_failure(
-                item, reason or "hub-error", detail, now=now, keep_state=reason == "hub-error"
+                item,
+                reason or "hub-error",
+                detail,
+                now=now,
+                keep_state=reason == "hub-error",
+                origin="check",
             )
     elif verdict == "up-to-date":
         # ``applied`` is kept for exactly ONE check cycle ("Updated just now"), so
@@ -361,6 +374,9 @@ def apply_check(
             state="applied" if keep_applied else "up-to-date",
             classification="local-only" if local_only else None,
             error_class=None,
+            # The sub-class belongs to the class it qualified; leaving it made a
+            # healed row read ``None/rejected`` in the links projection.
+            error_subclass=None,
             last_error=None,
             attempts=0,
             next_retry_at=None,
@@ -368,15 +384,63 @@ def apply_check(
             first_seen_available_at=None,
             summary={},
         )
+        item.pop("error_origin", None)
         item["baseline"] = baseline
     else:
         item.update(state="available", classification=classification, baseline=baseline)
         item["first_seen_available_at"] = item.get("first_seen_available_at") or _iso(now)
-        # A successful fetch retires the two classes a fetch can leave behind.
-        if item.get("error_class") in ("hub-item-missing", "no-credential"):
-            item["error_class"], item["last_error"] = None, None
+        # A SUCCESSFUL FETCH RETIRES EVERY FAILURE A FETCH RECORDED. It used to
+        # retire only ``hub-item-missing`` / ``no-credential``, so a fetch-time
+        # ``hub-error`` on a both-changed row (radientdev, 2026-11-11: a startup
+        # 401, attempts 11, ``auto_retry`` False) outlived every later 200: the
+        # up-to-date arm above clears errors, but a row that stays ``available``
+        # never reaches it, and status/links kept deriving ``failed`` forever.
+        # The attempt count and the retirement go too, because they counted
+        # FETCHES that now succeed; leaving ``auto_retry`` False would keep the
+        # update itself unreachable without a manual Retry. A failure the APPLY
+        # recorded (merge-refused, provider-error, a write error) is not this
+        # check's to clear: the fetch says nothing about whether the merge works.
+        if fetch_recorded_failure(item):
+            item.update(
+                error_class=None,
+                error_subclass=None,
+                last_error=None,
+                attempts=0,
+                next_retry_at=None,
+                auto_retry=True,
+            )
+            item.pop("error_origin", None)
     items[key] = item
     return item
+
+
+#: The sentences ``check._failure_reason`` writes for a failed FETCH. Read only
+#: to recognise rows recorded BEFORE ``error_origin`` existed (the operator's
+#: radientdev and qa-tester rows, 2026-11-11), which would otherwise stay
+#: latched until a manual Retry. No apply path writes these prefixes: apply
+#: failures say "could not write the update", "the merged text ...", or a
+#: merge/provider class.
+_LEGACY_FETCH_SENTENCES = (
+    "the hub refused the request (",
+    "the hub returned an error (",
+    "could not reach the hub:",
+)
+
+
+def fetch_recorded_failure(item: Mapping[str, Any]) -> bool:
+    """Whether the row's error was recorded by a CHECK's fetch (so a 200 heals it)."""
+
+    cls = item.get("error_class")
+    if not cls:
+        return False
+    if cls in ("hub-item-missing", "no-credential"):
+        return True
+    origin = item.get("error_origin")
+    if origin is not None:
+        return origin == "check"
+    return cls == "hub-error" and str(item.get("last_error") or "").startswith(
+        _LEGACY_FETCH_SENTENCES
+    )
 
 
 def settle_applied(
@@ -502,13 +566,21 @@ def record_failure(
     keep_state: bool = False,
     summary: Mapping[str, int] | None = None,
     rng: Callable[[float, float], float] = random.uniform,
+    origin: str = "apply",
 ) -> None:
-    """Set ``error_class``/``last_error``, the state and the retry schedule per B4.3."""
+    """Set ``error_class``/``last_error``, the state and the retry schedule per B4.3.
+
+    ``origin`` is WHO recorded it: ``"check"`` (a failed fetch, which the next
+    successful fetch retires -- ``fetch_recorded_failure``) or ``"apply"`` (a
+    merge or write, which only a later apply, a manual Retry or a settled check
+    clears).
+    """
 
     now = now or datetime.now(timezone.utc)
     cls, _, sub = error_class.partition("/")
     item.pop("updating_since", None)
     item["error_class"], item["error_subclass"] = cls, sub or None
+    item["error_origin"] = origin
     item["last_error"] = scrub(message)
     if cls == "no-credential":
         # A merge/apply refusal lands here without touching ``last_checked_at``

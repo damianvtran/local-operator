@@ -143,6 +143,87 @@ def test_a_signed_out_read_retires_the_schedule_the_class_it_replaced_armed() ->
     assert item["error_class"] == "no-credential" and item["next_retry_at"] is None
 
 
+def test_a_rejected_sign_in_is_uncounted_and_keeps_the_hubs_reason() -> None:
+    """A 401 is recorded as ``no-credential``/``rejected``: no attempt, no schedule,
+    and the sentence survives so the tooltip can say what was refused."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc)
+    for _ in range(st.MAX_ATTEMPTS + 2):
+        item = _apply(
+            doc,
+            verdict="unavailable",
+            reason="no-credential",
+            reason_subclass="rejected",
+            detail="the hub did not accept the sign-in (HTTP 401: invalid API key format)",
+        )
+    assert item["error_class"] == "no-credential" and item["error_subclass"] == "rejected"
+    assert item["last_error"] == (
+        "the hub did not accept the sign-in (HTTP 401: invalid API key format)"
+    )
+    assert item["attempts"] == 0 and item["auto_retry"] is True
+    item = _apply(doc)
+    assert item["error_class"] is None and item["last_error"] is None
+    assert item["error_subclass"] is None
+    # The up-to-date arm retires the sub-class with its class too.
+    _apply(doc, verdict="unavailable", reason="no-credential", reason_subclass="rejected")
+    item = _apply(doc, verdict="up-to-date", classification=None)
+    assert item["error_class"] is None and item["error_subclass"] is None
+
+
+def test_a_successful_fetch_heals_a_retired_fetch_failure_on_an_available_row() -> None:
+    """The radientdev latch: a both-changed row stays ``available``, so before this
+    the fetch-time ``hub-error`` (and its retired ``auto_retry``) outlived every
+    later 200 and the projections derived ``failed`` forever."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, classification="both-changed")
+    for _ in range(st.MAX_ATTEMPTS + 1):
+        item = _apply(
+            doc,
+            verdict="unavailable",
+            reason="hub-error",
+            detail="the hub returned an error (HTTP 502: bad gateway)",
+        )
+    assert item["auto_retry"] is False and item["error_origin"] == "check"
+    item = _apply(doc, classification="both-changed")
+    assert item["state"] == "available" and item["classification"] == "both-changed"
+    assert item["error_class"] is None and item["last_error"] is None
+    assert item["attempts"] == 0 and item["auto_retry"] is True
+    assert item["next_retry_at"] is None and "error_origin" not in item
+
+
+def test_a_legacy_fetch_failure_row_without_an_origin_is_healed_too() -> None:
+    """Rows written before ``error_origin`` (the operator's radientdev: attempts 11,
+    auto_retry False) are recognised by the fetch sentence, else they stay latched."""
+
+    doc: dict[str, Any] = {"items": {}}
+    item = _apply(doc, classification="both-changed")
+    item.update(
+        error_class="hub-error",
+        last_error="the hub refused the request (HTTP 401: invalid API key format)",
+        attempts=11,
+        auto_retry=False,
+    )
+    item.pop("error_origin", None)
+    item = _apply(doc, classification="both-changed")
+    assert item["error_class"] is None and item["auto_retry"] is True and item["attempts"] == 0
+
+
+def test_an_apply_failure_survives_a_successful_fetch() -> None:
+    """The fetch says nothing about whether the MERGE works: an apply-recorded
+    failure is not the check's to clear (the next apply or a Retry decides)."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, classification="both-changed")
+    st.record_failure(item, "hub-error", "could not write the update: disk full")
+    item = _apply(doc, classification="both-changed")
+    assert item["error_class"] == "hub-error" and item["error_origin"] == "apply"
+    legacy = _apply(doc, classification="both-changed")
+    legacy.pop("error_origin")
+    assert st.fetch_recorded_failure(legacy) is False  # not a fetch sentence
+
+
 def test_a_manual_retry_that_computed_retires_the_stale_failure() -> None:
     """U10: the retry proved the update computes, so the row must offer it, not another retry."""
 

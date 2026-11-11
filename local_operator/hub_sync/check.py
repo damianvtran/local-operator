@@ -102,6 +102,12 @@ class ItemCheck:
     #: B4.3 failure class when ``verdict == "unavailable"``.
     reason: str = ""
     detail: str = ""
+    #: The sub-class of ``reason``, kept OUT of ``reason`` so every consumer that
+    #: compares ``reason`` / ``error_class`` with ``"no-credential"`` (the SYSTEMIC
+    #: stop, the desktop route's sign-in answer) keeps matching. ``"rejected"``
+    #: under ``no-credential`` means a credential WAS sent and the hub refused it
+    #: (HTTP 401) -- see ``_failure_reason``.
+    reason_subclass: str | None = None
     #: The confirmed link id when the baseline carries an identity (None for a
     #: legacy unknown-origin link). The runner keys per-link policy on it.
     link_id: str | None = None
@@ -181,6 +187,41 @@ def _remote_meta(document: Mapping[str, Any]) -> tuple[str | None, Mapping[str, 
 
 def _status_of(error: BaseException) -> int | None:
     return getattr(error, "status_code", None)
+
+
+def _auth_rejected(error: BaseException) -> bool:
+    """Whether the hub answered HTTP 401 anywhere along the cause chain.
+
+    The team and skill clients raise ``APIError`` carrying ``status_code``; the
+    legacy agent download wraps the ``requests.HTTPError`` in a bare
+    ``RuntimeError`` ("Failed to download agent ... 401 Client Error"), so the
+    status lives only on ``__cause__.response``. Both shapes reached the
+    operator's store as counted ``hub-error`` rows (qa-tester, 2026-11-11).
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status = getattr(current, "status_code", None)
+        if status is None:
+            status = getattr(getattr(current, "response", None), "status_code", None)
+        if type(status) is int and status == 401:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _split_reason(reason: str) -> tuple[str, str | None]:
+    """``"no-credential/rejected"`` -> ``("no-credential", "rejected")``.
+
+    ``_failure_reason`` returns one string so its callers and tests keep their
+    2-tuple; the arms split it here into ``ItemCheck.reason`` (the class every
+    consumer compares) and ``ItemCheck.reason_subclass``.
+    """
+
+    cls, _, sub = reason.partition("/")
+    return cls, sub or None
 
 
 #: Transport failures by the phrase a person can act on, most specific first (a
@@ -294,6 +335,22 @@ def _failure_reason(
             "hub-item-missing",
             "the hub no longer lists this item, or this account cannot see it",
         )
+    if _auth_rejected(error):
+        # A 401 IS A SIGN-IN FACT, NOT A HUB FAILURE (operator report, 2026-11-11).
+        # The startup tick can run before the Radient token is refreshed or
+        # loaded; every org link then answered 401 and was stored as a COUNTED
+        # ``hub-error`` -- red "Retry" marks on ten teams, and a both-changed row
+        # (radientdev) that climbed past MAX_ATTEMPTS and retired its automatic
+        # retry for good. ``no-credential`` is the class built for this: uncounted,
+        # never "failed" in the projections, withdrawn by a later login, and
+        # retired by the first successful fetch. The ``rejected`` sub-class keeps
+        # the hub's own sentence so the tooltip can say a credential WAS sent and
+        # refused, which is different from "you are not signed in". 403 stays a
+        # refusal: it is an entitlement answer (``team_plan_required``), not a
+        # credential the next refresh can fix.
+        logger.warning("hub fetch rejected the sign-in: HTTP 401 for %s", subject)
+        reason = text if "HTTP 401" in text else f"HTTP 401: {text}"
+        return "no-credential/rejected", f"the hub did not accept the sign-in ({reason[:200]})"
     # ``bool`` is an ``int`` subclass; ``True`` is not an HTTP status.
     if type(status) is int and 100 <= status <= 599:
         logger.warning(
@@ -433,6 +490,7 @@ def check_hub_agents(
                     text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
             except Exception as error:  # noqa: BLE001 - classified below
                 reason, detail = _failure_reason(error, kind="agent", hub_id=hub_id)
+                reason, subclass = _split_reason(reason)
                 checks.append(
                     ItemCheck(
                         "agent",
@@ -444,6 +502,7 @@ def check_hub_agents(
                         local_fp=local_fp,
                         local=local,
                         reason=reason,
+                        reason_subclass=subclass,
                         detail=detail,
                     )
                 )
@@ -744,6 +803,7 @@ def check_hub_teams(
             )
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error, kind="team", hub_id=record.hub_id)
+            reason, subclass = _split_reason(reason)
             checks.append(
                 ItemCheck(
                     "team",
@@ -755,6 +815,7 @@ def check_hub_teams(
                     local_fp=local_fp,
                     local=local,
                     reason=reason,
+                    reason_subclass=subclass,
                     detail=detail,
                     served_by=_served_by(client),
                 )
@@ -994,6 +1055,7 @@ def check_hub_skills(
             matched_revision = record.remote_revision or not_modified.etag
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error, kind="skill", hub_id=record.hub_id)
+            reason, subclass = _split_reason(reason)
             checks.append(
                 ItemCheck(
                     "skill",
@@ -1005,6 +1067,7 @@ def check_hub_skills(
                     local_fp=local_fp,
                     local=local,
                     reason=reason,
+                    reason_subclass=subclass,
                     detail=detail,
                     link_id=record.identity.link_id if record.identity is not None else None,
                     served_by=_served_by(client),
