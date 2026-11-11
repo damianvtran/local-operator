@@ -1668,6 +1668,57 @@ def _group_closes(text: str) -> int:
     return count
 
 
+#: A word that changes the shell's directory, or how a later ``cd`` resolves,
+#: anywhere in a ``for`` body (review round 2 m1 on PR #3816). Quote- and
+#: context-blind on purpose: a match only makes a relative glob pin opaque,
+#: so an ``echo cd`` over-blocking is the safe direction.
+_BODY_MOVES_RE = re.compile(
+    r"(?<![\w./~$-])(?:cd|pushd|popd)(?![\w./-])"
+    r"|(?<![\w./~$-])set(?:\s+\S+)*?\s+(?:[-+][A-Za-z]*P|[-+]o\b|\$)"
+)
+_LOOP_OPENERS = ("for", "while", "until", "select")
+_LOOP_LEAD_WORDS = ("do", "then", "else", "elif", "!", "{", "(")
+
+
+def _for_body_moves(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
+    """Whether the loop opened at ``pieces[index]`` changes directory in its body.
+
+    Review round 2 m1 (PR #3816): the use-site cwd check in
+    ``_Walker._for_glob_words`` sees the body ONCE, in order, with subshell
+    state restored, so two shapes real bash runs against the state root slip
+    past it: a ``cd`` AFTER the use (``do : > $f; cd ~/.local-operator;
+    done`` re-anchors ``$f`` from the second iteration on) and a ``cd`` in a
+    subshell (``do (cd ~/.local-operator && sed -i … $f)``). Rather than
+    model iterations and subshells, a relative glob is pinned only when the
+    body, nested loops and subshells included, holds no ``cd``/``pushd``/
+    ``popd``/``set -P`` at all. The extent runs to the matching ``done``
+    (nested loops counted); an unterminated loop scans to the end.
+    """
+    depth = 0
+    body: list[str] = []
+    for text, _flag, _op in pieces[index:]:
+        head = text.strip()
+        while True:
+            word = head.split(None, 1)[0] if head else ""
+            if word in _LOOP_LEAD_WORDS:
+                head = head[len(word) :].lstrip()
+            elif head[:1] in ("(", "{") and head[:2] != "((":
+                head = head[1:].lstrip()
+            else:
+                break
+        if (head.split(None, 1)[0] if head else "") in _LOOP_OPENERS:
+            depth += 1
+        body.append(text if body else head.split(None, 1)[-1])
+        tail = _strip_trailing_redirects(text).rstrip(")}; ")
+        while tail.endswith("done") and (len(tail) == 4 or not (tail[-5].isalnum() or tail[-5] in "_./-")):
+            depth -= 1
+            tail = tail[:-4].rstrip(")}; ")
+        if depth <= 0:
+            break
+    # The header (``for f in <words>``) is excluded: a list word is data.
+    return bool(_BODY_MOVES_RE.search("\n".join(body[1:])))
+
+
 #: A STDOUT redirect: fd-less or ``1>``, or ``&>`` (R6-2). ``2>err.log`` only
 #: moves stderr, so the body still reaches the next reader. ``scan`` drops fd
 #: numbers, hence a dedicated, quote-blind pattern: it can only fail toward
@@ -1806,7 +1857,10 @@ class _Walker:
         #: cwd of the ``for`` itself and whether every word was absolute. Bash
         #: expands a relative glob to RELATIVE words, so the pin holds only
         #: where the cwd still equals the loop's (review B1, PR #3816).
-        self.for_globs: dict[str, tuple[list[tuple[str, str | None]], str, bool]] = {}
+        self.for_globs: dict[str, tuple[list[tuple[str, str | None]], str | None, bool]] = {}
+        #: Whether the ``for`` being walked changes directory anywhere in its
+        #: body; set per piece by ``walk`` from :func:`_for_body_moves`.
+        self.for_body_moves = False
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -1909,6 +1963,8 @@ class _Walker:
                 stages=[p[0] for p in pieces[start:index]],
                 earlier=[item for item in produced_so_far if not item.provably_sunk()],
             )
+            # Read by ``_for`` when this piece opens a ``for`` (review round 2 m1).
+            self.for_body_moves = _for_body_moves(pieces, index)
             if isolated:
                 snap = self._save()
                 self._segment(
@@ -2590,8 +2646,15 @@ class _Walker:
                         else os.path.join(_glob_escape(st.cwd), v.pattern)
                     )
                 entries.append((text, pattern))
+            # A relative word is never pinned when the body moves directory
+            # ANYWHERE (review round 2 m1): ``absolute`` is then the only way
+            # to pin, and a relative glob stays opaque at every use site.
             absolute = all(v.text.startswith("/") for v in values)
-            self.for_globs[key] = (entries, st.cwd, absolute)
+            if not absolute and self.for_body_moves:
+                entries_cwd: str | None = None
+            else:
+                entries_cwd = st.cwd
+            self.for_globs[key] = (entries, entries_cwd, absolute)
             st.env[var] = FOR_GLOB_MARK + key + OPAQUE_MARK
             return
         if any(v.opaque or v.pattern is not None for v in values):
@@ -3175,7 +3238,9 @@ class _Walker:
         if binding is None or exp.substitutions or exp.empty or exp.temp:
             return None
         entries, loop_cwd, absolute = binding
-        if not absolute and self.state.cwd != loop_cwd:
+        # ``loop_cwd`` is ``None`` when the body moves directory anywhere
+        # (review round 2 m1): a relative glob is then never pinned.
+        if not absolute and (loop_cwd is None or self.state.cwd != loop_cwd):
             # Review B1: a relative match moved with a ``cd``/``pushd`` (or an
             # unknowable one, cwd ``None``) in the body; the pin would name
             # the wrong file. The opaque reading is the fail-closed one.

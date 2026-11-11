@@ -117,9 +117,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   the script is a target; because GNU sed (`gsed`, Linux `sed`) reads that `''`
   as the script, `gsed` and any `-n`/`--quiet`/`--silent` keep the GNU reading,
   and the word after `''` still counts when it is a protected path. `$f` from
-  `for f in <glob>` is that glob, not the opaque working directory, while the
-  cwd stays the loop's (or every word is absolute): after a `cd`/`pushd` in the
-  body, the relative match is opaque again. Writes only (redirections, in-place
+  `for f in <glob>` is that glob, not the opaque working directory, when the
+  body never changes directory (or every word is absolute): a `cd`, `pushd`,
+  `popd` or `set -P` anywhere in the body — after the use, in a subshell, in a
+  nested loop — leaves a relative match opaque. Writes only (redirections, in-place
   edits, copy/move destinations); a delete through such a loop keeps the judge.
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
   own prefix. Before it runs, the checkpoint extracts real tool calls: this

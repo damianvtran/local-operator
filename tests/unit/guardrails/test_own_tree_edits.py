@@ -42,8 +42,9 @@ from local_operator.guardrails.check import CallContext, GuardSettings, check_to
 from local_operator.guardrails.classify import Risk, classify_bash
 from local_operator.guardrails.preview import preview_tool_call
 
-#: Captured at import, before any fixture stubs it.
+#: Captured at import, before any fixture stubs them.
 _REAL_GH_LOOKUP = prov._gh_open_prs
+_REAL_GH_HISTORY = prov._gh_prs
 
 S = "a85e507ffdfa"  # the editing / removing session
 S2 = "999999999999"  # an unrelated session
@@ -78,7 +79,14 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (state / "config.yml").write_text("version: 1\n")
     monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
     monkeypatch.setattr(prov, "_github_repo", lambda _: "damianvtran/local-operator-ui")
+    # ``worktree_activity`` asks the PR-history lookup (``_gh_prs``) first
+    # (#3782, on main since this PR was cut), so "no PR" needs it stubbed as
+    # well: with only ``_gh_open_prs`` stubbed the real ``gh`` ran. GitLab
+    # too, to keep the fixture forge-neutral (mirrors #3800's fixture).
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_mrs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_open_mrs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_running_owners", lambda real, sid: ())
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     monkeypatch.setenv("HOME", str(home))
@@ -228,6 +236,7 @@ def test_bsd_suffix_only_skips_a_literal_empty_word(home: Path, ui: Path) -> Non
 def test_untracked_file_edit_is_unchanged_low(home: Path, ui: Path) -> None:
     wt = ui / ".worktrees" / "bridge-single-recipient"
     (wt / "notes.json").write_text("{}\n")  # untracked
+    _own(home, wt)  # the root changed after recording (Linux ctime stamp)
     v = _classify(home, f"cd {WT} && sed -i '' '/x/,/y/d' notes.json")
     assert v.risk is Risk.LOW
     assert [t.target.path for t in v.targets] == [os.path.realpath(wt / "notes.json")]
@@ -292,6 +301,8 @@ def gh_timeout(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             raise subprocess.TimeoutExpired(argv, 8.0)
         return real_run(argv, *a, **k)
 
+    # Both real lookups, so the timeout reaches them through ``subprocess``.
+    monkeypatch.setattr(prov, "_gh_prs", _REAL_GH_HISTORY)
     monkeypatch.setattr(prov, "_gh_open_prs", _REAL_GH_LOOKUP)
     monkeypatch.setattr(prov.subprocess, "run", run)
 
@@ -337,7 +348,8 @@ def test_foreign_clean_worktree_with_gh_unknown_still_goes_to_the_judge(
 def test_own_clean_worktree_with_a_known_open_pr_stays_refused(
     home: Path, ui: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [1858])
+    # The open PR arrives through the history lookup, the one main consults first.
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [prov.ForgeChange(1858, "open", "")])
     v = _classify(home, f"git worktree remove --force {DONE}")
     assert v.risk is Risk.CRITICAL
     assert "open PR #1858" in v.targets[0].reason
@@ -370,7 +382,9 @@ def test_a_cd_in_the_loop_body_unpins_relative_glob_words(home: Path, ui: Path, 
     in *.yml; do cd ../st; sed -i '' s/v/PWNED/ $f; done)`` rewrote
     ``st/config.yml``. Pinning ``$f`` under the ``for``'s cwd ranked it LOW.
     """
-    (ui / ".worktrees" / "bridge-single-recipient" / "config.yml").write_text("k: v\n")
+    wt = ui / ".worktrees" / "bridge-single-recipient"
+    (wt / "config.yml").write_text("k: v\n")
+    _own(home, wt)  # the root changed after recording (Linux ctime stamp)
     v = _classify(home, f"cd {WT} && for f in *.yml; do {body}; done")
     assert v.risk >= Risk.HIGH, [(t.target.path, t.reason) for t in v.targets]
 
@@ -379,6 +393,7 @@ def test_a_cd_in_the_loop_body_unpins_a_nested_session_glob(home: Path, ui: Path
     wt = ui / ".worktrees" / "bridge-single-recipient"
     (wt / "sessions" / "x").mkdir(parents=True)
     (wt / "sessions" / "x" / "t.jsonl").write_text("{}\n")
+    _own(home, wt)  # the root changed after recording (Linux ctime stamp)
     command = f"cd {WT} && for f in sessions/*/*; do cd ~/.local-operator; : > $f; done"
     v = _classify(home, command)
     assert v.risk >= Risk.HIGH, [(t.target.path, t.reason) for t in v.targets]
@@ -388,9 +403,11 @@ def test_absolute_glob_entries_stay_pinned_across_a_cd(home: Path, ui: Path) -> 
     """Absolute words do not move with the cwd: still the precise CRITICAL reading."""
     command = f"cd {WT} && for f in ~/.local-operator/*.yml; do cd /; sed -i '' /x/d $f; done"
     assert _classify(home, command).risk is Risk.CRITICAL
-    # And the field case's own-tree pin still holds when the body never moves.
+    # Round 2 m1: ANY directory change in the body refuses a relative pin,
+    # even a ``cd`` back to the loop's own cwd (review n1's over-block, now
+    # consistently opaque rather than position-dependent).
     same = f"cd {WT} && for f in src/*/*/*.json; do cd {WT}; sed -i '' /x/d $f; done"
-    assert _classify(home, same).risk is Risk.LOW
+    assert _classify(home, same).risk is not Risk.LOW
 
 
 @pytest.mark.parametrize(
@@ -430,3 +447,50 @@ def test_copy_destination_loop_over_a_protected_glob_is_critical(home: Path, ui:
     """m2: ``cp x $f`` over a state-root glob was zero targets (LOW)."""
     command = "for f in ~/.local-operator/*.yml; do cp /etc/hosts $f; done"
     assert _classify(home, command).risk is Risk.CRITICAL
+
+
+# -- review round 2 (PR #3816) -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Takes effect on the NEXT iteration: the walker sees the use first.
+        ": > $f; cd ~/.local-operator",
+        # A subshell's cd is restored before the walker reaches ``done``.
+        "(cd ~/.local-operator && sed -i '' 's/.*//' $f)",
+        "(pushd ~/.local-operator && : > $f)",
+        "set -P; : > $f",
+        # A nested loop's cd still runs inside this body.
+        "for g in a b; do cd ~/.local-operator; done; : > $f",
+    ],
+    ids=["cd-at-end", "subshell-cd", "subshell-pushd", "set-P", "nested-loop-cd"],
+)
+def test_any_directory_change_in_the_body_unpins_a_relative_glob(
+    home: Path, ui: Path, body: str
+) -> None:
+    """m1 (round 2): a relative glob is pinned only when the body never moves.
+
+    Real bash, with ``wt/{a,config}.yml`` and ``st/config.yml``: ``(cd wt &&
+    for f in *.yml; do : > $f; cd ../st; done)`` left ``st/config.yml`` at 0
+    bytes, and ``(cd wt && for f in *.yml; do (cd ../st && sed -i '' 's/.*//'
+    $f); done)`` emptied it too. The use-site cwd check saw neither (the
+    first ``cd`` comes after the use; the second is restored with its
+    subshell) and ranked the state root's config.yml LOW.
+    """
+    wt = ui / ".worktrees" / "bridge-single-recipient"
+    (wt / "a.yml").write_text("k: v\n")
+    (wt / "config.yml").write_text("k: v\n")
+    _own(home, wt)  # the root changed after recording (Linux ctime stamp)
+    v = _classify(home, f"cd {WT} && for f in *.yml; do {body}; done")
+    assert v.risk >= Risk.HIGH, [(t.target.path, t.reason) for t in v.targets]
+
+
+def test_a_cd_after_the_loop_keeps_the_field_pin(home: Path, ui: Path) -> None:
+    """Only the loop's own body counts: a ``cd`` after ``done`` moves nothing."""
+    command = (
+        f"cd {WT} && for f in src/i18n/catalogues/*/ui.teamBridge.json; "
+        "do sed -i '' '/x/,/y/d' $f; done; cd ~/.local-operator"
+    )
+    v = _classify(home, command)
+    assert v.risk is Risk.LOW, [(t.target.path, t.reason) for t in v.targets]
