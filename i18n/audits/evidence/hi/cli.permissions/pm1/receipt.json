@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "record": "i18n/audits/evidence/hi/cli.permissions/pm1/record.json",
+  "companions": {
+    "record.json": "b00564a1498895b75320498faee7a11d4cb042966d67c8cdbc53d5955d8af837",
+    "report.md": "c8417a478f0713e7e9f05634fe306162460e4b075a737b660e7a3e5b5ecf75b3",
+    "audit.log": "4f10d1233fceef4e0c59bd3b316e49f33c251ba5f8ddce2ce6b1a618b50ecd56"
+  }
+}

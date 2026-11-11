@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "cli.permissions",
+  "history_sha256": "69106b829f2bca922830b87dd5d92ec01dd82e3cfb82ed923e39bf20d3378e3f",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "cli.permissions",
+      "source_sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+      "translator": {
+        "agent": "i18n-translator (PR #3691 coder agent, job ad99821ab9e1)",
+        "session": "ad99821ab9e1",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "f8ab0a45e07a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Independent audit r1-f8ab, 28/28 keys, check.py 0 problems. 0 blocker/0 major/4 minor (M1 « » vs guide “ ”; M2 app→aplicación de escritorio; M3 build→compilación; M4 Ejecútala referent). Record: i18n/audits/evidence/es/cli.permissions/r1-f8ab/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.permissions",
+      "source_sha256": "d5eed4044348f0fa462e1238209230507a48eb5e018b22c7a8b971b518d3f186",
+      "translator": {
+        "agent": "i18n-translator (lopdev round-2 wave, commit 788cc399; session not disclosed to auditor)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "9c0ff651f525",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "changes_requested",
+        "findings": 2
+      },
+      "status": "changes_requested",
+      "note": "Re-audit r2-9c0f, 38/38 keys, check.py 0. R1 M1-M4 resolved. 1 MAJOR: R2-1 screen.denied pane ≠ Apple es 'Grabación de pantalla y del audio del sistema'; 1 MINOR R2-2. Record: i18n/audits/evidence/es/cli.permissions/r2-9c0f/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.permissions",
+      "source_sha256": "58e58c3b19a07c024b609f614e686cc9a72def77e3de704870f0557e84e7be41",
+      "translator": {
+        "agent": "i18n-translator (lopdev round-3 wave, commit 85fb3581; session not disclosed to auditor)",
+        "session": null,
+        "model": null,
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (team lopdev)",
+        "session": "41862228e657",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Re-audit r3-4186 (R2+ scope: 5 changed keys + R2 findings). check.py 0. R2-1, R2-2 fixed; Apple es labels verified on macOS 27.2. 0 BLOCKER/MAJOR, 1 MINOR R3-1. Record: i18n/audits/evidence/es/cli.permissions/r3-4186/record.json"
+    }
+  ]
+}

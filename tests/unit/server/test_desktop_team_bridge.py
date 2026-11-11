@@ -899,8 +899,34 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
         "text": "the served text",
         "source": "served",
     }
-    # Screening is an invariant receipt, never a setting (§8, §13.9).
-    assert result["screening"] == {"required": True}
+    # Screening is an invariant receipt, never a setting (§8, §13.9). The ONE
+    # choice it carries is WHICH evaluated screener is tried first, plus the
+    # vetted list to choose from — served here because a renderer cannot import
+    # ``SCREENING_EVALUATED_MODELS``. No choice is stored on this machine.
+    assert result["screening"]["required"] is True
+    assert result["screening"]["preferred"] is None
+    assert result["screening"]["models"] == [
+        {
+            "value": "anthropic/claude-sonnet-5-5",
+            "provider": "anthropic",
+            "model_id": "claude-sonnet-5-5",
+        },
+        {
+            "value": "radient/anthropic/claude-sonnet-5.5",
+            "provider": "radient",
+            "model_id": "anthropic/claude-sonnet-5.5",
+        },
+        {
+            "value": "anthropic/claude-opus-5-5",
+            "provider": "anthropic",
+            "model_id": "claude-opus-5-5",
+        },
+        {
+            "value": "radient/anthropic/claude-opus-5.5",
+            "provider": "radient",
+            "model_id": "anthropic/claude-opus-5.5",
+        },
+    ]
     assert result["error"] is None
     assert discipline.boundaries == ["app_start"]
 
@@ -1074,8 +1100,23 @@ async def test_settings_get_passes_the_payload_through(api):
     FakeClient.behavior["settings"] = payload
     response = await client.get("/v1/desktop/team-bridge/settings?tenant_id=tnt_1")
     assert response.status_code == 200
-    # Passed through untouched, plus the ONE additive provenance flag.
-    assert response.json()["result"] == {**payload, "default_on": False}
+    # Passed through untouched, plus the ONE additive provenance flag and the
+    # LOCAL Screening model block (this machine's choice cannot come from the
+    # hub's answer).
+    result = response.json()["result"]
+    assert result["default_on"] is False
+    assert result["endpoint"] is None
+    # Machine-local typing preference (default on; typing design §7).
+    assert result["share_typing"] is True
+    assert result["settings"] == payload["settings"]
+    # ... and that list really is the evaluated table, so the block is not
+    # passing by echoing whatever it was handed.
+    from local_operator.team_bridge.model_boundary import SCREENING_EVALUATED_MODELS
+
+    assert result["screening"]["preferred"] is None
+    assert [entry["value"] for entry in result["screening"]["models"]] == [
+        f"{provider}/{model_id}" for provider, model_id in SCREENING_EVALUATED_MODELS
+    ]
 
 
 # -- default-on (bridge_consent_v2) additive contract ------------------------
@@ -4547,3 +4588,151 @@ async def test_conversation_replies_backward_window_and_conflicts(api):
         response = await client.get(f"{base}?{owner}&{suffix}")
         assert response.status_code == 422, (suffix, response.text)
         assert FakeClient.calls == before
+
+
+# -- the Screening model choice: LOCAL, per machine ---------------------------
+#
+# The screener runs on the RECEIVING machine, so which model screens first is a
+# local choice: it rides this plane's answers and is never forwarded to the hub
+# (the hub only shape-checks the id it is told about elsewhere). These tests pin
+# the contract the UI lane draws its dropdown from — the vetted list plus the
+# value actually in force — and the rule that an unusable write is IGNORED
+# rather than turned into a validation cliff.
+
+
+def _write_local_choice(root: Path, value: str) -> None:
+    """Put ``team_bridge.screening.model`` in this machine's config document.
+
+    Written as YAML on purpose: the route must obey the SAME document a hand edit
+    produces, not a state only a test could arrange. ``values:`` is the root the
+    reader consults.
+    """
+
+    (root / "config.yml").write_text(
+        "values:\n  team_bridge:\n    screening:\n      model: " + json.dumps(value) + "\n",
+        encoding="utf-8",
+    )
+
+
+async def test_status_serves_the_stored_screening_choice(api):
+    client, root, _discipline = api
+    _write_local_choice(root, "anthropic/claude-opus-5-5")
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["screening"]["preferred"] == "anthropic/claude-opus-5-5"
+    # The offer is the evaluated table whatever is stored: an off-table value can
+    # never widen the set a renderer may send back.
+    assert "anthropic/claude-opus-5-5" in [
+        entry["value"] for entry in result["screening"]["models"]
+    ]
+
+
+async def test_status_ignores_an_off_table_stored_choice(api):
+    """A hand-edited value the chain would ignore reads as NO CHOICE here too.
+
+    Otherwise the page would show a model selected while screening silently used
+    the table's own order — the exact disagreement this seam exists to prevent.
+    """
+
+    client, root, _discipline = api
+    _write_local_choice(root, "openai/gpt-6-astra")
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["screening"]["preferred"] is None
+
+
+async def test_settings_get_serves_the_stored_screening_choice(api):
+    client, root, _discipline = api
+    FakeClient.behavior["settings"] = {"endpoint": None}
+    _write_local_choice(root, "anthropic/claude-opus-5-5")
+    result = (await client.get("/v1/desktop/team-bridge/settings")).json()["result"]
+    assert result["screening"]["preferred"] == "anthropic/claude-opus-5-5"
+
+
+async def test_put_settings_stores_the_screening_choice_and_never_forwards_it(api):
+    client, root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={
+            "state": "paused",
+            "expected_account_id": "acc_7",
+            "screening_model": "anthropic/claude-opus-5-5",
+        },
+    )
+    assert response.status_code == 200, response.text
+    # The value in force comes back, so the renderer reconciles against the
+    # backend instead of its own optimistic state.
+    assert response.json()["result"]["screening"]["preferred"] == "anthropic/claude-opus-5-5"
+    # LOCAL: the hub write is unchanged by a screening choice.
+    assert "screening_model" not in FakeClient.behavior["last_put_kwargs"]
+    # ... and it really is persisted, not just echoed.
+    assert "claude-opus-5-5" in (root / "config.yml").read_text(encoding="utf-8")
+    assert (await client.get("/v1/desktop/team-bridge/status")).json()["result"]["screening"][
+        "preferred"
+    ] == "anthropic/claude-opus-5-5"
+
+
+async def test_put_settings_stores_a_login_flavour_canonically(api):
+    """``anthropic-key`` reaches the same weights as ``anthropic``, so one choice.
+
+    Storing the canonical spelling keeps the config file honest about WHICH
+    table entry is in force; the chain folds the flavour again harmlessly.
+    """
+
+    client, root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={
+            "state": "paused",
+            "expected_account_id": "acc_7",
+            "screening_model": "anthropic-key/claude-opus-5-5",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["screening"]["preferred"] == "anthropic/claude-opus-5-5"
+    assert "anthropic-key" not in (root / "config.yml").read_text(encoding="utf-8")
+
+
+async def test_put_settings_ignores_an_off_table_choice_and_echoes_what_is_in_force(api):
+    client, root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+    _write_local_choice(root, "anthropic/claude-opus-5-5")
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={
+            "state": "paused",
+            "expected_account_id": "acc_7",
+            "screening_model": "openai/gpt-6-astra",
+        },
+    )
+    assert response.status_code == 200, response.text
+    # The stored choice stands, and the answer says so rather than pretending the
+    # write landed.
+    assert response.json()["result"]["screening"]["preferred"] == "anthropic/claude-opus-5-5"
+    assert "gpt-6-astra" not in (root / "config.yml").read_text(encoding="utf-8")
+
+
+async def test_put_settings_without_the_field_keeps_a_stored_choice(api):
+    """A rename, a pause or a consent write must not clear a choice sideways."""
+
+    client, root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+    _write_local_choice(root, "anthropic/claude-opus-5-5")
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused", "expected_account_id": "acc_7"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["screening"]["preferred"] == "anthropic/claude-opus-5-5"
+
+
+async def test_put_settings_clears_the_choice_with_an_empty_string(api):
+    client, root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+    _write_local_choice(root, "anthropic/claude-opus-5-5")
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused", "expected_account_id": "acc_7", "screening_model": ""},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["screening"]["preferred"] is None

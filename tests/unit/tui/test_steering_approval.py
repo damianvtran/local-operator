@@ -72,6 +72,7 @@ from local_operator.tui.widgets.transcript import (
     UserBlock,
     WorkingBlock,
 )
+from tests.e2e.harness import settle_on
 
 from .test_app_pilot import FakeSession, _factory
 from .test_transcript_selection import _cell, _composer_copy
@@ -2648,12 +2649,44 @@ async def test_ctrl_c_on_an_empty_composer_keeps_the_exit_ladder() -> None:
         session.streaming = True
 
         await pilot.press("ctrl+c")
-        await pilot.pause()
+        # The hint is a transcript block appended by a LATER frame than the
+        # interrupt it reports, so wait for the row itself rather than for one
+        # idle tick; the same wait then covers the frame the `rows()` assertion
+        # below reads.
+        await settle_on(
+            pilot,
+            lambda: any("ctrl+c again to exit" in row for row in rows(app)),
+            "the 'ctrl+c again to exit' hint to paint after the first Ctrl+C",
+        )
         assert session.aborts == ["interrupted"]
         assert any("ctrl+c again to exit" in row for row in rows(app))
 
+        # RE-ARM THE LADDER IMMEDIATELY BEFORE THE SECOND PRESS, for the reason
+        # its sibling test above records in full: the ladder compares two real
+        # ``time.monotonic()`` readings against ``DOUBLE_INTERRUPT_WINDOW_S``
+        # (1.5 s), and everything above is unbounded on a loaded machine, so the
+        # second press can land AFTER the window and become a fresh first press
+        # — which leaves the app running with nothing to wait for. That is the
+        # one cause a bounded wait cannot fix, and it is the recorded cause of
+        # this exact assertion failing in CI (run 39838493282, 3.12 shard 3).
+        # Re-stamping keeps what this cell is about — the empty-composer path
+        # keeps the ladder — instead of betting on the runner's speed. Nothing
+        # about the window is weakened: the assert pins that the FIRST press
+        # armed it, and the window's own behaviour stays pinned by
+        # ``test_a_slow_second_ctrl_c_is_a_fresh_interrupt_not_an_exit`` and
+        # ``test_the_double_interrupt_window_is_a_deliberate_double_tap``.
+        assert app._last_interrupt_at, "the first press did not arm the exit ladder"
+        app._last_interrupt_at = time.monotonic()
         await pilot.press("ctrl+c")
-        await pilot.pause()
+        # Leaving is NOT one loop turn: the handler calls ``App.exit()`` and
+        # Textual then unwinds the app, its workers and its screen, so the
+        # assertion below has to wait for the state it reads instead of
+        # asserting one tick after the key that starts it.
+        await settle_on(
+            pilot,
+            lambda: not app.is_running,
+            "the app to finish exiting after the second Ctrl+C",
+        )
         assert not app.is_running
 
 

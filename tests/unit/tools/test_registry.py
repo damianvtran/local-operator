@@ -89,6 +89,10 @@ async def _allow_notify(**_kwargs: Any) -> str:
     return "Notified."
 
 
+async def _music_journal(_record: dict[str, Any]) -> None:
+    """Presence-only durable door for the fully capable registry fixture."""
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
@@ -135,6 +139,12 @@ def _engine_context(**kwargs) -> ToolContext:
         # The inbox door (docs/design/notifications-inbox.md §3.2): presence-
         # only, the ONE fact ``build_notify_tool``'s createIf gate reads.
         notify_inbox=_allow_notify,
+        journal_music_job=_music_journal,
+        # ``skill`` is a DEFAULT tool since the profile-proposals change, and
+        # its createIf is the managed profile root (``skill_tool._config_dir``),
+        # which every real session's context carries (session_factory sets
+        # ``memory_config_dir``). Presence-only: never read or written here.
+        memory_config_dir="/stub-profile-root",
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -188,7 +198,9 @@ def _force_browser_available(monkeypatch):
     monkeypatch.setattr(
         audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
     )
-    from local_operator.tools import artifact_data_tool
+    from local_operator.tools import artifact_data_tool, music_tool
+
+    monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
 
@@ -328,30 +340,36 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     every config root) appended after that — and ``artifact_data`` (the
     claude.ai artifact data store, createIf-gated on a stored anthropic OAuth
     grant) appended after that — and ``notify`` (the operator's inbox,
-    createIf-gated on the session's inbox door) is the newest append and now
-    ends the DEFAULT table. The configuration run's opt-in ``skill`` is the
-    newest BUILDER append and ends ``TOOL_BUILDERS`` only: it is absent from
-    ``DEFAULT_TOOL_NAMES`` on purpose (see ``test_skill_is_opt_in_only``), so
-    the builder table's tail is the default tail plus ``skill``."""
-    assert list(TOOL_BUILDERS)[-1] == "skill"
-    builders = list(TOOL_BUILDERS)[:-1]
-    assert DEFAULT_TOOL_NAMES[-1] == "notify"
+    createIf-gated on the session's inbox door) appended after that. The
+    profile-proposals change then made ``profile_proposal`` and ``skill``
+    default (both DEFERRED, so off the wire until fetched) and appended them,
+    in that order, at the end of BOTH tables -- ``skill`` is no longer an
+    opt-in builder-only tail. The async music tools (``generate_music``,
+    ``modify_music``, ``music_status``) are the newest append after that."""
+    music = ["generate_music", "modify_music", "music_status"]
+    assert list(TOOL_BUILDERS)[-3:] == music
+    assert DEFAULT_TOOL_NAMES[-3:] == music
+    builders = list(TOOL_BUILDERS)[:-3]
+    assert DEFAULT_TOOL_NAMES[-5:-3] == ["profile_proposal", "skill"]
+    assert builders[-2:] == ["profile_proposal", "skill"]
+    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-5]
+    assert defaults[-1] == "notify"
     assert builders[-1] == "notify"
-    assert DEFAULT_TOOL_NAMES[-2] == "artifact_data"
+    assert defaults[-2] == "artifact_data"
     assert builders[-2] == "artifact_data"
-    assert DEFAULT_TOOL_NAMES[-3] == "tags"
+    assert defaults[-3] == "tags"
     assert builders[-3] == "tags"
-    assert DEFAULT_TOOL_NAMES[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert defaults[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
     assert builders[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
-    assert DEFAULT_TOOL_NAMES[-6] == "bridge"
+    assert defaults[-6] == "bridge"
     assert builders[-6] == "bridge"
-    assert DEFAULT_TOOL_NAMES[-7] == "setting"
+    assert defaults[-7] == "setting"
     assert builders[-7] == "setting"
-    assert DEFAULT_TOOL_NAMES[-8] == "video_status"
+    assert defaults[-8] == "video_status"
     assert builders[-8] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-9] == "generate_video"
+    assert defaults[-9] == "generate_video"
     assert builders[-9] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-10] == "no_reply"
+    assert defaults[-10] == "no_reply"
     assert builders[-10] == "no_reply"
 
 
@@ -509,8 +527,9 @@ def test_enabled_empty_list_gives_no_tools() -> None:
 
 #: Builders that are in the table but deliberately NOT default: a host that
 #: declares one builds it (``Session._merge_capability_tools``); no other session
-#: does. Each entry is a reviewed decision, so the set is spelled out here.
-OPT_IN_ONLY_TOOLS = {"skill"}
+#: does. Each entry is a reviewed decision, so the set is spelled out here. Empty
+#: since the profile-proposals change made ``skill`` a (deferred) default tool.
+OPT_IN_ONLY_TOOLS: set[str] = set()
 
 
 def test_default_names_cover_builder_table() -> None:
@@ -520,30 +539,30 @@ def test_default_names_cover_builder_table() -> None:
     assert not OPT_IN_ONLY_TOOLS & set(DEFAULT_TOOL_NAMES)
 
 
-def test_skill_is_opt_in_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The configuration run's ``skill`` tool never enters an ordinary session.
+def test_skill_and_profile_proposal_are_deferred_defaults() -> None:
+    """``skill`` and ``profile_proposal`` are default tools an owner's request
+    reaches, but DEFERRED: built for every capable session, held off the wire.
 
-    The ordinary surface is what the prompt cache keys on, so this compares the
-    WHOLE default tools array (names, order, schemas) with and without the
-    ``skill`` builder in the table: adding it must not move a single byte. Built
-    from a context that WOULD satisfy the skill factory (a profile root), so the
-    absence is the default list's doing, not the factory's createIf.
+    Replaces the old opt-in-only pin. The operator intent is that owner-requested
+    skill authoring and proposal decisions are ordinary tools, while most turns
+    never pay their schema -- so both must BUILD from a real session's context
+    (profile root + registries) and both must be in ``DEFERRED_TOOLS`` with a
+    purpose line, which is what keeps them discoverable by name.
     """
-    import json
+    from local_operator.tools.deferral import DEFERRED_TOOL_PURPOSES, DEFERRED_TOOLS
 
-    context = _engine_context()
-    context.memory_config_dir = "/nonexistent-profile-root"
-    assert TOOL_BUILDERS["skill"](context) is not None, "the factory itself must build"
-
-    def wire(tools: list[Any]) -> str:
-        return json.dumps(
-            [[tool.name, tool.description, tool.parameters] for tool in tools], sort_keys=False
-        )
-
-    assert "skill" not in [tool.name for tool in create_tools(context)]
-    with_skill = wire(create_tools(context))
-    monkeypatch.delitem(TOOL_BUILDERS, "skill")
-    assert with_skill == wire(create_tools(context))
+    names = [tool.name for tool in create_tools(_engine_context())]
+    for name in ("profile_proposal", "skill"):
+        assert name in names
+        assert name in DEFERRED_TOOLS and DEFERRED_TOOL_PURPOSES.get(name)
+    # Each keeps its own createIf: no profile root -> no skill; no registries ->
+    # no profile_proposal; neither absence moves another tool.
+    without_root = [t.name for t in create_tools(_engine_context(memory_config_dir=None))]
+    assert without_root == [name for name in names if name != "skill"]
+    no_registries = [
+        t.name for t in create_tools(_engine_context(agent_registry=None, team_registry=None))
+    ]
+    assert "profile_proposal" not in no_registries and "skill" in no_registries
 
 
 def test_the_console_tool_is_absent_without_the_app(monkeypatch) -> None:
@@ -661,9 +680,12 @@ def test_diff_details_carries_a_rendered_diff_and_honours_the_cap() -> None:
     # An unchanged file reports no diff at all (nothing to render).
     unchanged = builtin._diff_details("f.txt", "a\nb\n", "a\nb\n")
     assert "diff" not in unchanged
-    # The cap bounds the stored list even for a pathological write.
+    # The cap bounds the stored list even for a pathological write, and the
+    # omission is reported as a count rather than a trailing marker row.
     big = builtin._diff_details("f.txt", "\n".join(f"line{i}" for i in range(500)), "")
-    assert len(big["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+    assert len(big["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES
+    assert "…" not in big["diff"]
+    assert big[builtin.DIFF_TRUNCATED_ROWS_KEY] == 501 - (len(big["diff"]) - 2)
 
 
 def _pem_block(line: str, *, prefix: str = "") -> str:
@@ -794,8 +816,11 @@ class TestDiffDetailsKeepsPemBlocksWhole:
             self.LINE + "\n" + self.LINE, self.LINE + "\n" + self.LINE * 2, 1
         )
         capped = builtin._diff_details("synthetic.md", huge_before, huge_after)
-        assert len(capped["diff"]) <= builtin._DIFF_DETAILS_CAP_LINES + 1
-        assert capped["diff"][-1] == "…"
+        # The only change sits inside a block longer than the cap: the cut moves
+        # before the block, leaving no change row, so NO diff is stored rather
+        # than a split block -- and the omission is still reported.
+        assert "diff" not in capped
+        assert capped[builtin.DIFF_TRUNCATED_ROWS_KEY] > builtin._DIFF_DETAILS_CAP_LINES
 
     def test_more_than_two_hundred_lines_with_a_long_repeated_run_still_publishes(self) -> None:
         """Review round 2, R2-1: a credential-free diff must never be withheld.
@@ -840,9 +865,11 @@ class TestDiffDetailsKeepsPemBlocksWhole:
         )
         before = big + "Middle guidance 111.\n" + big
         after = before.replace("Middle guidance 111.", "Middle guidance 222.", 1)
-        rows = self._details(before, after)
-        assert rows[-1] == "…", "the over-cap payload must advertise truncation"
-        assert len(rows) <= builtin._DIFF_DETAILS_CAP_LINES + 1
+        details = builtin._diff_details("synthetic.md", before, after)
+        # Hiding is now "no rows stored" plus the omitted count; a split block is
+        # never stored either way.
+        assert "diff" not in details, "a block larger than the cap must not be split"
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] > builtin._DIFF_DETAILS_CAP_LINES
 
     def test_new_file_create_header_matches_difflib_byte_for_byte(self) -> None:
         """A zero-length side prints the line BEFORE it, as difflib does (R3-1).
@@ -874,6 +901,264 @@ class TestDiffDetailsKeepsPemBlocksWhole:
         assert self._details(before, after) == list(
             difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=2)
         )
+
+
+def _assert_publishable(rows: list[str]) -> None:
+    """``rows`` survive the REAL publication seam unchanged under a no-op mask.
+
+    The seam (``harness.loop._redact_diff_detail``) withholds any diff whose hunk
+    counts disagree with its observed rows; an identity redactor isolates that
+    shape check from credential masking, so a withheld result here means the
+    producer handed it an invalid diff.
+    """
+    from local_operator.harness.loop import _DIFF_DETAIL_WITHHELD, _redact_diff_detail
+
+    published = _redact_diff_detail(rows, lambda text: text)
+    assert _DIFF_DETAIL_WITHHELD not in published, "valid truncated diff was withheld"
+    assert published == rows
+
+
+def _long_pem_block() -> str:
+    """A 22-row PRIVATE KEY block, long enough to straddle a cut."""
+    line = "M7qA9zKd3PxW8sVn" * 4
+    return (
+        "-----BEGIN " + "PRIV"
+        "ATE KEY-----\n" + "\n".join([line] * 20) + "\n-----END " + "PRIV"
+        "ATE KEY-----\n"
+    )
+
+
+def _hunk_counts_match(rows: list[str]) -> bool:
+    """Every ``@@`` header's counts equal the rows that follow it."""
+    import re
+
+    pattern = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+    index = 2
+    while index < len(rows):
+        match = pattern.fullmatch(rows[index])
+        if match is None:
+            return False
+        old_want = int(match[2]) if match[2] is not None else 1
+        new_want = int(match[4]) if match[4] is not None else 1
+        index += 1
+        old_seen = new_seen = 0
+        while index < len(rows) and not rows[index].startswith("@@"):
+            old_seen += rows[index][:1] in (" ", "-")
+            new_seen += rows[index][:1] in (" ", "+")
+            index += 1
+        if (old_seen, new_seen) != (old_want, new_want):
+            return False
+    return True
+
+
+class TestDiffDetailsTruncatesIntoARedactableShape:
+    """Over-cap diffs are cut at hunk boundaries, never into an invalid shape.
+
+    The bug: ``diff[:200] + ["…"]`` cut mid-hunk, the publication seam refused
+    the count mismatch and every write/edit diff over 200 rows reached replay,
+    subagent and transcript views as ``[output withheld: ...]``.
+    """
+
+    def test_large_new_file_keeps_its_first_rows_with_rewritten_header(self) -> None:
+        content = "".join(f"line {i}\n" for i in range(500))
+        details = builtin._diff_details("new.py", "", content)
+        rows = details["diff"]
+        assert len(rows) == builtin._DIFF_DETAILS_CAP_LINES
+        assert rows[2] == f"@@ -0,0 +1,{builtin._DIFF_DETAILS_CAP_LINES - 3} @@"
+        assert rows[3] == "+line 0"
+        assert "…" not in rows
+        assert details["added"] == 500
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == 501 - (len(rows) - 2)
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+
+    def test_many_hunks_keep_whole_hunks_then_a_valid_partial(self) -> None:
+        before_lines = [f"row {i}" for i in range(2000)]
+        after_lines = list(before_lines)
+        for index in range(0, 2000, 10):
+            after_lines[index] = f"changed {index}"
+        details = builtin._diff_details(
+            "many.txt", "\n".join(before_lines) + "\n", "\n".join(after_lines) + "\n"
+        )
+        rows = details["diff"]
+        assert len(rows) <= builtin._DIFF_DETAILS_CAP_LINES
+        assert _hunk_counts_match(rows)
+        assert rows[-1][:1] in (" ", "+", "-")
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] > 0
+        _assert_publishable(rows)
+
+    def test_exact_cap_is_not_truncated(self) -> None:
+        # 2 file headers + 1 hunk header + 197 added rows == the cap exactly.
+        content = "".join(f"x{i}\n" for i in range(builtin._DIFF_DETAILS_CAP_LINES - 3))
+        details = builtin._diff_details("exact.txt", "", content)
+        assert len(details["diff"]) == builtin._DIFF_DETAILS_CAP_LINES
+        assert builtin.DIFF_TRUNCATED_ROWS_KEY not in details
+        one_more = content + "extra\n"
+        over = builtin._diff_details("exact.txt", "", one_more)
+        assert len(over["diff"]) == builtin._DIFF_DETAILS_CAP_LINES
+        assert over[builtin.DIFF_TRUNCATED_ROWS_KEY] == 1
+        _assert_publishable(over["diff"])
+
+    def test_cut_never_splits_a_private_key_block(self) -> None:
+        line = "M7qA9zKd3PxW8sVn" * 4
+        pem = (
+            "-----BEGIN " + "PRIV"
+            "ATE KEY-----\n" + "\n".join([line] * 20) + "\n-----END " + "PRIV"
+            "ATE KEY-----\n"
+        )
+        # The block's 22 rows straddle row ~197 of a new file.
+        content = "".join(f"x{i}\n" for i in range(185)) + pem + "tail\n"
+        rows = builtin._diff_details("pem.txt", "", content)["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in rows), "cut moved before the block"
+        assert rows[-1] == "+x184"
+        assert _hunk_counts_match(rows)
+
+    def test_byte_budget_bounds_long_rows(self) -> None:
+        wide = "y" * 4000
+        content = "".join(f"{i}{wide}\n" for i in range(60))
+        details = builtin._diff_details("wide.json", "", content)
+        rows = details["diff"]
+        assert sum(len(r.encode()) for r in rows) <= builtin._DIFF_DETAILS_CAP_BYTES
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == 61 - (len(rows) - 2)
+        _assert_publishable(rows)
+
+    def test_rewrite_hunk_keeps_counts_valid_across_removed_and_added(self) -> None:
+        before = "".join(f"old {i}\n" for i in range(300))
+        after = "".join(f"new {i}\n" for i in range(300))
+        details = builtin._diff_details("rewrite.txt", before, after)
+        rows = details["diff"]
+        assert _hunk_counts_match(rows)
+        # Review R1-1: difflib renders all removals before all additions, so a
+        # prefix cut stored 197 red rows and no green. The cut now shares the
+        # 197-row budget: 99 '-' then 98 '+', each a contiguous prefix of its
+        # side, under a header with the observed counts.
+        assert rows[2] == "@@ -1,99 +1,98 @@"
+        body = rows[3:]
+        assert body == [f"-old {i}" for i in range(99)] + [f"+new {i}" for i in range(98)]
+        # 600 content rows, 197 kept; the header is framing, not a line.
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == 600 - 197
+        _assert_publishable(rows)
+
+    def test_replace_split_after_context_and_uneven_sides(self) -> None:
+        """Context before the block stays; a short side donates its leftovers."""
+        head = "".join(f"keep {i}\n" for i in range(5))
+        before = head + "".join(f"old {i}\n" for i in range(40)) + "end\n"
+        after = head + "".join(f"new {i}\n" for i in range(400)) + "end\n"
+        details = builtin._diff_details("uneven.txt", before, after)
+        rows = details["diff"]
+        # 197 rows = 2 context + all 40 '-' + 155 '+' (the leftover budget).
+        assert rows[2] == "@@ -4,42 +4,157 @@"
+        assert rows[3:5] == [" keep 3", " keep 4"]
+        assert sum(r.startswith("-") for r in rows[3:]) == 40, "every removal kept"
+        assert rows[-1] == "+new 154"
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+
+    def test_replace_split_never_splits_an_added_private_key(self) -> None:
+        """The split's '+' prefix stops before a block it cannot keep whole."""
+        pem = _long_pem_block()
+        before = "".join(f"old {i}\n" for i in range(300))
+        after = (
+            "".join(f"new {i}\n" for i in range(90))
+            + pem
+            + "".join(f"tail {i}\n" for i in range(200))
+        )
+        rows = builtin._diff_details("pem.txt", before, after)["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in rows)
+        added = [row for row in rows[3:] if row.startswith("+")]
+        assert added == [f"+new {i}" for i in range(90)], "cut moved before the block"
+        assert any(row.startswith("-") for row in rows[3:])
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+
+    def test_deleting_a_private_key_across_the_cut_never_splits_it(self) -> None:
+        """Review R1-4: the old-side span rule, pinned with a deleted block."""
+        pem = _long_pem_block()
+        # A pure deletion: the block's rows straddle the 197-row cut.
+        before = (
+            "".join(f"x{i}\n" for i in range(185)) + pem + "".join(f"y{i}\n" for i in range(50))
+        )
+        rows = builtin._diff_details("pem.txt", before, "")["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in rows)
+        assert rows[-1] == "-x184"
+        assert _hunk_counts_match(rows)
+        _assert_publishable(rows)
+        # Inside a replace split the old side is cut the same way: the '-'
+        # prefix stops before the block, the '+' side still shows.
+        replaced = builtin._diff_details(
+            "pem.txt",
+            "".join(f"x{i}\n" for i in range(80)) + pem + "".join(f"y{i}\n" for i in range(200)),
+            "".join(f"new {i}\n" for i in range(300)),
+        )["diff"]
+        assert not any("PRIV" "ATE KEY" in row for row in replaced)
+        assert [r for r in replaced[3:] if r.startswith("-")] == [f"-x{i}" for i in range(80)]
+        assert any(row.startswith("+") for row in replaced[3:])
+        assert _hunk_counts_match(replaced)
+        _assert_publishable(replaced)
+
+    def test_truncated_count_excludes_hunk_headers(self) -> None:
+        """Review R1-3 / QA Q1: the count is file lines, not ``@@`` rows."""
+        before_lines = [f"row {i}" for i in range(2000)]
+        after_lines = list(before_lines)
+        for index in range(0, 2000, 10):
+            after_lines[index] = f"changed {index}"
+        details = builtin._diff_details(
+            "many.txt", "\n".join(before_lines) + "\n", "\n".join(after_lines) + "\n"
+        )
+        full = ["--- ", "+++ "] + builtin._render_groups(
+            before_lines,
+            after_lines,
+            __import__("difflib")
+            .SequenceMatcher(None, before_lines, after_lines)
+            .get_grouped_opcodes(n=builtin._DIFF_CONTEXT_LINES),
+        )
+
+        def lines(rows: list[str]) -> int:
+            return sum(1 for row in rows[2:] if not row.startswith("@@"))
+
+        omitted = lines(full) - lines(details["diff"])
+        assert details[builtin.DIFF_TRUNCATED_ROWS_KEY] == omitted
+        omitted_headers = sum(r.startswith("@@") for r in full) - sum(
+            r.startswith("@@") for r in details["diff"]
+        )
+        assert omitted_headers > 1, "the case must omit several hunks"
+
+    def test_single_long_row_up_to_the_seam_budget_is_stored(self) -> None:
+        """Review R1-2: a 110 KB one-line file stored no diff under a flat 96 KiB.
+
+        The seam accepts the 4-row shape (128 KiB per diff); the producer's
+        budget is now 120 KiB, so the row is stored and publishes unchanged.
+        """
+        content = '{"k":"' + "v" * 110_000 + '"}\n'
+        details = builtin._diff_details("min.json", "", content)
+        assert builtin.DIFF_TRUNCATED_ROWS_KEY not in details
+        assert details["diff"][3] == "+" + content.rstrip("\n")
+        _assert_publishable(details["diff"])
+
+    def test_byte_budget_boundary_matches_the_seam(self) -> None:
+        """At the cap the seam publishes, even a mask-growing redactor; past it
+        the row is omitted, never shortened. Pins the margin's arithmetic."""
+        from local_operator.harness.loop import (
+            _DIFF_DETAIL_BYTES,
+            _DIFF_DETAIL_WITHHELD,
+            _redact_diff_detail,
+        )
+
+        cap = builtin._DIFF_DETAILS_CAP_BYTES
+        assert cap <= _DIFF_DETAIL_BYTES - 8 * 1024, "keep the per-diff margin"
+        framing = len("--- ") + len("+++ ") + len("@@ -0,0 +1 @@") + len("+")
+        at_cap = "z" * (cap - framing)
+        details = builtin._diff_details("edge.txt", "", at_cap + "\n")
+        rows = details["diff"]
+        assert sum(len(r.encode()) for r in rows) == cap
+        _assert_publishable(rows)
+        # A redactor that GROWS each masked view (a short value -> "[redacted]")
+        # still fits the seam's output budget at the cap.
+        grown = _redact_diff_detail(rows, lambda text: text + "[redacted]")
+        assert _DIFF_DETAIL_WITHHELD not in grown
+        over = builtin._diff_details("edge.txt", "", at_cap + "z\n")
+        assert "diff" not in over
+        assert over[builtin.DIFF_TRUNCATED_ROWS_KEY] == 1
 
 
 def test_write_reports_diff_counts_for_new_and_overwritten_files(tmp_path) -> None:

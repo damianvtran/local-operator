@@ -1,0 +1,116 @@
+{
+  "locale": "ur",
+  "namespace": "cli.permissions",
+  "audit_id": "urp1",
+  "audit_date": "2026-11-09",
+  "key_count": 28,
+  "pr": "https://github.com/damianvtran/local-operator/pull/3691",
+  "source_audit_revision": "50badda034d755ebb049c4f542f3073439bf823e",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team subagent)",
+    "session": "ffe80a68ac43",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "Host system prompt 'Model: anthropic/claude-opus-5-5' for this session; no fallback occurred",
+    "fallback": null,
+    "independent_from_translator_session": true,
+    "independence": "Distinct agent/session from translator (PR #3691 coder agent, job ad99821ab9e1, anthropic/claude-opus-5-5); did not author or edit the namespace. Same model family as translator: independent agent, not independent vendor."
+  },
+  "translator": {
+    "agent": "i18n-translator (PR #3691 coder agent, job ad99821ab9e1)",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.json",
+      "sha256": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.permissions.context.json",
+      "sha256": "aca67def3cff590dcc5f681e8ff0127fecf6b33775555e3eaafc240070ba15ce"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/cli.permissions.json",
+      "sha256": "589e1fa1176215d05a3f66a3f7119eedc096b89cdee65dde2e4c0f2f29be08bd"
+    }
+  },
+  "source_sha256_ledger": "eba1e1dd19a618fa8c46a3744197afd2dfa4e84b6774f16b20e8de389f4dbf8f",
+  "artifacts": {
+    "report.md": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp1/report.md",
+      "sha256": "e5b5b7813b7c00b286c7e28d7c5fe8584e12bc1b14a0601fc63df53eb0ad97e7"
+    },
+    "audit.log": {
+      "path": "i18n/audits/evidence/ur/cli.permissions/urp1/audit.log",
+      "sha256": "d832e7de181b48008ab113d63da4107063e10efb418ca75dca28073f0ca0e971"
+    }
+  },
+  "audit_log_is_execution_log": true,
+  "audit_notes_not_execution_log": "report.md is reasoning/findings; audit.log holds actual command output captured by tee-equivalent redirection in this session. The Apple language list line in audit.log records a web_fetch tool result, not a shell command.",
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 2,
+    "finding_ids": [
+      "U1",
+      "U2",
+      "U3",
+      "U4",
+      "U5"
+    ],
+    "severities": {
+      "U1": "MAJOR",
+      "U2": "MAJOR",
+      "U3": "MINOR",
+      "U4": "NIT",
+      "U5": "NIT"
+    }
+  },
+  "findings": [
+    {
+      "id": "U1",
+      "severity": "MAJOR",
+      "keys": [
+        "cli.permissions.status.screen.denied"
+      ],
+      "summary": "Urdu-coined macOS menu path; macOS has no Urdu UI so labels shown are English",
+      "suggested": "… System Settings > Privacy & Security > Screen Recording میں \"{row}\" آن کریں۔"
+    },
+    {
+      "id": "U2",
+      "severity": "MAJOR",
+      "keys": [
+        "cli.permissions.setup.explain",
+        "cli.permissions.setup.always_allow"
+      ],
+      "summary": "keychain button rendered ہمیشہ اجازت دیں; actual button reads Always Allow",
+      "suggested": "\"Always Allow\" منتخب کریں … / کیا آپ نے \"Always Allow\" منتخب کیا …"
+    },
+    {
+      "id": "U3",
+      "severity": "MINOR",
+      "keys": [
+        "en context sidecar notes"
+      ],
+      "summary": "'use localized macOS name' has no referent for ur; add exception + record in ur style guide"
+    },
+    {
+      "id": "U4",
+      "severity": "NIT",
+      "keys": [
+        "cli.permissions.status.identity.legacy"
+      ],
+      "summary": "bundle -> بنڈل"
+    },
+    {
+      "id": "U5",
+      "severity": "NIT",
+      "keys": [
+        "cli.permissions.help.permissions",
+        "cli.permissions.setup.refused.tty",
+        "cli.permissions.setup.no_app"
+      ],
+      "summary": "Latin-first lines resolve LTR on first-strong terminals; optional natural reorder"
+    }
+  ],
+  "mt_service_used": false,
+  "original_lost_evidence": null
+}

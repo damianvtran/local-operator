@@ -324,6 +324,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
         "never a directory",
     ),
+    # -- permissions_cli: the team-signing opt-in record ----------------------
+    (
+        "local_operator/permissions_cli.py::_restore_optin",
+        "<path>.unlink",
+        # ``procname._optin_path()``: <passwd home>/.local-operator/
+        # runtime-signing.json, a fixed file name under the passwd-derived
+        # home, never a directory and never under sessions/.
+        "Removes the team-signing opt-in file a failed `lop permissions setup` wrote",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
@@ -384,12 +393,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "this module made",
     ),
     (
-        "local_operator/procname.py::_plant_runtime",
+        # ``_publish_tree`` is the one publish protocol every runtime tree
+        # shape (legacy and both bundle flavors) shares since the bundle
+        # identity work; it inherited ``_plant_runtime``'s rename and rmtrees.
+        "local_operator/procname.py::_publish_tree",
         "os.rename",
-        "Publishes this plant's staging dir as <runtime root>/<key>; both interpreter-derived",
+        "Publishes this plant's staging dir as <runtime root>/<key>[-<flavor>]; "
+        "both interpreter-derived",
     ),
     (
-        "local_operator/procname.py::_plant_runtime",
+        "local_operator/procname.py::_publish_tree",
         "shutil.rmtree",
         # Two: the failed-build staging tree (a clone that died on ENOSPC must
         # never be renamed onto the build key) and a staging tree whose rename
@@ -736,6 +749,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
         "os.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
+    ),
+    # Desktop settings intents: sessions/<id>/settings-intent.json is written
+    # tmp + fsync + replace in the session directory, like desktop.json.
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.replace",
+        "Publishes this call's mkstemp .settings-intent.*.tmp FILE onto the "
+        "settings-intent.json FILE; replace rejects a directory target and the "
+        "session directory itself is never a source or target",
+    ),
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.unlink",
+        "Removes only this call's own mkstemp temporary FILE after a failed write; "
+        "unlink rejects directories",
     ),
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher.close",
@@ -2627,7 +2655,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
-    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
+    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 2),
+    (
+        "local_operator/tunnels/service.py::run.start_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid FILE",
+    ),
+    (
+        "local_operator/tunnels/service.py::run.reconcile_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid/.token FILEs",
+        2,
+    ),
+    (
+        "local_operator/tunnels/config.py::record_relay_offer",
+        "<path>.unlink",
+        "tunnel relay-offered marker FILE",
+    ),
     # The generation layout's own trees and pointer. Every path in this block is
     # built from ``stable_root()`` (``~/.local/share/lop``, from ``Path.home()``)
     # plus a timestamped generation id this module chose, or from

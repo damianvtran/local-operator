@@ -567,6 +567,184 @@ def fts_expression(q: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+#: One idle connection per library database file, held for the process life.
+#:
+#: WHY: every store call opens and closes its own connection (connections are
+#: not shared across the server's threads). When the LAST connection to a WAL
+#: database closes, SQLite checkpoints, deletes the ``-wal`` and the next open
+#: rebuilds the ``-shm`` wal-index from scratch. Measured 2026-11-10 on a clone
+#: of the operator's 178 MB index: 1,000 open/read/close cycles wrote 31.25 MiB
+#: (~32 KiB each) with nothing else holding the file, and 0.00 MiB with one idle
+#: connection held. The indexer opened ~85 connections/s under the operator's
+#: load, i.e. ~40 MiB per 15 s of pure connection churn in ``lop serve``.
+#:
+#: Constraints: the keeper never runs a transaction (a held read snapshot would
+#: pin the WAL and stop checkpoints), so it changes no locking or visibility;
+#: it is keyed by inode so a recovery swap (``_swap_in_database``) or an
+#: out-of-band replace gets a fresh keeper on the new file instead of pinning
+#: the unlinked one; it is skipped on Windows, where an open handle would block
+#: that swap's ``os.replace``; and at most ``_KEEPER_LIMIT`` files are held so a
+#: test run creating thousands of temporary indexes cannot exhaust descriptors.
+_KEEPERS: dict[str, tuple[int, sqlite3.Connection]] = {}
+_KEEPERS_LOCK: Final = threading.Lock()
+_KEEPER_LIMIT: Final = 4
+
+
+def _close_quietly(connection: sqlite3.Connection) -> None:
+    try:
+        connection.close()
+    except sqlite3.Error:
+        pass
+
+
+def _keep_open(path: Path) -> None:
+    """Make sure one idle connection holds ``path`` open (see ``_KEEPERS``)."""
+    if os.name == "nt":
+        return
+    key = str(path)
+    try:
+        inode = path.stat().st_ino
+    except OSError:
+        return
+    with _KEEPERS_LOCK:
+        held = _KEEPERS.get(key)
+        if held is not None and held[0] == inode:
+            return
+        if held is not None:
+            _close_quietly(_KEEPERS.pop(key)[1])
+        while len(_KEEPERS) >= _KEEPER_LIMIT:
+            _close_quietly(_KEEPERS.pop(next(iter(_KEEPERS)))[1])
+        try:
+            keeper = sqlite3.connect(path, timeout=5.0, check_same_thread=False)
+            # One completed statement attaches it to the wal-index; in the
+            # sqlite3 module's default mode a SELECT opens no transaction, so
+            # nothing stays pinned once it returns.
+            keeper.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+            # Held only once the file is in WAL mode: a keeper that attached
+            # while it was still a rollback-journal file (the first open,
+            # before ``_ensure_schema`` switches it) never joins the wal-index,
+            # so closes would still see themselves as the last connection.
+            # Not stored here means the next open simply tries again.
+            mode = keeper.execute("PRAGMA journal_mode").fetchone()
+            if not mode or str(mode[0]).lower() != "wal":
+                _close_quietly(keeper)
+                return
+        except sqlite3.Error:
+            return
+        _KEEPERS[key] = (inode, keeper)
+
+
+def release_keepers(path: Path | None = None) -> None:
+    """Close the held connection for ``path`` (every one when ``None``).
+
+    Called before a recovery deletes the ``-wal``/``-shm`` and swaps the file:
+    a keeper closing AFTER the swap would checkpoint and unlink the WAL by
+    NAME, which by then belongs to the new database. Tests use the bare form.
+    """
+    with _KEEPERS_LOCK:
+        keys = list(_KEEPERS) if path is None else [str(path)]
+        for key in keys:
+            held = _KEEPERS.pop(key, None)
+            if held is not None:
+                _close_quietly(held[1])
+
+
+#: ``idx_assets`` columns ``recompute_assets`` derives, in its value order:
+#: everything except the key and ``indexed_at``. Comparing exactly these is
+#: what lets an unchanged aggregate skip its write.
+_ASSET_COMPARED_COLUMNS: Final = (
+    "key",
+    "path",
+    "digest",
+    "derived_name",
+    "effective_name",
+    "description",
+    "category",
+    "kind",
+    "content_type",
+    "origin",
+    "origin_group",
+    "origins",
+    "highlighted",
+    "size_bytes",
+    "width",
+    "height",
+    "duration_s",
+    "first_ts",
+    "last_ts",
+    "is_final",
+    "tag_names",
+    "session_titles",
+)
+
+
+#: ``idx_occurrences`` columns in the order :func:`_occurrence_values` builds
+#: them; the diff in ``replace_session_occurrences`` compares tuples read back
+#: in this same order, so the two must never drift apart.
+_OCCURRENCE_COLUMNS: Final = (
+    "asset_id",
+    "key",
+    "session_id",
+    "title",
+    "origin",
+    "child_id",
+    "label",
+    "tool",
+    "intent",
+    "first_ts",
+    "last_ts",
+    "first_seq",
+    "last_seq",
+    "touches",
+    "highlighted",
+    "name",
+    "path",
+    "kind",
+    "content_type",
+    "size_bytes",
+    "width",
+    "height",
+    "duration_s",
+)
+
+
+def _occurrence_values(session_id: str, row: dict[str, Any]) -> tuple[Any, ...]:
+    """One scan row normalised to exactly what SQLite stores and returns.
+
+    The coercions are the ones the column affinities apply anyway, done here so
+    a stored row compares EQUAL to its rescanned twin: a mismatch would rewrite
+    the row on every scan and quietly bring the write churn back.
+    """
+    return (
+        row["asset_id"],
+        row.get("key") or "",
+        session_id,
+        row.get("title") or "",
+        row.get("origin") or "mentioned",
+        row.get("child_id") or "",
+        row.get("label"),
+        row.get("tool") or "",
+        row.get("intent"),
+        float(row.get("first_ts") or 0.0),
+        float(row.get("last_ts") or 0.0),
+        int(row.get("first_seq") or 0),
+        int(row.get("last_seq") or 0),
+        int(row.get("touches") or 1),
+        1 if row.get("highlighted") else 0,
+        row.get("name") or "",
+        row.get("path"),
+        row.get("kind") or "other",
+        # NULL, not the column default: a recorded MIME wins in ``classify``,
+        # so substituting one here would make every text file
+        # "application/octet-stream".
+        row.get("content_type") or None,
+        row.get("size_bytes"),
+        row.get("width"),
+        row.get("height"),
+        row.get("duration_s"),
+    )
+
+
 class LibraryStore:
     """The derived index. One connection per call, like the metadata store.
 
@@ -651,13 +829,23 @@ class LibraryStore:
             # reads). ``_ensure_schema`` sets it once, at bootstrap.
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA synchronous=NORMAL")
-            return connection
+            # Statement journals and sorter spills go to RAM, not ``etilqs_*``
+            # temp files. Every multi-row write here runs inside BEGIN
+            # IMMEDIATE with FTS/facet triggers, so SQLite opens a statement
+            # journal per statement; on disk that was the largest remaining
+            # write source in ``lop serve`` (2026-11-10 rig: ~110 -> ~18 MiB
+            # per 15 s with only this pragma changed). Temp data is never
+            # durable, so nothing is lost; the RAM it takes is bounded by one
+            # statement's undo or one sort, a few MB at the 50k-asset catalog.
+            connection.execute("PRAGMA temp_store=MEMORY")
         except BaseException:
             try:
                 connection.close()
             except sqlite3.Error:
                 pass
             raise
+        _keep_open(self.path)
+        return connection
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -1172,6 +1360,7 @@ class LibraryStore:
         A method of its own so the tests can prove two concurrent recoveries
         swap exactly once.
         """
+        release_keepers(self.path)
         for suffix in ("-wal", "-shm"):
             Path(f"{self.path}{suffix}").unlink(missing_ok=True)
         os.replace(temp, self.path)
@@ -1360,56 +1549,59 @@ class LibraryStore:
         session_id: str,
         rows: Sequence[dict[str, Any]],
     ) -> set[str]:
-        """Replace one session's occurrence rows; return every asset they touch.
+        """Make one session's occurrence rows equal ``rows``; return the assets that CHANGED.
 
-        The union includes assets the session STOPPED touching: their aggregate
-        is now different (a dropped origin can demote ``origin_group``), so the
-        caller must recompute them even though no new row mentions them.
+        Why a diff and not ``DELETE`` + reinsert: the watcher rescans a session
+        on every journal append and every roster-sidecar replace, ~2 scans/s
+        across ~25 live sessions on the operator's Mac (measured 2026-11-10,
+        ``idx_state.revision`` advancing 1.95/s). The old full rewrite deleted
+        and re-inserted every row of the session (up to 2,286 for one session)
+        on each scan and the caller then rewrote every one of those assets
+        (plus their FTS and facet-count rows through the triggers), so a scan
+        that found nothing new still wrote megabytes: ``lop serve`` sustained
+        ~1 GiB/min of disk writes. Only rows whose content differs are written
+        now, so a scan's write cost follows what the journal actually added.
+
+        The returned set is every asset whose occurrence rows were inserted,
+        updated or deleted — including assets the session STOPPED touching:
+        their aggregate is now different (a dropped origin can demote
+        ``origin_group``), so the caller must recompute them. An asset whose
+        rows are byte-identical has an unchanged aggregate (the aggregate is a
+        function of the occurrence set alone; name/description/tag edits reach
+        ``idx_assets`` through the metadata triggers), so it is left alone.
+
+        ``rows`` may repeat a primary key; the last one wins, exactly as the
+        ``INSERT OR REPLACE`` it replaced behaved.
         """
-        affected: set[str] = set()
+        desired: dict[tuple[str, str], tuple[Any, ...]] = {}
+        for row in rows:
+            values = _occurrence_values(session_id, row)
+            desired[(values[0], values[5])] = values
+        existing: dict[tuple[str, str], tuple[Any, ...]] = {}
         for row in connection.execute(
-            "SELECT DISTINCT asset_id FROM idx_occurrences WHERE session_id = ?", (session_id,)
+            "SELECT " + ", ".join(_OCCURRENCE_COLUMNS) + " FROM idx_occurrences "
+            "WHERE session_id = ?",
+            (session_id,),
         ):
-            affected.add(str(row["asset_id"]))
-        connection.execute("DELETE FROM idx_occurrences WHERE session_id = ?", (session_id,))
-        connection.executemany(
-            "INSERT OR REPLACE INTO idx_occurrences(asset_id, key, session_id, title, origin, "
-            "child_id, label, tool, intent, first_ts, last_ts, first_seq, last_seq, touches, "
-            "highlighted, name, path, kind, content_type, size_bytes, width, height, "
-            "duration_s) VALUES(" + ", ".join(["?"] * 23) + ")",
-            [
-                (
-                    row["asset_id"],
-                    row.get("key") or "",
-                    session_id,
-                    row.get("title") or "",
-                    row.get("origin") or "mentioned",
-                    row.get("child_id") or "",
-                    row.get("label"),
-                    row.get("tool") or "",
-                    row.get("intent"),
-                    float(row.get("first_ts") or 0.0),
-                    float(row.get("last_ts") or 0.0),
-                    int(row.get("first_seq") or 0),
-                    int(row.get("last_seq") or 0),
-                    int(row.get("touches") or 1),
-                    1 if row.get("highlighted") else 0,
-                    row.get("name") or "",
-                    row.get("path"),
-                    row.get("kind") or "other",
-                    # NULL, not the column default: a recorded MIME wins in
-                    # ``classify``, so substituting one here would make every
-                    # text file "application/octet-stream".
-                    row.get("content_type") or None,
-                    row.get("size_bytes"),
-                    row.get("width"),
-                    row.get("height"),
-                    row.get("duration_s"),
-                )
-                for row in rows
-            ],
-        )
-        affected.update(row["asset_id"] for row in rows)
+            values = tuple(row)
+            existing[(values[0], values[5])] = values
+        affected: set[str] = set()
+        stale = [key for key in existing if key not in desired]
+        if stale:
+            connection.executemany(
+                "DELETE FROM idx_occurrences WHERE asset_id = ? AND session_id = ? "
+                "AND child_id = ?",
+                [(asset_id, session_id, child_id) for asset_id, child_id in stale],
+            )
+            affected.update(asset_id for asset_id, _ in stale)
+        changed = [values for key, values in desired.items() if existing.get(key) != values]
+        if changed:
+            connection.executemany(
+                "INSERT OR REPLACE INTO idx_occurrences(" + ", ".join(_OCCURRENCE_COLUMNS) + ") "
+                "VALUES(" + ", ".join(["?"] * len(_OCCURRENCE_COLUMNS)) + ")",
+                changed,
+            )
+            affected.update(values[0] for values in changed)
         return affected
 
     def recompute_assets(
@@ -1439,7 +1631,9 @@ class LibraryStore:
                 )
             )
             existing = connection.execute(
-                "SELECT key FROM idx_assets WHERE asset_id = ?", (asset_id,)
+                "SELECT " + ", ".join(_ASSET_COMPARED_COLUMNS) + " FROM idx_assets "
+                "WHERE asset_id = ?",
+                (asset_id,),
             ).fetchone()
             if not rows:
                 connection.execute("DELETE FROM idx_assets WHERE asset_id = ?", (asset_id,))
@@ -1465,56 +1659,53 @@ class LibraryStore:
                 meta["description_source"] if meta else None,
                 "",
             )
+            # Tag names are the metadata store's, not the previous idx row's:
+            # an asset whose metadata row survived a rebuild must come back
+            # searchable by its tags without waiting for the next tag write.
+            tag_row = connection.execute(
+                "SELECT COALESCE((SELECT GROUP_CONCAT(t.name, ' ') FROM asset_tags at "
+                "JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = ?), '')",
+                (asset_id,),
+            ).fetchone()
+            values = (
+                aggregate.key,
+                aggregate.path,
+                aggregate.digest,
+                aggregate.derived_name,
+                effective_name,
+                description,
+                aggregate.category,
+                aggregate.kind,
+                aggregate.content_type,
+                aggregate.origin,
+                aggregate.origin_group,
+                json.dumps(aggregate.origins),
+                1 if aggregate.highlighted else 0,
+                aggregate.size_bytes,
+                aggregate.width,
+                aggregate.height,
+                aggregate.duration_s,
+                aggregate.first_ts,
+                aggregate.last_ts,
+                1 if is_final(aggregate) else 0,
+                str(tag_row[0]) if tag_row else "",
+                " ".join(aggregate.session_titles),
+            )
+            if existing is not None and tuple(existing) == values:
+                # Unchanged aggregate: skip the upsert. ``indexed_at`` is the
+                # only column that would differ, and rewriting the row for it
+                # also fires the FTS delete+insert and facet-count triggers —
+                # that per-asset rewrite on every rescan was most of the
+                # ``lop serve`` write churn measured on 2026-11-10. Nothing
+                # reads ``indexed_at`` as a freshness signal for listings.
+                continue
             connection.execute(
-                "INSERT INTO idx_assets(asset_id, key, path, digest, derived_name, "
-                "effective_name, description, category, kind, content_type, origin, "
-                "origin_group, origins, highlighted, size_bytes, width, height, duration_s, "
-                "first_ts, last_ts, is_final, tag_names, session_titles, indexed_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                # Tag names are the metadata store's, not the previous idx row's:
-                # an asset whose metadata row survived a rebuild must come back
-                # searchable by its tags without waiting for the next tag write.
-                "  COALESCE((SELECT GROUP_CONCAT(t.name, ' ') FROM asset_tags at "
-                "            JOIN tags t ON t.id = at.tag_id WHERE at.asset_id = ?), ''), "
-                "  ?, "
-                "  ?) "
-                "ON CONFLICT(asset_id) DO UPDATE SET key = excluded.key, path = excluded.path, "
-                "digest = excluded.digest, derived_name = excluded.derived_name, "
-                "effective_name = excluded.effective_name, description = excluded.description, "
-                "category = excluded.category, kind = excluded.kind, "
-                "content_type = excluded.content_type, origin = excluded.origin, "
-                "origin_group = excluded.origin_group, origins = excluded.origins, "
-                "highlighted = excluded.highlighted, size_bytes = excluded.size_bytes, "
-                "width = excluded.width, height = excluded.height, "
-                "duration_s = excluded.duration_s, first_ts = excluded.first_ts, "
-                "last_ts = excluded.last_ts, is_final = excluded.is_final, "
-                "session_titles = excluded.session_titles, indexed_at = excluded.indexed_at",
-                (
-                    asset_id,
-                    aggregate.key,
-                    aggregate.path,
-                    aggregate.digest,
-                    aggregate.derived_name,
-                    effective_name,
-                    description,
-                    aggregate.category,
-                    aggregate.kind,
-                    aggregate.content_type,
-                    aggregate.origin,
-                    aggregate.origin_group,
-                    json.dumps(aggregate.origins),
-                    1 if aggregate.highlighted else 0,
-                    aggregate.size_bytes,
-                    aggregate.width,
-                    aggregate.height,
-                    aggregate.duration_s,
-                    aggregate.first_ts,
-                    aggregate.last_ts,
-                    1 if is_final(aggregate) else 0,
-                    asset_id,
-                    " ".join(aggregate.session_titles),
-                    time.time(),
-                ),
+                "INSERT INTO idx_assets(asset_id, " + ", ".join(_ASSET_COMPARED_COLUMNS) + ", "
+                "indexed_at) VALUES(" + ", ".join(["?"] * (len(_ASSET_COMPARED_COLUMNS) + 2)) + ") "
+                "ON CONFLICT(asset_id) DO UPDATE SET "
+                + ", ".join(f"{column} = excluded.{column}" for column in _ASSET_COMPARED_COLUMNS)
+                + ", indexed_at = excluded.indexed_at",
+                (asset_id, *values, time.time()),
             )
 
     # -- read path ----------------------------------------------------------
@@ -2194,6 +2385,7 @@ def _asset_from_row(
 
 __all__ = [
     "DB_PATH_PARTS",
+    "release_keepers",
     "IndexUnavailable",
     "LibraryStore",
     "SCHEMA_VERSION",

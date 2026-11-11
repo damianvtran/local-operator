@@ -206,6 +206,25 @@ class CallContext:
     messages: Any = None
 
 
+#: How far a refusal reaches, appended to every refusal text. Model-facing
+#: (English by design, like ``BLOCK_MARKER``). WHY: "final; never reword or
+#: retry" was read too broadly — in session 4e70660bd1bf (local-operator-ui
+#: PR #1813) an auditor, after a correct refusal to import ANOTHER session's
+#: receipt, declined to write its OWN freshly authored receipt to the repo's
+#: mandated ``i18n/receipts/`` as a "reroute", and the operator had to step in
+#: for something no guard ever refused. Finality covers the same effect on the
+#: same targets; fresh work is a different action. The system prompt
+#: (``prompts_md/system.md``) and ``guide://guardrails`` say the same.
+REFUSAL_SCOPE = (
+    "This refusal is final for THIS action: the same effect on the same targets, by any "
+    "spelling or path, is a reroute. A new artifact from your own fresh work, written to "
+    "your own worktree's mandated location, is a different action and needs no approval. "
+    # Review m2 (PR #3700): the anti-reroute clause lived only in the guide,
+    # but this text is what the agent reads at the moment of refusal.
+    "Copying or importing the blocked material in by another route is still the same action."
+)
+
+
 def _targets_text(verdict: Verdict) -> str:
     flagged = verdict.flagged_targets or verdict.targets
     parts = [f"{t.shown or t.path} ({t.reason})" for t in flagged[:6]]
@@ -234,17 +253,47 @@ def _critical_text(verdict: Verdict) -> str:
         f"or overwrite {_targets_text(verdict)}. Nothing was run. This is not retryable by "
         "rewording, and no approval lifts it from inside the session. If a narrower path was "
         "intended, target it directly (for example a path inside your own scratchpad); "
-        "otherwise ask the operator."
+        f"otherwise ask the operator. {REFUSAL_SCOPE}"
     )
 
 
-def review_text(rule: str, reason: str, targets: str) -> str:
+#: ``judge.run_judge``/``parse_answer`` prefix every no-verdict reason with this.
+JUDGE_UNAVAILABLE = "judge unavailable"
+
+
+def review_text(
+    rule: str, reason: str, targets: str, *, no_verdict: bool = False, paths: bool = True
+) -> str:
+    """The refusal text of a reviewed call.
+
+    ``no_verdict`` comes from ``JudgeResult.no_verdict``, never from the
+    reason's wording (review R2-n2). ``paths`` is False when ``targets``
+    names the call itself (a user rule), so the remedy asks for an
+    instruction naming this call rather than "these paths" (R2-n1).
+    """
+    if no_verdict:
+        # Issue #3613: a timeout, an exception, a host with no judge model or
+        # an off-contract answer is NO verdict. The call still fails closed,
+        # but the agent must not read it as a policy refusal and "adapt" by
+        # rewording or duplicating files; it should retry later or get the
+        # operator's answer. The ``judge unavailable: <cause>`` phrase stays
+        # verbatim so the TUI notice and log matching keep working.
+        return (
+            f"{BLOCK_MARKER} {rule} (review): the safety check could not reach a verdict "
+            f"({reason}). This is not a policy decision: nothing judged this call unsafe, "
+            f"but a call that cannot be checked is not run. Targets: {targets}. Nothing was "
+            "run. Retry later, or settle it with a store-verified `ask` answer or an "
+            f"explicit operator instruction naming {'these paths' if paths else 'this call'}."
+        )
     tail = (
         SUPPORTED_DELETE_PATHS
         if rule == DANGEROUS_DELETE_RULE
         else ("Ask the user, or target a narrower path.")
     )
-    return f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. {tail}"
+    return (
+        f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. "
+        f"{tail} {REFUSAL_SCOPE}"
+    )
 
 
 def rule_block_text(rule: Rule) -> str:
@@ -257,7 +306,7 @@ def rule_block_text(rule: Rule) -> str:
     body = f" {rule.body}" if rule.body else ""
     return (
         f"{BLOCK_MARKER} {rule.name} (block): this call matched a user rule. "
-        f"Nothing was run.{body}"
+        f"Nothing was run.{body} {REFUSAL_SCOPE}"
     )
 
 
@@ -310,6 +359,24 @@ def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
     if any(t.target.credential_derived for t in verdict.targets):
         return BUILTIN_REFUSE_CREDENTIAL
     return BUILTIN_JUDGE
+
+
+def _git_bearing(path: str) -> bool:
+    """Is ``path`` a repository/worktree root, a ``.git`` entry or inside one?
+
+    WHY: the pre-judge ask settlement (``DeleteCase.settled``) must never
+    decide these alone (PR #3710 x #3700): a root carries ``git:`` facts the
+    judge weighs, and ``<repo>/.git`` or ``<repo>/.git/objects`` destroys the
+    history of the root above it even though no ``.git`` sits *below* it.
+    """
+    return ".git" in Path(path).parts or os.path.lexists(os.path.join(path, ".git"))
+
+
+@dataclass(frozen=True)
+class _Approved:
+    """An ask's deterministic approval, shaped for ``DeleteCase._named_by``."""
+
+    text: str
 
 
 @dataclass
@@ -366,14 +433,48 @@ class DeleteCase:
         if self.unverifiable or self.operator_only or not self.paths:
             return ""
         listed = list(getattr(self.evidence, "listed", {}) or {})
-        if not listed:
-            return ""
         # ``alone``: resolver-pinned coverage only, and no git repository
         # below a target the clone check did not vouch for (PR #3614 review
         # R1-MAJOR-1 / R1-MINOR-1); anything weaker goes to the judge with
         # its evidence listed.
-        basis, missing = self.verify("ALLOW evidence=" + ",".join(listed), alone=True)
-        return "" if missing else basis
+        by_evidence: dict[str, str] = {}
+        if listed:
+            from local_operator.guardrails.evidence import verify as verify_evidence
+
+            by_evidence = verify_evidence(
+                listed, self.paths, self.evidence, env=self.env, stop=self.stop, alone=True
+            )
+        basis: list[str] = []
+        for path in self.paths:
+            if path in by_evidence:
+                basis.append(f"{path} created by {by_evidence[path]}")
+                continue
+            # ASK SETTLED BEFORE THE JUDGE (incident 2026-11-09, a-a382): the
+            # operator answered "Remove all 57" to a yes/no ask naming each
+            # path, and a judge that timed out refused 55 of them. A store-
+            # verified answer whose deterministic approval names the path
+            # (``OperatorWords.approved``) is the operator's decision; the
+            # judge could only agree or override them.
+            if _git_bearing(path):
+                # A repository or worktree root, or a ``.git`` directory or
+                # anything inside one, is never settled by an ask alone: its
+                # ``git:`` facts (open PR, running owner — PR #3700) are the
+                # judge's to weigh against the answer.
+                return ""
+            words = next(
+                (
+                    w
+                    for w in self.operator.words
+                    if w.ask_id and w.approved and self._named_by(path, _Approved(w.approved))
+                ),
+                None,
+            )
+            if words is None:
+                return ""
+            basis.append(f"{path} named by ask {words.ask_id}")
+        if len(basis) > 6:
+            basis = [*basis[:6], f"… and {len(basis) - 6} more"]
+        return "; ".join(basis)
 
     def verify(self, answer: str, *, alone: bool = False) -> tuple[str, str]:
         """``(basis, missing)``: what verified each path, and what did not verify.
@@ -493,6 +594,18 @@ def build_delete_case(verdict: Verdict, ctx: CallContext) -> DeleteCase:
         operator = prov.OperatorBrief()
         if ctx.user_request:
             operator.words.append(prov.OperatorWords("operator, direct", ctx.user_request))
+    if ctx.session_id and paths:
+        # One task tree, one owner: an ask the operator answered higher in
+        # this session's lineage counts even when no brief carried its id.
+        # Read here (HIGH calls only), not in the per-call brief; a new brief
+        # so the caller's object is never mutated.
+        extra = prov.lineage_asks(
+            ctx.session_id, known=[(w.ask_id, w.session_id) for w in operator.words if w.ask_id]
+        )
+        if extra:
+            operator = prov.OperatorBrief(
+                words=[*operator.words, *extra], excluded=dict(operator.excluded)
+            )
     evidence = ev_mod.gather(
         paths, session_id=ctx.session_id, env=ctx.env, stop=stop, messages=ctx.messages
     )
@@ -682,7 +795,13 @@ async def _dangerous_delete(
         return outcome
     return GuardOutcome(
         blocked=True,
-        text=review_text(DANGEROUS_DELETE_RULE, reason, targets),
+        text=review_text(
+            DANGEROUS_DELETE_RULE,
+            reason,
+            targets,
+            # A verification failure after an ALLOW is a real refusal.
+            no_verdict=result.no_verdict and reason == result.reason,
+        ),
         rule=DANGEROUS_DELETE_RULE,
         risk=risk_name,
         destructive=True,
@@ -815,7 +934,13 @@ async def _check_tool_call(
         if not result.allowed:
             return GuardOutcome(
                 blocked=True,
-                text=review_text(rule.name, result.reason, f"this {tool_name} call"),
+                text=review_text(
+                    rule.name,
+                    result.reason,
+                    f"this {tool_name} call",
+                    no_verdict=result.no_verdict,
+                    paths=False,
+                ),
                 rule=rule.name,
                 risk="rule",
                 destructive=bool(outcome and outcome.destructive),

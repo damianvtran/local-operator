@@ -125,18 +125,29 @@ def test_an_old_push_cannot_revert_a_newer_completed_pull(
     devices: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a, c, network_id, link = _settled_pair(devices, monkeypatch)
+    _negotiated_pair(a, c, network_id, link)
     _rename_own_row(c, network_id, "old-snapshot")
     old = store.load(network_id, c.root)
+    # Heartbeats truthfully restore the live listener's address. Give only the
+    # captured stale frame a different endpoint, so accepting it is observable
+    # without racing a fictitious address against that independent writer.
+    old_own = old.member(c.device_id)
+    assert old_own is not None
+    old_own.endpoints = ["127.0.0.1:1"]
+    endpoints = c.server.advertised_endpoints()
+    assert endpoints
     with store.mutate(network_id, c.root) as record:
         own = record.member(c.device_id)
         assert own is not None
         own.name = "new-pull"
-        own.endpoints = ["127.0.0.1:61001"]
+        own.endpoints = list(endpoints)
         store.save(record, c.root)
     assert a.server._pull_members(link) == ""
     stamp = link.member_pulled_at
     pulled = _row(a, c.device_id)
     assert pulled is not None and pulled.name == "new-pull"
+    assert pulled.endpoints == endpoints
+    assert old.sequence < link.member_snapshot_sequence
     reverse = c.server._link_for(a.device_id)
     assert reverse.send(_change_frame(old))
     _wire_barrier(c.server, reverse)
@@ -150,7 +161,7 @@ def test_an_old_push_cannot_revert_a_newer_completed_pull(
         link.member_pulled_at == stamp,
     )
     assert row.name == "new-pull"
-    assert row.endpoints == ["127.0.0.1:61001"]
+    assert row.endpoints == endpoints
     assert link.member_pulled_at == stamp
 
 
@@ -162,6 +173,13 @@ def test_push_converges_without_a_pull_and_does_not_forge_answer_age(
     # A disabled pull is the negative control: neither a timer nor the listing
     # below can rescue a missing push, and receiving it must not invent an answer.
     monkeypatch.setattr(a.server, "_pull_members", lambda link: "no_answer")
+    # The independent membership pass may already be inside a real pull that
+    # resolved `_pull_members` before the patch; c can answer it after the
+    # rename, stamping the link and clearing the push's verification need just
+    # before refresh. Refuse every answer applied from here, in flight or new.
+    monkeypatch.setattr(
+        a.server, "_apply_member_answer", lambda link, reply, conditional, own_view: "no_answer"
+    )
     stamp = link.member_pulled_at
     _rename_own_row(c, network_id, "changed-by-push")
     c.server._publish_member_changes()
@@ -209,10 +227,25 @@ def test_only_negotiated_change_push_links_get_the_long_ceiling(
     assert reverse is not None
     reverse.capabilities = frozenset(reverse.capabilities - {wire.MEMBER_LIST_PUSH_V1})
     frames = []
-    monkeypatch.setattr(reverse, "send", lambda frame, **kwargs: frames.append(frame) or True)
+    publisher_thread = threading.get_ident()
+    send = reverse.send
+
+    def record_send(frame: dict[str, Any], **kwargs: Any) -> bool:
+        # Keep the independent membership timer's real requests/acks moving.
+        # Publication calls send synchronously, so caller identity attributes
+        # traffic to the publisher without treating a due legacy pull as a push.
+        if threading.get_ident() == publisher_thread:
+            frames.append(frame)
+        return send(frame, **kwargs)
+
+    monkeypatch.setattr(reverse, "send", record_send)
+    _wire_barrier(c.server, reverse)
+    baseline = len(frames)
     _rename_own_row(c, network_id, "old-peer")
     c.server._publish_member_changes()
-    assert not frames
+    # The explicit publisher must add NO traffic to the settled baseline: no
+    # notification, optional push fields, or replacement pull for an old peer.
+    assert len(frames) == baseline
 
 
 def test_unchanged_table_does_not_push_again(devices: Any, monkeypatch: pytest.MonkeyPatch) -> None:

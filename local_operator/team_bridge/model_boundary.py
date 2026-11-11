@@ -33,15 +33,19 @@ import base64
 import hashlib
 import inspect
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 
+from local_operator.team_bridge.settings import read_screening_model
 from local_operator.team_bridge.store import (
     SCREENING_FAILURE_CLASSES as _STORE_FAILURE_CLASSES,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
 from local_operator.team_bridge.types import OwnerSnapshot
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DefaultSelection",
@@ -53,6 +57,7 @@ __all__ = [
     "SCREENING_EVALUATED_MODELS",
     "SCREENING_MODEL_UNAVAILABLE",
     "is_evaluated_screening_model",
+    "evaluated_screening_pair",
     "resolve_default_selection",
     "resolve_screening_chain",
     "resolve_screening_selection",
@@ -384,6 +389,31 @@ def provider_hold_code(failure: BaseException) -> str:
     return "provider_error"
 
 
+def evaluated_screening_pair(provider: str, model_id: str) -> tuple[str, str] | None:
+    """The TABLE's own spelling of ``provider/model_id``, or ``None`` if unlisted.
+
+    ONE implementation of "is this pair on the table", because three places now
+    ask it and a second copy would drift from the eval table: the chain
+    (:func:`resolve_screening_chain`, which re-orders to this entry), the
+    membership predicate (:func:`is_evaluated_screening_model`), and the desktop
+    plane, which must not show a stored model as SELECTED while the chain
+    silently ignores it — or fold a login flavour into the config file under a
+    provider spelling no entry uses.
+
+    Folding is by credential STORAGE owner (``anthropic-key`` -> ``anthropic``);
+    an id the registry cannot resolve admits nothing, so an unreadable registry
+    fails closed rather than promoting an unknown pair.
+    """
+
+    try:
+        from local_operator.providers.registry import credential_provider_id
+
+        canonical = (credential_provider_id(provider), model_id)
+    except Exception:  # noqa: BLE001 — an unreadable registry admits nothing
+        return None
+    return canonical if canonical in SCREENING_EVALUATED_MODELS else None
+
+
 def is_evaluated_screening_model(provider: str, model_id: str) -> bool:
     """Whether ``provider/model_id`` is on :data:`SCREENING_EVALUATED_MODELS`.
 
@@ -392,13 +422,7 @@ def is_evaluated_screening_model(provider: str, model_id: str) -> bool:
     because a sibling snapshot or a router alias has no eval result.
     """
 
-    try:
-        from local_operator.providers.registry import credential_provider_id
-
-        storage = credential_provider_id(provider)
-    except Exception:  # noqa: BLE001 — an unreadable registry admits nothing
-        return False
-    return (storage, model_id) in SCREENING_EVALUATED_MODELS
+    return evaluated_screening_pair(provider, model_id) is not None
 
 
 def _credentialed_providers(config_dir: Path) -> set[str]:
@@ -561,11 +585,22 @@ def resolve_screening_chain(
     (fail-closed). When every hop is tried and fails on route errors, the
     pipeline holds the same code (:func:`provider_hold_code`).
 
-    ``preferred`` is the stored "Screening model" choice (Aida 2026-11-04;
-    follow-up UI, nothing passes it yet): a pair FROM the table moved to the
-    front of stage 1. Off-table values are ignored -- a setting can re-order
-    the preferred screeners, never promote another model -- and when the
-    chosen pair is unreachable the rest of stage 1 and then stage 2 still run.
+    ``preferred`` is the stored "Screening model" choice (Aida 2026-11-04): a
+    pair FROM the table moved to the front of stage 1. TWO production callers
+    pass it -- the screening cycle (``scheduler.py``) and
+    :func:`resolve_screening_selection`, which the image gate and the
+    canonical-provider read use -- so a stored choice is what this machine
+    screens with, everywhere. Off-table values are ignored -- a setting can
+    re-order the preferred screeners, never promote another model -- and a hop
+    whose ROUTE fails is walked past, so the rest of stage 1 and then stage 2
+    still run. "The route failed" is exactly the closed set
+    :func:`_sender_cannot_cause` admits: a credential the provider answers 401,
+    quota or an empty balance (429/402), a 404 for a pair the route does not
+    serve, a gateway/overload status whose text names no content verdict, a
+    timeout, or a transport error raised before the body was sent. Any failure
+    the sender's own bytes can provoke (every other 4xx, and a 403) still STOPS
+    the walk and holds -- that is what keeps a crafted message from buying a
+    weaker screener (S-1).
 
     WHY THE CHAIN WALK EXISTS AT ALL: a screening request is ``isolated=True``
     and the failover layer turns retry off for isolated requests
@@ -578,19 +613,18 @@ def resolve_screening_chain(
     model.
     """
 
-    # Lazy, to avoid the import cycle; one import serves both uses below.
-    from local_operator.providers.registry import (
-        credential_provider_id,
-        credential_source_id,
-    )
+    # Lazy, to avoid the import cycle; ``credential_source_id`` is the only
+    # registry call this walk makes (the table fold lives in
+    # :func:`evaluated_screening_pair`).
+    from local_operator.providers.registry import credential_source_id
 
     credentialed = _credentialed_providers(config_dir)
     order = list(SCREENING_EVALUATED_MODELS)
     if preferred is not None:
         # Folded onto the table's own spelling so a login flavour
         # (``anthropic-key``) re-orders the canonical entry, never adds one.
-        canonical = (credential_provider_id(preferred[0]), preferred[1])
-        if canonical in order:
+        canonical = evaluated_screening_pair(preferred[0], preferred[1])
+        if canonical is not None:
             order = [canonical] + [pair for pair in order if pair != canonical]
     hops: list[DefaultSelection] = []
     for provider, model_id in order:
@@ -633,7 +667,14 @@ def resolve_screening_selection(config_dir: Path) -> DefaultSelection | None:
     configuration only, never a session's chat model.
     """
 
-    chain = resolve_screening_chain(config_dir)
+    chain = resolve_screening_chain(
+        config_dir,
+        # This is a chain built for REAL use (the image gate, the canonical
+        # provider read), so the machine's stored "Screening model" choice is
+        # part of it exactly as it is in the cycle: a preference that re-orders
+        # the evaluated screeners and nothing else.
+        preferred=read_screening_model(config_dir),
+    )
     return chain[0] if chain else None
 
 
@@ -660,6 +701,29 @@ _QUOTA_STATUSES = frozenset({429, 402})
 #: ``kind="auth"`` — so neither the status nor the kind can separate a bad
 #: credential from a content verdict. A 403 HOLDS (PR #3194 review M2 / S-5).
 _AUTH_STATUSES = frozenset({401})
+#: The ROUTE does not serve this (provider, model) at all: a retired model, a
+#: pair the owner's account is not enabled for, or a gateway rejecting an
+#: unknown model — which sends no body at all, so ``not_found_error`` wording
+#: is frequently absent and :func:`_describe_bare_status` supplies the text.
+#: That is why the status alone is the signal here: demanding a typed code first
+#: would fail-closed on exactly the bare 404 the operator directive of
+#: 2026-11-04 covers.
+#:
+#: WHY 404 ADVANCES WHILE 403 STOPS — the split is deliberate (PR #3632 review
+#: R1), not an oversight. Neither status says anything about the SUBMISSION: no
+#: body makes a provider report a missing model, so advancing on a 404 cannot
+#: buy a weaker screener (S-1). It only says the chosen pair is not deployable
+#: on this account, which is the OWNER's configuration — and a preference must
+#: never block (the same directive that removed the credential and quota
+#: cases). A 403 is not like that: one marker-less status carries BOTH a content
+#: verdict (see :data:`_AUTH_STATUSES`) and a genuine permission error, and
+#: neither the status nor ``kind`` separates them. Advancing there would drop a
+#: content verdict the first provider already reached (S-1) AND paper over a
+#: credential fault the owner has to see. So a 403 keeps stopping, and its hold
+#: records ``auth_unusable`` (``screening_failure_class``): the owner is told
+#: their account cannot reach the model they chose, rather than the message
+#: quietly screening somewhere else.
+_NOT_FOUND_STATUSES = frozenset({404})
 #: Content-verdict wording a provider can relay on an otherwise-advancing
 #: gateway status — Alibaba's "Output data may contain inappropriate content"
 #: arrives as a relayed 502 (``failover.py`` ``is_input_refusal`` docstring).
@@ -700,9 +764,11 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     screener, and the first provider refusing the input is itself evidence.
     Only failures of the ROUTE advance: our credential rejected (401, or an
     OAuth refresh that failed — never 403, see ``_AUTH_STATUSES``), quota
-    (429), a timeout, a gateway/overload status (502/503/504/529) whose raw
-    text names no content verdict, or a transport error our own client raised
-    before the body was sent.
+    (429), a route that does not serve the pair at all (404 — see
+    ``_NOT_FOUND_STATUSES`` for why that advances while a 403 does not), a
+    timeout, a gateway/overload status (502/503/504/529) whose raw text names
+    no content verdict, or a transport error our own client raised before the
+    body was sent.
 
     MUST be evaluated on the RAW exception, before ``_scrub_wire_failure``
     erases everything but typed fields; it reads types, ``status``, typed
@@ -741,7 +807,7 @@ def _sender_cannot_cause(failure: BaseException) -> bool:
     if isinstance(status, int) and status:
         if status in _AUTH_STATUSES or status in _QUOTA_STATUSES:
             return True
-        if status not in _ADVANCE_STATUSES:
+        if status not in _ADVANCE_STATUSES and status not in _NOT_FOUND_STATUSES:
             return False
         raw = str(getattr(failure, "message", "") or "").lower()
         return not any(marker in raw for marker in _CONTENT_VERDICT_MARKERS)
@@ -1499,6 +1565,16 @@ class ScreenModelRunner:
         return "".join(parts), mid
 
 
+#: Draws per hop when the reply is empty or unparsable: the first plus ONE
+#: re-draw, then fail over. Bounded by the measured incident, not a guess: of
+#: 719 screening calls over 7 days (operator machine, 2026-11-09) every hold
+#: that parked a message for hours followed ONE unusable draw, and a re-draw is
+#: a fresh sample (no temperature 0 is sent to the Claude 5+/GPT-5 families).
+#: Each draw is one physical budget unit (``reserve_http_attempt``), so the
+#: worst case is ``2 x hops`` units per screening, far under the 400/h budget.
+_UNUSABLE_REPLY_DRAWS_PER_HOP = 2
+
+
 class ScreenChainRunner:
     """Walk the screening hops in order: one isolated attempt per hop.
 
@@ -1515,16 +1591,21 @@ class ScreenChainRunner:
       a FRESH wire guard and dedicated client: per-send charging, the route
       check and the hop's own (provider, model) tuple check all still apply.
     * Advance ONLY on a failure a sender cannot cause (:func:`_sender_cannot_cause`:
-      credential unusable, quota, timeout, 502/503/504/529, a pre-send
-      transport error), or on the unevidenced ``("", None)`` signal (serving
-      identity is request-local provenance, not something a body controls).
+      credential unusable, quota, a route that does not serve the pair (404),
+      timeout, 502/503/504/529, a pre-send transport error), or on the
+      unevidenced ``("", None)`` signal (serving identity is request-local
+      provenance, not something a body controls).
       EVERYTHING ELSE STOPS AND HOLDS (S-1/S-2): any other 4xx (content-filter
-      400, 413), any other 5xx, every :class:`_ScreeningStreamRefused`
+      400, 413, every 403), any other 5xx, every :class:`_ScreeningStreamRefused`
       (refusal, length, tool use, over-cap, missing end/stop, error, aborted,
       images_unsupported), the guard's own fail-closed refusals, and local
       defects. A sender-triggerable failure must never buy a weaker screener.
-      A return carrying a model identity STOPS the walk whatever its text: a
-      model HOLD is a verdict, not a failure.
+      A return carrying a model identity and a USABLE reply stops the walk: a
+      model HOLD is a verdict, not a failure. An EMPTY reply, or one the
+      caller's ``reply_usable`` rejects, is not an answer: it is re-drawn once
+      on the same hop, then the walk advances (operator report 2026-11-09).
+      The one-step-weaker-screener exposure is bounded: every hop is in the
+      operator's own approved chain and accepted by the serving-identity gate.
     * Every hop failing re-raises the LAST exception, tagged
       ``tb_chain_exhausted`` when more than one hop ran, so the pipeline
       records exactly ONE breaker failure and ONE ``provider_error`` hold.
@@ -1553,6 +1634,24 @@ class ScreenChainRunner:
         #: ``None``. The pipeline reads :attr:`answered_preferred` from it to
         #: stamp ``screener_preferred``; an ordinary cascade hop is never preferred.
         self.answered_hop: DefaultSelection | None = None
+        #: Optional caller predicate: is this non-empty reply an ANSWER? The
+        #: single-message pipeline sets it to "``parse_verdict`` accepts it";
+        #: unset (the batch path), only an empty reply is unusable.
+        self.reply_usable: Callable[[str], bool] | None = None
+        #: Unusable draws on the last :meth:`acall` (diagnostics and tests).
+        self.unusable_replies = 0
+        #: Whether HOP 0 itself ANSWERED (unusably) on the last :meth:`acall`.
+        #: The pipeline keys the answer cache by hop 0's model, and caches only
+        #: hop 0's answers so a ROUTE failover never parks a message under the
+        #: primary's identity. When hop 0 answered off-grammar, though, the
+        #: primary is up and the advance was the reply's doing -- which a sender
+        #: can provoke -- so the fallback's parseable hold is the message's
+        #: answer and must be cached, or every backoff pass re-draws it until it
+        #: says deliver (code review round 1, R1). Set by an unusable reply on
+        #: ANY hop before the one that answered (round 2, M1): a route-failed
+        #: hop 0 followed by an off-grammar hop 1 is the same reply-driven
+        #: advance, and the name is kept for the pipeline's reader.
+        self.primary_answered_unusably = False
 
     @property
     def answered_preferred(self) -> bool:
@@ -1626,69 +1725,87 @@ class ScreenChainRunner:
         last_failure: BaseException | None = None
         attempts = 0
         unevidenced: tuple[str, str | None] = ("", None)
+        #: The last ANSWERED-but-unusable reply (empty, or one the caller's
+        #: ``reply_usable`` rejects), returned when no later hop does better.
+        unusable: tuple[str, str | None] | None = None
+        unusable_hop: tuple[int, DefaultSelection] | None = None
+        self.unusable_replies = 0
+        self.primary_answered_unusably = False
         for index, hop in enumerate(self._hops):
-            runner = self._build(hop)
-            if runner is None:
-                continue
-            attempts += 1
-            try:
-                # Each hop is asked under ITS OWN model id: the hop runner's
-                # identity gate compares against its own selection. Invoked
-                # through the pipeline's own runner contract, so a hop that
-                # is a plain synchronous callable (an injected factory) is
-                # driven exactly as the pipeline drives a bare runner.
-                from local_operator.team_bridge.screening import (
-                    _invoke_runner,
-                    _maybe_await,
-                )
-
-                reply, actual = await _maybe_await(
-                    _invoke_runner(
-                        runner,
-                        prompt,
-                        hop.model_id,
-                        images=list(images) if images is not None else None,
-                    )
-                )
-            except _ScreeningStreamRefused as refusal:
-                # The hop that ANSWERED owns the answer: the pipeline caches a
-                # model-answer hold under the REQUESTED model's key, so a
-                # fallback's refusal must not be remembered as the primary's —
-                # a cached fallback answer would park the message even after the
-                # primary recovered, turning a route failure into an answer.
-                # Typed attribute, never prose.
-                setattr(refusal, "serving_model", hop.model_id)
-                raise
-            except Exception as failure:  # noqa: BLE001 — classified below; control flow propagates
-                # A wire failure was classified on its RAW form by the guard
-                # before scrubbing; a failure raised outside the guard (the
-                # credential cascade, a local defect) is still raw here.
-                advance = getattr(failure, _ADVANCE_ATTR, None)
-                if advance is None:
-                    # No guard verdict: this hop refused ABOVE the guarded
-                    # client (the failover layer's credential cascade). Only the
-                    # EMITTER's pre-dispatch stamp may advance here — the kind
-                    # allow-list stays on the scrubbed wire path, where a send
-                    # count has already ruled, so an unscrubbed failure can
-                    # never be promoted by its own `kind`. (B1, PR #3212)
-                    advance = _sender_cannot_cause(failure) or (
-                        _producer_stated_prewire(failure)
-                        and _prewire_refusal_advances(failure, sent=False, prewire=True)
-                    )
-                if not advance:
+            for draw in range(_UNUSABLE_REPLY_DRAWS_PER_HOP):
+                runner = self._build(hop)
+                if runner is None:
+                    break
+                attempts += 1
+                try:
+                    reply, actual = await self._ask(runner, hop, prompt, images)
+                except _ScreeningStreamRefused as refusal:
+                    # The hop that ANSWERED owns the answer: the pipeline caches a
+                    # model-answer hold under the REQUESTED model's key, so a
+                    # fallback's refusal must not be remembered as the primary's —
+                    # a cached fallback answer would park the message even after the
+                    # primary recovered, turning a route failure into an answer.
+                    # Typed attribute, never prose.
+                    setattr(refusal, "serving_model", hop.model_id)
                     raise
-                last_failure = failure
-                continue
-            if actual is not None:
-                # B4b D4: the provider of the hop that ANSWERED, read by the
-                # pipeline for release eligibility. A model id alone cannot
-                # tell the direct Anthropic route from a re-seller serving the
-                # same id, and eligibility is keyed on the (provider, model) pair.
-                self.served_provider = hop.provider
-                self.served_hop_index = index
-                self.answered_hop = hop
-                return reply, actual
-            unevidenced = (reply, actual)
+                except (
+                    Exception
+                ) as failure:  # noqa: BLE001 — classified below; control flow propagates
+                    # A wire failure was classified on its RAW form by the guard
+                    # before scrubbing; a failure raised outside the guard (the
+                    # credential cascade, a local defect) is still raw here.
+                    advance = getattr(failure, _ADVANCE_ATTR, None)
+                    if advance is None:
+                        # No guard verdict: this hop refused ABOVE the guarded
+                        # client (the failover layer's credential cascade). Only the
+                        # EMITTER's pre-dispatch stamp may advance here — the kind
+                        # allow-list stays on the scrubbed wire path, where a send
+                        # count has already ruled, so an unscrubbed failure can
+                        # never be promoted by its own `kind`. (B1, PR #3212)
+                        advance = _sender_cannot_cause(failure) or (
+                            _producer_stated_prewire(failure)
+                            and _prewire_refusal_advances(failure, sent=False, prewire=True)
+                        )
+                    if not advance:
+                        raise
+                    last_failure = failure
+                    break
+                if actual is None:
+                    unevidenced = (reply, actual)
+                    break
+                if self._usable(reply):
+                    # B4b D4: the provider of the hop that ANSWERED, read by the
+                    # pipeline for release eligibility. A model id alone cannot
+                    # tell the direct Anthropic route from a re-seller serving the
+                    # same id, and eligibility is keyed on the (provider, model) pair.
+                    self._answered_by(index, hop)
+                    return reply, actual
+                # EMPTY OR UNPARSABLE IS NOT AN ANSWER (operator report
+                # 2026-11-09, R2): an empty completion parsed as ``parse_failed``
+                # and was cached as a final answer, so one blank draw parked a
+                # message for days. Re-draw once on this hop, then fail over. A
+                # real ``hold``/``bounce`` is usable and returned above, so this
+                # can never shop for a ``deliver`` among parseable verdicts.
+                self.unusable_replies += 1
+                # ANY unusable reply before the serving hop, not only hop 0's
+                # (code review round 2, M1): with hop 0 route-failed and hop 1
+                # off-grammar, the advance to hop 2 was still the reply's doing.
+                self.primary_answered_unusably = True
+                unusable = (reply, actual)
+                unusable_hop = (index, hop)
+                logger.info(
+                    "bridge: screening reply unusable code=%s hop=%d draw=%d",
+                    "empty_reply" if not reply.strip() else "unparsable_reply",
+                    index,
+                    draw,
+                )
+        if unusable is not None and unusable_hop is not None:
+            # Answered, but never usably: the pipeline records the NON-cached
+            # ``empty_reply``/``parse_failed`` hold and the backoff retries it.
+            # Preferred over a later hop's route failure, which would charge the
+            # breaker for a provider that did answer.
+            self._answered_by(*unusable_hop)
+            return unusable
         if last_failure is None:
             return unevidenced
         if attempts > 1:
@@ -1699,6 +1816,40 @@ class ScreenChainRunner:
         # ``provider_hold_code`` turns this into the owner-notice hold.
         setattr(last_failure, "tb_cascade_exhausted", True)
         raise last_failure
+
+    def _answered_by(self, index: int, hop: DefaultSelection) -> None:
+        self.served_provider = hop.provider
+        self.served_hop_index = index
+        self.answered_hop = hop
+
+    def _usable(self, reply: str) -> bool:
+        if not isinstance(reply, str) or not reply.strip():
+            return False
+        check = self.reply_usable
+        return True if check is None else bool(check(reply))
+
+    async def _ask(
+        self,
+        runner: Any,
+        hop: DefaultSelection,
+        prompt: str,
+        images: "Sequence[tuple[bytes, str]] | None",
+    ) -> tuple[str, str | None]:
+        # Each hop is asked under ITS OWN model id: the hop runner's
+        # identity gate compares against its own selection. Invoked
+        # through the pipeline's own runner contract, so a hop that
+        # is a plain synchronous callable (an injected factory) is
+        # driven exactly as the pipeline drives a bare runner.
+        from local_operator.team_bridge.screening import _invoke_runner, _maybe_await
+
+        return await _maybe_await(
+            _invoke_runner(
+                runner,
+                prompt,
+                hop.model_id,
+                images=list(images) if images is not None else None,
+            )
+        )
 
     async def aclose(self) -> None:
         """Close every hop runner that was built (each close is idempotent)."""

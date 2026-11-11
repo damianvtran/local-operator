@@ -1,0 +1,47 @@
+# audit.log — actual command output captured by auditor session d94d672abfb8, 2026-11-09, worktree @ 50badda034d755ebb049c4f542f3073439bf823e
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit=0
+$ parity script (placeholders, backtick spans, trailing space, verbatim tokens, ZWJ/ZWNJ, rich cell_len en/hi)
+keys en 28 hi 28 symdiff []
+cli.permissions.help.permissions 72 68 []
+cli.permissions.help.status 84 76 []
+cli.permissions.help.setup 94 70 []
+cli.permissions.status.not_macos 56 40 []
+cli.permissions.status.identity.team 78 68 []
+cli.permissions.status.identity.adhoc 68 64 []
+cli.permissions.status.identity.legacy 105 84 []
+cli.permissions.status.identity.none 79 50 []
+cli.permissions.status.image 13 11 []
+cli.permissions.status.optin.on 51 40 []
+cli.permissions.status.optin.off 78 68 []
+cli.permissions.status.optin.blocked 52 38 []
+cli.permissions.status.app.found 33 28 []
+cli.permissions.status.app.missing 26 19 []
+cli.permissions.status.screen.granted 45 33 []
+cli.permissions.status.screen.denied 126 93 []
+cli.permissions.status.screen.unknown 58 37 []
+cli.permissions.status.guide 30 27 []
+cli.permissions.setup.refused.tty 61 49 []
+cli.permissions.setup.refused.isolated 89 62 []
+cli.permissions.setup.no_app 88 68 []
+cli.permissions.setup.no_identity 131 109 []
+cli.permissions.setup.explain 221 184 []
+cli.permissions.setup.confirm 16 13 []
+cli.permissions.setup.cancelled 31 23 []
+cli.permissions.setup.failed 113 96 []
+cli.permissions.setup.always_allow 63 48 []
+cli.permissions.setup.done 130 105 []
+$ grep -o सेशन local_operator/i18n/catalogues/hi/*.json | sort | uniq -c
+   1 local_operator/i18n/catalogues/hi/cli.permissions.json:सेशन
+$ grep -l सत्र local_operator/i18n/catalogues/hi/*.json | wc -l
+      59
+$ grep -ohE "(बंडल|bundle)" local_operator/i18n/catalogues/hi/*.json | sort | uniq -c
+   5 bundle
+   4 बंडल
+$ grep -n "^| session" i18n/glossary.md
+44:| session | translate | session · sesión · 会话 · сессия · phiên · سیشن · सत्र |
+$ python3 scripts/i18n/ledger.py history-sha --locale hi --namespace cli.permissions
+4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+# web_fetch https://support.apple.com/hi-in/guide/mac-help/mh11848/mac (2026-11-09): Apple hi-IN text reads "Apple मेन्यू > सिस्टम सेटिंग चुनें"; TOC lists "गोपनीयता और सुरक्षा". Screen-Recording page mchld6aa7d23 returned HTTP 429 (not verified).
+$ ledger.py append --dry-run -> i18n/audit-history/hi/cli.permissions.json (exit 0); first --apply: "audit storage mutation is busy; retry shortly" (exit 2); retry --apply with expected 4f53cda1... -> i18n/audit-history/hi/cli.permissions.json (exit 0); new history_sha256 e80243d4528ffed128b2b26e9d14bfadb1587e253b0076c3af1b4ea8488348e1

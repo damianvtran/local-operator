@@ -1829,7 +1829,7 @@ class DesktopSessionBridge:
                 try:
                     facade_at = time.monotonic() if phases is not None else 0.0
                     remote = (
-                        await self._ensure_facade(phase_times=phases)
+                        await self._ensure_facade(phase_times=phases, trace_span=trace_id)
                         if phases is not None
                         else await self._ensure_facade()
                     )
@@ -1981,7 +1981,7 @@ class DesktopSessionBridge:
         self.publish_frontend_replace()
 
     async def _ensure_facade(
-        self, *, phase_times: dict[str, float] | None = None
+        self, *, phase_times: dict[str, float] | None = None, trace_span: str | None = None
     ) -> AttachedSession:
         """This bridge's facade, constructed cold on first use. Caller holds the lock."""
         if self.remote is None:
@@ -2082,6 +2082,7 @@ class DesktopSessionBridge:
                     # argument and stay eager, because each of them paints or
                     # folds ``history()`` and none has a page reader behind it.
                     deferred_history=True,
+                    _trace_span=trace_span,
                 )
                 if phase_times is not None:
                     phase_times["cold_ms"] = (time.monotonic() - cold_at) * 1000

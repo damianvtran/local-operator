@@ -736,6 +736,8 @@
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "每小时闲聊上限",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "整个账户的筛查上限按滚动一小时计，由该账户下的所有会话与设备共享。立即生效，无需重启。",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "每小时筛查上限",
+  "wire.settings.team_bridge_screening_model.help": "哪个模型首先筛查收到的智能体消息。留空使用经过测试的顺序，这是最安全的默认值。选择只会把该模型提到最前：如果它不可用或配额不足，这台机器自身配置的模型和回退模型仍会筛查，因此偏好设置绝不会阻塞消息。",
+  "wire.settings.team_bridge_screening_model.label": "筛查模型",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "单个发送者在账户上限中所占的份额；默认为账户上限的一半。发送者绝不会超过账户上限本身。",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "每小时单发送者上限",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "从账户上限中划出，绝不额外增加：除真人直接联系你的智能体之外，其余消息每小时最多只能占用这么多。剩下的留给真人。",

@@ -350,8 +350,14 @@ class AskQueue:
         timeout_raw: Any,
         *,
         tool_call_id: str = "",
+        consent: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate, cap, append ``queued``, arm the timer; return a receipt.
+
+        ``consent`` is HOST-ONLY (see ``store.EVENT_CONSENT_USED``): the account
+        write an affirmative answer to this ask authorises. Keyword-only and never
+        reachable from the ``ask`` tool, so a model cannot mint a consent-bearing
+        ask; the session grants on it only for a person's answer, once.
 
         Returns ``{"ok": True, "text": …, "details": …}`` or
         ``{"ok": False, "error": …}``. Every refusal is a validation error the
@@ -422,6 +428,8 @@ class AskQueue:
             "tool_call_id": str(tool_call_id or ""),
             "questions": shapes,
         }
+        if consent is not None:
+            record["consent"] = dict(consent)
         event = {"v": store.EVENT_SCHEMA, "kind": store.EVENT_QUEUED, "at": now, **record}
         if not store.append_event(self.session_dir, event):
             return {
@@ -2748,6 +2756,20 @@ class AskQueue:
             return ", ".join(names) if names else None
         return str(value)
 
+    def mark_consent_used(self, ask_id: str) -> bool:
+        """Spend a host-filed consent ask (single use; survives fold and restart).
+
+        ``False`` when the event could not be recorded: the caller must then
+        REFUSE the write, because an unrecorded spend could be spent again.
+        """
+        event = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_CONSENT_USED,
+            "at": self._now(),
+            "ask_id": str(ask_id),
+        }
+        return bool(store.append_event(self.session_dir, event))
+
     def find(self, ask_id: str, now_ms: int | None = None) -> dict[str, Any] | None:
         """The folded record for ``ask_id``, or ``None`` when this log never had it.
 
@@ -3088,6 +3110,13 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # when present — an ask without it keeps the exact pre-scope shape, so
         # existing logs fold and serialize byte-identically.
         shape["bridge"] = dict(bridge)
+    recommended_all = raw.get("recommended_all")
+    if recommended_all is not None:
+        # A multi-select's recommendation SET (`AskQuestion.recommended_all`),
+        # added ONLY when present: `recommended` stays the int the log has
+        # always carried, and every ask without a set keeps the exact prior
+        # shape, so existing logs fold byte-identically. Never emit it as None.
+        shape["recommended_all"] = list(recommended_all)
     return shape
 
 
