@@ -1442,6 +1442,13 @@ def classify_targets(
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
     ranked = [_rank(t, prot, session_id) for t in targets]
+    # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
+    # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
+    # row for it would invent a target (review M1 on PR #3816).
+    ranked = [r for r in ranked if not (r.target.critical_only and r.risk is not Risk.CRITICAL)]
+    evidence_hits = [
+        h for h in evidence_hits if not (h.target.critical_only and h.risk is not Risk.CRITICAL)
+    ]
     # An append that is not forging evidence is not a destructive target at all:
     # drop it so it adds no "destructive" annotation and no target text.
     ranked = [r for r in ranked if not (r.target.op == "append" and r.risk is Risk.LOW)]

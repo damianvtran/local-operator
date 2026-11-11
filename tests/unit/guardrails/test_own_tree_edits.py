@@ -20,9 +20,11 @@ Rule decided here (documented in the guardrails guide): an in-place edit
 rewrites file CONTENT, never removes a path, so it ranks like any write —
 CRITICAL on the state root, ``config.yml``, ``secrets/`` and the guard's
 evidence exactly as before, LOW elsewhere. That holds for a tracked file in an
-own, foreign or primary checkout alike (git restores it) and for an untracked
-one (unchanged: it was LOW before). What this file pins is that the parse no
-longer invents a directory, a script or a suffix as the target.
+own, foreign or primary checkout alike and for an untracked one (unchanged: it
+was LOW before): an in-place edit rewrites content and removes no path;
+uncommitted edits in another tree are not protected by this rank. What this
+file pins is that the parse no longer invents a directory, a script or a suffix
+as the target.
 """
 
 from __future__ import annotations
@@ -232,7 +234,7 @@ def test_untracked_file_edit_is_unchanged_low(home: Path, ui: Path) -> None:
 
 
 def test_tracked_edit_in_a_foreign_or_primary_checkout_is_low_too(home: Path, ui: Path) -> None:
-    """The documented rule: an edit is not a deletion, wherever git can restore it."""
+    """The documented rule: an edit rewrites content and removes no path, in any checkout."""
     command = f"cd {UI} && sed -i '' '/a/d' src/i18n/catalogues/en/ui.teamBridge.json"
     assert _classify(home, command, sid=S2).risk is Risk.LOW
     loop = (
@@ -347,3 +349,84 @@ def test_own_clean_worktree_with_a_running_other_owner_still_goes_to_the_judge(
     monkeypatch.setattr(prov, "_running_owners", lambda real, sid: ("bbbbbbbbbbbb",))
     v = _classify(home, f"git worktree remove --force {DONE}")
     assert v.risk is Risk.HIGH
+
+
+# -- review round 1 (PR #3816) -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "cd ~/.local-operator && sed -i '' 's/.*//' $f",
+        "cd ~/.local-operator; : > $f",
+        "pushd ~/.local-operator; : > $f; popd",
+    ],
+    ids=["cd-sed", "cd-truncate", "pushd-truncate"],
+)
+def test_a_cd_in_the_loop_body_unpins_relative_glob_words(home: Path, ui: Path, body: str) -> None:
+    """B1: bash expands ``*.yml`` to RELATIVE words, so a ``cd`` in the body moves them.
+
+    Real bash: with ``wt/config.yml`` and ``st/config.yml``, ``(cd wt && for f
+    in *.yml; do cd ../st; sed -i '' s/v/PWNED/ $f; done)`` rewrote
+    ``st/config.yml``. Pinning ``$f`` under the ``for``'s cwd ranked it LOW.
+    """
+    (ui / ".worktrees" / "bridge-single-recipient" / "config.yml").write_text("k: v\n")
+    v = _classify(home, f"cd {WT} && for f in *.yml; do {body}; done")
+    assert v.risk >= Risk.HIGH, [(t.target.path, t.reason) for t in v.targets]
+
+
+def test_a_cd_in_the_loop_body_unpins_a_nested_session_glob(home: Path, ui: Path) -> None:
+    wt = ui / ".worktrees" / "bridge-single-recipient"
+    (wt / "sessions" / "x").mkdir(parents=True)
+    (wt / "sessions" / "x" / "t.jsonl").write_text("{}\n")
+    command = f"cd {WT} && for f in sessions/*/*; do cd ~/.local-operator; : > $f; done"
+    v = _classify(home, command)
+    assert v.risk >= Risk.HIGH, [(t.target.path, t.reason) for t in v.targets]
+
+
+def test_absolute_glob_entries_stay_pinned_across_a_cd(home: Path, ui: Path) -> None:
+    """Absolute words do not move with the cwd: still the precise CRITICAL reading."""
+    command = f"cd {WT} && for f in ~/.local-operator/*.yml; do cd /; sed -i '' /x/d $f; done"
+    assert _classify(home, command).risk is Risk.CRITICAL
+    # And the field case's own-tree pin still holds when the body never moves.
+    same = f"cd {WT} && for f in src/*/*/*.json; do cd {WT}; sed -i '' /x/d $f; done"
+    assert _classify(home, same).risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gsed -i '' s/x/y/ ~/.local-operator/config.yml",
+        "gsed -n -i '' ~/.local-operator/config.yml",
+        "sed -n -i '' ~/.local-operator/config.yml",
+        "sed --quiet -i '' ~/.local-operator/config.yml",
+        "sed --silent -i '' ~/.local-operator/config.yml",
+        "sed -i '' -n ~/.local-operator/config.yml",
+        "sed -i '' ~/.local-operator/config.yml",
+    ],
+    ids=["gsed", "gsed-n", "sed-n", "sed-quiet", "sed-silent", "sed-n-after", "sed-no-script"],
+)
+def test_gnu_reading_of_dash_i_empty_keeps_the_file_critical(
+    home: Path, ui: Path, command: str
+) -> None:
+    """M1/n1: GNU ``-i`` takes only an ATTACHED suffix, so ``''`` is the script.
+
+    The word after it is then a FILE, and with ``-n`` an empty script prints
+    nothing: GNU sed truncates it in place. ``gsed`` is always GNU; ``sed`` is
+    GNU on Linux. The BSD skip must not hide that file.
+    """
+    v = _classify(home, command)
+    assert v.risk is Risk.CRITICAL, [(t.target.path, t.reason) for t in v.targets]
+
+
+def test_gnu_reading_adds_nothing_when_the_word_is_an_ordinary_script(home: Path, ui: Path) -> None:
+    """The second reading only counts when it reaches a protected path."""
+    target = "src/i18n/catalogues/en/ui.teamBridge.json"
+    v = _classify(home, f"cd {WT} && sed -i '' '/\"$K\"/d' {target}")
+    assert v.risk is Risk.LOW, [(t.target.path, t.reason) for t in v.targets]
+
+
+def test_copy_destination_loop_over_a_protected_glob_is_critical(home: Path, ui: Path) -> None:
+    """m2: ``cp x $f`` over a state-root glob was zero targets (LOW)."""
+    command = "for f in ~/.local-operator/*.yml; do cp /etc/hosts $f; done"
+    assert _classify(home, command).risk is Risk.CRITICAL

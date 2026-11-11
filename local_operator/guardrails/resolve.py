@@ -928,6 +928,11 @@ class Target:
     forced: bool = False
     #: Double force is narrowly allowed for a verified stale git initialization lock.
     force_count: int = 0
+    #: A target only an ALTERNATE parse produces (GNU sed's reading of BSD
+    #: ``-i ''``, review M1 on PR #3816): ``classify`` keeps it only when it
+    #: ranks CRITICAL, so it can raise a verdict to CRITICAL and never add a
+    #: HIGH for what is, under the other reading, the script.
+    critical_only: bool = False
     #: A ``touch`` handed to an interpreter (``node``/``python``) running a
     #: script FILE: that script's absolute path. ``classify`` lets a read of a
     #: same-task-tree session's scratch file rank LOW only when the script is
@@ -1556,6 +1561,28 @@ def _split_cluster(name: str, cluster: str) -> tuple[str, str | None]:
     return cluster, None
 
 
+def _sed_quiet(args: list[Expanded]) -> bool:
+    """Whether a sed command line asks for ``-n``/``--quiet``/``--silent``.
+
+    Review M1 (PR #3816): under GNU sed, ``-n -i ''`` runs the empty script
+    ``''`` with output suppressed and so truncates the next word's file in
+    place; the BSD ``-i ''`` reading must not apply then. Scans every option
+    word, a cluster up to its first script letter (``-ni``, ``-in``), and
+    stops at ``--``. A script word that merely looks like ``-n`` only makes
+    the reading stricter.
+    """
+    for w in args:
+        t = w.text
+        if t == "--":
+            return False
+        if t in ("--quiet", "--silent"):
+            return True
+        if t.startswith("-") and not t.startswith("--") and len(t) > 1:
+            if "n" in _split_cluster("sed", t[1:])[0]:
+                return True
+    return False
+
+
 @dataclass
 class _Feed:
     """What reaches a pipeline stage's stdin from the stages before it."""
@@ -1775,8 +1802,11 @@ class _Walker:
         self.for_roots: dict[str, str] = {}
         #: ``for VAR in <glob> …`` bindings, by the key inside the variable's
         #: ``FOR_GLOB_MARK`` value: one ``(absolute text, absolute pattern)``
-        #: per list word (``pattern`` is ``None`` for a literal word).
-        self.for_globs: dict[str, list[tuple[str, str | None]]] = {}
+        #: per list word (``pattern`` is ``None`` for a literal word), plus the
+        #: cwd of the ``for`` itself and whether every word was absolute. Bash
+        #: expands a relative glob to RELATIVE words, so the pin holds only
+        #: where the cwd still equals the loop's (review B1, PR #3816).
+        self.for_globs: dict[str, tuple[list[tuple[str, str | None]], str, bool]] = {}
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -2145,7 +2175,10 @@ class _Walker:
         # ``e`` such as ``-pe``), EVERY operand is a file; otherwise the
         # first operand is the script.
         files: list[Expanded] = []
+        #: Words only GNU sed's reading of ``-i ''`` makes files (review M1).
+        gnu_files: list[Expanded] = []
         script_by_flag = False
+        quiet = name == "sed" and _sed_quiet(args)
         k = 0
         while k < len(args):
             t = args[k].text
@@ -2172,7 +2205,13 @@ class _Walker:
                     k += 1 if attached else 2
                     continue
                 if (
-                    name in ("sed", "gsed")
+                    # Review M1 (PR #3816): never ``gsed``, which is always GNU,
+                    # and never with ``-n``/``--quiet``/``--silent``: GNU's
+                    # ``-i`` takes only an ATTACHED suffix, so there ``''`` is
+                    # the script, the next word a file, and ``-n`` with an empty
+                    # script truncates it (``gsed -n -i '' config.yml``).
+                    name == "sed"
+                    and not quiet
                     and _flags.endswith("i")
                     and k + 1 < len(args)
                     and args[k + 1].text == ""
@@ -2188,6 +2227,14 @@ class _Walker:
                     # unset ``$k`` made it an "expanded empty" HIGH), and with
                     # ``-e`` the '' itself resolved to the cwd as an overwrite.
                     # Only a literal '' qualifies: ``-i "$SUF"`` may hold a name.
+                    # ``sed`` is GNU on Linux, though, where the next word IS a
+                    # file: rank it under that reading too, max of both. It is
+                    # ``critical_only`` because without ``-n`` GNU rewrites it
+                    # unchanged, so only a protected path (where even that is
+                    # forbidden) should move the verdict; a script word read
+                    # as a path must not re-create the HIGH this skip removed.
+                    if k + 2 < len(args) and not args[k + 2].text.startswith("-"):
+                        gnu_files.append(args[k + 2])
                     k += 2
                     continue
                 k += 1
@@ -2197,8 +2244,17 @@ class _Walker:
                 continue
             files.append(args[k])
             k += 1
-        for w in files if script_by_flag else files[1:]:
+        chosen = files if script_by_flag else files[1:]
+        for w in chosen:
             self._add(w, "overwrite", name)
+        chosen_ids = {id(w) for w in chosen}
+        for w in gnu_files:
+            if id(w) in chosen_ids:
+                continue  # both readings already agree it is a file
+            before = len(self.result.targets)
+            self._add(w, "overwrite", name)
+            for target in self.result.targets[before:]:
+                target.critical_only = True
         return
 
     # -- program handlers ------------------------------------------------------
@@ -2516,7 +2572,12 @@ class _Walker:
             # would: the target IS that glob, ranked by the existing glob rules
             # (CRITICAL when it reaches a protected name, LOW for an ordinary
             # match set). Resolved against the cwd of the ``for`` itself, as
-            # bash expands it there, so a later ``cd`` in the body cannot move it.
+            # bash expands it there. But bash binds ``$f`` to the RELATIVE match
+            # (``config.yml``), so a ``cd``/``pushd`` in the body re-anchors it:
+            # ``for f in *.yml; do cd ~/.local-operator && sed -i … $f`` edits
+            # the state root's config.yml (review B1, reproduced in real bash).
+            # The loop's cwd is recorded so ``_for_glob_words`` pins only where
+            # the use site's cwd still equals it, or every word was absolute.
             key = str(len(self.for_globs))
             entries: list[tuple[str, str | None]] = []
             for v in values:
@@ -2529,7 +2590,8 @@ class _Walker:
                         else os.path.join(_glob_escape(st.cwd), v.pattern)
                     )
                 entries.append((text, pattern))
-            self.for_globs[key] = entries
+            absolute = all(v.text.startswith("/") for v in values)
+            self.for_globs[key] = (entries, st.cwd, absolute)
             st.env[var] = FOR_GLOB_MARK + key + OPAQUE_MARK
             return
         if any(v.opaque or v.pattern is not None for v in values):
@@ -2900,7 +2962,9 @@ class _Walker:
         if pinned is not None:
             # ``$f`` from ``for f in <glob>``: one target per list word, each
             # the glob (or literal) bash iterates — never the opaque cwd.
-            # WRITES ONLY (in-place edits, redirections, copy destinations):
+            # WRITES ONLY (in-place edits and redirections here; a copy's
+            # overwritten destination is folded the same way in
+            # ``_add_overwrite_dest``):
             # a delete/move keeps the opaque reading, because a glob DELETE
             # ranks by rules that are looser than the opaque judge for some
             # shapes (``rm -rf .worktrees/*`` ranks LOW today, foreign trees
@@ -3107,8 +3171,14 @@ class _Walker:
         if not text.startswith(FOR_GLOB_MARK) or not text.endswith(OPAQUE_MARK):
             return None
         key = text[len(FOR_GLOB_MARK) : -len(OPAQUE_MARK)]
-        entries = self.for_globs.get(key)
-        if entries is None or exp.substitutions or exp.empty or exp.temp:
+        binding = self.for_globs.get(key)
+        if binding is None or exp.substitutions or exp.empty or exp.temp:
+            return None
+        entries, loop_cwd, absolute = binding
+        if not absolute and self.state.cwd != loop_cwd:
+            # Review B1: a relative match moved with a ``cd``/``pushd`` (or an
+            # unknowable one, cwd ``None``) in the body; the pin would name
+            # the wrong file. The opaque reading is the fail-closed one.
             return None
         return [Expanded(text=t, pattern=p, opaque_contained=False) for t, p in entries]
 
@@ -3181,6 +3251,16 @@ class _Walker:
         sources: list[Expanded] | None = None,
         flags: list[str] | None = None,
     ) -> None:
+        pinned = self._for_glob_words(exp)
+        if pinned is not None:
+            # Review m2 (PR #3816): ``for f in ~/.local-operator/*.yml; do cp x
+            # $f`` hit the opaque early return below and named NOTHING (LOW),
+            # while the direct ``cp x ~/.local-operator/config.yml`` is
+            # CRITICAL. The destination is overwritten, so it takes the same
+            # pin as a redirection; never looser, since before it named nothing.
+            for word in pinned:
+                self._add(word, "overwrite", program)
+            return
         if exp.opaque or exp.pattern is not None:
             return
         path, _ = _absolute(exp.text, self.state.cwd)

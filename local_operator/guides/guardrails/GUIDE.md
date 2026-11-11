@@ -111,10 +111,16 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   file's content and remove no path, so they rank like any write: CRITICAL on
   the state root, `config.yml`, `secrets/` and session evidence, LOW elsewhere
   — a tracked file in your own, another session's or a primary checkout
-  alike (git restores it), and an untracked one. BSD `sed -i ''` is read as an
-  empty backup suffix, so neither the `''` nor the script is a target, and
-  `$f` from `for f in <glob>` is that glob, not the opaque working directory
-  (writes only; a delete through such a loop keeps the judge).
+  alike, and an untracked one. An in-place edit rewrites content and removes
+  no path; uncommitted edits in another tree are not protected by this rank.
+  BSD `sed -i ''` is read as an empty backup suffix, so neither the `''` nor
+  the script is a target; because GNU sed (`gsed`, Linux `sed`) reads that `''`
+  as the script, `gsed` and any `-n`/`--quiet`/`--silent` keep the GNU reading,
+  and the word after `''` still counts when it is a protected path. `$f` from
+  `for f in <glob>` is that glob, not the opaque working directory, while the
+  cwd stays the loop's (or every word is absolute): after a `cd`/`pushd` in the
+  body, the relative match is opaque again. Writes only (redirections, in-place
+  edits, copy/move destinations); a delete through such a loop keeps the judge.
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
   own prefix. Before it runs, the checkpoint extracts real tool calls: this
   session's from the harness's memory, its descendants' (found by `origin.json`
