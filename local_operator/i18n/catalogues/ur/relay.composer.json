@@ -10,6 +10,6 @@
   "relay.composer.delivery.queue": "قطار",
   "relay.composer.delivery.both": "دونوں",
   "relay.composer.delivery.steer_hint": "فوراً مداخلت (موجودہ طرزِ عمل)",
-  "relay.composer.delivery.queue_hint": "انتظار کریں؛ ٹولز کو نہ روکیں",
+  "relay.composer.delivery.queue_hint": "انتظار کریں؛ ٹولز کو کبھی نہ روکیں",
   "relay.composer.delivery.both_hint": "انتظار، پھر دیر ہو تو مداخلت"
 }

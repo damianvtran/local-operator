@@ -146,6 +146,8 @@
   "wire.settings.compaction_wire_bytes_budget.label": "Лимит размера запроса (байты)",
   "wire.settings.compaction_wire_bytes_trigger.help": "Сжимать, как только запрос превысит этот размер: сессия с обилием скриншотов сжимается заранее, вместо того чтобы отбрасывать скриншоты. 0 отключает.",
   "wire.settings.compaction_wire_bytes_trigger.label": "Триггер размера запроса (байты)",
+  "wire.settings.composer.description": "Как доставляется сообщение, которое вы отправляете, пока агент работает. Изменение действует сразу в терминале и настольном приложении.",
+  "wire.settings.composer.title": "Отправка сообщений",
   "wire.settings.conversation_length.help": "Устарело. Заменено движком сжатия.",
   "wire.settings.conversation_length.label": "Длина беседы",
   "wire.settings.desktop.description": "Куда отправляет клик по уведомлению, когда настольное приложение не запущено.",

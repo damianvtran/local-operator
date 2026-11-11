@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "8a0754cca30cb060f6a01723e763edb7729bc1202b81e9d1cd07d18050fbad0d",
+  "history_sha256": "487f71288ff1197ab0da08c794c1e20f579c365e59154057eee509f22476bf39",
   "entries": [
     {
       "locale": "ur",
@@ -225,6 +225,31 @@
       "note": "MERGE-UNION receipt (NOT a new semantic audit): merge reconciliation of concurrent additions to one namespace; no value changed. Origin/main en wire.settings sha 206f2b124405… and ours bffca6147c3a… merged to b1bcfd823f34…. Proof (this session, scripted): merged <locale>/wire.settings.json == origin/main's file + exactly our 8 tui_busy_delivery keys; every value byte-identical to one of the two independently audited states (origin/main catalogue for upstream keys; committed e635f034a catalogue for our 8 keys); keyset union, zero mismatches on all 7 locales. Only wave-1/2 keys were newly audited by us (r2 keys_audited 8, r3 keys_audited 3, previous rows in this file); upstream keys audited under their own row. This receipt attests byte-identity only and re-stamps the merged source/context/target hashes so the freshness gate can evaluate the union. No second independent audit: merge reconciliation; no value changed.",
       "round": "r4",
       "keys_audited": 10
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "41b6a352abefc77fd48f54131a7bff09fb9361a457aeaf524c9abded206dde3c",
+      "context_sha256": "dc630a851848e6545d8a4603ee00430ddb426cbe73444eee185c4ee1674e61ad",
+      "target_sha256": "aee9f92f0adac4c549bc4393542317a5e1ca76dd740ea99e6d0894a4cc291f52",
+      "keys_audited": 10,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S1 Message sending section (branch feat/busy-delivery-modes @ 4b70d0d83 + uncommitted catalogue edits, 2026-11-11): 10 keys audited in this namespace. 8 keys carried over by rename from wire.settings.tui_busy_delivery.* (label, help, choice.steer/queue/both label/description) to wire.settings.delivery_busy_default.*; values moved byte-identically from the keys audited in earlier waves (r2/r3 + r4 union, PR #3768 history) and re-audited in context this round. 2 NEW keys: wire.settings.composer.title, wire.settings.composer.description. en source renamed in 4b70d0d83; en context sidecar gained the 2 composer entries in the same commit. keys_audited lists all 10 keys of this slice. Audit: fr/es/zh-CN/ru/vi/hi PASS 0 blocker/major, no findings, first pass. ur had 1 major in round 1 on wire.settings.delivery_busy_default.choice.queue.description ('نہ روکیں' lost the explicit 'never'); remediated with the auditor's own replacement verbatim 'انتظار کریں؛ ٹولز کو کبھی نہ روکیں' (34 cells), mirrored byte-identically in relay.composer.delivery.queue_hint (ur only); round-2 delta audit (same auditor): PASS 0/0. Accepted minors: none. No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }

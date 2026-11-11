@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "relay.composer",
-  "history_sha256": "61368475bb2b0a9e959696d12feb75d2b53082c8c40701e9f350fb2e9577b178",
+  "history_sha256": "e7c26a5475fcf85969c9c28a1f20670aff494bfe5927beffea0d7240fd8bf5ce",
   "entries": [
     {
       "locale": "ur",
@@ -53,6 +53,31 @@
       "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 3 keys audited in this namespace (delivery.steer_hint/queue_hint/both_hint). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit (same auditor, only the 8 changed/new keys audited): PASS 0 blocker/major, no findings, first pass. Wave-1 accepted minor on steer.description (nit) is superseded: that description was replaced in wave 2 and re-audited. No second independent audit: copy is not high-visibility/safety; no second_audit field.",
       "round": "r3",
       "keys_audited": 3
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.composer",
+      "source_sha256": "138397e44abf8f0e63f3ae0fa65f26e32482af6eef7dcfb5bc7f34b0ed21d162",
+      "context_sha256": "284f54545555015c629c8557ccd5087501f7be6d6455f36c59ada1fd0ae6800f",
+      "target_sha256": "7053f42c7edab5caba79ab128f338df5a300fdce0cf247f6a6f5e30324eb90bb",
+      "keys_audited": 1,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S1 (branch feat/busy-delivery-modes, 2026-11-11): single-value remediation of relay.composer.delivery.queue_hint to stay byte-identical with the settings description after the ur settings remediation (see ur wire.settings receipt, same slice); en source and context sidecar unchanged this slice. keys_audited 1. Round-2 delta audit (same auditor): PASS 0/0. No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }

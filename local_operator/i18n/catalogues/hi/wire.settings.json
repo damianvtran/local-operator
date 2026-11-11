@@ -146,6 +146,8 @@
   "wire.settings.compaction_wire_bytes_budget.label": "अनुरोध आकार सीमा (बाइट)",
   "wire.settings.compaction_wire_bytes_trigger.help": "अनुरोध इस आकार को पार करते ही संपीडित करें, ताकि स्क्रीनशॉट-भारी सत्र फ़्रेम हटाने के बजाय जल्दी सारांशित हो जाए। 0 बंद कर देता है।",
   "wire.settings.compaction_wire_bytes_trigger.label": "अनुरोध आकार ट्रिगर (बाइट)",
+  "wire.settings.composer.description": "एजेंट के काम करते समय आपका भेजा गया संदेश कैसे पहुँचाया जाए। बदलाव टर्मिनल और डेस्कटॉप ऐप में तुरंत लागू होता है।",
+  "wire.settings.composer.title": "संदेश भेजना",
   "wire.settings.conversation_length.help": "अप्रचलित। संपीडन इंजन इसे बदल चुका है।",
   "wire.settings.conversation_length.label": "बातचीत की लंबाई",
   "wire.settings.desktop.description": "डेस्कटॉप ऐप न चल रहा हो तो सूचना पर क्लिक करने से आप कहाँ पहुँचते हैं।",

@@ -146,6 +146,8 @@
   "wire.settings.compaction_wire_bytes_budget.label": "Giới hạn kích thước yêu cầu (byte)",
   "wire.settings.compaction_wire_bytes_trigger.help": "Nén ngay khi yêu cầu vượt kích thước này, để phiên nhiều ảnh chụp màn hình tóm tắt sớm thay vì bỏ khung hình. 0 tắt.",
   "wire.settings.compaction_wire_bytes_trigger.label": "Mốc kích thước yêu cầu (byte)",
+  "wire.settings.composer.description": "Cách chuyển một tin nhắn bạn gửi trong lúc tác nhân đang làm việc. Thay đổi có hiệu lực ngay trong terminal và ứng dụng desktop.",
+  "wire.settings.composer.title": "Gửi tin nhắn",
   "wire.settings.conversation_length.help": "Đã lỗi thời. Được thay thế bởi bộ máy nén.",
   "wire.settings.conversation_length.label": "Độ dài cuộc trò chuyện",
   "wire.settings.desktop.description": "Nơi bạn được đưa đến khi bấm vào thông báo lúc ứng dụng desktop không chạy.",
