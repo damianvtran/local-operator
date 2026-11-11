@@ -313,3 +313,97 @@ async def test_stepped_aside_aida_stash_for_boot_session_is_returned(monkeypatch
         assert rig.app._editor().text == "plan my day"
         assert rig.app._pending_aida_prompt is None
         assert rig.submitted == []
+
+
+# The in-process swap (`_reload_session`) has its own sidebar step-aside, and
+# the requester's decision covers every branch of that class: the prompt its
+# replacement carried (a switch-mode `/fork <message>` sidecar, or an `/aida
+# <request>` stash riding a `/resume`) is handed back, never sent and never
+# dropped. Before the fix that branch disposed the replacement bare.
+
+
+class _Replacement(FakeSession):
+    @property
+    def session_id(self) -> str:
+        return "s2"
+
+
+async def _reload_stepped_aside(
+    rig: _Rig, pilot: Any, *, draft: str | None = None, aida: str | None = None
+) -> _Replacement:
+    """Boot normally, start a swap, click the sidebar while it builds, release."""
+    app = rig.app
+    rig.gate.set()
+    await settle(pilot, lambda: app._session is rig.boot, what="boot adopted", workers=("session",))
+    if aida is not None:
+        # Armed AFTER boot adopted, the way `/aida <request>` stashes it just
+        # before its `/resume`: boot's own adoption consumes any earlier stash.
+        app._pending_aida_prompt = ("s2", aida, None)
+    replacement = _Replacement()
+    rig._spy_dispose(replacement, "replacement")
+    building = asyncio.Event()
+    release = asyncio.Event()
+
+    async def swap_factory() -> Any:
+        building.set()
+        await release.wait()
+        return replacement
+
+    app._session_factory = swap_factory
+    app._run_session_transition(app._reload_session())
+    await settle(pilot, building.is_set, what="reload building")
+    app._sidebar_navigation.generation += 1
+    if draft is not None:
+        app._editor().load_text(draft)
+    release.set()
+    await settle(
+        pilot,
+        lambda: any(e.startswith("replacement.dispose") for e in rig.events),
+        what="reload stepped aside",
+        workers=("session",),
+    )
+    return replacement
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stash", ["fork", "aida"])
+async def test_reload_step_aside_returns_prompt_as_unsent_draft(
+    monkeypatch, tmp_path, stash
+) -> None:
+    rig = _Rig(monkeypatch, tmp_path, live=True)
+    sidecar = tmp_path / "sessions" / "s2" / "boot-prompt.json"
+    if stash == "fork":
+        from local_operator.fork import write_boot_prompt
+
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        write_boot_prompt(sidecar.parent, "summarise the release notes")
+    async with rig.app.run_test(size=(100, 30)) as pilot:
+        replacement = await _reload_stepped_aside(
+            rig, pilot, aida="summarise the release notes" if stash == "aida" else None
+        )
+        await settle(pilot, lambda: bool(rig.notices()), what="notice shown")
+        assert rig.app._editor().text == "summarise the release notes"
+        assert rig.notices() == [RETURNED]
+        assert rig.submitted == []
+        assert replacement.prompts == []
+        assert rig.boot.prompts == []
+        assert rig.app._pending_aida_prompt is None
+    assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+async def test_reload_step_aside_keeps_users_draft_and_quotes_prompt(monkeypatch, tmp_path) -> None:
+    from local_operator.fork import write_boot_prompt
+
+    rig = _Rig(monkeypatch, tmp_path, live=True)
+    session_dir = tmp_path / "sessions" / "s2"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    write_boot_prompt(session_dir, "summarise the release notes")
+    async with rig.app.run_test(size=(100, 30)) as pilot:
+        replacement = await _reload_stepped_aside(rig, pilot, draft="my own words")
+        await settle(pilot, lambda: bool(rig.notices()), what="notice shown")
+        assert rig.app._editor().text == "my own words"
+        assert rig.notices() == [KEPT_PREFIX + "summarise the release notes"]
+        assert rig.submitted == []
+        assert replacement.prompts == []
+        assert rig.boot.prompts == []

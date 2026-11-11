@@ -14345,7 +14345,9 @@ class OperatorApp(App[None]):
         """Hand back the prompts a stepped-aside boot would have sent.
 
         Boot steps aside (see `_boot_session`) when the user navigated or
-        resumed elsewhere while it was building. Its stashed prompts — a
+        resumed elsewhere while it was building; an in-process swap
+        (`_reload_session`) steps aside the same way on a sidebar click, and
+        hands its replacement's prompts back through here too. Its stashed prompts — a
         ``/fork``'s opening message (the sidecar `_submit_boot_prompt`
         consumes) and an ``/aida <request>`` stashed for boot's own session —
         were written for a conversation that is no longer on screen.
@@ -18000,6 +18002,16 @@ class OperatorApp(App[None]):
             else:
                 if navigation_generation != self._sidebar_navigation.generation:
                     if session is not self._session:
+                        # Same step-aside class as `_boot_session`: the
+                        # replacement this swap built (a `/fork <message>`
+                        # in switch mode, or a `/resume` carrying an `/aida
+                        # <request>`) holds a prompt the success branch below
+                        # would submit. Disposing it bare dropped that prompt
+                        # silently and left the fork sidecar to fire on the
+                        # fork's next resume. The requester's decision (see
+                        # `_return_unsent_boot_prompts`) covers every such
+                        # branch: never send it, never drop it — hand it back.
+                        self._return_unsent_boot_prompts(session)
                         await session.dispose()
                     return
                 carried_spend = self._reset_ledger_for_swap()
