@@ -1370,6 +1370,10 @@ class DesktopSubscription:
     #: negotiation the runtime's attach gate runs, with the query parameter as
     #: this transport's half).
     supplements: bool = False
+    #: Whether this subscriber declared ``?diff_bindings=1`` (QA F5 on #3762):
+    #: only then does its initial snapshot frame carry nested write/edit
+    #: binding rows. Default False keeps an older renderer's rows unchanged.
+    diff_bindings: bool = False
     journal_order: bool = False
     #: Whether this subscriber negotiated the COMPLETE peer-source contract
     #: (the events route's ``?peer_journal_source=1``): only then does the
@@ -3599,6 +3603,7 @@ class DesktopSessionBridge:
         order_ids: list[str] | None = None,
         peer_journal_source: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
     ) -> dict[str, Any]:
         # THE FRAME'S DEADLINE STARTS HERE, at the request, not at its own read:
         # everything this method does before the page (the attention glance, the
@@ -3714,6 +3719,9 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(supplements),
+                # Only when declared, like supplements: a forwarding path that
+                # predates the flag keeps its exact call shape.
+                **({"diff_bindings": True} if diff_bindings else {}),
                 # THE SNAPSHOT'S OWN BUDGET, measured from the request: the frame
                 # read may spend what REMAINS of it on facts and nothing more. See
                 # ``open_frame.OPEN_FRAME_SNAPSHOT_BUDGET_S`` for the figure and
@@ -3838,6 +3846,7 @@ class DesktopSessionBridge:
         source_read: str | None = None,
         expected_journal_generation: str | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
         deadline: float | None = None,
     ) -> dict[str, Any]:
         """One page of the durable journal.
@@ -3999,6 +4008,10 @@ class DesktopSessionBridge:
                 journal_order=journal_order,
                 order_ids=order_ids,
                 supplements=self._can_paint_supplements(supplements),
+                # No runtime capability gate: the binding is durable host data
+                # the strip re-validates against THIS session; the viewer's
+                # declaration is the only input.
+                diff_bindings=diff_bindings,
                 deadline=(
                     deadline
                     if deadline is not None
@@ -4087,6 +4100,7 @@ class DesktopSessionBridge:
         journal_order: bool = False,
         order_ids: list[str] | None = None,
         supplements: bool = False,
+        diff_bindings: bool = False,
     ) -> dict[str, Any]:
         """The paint-only, run-aligned page of ``docs/DESKTOP_API.md`` §"The open frame".
 
@@ -4128,6 +4142,9 @@ class DesktopSessionBridge:
         through one call, and splitting the parameter list per flag is how the two
         pages would come to disagree about the same rows.
         """
+        # The strip scopes binding rows to the VIEWED session id, never a row's
+        # own claim; ``None`` keeps the pre-flag allow-list exactly.
+        binding_view = self.session_id if diff_bindings else None
         directory = self.root / "sessions" / self.session_id
         if around_id is not None:
             try:
@@ -4152,7 +4169,8 @@ class DesktopSessionBridge:
             result = build_frame(
                 anchored,
                 supplements=supplements,
-                memo=StripMemo(supplements=supplements),
+                diff_bindings=binding_view,
+                memo=StripMemo(supplements=supplements, diff_bindings=binding_view),
                 index=anchored_index,
                 resolved_runs=facts.runs if facts is not None else None,
                 runs_state="building",
@@ -4213,7 +4231,7 @@ class DesktopSessionBridge:
         # strips it twice more. Safe because every row here is this request's own
         # row object built by ``_wire_rows`` (its payload may be shared with the
         # page cache, but the memo keys the request's own envelope dict).
-        strip_memo = StripMemo(supplements=supplements)
+        strip_memo = StripMemo(supplements=supplements, diff_bindings=binding_view)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4260,9 +4278,25 @@ class DesktopSessionBridge:
             page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
-            kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
-            paintable_rows = paintable(collected, supplements=supplements, memo=strip_memo)
-            if reached and len(paintable(kept, supplements=supplements, memo=strip_memo)) >= limit:
+            kept, reached = align_page(
+                collected,
+                limit,
+                supplements=supplements,
+                memo=strip_memo,
+                diff_bindings=binding_view,
+            )
+            paintable_rows = paintable(
+                collected, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+            )
+            if (
+                reached
+                and len(
+                    paintable(
+                        kept, supplements=supplements, memo=strip_memo, diff_bindings=binding_view
+                    )
+                )
+                >= limit
+            ):
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -4327,6 +4361,7 @@ class DesktopSessionBridge:
                     limit=limit,
                     supplements=supplements,
                     memo=strip_memo,
+                    diff_bindings=binding_view,
                 )
                 if stop is not None and stop < len(page_rows):
                     collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
@@ -4342,11 +4377,18 @@ class DesktopSessionBridge:
         index, facts = await self._resolve_frame_source(
             index, collected, order_pages, order_ids or [], tail_read, deadline
         )
-        kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
+        kept, reached = align_page(
+            collected,
+            limit,
+            supplements=supplements,
+            memo=strip_memo,
+            diff_bindings=binding_view,
+        )
         result = build_frame(
             kept,
             supplements=supplements,
             memo=strip_memo,
+            diff_bindings=binding_view,
             index=index,
             resolved_runs=facts.runs if facts is not None else None,
             runs_state="building",
@@ -6400,6 +6442,7 @@ class DesktopSessionBridge:
         *,
         frontend_replace: bool = False,
         supplements: bool = False,
+        diff_bindings: bool = False,
         journal_order: bool = False,
         peer_journal_source: bool = False,
     ) -> DesktopSubscription:
@@ -6430,6 +6473,7 @@ class DesktopSessionBridge:
         sub = DesktopSubscription(
             frontend_replace=frontend_replace,
             supplements=supplements,
+            diff_bindings=diff_bindings,
             journal_order=journal_order,
             peer_journal_source=peer_journal_source,
         )
@@ -6483,6 +6527,7 @@ class DesktopSessionBridge:
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=peer_journal_source,
                 **supplement_read_options(sub.supplements),
+                **({"diff_bindings": True} if sub.diff_bindings else {}),
             )
             if open_trace.enabled():
                 open_trace.mark(

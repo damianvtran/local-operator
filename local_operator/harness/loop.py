@@ -458,8 +458,8 @@ def _source_affected_lines(text: str, redact: Callable[[str], str]) -> set[int]:
 #: row bodies, linear in their combined length, so the total work of the pass
 #: is bounded by this figure, not by rows squared. 32 Mi characters covers a
 #: full-ceiling archive's change blocks (``ARCHIVE_REDACT_BYTES`` is 4 MiB)
-#: several times over; past it, the rest of a block that already holds masked
-#: evidence is masked whole -- the over-masking direction, never a leak.
+#: several times over; past it, every remaining unverified content row is
+#: masked -- the over-masking direction, never a leak.
 _COUNTERPART_CHECK_BUDGET = 32 * 1024 * 1024
 
 
@@ -502,13 +502,16 @@ def _mask_by_source_evidence(
     * a DUPLICATE -- a row whose text equals a masked source line (``sensitive``,
       from :func:`_sensitive_line_texts` over the ORIGINAL sides) is masked
       wherever it appears, on either side; and
-    * a CHANGED COUNTERPART -- inside one contiguous ``-``/``+`` change block, a
-      row that contains, or is contained in, a masked row's original body
-      (``SECRET-LINE`` edited to ``SECRET-LINE-X``) is masked too.
+    * a COUNTERPART -- anywhere in the diff, a content row (context included) whose
+      stripped body contains, or is contained in, a sensitive source line or a
+      masked row's body (``SECRET-LINE`` edited to ``SECRET-LINE-X``, even in a
+      separate hunk from an unchanged original) is masked too.
 
-    One pass, not transitive: only rows masked by index or duplicate evidence
-    seed the counterpart check, so a masked counterpart never spreads further.
-    Work is bounded by :data:`_COUNTERPART_CHECK_BUDGET`. Nothing is re-diffed.
+    One pass, not transitive: the seed set is frozen before the counterpart
+    check, so a masked counterpart never spreads further. Work is bounded by
+    :data:`_COUNTERPART_CHECK_BUDGET`; past it every remaining unverified
+    content row is masked (fail closed). With no seeds the rows pass through
+    byte-exact. Nothing is re-diffed.
     """
     from local_operator.redaction_shapes import REDACTION_MARKER
 
@@ -538,29 +541,47 @@ def _mask_by_source_evidence(
             old_line += 1
         if tag in " +":
             new_line += 1
-    budget = _COUNTERPART_CHECK_BUDGET
-    at = 2
-    while at < len(rows):
-        if rows[at][:1] not in ("-", "+") or _DIFF_HUNK.fullmatch(rows[at]):
-            at += 1
-            continue
-        end = at
-        while (
-            end < len(rows) and rows[end][:1] in ("-", "+") and not _DIFF_HUNK.fullmatch(rows[end])
-        ):
-            end += 1
-        seeds = [rows[i][1:] for i in range(at, end) if masked[i] and rows[i][1:].strip()]
-        if seeds:
-            for i in range(at, end):
-                body = rows[i][1:]
-                if masked[i] or not body.strip():
-                    continue
-                for seed in seeds:
-                    budget -= len(seed) + len(body)
-                    if budget < 0 or seed in body or body in seed:
-                        masked[i] = True
-                        break
-        at = end
+    # GLOBAL counterpart closure (QA F1 round 2 on #3762): a block-local check
+    # missed an edited copy of an UNCHANGED literal line that landed in a
+    # separate hunk -- the literal never appears as a row, so no block held a
+    # seed. Seeds are therefore frozen once from every whole-side sensitive
+    # line PLUS every row already masked by index/duplicate evidence, and every
+    # unmasked content row anywhere in the diff is judged against them. Frozen
+    # before the pass, so a newly masked row never seeds (not transitive).
+    # Stripped bodies make re-indented copies match; only the judgement strips
+    # -- the published row is the marker or the original bytes.
+    # CONTEXT rows are judged too: the whole-side callback clearing a context
+    # position does not clear a derived copy of a registered value sitting
+    # there (an existing ``parts[3]+'-X'`` line left unchanged next to a
+    # changed region) -- skipping them leaks the same shape.
+    seeds = {line.strip() for line in sensitive if line.strip()}
+    seeds.update(
+        rows[i][1:].strip() for i in range(2, len(rows)) if masked[i] and rows[i][1:].strip()
+    )
+    if seeds:
+        budget = _COUNTERPART_CHECK_BUDGET
+        ordered = sorted(seeds)
+        exhausted = False
+        for i in range(2, len(rows)):
+            row = rows[i]
+            if masked[i] or row[:1] not in (" ", "-", "+") or _DIFF_HUNK.fullmatch(row):
+                continue
+            body = row[1:].strip()
+            if not body:
+                continue
+            if exhausted:
+                # Fail closed: an unverified content row is masked, never stored raw.
+                masked[i] = True
+                continue
+            for seed in ordered:
+                budget -= len(seed) + len(body)
+                if budget < 0:
+                    exhausted = True
+                    masked[i] = True
+                    break
+                if seed in body or body in seed:
+                    masked[i] = True
+                    break
     for at in range(2, len(rows)):
         out.append(rows[at][:1] + REDACTION_MARKER if masked[at] else rows[at])
     return out

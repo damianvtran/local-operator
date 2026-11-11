@@ -3607,6 +3607,9 @@ async def snapshot(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ: an existing but silent owner must not fail a read. The durable answer
     # is on disk in this same process, so the attempt is bounded
@@ -3662,6 +3665,7 @@ async def snapshot(
                 **({"journal_order": True, "order_ids": order_ids} if journal_order else {}),
                 peer_journal_source=bool(peer_journal_source),
                 **supplement_read_options(bool(supplements)),
+                **({"diff_bindings": True} if diff_bindings else {}),
             )
         )
 
@@ -3724,6 +3728,9 @@ async def history(
     source_read: Annotated[str | None, Query(max_length=32)] = None,
     expected_journal_generation: Annotated[str | None, Query(max_length=128)] = None,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
@@ -3785,6 +3792,7 @@ async def history(
                 source_read=source_read,
                 expected_journal_generation=expected_journal_generation,
                 **supplement_read_options(bool(supplements)),
+                **({"diff_bindings": True} if diff_bindings else {}),
             )
         )
 
@@ -6284,6 +6292,9 @@ async def events(
     ] = None,
     peer_journal_source: Annotated[int, Query(ge=0, le=1)] = 0,
     supplements: int = Query(default=0, ge=0),
+    # Viewer-declared (QA F5 on #3762): a client that can paint nested
+    # write/edit binding rows sends 1; default 0 serves today's rows exactly.
+    diff_bindings: Annotated[int, Query(ge=0, le=1)] = 0,
 ):
     # Acquire BEFORE returning response headers: invalid identity/capacity must
     # return JSON status, not a misleading 200 followed by a broken SSE stream.
@@ -6336,6 +6347,7 @@ async def events(
                 sub = bridge.subscribe(
                     frontend_replace=bool(frontend_replace),
                     supplements=bool(supplements),
+                    diff_bindings=bool(diff_bindings),
                     journal_order=bool(journal_order),
                     peer_journal_source=bool(peer_journal_source),
                 )

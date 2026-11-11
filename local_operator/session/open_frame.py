@@ -320,7 +320,65 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     return {"custom_type": "supplement_v1", "details": fitted}
 
 
-def strip_entry(entry: Mapping[str, Any], *, supplements: bool = False) -> dict[str, Any] | None:
+#: The host-written nested write/edit binding (``diff_archive``'s
+#: ``NESTED_DIFF_BINDING_TYPE``; literal here so this module stays import-light,
+#: pinned equal by a test). Painted ONLY for a viewer that declared
+#: ``diff_bindings`` -- an older client cannot paint it, so by default it stays
+#: outside the allow-list and spends no row budget (QA F5 on #3762).
+_DIFF_BINDING_TYPE = "tool_call_diff_binding_v1"
+_DIFF_FULL_FIELDS = ("v", "state", "rows", "digest")
+
+
+def _diff_binding_payload(payload: Mapping[str, Any], session_id: str) -> dict[str, Any] | None:
+    """A binding rebuilt from its validated, whitelisted fields, or ``None``.
+
+    The authority is :func:`diff_archive._binding_details` bound to the VIEWED
+    session (never the row's own claim): exact ids, ``v``, ``outer:`` prefix
+    consistency. The row is then REBUILT, not copied, so host extras, content,
+    paths or any other field never reach the wire. ``diff_full`` keeps only the
+    canonical descriptor fields with their exact scalar types; anything else
+    drops the whole row (fail closed).
+    """
+    from local_operator.tools.diff_archive import _binding_details
+
+    details = payload.get("details")
+    if not isinstance(details, Mapping) or not isinstance(details.get("call_id"), str):
+        return None
+    call_id = details["call_id"]
+    match = _binding_details(dict(payload), call_id, session_id)
+    if match is None or match[0] not in ("write", "edit"):
+        return None
+    descriptor = match[1]["diff_full"]
+    if set(descriptor) - set(_DIFF_FULL_FIELDS):
+        return None
+    version, state = descriptor.get("v"), descriptor.get("state")
+    rows, digest = descriptor.get("rows"), descriptor.get("digest")
+    if type(version) is not int or not isinstance(state, str) or not state:
+        return None
+    if "rows" in descriptor and type(rows) is not int:
+        return None
+    if "digest" in descriptor and not isinstance(digest, str):
+        return None
+    kept = {key: descriptor[key] for key in _DIFF_FULL_FIELDS if key in descriptor}
+    return {
+        "custom_type": _DIFF_BINDING_TYPE,
+        "details": {
+            "v": details["v"],
+            "session_id": session_id,
+            "outer_call_id": details["outer_call_id"],
+            "call_id": call_id,
+            "tool": match[0],
+            "diff_full": kept,
+        },
+    }
+
+
+def strip_entry(
+    entry: Mapping[str, Any],
+    *,
+    supplements: bool = False,
+    diff_bindings: str | None = None,
+) -> dict[str, Any] | None:
     """One wire row reduced to what a surface paints, or ``None`` to drop it.
 
     The input is the desktop envelope (``{id, ts, ts_source, type, payload}``)
@@ -341,6 +399,12 @@ def strip_entry(entry: Mapping[str, Any], *, supplements: bool = False) -> dict[
     if etype == "custom":
         if payload.get("custom_type") == "supplement_v1" and supplements is True:
             kept = _supplement_payload(payload)
+            envelope = {
+                key: entry[key] for key in ("id", "ts", "ts_source", "type") if key in entry
+            }
+            return {**envelope, "payload": kept} if kept is not None else None
+        if diff_bindings is not None and payload.get("custom_type") == _DIFF_BINDING_TYPE:
+            kept = _diff_binding_payload(payload, diff_bindings)
             envelope = {
                 key: entry[key] for key in ("id", "ts", "ts_source", "type") if key in entry
             }
@@ -444,23 +508,28 @@ class StripMemo:
       must not mutate it at all before ``_frame_answer``).
     """
 
-    __slots__ = ("supplements", "_seen")
+    __slots__ = ("supplements", "diff_bindings", "_seen")
 
-    def __init__(self, *, supplements: bool = False) -> None:
+    def __init__(self, *, supplements: bool = False, diff_bindings: str | None = None) -> None:
         self.supplements = supplements
+        # The viewed session id when the viewer declared ``diff_bindings``;
+        # fixed per memo for the same reason as ``supplements``.
+        self.diff_bindings = diff_bindings
         self._seen: dict[int, tuple[Mapping[str, Any], dict[str, Any] | None]] = {}
 
     def __call__(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
         hit = self._seen.get(id(row))
         if hit is not None and hit[0] is row:
             return hit[1]
-        stripped = strip_entry(row, supplements=self.supplements)
+        stripped = strip_entry(
+            row, supplements=self.supplements, diff_bindings=self.diff_bindings
+        )
         self._seen[id(row)] = (row, stripped)
         return stripped
 
 
 def _stripper(
-    supplements: bool, memo: StripMemo | None
+    supplements: bool, memo: StripMemo | None, diff_bindings: str | None = None
 ) -> Callable[[Mapping[str, Any]], dict[str, Any] | None]:
     """The strip a pure helper uses: the request's memo, or the plain function.
 
@@ -468,9 +537,11 @@ def _stripper(
     serve the wrong rows, so it is refused rather than silently used.
     """
     if memo is None:
-        return lambda row: strip_entry(row, supplements=supplements)
+        return lambda row: strip_entry(row, supplements=supplements, diff_bindings=diff_bindings)
     if memo.supplements is not supplements:
         raise ValueError("StripMemo built for a different supplements value")
+    if memo.diff_bindings != diff_bindings:
+        raise ValueError("StripMemo built for a different diff_bindings view")
     return memo
 
 
@@ -479,6 +550,7 @@ def paintable(
     *,
     supplements: bool = False,
     memo: StripMemo | None = None,
+    diff_bindings: str | None = None,
 ) -> list[dict[str, Any]]:
     """The rows of ``rows`` a transcript paints, in order, stripped.
 
@@ -489,7 +561,7 @@ def paintable(
     caller, which is why this is a pure filter over the strip and not a second
     predicate beside it.
     """
-    strip = _stripper(supplements, memo)
+    strip = _stripper(supplements, memo, diff_bindings)
     out: list[dict[str, Any]] = []
     for row in rows:
         stripped = strip(row)
@@ -540,6 +612,7 @@ def late_index_stop(
     limit: int,
     supplements: bool = False,
     memo: StripMemo | None = None,
+    diff_bindings: str | None = None,
 ) -> int | None:
     """How many of the hunt's pages a read WITH the index would have kept, or ``None``.
 
@@ -575,7 +648,9 @@ def late_index_stop(
         taken += rows
         if (
             taken
-            and len(paintable(collected[-taken:], supplements=supplements, memo=memo)) >= limit
+            and len(paintable(
+                collected[-taken:], supplements=supplements, memo=memo, diff_bindings=diff_bindings
+            )) >= limit
         ):
             return pages
     return None
@@ -626,6 +701,7 @@ def align_page(
     extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
     supplements: bool = False,
     memo: StripMemo | None = None,
+    diff_bindings: str | None = None,
 ) -> tuple[list[Mapping[str, Any]], bool]:
     """Cut ``rows`` to the page the contract promises: (kept rows, head reached).
 
@@ -655,7 +731,7 @@ def align_page(
     if limit < 1:
         return list(rows), True
     order = list(rows)
-    strip = _stripper(supplements, memo)
+    strip = _stripper(supplements, memo, diff_bindings)
     painted = [(index, strip(row)) for index, row in enumerate(order)]
     paintable = [(index, entry) for index, entry in painted if entry is not None]
     if not paintable:
@@ -803,6 +879,7 @@ def build_frame(
     anchor_id: str | None = None,
     supplements: bool = False,
     memo: StripMemo | None = None,
+    diff_bindings: str | None = None,
 ) -> FrameResult:
     """Strip, cap and publish one page from rows already read, newest last.
 
@@ -821,7 +898,7 @@ def build_frame(
     """
     ordered = list(raw_entries)
     raw_rows = len(ordered)
-    strip = _stripper(supplements, memo)
+    strip = _stripper(supplements, memo, diff_bindings)
     dropped = sum(1 for raw in ordered if strip(raw) is None)
     # FROM THE NEWEST END, because the caps decide what a page can hold and the
     # rows a reader cannot lose are the recent ones: a page truncated at its

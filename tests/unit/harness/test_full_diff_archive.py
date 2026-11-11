@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -156,19 +156,32 @@ def _all_rows(tmp_path: Path, call_id: str) -> list[str]:
     return rows
 
 
-def _details(session: Session) -> list[dict[str, Any]]:
-    """Every persisted tool row's details, read from the history UNION.
+def _details(session: Session, call_id: str) -> dict[str, Any]:
+    """The persisted tool row's details for ``call_id``, from the DURABLE journal.
 
-    ``build_llm_history`` yields ``Message`` and ``CustomMessage`` items; a
-    200 KiB result compacts the 100k-token test window and inserts a
-    ``compaction_summary`` ``CustomMessage`` that has no ``role`` (QA F2 on
-    #3762). Compaction stays exercised; only non-tool items are skipped.
+    ``build_llm_history`` is the model's context, and compaction legitimately
+    PRUNES whole rows from it (a 200 KiB result compacts the 100k-token test
+    window; QA F2 on #3762 hit an IndexError there). This reads through
+    :func:`diff_archive.find_tool_details`, the same journal reader the routes
+    use, so compaction stays on and the assertion targets what is stored.
     """
-    return [
-        cast(dict[str, Any], m.provider_payload)["details"]
-        for m in session.transcript.build_llm_history()
-        if getattr(m, "role", None) == "tool"
-    ]
+    found = diff_archive.find_tool_details(session.transcript.directory, call_id, SESSION_ID)
+    assert found is not None, call_id
+    return found[1]
+
+
+def _raw_tool_rows(session: Session, call_id: str) -> list[dict[str, Any]]:
+    """Every persisted tool row for ``call_id``, read raw from the journal file.
+
+    For duplicate-call-id facts: ``find_tool_details`` fails closed on an
+    ambiguous id by design, so it cannot count the rows that make it ambiguous.
+    """
+    out = []
+    for line in session.transcript.path.read_text().splitlines():
+        payload = json.loads(line).get("payload", {})
+        if payload.get("role") == "tool" and payload.get("tool_call_id") == call_id:
+            out.append(payload)
+    return out
 
 
 def _every_stored_byte(tmp_path: Path, session: Session, events: list[Any]) -> str:
@@ -220,7 +233,7 @@ async def test_write_over_preview_archives_complete_diff_live_and_persisted(tmp_
     session, events = await _run(
         tmp_path, [("w-big", "write", {"path": str(target), "content": _big(500)})]
     )
-    details = _details(session)[0]
+    details = _details(session, "w-big")
     assert details[DIFF_TRUNCATED_ROWS_KEY] > 0
     desc = details[diff_archive.DIFF_FULL_KEY]
     assert set(desc) == {"v", "state", "rows", "digest"}
@@ -270,7 +283,7 @@ async def test_real_edit_over_preview_keeps_signs_and_earlier_call_is_immutable(
             ("e-2", "write", {"path": str(target), "content": "short\n"}),
         ],
     )
-    first = _details(session)[0]
+    first = _details(session, "e-1")
     assert first.get(diff_archive.DIFF_FULL_KEY, {}).get("state") == "archived", first
     rows = _all_rows(tmp_path, "e-1")
     assert "-MIDDLE_SENTINEL = 2" in rows and "+MIDDLE_SENTINEL := 2" in rows
@@ -325,7 +338,7 @@ async def test_edit_inside_tall_literal_archive_publishes_no_fragment(tmp_path):
     )
     blob = _every_stored_byte(tmp_path, session, events)
     assert [i for i, part in enumerate(parts) if part in blob] == []
-    assert _details(session)[0][diff_archive.DIFF_FULL_KEY]["state"] == "archived"
+    assert _details(session, "c-1")[diff_archive.DIFF_FULL_KEY]["state"] == "archived"
     # The changed ordinary rows stay readable on both sides, signs kept.
     rows = _all_rows(tmp_path, "c-1")
     assert "-filler 0" in rows and "+FILLER 0" in rows and "+FILLER 449" in rows
@@ -345,8 +358,89 @@ async def test_duplicate_of_literal_line_inside_preview_is_masked(tmp_path):
     )
     blob = _every_stored_byte(tmp_path, session, events)
     assert [i for i, part in enumerate(parts) if part in blob] == []
-    diff = _details(session)[0]["diff"]
+    diff = _details(session, "q-1")["diff"]
     assert "+row_0" in diff and "+row_59" in diff and diff[2] == "@@ -0,0 +1,61 @@"
+
+
+def _r2_rows(tmp_path: Path, parts: list[str], before: list[str], after: list[str]):
+    """Shared F1 round-2 shape: a >200-row diff whose preview cuts the tail."""
+    target = tmp_path / "r2.txt"
+    target.write_text("\n".join(before) + "\n")
+    return target, [("r2-1", "write", {"path": str(target), "content": "\n".join(after) + "\n"})]
+
+
+async def test_edited_copy_of_unchanged_literal_in_separate_hunk_is_masked(tmp_path):
+    """QA F1 round 2 on #3762, exact composition: the literal at 100..109 is
+    UNCHANGED (never a row), filler 300..559 changes, and ``parts[3] + '-X'``
+    is appended at line 601 as its own 4-row hunk. The preview (200 rows) cut
+    before it; the archive stored it raw because no block held a seed."""
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    parts = _literal(10, "R")
+    pad = [f"filler {index}" for index in range(590)]
+    before = pad[:100] + parts + pad[100:]
+    after = [line.replace("filler ", "FILLER ") if 300 <= i < 560 else line
+             for i, line in enumerate(before)] + [parts[3] + "-X"]
+    target, calls = _r2_rows(tmp_path, parts, before, after)
+    session, events = await _run(tmp_path, calls, secrets=("\n".join(parts),))
+    blob = _every_stored_byte(tmp_path, session, events)
+    assert [i for i, part in enumerate(parts) if part in blob] == []
+    detail = diff_archive.find_tool_details(session.transcript.directory, "r2-1", SESSION_ID)
+    assert detail is not None and detail[1][diff_archive.DIFF_FULL_KEY]["state"] == "archived"
+    rows = _all_rows(tmp_path, "r2-1")
+    hunks = [row for row in rows[2:] if row.startswith("@@ ")]
+    assert len(hunks) == 2
+    assert rows[-1] == "+" + REDACTION_MARKER, "the appended copy is masked, sign kept"
+    # Counters/signs unchanged; ordinary rows on both sides stay readable.
+    assert sum(r.startswith("-") and not r.startswith("--- ") for r in rows) == 260
+    assert sum(r.startswith("+") and not r.startswith("+++ ") for r in rows) == 261
+    assert "-filler 290" in rows and "+FILLER 290" in rows and "+FILLER 549" in rows
+    assert target.read_text().splitlines()[-1] == parts[3] + "-X", "executor bytes untouched"
+
+
+async def test_derived_copy_on_unchanged_context_row_is_masked(tmp_path):
+    """Same root, context side: an EXISTING ``parts[3] + '-X'`` at line 560 is
+    left unchanged right after the changed filler, so it surfaces only as a
+    trailing CONTEXT row of a >200-row diff whose literal sits outside every
+    hunk. Index evidence and exact duplicates both miss it."""
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    parts = _literal(10, "C")
+    pad = [f"filler {index}" for index in range(590)]
+    before = pad[:100] + parts + pad[100:]
+    before[560] = parts[3] + "-X"
+    after = [line.replace("filler ", "FILLER ") if 300 <= i < 560 else line
+             for i, line in enumerate(before)]
+    _, calls = _r2_rows(tmp_path, parts, before, after)
+    session, events = await _run(tmp_path, calls, secrets=("\n".join(parts),))
+    blob = _every_stored_byte(tmp_path, session, events)
+    assert [i for i, part in enumerate(parts) if part in blob] == []
+    rows = _all_rows(tmp_path, "r2-1")
+    assert " " + REDACTION_MARKER in rows, "the context copy is masked, sign kept"
+    assert sum(r.startswith("-") and not r.startswith("--- ") for r in rows) == 260
+    assert sum(r.startswith("+") and not r.startswith("+++ ") for r in rows) == 260
+    assert "+FILLER 290" in rows
+
+
+def test_counterpart_budget_exhaustion_masks_every_unverified_row(monkeypatch):
+    """Past the shared character budget every remaining content row is masked
+    (fail closed); headers stay exact and nothing raw is published."""
+    from local_operator.harness import loop
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    monkeypatch.setattr(loop, "_COUNTERPART_CHECK_BUDGET", 40)
+    rows = ["--- a", "+++ b", "@@ -1,3 +1,3 @@", " keep one", "-old two", "+new two", " keep three"]
+    out = loop._mask_by_source_evidence(rows, set(), set(), {"SEEDLINE-0123456789"})
+    assert out[:3] == rows[:3]
+    assert out[3] == " keep one", "checked within budget and cleared"
+    assert out[4:] == ["-" + REDACTION_MARKER, "+" + REDACTION_MARKER, " " + REDACTION_MARKER]
+
+
+def test_no_seed_passes_rows_through_byte_exact():
+    from local_operator.harness import loop
+
+    rows = ["--- a", "+++ b", "@@ -1,2 +1,2 @@", " same", "-x = 1", "+x = 2"]
+    assert loop._mask_by_source_evidence(rows, set(), set(), frozenset()) == rows
 
 
 @pytest.mark.parametrize("separator", ["\r\n", "\f"])
@@ -379,7 +473,7 @@ async def test_private_key_block_past_preview_never_stored(tmp_path):
     )
     blob = _every_stored_byte(tmp_path, session, events)
     assert [row for row in body if row in blob] == []
-    state = _details(session)[0][diff_archive.DIFF_FULL_KEY]["state"]
+    state = _details(session, "k-1")[diff_archive.DIFF_FULL_KEY]["state"]
     assert state in {"archived", "withheld"}
 
 
@@ -390,7 +484,7 @@ async def test_no_redactor_archives_nothing_and_says_unavailable(tmp_path):
         [("w-1", "write", {"path": str(target), "content": _big(500)})],
         redact=False,
     )
-    desc = _details(session)[0][diff_archive.DIFF_FULL_KEY]
+    desc = _details(session, "w-1")[diff_archive.DIFF_FULL_KEY]
     assert desc == {"v": 1, "state": "unavailable"}
     assert not (tmp_path / "config" / diff_archive.DIFF_ARCHIVE_DIRNAME).exists()
     page = diff_archive.load_page(_session_dir(tmp_path), SESSION_ID, "w-1")
@@ -401,7 +495,7 @@ async def test_over_archive_ceiling_is_oversized_with_no_prefix_stored(tmp_path)
     target = tmp_path / "huge.txt"
     content = "".join(f"r{index}\n" for index in range(diff_archive.ARCHIVE_MAX_ROWS))
     session, _ = await _run(tmp_path, [("h-1", "write", {"path": str(target), "content": content})])
-    desc = _details(session)[0][diff_archive.DIFF_FULL_KEY]
+    desc = _details(session, "h-1")[diff_archive.DIFF_FULL_KEY]
     assert desc == {"v": 1, "state": "oversized"}
     store = tmp_path / "config" / diff_archive.DIFF_ARCHIVE_DIRNAME
     assert not store.exists() or not any(store.iterdir())
@@ -410,7 +504,7 @@ async def test_over_archive_ceiling_is_oversized_with_no_prefix_stored(tmp_path)
 async def test_small_diff_is_inline_and_records_no_descriptor(tmp_path):
     target = tmp_path / "small.txt"
     session, _ = await _run(tmp_path, [("i-1", "write", {"path": str(target), "content": "a\n"})])
-    assert diff_archive.DIFF_FULL_KEY not in _details(session)[0]
+    assert diff_archive.DIFF_FULL_KEY not in _details(session, "i-1")
     page = diff_archive.load_page(_session_dir(tmp_path), SESSION_ID, "i-1")
     assert page["state"] == "inline" and page["rows"] == []
 
@@ -593,7 +687,7 @@ async def test_first_and_only_huge_line_is_archived_not_lost(tmp_path, tool):
         target.write_text("old-line\n")
         calls = [("h-1", "edit", {"path": str(target), "old_text": "old-line", "new_text": huge})]
     session, events = await _run(tmp_path, calls)
-    details = _details(session)[0]
+    details = _details(session, "h-1")
     assert details[DIFF_TRUNCATED_ROWS_KEY] > 0
     if tool == "write":
         # The only row did not fit the preview: the inline form is the fixed
@@ -622,8 +716,7 @@ async def test_real_session_reusing_a_call_id_never_serves_the_wrong_capture(tmp
     assert "+MIDDLE_SENTINEL = 2" in first
     # Second prompt on the SAME session: the provider reuses the call id.
     await session.prompt("again")
-    details = _details(session)
-    assert len(details) == 2
+    assert len(_raw_tool_rows(session, "dup-id")) == 2
     page = diff_archive.load_page(_session_dir(tmp_path), SESSION_ID, "dup-id")
     assert page["state"] == "unavailable" and page["rows"] == []
 
