@@ -80,6 +80,23 @@ are masked wherever they appear on a model-visible surface:
   parse and restored. Keys,
   resource addresses, types, names and every unmarked value stay readable; a
   plan that does not parse whole (truncated) is left to the plaintext rules.
+* a value whose credential NAME sits one step away: the sibling `key`/`name`
+  field of a `{"key": NAME, "value": V}` object (HCP Terraform vars API,
+  GitLab CI variables API, Kubernetes `env:` entries, generic key/value
+  arrays) or the parent key of `{NAME: {"value": V}}`, in JSON (minified,
+  pretty, `read` gutter) and YAML. The name is judged by `is_credential_name`
+  and the value by the assignment rule's own value proof (a value with
+  whitespace is prose, as it is for `NAME=V`); only `V` is masked, in place
+  and unregistered. A URL value stays with the DSN/URL rules (they
+  keep user and host).
+* `is_credential_name` reads a name without its trailing environment
+  qualifiers (`_PROD`, `_PRODUCTION`, `_DEV`, `_STAGING`, `_STG`, `_QA`,
+  `_TEST`, `_LIVE`, `_SANDBOX`, numeric suffixes), and recognises
+  `…_SERVICE_ACCOUNT_JSON`, `…_CREDENTIALS_JSON` and a Slack/Discord/Teams
+  `…_WEBHOOK_URL` (whose URL is masked whole). A generic `*_URL` or `*_JSON`
+  is not a credential name.
+* a Minerva application key: `mrva-[qa-](live|dev)-` plus 32 or more
+  base64url characters (the bare prefix stays readable).
 
 ### 2.2 Not a secret
 
@@ -397,6 +414,25 @@ comment.
 * The argument pass (code) and the team-bridge guard skip the Secret and
   Terraform structure rules: a manifest the agent writes may carry an ordinary value that
   must not be rewritten in its own program. The decode pass still runs there.
+* **Residual — a name printed after its value on a later stream release.**
+  The live `bash` stream gives the indirect-name rule a 4 KiB lookbehind, so
+  a `"key": NAME` line released before its `"value"` line is still read
+  together; a value printed BEFORE its name and released first has already
+  left. The settled result is judged whole. The YAML spelling looks at most
+  64 lines either side of a `value:` for its name (a cost bound).
+* `transcript.jsonl` (and its compaction temp) is created and kept `0600`;
+  an older transcript becomes `0600` on its next append. Every string in a
+  tool result's `details` is scrubbed before it is persisted, not only the
+  diff and the MCP payload. The details copy is masked in place and never
+  registered (a match only details shows cannot mask later output), and an
+  identifier-shaped details string (no whitespace, `=` or `:`) gets only the
+  exact values the session already holds.
+* A quoted `"key"`/`"name"` field whose value is a word-led identifier
+  (`setting_1042`, `release-20261111`) is a NAME and is kept; an opaque value
+  there (a UUID, a hex key) is still masked.
+* `client-inline-password` does not read `-p` followed by a port (all digits)
+  or a UUID as a password, and leaves `-p` to `kubectl` when `kubectl` is the
+  last command word before it (`kubectl logs -p <pod>`).
 
 ## 7. Enforcement map
 

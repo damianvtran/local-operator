@@ -137,6 +137,7 @@ from local_operator.incidents import (
     REASONING_ECHO_MARKERS,
 )
 from local_operator.model.effort import real_rungs
+from local_operator.redaction_shapes import redaction_scope
 from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -349,15 +350,74 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 
 
-def _redact_nested_strings(value: Any, redact: Callable[[str], str]) -> Any:
-    """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``."""
+def _is_content_string(value: str) -> bool:
+    """Prose, output, a URL or a ``NAME=VALUE``/``name: value`` carrier — not a
+    bare identifier (see ``content_only``)."""
+    return "=" in value or ":" in value or any(char.isspace() for char in value)
+
+
+def _redact_nested_strings(
+    value: Any, redact: Callable[[str], str], *, content_only: bool = False
+) -> Any:
+    """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``.
+
+    Keys, numbers, booleans and container TYPES are kept (a tuple stays a
+    tuple), so a reader comparing a field it did not expect to change — a
+    counter, a flag, a ``job_ids`` tuple — sees exactly what it stored.
+
+    ``content_only`` gives a string with no whitespace, ``=`` or ``:`` only the
+    exact-value pass (``redaction_scope("values")``): that is an IDENTIFIER (a
+    question id, a model name, a path, a handle) that its reader matches
+    exactly. Measured on the 200 most recent sessions before the filter: the
+    shape pass masked ``questions[].id``, ``question_ids[]`` and ``model`` values
+    through the vendor-prefix rule — an ask answer keyed by that id could no
+    longer be matched. A value the session already holds as a credential carries
+    no such risk, so it is still masked there (PR #3789 review R3). Prose,
+    command output, URLs and ``KEY=value`` lines (where a credential actually
+    travels in details: ``rows``, ``text``, ``prompt``) get the full pass.
+    """
     if isinstance(value, str):
-        return redact(value) if value else value
+        if not value:
+            return value
+        if content_only and not _is_content_string(value):
+            with redaction_scope("values"):
+                return redact(value)
+        return redact(value)
     if isinstance(value, dict):
-        return {key: _redact_nested_strings(item, redact) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_nested_strings(item, redact) for item in value]
+        return {
+            key: _redact_nested_strings(item, redact, content_only=content_only)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(
+            _redact_nested_strings(item, redact, content_only=content_only) for item in value
+        )
+    if isinstance(value, list):
+        return [_redact_nested_strings(item, redact, content_only=content_only) for item in value]
     return value
+
+
+#: Shortest string that can carry anything the redactor masks (a registered
+#: value or a shape); the same floor as ``redaction_shapes.DETECTED_COMPONENT_FLOOR``.
+_DETAIL_SCAN_MIN_CHARS = 8
+
+
+def _carries_scannable_string(value: Any, depth: int = 0) -> bool:
+    """Whether a JSON-shaped ``value`` holds a string long enough to need the redactor.
+
+    The cheap ON-loop gate for :meth:`AgentLoop._redact_details`: most results'
+    details are ids, modes, counters and flags, and must not pay a thread hop.
+    Past a nesting depth it answers ``True`` (scan it) rather than recursing.
+    """
+    if isinstance(value, str):
+        return len(value) >= _DETAIL_SCAN_MIN_CHARS
+    if depth > 32:
+        return True
+    if isinstance(value, dict):
+        return any(_carries_scannable_string(item, depth + 1) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_carries_scannable_string(item, depth + 1) for item in value)
+    return False
 
 
 # The producer caps diffs at 200 rows; this independent publication budget leaves
@@ -7898,12 +7958,16 @@ class AgentLoop:
         UI are all untouched, while the stored copy, the replay and the
         transcript get the mask the result text already had.
 
-        **Only the content-bearing keys, and only their strings.**
-        :data:`_CONTENT_BEARING_DETAIL_KEYS` names them (the file tools' diff
-        today). The other keys in the same dict — ``added``/``removed``
-        counters, the ``path``, ``spill`` handles — keep their exact values,
-        because their readers parse and compare them (the diff badge, compaction
-        pruning, the spill reader).
+        **Every string, and only strings.** :data:`_CONTENT_BEARING_DETAIL_KEYS`
+        (the file tools' diff) gets the hunk-aware masking below; every other
+        key's strings go through ``redact`` in place, without registering what
+        they match (follow-up to PR #3756: a details string outside the diff was
+        persisted unmasked); identifier-shaped strings get only the exact-value
+        pass (see :func:`_redact_nested_strings`). Numbers,
+        booleans, keys and container types keep their exact values — the
+        ``added``/``removed`` counters the diff badge reads, compaction's flags —
+        and an ordinary string (a ``path``, a ``spill`` handle) carries no shape,
+        so the redactor returns it unchanged.
 
         **A sibling of :meth:`_redact_content`, not a fusion**, because the two
         fire at different rates: the content scan is every result's hot path,
@@ -7921,15 +7985,16 @@ class AgentLoop:
         # to mask. See the block in ``_redact_content``.
         if tool_name in PUBLIC_COPY_TOOLS:
             return details
-        has_server_result = details.get("server_result") is not None
-        if not has_server_result and not any(
-            isinstance(details.get(key), str)
-            or (
-                isinstance(details.get(key), (list, tuple))
-                and any(isinstance(item, str) for item in details[key])
-            )
-            for key in _CONTENT_BEARING_DETAIL_KEYS
-        ):
+        # EVERY string in details is masked, not only the diff and the MCP
+        # payload (follow-up to PR #3756). ``Message.tool_result`` lifts the
+        # whole dict into ``provider_payload['details']`` and that is written to
+        # transcript.jsonl as is, so any tool that echoes command output, a row
+        # or a URL into details (``rows``, ``jobs``, ``url`` …) persisted what
+        # the result text had masked. One walk at this seam covers every tool,
+        # present and future, instead of a list of keys that is wrong the day a
+        # tool adds one. Only strings change; keys, numbers and flags keep their
+        # exact values for the readers that parse them.
+        if not _carries_scannable_string(details):
             return details
 
         def _run() -> dict[str, Any]:
@@ -7937,7 +8002,23 @@ class AgentLoop:
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
-                out = dict(details)
+                # IN PLACE, never registered (PR #3789 review R1): details is a
+                # copy of what the result's content already carried, and the
+                # content scan registered everything found there. A match only
+                # these strings show must not become a session-wide value: a
+                # details-only false positive would then mask the same bytes in
+                # every later, unrelated result. The diff keeps base behaviour.
+                with redaction_scope("uncontained"):
+                    out = {
+                        key: (
+                            value
+                            if key in _CONTENT_BEARING_DETAIL_KEYS
+                            else _redact_nested_strings(
+                                value, redact, content_only=key != "server_result"
+                            )
+                        )
+                        for key, value in details.items()
+                    }
                 for key in _CONTENT_BEARING_DETAIL_KEYS:
                     if key in details:
                         value = details[key]
@@ -7955,13 +8036,8 @@ class AgentLoop:
                             out[key] = tuple(masked) if isinstance(value, tuple) else masked
                         else:
                             out[key] = _redact_diff_detail(value, redact)
-                if has_server_result:
-                    # An MCP result's raw server payload
-                    # (``mcp/tool_bridge.py``) rides into the transcript
-                    # beside the masked text, so it was the copy that kept the
-                    # value (PR #3756, QA Q6). Every string in it is masked;
-                    # keys and non-string values keep theirs.
-                    out["server_result"] = _redact_nested_strings(details["server_result"], redact)
+                # ``server_result`` (an MCP result's raw payload, PR #3756 QA Q6)
+                # is covered by the walk above like every other key.
                 return out
 
         return await asyncio.to_thread(_run)

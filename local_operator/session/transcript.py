@@ -273,6 +273,34 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
 STT_TRANSCRIPT_CUSTOM_TYPE = "stt_transcript_v1"
 
 
+#: Owner-only mode for transcript.jsonl and its rewrite temp, matching spill
+#: files and compression archives (``compression._reserve``).
+_TRANSCRIPT_MODE = 0o600
+
+
+def _keep_private(fd: int) -> None:
+    """Make an open transcript descriptor owner-only (best-effort).
+
+    WHY (follow-up to PR #3756): a transcript holds every tool result the model
+    read, and a credential the redactor did not recognise is in it verbatim, yet
+    it was created with the process umask (``0644``, world-readable to every
+    local account) while the spill files beside it were ``0600``. Applied on
+    EVERY open for writing rather than only at creation, so a transcript written
+    by an older build, ``fork``, or an import becomes private on its next append.
+    A filesystem that refuses ``chmod`` (some network mounts) must not fail the
+    append: losing the turn is worse than a wider mode, so errors are swallowed.
+    The containing ``sessions/`` directory is already ``0700``; this closes the
+    file itself for a copy, a backup or a looser parent.
+    """
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is None:  # Windows: POSIX modes do not apply
+        return
+    try:
+        fchmod(fd, _TRANSCRIPT_MODE)
+    except OSError:
+        logger.debug("transcript: could not restrict mode", exc_info=True)
+
+
 def is_bookkeeping_entry(entry: "TranscriptEntry") -> bool:
     """Whether ``entry`` is a :data:`BOOKKEEPING_CUSTOM_TYPES` record.
 
@@ -3354,6 +3382,7 @@ class Transcript:
                 )
                 try:
                     with self.path.open("a", encoding="utf-8") as handle:
+                        _keep_private(handle.fileno())
                         for entry in entries:
                             # Retain the LAST row's bytes: the selection ledger's
                             # boundary digest is otherwise a 2 MB backward read of
@@ -3390,6 +3419,7 @@ class Transcript:
             )
             try:
                 with self.path.open("w", encoding="utf-8") as handle:
+                    _keep_private(handle.fileno())
                     for row in (*self._entries, *entries):
                         handle.write(row.to_json() + "\n")
                     handle.flush()
@@ -3991,7 +4021,9 @@ class Transcript:
         interrupted compaction leaves the original transcript readable.
         """
         tmp = self.path.with_suffix(self.path.suffix + ".compact")
-        tmp.write_text(payload, encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as handle:
+            _keep_private(handle.fileno())
+            handle.write(payload)
         os.replace(tmp, self.path)
 
     def flush(self) -> None:

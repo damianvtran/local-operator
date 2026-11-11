@@ -120,11 +120,15 @@ import functools
 import json
 import re
 import urllib.parse
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import (
     Any,
     Callable,
     Iterable,
+    Iterator,
+    Literal,
     Mapping,
     Match,
     NamedTuple,
@@ -133,6 +137,47 @@ from typing import (
     Sequence,
     Union,
 )
+
+#: How far a session redactor may act on the text it is handed right now.
+#:
+#: ``"full"`` (the default, every tool result's text): exact values, then the
+#: shape pass, and every shape hit is REGISTERED as a value to scrub for the rest
+#: of the session.
+#:
+#: ``"uncontained"``: the same masking, but nothing is registered. For a COPY of
+#: content the session already scanned — a result's ``details`` (PR #3789 review
+#: R1). A shape match that appears only there must mask that copy in place and
+#: nothing else: registered, a details-only false positive (``kubectl logs -p
+#: <pod-uuid>`` beside a ``psql`` word) masked the same UUID in every later,
+#: unrelated result. This is the stance the plan and indirect-name rules
+#: already take. Anything that also reached the content was registered there.
+#:
+#: ``"values"``: only the exact values the session already holds. For an
+#: IDENTIFIER-shaped string (no whitespace, ``=`` or ``:``) whose reader matches
+#: it exactly: shapes misfire on ids and model names, but a value the session
+#: already knows is a credential carries no false-positive risk (review R3).
+#:
+#: A ContextVar rather than a parameter because the loop holds only an opaque
+#: ``redact(text)`` callable; it rides into the ``to_thread`` worker with the
+#: context copy, like ``harness.redaction.tool_source``.
+RedactionScope = Literal["full", "uncontained", "values"]
+_REDACTION_SCOPE: ContextVar[RedactionScope] = ContextVar("redaction_scope", default="full")
+
+
+def current_redaction_scope() -> RedactionScope:
+    """The :data:`RedactionScope` the caller published, ``"full"`` by default."""
+    return _REDACTION_SCOPE.get()
+
+
+@contextmanager
+def redaction_scope(scope: RedactionScope) -> Iterator[None]:
+    """Publish ``scope`` for the redactor calls made inside the block."""
+    token = _REDACTION_SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        _REDACTION_SCOPE.reset(token)
+
 
 REDACTION_MARKER = "[redacted]"
 """What a credential is replaced with in anything about to be surfaced.
@@ -674,6 +719,64 @@ def _name_segments(name: str) -> list[str]:
     return [part for part in _SPLIT_NAME.split(name.strip("_.-").lower()) if part]
 
 
+#: Trailing ENVIRONMENT qualifiers a deployment appends to a credential name
+#: (``MINERVA_API_KEY_PROD``, ``API_KEY_STAGING``, ``DB_PASSWORD_2``). The tail
+#: rule below reads the LAST segment, so a qualifier there hid the credential
+#: word entirely and the value was published (2026-11 follow-up to PR #3756: a
+#: ``…_API_KEY_PROD`` Secret key name went unjudged). Stripping them is the
+#: whole change — the name still has to END in a credential word once they are
+#: gone, so ``PROD_REGION`` or ``TEST_URL`` gain nothing. Deliberately an
+#: explicit list, not "any short segment": ``…_KEY_ID`` must stay judged as
+#: written, and ``id`` is a qualifier word elsewhere in this module.
+#:
+#: ONLY the ``_`` spelling, the environment-variable one (measured, FP pass on
+#: the 200 most recent sessions): a hyphenated ``minerva-nexus/secrets-prod`` is
+#: a Secret/store RESOURCE name, not a variable, and stripping its ``-prod`` made
+#: the prose after it (``secrets-prod: fail``) a "credential value".
+_ENV_QUALIFIER_SUFFIX = re.compile(
+    r"(?:_(?:prod|production|dev|staging|stg|qa|test|live|sandbox|[0-9]+))+$", re.IGNORECASE
+)
+
+#: Compound names whose last segment is a CONTAINER word (``json``/``url``), so
+#: the tail rule cannot see them, yet whose whole spelling names a credential.
+#: Precise on purpose (operator, 2026-11: "most precise set of changes"): a
+#: generic ``*_JSON`` or ``*_URL`` is configuration, and only these spellings
+#: are measured credential carriers — a Google service-account key file
+#: (``GOOGLE_SERVICE_ACCOUNT_JSON``, ``GOOGLE_APPLICATION_CREDENTIALS_JSON``) and
+#: a chat incoming-webhook URL, whose PATH is the bearer secret
+#: (``SANCTIONS_GOVERNANCE_SLACK_WEBHOOK_URL``).
+_CREDENTIAL_JSON_PREFIXES = (("service", "account"), ("credentials",), ("credential",))
+_WEBHOOK_VENDOR_SEGMENTS = frozenset({"slack", "discord", "teams", "msteams"})
+
+
+def _qualified_segments(name: str) -> list[str]:
+    """``name``'s segments without trailing ``_``-joined environment qualifiers.
+
+    The whole name is kept when it is nothing but qualifiers, so ``PROD`` or
+    ``_2`` is judged as itself (and is not a credential word).
+    """
+    bare = name.strip("_.-")
+    return _name_segments(_ENV_QUALIFIER_SUFFIX.sub("", bare) or bare)
+
+
+def _is_compound_credential_name(segments: list[str]) -> bool:
+    """``…_SERVICE_ACCOUNT_JSON``, ``…_CREDENTIALS_JSON``, ``…_SLACK_WEBHOOK_URL``."""
+    if len(segments) < 2:
+        return False
+    if segments[-1] == "json":
+        head = segments[:-1]
+        return any(tuple(head[-len(prefix) :]) == prefix for prefix in _CREDENTIAL_JSON_PREFIXES)
+    if segments[-1] == "url" and segments[-2] == "webhook":
+        return any(segment in _WEBHOOK_VENDOR_SEGMENTS for segment in segments[:-2])
+    return False
+
+
+def is_webhook_credential_name(name: str) -> bool:
+    """Whether ``name`` is a chat incoming-webhook URL name (its URL is the secret)."""
+    segments = _qualified_segments(name)
+    return len(segments) > 2 and segments[-1] == "url" and _is_compound_credential_name(segments)
+
+
 def is_credential_name(name: str) -> bool:
     """Whether an identifier ENDS in a credential word, at a segment boundary.
 
@@ -682,21 +785,31 @@ def is_credential_name(name: str) -> bool:
     segment), ``keyboard_layout`` is not (it does not END in one), and
     ``num_tokens`` is not a credential either — it is rejected as a count, which
     is the separate judgement :func:`is_count_shaped` makes.
+
+    Trailing environment qualifiers are stripped first (``API_KEY_PROD`` is
+    ``API_KEY``; see :data:`_ENV_QUALIFIER_SUFFIX`), and a short list of
+    compound credential names ending in ``json``/``url`` is recognised (see
+    :data:`_CREDENTIAL_JSON_PREFIXES`). The NAME is only ever a reason to judge
+    the VALUE beside it: no rule masks a name itself.
     """
     lowered = name.strip("_.-").lower()
     if not lowered:
         return False
     if lowered in _RUN_TOGETHER_NAMES:
         return True
-    segments = _name_segments(lowered)
+    segments = _qualified_segments(lowered)
     if not segments:
         return False
+    if len(segments) == 1 and segments[0] in _RUN_TOGETHER_NAMES:
+        return True  # ``PGPASSWORD_PROD``
     tail = segments[-1]
     if tail in _CRED_NAME_FORMS:
         return True
     # A trailing pair split apart by the separator: ``client-key-data`` is
     # kubeconfig's private key, spelled in three segments.
-    return len(segments) > 1 and segments[-2] + tail in _CRED_NAME_FORMS
+    if len(segments) > 1 and segments[-2] + tail in _CRED_NAME_FORMS:
+        return True
+    return _is_compound_credential_name(segments)
 
 
 def is_count_shaped(name: str) -> bool:
@@ -1119,11 +1232,17 @@ def is_strong_credential_name(name: str) -> bool:
     depend on digits (an expression, a quoted path, a bare filesystem path, a
     credential-less URL, a value that repeats its own name) apply to both.
     """
-    segments = _name_segments(name)
+    segments = _qualified_segments(name)
     if not segments:
         return False
-    lowered = name.lower()
+    # Judged on the name WITHOUT its environment qualifiers, the same reading
+    # :func:`is_credential_name` takes: ``API_KEY_PROD`` is as strong as ``API_KEY``.
+    lowered = "_".join(segments)
     if any(word in lowered for word in _STRONG_CRED_WORDS):
+        return True
+    if _is_compound_credential_name(segments):
+        # A service-account key file or a webhook URL is a credential under ANY
+        # value spelling; the weak-name digit proof would release a hook path.
         return True
     squashed = lowered.replace("_", "").replace("-", "")
     if squashed.endswith(("key", "keys", "keydata", "keystore")):
@@ -2045,6 +2164,10 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # auth"`` is a claim NAME; the value proves itself the same way a ``*_URL``
     # name's does — userinfo password or credential-shaped query parameter.
     if _URL_LIKE.match(value):
+        # ...except an incoming-webhook URL, whose PATH is the bearer secret: the
+        # name already says so, and no userinfo or query parameter ever will.
+        if is_webhook_credential_name(name):
+            return False
         return not _url_contains_credential(value)
     # A dotted attribute path is a REFERENCE to a credential, not one:
     # ``key="providers.anthropic.cache_ttl_1h_min_context_tokens"``. Digits in a
@@ -2938,6 +3061,30 @@ def _query_value_prefix(run: str) -> str:
     return _QUERY_VALUE_STOP.split(run, maxsplit=1)[0]
 
 
+#: A client word (the ``client-inline-password`` alternation) or ``kubectl``,
+#: as a command word. Used to decide which of them OWNS a ``-p`` flag.
+_CLIENT_OR_KUBECTL_WORD = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.\-])(mysql|mysqldump|psql|pg_dump|pg_restore|mongo|mongosh|"
+    r"clickhouse-client|redis-cli|influx|kubectl)(?=[ \t])"
+)
+
+
+def _client_inline_password_guard(match: Match[str]) -> bool:
+    """Refuse a ``-p`` that belongs to ``kubectl``, not to the database client.
+
+    ``kubectl logs -p`` means "previous container", and its argument is a pod
+    name. The rule's 200-character gap let a client word earlier on the line (a
+    ``psql`` in a wake message, then ``kubectl logs -p`` and a pod) claim the
+    flag. The flag belongs to the LAST command word before it, so a ``kubectl``
+    there releases it, while a client named after the ``kubectl`` (``kubectl
+    exec … -- mysql …``) still owns its flag. PR #3789 review R4.
+    """
+    words = _CLIENT_OR_KUBECTL_WORD.findall(match.group(1))
+    if match.group(1).rstrip()[-2:] not in ("-p", "-P") or not words:
+        return True
+    return words[-1].lower() != "kubectl"
+
+
 def _assignment_value_guard(match: Match[str]) -> bool:
     """The checks both spellings of the named-assignment rule share.
 
@@ -3043,6 +3190,37 @@ def _assignment_guard(match: Match[str]) -> bool:
     return _assignment_value_guard(match)
 
 
+#: Field names whose quoted value may be an IDENTIFIER: the NAME of a setting
+#: or variable in a ``{"key": …, "value": …}`` / ``{"name": …}`` record. ``key``
+#: ends in a credential word, so the quoted rule masked ``"key": "setting_1042"``
+#: (2,900 of 3,000 rows in PR #3789 QA's fixture) because its four digits put it
+#: past the word-shaped release (``_WORD_SHAPED_MAX_DIGITS``): a name redacted,
+#: which the redaction policy forbids. The credential in such a record sits
+#: under ``value`` and is judged by the indirect-name rule through this name.
+_IDENTIFIER_FIELD_NAMES = frozenset({"key", "name"})
+
+#: A word-led compound NAME: a 2+-letter word, then segments that are each ALL
+#: letters or ALL digits (``setting_1042``, ``release-20261111``, ``app.v.2``).
+#: The per-segment purity is the discriminator against an opaque value under a
+#: bare ``key``, which the corpus pins as masked (``test_a_weak_name_still_
+#: masks_an_opaque_value``): a UUID starts with a hex run that mixes digits and
+#: letters, a hex/base64 key carries no separator, and a random token's
+#: segments mix both.
+_IDENTIFIER_FIELD_VALUE = re.compile(r"[A-Za-z]{2,}(?:[_.\-](?:[A-Za-z]+|[0-9]+))+")
+
+
+def _is_identifier_field_value(match: Match[str]) -> bool:
+    """Whether a quoted ``"key"``/``"name"`` field holds a word-led NAME."""
+    if match.group("name").lower() not in _IDENTIFIER_FIELD_NAMES:
+        return False
+    value = match.group(4)
+    return (
+        len(value) <= 64
+        and _VENDOR_PATTERN.search(value) is None
+        and _IDENTIFIER_FIELD_VALUE.fullmatch(value) is not None
+    )
+
+
 def _assignment_guard_quoted(match: Match[str]) -> bool:
     """The guard of the QUOTED spelling: group 3 is the delimiter, not a refusal.
 
@@ -3051,6 +3229,8 @@ def _assignment_guard_quoted(match: Match[str]) -> bool:
     rule has a non-empty group 3 by construction, so the shared body is the whole
     of the judgement.
     """
+    if _is_identifier_field_value(match):
+        return False
     return _assignment_value_guard(match)
 
 
@@ -4513,10 +4693,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(?i)((?<![A-Za-z0-9_.\-])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
             r"mongo|mongosh|clickhouse-client|redis-cli|influx)"
             r"(?=[ \t])"
-            r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
+            # ``-p`` followed by an all-digit or UUID-shaped run is a PORT
+            # (psql/pg_dump/pg_restore/redis-cli ``-p 5432``, mysql ``-P``
+            # under ``(?i)``) or a resource id, never a password: the lazy gap
+            # moves on to the next ``-p`` instead (PR #3789 review R4).
+            r"[^\n]{0,200}?\s-(?:a|p(?!\s*(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})(?!\S)))(?:\s+)?)(\S{2,})"
         ),
-        r"\1" + REDACTION_MARKER,
+        None,
         2,
+        guard=_client_inline_password_guard,
     ),
     # ``.npmrc``: its registry key with an ``_authToken`` entry.
     Shape(
@@ -4694,6 +4880,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     Shape(
         "slack-token",
         re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+        REDACTION_MARKER,
+    ),
+    Shape(
+        "minerva-api-key",
+        # Minerva application keys (auth-svc ``application_key_format.go``): one of
+        # four exact display prefixes, then ``base64.RawURLEncoding`` of 32 random
+        # bytes (43 chars) or, when the RNG fails, a UUID (36). The 32-char floor
+        # covers both and keeps the bare prefix readable where docs and code name
+        # it (``"mrva-live-"``, ``mrva-unknown``) — the prefix is not the secret.
+        re.compile(r"\bmrva-(?:qa-)?(?:live|dev)-[A-Za-z0-9_\-]{32,}(?![A-Za-z0-9_\-])"),
         REDACTION_MARKER,
     ),
 )
@@ -5902,16 +6098,22 @@ def _scrub_guttered_plan(text: str) -> Optional[str]:
     if masked == stripped:
         return None
     new_lines = masked.splitlines(keepends=True)
+    # Same line count: the mask rewrote lines in place, so the zip IS the
+    # alignment and the line diff below would only spend its budget proving it
+    # (PR #3789 review R5).
     if len(new_lines) == len(lines):
         return "".join(gutter + line for gutter, line in zip(gutters, new_lines))
-    # The re-render changed the line count (a masked multi-line value collapses
-    # to one marker; a source-inline array expands). Every line keeps its
-    # ORIGINAL gutter and the output keeps the original line count (round-3
-    # review R3-3): a later ``read`` by range or an edit by line number lands
-    # where the file says. Unchanged lines are aligned from both ends; the
-    # changed middle is laid onto the original middle's slots — padded with
-    # empty lines when it shrank, its overflow joined onto the last slot when
-    # it grew.
+    blocks = _changed_line_blocks(stripped_lines, new_lines)
+    if blocks is not None:
+        laid = _lay_blocks(lines, new_lines, blocks)
+        return "".join(gutter + line for gutter, line in zip(gutters, laid))
+    # Fallback past the diff budget (see ``_DIFF_MAX_EDITS``). The re-render
+    # changed the line count (a masked multi-line value collapses to one
+    # marker; a source-inline array expands). Every line keeps its ORIGINAL
+    # gutter and the output keeps the original line count (round-3 review
+    # R3-3). Unchanged lines are aligned from both ends; the changed middle is
+    # laid onto the original middle's slots — padded with empty lines when it
+    # shrank, its overflow joined onto the last slot when it grew.
     lead = 0
     limit = min(len(new_lines), len(lines))
     while lead < limit and new_lines[lead] == stripped_lines[lead]:
@@ -5938,6 +6140,134 @@ def _scrub_guttered_plan(text: str) -> Optional[str]:
     ]
     laid = new_lines[:lead] + middle + new_lines[len(new_lines) - tail :]
     return "".join(gutter + line for gutter, line in zip(gutters, laid))
+
+
+#: Edit budget for :func:`_changed_line_blocks`. Masking a plan changes only the
+#: lines of its masked values (a 3-line list collapsing to one marker line is 4
+#: edits), so a real plan read sits far below this; past it the cost (O(D²)
+#: steps, D² trace entries) is not worth paying and the coarser two-ended
+#: alignment above is used instead — the behaviour before this budget existed.
+_DIFF_MAX_EDITS = 1000
+
+
+def _changed_line_blocks(
+    old: list[str], new: list[str]
+) -> Optional[list[tuple[int, int, int, int]]]:
+    """The non-equal ``(i1, i2, j1, j2)`` blocks between two line lists, or ``None``.
+
+    WHY (PR #3756 QA Q11): the two-ended alignment treated EVERYTHING between the
+    first and last changed line as one block, so with two masked multi-line
+    values the unchanged lines between them slid up by the first block's shrink
+    and a range ``read`` or a line-numbered ``edit`` landed on the wrong line.
+    Each block is laid onto its OWN original lines here, so every unchanged line
+    keeps its original line number. Myers' O((N+M)·D) diff over the middle left
+    after trimming the common prefix and suffix; ``None`` past
+    :data:`_DIFF_MAX_EDITS`.
+    """
+    lead = 0
+    limit = min(len(old), len(new))
+    while lead < limit and old[lead] == new[lead]:
+        lead += 1
+    tail = 0
+    while tail < limit - lead and old[len(old) - 1 - tail] == new[len(new) - 1 - tail]:
+        tail += 1
+    a, b = old[lead : len(old) - tail], new[lead : len(new) - tail]
+    n, m = len(a), len(b)
+    if n + m == 0:
+        return []
+    span = _DIFF_MAX_EDITS + 1
+    frontier = [0] * (2 * span + 1)  # furthest x on diagonal k, at index k + span
+    trace: list[list[int]] = []
+    found = False
+    for d in range(_DIFF_MAX_EDITS + 1):
+        trace.append(frontier[span - d - 1 : span + d + 2])
+        for k in range(-d, d + 1, 2):
+            if k == -d or (k != d and frontier[span + k - 1] < frontier[span + k + 1]):
+                x = frontier[span + k + 1]
+            else:
+                x = frontier[span + k - 1] + 1
+            y = x - k
+            while x < n and y < m and a[x] == b[y]:
+                x += 1
+                y += 1
+            frontier[span + k] = x
+            if x >= n and y >= m:
+                found = True
+                break
+        if found:
+            break
+    if not found:
+        return None
+    # Walk back through the trace collecting the matched (equal) line pairs.
+    pairs: list[tuple[int, int]] = []
+    x, y = n, m
+    for d in range(len(trace) - 1, -1, -1):
+        saved = trace[d]  # frontier before step d, diagonals -d-1 .. d+1
+        k = x - y
+        at = lambda diagonal: saved[diagonal + d + 1]  # noqa: E731 - local index shim
+        if k == -d or (k != d and at(k - 1) < at(k + 1)):
+            previous_k = k + 1
+        else:
+            previous_k = k - 1
+        previous_x = at(previous_k) if d > 0 else 0
+        previous_y = previous_x - previous_k if d > 0 else 0
+        while x > previous_x and y > previous_y:
+            x -= 1
+            y -= 1
+            pairs.append((x, y))
+        x, y = previous_x, previous_y
+    pairs.reverse()
+    blocks: list[tuple[int, int, int, int]] = []
+    i = j = 0
+    for pi, pj in pairs + [(n, m)]:
+        if pi > i or pj > j:
+            blocks.append((lead + i, lead + pi, lead + j, lead + pj))
+        i, j = pi + 1, pj + 1
+    return blocks
+
+
+def _lay_blocks(
+    lines: list[str], new_lines: list[str], blocks: list[tuple[int, int, int, int]]
+) -> list[str]:
+    """``new_lines`` laid onto ``lines``' slots: one output line per original line.
+
+    Equal lines map one-to-one. A changed block takes its own original slots —
+    padded with empty lines when it shrank, its overflow joined onto its last
+    slot when it grew, and joined onto the line before it when it has no slot at
+    all (a pure insertion). Each slot keeps its original line ending.
+    """
+
+    def ending(index: int) -> str:
+        return lines[index][len(lines[index].rstrip("\r\n")) :]
+
+    laid = list(lines)
+    leading = ""  # a pure insertion before line 1, joined onto it at the end
+    i = j = 0
+    for i1, i2, j1, j2 in blocks + [(len(lines), len(lines), len(new_lines), len(new_lines))]:
+        while i < i1:
+            laid[i] = new_lines[j].rstrip("\r\n") + ending(i)
+            i += 1
+            j += 1
+        chunk = [line.rstrip("\r\n") for line in new_lines[j1:j2]]
+        slots = i2 - i1
+        if slots == 0:
+            if chunk:
+                joined = " ".join(line.strip() for line in chunk)
+                if i1 > 0:
+                    laid[i1 - 1] = laid[i1 - 1].rstrip("\r\n") + " " + joined + ending(i1 - 1)
+                else:
+                    leading = joined + " "
+        else:
+            if len(chunk) > slots:
+                chunk = chunk[: slots - 1] + [" ".join(line.strip() for line in chunk[slots - 1 :])]
+            else:
+                chunk = chunk + [""] * (slots - len(chunk))
+            for offset, line in enumerate(chunk):
+                laid[i1 + offset] = line + ending(i1 + offset)
+        i, j = i2, j2
+    if leading and laid:
+        laid[0] = leading + laid[0]
+    return laid
 
 
 def _scrub_plain_terraform_plan_json(text: str) -> str:
@@ -5973,11 +6303,247 @@ def _scrub_plain_terraform_plan_json(text: str) -> str:
     return text
 
 
+# --- a credential NAME held one step away from its VALUE ---------------------------
+#
+# WHY (2026-11 follow-up to PR #3756): every name-driven rule reads ``NAME = VALUE``
+# or ``"NAME": "VALUE"``, so a value whose name sits in a SIBLING field or in the
+# PARENT key was published whole:
+#
+# * ``{"key": "AWS_SECRET_KEY", "value": "<secret>"}`` — HCP Terraform's vars API
+#   (``data[].attributes.{key,value}``), GitLab's CI variables API, and every
+#   generic key/value array (``{"name": "DB_PASSWORD", "value": …}``, Kubernetes
+#   ``env:`` entries in YAML);
+# * ``{"AWS_SECRET_KEY": {"value": "<secret>"}}`` — the Terraform-variables shape
+#   outside a plan (the plan rule above only reads a whole plan object).
+#
+# The fix applies the EXISTING judgement (:func:`is_credential_name`, the count
+# guard, and the same value proof the assignment rule uses) to that one-step-away
+# name, and masks the VALUE only — keys, names and every other field stay
+# readable (operator constraint: names are never redacted). Like the plan rule
+# the mask is in place and NOT registered: the value proof is the assignment
+# rule's, but a value judged through a sibling field has less context than an
+# ``=`` binding, and a session-wide registration would multiply any miss.
+
+_INDIRECT_NAME_FIELDS = frozenset({"key", "name"})
+_INDIRECT_NAME_SHAPE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,127}")
+#: Live-stream lookbehind for this rule (see :func:`scrub_indirect_names_in_context`).
+_INDIRECT_CONTEXT_CHARS = 4096
+#: How many lines either side of a YAML ``value:`` its sibling name may sit. A COST
+#: bound, not a reach: without it a log of ``value: N`` lines at one column walked
+#: the whole text per line (20,000 lines: 58 s, measured). The spellings this rule
+#: exists for put the name on the adjacent line (k8s ``env``, GitLab/HCP
+#: variables: 1 line; with ``variable_type``/``protected`` beside it, 2-4).
+_INDIRECT_YAML_WINDOW = 64
+_INDIRECT_VALUE_FIELD = "value"
+_INDIRECT_JSON_HINT = re.compile(r'"value"\s*:\s*"')
+
+
+def _indirect_value_is_credential(name: Optional[str], value: str) -> bool:
+    """Whether ``value``, named ``name`` one step away, is masked (see the section note)."""
+    # The assignment rule's own value floor: below it a value is a word or a
+    # flag (``"x"``, ``"true"``), and masking it hides data while protecting nothing.
+    if not name or len(value) < _ASSIGNED_VALUE_MIN_CHARS or REDACTION_MARKER in value:
+        return False
+    # The assignment rule's own value CLASS (``_ASSIGNED_VALUE`` and the quoted
+    # group are runs of non-whitespace): a value with a space is prose — a form
+    # label (``In Progress Review``), a description (``Please set via env
+    # var``), a passphrase example — and ``NAME=<it>`` never masks it. Without
+    # this the sibling spelling masked what the direct one keeps (PR #3789
+    # review R2).
+    if any(char.isspace() for char in value):
+        return False
+    # The name must be a VARIABLE name: every spelling this rule exists for (HCP
+    # and GitLab variables, ``env:`` entries) holds an identifier. A path such as
+    # ``opensearch/opensearch-admin-credentials`` names a Secret RESOURCE, and the
+    # ``value`` beside it in the FP pass was a sentinel phrase, not a credential.
+    if not _INDIRECT_NAME_SHAPE.fullmatch(name):
+        return False
+    if not is_credential_name(name) or is_count_shaped(name):
+        return False
+    if _is_template_value(value):
+        return False
+    # A URL's credential is the DSN/URL rules' (they mask the password and keep
+    # user and host readable, and register it); masking the whole URL here would
+    # take that back. A chat webhook's URL IS the secret, so it stays this rule's.
+    if _URL_LIKE.match(value) and not is_webhook_credential_name(name):
+        return False
+    return not _value_is_not_a_credential(
+        _value_before_an_escape(value), name=name, strong=is_strong_credential_name(name)
+    )
+
+
+def _indirect_name_json_spans(text: str) -> list[_Span]:
+    """Spans masking a JSON ``"value"`` string named by its sibling ``key``/``name``
+    field or, when it has no such sibling, by its parent object's key.
+
+    The same token walk as :func:`_k8s_secret_json_spans`, for the same reasons:
+    the JSON may sit inside other text (a ``read`` gutter, a log prefix) and every
+    other byte must stay as it was. Field order is free: a sibling seen after the
+    value still names it, because the judgement is made when the object closes.
+    """
+    if not _INDIRECT_JSON_HINT.search(text):
+        return []
+    spans: list[_Span] = []
+    # frame: [type, key, expecting_value, sibling_name, value_span, parent_key]
+    stack: list[list[Any]] = []
+    for match in _JSON_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        top = stack[-1] if stack else None
+        if token == "{":
+            parent = top[1] if top is not None and top[0] == "o" and top[2] else None
+            stack.append(["o", None, False, None, None, parent])
+        elif token == "[":
+            stack.append(["a", None, False, None, None, None])
+        elif token in "}]":
+            if not stack:
+                continue
+            frame = stack.pop()
+            if frame[0] == "o" and frame[4] is not None:
+                name = frame[3] if frame[3] is not None else frame[5]
+                start, end, value = frame[4]
+                if _indirect_value_is_credential(name, value):
+                    spans.append((start, end, REDACTION_MARKER, []))
+            parent_frame = stack[-1] if stack else None
+            if parent_frame is not None and parent_frame[0] == "o":
+                parent_frame[2] = False
+        elif token == ":":
+            if top is not None and top[0] == "o":
+                top[2] = True
+        elif token == ",":
+            if top is not None and top[0] == "o":
+                top[2] = False
+        elif top is not None and top[0] == "o":
+            if not top[2]:
+                top[1] = token[1:-1]
+            elif top[1] in _INDIRECT_NAME_FIELDS:
+                top[3] = token[1:-1]
+            elif top[1] == _INDIRECT_VALUE_FIELD:
+                top[4] = (match.start() + 1, match.end() - 1, token[1:-1])
+    return spans
+
+
+def _yaml_scalar_span(line: str, key: _YamlKey) -> Optional[tuple[int, int]]:
+    """``(start, end)`` of a plain or quoted scalar value inside ``line``, else ``None``."""
+    raw = key.value
+    if not raw or _YAML_BLOCK_SCALAR_RE.match(raw) or raw[0] in "{[&*!|>":
+        return None
+    start = key.value_start
+    if raw[0] in "\"'":
+        close = raw.find(raw[0], 1)
+        if close <= 1:
+            return None
+        return start + 1, start + close
+    comment = raw.find(" #")
+    inner = raw[:comment].rstrip(" \t") if comment >= 0 else raw
+    return (start, start + len(inner)) if inner else None
+
+
+def _indirect_name_yaml_spans(text: str) -> list[_Span]:
+    """The YAML spelling: ``- key: NAME`` / ``name: NAME`` beside ``value: V``, or
+    ``NAME:`` whose child mapping holds ``value: V`` (read gutter tolerated)."""
+    if "value:" not in text:
+        return []
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    position = 0
+    for line in lines:
+        offsets.append(position)
+        position += len(line)
+    parsed = [_yaml_key(line) if ":" in line else None for line in lines]
+    indents = [
+        _line_indent(content) if content.strip() and not content.lstrip().startswith("#") else None
+        for content in (_yaml_content(line) for line in lines)
+    ]
+    spans: list[_Span] = []
+    for index, key in enumerate(parsed):
+        if key is None or key.key != _INDIRECT_VALUE_FIELD or not key.value:
+            continue
+        column = key.column
+        sibling: Optional[str] = None
+        parent: Optional[str] = None
+        if key.indent == column:  # not itself a list item's first line: look up
+            for above in range(index - 1, max(-1, index - 1 - _INDIRECT_YAML_WINDOW), -1):
+                indent, other = indents[above], parsed[above]
+                if indent is None:
+                    continue
+                if other is None:
+                    if indent < column:
+                        break
+                    continue
+                if other.column > column:
+                    continue
+                if other.column == column:
+                    if other.key == _INDIRECT_VALUE_FIELD:
+                        break  # another record's ``value``: one mapping has one
+                    if other.key in _INDIRECT_NAME_FIELDS and sibling is None:
+                        sibling = other.value.strip("\"'")
+                    if other.indent < column:
+                        break  # the ``- `` line that opens this list item
+                    continue
+                if not other.value:
+                    parent = other.key
+                break
+        for below in range(index + 1, min(len(lines), index + 1 + _INDIRECT_YAML_WINDOW)):
+            indent, other = indents[below], parsed[below]
+            if indent is None:
+                continue
+            if indent < column:
+                break  # the parent's level, or the next ``- `` item
+            if other is not None and other.column == column and other.key == _INDIRECT_VALUE_FIELD:
+                break  # another record's ``value``
+            if (
+                other is not None
+                and other.indent == column
+                and other.key in _INDIRECT_NAME_FIELDS
+                and sibling is None
+            ):
+                sibling = other.value.strip("\"'")
+        span = _yaml_scalar_span(lines[index].rstrip("\r\n"), key)
+        if span is None:
+            continue
+        value = lines[index][span[0] : span[1]]
+        if _indirect_value_is_credential(sibling if sibling is not None else parent, value):
+            base = offsets[index]
+            spans.append((base + span[0], base + span[1], REDACTION_MARKER, []))
+    return spans
+
+
+def scrub_indirect_names_in_context(context: str, text: str) -> str:
+    """The live stream's half of the indirect-name rule: ``context`` is lookbehind.
+
+    A pipe releases at line boundaries, so ``"key": "DB_PASSWORD",`` can go out in
+    one release and its ``"value"`` line in the next; the whole-text rule would then
+    see a value with no name beside it and the spill file (written from the
+    released stream) kept it, readable through ``read spill://…?q=``. Only spans
+    inside ``text`` are applied — the context is already on screen. A name printed
+    AFTER its value in a later release is the known residual: the value has left.
+    """
+    # The name is ONE step away — a sibling field or the parent key, a few lines
+    # up — so a short tail of the lookbehind is enough, and it keeps a stream that
+    # releases line by line linear (the full 256 KiB lookbehind re-walked per
+    # release would be quadratic). Cut back to a line start so YAML indents hold.
+    if len(context) > _INDIRECT_CONTEXT_CHARS:
+        context = context[-_INDIRECT_CONTEXT_CHARS:]
+        newline = context.find("\n")
+        context = context[newline + 1 :] if newline >= 0 else ""
+    combined = context + text
+    spans = _indirect_name_json_spans(combined) + _indirect_name_yaml_spans(combined)
+    if not spans:
+        return text
+    return _apply_spans(combined, spans, len(context), [])
+
+
+def _scrub_indirect_credential_names(text: str, hits: list[ShapeHit]) -> str:
+    spans = _indirect_name_json_spans(text) + _indirect_name_yaml_spans(text)
+    return _apply_spans(text, spans, 0, hits) if spans else text
+
+
 def _scrub_credential_structures(text: str, hits: list[ShapeHit]) -> str:
     # Terraform plan values are masked in place and never registered: a
     # sensitive attribute is often a short ordinary word or number, and
     # promoting it would mask that word in every later result.
     text = _scrub_terraform_plan_json(text)
+    text = _scrub_indirect_credential_names(text, hits)
     if "Secret" in text:
         text = _scrub_k8s_secret_json(text, hits)
         text = _scrub_k8s_secret_yaml(text, hits)
@@ -6422,6 +6988,8 @@ class StructureStreamGuard:
         hits: list[ShapeHit] = []
         if ready and _SECRET_DATA_HEADER_RE.search(ready):
             ready, hits = scrub_credential_structures_in_context(self.context, ready)
+        if ready and ("value" in ready):
+            ready = scrub_indirect_names_in_context(self.context, ready)
         context = self.context + ready
         if len(context) > _STRUCTURE_CONTEXT_CHARS:
             context = context[-_STRUCTURE_CONTEXT_CHARS:]
@@ -7515,6 +8083,12 @@ _SHAPE_ANCHORS: tuple[str, ...] = (
     "redis-cli",
     "influx",
     "hooks.slack.com",
+    # The compound credential NAMES of ``_is_compound_credential_name`` that carry
+    # none of the words above (``\u2026_CREDENTIALS_JSON`` is gated by ``credential``).
+    "account_json",
+    "account-json",
+    "webhook",
+    "mrva-",  # minerva-api-key
     # Bare issuer tokens, whose rules have no name to anchor on. Each group
     # names the rule it gates; a prefix added to one of those patterns without a
     # line here is the defect `_VENDOR_ANCHORS` was derived to make impossible
@@ -8934,9 +9508,14 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # ``/dev/null``) or a ``$( )`` capture is the safe form this hint
         # recommends. ``)`` is not an argument character, so a capture never
         # reaches the end-of-command lookahead.
+        # Global options may precede the service (``aws --region X --profile P
+        # secretsmanager …``), the same allowance the kubectl rules make; a
+        # backtick capture is a capture like ``$( )`` (#3756 deferred N4-1), so
+        # the backtick is not an argument character either.
         re.compile(
-            r"(?i)\baws\s+secretsmanager\s+get-secret-value\b"
-            r"(?:\s+[^\s|;&>)]+)*?"
+            r"(?i)\baws(?:\s+--?[A-Za-z][\w-]*(?:=[^\s|;&>)`]*|\s+[^\s|;&>)`-][^\s|;&>)`]*)?)*?"
+            r"\s+secretsmanager\s+get-secret-value\b"
+            r"(?:\s+[^\s|;&>)`]+)*?"
             r"(?:\s+(?:[0-9]?>&[0-9]|2>\s*/dev/null))*\s*(?=$|;|&&|\|\||\n)"
         ),
         "check it exists by name: `aws secretsmanager describe-secret --secret-id NAME`; "
