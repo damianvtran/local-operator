@@ -4558,6 +4558,62 @@ async def test_the_question_is_complete_where_the_constant_used_to_cut_it() -> N
 
 
 @pytest.mark.asyncio
+async def test_a_multiline_question_counts_the_rows_it_paints() -> None:
+    """PR #3693 design D1: a newline is a row break, not a character in a word.
+
+    The host-filed org-hub consent ask puts one section per line. ``wrap_cells``
+    splits on " " only, so before the fix the card measured 4 question rows that
+    the terminal painted as 7: the budget squeezed the options and the last
+    line (the local-edits note) was clipped at 100x30. Asserted on the drawn
+    rows: none carries a newline, the drawn rows are the per-paragraph wrap, and
+    the last paragraph is on screen.
+    """
+    from local_operator.hub_org.consent import ask_question
+
+    plan = {
+        "tenant": "tenant-x",
+        "org_name": "Minerva",
+        "new": [
+            {"kind": "skill", "name": "minerva-billing", "hub_id": "h1"},
+            {"kind": "agent", "name": "support-triage", "hub_id": "h2"},
+        ],
+        "updates": [
+            {"kind": "skill", "name": "minerva-credentials", "hub_id": "h3", "local_edits": True},
+            {"kind": "skill", "name": "minerva-data-agents", "hub_id": "h4"},
+            {"kind": "agent", "name": "code-reviewer", "hub_id": "h5"},
+        ],
+        "resubscribe": [],
+    }
+    shape, _affirm = ask_question(plan)
+    text = shape["question"]
+    paragraphs = text.split("\n")
+    assert len(paragraphs) == 4, paragraphs  # title, new, updates, edits note
+    question = AskQuestion(
+        id=shape["id"],
+        question=text,
+        options=[AskOption(**option) for option in shape["options"]],
+        recommended=0,
+    )
+    for size in ((100, 30), (100, 40)):
+        app, card = await _real_app_card(size, [question])
+        async with app.run_test(size=size) as pilot:
+            await _show(app, pilot, card)
+            layout = card._layout()
+            full = [row for p in paragraphs for row in _wrap(p, layout.width)]
+            drawn = list(layout.question)
+            # Every counted row is ONE painted line.
+            assert not any("\n" in row for row in drawn), (size, drawn)
+            if size == (100, 40):
+                # Room to spare: the whole question, edits note last.
+                assert drawn == full and drawn[-1] == paragraphs[-1], (size, drawn)
+            else:
+                # Tight: the card's own bound cuts with the "…" mark (reachable
+                # by ^e), never a newline smuggled inside a counted row.
+                assert drawn[:-1] == full[: len(drawn) - 1], (size, drawn)
+                assert drawn[-1].endswith("…") and len(drawn) < len(full), (size, drawn)
+
+
+@pytest.mark.asyncio
 async def test_the_adaptive_bound_is_stable_across_repaints() -> None:
     """The bound reads ``_body_rows(1)``, never the live budget.
 

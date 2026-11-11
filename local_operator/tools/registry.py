@@ -32,6 +32,7 @@ from local_operator.tools.image_tool import build_generate_image_tool
 from local_operator.tools.library_tool import build_library_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.memory_tools import build_memory_tool
+from local_operator.tools.profile_proposal_tool import build_profile_proposal_tool
 from local_operator.tools.project_tool import (
     build_project_delete_tool,
     build_project_tool,
@@ -220,12 +221,13 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # purpose: appending never shifts a provider-visible array prefix, which is
     # what the prompt cache keys on.
     "notify": lambda context: builtin.build_notify_tool(context),
-    # OPT-IN, NOT DEFAULT: the configuration run's skill editor. In this table so
-    # a declaring host can build it (`session_factory.AGENTS_CONFIG_TOOLS` +
-    # `Session._merge_capability_tools`), and deliberately ABSENT from
-    # `DEFAULT_TOOL_NAMES` below, so no ordinary session builds it and no other
-    # session's tools array -- the prompt-cache prefix -- moves. Appended at END
-    # for the same prefix reason as every entry above.
+    # Deferred: filing receipts name the conversation decision door.
+    "profile_proposal": lambda context: build_profile_proposal_tool(context),
+    # Standard authoring tool, reachable in owner conversations as well as the
+    # Agents configuration run. Mutations independently require host consent;
+    # availability alone cannot authorize a remote or delegated account write.
+    # Kept in the SAME relative order as ``DEFAULT_TOOL_NAMES`` below so both
+    # tables share one tail (pinned by test_the_newest_appends_stay_last...).
     "skill": lambda context: build_skill_tool(context),
 }
 
@@ -290,6 +292,8 @@ DEFAULT_TOOL_NAMES: list[str] = [
     # The newest append (see the table comment above): createIf-gated on the
     # session's inbox door.
     "notify",
+    "profile_proposal",
+    "skill",
 ]
 
 

@@ -44,7 +44,7 @@ from local_operator.session import session as session_mod
 from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
-from tests.unit.session.test_session import MODEL, ScriptedStream
+from tests.unit.session.test_session import MODEL, ScriptedStream, wait_for
 
 
 def _session(tmp_path: Path) -> Session:
@@ -245,11 +245,28 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
     "payload read" and "row on disk" is real. Marking the write clean
     afterwards regardless of what the holder now says reported the NEWER title
     as saved and left the OLDER one on disk — the next resume then restored a
-    name the user had already replaced. Caught with the slowed append below,
-    which widens the window to something a test can hit deterministically.
+    name the user had already replaced. Caught with the held append below,
+    which holds the window open until the test has renamed inside it.
+
+    The window is driven by EVENTS, not by wall-clock sleeps. The earlier
+    form slowed the append by 150 ms and then slept 50 ms ("the write is now
+    inside append_custom") and 500 ms ("the chase has landed"); on a loaded
+    xdist worker the chase's own append outran that 500 ms and the read found
+    the first title (CI job 129725144335, gw2) — the product had not lost the
+    name, the test had stopped looking too early. Now the first append signals
+    ``entered`` once the product has read its payload and is inside the write,
+    and then holds on ``release`` until the rename has been issued, so the
+    rename lands mid-write by construction; the test then waits on the real
+    condition (the resumed name on disk) under ``wait_for``'s deadline, which
+    fails loudly rather than reading a half-finished chase.
     """
 
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
     class SlowTranscript(Transcript):
+        calls = 0
+
         async def append_custom(
             self,
             custom_type: str,
@@ -258,7 +275,13 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
             preserve_mtime: bool = False,
             entry_id: str | None = None,
         ):
-            await asyncio.sleep(0.15)  # the payload was read BEFORE this
+            # Only the FIRST append is held: it is the one the rename has to land
+            # inside. The chase must run unhindered, or the test would be waiting
+            # on its own hold rather than on the product's correction.
+            SlowTranscript.calls += 1
+            if SlowTranscript.calls == 1:
+                entered.set()  # the payload was read BEFORE this call
+                await release.wait()
             return await super().append_custom(
                 custom_type, details, preserve_mtime=preserve_mtime, entry_id=entry_id
             )
@@ -272,9 +295,11 @@ async def test_a_rename_landing_mid_write_is_not_lost(tmp_path) -> None:
     )
     await session.async_init()
     session.set_conversation_name("First title", user_set=False)
-    await asyncio.sleep(0.05)  # the write is now inside append_custom
+    await wait_for(entered.is_set)  # the write is now inside append_custom
     session.set_conversation_name("Second title", user_set=True)
-    await asyncio.sleep(0.5)  # the chase lands without any dispose
+    release.set()
+    # The chase lands without any dispose.
+    await wait_for(lambda: _session(tmp_path).conversation_name == "Second title")
 
     # On disk BEFORE teardown: the correction must not depend on quitting.
     assert _session(tmp_path).conversation_name == "Second title"

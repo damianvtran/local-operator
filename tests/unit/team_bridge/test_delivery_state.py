@@ -89,11 +89,11 @@ _SCREENING_UNAVAILABLE = {
     "budget_exhausted",
     # The connector's own "screen_item answered nothing" (see the helper's note).
     "screening_unavailable",
-    # #3200/#3195: the provider answered but the reply cannot admit (the
-    # model's own safety stop, or a reply cut off at the output ceiling).
-    # Transient, so screening is "unavailable", not "awaiting review".
-    "model_refused",
-    "reply_truncated",
+    # Blank on every hop: NOT cached, re-screened on the backoff (2026-11-09).
+    "empty_reply",
+    # ``model_refused``/``reply_truncated`` moved OUT (2026-11-09): both are
+    # cached answers that are never re-screened, so "temporarily unavailable"
+    # was untrue; they are owner-review holds and publish ``awaiting_review``.
     "batch_unresolved",
     # No evaluated screening model is reachable: nothing judged the message.
     "screening_model_unavailable",

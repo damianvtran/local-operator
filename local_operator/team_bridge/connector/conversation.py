@@ -65,11 +65,13 @@ from ..attachments import (
 from ..client import (
     SCREENING_TEMPLATE_V3_SHA256,
     SCREENING_TEMPLATE_V4_SHA256,
+    SCREENING_TEMPLATE_V5_PIN,
+    SCREENING_VERSION_V5,
     BridgeRefusal,
     agent_file_reads_capability,
     screening_template_v4_usable,
 )
-from ..hold_release import WORK_SCOPE_HOLD
+from ..hold_release import REVIEW_HOLD_CODES, WORK_SCOPE_HOLD
 from ..types import ConversationFeedRef
 from .batch_screen import (
     allocation_for,
@@ -399,6 +401,59 @@ def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def screening_addressed(ref: Any, display: Mapping[str, Any] | None) -> str:
+    """How THIS message reached this agent, for the screener: a closed value.
+
+    The hub's own vocabulary (bridge-screen-v5's ``{{addressed}}``): ``direct`` |
+    ``thread`` | ``everyone`` | ``ambient``. The hub's value, carried on the feed
+    ref from ``events[].ids.addressed``, wins whenever it is present: the server
+    resolves ``everyone`` (an @channel, a small group) and validated mentions,
+    which this client cannot. Otherwise — an older hub, or a row queued before
+    this build — the value is DERIVED from server-provided facts only (the feed
+    ref's mention bit, the body read's ``conversation_kind`` and its
+    ``thread_follower`` bit), mapping a mention or a DM to ``direct``. Never
+    parsed from the body, so a sender cannot forge "you were asked" by writing
+    "@you". WHY (operator report 2026-11-09, R4): non-addressee agents held or
+    refused a channel post that asked SOMEONE ELSE's agent for work, because the
+    screener could not tell whether this agent was the one asked. Same
+    precedence as :func:`card_directed` (a mention always wins; only an explicit
+    ``thread_follower is True`` counts as a followed thread).
+    """
+
+    stated = getattr(ref, "addressed", None)
+    if isinstance(stated, str) and stated:
+        return stated
+    display = display or {}
+    if bool(getattr(ref, "mention", False)):
+        return "direct"
+    if display.get("conversation_kind") == "dm":
+        return "direct"
+    if display.get("thread_follower") is True:
+        return "thread"
+    return "ambient"
+
+
+def screening_routing(ref: Any, display: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The routing keys a conversation screening item carries (see :func:`_screening_item`).
+
+    ``routing_stated`` is True only when the HUB stated ``addressed`` on this
+    delivery. It decides whether the routing joins the envelope digest
+    (``screening.validate_envelope``): a stated routing is a fact about the
+    delivery, so two byte-identical posts reaching this agent differently must
+    not share a cached verdict; a derived one stays out so every pre-v5 digest is
+    unchanged. ``relation`` is the hub's ``sender_relation``; absent means
+    ``member`` (the hub's documented default), applied at render time.
+    """
+
+    routing: dict[str, Any] = {"addressed": screening_addressed(ref, display)}
+    if isinstance(getattr(ref, "addressed", None), str) and ref.addressed:
+        routing["routing_stated"] = True
+        relation = getattr(ref, "sender_relation", None)
+        if isinstance(relation, str) and relation:
+            routing["relation"] = relation
+    return routing
+
+
 def _screening_item(
     *,
     owner: Any,
@@ -407,6 +462,9 @@ def _screening_item(
     body: str,
     body_hash: str,
     sender: Mapping[str, Any],
+    addressed: str = "",
+    relation: str = "",
+    routing_stated: bool = False,
 ) -> dict[str, Any]:
     """The H3 envelope for a conversation message.
 
@@ -442,6 +500,11 @@ def _screening_item(
             "name": str(sender.get("display_label") or ""),
         },
         "thread": {"id": conversation_id, "tenant_id": owner.tenant_id},
+        # Closed values from :func:`screening_routing`; rendered only into a
+        # template that carries the routing slots (prompt v5).
+        **({"addressed": addressed} if addressed else {}),
+        **({"relation": relation} if relation else {}),
+        **({"routing_stated": True} if routing_stated else {}),
     }
 
 
@@ -1303,6 +1366,26 @@ async def _notify_budget_exhausted(
         logger.info("bridge: budget notification unrecorded code=notify_failed")
 
 
+def _text_admit_template(result: Any) -> str | None:
+    """The ``template_sha256`` a TEXT-ONLY allow carries to the hub's admit.
+
+    ``None`` (omitted) is the pre-v5 shape: the hub reads it as the ``screening``
+    slot's template. A screen that actually rendered bridge-screen-v5 must say so,
+    because the hub validates a named template's vocabulary on a text-only admit
+    and accepts the v5 hash beside the older text templates (agent-server
+    ``admitAttachmentGrant``; it does not record it, code review round 2, N1).
+    Only the pinned v5 hash qualifies; any other rendered value (a cache hit
+    renders nothing) keeps the omitted shape.
+    """
+
+    if (
+        getattr(result, "rendered_version", None) == SCREENING_VERSION_V5
+        and getattr(result, "rendered_template_sha256", None) == SCREENING_TEMPLATE_V5_PIN
+    ):
+        return SCREENING_TEMPLATE_V5_PIN
+    return None
+
+
 def _owner_released(receipt: Any) -> bool:
     from ..hold_release import OWNER_RELEASE_SHA256
 
@@ -1310,7 +1393,13 @@ def _owner_released(receipt: Any) -> bool:
 
 
 async def _notify_work_scope_hold(
-    store: Any, owner: Any, config_dir: Path, session_id: str, message_id: str
+    store: Any,
+    owner: Any,
+    config_dir: Path,
+    session_id: str,
+    message_id: str,
+    *,
+    code: str = "work_scope_hold",
 ) -> None:
     """The per-message B4b notice (``hold_release.raise_notice``); never fails the hold."""
 
@@ -1318,7 +1407,7 @@ async def _notify_work_scope_hold(
 
     from .. import hold_release
 
-    if not hold_release.enabled(config_dir):
+    if not hold_release.enabled_for(config_dir, code):
         return
     try:
         await asyncio.to_thread(
@@ -1678,6 +1767,7 @@ async def handle_conversation_available(
             body=body_text,
             body_hash=body_hash,
             sender=sender,
+            **screening_routing(ref, display),
         )
         if screened_images is not None:
             item["attachments"] = screened_images
@@ -1715,11 +1805,16 @@ async def handle_conversation_available(
                 await _notify_budget_exhausted(store, owner, config_dir, designation)
             else:
                 await notify_screening_infra_hold(owner, config_dir, designation, code)
-            if code == WORK_SCOPE_HOLD:
+            if code == WORK_SCOPE_HOLD or code in REVIEW_HOLD_CODES:
                 # B4b DESIGN §2.1: raised HERE so fresh screens, batch results
                 # and answer-cache re-drives all reach it; the per-message key
-                # makes every re-drive an ``unchanged`` no-op.
-                await _notify_work_scope_hold(store, owner, config_dir, designation, message_id)
+                # makes every re-drive an ``unchanged`` no-op. Review holds
+                # (``model_hold`` & co., operator report 2026-11-09) raise the
+                # same per-message notice in the designated session's inbox the
+                # moment they are written, not after the 60-minute count alert.
+                await _notify_work_scope_hold(
+                    store, owner, config_dir, designation, message_id, code=code
+                )
             return outcome
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":
@@ -1822,7 +1917,7 @@ async def handle_conversation_available(
         admit_template = (
             SCREENING_TEMPLATE_V4_SHA256
             if admitted_files_hash is not None
-            else SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None
+            else SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else _text_admit_template(result)
         )
         try:
             await _admit(files_hash=admitted_files_hash, template=admit_template)

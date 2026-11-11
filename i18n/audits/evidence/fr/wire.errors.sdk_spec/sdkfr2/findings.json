@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "audit_id": "sdkfr2",
+  "locale": "fr",
+  "namespace": "wire.errors.sdk_spec",
+  "head_sha": "f990c30424edb03801b1ba2325f27092572c3a27",
+  "catalogue_sha256": "d758be6d6f429af51854e2aacf702239f05eed54c5724565d4f43380cec9387e",
+  "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 0
+  },
+  "findings": [
+    {
+      "id": "FR2-T1",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "current_text": "birth_effort d’une nouvelle session lancée fait partie des paramètres initiaux et exige que le couple hosting/model soit également fourni ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle.",
+      "evidence": {
+        "punctuation_offsets": [
+          138
+        ],
+        "preceding_codepoint": "U+0020",
+        "required": "U+202F",
+        "rule": "i18n/style-guides/fr.md:95-96"
+      },
+      "problem": "Ordinary space before prose semicolon; French guide requires narrow no-break space. Meaning is correct.",
+      "suggested_value": "birth_effort d’une nouvelle session lancée fait partie des paramètres initiaux et exige que le couple hosting/model soit également fourni ; indiquez les trois, ou ouvrez la session dans le processus courant (open_session) pour fixer un niveau initial sans couple de modèle."
+    },
+    {
+      "id": "FR2-T2",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "current_text": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine).",
+      "evidence": {
+        "punctuation_offsets": [
+          111
+        ],
+        "preceding_codepoint": "U+0020",
+        "required": "U+202F",
+        "rule": "i18n/style-guides/fr.md:95-96"
+      },
+      "problem": "Ordinary space before prose semicolon; French guide requires narrow no-break space. Meaning is correct.",
+      "suggested_value": "spawn_session() transmet le couple hosting/model à un runtime NEW dans un même ensemble de paramètres initiaux ; indiquez les deux, ou aucun (l’enfant résout alors son modèle depuis la configuration de la racine)."
+    },
+    {
+      "id": "FR2-T3",
+      "severity": "minor",
+      "key": "wire.errors.sdk_spec.spawn_output_unsupported",
+      "current_text": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis confiez-lui une tâche",
+      "evidence": {
+        "punctuation_offsets": [
+          70
+        ],
+        "preceding_codepoint": "U+0020",
+        "required": "U+202F",
+        "rule": "i18n/style-guides/fr.md:95-96"
+      },
+      "problem": "Ordinary space before prose semicolon; French guide requires narrow no-break space. Meaning is correct.",
+      "suggested_value": "spawn_session() ne peut pas porter de contrainte de sortie ({fields}) ; ouvrez la session avec open_session(..., mode=''own'') puis confiez-lui une tâche"
+    }
+  ],
+  "report_comment": "https://github.com/damianvtran/local-operator/pull/3708#issuecomment-6756775103"
+}
