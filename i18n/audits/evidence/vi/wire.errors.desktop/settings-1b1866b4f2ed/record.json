@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "wire.errors.desktop",
+  "pr": "settings-intents core PR (number not in brief)",
+  "worktree": "/Users/damian/local-operator/.worktrees/settings-intents",
+  "head": "6a7be3d12a018699ffd77f1610d84e1af2794189",
+  "merge_base": "ae1dd3e0a769fc0345dee7c21b4418f45b82cad3",
+  "catalogue_state": "committed at head",
+  "source_sha256": "b2bef8965912381f5516ff9ce75f91ad8a4ba6a332ca2a8c89c84a075f08b482",
+  "target_sha256": "089d7c509af7840d91c81506f03dca510243246176148c51113ec6e197f6f41b",
+  "base_target_sha256": "c48bddc53d05ba1b46253678a94b37972756b549420ff7eb6cf934a4d3b707ac",
+  "translator": {
+    "agent": "coder-settings-intents-core",
+    "session": "d0c5356bb4d3",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-09",
+    "fallback": "Translations authored before quota fallback to openai/gpt-6.1-sol; fallback only used for later product corrections and receipt assembly."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translator)",
+    "session": "1b1866b4f2ed",
+    "model": "anthropic/claude-opus-5-5",
+    "fallback": "none observed in this session",
+    "date": "2026-11-09",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0
+  },
+  "status": "passed",
+  "audit_kind": "delta audit of added keys + mechanical carry of unchanged keys",
+  "audited_keys": [
+    "wire.errors.desktop.settings_intent_generation_moved"
+  ],
+  "keys_total": 89,
+  "carry_proof": {
+    "unchanged_keys_byte_identical_to_merge_base": true,
+    "base_ledger_row_status": "passed",
+    "base_ledger_source_sha256_equals_base_en": true,
+    "base_ledger_row_names_base_target_sha": true
+  },
+  "verified": [
+    "key set equals en",
+    "placeholder names equal en",
+    "no bidi control characters",
+    "scripts/i18n/check.py --catalogues-only rc=0 (0 problems) under run_bounded 600s/1200MB"
+  ],
+  "reading": "Added values read against en and the context sidecar: meaning, register, 'step' = next model call (not next user message), reassuring tone, placeholder position, kept-Latin model labels. No findings.",
+  "findings": [],
+  "not_verified": "native-speaker review; rendered TUI/phone/desktop width and Urdu RTL",
+  "ledger_note_draft": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 1 added key(s) read, 0 findings; 88 unchanged keys byte-identical to the passed row at base. Target 089d7c509af7840d91c81506f03dca510243246176148c51113ec6e197f6f41b. Evidence: i18n/audits/evidence/vi/wire.errors.desktop/settings-1b1866b4f2ed/record.json"
+}

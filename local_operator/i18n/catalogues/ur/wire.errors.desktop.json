@@ -78,6 +78,7 @@
   "wire.errors.desktop.session_is_remote_open": "{session_id} {label} پر ہے، اور یہ ڈیسکٹاپ ابھی دوسرے ڈیوائس پر کوئی گفتگو نہیں کھول سکتا۔ اسے `lop sessions move {session_id} --to local` سے یہاں واپس لائیں، یا ٹرمینل سے `/network sessions --peer {label} --engage {session_id}` کے ذریعے چلائیں۔",
   "wire.errors.desktop.session_is_remote_write": "{noun} ({session_id}) {label} پر ہے، اور یہ ڈیسکٹاپ ابھی اسے وہاں نہیں لکھ سکتا؛ یہاں کچھ نہیں بدلا گیا۔",
   "wire.errors.desktop.session_not_found": "id {session_id} والی کوئی گفتگو نہیں",
+  "wire.errors.desktop.settings_intent_generation_moved": "اس کی جگہ ایک نئی تبدیلی آ چکی ہے، اس لیے منسوخ کرنے کو کچھ نہیں۔",
   "wire.errors.desktop.skill_alias_occupied": "ایک مقامی مہارت پہلے سے یہ نام استعمال کر رہی ہے۔ Hub کی مہارت کا pull --dry-run کے ساتھ کریں تاکہ منسلک کرنے کے merge کا جائزہ لے سکیں، یا کوئی دوسرا نام چنیں۔",
   "wire.errors.desktop.skill_local_changes_unpublished": "اس مہارت میں مقامی تبدیلیاں ہیں جو کبھی شائع نہیں ہوئیں، اور اسے ہٹانے سے وہ ضائع ہو جائیں گی۔ پہلے انہیں شائع کریں، یا انہیں ضائع کرنے کے لیے پھر بھی ہٹا دیں۔",
   "wire.errors.desktop.skill_not_editable": "یہاں یہ مہارت صرف پڑھنے کے لیے ہے۔ تبدیلی کے لیے اسے اپنی مہارتوں میں کاپی کریں۔",

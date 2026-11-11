@@ -55,6 +55,7 @@ from tests.e2e.harness import (
     build_session,
     dispose_quietly,
     drain,
+    settle_on,
     text_turn,
     transcript_text,
     wait_for_adoption,
@@ -541,6 +542,15 @@ async def test_an_unfinished_token_still_takes_the_second_enter_to_send(tmp_path
             await pilot.press("enter")
             settled = await _settle(pilot, lambda: bool(stream.requests))
             assert settled, "the completed token still could not be sent"
+            # Same in-flight teardown as ``test_prose_naming_no_path...``: this
+            # cell also left ``run_test`` on the SEND's frame, with the turn
+            # still to end. Its sibling flaked first; the assumption is shared,
+            # so the wait is too.
+            await settle_on(
+                pilot,
+                lambda: app._working_block is None,
+                "the sending turn to end before the app is torn down",
+            )
             assert "MARKER_README_913" in _sent_to_model(stream)
     finally:
         await dispose_quietly(session)
@@ -585,6 +595,27 @@ async def test_prose_naming_no_path_is_sent_verbatim_and_never_rewritten(tmp_pat
             await pilot.press("enter")
             settled = await _settle(pilot, lambda: bool(stream.requests))
             assert settled, "the prose draft could not be sent"
+            # THE TURN IS STILL IN FLIGHT HERE, and leaving ``app.run_test`` with
+            # it in flight is what made this cell red (issue #3649):
+            # ``stream.requests`` is populated when the provider is CALLED, i.e.
+            # at the START of the turn, while the turn's own end is a later
+            # frame. Tearing the app down first let ``on_turn_ended`` run
+            # ``_dismiss_working_block`` after ``_shutdown`` had pruned the
+            # screen, so ``_transcript_view()``'s ``#transcript`` re-lookup
+            # raised ``NoMatches`` out of ``run_test.__aexit__`` and failed a
+            # test whose assertions had all passed. Waiting for the turn to END
+            # while the transcript is still mounted is the fix; the ``#transcript``
+            # node existing during the test was never the thing in question.
+            #
+            # ``_working_block`` is the app's own turn-end latch: it is set
+            # while the turn runs and cleared by ``_dismiss_working_block``,
+            # the exact function that raised, so this waits on the state whose
+            # transition broke rather than on a tick count.
+            await settle_on(
+                pilot,
+                lambda: app._working_block is None,
+                "the sending turn to end before the app is torn down",
+            )
             assert (
                 editor.text != "run glab mr create --assignee @README.md"
             ), "the operator's prose was rewritten into a filename"

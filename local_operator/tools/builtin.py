@@ -146,7 +146,7 @@ from local_operator.imaging import (
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
 )
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import python_argv, session_python_argv
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
 from local_operator.procstate import (
@@ -210,6 +210,7 @@ from local_operator.tools.confinement import (
     shell_sandbox_unavailable_reason_async,
     shell_write_confinement_of,
 )
+from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT, fits_source_evidence
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -10909,11 +10910,11 @@ async def execute_edit(
     if pad_advisory:
         text = f"{text}\n{pad_advisory}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "edit",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -11121,7 +11122,7 @@ def _edit_file_result_locked(
             )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    details = _diff_details(str(path), original, current)
+    details = _with_diff_source(_diff_details(str(path), original, current), original, current)
     if pad_advisory:
         # The worker thread already returns ``details``; this private, popped key
         # carries the receipt line without changing that transaction's shape.
@@ -11251,6 +11252,11 @@ _MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
 #: It is popped before rendering, so the structured diff remains unchanged.
 _SCRATCHPAD_ADVISORY_KEY = "_scratchpad_advisory"
 
+#: The same one-way worker-to-result channel for the complete raw file sides.
+#: Popped by ``_diff_text_result`` onto a private ``ToolResult`` attribute, so
+#: it never reaches the persisted details.
+_DIFF_SOURCE_KEY = "_diff_source"
+
 
 #: One unified-diff hunk header. Counts default to 1 when omitted, which the
 #: grammar allows for a single-line side.
@@ -11335,6 +11341,48 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     if omitted:
         details[DIFF_TRUNCATED_ROWS_KEY] = omitted
     return details
+
+
+def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[str, Any]:
+    """Attach the complete sides as source evidence for the loop's seam.
+
+    Called by the write/edit transactions with the exact bytes they diffed.
+    The scratch key is popped onto a private ``ToolResult`` attribute by
+    ``_diff_text_result`` (see ``tools/diff_limits`` for why the per-hunk
+    judgement alone is not enough). Over the bound no complete-side proof is
+    possible, so the diff is withheld instead; counters and path stay exact.
+    """
+    if not isinstance(details.get("diff"), list):
+        return details
+    if fits_source_evidence(before, after):
+        details[_DIFF_SOURCE_KEY] = (before, after)
+    else:
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    return details
+
+
+def _diff_text_result(
+    tool_call_id: str, tool_name: str, text: str, details: dict[str, Any]
+) -> ToolResult:
+    """``_text`` for write/edit, moving the raw source evidence off ``details``.
+
+    ``details`` is serialized everywhere, so the raw sides must leave it before
+    a ``ToolResult`` exists. They ride the private ``_diff_source`` together
+    with the raw preview, and the public preview becomes the withheld receipt
+    until the loop's seam (``AgentLoop._settle_write_diff``) publishes the
+    source-masked copy. A path that never reaches that seam (a direct
+    ``execute`` caller, a copy that dropped the private attribute) therefore
+    publishes the receipt, never raw rows.
+    """
+    source = details.pop(_DIFF_SOURCE_KEY, None)
+    preview = details.get("diff")
+    if source is not None and isinstance(preview, list):
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    result = _text(tool_call_id, tool_name, text, details=details)
+    if source is not None and isinstance(preview, list):
+        before, after = source
+        result._diff_source = (before, after, tuple(preview))
+    return result
 
 
 def _utf8_size(rows: Sequence[str]) -> int:
@@ -12004,11 +12052,11 @@ async def execute_write(
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "write",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -12036,7 +12084,7 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    details = _diff_details(str(path), previous, content)
+    details = _with_diff_source(_diff_details(str(path), previous, content), previous, content)
     introduced = _marker_introduced(previous, content)
     if introduced:
         details[_MARKER_INTRODUCED_KEY] = introduced
@@ -20106,22 +20154,22 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
 async def _sessions_launch(
     argv: list[str], env: dict[str, str], cwd: str | None
 ) -> tuple[int, str]:
-    """Run THIS build's CLI (``python -P -m local_operator.cli …``) and return
-    ``(returncode, stderr)``.
+    """Run the new session's CLI and return ``(returncode, stderr)``.
 
-    Not ``shutil.which("lop")``: the ``lop`` on PATH may be a different build
-    (a global install, a generation pointer) than the session that spawned
-    it, and the two could disagree about a flag the argv above uses.
-    ``python_argv`` adds ``-P`` so a checkout that merely happens to be the
-    cwd cannot shadow the installed package — the same spelling
-    ``update.py``'s relaunch and ``tui/session_move.py``'s nested run use.
+    A generation-installed parent resolves the concrete CURRENT interpreter
+    for this independent session, not its own pinned old build. Developer and
+    legacy installs stay on their own interpreter. Never use PATH's ``lop``:
+    it may belong to an unrelated install. ``session_python_argv`` also keeps
+    ``-P`` so a checkout in the cwd cannot shadow the selected distribution.
+    This boundary intentionally follows updates; same-session helpers and mesh
+    protocol calls continue to use their parent's build.
 
     The child is its own process group so a fired bound can reap the whole
     tree; ``stdin`` is /dev/null because an exec run is never interactive
     (``--control`` is deliberately not exposed by this tool).
     """
     process = await asyncio.create_subprocess_exec(
-        *python_argv(*_SESSIONS_CLI, *argv),
+        *session_python_argv(*_SESSIONS_CLI, *argv),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -34074,7 +34122,16 @@ async def execute_jobs(
         # reading the feature exists for was the hardest to find. Emitting it here
         # as its own FIXED-WIDTH cell keeps that emphasis while leaving every
         # label in the grid starting at one column.
-        rows_out.append((f"{job.id}  {job.status:<9}  {age} {sense:<4}", clause or "", job.label))
+        label = job.label
+        if getattr(job, "type", "") == "task":
+            # The model a subagent is served by NOW, after the label so the
+            # aligned grid and every non-task row stay byte-identical. Same
+            # rule as ``hub list``: live rows always, settled rows only when
+            # they ended off their pin.
+            model = _job_model_clause(context, job)
+            if model and (running or model.startswith("pinned ")):
+                label = f"{label}  [{model}]"
+        rows_out.append((f"{job.id}  {job.status:<9}  {age} {sense:<4}", clause or "", label))
     cell_width = max((len(clause) for _, clause, _ in rows_out if clause), default=0)
     lines = []
     for cells, clause, label in rows_out:
@@ -34238,8 +34295,10 @@ class HubParams(BaseModel):
     model: str | None = Field(
         default=None,
         description=(
-            "Omit to keep role/tier defaults. 'inherit' follows the parent, skipping role pins; "
-            "provider/model-id pins this run. Never combine with effort."
+            # Trimmed again in review round 2 (context-budget CI was 3 tokens
+            # over): same facts, the tool:// ops table carries the detail.
+            "resume/set_model. Omit: role/tier default. 'inherit': the parent's, "
+            "skipping role pins; provider/model-id pins this run."
         ),
     )
 
@@ -34258,9 +34317,19 @@ class HubParams(BaseModel):
     # (audit items 2+3): `read tool://hub` renders the same blurbs, and the
     # tool description above already names every verb at a fraction of the
     # cost. The enum literals stay, so a reader still learns the op set here.
-    op: Literal["list", "peek", "send", "ask", "steer", "pause", "cancel", "resume"] = Field(
-        description="The verb to run."
+    op: Literal[
+        "list", "peek", "send", "ask", "steer", "pause", "cancel", "resume", "set_model"
+    ] = Field(description="The verb to run.")
+    # ``set_model`` (2026-11 quota incident): switch a RUNNING child in place.
+    # Two fields, kept terse because this schema rides every request of the
+    # top session and of every delegating child; the contract lives in the
+    # tool:// ops table. ``effort`` is a reasoning LEVEL on the chosen model,
+    # not a task tier: the child is already running, there is no launch to
+    # route through a tier.
+    effort: str | None = Field(
+        default=None, description="set_model: reasoning level, or lo|med|hi tier."
     )
+    cascade: bool = Field(default=False, description="set_model: also running descendants.")
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
     # ``anyOf``, and this module's schemas reach Gemini verbatim as
     # ``function_declarations`` (providers/clients.py builds the body with
@@ -34275,9 +34344,8 @@ class HubParams(BaseModel):
     to: list[str] | None = Field(
         default=None,
         description=(
-            "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
-            "labels, or [\"all\"] for every running subagent; 'ask' and 'peek' take "
-            "exactly one. Omit for op='list'."
+            "Job ids (see 'hub op=list'), labels, or [\"all\"] (every running "
+            "subagent); 'ask'/'peek' take exactly one. Omit for list."
         ),
     )
 
@@ -34292,8 +34360,9 @@ class HubParams(BaseModel):
     message: str | None = Field(
         default=None,
         description=(
-            "Body. Required for send/ask/steer/resume; for pause/cancel it is "
-            "recorded as the reason the child ended; ignored by list/peek."
+            # Trimmed with the set_model fields (context budget): same facts.
+            "Body: required for send/ask/steer/resume; pause/cancel record it as "
+            "why the child ended."
         ),
     )
     timeout_ms: int = Field(
@@ -34319,10 +34388,7 @@ class HubParams(BaseModel):
     steps: int | None = Field(
         default=None,
         ge=1,
-        description=(
-            "op='peek' only: shorthand for the last N steps (overrides range). "
-            "Omit for the default (5)."
-        ),
+        description=("op='peek': the last N steps (overrides range; default 5)."),
     )
 
 
@@ -34526,7 +34592,7 @@ def _hub_list(
     completed_ids = [row.job_id for row in rows if row.status == "completed"]
     shown_completed = set(completed_ids[-HUB_LIST_COMPLETED_SHOWN:])
     folded = len(completed_ids) - len(shown_completed)
-    all_lines = _hub_roster_lines(rows)
+    all_lines = _hub_roster_lines(rows, comms)
     # A FOLD NEEDS SOMEWHERE TO PUT WHAT IT FOLDS. The handle is what keeps the
     # older rows \u2014 and the ``transcript <id>`` a ``--resume`` needs \u2014 reachable,
     # so a store that refused the write means NO fold: every row renders, exactly
@@ -34537,7 +34603,7 @@ def _hub_list(
         visible = [
             row for row in rows if row.status != "completed" or row.job_id in shown_completed
         ]
-        lines = _hub_roster_lines(visible)
+        lines = _hub_roster_lines(visible, comms)
         lines[0] = f"{len(rows)} subagent(s), {len(visible)} shown:"
         lines.insert(
             1,
@@ -34574,6 +34640,8 @@ def _hub_list(
                 # rendered line) so the mobile/desktop projection can show
                 # WHO stopped a child without re-deriving it from prose.
                 "ended_by": row.ended_by,
+                # The served/pinned pair behind the rendered model clause.
+                **_model_detail(comms, row.job_id),
             }
             for row in rows
         ],
@@ -34585,7 +34653,7 @@ def _hub_list(
     return _text(tool_call_id, "hub", "\n".join(lines), details=details)
 
 
-def _hub_roster_lines(rows: list[Any]) -> list[str]:
+def _hub_roster_lines(rows: list[Any], comms: Any = None) -> list[str]:
     """The roster rows for ``hub op='list'``: a count line, then one block per child."""
     lines = [f"{len(rows)} subagent(s):"]
     # FUNCTION-LOCAL: ``builtin`` is a denied-module boundary (see the note
@@ -34617,6 +34685,15 @@ def _hub_roster_lines(rows: list[Any]) -> list[str]:
         if row.resumable and row.session_id:
             extras += f", transcript {row.session_id}"
         lines.append(f"- {row.label} ({row.job_id}): {row.status}{age}{idle} — {extras}")
+        # The model clause: always for a live row (what answers it NOW), and
+        # for a settled row only when it ended on something other than its
+        # pin — a long roster of completed children must not pay a line each
+        # for a fact nobody acts on.
+        if comms is not None:
+            clause = _served_model_clause(comms, row.job_id)
+            live = row.status in ("running", "starting", "queued", "pausing")
+            if clause and (live or clause.startswith("pinned ")):
+                lines.append(f"    {clause}")
         # WHO ended it, and why. The field the old ``del reason`` discarded:
         # without this line a cancelled child read as a bare ``cancelled`` with
         # no actor anywhere, which is the second half of the complaint.
@@ -34732,6 +34809,103 @@ async def _hub_peek(tool_call_id: str, comms: Any, params: Any, ids: list[str]) 
     )
 
 
+def _served_model_clause(comms: Any, job_id: str) -> str:
+    """``on X`` or ``pinned X, ran on Y``: the model serving a child NOW.
+
+    The one rendering ``hub list``, ``jobs`` and the ``set_model`` receipt
+    share, read from ``SubagentComms.model_reading`` (the live route state),
+    so no surface can say a child is on its pin while a fallback answers —
+    before this the served model showed only in the run-details badge.
+    ``""`` when nothing recorded a model, or the host predates the reader.
+    """
+    reading = getattr(comms, "model_reading", None)
+    if not callable(reading):
+        return ""
+    served, pinned = cast("tuple[str, str]", reading(job_id))
+    if not served:
+        return ""
+    if not pinned:
+        return f"on {served}"
+    # "pinned" only when a pin chose the primary: an inheriting child that
+    # fell back names its primary without claiming a pin (review round 1, R7).
+    owns = getattr(comms, "model_pinned", None)
+    if callable(owns) and not owns(job_id):
+        return f"on {served} (primary {pinned})"
+    return f"pinned {pinned}, ran on {served}"
+
+
+def _job_model_clause(context: ToolContext | None, job: Any) -> str:
+    """:func:`_served_model_clause` for a ``jobs`` row, from the row alone if needed.
+
+    Prefers the comms reader (the live child's route state). A host without
+    comms still has the row's own ``model_label`` (rewritten by every route
+    edge the relay sees) and ``requested_model_label`` (the launch pin).
+    """
+    comms = getattr(context, "subagent_comms", None) if context is not None else None
+    if comms is not None and callable(getattr(comms, "model_reading", None)):
+        return _served_model_clause(comms, job.id)
+    served = str(getattr(job, "model_label", "") or "")
+    pinned = str(getattr(job, "requested_model_label", "") or "")
+    if not served:
+        return ""
+    return f"pinned {pinned}, ran on {served}" if pinned and pinned != served else f"on {served}"
+
+
+def _model_detail(comms: Any, job_id: str) -> dict[str, str]:
+    """``{"model", "pinned_model"}`` for a roster row's ``details``, or ``{}``."""
+    reading = getattr(comms, "model_reading", None)
+    if not callable(reading):
+        return {}
+    served, pinned = cast("tuple[str, str]", reading(job_id))
+    return {"model": served, "pinned_model": pinned} if served else {}
+
+
+async def _hub_set_model(
+    tool_call_id: str,
+    comms: Any,
+    params: Any,
+    ids: list[str],
+    errors: list[str],
+    scope: str | None,
+) -> ToolResult:
+    """Render ``hub op='set_model'``: one receipt line per child, naming the
+    SERVED model after the switch (not the requested one) and any kept pin."""
+    deliveries = await comms.set_model(
+        ids,
+        model=params.model,
+        effort=params.effort,
+        cascade=params.cascade,
+        scope=scope,
+    )
+    acted = [delivery for delivery in deliveries if delivery.outcome != "failed"]
+    lines = [f"set_model: {len(acted)}/{len(deliveries)} subagent(s)"]
+    for delivery in deliveries:
+        line = f"- {delivery.label} ({delivery.job_id}): {delivery.outcome}"
+        if delivery.outcome != "failed":
+            clause = _served_model_clause(comms, delivery.job_id)
+            line += f", {clause}" if clause else ""
+        line += f" — {delivery.error}" if delivery.error else ""
+        lines.append(line)
+    lines.extend(f"- {error}" for error in errors)
+    if acted:
+        lines.append(
+            "Applies at each one's next model call; same job ids, subagents and tabs. "
+            "A primary still out of quota falls back again on that call."
+        )
+    return _text(
+        tool_call_id,
+        "hub",
+        "\n".join(lines),
+        details={
+            "op": "set_model",
+            "job_ids": [delivery.job_id for delivery in deliveries],
+            "acted": len(acted),
+            "useless": not acted,
+        },
+        useless=not acted,
+    )
+
+
 def _hub_receipt_lines(deliveries: list[Any]) -> list[str]:
     return [
         (
@@ -34812,8 +34986,10 @@ async def _execute_hub_parent(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "hub", exc)
 
-    if params.model is not None and params.op != "resume":
-        return _error(tool_call_id, "hub", "model is only valid for op='resume'")
+    if params.model is not None and params.op not in ("resume", "set_model"):
+        return _error(tool_call_id, "hub", "model is only valid for op='resume' or 'set_model'")
+    if (params.effort is not None or params.cascade) and params.op != "set_model":
+        return _error(tool_call_id, "hub", "effort and cascade are only valid for op='set_model'")
     if params.op == "list":
         return _hub_list(tool_call_id, comms, scope, context)
 
@@ -34830,7 +35006,10 @@ async def _execute_hub_parent(
         outcome = comms.reply_to_parent(scope, params.message or "")
         return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
 
-    if params.op not in ("cancel", "pause", "peek") and not (params.message or "").strip():
+    if (
+        params.op not in ("cancel", "pause", "peek", "set_model")
+        and not (params.message or "").strip()
+    ):
         return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
 
     if not params.to:
@@ -34864,6 +35043,8 @@ async def _execute_hub_parent(
 
     if params.op == "peek":
         return await _hub_peek(tool_call_id, comms, params, ids)
+    if params.op == "set_model":
+        return await _hub_set_model(tool_call_id, comms, params, ids, errors, scope)
 
     message = params.message or ""
     if params.op == "ask":
@@ -35216,8 +35397,8 @@ class AskParams(BaseModel):
 #: marked an option ``recommended`` has already stated what it would do.
 ASK_UNANSWERED_TEXT = (
     "The user closed the question without answering, so nothing was chosen. "
-    "Do not ask again: decide yourself (take your recommended option where you "
-    "gave one), then say in one line what you assumed and carry on."
+    "Do not ask again: decide yourself (take your recommended option(s) where you "
+    "gave any), then say in one line what you assumed and carry on."
 )
 
 

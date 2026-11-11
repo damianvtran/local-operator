@@ -121,6 +121,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # Music tools resolve their own shipped copy without changing audited
+        # neighboring namespaces; exact-set and mutation checks still apply.
+        "wire.music",
         # Notification sounds (#3398): the settings section, rows, the built-in
         # sound names and `lop sound` help, in its own namespace so the audited
         # wire.settings hashes are untouched.
@@ -162,6 +165,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Carried by all seven locales, each with its own passed ledger row.
         "wire.outcome_notices",
         "wire.push_alert",
+        # The host-filed org-hub pull consent ask (PR #3693): its own namespace
+        # so no audited catalogue's hash moves; its locales ride the same PR.
+        "wire.hub_pull",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

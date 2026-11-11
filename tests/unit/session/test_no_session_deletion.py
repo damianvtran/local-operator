@@ -750,6 +750,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # Desktop settings intents: sessions/<id>/settings-intent.json is written
+    # tmp + fsync + replace in the session directory, like desktop.json.
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.replace",
+        "Publishes this call's mkstemp .settings-intent.*.tmp FILE onto the "
+        "settings-intent.json FILE; replace rejects a directory target and the "
+        "session directory itself is never a source or target",
+    ),
+    (
+        "local_operator/server/utils/settings_intents.py::IntentStore.save",
+        "os.unlink",
+        "Removes only this call's own mkstemp temporary FILE after a failed write; "
+        "unlink rejects directories",
+    ),
     (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher.close",
         "<path>.unlink",
@@ -2640,7 +2655,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/tunnels/cli.py::dispatch", "<path>.unlink", "tunnel pid/state FILEs", 2),
     ("local_operator/tunnels/install.py::uninstall", "<path>.unlink", "plist FILE"),
-    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 3),
+    ("local_operator/tunnels/service.py::run", "<path>.unlink", "tunnel pid/state FILEs", 2),
+    (
+        "local_operator/tunnels/service.py::run.start_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid FILE",
+    ),
+    (
+        "local_operator/tunnels/service.py::run.reconcile_cloudflared",
+        "<path>.unlink",
+        "tunnel cloudflared.pid/.token FILEs",
+        2,
+    ),
+    (
+        "local_operator/tunnels/config.py::record_relay_offer",
+        "<path>.unlink",
+        "tunnel relay-offered marker FILE",
+    ),
     # The generation layout's own trees and pointer. Every path in this block is
     # built from ``stable_root()`` (``~/.local/share/lop``, from ``Path.home()``)
     # plus a timestamped generation id this module chose, or from

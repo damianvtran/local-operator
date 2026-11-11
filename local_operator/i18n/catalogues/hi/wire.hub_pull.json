@@ -1,0 +1,12 @@
+{
+  "wire.hub_pull.ask.local_edits": "* में आपके अपने बदलाव हैं: वे रखे जाते हैं या merge किए जाते हैं, कभी अधिलेखित नहीं होते।",
+  "wire.hub_pull.ask.more": "{names} और {count} अन्य",
+  "wire.hub_pull.ask.new": "{count, plural, one {# नया आइटम} other {# नए आइटम}}: {names}",
+  "wire.hub_pull.ask.option.not_now": "अभी नहीं",
+  "wire.hub_pull.ask.option.not_now.description": "अभी कुछ न बदलें।",
+  "wire.hub_pull.ask.option.update": "अभी अपडेट करें",
+  "wire.hub_pull.ask.option.update.description": "नए आइटम जोड़ें और जो आपके पास पहले से हैं उन्हें अपडेट करें। आपके अपने बदलाव बने रहेंगे।",
+  "wire.hub_pull.ask.resubscribe": "{count, plural, one {# आइटम फिर से अपडेट होता रहेगा} other {# आइटम फिर से अपडेट होते रहेंगे}}: {names}",
+  "wire.hub_pull.ask.title": "अपने संगठन के हब से अपने {org} आइटम अपडेट करें?",
+  "wire.hub_pull.ask.updates": "{count, plural, one {# अपडेट} other {# अपडेट}}: {names}"
+}

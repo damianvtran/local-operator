@@ -146,7 +146,14 @@ async def test_the_org_chart_keeps_its_own_question_mark_legend() -> None:
     session.team_registry = _registry(TeamEditFields(name="org"))
     app = _app(session)
     async with app.run_test(size=(110, 34)) as pilot:
-        await pilot.pause()
+        # The chart reads the team registry off the ADOPTED session, which
+        # lands only at the end of the async boot worker; one pause raced it
+        # on a loaded CI host (main full-suite 42871819682: resolve_org got
+        # ``teams=None``). The real `/team chart` caller can never get here
+        # before adoption — it resolves the registry and team first — so this
+        # direct entry must wait for the same premise.
+        await _boot(pilot, app)
+        assert app._team_registry() is not None, "premise: session booted"
         app._open_org_chart_view("org")
         for _ in range(6):
             await pilot.pause()

@@ -89,6 +89,10 @@ async def _allow_notify(**_kwargs: Any) -> str:
     return "Notified."
 
 
+async def _music_journal(_record: dict[str, Any]) -> None:
+    """Presence-only durable door for the fully capable registry fixture."""
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
@@ -135,6 +139,12 @@ def _engine_context(**kwargs) -> ToolContext:
         # The inbox door (docs/design/notifications-inbox.md §3.2): presence-
         # only, the ONE fact ``build_notify_tool``'s createIf gate reads.
         notify_inbox=_allow_notify,
+        journal_music_job=_music_journal,
+        # ``skill`` is a DEFAULT tool since the profile-proposals change, and
+        # its createIf is the managed profile root (``skill_tool._config_dir``),
+        # which every real session's context carries (session_factory sets
+        # ``memory_config_dir``). Presence-only: never read or written here.
+        memory_config_dir="/stub-profile-root",
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -188,7 +198,9 @@ def _force_browser_available(monkeypatch):
     monkeypatch.setattr(
         audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
     )
-    from local_operator.tools import artifact_data_tool
+    from local_operator.tools import artifact_data_tool, music_tool
+
+    monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
 
@@ -328,30 +340,36 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     every config root) appended after that — and ``artifact_data`` (the
     claude.ai artifact data store, createIf-gated on a stored anthropic OAuth
     grant) appended after that — and ``notify`` (the operator's inbox,
-    createIf-gated on the session's inbox door) is the newest append and now
-    ends the DEFAULT table. The configuration run's opt-in ``skill`` is the
-    newest BUILDER append and ends ``TOOL_BUILDERS`` only: it is absent from
-    ``DEFAULT_TOOL_NAMES`` on purpose (see ``test_skill_is_opt_in_only``), so
-    the builder table's tail is the default tail plus ``skill``."""
-    assert list(TOOL_BUILDERS)[-1] == "skill"
-    builders = list(TOOL_BUILDERS)[:-1]
-    assert DEFAULT_TOOL_NAMES[-1] == "notify"
+    createIf-gated on the session's inbox door) appended after that. The
+    profile-proposals change then made ``profile_proposal`` and ``skill``
+    default (both DEFERRED, so off the wire until fetched) and appended them,
+    in that order, at the end of BOTH tables -- ``skill`` is no longer an
+    opt-in builder-only tail. The async music tools (``generate_music``,
+    ``modify_music``, ``music_status``) are the newest append after that."""
+    music = ["generate_music", "modify_music", "music_status"]
+    assert list(TOOL_BUILDERS)[-3:] == music
+    assert DEFAULT_TOOL_NAMES[-3:] == music
+    builders = list(TOOL_BUILDERS)[:-3]
+    assert DEFAULT_TOOL_NAMES[-5:-3] == ["profile_proposal", "skill"]
+    assert builders[-2:] == ["profile_proposal", "skill"]
+    builders, defaults = builders[:-2], DEFAULT_TOOL_NAMES[:-5]
+    assert defaults[-1] == "notify"
     assert builders[-1] == "notify"
-    assert DEFAULT_TOOL_NAMES[-2] == "artifact_data"
+    assert defaults[-2] == "artifact_data"
     assert builders[-2] == "artifact_data"
-    assert DEFAULT_TOOL_NAMES[-3] == "tags"
+    assert defaults[-3] == "tags"
     assert builders[-3] == "tags"
-    assert DEFAULT_TOOL_NAMES[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert defaults[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
     assert builders[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
-    assert DEFAULT_TOOL_NAMES[-6] == "bridge"
+    assert defaults[-6] == "bridge"
     assert builders[-6] == "bridge"
-    assert DEFAULT_TOOL_NAMES[-7] == "setting"
+    assert defaults[-7] == "setting"
     assert builders[-7] == "setting"
-    assert DEFAULT_TOOL_NAMES[-8] == "video_status"
+    assert defaults[-8] == "video_status"
     assert builders[-8] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-9] == "generate_video"
+    assert defaults[-9] == "generate_video"
     assert builders[-9] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-10] == "no_reply"
+    assert defaults[-10] == "no_reply"
     assert builders[-10] == "no_reply"
 
 
@@ -509,8 +527,9 @@ def test_enabled_empty_list_gives_no_tools() -> None:
 
 #: Builders that are in the table but deliberately NOT default: a host that
 #: declares one builds it (``Session._merge_capability_tools``); no other session
-#: does. Each entry is a reviewed decision, so the set is spelled out here.
-OPT_IN_ONLY_TOOLS = {"skill"}
+#: does. Each entry is a reviewed decision, so the set is spelled out here. Empty
+#: since the profile-proposals change made ``skill`` a (deferred) default tool.
+OPT_IN_ONLY_TOOLS: set[str] = set()
 
 
 def test_default_names_cover_builder_table() -> None:
@@ -520,30 +539,30 @@ def test_default_names_cover_builder_table() -> None:
     assert not OPT_IN_ONLY_TOOLS & set(DEFAULT_TOOL_NAMES)
 
 
-def test_skill_is_opt_in_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The configuration run's ``skill`` tool never enters an ordinary session.
+def test_skill_and_profile_proposal_are_deferred_defaults() -> None:
+    """``skill`` and ``profile_proposal`` are default tools an owner's request
+    reaches, but DEFERRED: built for every capable session, held off the wire.
 
-    The ordinary surface is what the prompt cache keys on, so this compares the
-    WHOLE default tools array (names, order, schemas) with and without the
-    ``skill`` builder in the table: adding it must not move a single byte. Built
-    from a context that WOULD satisfy the skill factory (a profile root), so the
-    absence is the default list's doing, not the factory's createIf.
+    Replaces the old opt-in-only pin. The operator intent is that owner-requested
+    skill authoring and proposal decisions are ordinary tools, while most turns
+    never pay their schema -- so both must BUILD from a real session's context
+    (profile root + registries) and both must be in ``DEFERRED_TOOLS`` with a
+    purpose line, which is what keeps them discoverable by name.
     """
-    import json
+    from local_operator.tools.deferral import DEFERRED_TOOL_PURPOSES, DEFERRED_TOOLS
 
-    context = _engine_context()
-    context.memory_config_dir = "/nonexistent-profile-root"
-    assert TOOL_BUILDERS["skill"](context) is not None, "the factory itself must build"
-
-    def wire(tools: list[Any]) -> str:
-        return json.dumps(
-            [[tool.name, tool.description, tool.parameters] for tool in tools], sort_keys=False
-        )
-
-    assert "skill" not in [tool.name for tool in create_tools(context)]
-    with_skill = wire(create_tools(context))
-    monkeypatch.delitem(TOOL_BUILDERS, "skill")
-    assert with_skill == wire(create_tools(context))
+    names = [tool.name for tool in create_tools(_engine_context())]
+    for name in ("profile_proposal", "skill"):
+        assert name in names
+        assert name in DEFERRED_TOOLS and DEFERRED_TOOL_PURPOSES.get(name)
+    # Each keeps its own createIf: no profile root -> no skill; no registries ->
+    # no profile_proposal; neither absence moves another tool.
+    without_root = [t.name for t in create_tools(_engine_context(memory_config_dir=None))]
+    assert without_root == [name for name in names if name != "skill"]
+    no_registries = [
+        t.name for t in create_tools(_engine_context(agent_registry=None, team_registry=None))
+    ]
+    assert "profile_proposal" not in no_registries and "skill" in no_registries
 
 
 def test_the_console_tool_is_absent_without_the_app(monkeypatch) -> None:
