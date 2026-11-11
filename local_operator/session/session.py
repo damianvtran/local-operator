@@ -45,6 +45,7 @@ import json
 import logging
 import math
 import os
+import re
 import string
 import tempfile
 import time
@@ -157,6 +158,7 @@ from local_operator.harness.subagent import (
     run_subagent,
     team_slot_name,
 )
+from local_operator.harness.tool_names import normalise_replay_tool_names
 from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     FAULT_INVALID_ARGUMENTS,
@@ -795,6 +797,58 @@ _STOPPED_WORK_RESIDUE_TYPES = frozenset(
 #: line".
 _USER_MESSAGE_STAMP_CAP = 256
 
+#: How long after an operator turn ends a firing wake is PARKED instead of
+#: opening its own turn below the operator's exchange. Measured over the
+#: fleet's transcripts (2816 sessions, 7298 operator messages, 2563 wake
+#: fires): median gap between operator messages 228 s, 36.8% of follow-ups
+#: within 120 s; idle wakes falling within 30/60/120/300 s of an operator
+#: message: 49/85/116/247. W=120 catches the bulk of the "just after the
+#: operator" cases without swallowing overnight monitoring. Read at call
+#: time (module attribute) so tests can patch it.
+WAKE_OPERATOR_QUIET_S = 120
+
+#: The longest a parked wake may wait, measured from its FIRST park. Bounds
+#: the re-arm loop: a wake parks in the milliseconds between the fold point
+#: and ``_is_streaming`` flipping, and that operator turn then runs longer
+#: than D — at D the batch delivers as its own turn rather than waiting for
+#: the conversation to end. A continuing conversation never reaches D:
+#: every operator ``prompt()`` folds the batch at its start. Read at call time.
+WAKE_PARK_CAP_S = 600
+
+#: Wakes that must never be parked: cadence-family check-in rows from BOTH
+#: engines (``aida-cadence``/``aida-extra-*`` and ``librarian-cadence``/
+#: ``librarian-extra-*``). The greeting/cadence stamps
+#: (``_aida_cadence_delivered``/``_librarian_cadence_delivered``) are set at a
+#: fire BEFORE the park branch, so parking one would spend the stamp without
+#: ever delivering it; cadence checks are the product surface and must open
+#: their own turn immediately. An operator-armed ``wN`` on a duty session
+#: still parks normally (the cadence-family predicate, not the duty flag,
+#: is the gate).
+
+_PARKED_WAKE_FOLD_NOTE = (
+    "(This wake fired while you were talking to the operator, so it was held and "
+    "folded into your current answer instead of opening its own turn below the "
+    "operator's messages. Answer the operator first; mention this wake only if "
+    "it has news for them; otherwise add nothing.)"
+)
+
+
+def _is_cadence_family_wake(wake_id: str) -> bool:
+    """Whether ``wake_id`` is a cadence-family check-in row from either engine.
+
+    Cadence deliveries must never park: the greeting/cadence stamps are set
+    at a fire before the park branch, so parking one would spend the stamp
+    without delivering it. One predicate for both engines — a duty flag
+    would exempt an operator-armed wake on her session too.
+    """
+    from local_operator.aida import proactive as _aida_proactive
+    from local_operator.librarian import proactive as _librarian_proactive
+
+    return _aida_proactive.is_cadence_family_row(
+        wake_id
+    ) or _librarian_proactive.is_cadence_family_row(wake_id)
+
+
 #: How many open asks the reminder NAMES (design §16/SA-D3). Deliberately NOT
 #: ``asks.policy.OPEN_ASK_CAP``: that is the model's asking budget, and bridge
 #: requests and relays ride their own eight each, so a session can hold more open
@@ -1086,6 +1140,9 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # receives it (`_job_id` is set before the merge, so the builder refuses).
     # Appended last for the same prefix reason as `sessions`.
     "notify",
+    "generate_music",
+    "modify_music",
+    "music_status",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -2510,6 +2567,96 @@ _WIRE_BUDGET_RATCHET = 0.75
 _WIRE_BUDGET_FLOOR = 4_000_000
 
 
+def _idle_cache_ttl_from_usage(usage: Any) -> float | None:
+    """``compaction.idle.cache_ttl_from_usage``, degrading to ``None``.
+
+    Resolved lazily for the reason the session imports ``compaction.api``
+    lazily: a build without the compaction package must still run turns.
+    """
+    try:
+        from local_operator.compaction.idle import cache_ttl_from_usage
+    except ImportError:  # pragma: no cover - compaction is part of every build
+        return None
+    return cache_ttl_from_usage(usage)
+
+
+async def _settle_before_end(
+    hook: Callable[[CompactionOutcome], Awaitable[None]] | None,
+    outcome: CompactionOutcome,
+) -> None:
+    """Run ``_finish_compaction``'s ``before_end`` hook; never raises.
+
+    Swallowing is the contract: the hook is bookkeeping, and a raise here
+    would skip the ``compaction_end`` event every host needs to leave its
+    "compacting" state.
+    """
+    if hook is None:
+        return
+    try:
+        await hook(outcome)
+    except Exception:  # noqa: BLE001 - bookkeeping must not eat the end event
+        logger.debug("compaction before_end hook failed", exc_info=True)
+
+
+def _idle_growth_baseline(transcript: Any) -> tuple[int | None, int | None, str]:
+    """``(A_M, D, marker_id)`` for idle compaction's growth gate, from disk.
+
+    ``A_M`` is the context size the latest compaction marker ``M`` left:
+
+    1. the FIRST provider ``context_tokens`` recorded after ``M``: the first
+       request on the compacted context measured what the pass left, in the
+       provider's own units. Preferred over the receipt because the receipt
+       is a LOCAL estimate, and on snapcompact it is clamped to the
+       before-size whenever the archive frames' provider pricing cannot be
+       seen locally (``_finish_compaction``'s receipt math);
+    2. else the ``compaction_idle_pass`` row an idle pass wrote for ``M``
+       (covers the gap between the pass and the next request);
+    3. else ``None``: a pass exists but nothing has measured it yet, which
+       the predicate reads as zero growth (no request has grown it).
+
+    ``0`` when the session has never compacted. ``D`` is the context size of
+    the latest ``compaction_idle_declined`` row written for this same ``M``
+    (a decline before a newer pass is void). Transcript-derived on purpose:
+    the anti-thrash rule must survive a runtime restart, and the journal is
+    the one state a restarted session rebuilds from.
+    """
+    from local_operator.compaction.idle import (
+        COMPACTION_IDLE_DECLINED_TYPE,
+        COMPACTION_IDLE_PASS_TYPE,
+    )
+
+    if transcript is None:
+        return 0, None, ""
+    marker = transcript.latest_entry("compaction")
+    marker_id = marker.id if marker is not None else ""
+    declined: int | None = None
+    decline = transcript.latest_custom(COMPACTION_IDLE_DECLINED_TYPE)
+    if decline is not None and str(decline.get("marker_id") or "") == marker_id:
+        value = decline.get("context_tokens")
+        if isinstance(value, int) and not isinstance(value, bool):
+            declined = value
+    if marker is None:
+        return 0, declined, marker_id
+    entries = transcript.entries()
+    position = next(
+        (index for index in range(len(entries) - 1, -1, -1) if entries[index].id == marker_id),
+        None,
+    )
+    if position is not None:
+        for entry in entries[position + 1 :]:
+            usage = entry.payload.get("usage") if entry.type == "message" else None
+            if isinstance(usage, dict):
+                tokens = usage.get("context_tokens")
+                if isinstance(tokens, int) and tokens > 0:
+                    return tokens, declined, marker_id
+    receipt = transcript.latest_custom(COMPACTION_IDLE_PASS_TYPE)
+    if receipt is not None and str(receipt.get("marker_id") or "") == marker_id:
+        value = receipt.get("tokens_after")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, declined, marker_id
+    return None, declined, marker_id
+
+
 def _newest_usage_at_ms(transcript: Transcript, *, now_ms: int | None = None) -> int:
     """Epoch ms of the newest provider usage the transcript recorded, else 0.
 
@@ -3794,6 +3941,19 @@ class Session:
         #: the only input that can authorize an account profile save without a
         #: card (``_authorize_account_profile_write``). Reset at the pipeline head.
         self._run_owner_texts: list[str] = []
+        self._last_displayed_profile_proposal: str | None = None
+        # Parallel to ``_run_owner_texts``: the proposal that was displayed when
+        # each owner text ARRIVED. A contextual "yes" binds only to that, so a
+        # ``profile_proposal op=show`` the model runs after the owner spoke can
+        # never rebind the owner's earlier words to a different proposal.
+        self._run_owner_text_bindings: list[str | None] = []
+        self._run_owner_consent = False
+        self._run_untrusted_input = False
+        #: Ask ids a PERSON answered in this run (``ask_answer_is_person``). The
+        #: hub-pull consent seam grants only on an answered HOST-FILED consent ask
+        #: that arrived in the run doing the write, so a stale yes from an older
+        #: turn cannot authorise a pull the user is no longer looking at.
+        self._run_answered_ask_ids: set[str] = set()
         self._run_last_trigger: str | None = None
         self._run_user_text: str = ""
         #: Wall-clock start of the current pipeline (the logical turn), frozen onto the
@@ -4393,15 +4553,23 @@ class Session:
         # X (sticky) and the reply says when the schema joins the array. Passed
         # INTO the link rather than wrapped around it, so the value reaching the
         # executor is still the identity-checked ``ToolDocsLink``.
+        # ``fallback`` serves a deferred MCP tool's doc (dispatchable through
+        # the fallback resolver, absent from ``self._tools``) so the loop's
+        # "read tool://<name>" hint never dead-ends in ``Unknown tool``; it is
+        # rendered inline and NOT published (the array is the cache prefix).
         self._skill_resolver = chain_tool_docs(
-            skill_resolver, lambda: self._tools, on_tool_read=self._activate_on_tool_doc
+            skill_resolver,
+            lambda: self._tools,
+            on_tool_read=self._activate_on_tool_doc,
+            fallback=self._resolve_tool_outside_inventory,
         )
         self._request_approval = request_approval
         self._authorize_durable_write = authorize_durable_write
-        if authorize_durable_write is None and owner_prompt_consent and not self._parent_session_id:
-            # TOP-LEVEL ONLY: a subagent's opening prompt is its parent's text,
-            # never the person's, so a child never gets the owner-prompt seam
-            # (and the callback re-checks the parent id at call time anyway).
+        if authorize_durable_write is None and owner_prompt_consent:
+            # Installed for every session; children are refused at call time:
+            # ``_profile_owner_consent`` requires no parent session, because a
+            # subagent's opening prompt is its parent's text, never the person's.
+            # A child's writes are therefore filed as proposals, never granted.
             self._authorize_durable_write = self._authorize_account_profile_write
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
@@ -4870,6 +5038,31 @@ class Session:
         # treadmill on the user's bill. Non-negotiable: once set, the advisor
         # is done for the life of the session.
         self._advisor_disabled = False
+        # --- Idle / pre-wake compaction (``compaction/idle.py``) ------------
+        #
+        # One session-owned timer, armed at a turn end whose context qualifies
+        # and cancelled by any turn start or dispose. It lives on the Session
+        # (the runtime process), not the TUI, so a headless session parked on
+        # a wake gets the same pass as an attached one. All anti-thrash state is
+        # re-derived from the TRANSCRIPT at every arm/fire (markers plus the
+        # ``compaction_idle_*`` custom rows), so none of it is kept here: a
+        # restart cannot forget a decline and refire.
+        self._idle_timer: asyncio.TimerHandle | None = None
+        self._idle_task: asyncio.Task[Any] | None = None
+        #: Set while the idle pass holds ``_turn_lock`` and is committing. A turn
+        #: start must NOT cancel the task then: a wake delivery is queued on the
+        #: lock and runs on the compacted context once it is released; a typed
+        #: ``prompt()`` is refused with ``TurnInFlight``, as during ``/compact``.
+        self._idle_committing = False
+        #: Cache lifetime the provider last WROTE this prefix with, sticky
+        #: across read-only turns (a read refreshes, it does not change, the
+        #: lifetime). ``None`` until a usage reports a 5m/1h write split.
+        self._idle_cache_ttl_s: float | None = None
+        #: Epoch ms of the latest assistant ``message_start``, which the loop
+        #: yields BEFORE building the request — a lower bound on when the
+        #: provider last read (and so refreshed) the cached prefix, which makes
+        #: ``E = anchor + TTL`` err early, the safe direction.
+        self._idle_cache_anchor_ms = 0
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
         # The advisor call was already off the turn, but the PASS it authorised
@@ -5031,6 +5224,40 @@ class Session:
         self._profile_result_waiters: dict[str, asyncio.Task[Any]] = {}
         self._signal: AbortSignal | None = None
         self._is_streaming = False
+        #: True from ``prompt()`` acquiring ``_turn_lock`` (before
+        #: ``_is_streaming`` flips) until the turn's ``finally``. Covers the
+        #: window between lock acquire and streaming start, where an idle-path
+        #: wake would otherwise spawn a turn that queues on the lock directly
+        #: below the operator's row.
+        self._operator_turn_open = False
+        #: Set True when the CURRENT turn admitted an operator message (the
+        #: ``_note_admitted_user_message`` admission sites in ``_run_turn``
+        #: and the steer drain — set only when the helper actually stamps),
+        #: reset in ``_run_turn``'s ``finally``. Read in that same ``finally``
+        #: to stamp ``_last_operator_turn_end`` — the end of this turn, not
+        #: its admission, so a long turn cannot consume the quiet window. A
+        #: wake-initiated turn never sets it, so wake chains never open the
+        #: window.
+        self._turn_admitted_operator = False
+        #: Epoch seconds when the last turn that admitted an operator message
+        #: ended (``None`` before the first). Wake-defer evidence: a wake
+        #: firing while ``now < last_end + WAKE_OPERATOR_QUIET_S`` parks. Only
+        #: operator-admitted turns stamp it (see ``_note_admitted_user_message``
+        #: call sites), so wake-initiated turns never open the window.
+        self._last_operator_turn_end: float | None = None
+        #: Parked idle wakes awaiting the quiet-window deadline, keyed by
+        #: wake id. A newer fire of the same id replaces the older parked one
+        #: (one delivery per id while parked), mirroring transcript dedup.
+        self._parked_wakes: dict[str, CustomMessage] = {}
+        #: First park time (epoch s) of the CURRENT park batch; the cap
+        #: deadline is ``first_park + WAKE_PARK_CAP_S``. Reset when the batch
+        #: is taken (fold or deadline delivery).
+        self._parked_wakes_first_park: float | None = None
+        #: The ONE tracked deadline task for the park batch, via
+        #: ``_spawn_background`` so dispose cancels it (no pending task after
+        #: dispose). Re-armed by the deadline runner when an operator turn is
+        #: still open at wake time.
+        self._parked_wake_task: asyncio.Task[Any] | None = None
         #: Bang-mode receipts that completed while a turn or manual compaction
         #: owned the message list. They cannot be spliced into a live provider
         #: batch, but dropping them would make a visible command disappear on
@@ -5269,6 +5496,12 @@ class Session:
         #: Read by ``ServingSessionHandle`` (the supplement runner's seam). Public like
         #: ``title_fit_check`` because the runtime handle holds the session, not the hooks.
         self.supplement_seam = supplement_seam
+        #: Set by ``ServingSessionHandle`` to its ``SupplementRunner.on_music_settled``:
+        #: the turn highlights must learn when a background music job settles, and the
+        #: runner lives on the handle, not here. ``None`` (exec, children, tests) = no-op.
+        self.music_settled_listener: (
+            Callable[[Mapping[str, Any]], Coroutine[Any, Any, None]] | None
+        ) = None
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
@@ -6608,6 +6841,9 @@ class Session:
         # outlived its runtime gets its check-wake ensured here, before the
         # first turn — see ``_boot_video_jobs``.
         await self._boot_video_jobs()
+        from local_operator.music.jobs import recover as recover_music_jobs
+
+        await recover_music_jobs(self._build_tool_context())
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands
             # at (or microseconds before) the grace deadline, and a COLD
@@ -7192,11 +7428,14 @@ class Session:
         # symbols this seam always has — ``test_read_only_prompt_bound``'s stub
         # session mirrors exactly those, and routing through an instance method
         # it cannot know about broke the aside-equals-turn equality it pins.
-        return blocks, bound_replay_payloads(
-            with_attachment_hints(
-                self._render_history([*history, *turns]),
-                world_root=self._confinement_root,
-            )
+        return blocks, normalise_replay_tool_names(
+            bound_replay_payloads(
+                with_attachment_hints(
+                    self._render_history([*history, *turns]),
+                    world_root=self._confinement_root,
+                )
+            ),
+            self._tools,
         )
 
     @property
@@ -7418,6 +7657,37 @@ class Session:
         )
         return result
 
+    def request_route_reprobe(self, *, withdraw: bool = False, launch_pin: object = None) -> None:
+        """Make this session's NEXT model call a quota re-probe boundary.
+
+        The entry ``hub op='set_model'`` and ``hub op='steer'`` use on a RUNNING
+        subagent. A child's task is one user message, so the message-boundary
+        re-probe that returns a parent to its recovered primary never fires for
+        it; without this a child that fell back stayed there for the rest of its
+        task (the 2026-11 quota incident). Nothing is torn down: the child keeps
+        its job id, its own subagents and any browser tab it owns.
+
+        ``withdraw`` drops an active fallback now (the display AND the stream's
+        route), like an explicit ``/model`` re-selection. ``launch_pin`` is
+        ``None`` to leave the stream's launch pin alone, ``""`` to clear it (the
+        child now inherits), or a ``provider/model_id`` selector to re-pin it.
+        """
+        stream = self._stream_fn
+        if withdraw and self._active_fallback is not None:
+            self._drop_fallback_pin(self._model, "re-probe requested")
+        if isinstance(launch_pin, str):
+            if launch_pin:
+                mark = getattr(stream, "mark_launch_pin", None)
+                if callable(mark):
+                    mark(launch_pin)
+            else:
+                clear = getattr(stream, "clear_launch_pin", None)
+                if callable(clear):
+                    clear()
+        request = getattr(stream, "request_reprobe", None)
+        if callable(request):
+            request(withdraw=withdraw)
+
     def set_model(
         self,
         model: ModelSpec,
@@ -7548,6 +7818,14 @@ class Session:
         # and the journal stays one row per switch, not one per keystroke.
         self._selected_model_dirty = True
         self._spawn_selected_model_write()
+        # Idle compaction's cache clock describes the OLD model's prompt
+        # cache; the new model's namespace is cold. An armed timer would fire
+        # the parked advisor on the new model as a full cache WRITE of the
+        # context, the one cost the feature must never buy (PR #3753 review
+        # R1). Forget both; the next turn end re-arms from fresh usage.
+        self._cancel_idle_compaction()
+        self._idle_cache_ttl_s = None
+        self._idle_cache_anchor_ms = 0
         if explicit:
             # The user chose: from here a ``hosting``/``model_name`` edit on
             # disk keeps its hands off this session (see
@@ -9982,6 +10260,14 @@ class Session:
             # paints its notices, from its own call in `_aside_worker`.
             text = expansion.sent
             await self._turn_lock.acquire()
+            # An operator turn is OPEN from here, before ``_is_streaming``
+            # flips: an idle-path wake landing in that window would otherwise
+            # spawn a turn that queues on the lock directly below the
+            # operator's row (brief case (b)). Cleared in the ``finally``.
+            # Only a genuine operator prompt opens it: a harness-injected
+            # row (goal loop, serving chrome) is not the operator's words,
+            # so it must not park a wake either.
+            self._operator_turn_open = not harness_injected
         try:
             # A USER TURN IS A REPLY (R34): retire every pending patience row
             # before anything else in this turn. Over-cancel is deliberate —
@@ -10065,6 +10351,40 @@ class Session:
                 # See `docs/DESKTOP_API.md` for what a viewer does with it.
                 user.provider_payload = {RENDERED_INJECTION_KEY: True}
             initial: list[AgentMessage] = [catchup, user] if catchup is not None else [user]
+            # PARKED WAKES FOLD HERE, beside the catch-up fold above: a wake that
+            # fired during the operator's conversation was held rather than
+            # opening its own turn below the operator's exchange. It joins the
+            # SAME turn, ahead of the user's message, so the model reads it
+            # before answering; the folded text says to answer the operator
+            # first and mention the wake only if it has news. Taking the batch
+            # cancels the deadline task (the fold IS the delivery now).
+            # The ``WakeDeliveredEvent`` receipt is emitted HERE, at delivery — not
+            # at park time: a parked wake must not paint a wake line below the
+            # operator's exchange before it has actually run. The dedup key
+            # (wake_id, occurrence) is the same one replay uses, so the live
+            # card and the persisted row still dedup to one line.
+            parked = self._take_parked_wakes()
+            if parked:
+                for wake_message in parked:
+                    wake_message.details["text"] = (
+                        f"{wake_message.details['text']}\n\n{_PARKED_WAKE_FOLD_NOTE}"
+                    )
+                # The receipt at delivery (QA Q5): the fold is the common path
+                # and was silent — the wake shaped the answer but the live
+                # transcript showed nothing until a later replay. Emitting here
+                # puts the line under the operator's echo and before the answer,
+                # so the answer stays last.
+                for wake_message in parked:
+                    if not wake_message.details.get("hidden"):
+                        await self._emit(
+                            WakeDeliveredEvent(
+                                text=str(wake_message.details["text"]),
+                                catchup=False,
+                                wake_id=str(wake_message.details.get("wake_id", "")),
+                                occurrence=int(wake_message.details.get("occurrence", 0) or 0),
+                            )
+                        )
+                initial = [*initial[:-1], *parked, *initial[-1:]]
             await self._run_turn_pipeline(
                 initial,
                 admitted=admitted,
@@ -10083,6 +10403,10 @@ class Session:
         finally:
             # A body this person's turn left pending is served by its own turn.
             self._rearm_pending_body_followup()
+            # The operator turn is CLOSED: wake-defer now measures the quiet
+            # window from ``_last_operator_turn_end``, stamped when the
+            # operator's message was admitted in ``_run_turn``.
+            self._operator_turn_open = False
             # D8: anything queued after the pipeline's own flush (or on an
             # early exit before it) lands before the lock goes free.
             # Release in its own ``finally`` (R2-1): see the helper.
@@ -13527,7 +13851,7 @@ class Session:
         since = sum(1 for _, at in self._user_messages if at > asked_at_ms)
         return since, self._user_messages[-1][1]
 
-    def _note_admitted_user_message(self, message: AgentMessage) -> None:
+    def _note_admitted_user_message(self, message: AgentMessage) -> bool:
         """Stamp one message as an ADMITTED operator message (SA-D7).
 
         Called at the two points that hand a user row to the model — the turn's
@@ -13541,23 +13865,27 @@ class Session:
         marker (``RENDERED_INJECTION_KEY``) and the shared text predicate together
         are the same two rules every surface uses to decide what to paint as the
         operator's own words, so the count and the transcript agree.
+
+        Returns True only when the stamp landed, so the wake-defer flag can
+        follow the same operator-only filter without re-checking it.
         """
         if not isinstance(message, Message) or message.role != "user":
-            return
+            return False
         if (message.provider_payload or {}).get(RENDERED_INJECTION_KEY):
-            return
+            return False
         from local_operator.harness.rows import is_harness_chrome
 
         if is_harness_chrome(message.text):
-            return
+            return False
         key = str(getattr(message, "id", "") or "")
         # A row handed to two admission sites in one runtime must count once. The
         # scan is over the bounded stamp, so it is O(cap) per admitted message.
         if key and any(existing == key for existing, _ in self._user_messages):
-            return
+            return False
         if len(self._user_messages) == _USER_MESSAGE_STAMP_CAP:
             self._user_message_stamp_truncated = True
         self._user_messages.append((key, self._operator_message_stamp_ms(message)))
+        return True
 
     def _operator_message_stamp_ms(self, message: AgentMessage) -> int:
         """The ONE clock an admitted operator message is stamped from.
@@ -14094,6 +14422,11 @@ class Session:
         The deferral set minus role pins and minus what the session has
         already activated. Empty when ``tools.defer`` is off, which is the
         inverse canary: the pre-deferral array comes back.
+
+        Built-in names only (``tools/deferral.py``'s static set). MCP tools
+        defer through their own origin sets in ``session_factory``, and that
+        exclusion is load-bearing: the ``tool://`` and invalid-call activation
+        hooks gate on this set, and must never publish an MCP schema.
         """
         if not self._tool_deferral:
             return frozenset()
@@ -14177,6 +14510,11 @@ class Session:
         a VALID direct call does not activate (it already knew the arguments,
         and publishing would only rewrite the prefix). Hooked on the ledger
         callback because that sees every call exactly once, with its fault.
+
+        Built-in ``DEFERRED_TOOLS`` only: a deferred MCP tool's name is never
+        in :meth:`_deferred_now`, so an invalid call to one publishes nothing.
+        Its schema stays out of the cache-prefix array; the loop's hint sends
+        the model to ``tool://<name>``, which renders that schema inline.
         """
         from local_operator.harness.types import FAULT_INVALID_ARGUMENTS
 
@@ -14741,104 +15079,342 @@ class Session:
         return resolver(name) if resolver is not None else None
 
     async def _authorize_account_profile_write(self, intent: "DurableWriteIntent") -> Any:
-        """The session-owned consent seam for tool-issued ACCOUNT profile writes.
+        """Use host-held input witnesses; otherwise file a bounded proposal.
 
-        Users ask their agents to edit agent and team profiles; before this seam
-        no host installed ``authorize_durable_write`` and every such write was
-        refused even right after the user asked. It decides from HOST-HELD state
-        only — no tool parameter and no model text grants anything:
-
-        * PATH A, the user asked: this run took in the owner's own typed,
-          non-injected message (``_run_owner_texts``; ask answers, peer and
-          Team Bridge messages, wakes, monitors, remote prompts and job results
-          never write it), the session has no parent, and that message names
-          the profile AND explicitly requests the definition fields in a direct
-          edit imperative. Only wording-only update/revert (instructions, label
-          or description) qualifies; ambiguous mentions, policy fields and every
-          other operation ask.
-          The name match narrows only: failing it routes to path B.
-        * PATH B, anything else: the host's tool-approval gate, asked with a
-          card naming the profile, the operation, the changed fields and a diff
-          summary. That gate's approve is an authority-checked answer
-          (``approval_answer`` is in ``harness.approval.AUTHORITY_OPS``) and is
-          never auto-approved (``never_auto_approved``), so ``--yolo`` and
-          approve-all cannot grant it. It pauses this one tool call, not the
-          session. The base revision on the intent is re-checked by the tool
-          under the write lock, so an approval cannot land on a moved row.
+        A child or an untrusted input can suggest a change, never authorize it.
+        Naming the profile narrows direct owner edits without imposing a brittle
+        edit-verb regex. Seed operations retain the never-auto-approved card.
         """
-        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE, ask_approval
         from local_operator.profile_scope import (
-            owner_text_requests_profile_edit,
+            owner_text_requests_profile_change,
+            owner_text_requests_profile_creation,
             profile_field_label,
         )
 
-        # A name mention is not permission to change policy. Only ordinary
-        # wording edits and their revert may use the no-card path; every other
-        # operation or field (including a model-selected create name) asks.
-        wording_only = (
-            intent.operation in {"update", "revert"}
-            and bool(intent.changes)
-            and set(intent.changes) <= {"instructions", "description", "label"}
-        )
-        if wording_only and not self._parent_session_id and self._run_owner_texts:
-            names = [intent.name, *self._profile_labels(intent)]
+        if intent.operation == "hub_pull":
+            # Its own ladder (below): a hub_pull grant can never fall through to,
+            # or be reached from, the profile-edit paths, and no other operation
+            # can be granted by it.
+            return await self._authorize_hub_pull(intent)
+        consent = self._profile_owner_consent()
+        if consent and intent.operation in {"create", "update", "revert"}:
+            names = (
+                [intent.name]
+                if intent.kind == "skill"
+                else [intent.name, *self._profile_labels(intent)]
+            )
             if any(
-                owner_text_requests_profile_edit(
-                    text, names, operation=intent.operation, fields=intent.changes
+                owner_text_requests_profile_change(text, names)
+                or (
+                    intent.operation == "create"
+                    and owner_text_requests_profile_creation(text, intent.kind)
                 )
                 for text in self._run_owner_texts
             ):
                 run_ms = int(self._run_started_at * 1000)
                 return f"owner-prompt:{self._session_id or 'session'}@{run_ms}"
-        # No parked turn, and no model retry: the typed signed provider is the
-        # continuation. Filing itself confers no mutation/signing authority.
-        #
-        # OPS WITHOUT A BOUNDED PROPOSAL keep the pre-existing card path: a seed
-        # reset, a sync, a promote or an install names a packaged artefact rather
-        # than authored values, so there is nothing to state exactly in a signed
-        # payload. They are unchanged here on purpose (falls through below).
         if intent.proposal is not None:
-            from local_operator import profile_approval
-            from local_operator.harness.types import QueuedProfileWrite
+            from local_operator import profile_proposals
+            from local_operator.harness.types import ProposedProfileWrite
 
             registry = self.agent_registry if intent.kind == "agent" else self.team_registry
             if registry is None:
                 return None
-            root = Path(registry.config_dir)
-            data = profile_approval.build(
-                root,
+            record = profile_proposals.file(
+                Path(registry.config_dir),
                 session_id=self._session_id,
                 tool_call_id=intent.tool_call_id,
+                trust="untrusted" if self._run_untrusted_input else "owner" if consent else "agent",
+                trigger=self._run_last_trigger or "internal",
                 **intent.proposal,
             )
-            record = profile_approval.file_request(root, data)
-            return QueuedProfileWrite(
-                approval_id=record["approval_id"],
-                request_digest=record["request_digest"],
-                expires_at=record["expires_at"],
-                receipt_id=data.receipt_id,
-                profile_kind=data.profile_kind,
-                profile_name=data.name,
+            if record["state"] == profile_proposals.STATE_PENDING:
+                # The receipt tells the model to show this proposal to the user,
+                # so it is what a LATER owner "yes" may refer to (see
+                # ``_note_run_input``, which binds each owner text to the
+                # proposal displayed before it arrived).
+                self._last_displayed_profile_proposal = record["id"]
+            return ProposedProfileWrite(
+                state=str(record["state"]),
+                proposal_id=record["id"],
+                profile_kind=record["kind"],
+                profile_name=record["name"],
                 changes=intent.changes,
                 diff=tuple(intent.summary.splitlines()),
+                summary=tuple(
+                    profile_proposals.summary_line(item)
+                    for item in profile_proposals.summarize_changes(
+                        profile_proposals.changes(
+                            record.get("before"), record["after"], record.get("fields") or []
+                        )
+                    )
+                ),
             )
         gate = self._request_approval
         if gate is None:
             from local_operator.harness.approval import ApprovalUnavailableError
 
             raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no approval surface is attached")
-        changed = (
-            ", ".join(profile_field_label(field) for field in intent.changes) or "(no fields named)"
+        from local_operator import profile_proposals
+
+        # The first line is unchanged (TUI/mobile show the card raw). The
+        # second line used to be followed by ``intent.summary`` verbatim — a
+        # whole instructions diff or new skill file — so a direct save of a
+        # long brief reproduced the unbounded ask card. Line 2 is now a bounded
+        # list of the fields/paths the save touches (names only: the intent
+        # has no structured before/after, and counts parsed from its prose
+        # summary mis-counted — PR #3777 R3-1), then — after a blank line —
+        # the change content clipped to SAVE_DETAIL_MAX_CHARS: a direct save
+        # has no review page (skills have no proposal path), so the card is
+        # the only place the approver can read what they approve (R2-2).
+        # Proposal cards stay 3 lines with structured counts.
+        changed = profile_proposals.save_changes_line(
+            profile_field_label(field) for field in intent.changes
         )
         card = (
             f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
-            f"Changes: {changed}."
+            f"{changed}."
         )
-        if intent.summary:
-            card += f"\n{intent.summary}"
+        if intent.summary.strip():
+            card += "\n\n" + profile_proposals.clip_save_detail(intent.summary)
         if await ask_approval(gate, ACCOUNT_PROFILE_GATE, card, None):
             return f"approval:{intent.base_revision or 'new'}"
         return None
+
+    def _profile_owner_consent(self) -> bool:
+        """Only a top-level owner's clean run may authorize account writes."""
+        return bool(
+            not self._parent_session_id
+            and (self._run_owner_texts or self._run_owner_consent)
+            and not self._run_untrusted_input
+        )
+
+    async def decide_profile_proposal(self, proposal_id: str, action: str) -> str:
+        """Host-only decision: model parameters cannot manufacture owner consent."""
+        from local_operator import profile_proposals as P
+        from local_operator.harness.approval import ACCOUNT_PROFILE_GATE, ask_approval
+        from local_operator.profile_scope import owner_text_assents
+
+        if self._parent_session_id or action not in {"apply", "reject", "show"}:
+            return "refused"
+        registry = self.agent_registry or self.team_registry
+        if registry is None:
+            return "refused"
+        proposal = P.get(Path(registry.config_dir), proposal_id)
+        if proposal is None:
+            return "refused"
+        if action == "show":
+            self._last_displayed_profile_proposal = proposal_id
+            return "shown"
+        # A generic owner input is not approval. A contextual assent binds only
+        # to the proposal that was displayed BEFORE that owner text arrived
+        # (snapshotted per text in ``_note_run_input``), and an explicit
+        # apply/reject instruction must name this exact proposal ID. Model
+        # parameters and model-run ``show`` calls never manufacture consent.
+        explicit = any(
+            (binding == proposal_id and owner_text_assents(text))
+            or (
+                proposal_id in text
+                and re.match(r"^\s*(?:please\s+)?(?:apply|accept|approve|reject)\b", text, re.I)
+            )
+            for text, binding in zip(
+                self._run_owner_texts, self._run_owner_text_bindings, strict=False
+            )
+        )
+        # FAIL CLOSED on ask answers: ``_run_owner_consent`` (a person answered
+        # an ask) is not bound to any proposal, so it never grants one here;
+        # the exact-proposal card below remains the route for that case.
+        consent = self._profile_owner_consent() and explicit
+        if action == "reject":
+            return "granted" if consent else "refused"
+        if consent and proposal["origin"]["trust"] != "untrusted":
+            return "granted"
+        if self._request_approval is None:
+            return "refused"
+        # A bounded summary, never the full before → after text: a multi-KB
+        # team brief inline made the ask card fill the conversation and hide
+        # its own options. The diff is reviewed in Agents → <name>; the first
+        # line's form is a contract with the UI (see approval_card_text).
+        card = P.approval_card_text(
+            proposal, P.detail(Path(registry.config_dir), proposal)["changes"]
+        )
+        return (
+            "card"
+            if await ask_approval(self._request_approval, ACCOUNT_PROFILE_GATE, card, None)
+            else "refused"
+        )
+
+    #: How long the host-filed hub-pull ask stays answerable. A day, the
+    #: queue's maximum: the question is "take your org's latest", which stays
+    #: valid that long, and the person it is for is often not at the screen
+    #: when a teammate's message woke this turn (the Victor incident).
+    HUB_PULL_ASK_TIMEOUT_S = 86400
+
+    async def _authorize_hub_pull(self, intent: "DurableWriteIntent") -> Any:
+        """Consent for an agent's org-hub pull/update (``agent op=org_pull``).
+
+        WHY A SEPARATE LADDER. Pulling the organization's items, and updating
+        ones already pulled, is the safe class: nothing is deleted, replaced,
+        unlinked or pushed, a conflicting local copy is kept (adopt-link) and a
+        conflicting update is reported for review rather than forced. Turns that
+        want it are usually woken by a teammate (Team Bridge), a peer or a wake,
+        where no card can be shown, so refusing sent non-technical users to a CLI.
+        Every step decides from HOST-HELD state only; the plan on the intent is
+        built by the tool from the catalogue, never by the model. In order:
+
+        1. Standing consent: the matching auto policy is on (org auto-enrol for
+           new items, hub-sync auto-update per kind for updates) and nothing
+           needs re-subscribing. The daemon performs the identical write
+           unattended under that policy, so asking again would add nothing.
+        2. A person answered, IN THIS RUN, a host-filed consent ask for the same
+           tenant whose kinds AND exact items (:func:`consent_items`: hub ids,
+           update target revisions) cover this plan, with its affirmative
+           option; not a bridge/relay ask; not already spent. Spent here
+           (single use). The exact "Not now" option is a decline: nothing is
+           written and nothing is re-asked in this run.
+        3. Otherwise file ONE host-authored ask carrying the plan (an open ask
+           is reused only when its items cover this plan) and return
+           :class:`QueuedHubPull`: the tool tells the model to end the turn and
+           retry when the answer arrives.
+
+        WHAT IS DELIBERATELY NOT HERE (PR #3693 review round 1):
+
+        * No "the owner's message asked for it" rung (R1). Keyword matching on
+          free text cannot tell "update my skills" from "do not update my
+          skills" or "get the agent logs"; guessing authorisation from prose is
+          the failure. The owner who asks gets the same one-tap ask instead,
+          which the operator accepted as the ceiling on friction.
+        * No attached approval card (D2). The shared account-profile gate
+          titled it "Allow account profile save?" with run-this-call options;
+          one queued ask is the single, correctly worded surface whether or not
+          someone is attached, and both paths grant identically.
+        * A typed ("Other") answer is NEITHER a yes nor a no (D3): the ask card
+          always offers free text, and a typed "yes please" must not silently
+          decline, nor may fuzzy prose grant. It is skipped, and a fresh ask with
+          the exact options is filed.
+        * A stale yes is not reused (R2): if the plan now holds an item or
+          revision the person did not see, the answer does not cover it and the
+          host asks again with the current plan.
+
+        A teammate's or another agent's request is never consent: no step reads
+        message text at all.
+        """
+        from local_operator.harness.approval import (
+            ACCOUNT_PROFILE_GATE,
+            ApprovalUnavailableError,
+        )
+        from local_operator.harness.types import QueuedHubPull
+        from local_operator.hub_org.consent import ask_question, consent_items
+
+        plan = dict(intent.plan or {})
+        tenant = str(plan.get("tenant") or "")
+        kinds = {str(k) for k in (plan.get("kinds") or ())}
+        items = set(consent_items(plan))
+        if not tenant or not kinds or not items:
+            # No host plan, or a plan that writes nothing: there is nothing a
+            # grant could be bound to, so there is no grant (fail closed). The
+            # tool never asks for an empty plan; it reports a no-op instead.
+            return None
+        if self._hub_pull_auto_policy_covers(plan):
+            return f"auto-policy:hub_pull:{tenant}"
+        queue = self.ask_queue()
+        if queue is None:
+            raise ApprovalUnavailableError(ACCOUNT_PROFILE_GATE, "no ask queue to ask the user")
+
+        def covers(consent: Mapping[str, Any]) -> bool:
+            return kinds <= {str(k) for k in (consent.get("kinds") or ())} and items <= {
+                str(k) for k in (consent.get("items") or ())
+            }
+
+        for ask_id in sorted(self._run_answered_ask_ids):
+            record = queue.find(ask_id)
+            consent = (record or {}).get("consent")
+            if not isinstance(consent, Mapping) or consent.get("op") != "hub_pull":
+                continue
+            if str(consent.get("tenant") or "") != tenant:
+                continue
+            if record.get("relay") or self._is_bridge_ask_record(record):
+                continue
+            if record.get("status") != "answered" or record.get("consent_used"):
+                continue
+            picks = [str(v) for v in (record.get("answers") or {}).get("hub_pull") or ()]
+            decline = str(consent.get("decline") or "")
+            if decline and picks == [decline]:
+                # The person picked "Not now" for this organization: that IS
+                # their answer, whatever the plan now holds. Decline, and do not
+                # file the same question again in this run.
+                return None
+            if picks != [str(consent.get("affirm") or "")] or not covers(consent):
+                # Typed text (D3) or a yes to a different plan (R2): not consent
+                # for THIS plan. Fall through to asking with the exact options.
+                continue
+            if not queue.mark_consent_used(ask_id):
+                return None  # an unrecorded spend could be spent twice
+            return f"ask:{ask_id}"
+        for record in queue.open_records():
+            consent = record.get("consent")
+            if (
+                isinstance(consent, Mapping)
+                and consent.get("op") == "hub_pull"
+                and str(consent.get("tenant") or "") == tenant
+                # Reuse only an open ask whose yes would cover THIS plan; a wider
+                # or changed pull files its own question rather than relying on
+                # an answer to something else.
+                and covers(consent)
+            ):
+                return QueuedHubPull(ask_id=str(record["ask_id"]), tenant=tenant, reused=True)
+        question, affirm = ask_question(plan)
+        receipt = queue.enqueue(
+            [question],
+            self.HUB_PULL_ASK_TIMEOUT_S,
+            tool_call_id=intent.tool_call_id,
+            consent={
+                "op": "hub_pull",
+                "tenant": tenant,
+                "kinds": sorted(kinds),
+                "items": sorted(items),
+                "affirm": affirm,
+                # The persisted labels, never re-rendered strings: a language
+                # change between asking and answering cannot flip an answer.
+                "decline": str(question["options"][1]["label"]),
+            },
+        )
+        if not receipt.get("ok"):
+            logger.warning("hub-pull consent ask not filed: %s", receipt.get("error"))
+            return None
+        return QueuedHubPull(ask_id=str(receipt["details"]["ask_id"]), tenant=tenant)
+
+    @staticmethod
+    def _hub_pull_auto_policy_covers(plan: Mapping[str, Any]) -> bool:
+        """Whether the user's standing auto policy already authorises this plan.
+
+        Mirrors what the daemon writes unattended: org auto-enrol pulls new items
+        (``hub_org.enrol``), and the hub-sync runner applies available updates
+        for kinds whose auto-update is on (``auto_for``: skills follow the agents
+        switch there, kept so this never grants more than the runner would). The
+        runner skips unsubscribed links, so any re-subscribe needs a person.
+        Any read failure is "not covered" (fail closed to asking).
+        """
+        if plan.get("resubscribe"):
+            return False
+        try:
+            from local_operator.config import read_config_values
+            from local_operator.hub_org.settings import auto_enrol_enabled
+            from local_operator.hub_sync.settings import HubSyncSettings
+            from local_operator.paths import config_dir as _resolve_config_dir
+
+            root = _resolve_config_dir()
+            if plan.get("new") and not auto_enrol_enabled(root):
+                return False
+            update_kinds = {str(row.get("kind")) for row in plan.get("updates") or ()}
+            if update_kinds:
+                settings = HubSyncSettings.from_values(read_config_values(root) or {})
+                if not all(settings.auto_for(kind) for kind in update_kinds):
+                    return False
+        except Exception:  # noqa: BLE001 - an unreadable policy is not consent
+            return False
+        return bool(plan.get("new") or plan.get("updates"))
 
     def _profile_labels(self, intent: "DurableWriteIntent") -> list[str]:
         """The target row's display label, so "update the Code Reviewer" names it."""
@@ -14947,6 +15523,11 @@ class Session:
                 self._last_usage = message.usage
                 if message.usage.context_tokens:
                     self._context_tokens_hint = int(message.usage.context_tokens)
+                # Idle compaction's cache clock: sticky, so a read-only turn
+                # keeps the lifetime the prefix was written with.
+                written_ttl = _idle_cache_ttl_from_usage(message.usage)
+                if written_ttl is not None:
+                    self._idle_cache_ttl_s = written_ttl
                 return
 
     def _adopt_off_record_usage(self, usage: Usage) -> None:
@@ -16604,6 +17185,34 @@ class Session:
         deliberately cannot — and no other reader may be taught a new name.
         """
         custom_type = getattr(message, "custom_type", None)
+        # Fail CLOSED: unknown internal inputs and remote prompts taint the
+        # entire run, including inputs drained after an owner's typed message.
+        # Ask rows currently omit answered_by, so phone answers cannot be
+        # distinguished: they require the approval card rather than granting.
+        benign = {
+            "wake_prompt",
+            "monitor_prompt",
+            "job_result",
+            "session_incident",
+            "session_model_switch",
+            "session_credential_redaction",
+            "todo_reminder",
+            "project_reminder",
+            "profile_proposal_result",
+        }
+        if _is_remote_prompt(message) or is_harness_injection(message):
+            self._run_untrusted_input = True
+        elif custom_type == "ask_response":
+            details = getattr(message, "details", None) or {}
+            by = details.get("answered_by") or {}
+            if ask_answer_is_person(message) and by.get("surface") in {"tui", "desktop", "chat"}:
+                self._run_owner_consent = True
+            else:
+                self._run_untrusted_input = True
+        elif custom_type is not None and custom_type not in benign:
+            self._run_untrusted_input = True
+        elif custom_type is None and getattr(message, "role", None) != "user":
+            self._run_untrusted_input = True
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
             self._run_triggers.add(str(custom_type))
             self._run_last_trigger = str(custom_type)
@@ -16645,6 +17254,9 @@ class Session:
             # (``ask_timeout``), a ``declined`` or ``late`` response, and every
             # harness-minted row (``attribution`` system/agent) stay refused.
             if ask_answer_is_person(message):
+                answered_id = (getattr(message, "details", None) or {}).get("ask_id")
+                if isinstance(answered_id, str) and answered_id:
+                    self._run_answered_ask_ids.add(answered_id)
                 self._run_typed_user = True
                 self._run_last_trigger = TRIGGER_TYPED
                 self._run_user_text = ask_answer_text(
@@ -16670,6 +17282,7 @@ class Session:
                 # here. Full text, untruncated: the name match must see it all.
                 if not _is_remote_prompt(message):
                     self._run_owner_texts.append(str(getattr(message, "text", "") or ""))
+                    self._run_owner_text_bindings.append(self._last_displayed_profile_proposal)
 
     def _turn_is_user_directed(self) -> bool:
         """Whether a person's own message drives this run (body-exclusion gate).
@@ -18730,6 +19343,13 @@ class Session:
         # stamps the count of the call that just reported instead of the one
         # before it -- strictly fresher, and the boundary note below still
         # runs (idempotent: it re-adopts the newest usage it scans).
+        if (
+            isinstance(event, MessageStartEvent)
+            and isinstance(event.message, Message)
+            and event.message.role == "assistant"
+        ):
+            # Idle compaction's cache anchor; see ``_idle_cache_anchor_ms``.
+            self._idle_cache_anchor_ms = int(time.time() * 1000)
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
             # The provider-cache clock the prune sweeps read
@@ -19254,6 +19874,10 @@ class Session:
         self._run_aida_checkin = False
         self._run_typed_user = False
         self._run_owner_texts = []
+        self._run_owner_text_bindings = []
+        self._run_owner_consent = False
+        self._run_untrusted_input = False
+        self._run_answered_ask_ids = set()
         self._run_last_trigger = None
         self._run_user_text = ""
         self._run_started_at = time.time()
@@ -19971,6 +20595,9 @@ class Session:
             # latch makes the second call a no-op in the common case.
             await self._monitors.announce_unannounced_disables()
         self._is_streaming = True
+        # Any turn supersedes a pending idle pass: it re-reads the warm cache
+        # itself, and its own turn end re-arms the check on the new context.
+        self._cancel_idle_compaction()
         self._generation += 1  # monotonic; stamped on start AND end events
         self._last_activity_ms = int(time.time() * 1000)
         signal = AbortSignal()
@@ -20063,7 +20690,8 @@ class Session:
                     # ask card counts, so an ask raised in this turn says how much
                     # the operator has said since it was asked. The helper applies
                     # the structural harness marker on top of this predicate.
-                    self._note_admitted_user_message(message)
+                    if self._note_admitted_user_message(message):
+                        self._turn_admitted_operator = True
                     await self._emit(MessageStartEvent(message=message))
 
             # Belt-and-braces for peer delivery: consume any inbox rows spooled
@@ -20641,6 +21269,13 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
+            # WAKE-DEFERRAL end stamp: only a turn that admitted an operator
+            # message opens the quiet window. Set here (turn END), not at
+            # admission, so a long turn cannot consume the window before it
+            # ends — the brief measures from turn end.
+            if self._turn_admitted_operator:
+                self._last_operator_turn_end = time.time()
+            self._turn_admitted_operator = False
             # A ONE-SHOT HOST'S HOLD, armed one host-hop earlier (v3,
             # 2026-09-30): ``run_print_mode`` will dispose this session the
             # moment its prompt returns, and its own arming of the departure
@@ -21463,6 +22098,7 @@ class Session:
             # the session because this context is rebuilt every turn; ``None``
             # is a refusal, never a permission (see the constructor field).
             authorize_durable_write=self._authorize_durable_write,
+            decide_profile_proposal=self.decide_profile_proposal,
             register_profile_action=self._profile_actions.register,
             ask_user=self._ask_user,
             # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path
@@ -21538,6 +22174,8 @@ class Session:
             # rows themselves, and this method is the ONE append path for
             # ``video_job_v1`` records (see ``journal_video_job``).
             journal_video_job=self.journal_video_job,
+            journal_music_job=self.journal_music_job,
+            session_disposed=lambda: self._disposed,
             # The audio lane's late-settlement pair: a cancelled-but-running
             # job may finish minutes after the tool returned, so the settle
             # poll rides the SESSION's background task set (tracked, and
@@ -23115,6 +23753,10 @@ class Session:
         except OSError:
             logger.warning("could not journal credential binding change", exc_info=True)
 
+    async def journal_music_job(self, record: dict[str, Any]) -> None:
+        """Persist music recovery identity without making bookkeeping fresh work."""
+        await self._transcript.append_custom("music_job_v1", record, preserve_mtime=True)
+
     async def journal_video_job(self, record: dict[str, Any]) -> None:
         """Append one durable ``video_job_v1`` record (media wave-2, video phase).
 
@@ -23194,6 +23836,21 @@ class Session:
         except Exception:  # noqa: BLE001 — a boot conversion must not fail the open
             logger.warning("video boot conversion failed", exc_info=True)
 
+    def _notify_music_settled(self, job: Any) -> None:
+        """Hand a settled music job's receipt to the highlights listener, detached.
+
+        Detached through ``_spawn_background`` so the merge (a journal walk under the
+        supplement write lock) can never delay the job's own delivery, and so dispose
+        reaps it. The receipt is the runner's ``music_receipt`` progress field
+        (``music/jobs.py``); a job that failed before reporting one has nothing to show.
+        """
+        listener = self.music_settled_listener
+        latest = getattr(job, "latest_details", None)
+        receipt = latest.get("music_receipt") if isinstance(latest, dict) else None
+        if listener is None or not isinstance(receipt, dict):
+            return
+        self._spawn_background(listener(dict(receipt)))
+
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
 
@@ -23219,11 +23876,15 @@ class Session:
         # consume nested work deliberately through its own jobs/wait tools.
         if self._job_id is not None:
             return
+        if getattr(job, "type", "") == "music":
+            # BEFORE the consumed gate: a track the model collected with ``wait`` is still
+            # one the operator made and must see in the producing turn's highlights.
+            self._notify_music_settled(job)
         # ``video`` rides this gate as of the video phase (media wave-2): a
         # settled video job delivers its review result exactly like a child,
         # and its cancellations never reach here (the manager's task-cancel
         # arm returns before delivery, as for every type).
-        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video"):
+        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video", "music"):
             return
         if self._leaving_deliveries:
             # A result that arrives AFTER the departure latch must not be
@@ -23736,7 +24397,7 @@ class Session:
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
             details["held"] = True
-        if getattr(job, "type", "") == "video":
+        if getattr(job, "type", "") in ("video", "music"):
             # The video receipt rides the row for the review turn (§5.3 of the
             # video contract): digest/content_type/duration/model/cost are the
             # facts a surface (or the model) needs to find the attachment
@@ -23744,7 +24405,10 @@ class Session:
             # progress channel (``latest_details``), so the delivery path stays
             # generic — task/bash rows keep their exact two-key shape.
             latest = getattr(job, "latest_details", None)
-            receipt = latest.get("video_receipt") if isinstance(latest, dict) else None
+            receipt_key = (
+                "music_receipt" if getattr(job, "type", "") == "music" else "video_receipt"
+            )
+            receipt = latest.get(receipt_key) if isinstance(latest, dict) else None
             if isinstance(receipt, dict):
                 details.update(receipt)
         return CustomMessage(
@@ -23998,7 +24662,8 @@ class Session:
                     # hands it to the model — so the card's count follows the same
                     # rule a typed prompt follows. The helper drops harness chrome
                     # (a spooled owner prompt, a goal continuation).
-                    self._note_admitted_user_message(message)
+                    if self._note_admitted_user_message(message):
+                        self._turn_admitted_operator = True
                     await self._emit(MessageStartEvent(message=message))
             self.refresh_frontend_state()
         # §14.3: a drained message became part of THIS run's inputs the moment
@@ -24953,6 +25618,11 @@ class Session:
             # Refused: below threshold, disabled, nothing worth summarizing.
             # The automatic path has nobody to tell — a turn that did not need
             # compacting must not narrate that fact every time.
+            #
+            # This IS the turn end of a session that may now go idle on a large
+            # context, so it is where the idle / pre-wake pass is considered.
+            # Arming only schedules a timer; the predicate is re-run at fire.
+            self._arm_idle_compaction()
             return
         if planned.advisor_hint is not None and self._pass_may_run_off_the_turn(planned):
             # Advisory AND genuinely below the configured trigger: nothing is
@@ -25272,6 +25942,353 @@ class Session:
             )
         return advanced
 
+    # --- Idle / pre-wake compaction -----------------------------------------
+    #
+    # Lifecycle: ``_maybe_compact`` (turn end, below the ordinary trigger) ->
+    # ``_arm_idle_compaction`` (predicate on cheap inputs; arms ONE timer at
+    # ``F = E - (advisor_timeout_s + 30 s)``) -> ``_on_idle_timer`` ->
+    # ``_run_idle_compaction`` (predicate again on the exact estimate, parked
+    # advisor as a cache read, then the ordinary plan/commit under the turn
+    # lock). Any turn start or dispose cancels it (``_cancel_idle_compaction``).
+    # Cold start at session LOAD (a resumed session that is already idle) is
+    # deliberately not armed: its cache age is unknown to this process and
+    # the first turn's end arms it anyway.
+
+    def _idle_inputs(self, settings: Any, compaction_api: Any, context_tokens: int) -> Any:
+        """Run ``idle_compaction_due`` on this session's current state."""
+        t_eff = compaction_api.resolve_threshold_tokens(
+            self.effective_model.context_window, settings
+        )
+        threshold = compaction_api.idle_threshold_for(
+            t_eff, int(getattr(settings, "idle_threshold_tokens", 0) or 0)
+        )
+        # The transcript scan only matters above the idle line; below it the
+        # predicate answers ``below_idle_threshold`` before reading these.
+        baseline, declined = (
+            _idle_growth_baseline(self._transcript)[:2]
+            if context_tokens >= threshold
+            else (0, None)
+        )
+        # Deliberately UNFILTERED: hidden internal timers (patience, ask_timeout)
+        # also run a model turn when they fire on an idle session, so they keep
+        # the prompt cache warm exactly like a visible wake. Dropping them via
+        # ``scheduled_rows`` would buy an advisor call the fire makes redundant.
+        # A fire that retires silently instead (watermark/TTL, a settled ask)
+        # costs one forgone idle pass — the same outcome as idle compaction off.
+        runnable = self._wake.armed_schedules
+        next_wake = min((row.next_due_at for row in runnable), default=None)
+        ttl_s = self._idle_cache_ttl_s or compaction_api.fallback_cache_ttl_s(
+            self.effective_model.provider
+        )
+        anchor = self._idle_cache_anchor_ms or self._last_provider_request_ms
+        expiry = int(anchor + ttl_s * 1000)
+        decision = compaction_api.idle_compaction_due(
+            enabled=bool(settings.enabled) and bool(getattr(settings, "idle_enabled", False)),
+            strategy=self._resolve_strategy(settings),
+            is_subagent=bool(self._parent_session_id),
+            context_tokens=context_tokens,
+            t_eff=t_eff,
+            idle_threshold_tokens=int(getattr(settings, "idle_threshold_tokens", 0) or 0),
+            idle_min_growth_tokens=int(getattr(settings, "idle_min_growth_tokens", 0) or 0),
+            baseline_after_tokens=baseline,
+            declined_at_tokens=declined,
+            next_wake_due_ms=next_wake,
+            cache_expiry_ms=expiry,
+            now_ms=int(time.time() * 1000),
+            advisor_timeout_s=float(getattr(settings, "advisor_timeout_s", 30.0) or 30.0),
+        )
+        return decision, expiry, t_eff
+
+    def _arm_idle_compaction(self) -> None:
+        """Arm the idle pass's timer when this turn end qualifies; never raises.
+
+        Cheap by construction (it runs at every turn end): the context figure
+        is the provider-reported size, with no render or tokenize. A session
+        with NO provider-reported size is not armed at all: without a wire
+        usage there is no observed prompt cache to race, and the economics
+        this feature rests on (advisor = cache read) are unknown. The exact
+        ``compaction_context_tokens`` figure is taken at FIRE time, where a
+        pass is genuinely on the table.
+        """
+        self._cancel_idle_compaction()
+        if self._disposed:
+            return
+        try:
+            from local_operator.compaction import api as compaction_api
+
+            settings = self._compaction_settings or compaction_api.CompactionSettings()
+            if not getattr(settings, "idle_enabled", False) or self._parent_session_id:
+                return
+            context_tokens = self._idle_gate_tokens()
+            if context_tokens is None:
+                return
+            decision, expiry, _t_eff = self._idle_inputs(settings, compaction_api, context_tokens)
+            if not decision.due:
+                logger.debug("idle compaction not armed: %s", decision.reason)
+                return
+            timeout = float(getattr(settings, "advisor_timeout_s", 30.0) or 30.0)
+            fire_at = compaction_api.idle_fire_at_ms(expiry, timeout)
+            delay_s = max(0.0, (fire_at - int(time.time() * 1000)) / 1000.0)
+            loop = asyncio.get_running_loop()
+        except Exception:  # noqa: BLE001 - an optimisation must never break a turn end
+            logger.debug("idle compaction arm failed", exc_info=True)
+            return
+        generation = self._generation
+        self._idle_timer = loop.call_later(delay_s, self._on_idle_timer, generation)
+        logger.debug(
+            "idle compaction armed in %.0fs (context=%d growth=%d/%d wake_pending=%s)",
+            delay_s,
+            decision.context_tokens,
+            decision.growth_tokens,
+            decision.growth_needed_tokens,
+            decision.wake_pending,
+        )
+
+    def _idle_gate_tokens(self) -> int | None:
+        """The ONE context figure the idle gates compare, or ``None``.
+
+        Provider-reported size of the last request PLUS that request's own
+        visible reply (``output_tokens - reasoning_tokens``; reasoning is not
+        re-sent): the reply is part of the next request, so a turn whose
+        final reply carries the context over the idle line arms at THAT turn
+        end, not one turn later (PR #3753 QA Q4). Both the arm check and the
+        decline journal use this figure (review R2): the decline used to
+        store ``max(provider, local)`` while the arm compared provider-only,
+        so on image-heavy sessions where the local estimate runs high the gap
+        silently stretched suppression past the advertised ``G``. No local
+        tokenize: this runs at every turn end.
+        """
+        usage = self._last_usage
+        if usage is None or not usage.context_tokens:
+            return None
+        reply = max(0, int(usage.output_tokens or 0) - int(usage.reasoning_tokens or 0))
+        return int(usage.context_tokens) + reply
+
+    def _cancel_idle_compaction(self) -> None:
+        """Drop the armed timer, and an idle pass that has not taken the lock.
+
+        A pass that is COMMITTING (holds ``_turn_lock``) is left to finish. A
+        wake / ``_prompt_messages`` delivery queues on that lock and runs on
+        the compacted context; a typed ``prompt()`` is refused with
+        ``TurnInFlight`` exactly as during ``/compact`` (the TUI holds it and
+        re-sends on ``compaction_end``).
+        """
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        task = self._idle_task
+        if task is not None and not task.done() and not self._idle_committing:
+            task.cancel()
+            self._idle_task = None
+
+    def _on_idle_timer(self, generation: int) -> None:
+        self._idle_timer = None
+        if self._disposed or generation != self._generation:
+            return
+        self._idle_task = self._spawn_background(self._run_idle_compaction(generation))
+
+    def _idle_may_proceed(self, generation: int) -> bool:
+        """Every bail-out shared by the fire, post-advisor and post-lock checks."""
+        return not (
+            self._disposed
+            or generation != self._generation
+            or self._is_streaming
+            or self._turn_lock.locked()
+            or self._compacting
+            or self._compaction_pass_in_flight
+            or self._pending_compaction is not None
+            or self._advisor_in_flight
+        )
+
+    async def _journal_idle_decline(self, context_tokens: int, why: str) -> None:
+        """Durably record "not now" so the advisor waits for ``G`` more growth."""
+        if self._transcript is None:
+            return
+        from local_operator.compaction.idle import COMPACTION_IDLE_DECLINED_TYPE
+
+        _baseline, _declined, marker_id = _idle_growth_baseline(self._transcript)
+        try:
+            await self._transcript.append_custom(
+                COMPACTION_IDLE_DECLINED_TYPE,
+                {"marker_id": marker_id, "context_tokens": int(context_tokens), "why": why},
+                # Bookkeeping about a session nobody is working in: it must not
+                # re-rank the session as freshly active.
+                preserve_mtime=True,
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping, never a crash
+            logger.debug("idle compaction: decline journal failed", exc_info=True)
+
+    async def _run_idle_compaction(self, generation: int) -> None:
+        """The idle pass: parked advisor, then the ordinary pass. Total, never raises.
+
+        Ordering is the race design:
+
+        1. Bail unless nothing else owns the conversation, then re-run the
+           predicate on the EXACT context figure.
+        2. The advisor runs WITHOUT the turn lock: it is a read-only aside
+           (append-only request, so it reads the warm prefix) and a wake or
+           user message arriving meanwhile must not wait on it. Such a turn
+           bumps ``_generation`` and cancels this task; no decline is
+           journaled, because nothing was decided.
+        3. Only then take the lock WITHOUT waiting (``locked()`` is checked and
+           ``acquire`` is called with no await in between, so the uncontended
+           fast path cannot yield), set ``_compacting`` exactly as
+           ``compact_now`` does, and plan with the parked hint. A wake
+           delivery arriving now queues on the lock and runs on the reduced
+           context; a typed ``prompt()`` is refused with ``TurnInFlight`` as
+           during ``/compact``, and a host holding it re-sends on
+           ``compaction_end`` — which is why every yielding write happens
+           BEFORE that event (``before_end``), never between it and release.
+        4. Every way the pass ends without compacting journals a decline,
+           including a failed summarize/commit (PR #3753 UX U2): otherwise a
+           provider that fails every time is re-asked, and re-fails, at every
+           small wake.
+        """
+        try:
+            from local_operator.compaction import api as compaction_api
+
+            if not self._idle_may_proceed(generation):
+                return
+            settings = self._compaction_settings or compaction_api.CompactionSettings()
+            history = list(self._context.messages)
+            provider_reported = (
+                self._last_usage.context_tokens if self._last_usage is not None else None
+            )
+            # The anti-thrash figure (review R2): what declines record and what
+            # the arm check compared. The pass itself sizes on the exact figure.
+            gate_tokens = self._idle_gate_tokens()
+            local_estimate = await self._offloaded(
+                compaction_api, "estimate_messages_tokens", self._render_for_compaction()
+            )
+            context_tokens = compaction_api.compaction_context_tokens(
+                provider_reported, local_estimate
+            )
+            decision, _expiry, t_eff = self._idle_inputs(settings, compaction_api, context_tokens)
+            if not decision.due or not self._idle_may_proceed(generation):
+                logger.debug("idle compaction skipped at fire: %s", decision.reason)
+                return
+            timeout = float(getattr(settings, "advisor_timeout_s", 30.0) or 30.0)
+            prompt = compaction_api.build_advisor_prompt(
+                history,
+                context_tokens=context_tokens,
+                threshold_tokens=t_eff,
+                parked=True,
+                wake_pending=decision.wake_pending,
+            )
+            self._advisor_in_flight = True
+            failure = "advisor_timeout"
+            try:
+                raw = await asyncio.wait_for(
+                    self.advise_compaction([Message.user(prompt)]), timeout
+                )
+            except asyncio.TimeoutError:
+                raw = None
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a provider failure is a decline
+                # Journaled like a "no": an advisor that fails every time must
+                # not be re-asked at every turn end until G more growth.
+                logger.debug("idle compaction advisor call failed", exc_info=True)
+                raw = None
+                failure = "advisor_error"
+            finally:
+                self._advisor_in_flight = False
+            if generation != self._generation or self._disposed:
+                return
+            genuine_user_ids = {
+                message.id
+                for message in self._context.messages
+                if isinstance(message, Message) and message.role == "user"
+            }
+            hint = (
+                compaction_api.validate_hint(
+                    compaction_api.parse_hint(raw),
+                    history,
+                    genuine_user_ids=genuine_user_ids,
+                    min_confidence=float(getattr(settings, "advisor_min_confidence", 0.6) or 0.0),
+                    keep_recent_tokens=int(settings.keep_recent_tokens),
+                    floor_cap=self._advisor_floor_cap(settings),
+                    turn_index=generation,
+                    parked=True,
+                )
+                if raw is not None
+                else None
+            )
+            if hint is None:
+                await self._journal_idle_decline(
+                    gate_tokens or context_tokens,
+                    failure if raw is None else "advisor_declined",
+                )
+                return
+            if not self._idle_may_proceed(generation):
+                return
+            await self._turn_lock.acquire()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001 - an idle optimisation must never surface
+            logger.debug("idle compaction failed before commit", exc_info=True)
+            return
+        self._idle_committing = True
+        self._compacting = True
+        decline_tokens = gate_tokens or context_tokens
+        try:
+            if generation != self._generation:
+                return
+            planned = await self._plan_compaction(respect_threshold=False, parked_hint=hint)
+            if isinstance(planned, CompactionOutcome):
+                await self._journal_idle_decline(decline_tokens, f"refused:{planned.reason}")
+                return
+            # Refuse a pass that would fold too little to pay for itself: the
+            # rewrite of the shortened prefix is a cold cache write, so the
+            # summarized span has to be worth at least G/2 (``compaction/idle.py``).
+            summarized = await self._offloaded(
+                compaction_api, "estimate_messages_tokens", planned.llm_history[: planned.cut]
+            )
+            growth_needed = compaction_api.idle_growth_for(
+                t_eff, int(getattr(settings, "idle_min_growth_tokens", 0) or 0)
+            )
+            if summarized < growth_needed // 2:
+                await self._journal_idle_decline(decline_tokens, "too_little_to_summarize")
+                return
+
+            async def settle(outcome: CompactionOutcome) -> None:
+                # Runs BEFORE ``compaction_end`` (see ``_finish_compaction``):
+                # after that event nothing here may yield until release.
+                if not outcome.ran:
+                    await self._journal_idle_decline(decline_tokens, "pass_failed")
+                    return
+                if self._transcript is None:
+                    return
+                marker = self._transcript.latest_entry("compaction")
+                await self._transcript.append_custom(
+                    compaction_api.COMPACTION_IDLE_PASS_TYPE,
+                    {
+                        "marker_id": marker.id if marker is not None else "",
+                        "tokens_before": int(outcome.tokens_before),
+                        "tokens_after": int(outcome.tokens_after),
+                        "summarized_tokens": int(summarized),
+                    },
+                    preserve_mtime=True,
+                )
+
+            outcome = await self._run_compaction(planned, reason="idle", before_end=settle)
+            if outcome.ran:
+                self._held_context_tokens = outcome.tokens_after
+        except Exception:  # noqa: BLE001
+            logger.warning("idle compaction pass failed", exc_info=True)
+            # A raise outside the pass (planning, the summarized-span ruler)
+            # is a failure too, and journals like one so it cannot repeat at
+            # every small wake (UX U2). Before release, but no end event has
+            # been emitted on this path, so the await cannot race a held prompt.
+            await self._journal_idle_decline(decline_tokens, "pass_failed")
+        finally:
+            self._compacting = False
+            self._idle_committing = False
+            try:
+                await self._flush_queued_before_release()
+            finally:
+                self._turn_lock.release()
+
     async def compact_now(self) -> CompactionOutcome:
         """Compact the context NOW, on the user's explicit request (``/compact``).
 
@@ -25536,14 +26553,55 @@ class Session:
         idle_flush_ms = int(getattr(compaction_api, "IDLE_FLUSH_MS", 5_400_000))
         if int(time.time() * 1000) - last_ms < idle_flush_ms:
             return
+        # The same cold-cache proof licenses shrinking the tools array: this
+        # run's first request re-writes the prefix anyway.
+        self._demote_cold_mcp_tools()
         try:
             llm_history = self._render_for_compaction()
             await self._sweep_stale_outputs(compaction_api, settings, llm_history)
         except Exception:  # noqa: BLE001 — an optimisation must never fail a run
             logger.debug("pre-run idle sweep failed", exc_info=True)
 
+    def _demote_cold_mcp_tools(self) -> bool:
+        """Run the MCP wiring's idle-schema demotion at a cache-cold boundary.
+
+        Called from exactly two places, the only moments a tools-array change
+        costs (close to) nothing: the idle flush in :meth:`_sweep_before_run`
+        (a gap of ``IDLE_FLUSH_MS`` has expired the provider cache) and a
+        compaction COMMIT in :meth:`_finish_compaction` (the history behind the
+        prefix is being rewritten, so the next request is a cache write of the
+        conversation anyway; the tools+system head is the small part of it).
+        Anywhere else a removal is a ``tools_changed`` miss on a warm cache.
+
+        THE SHRINK MUST LAND ON THAT SAME REQUEST. The array is latched once per
+        turn (:meth:`_wire_tools`); a compaction can commit mid-turn, and with
+        the latch held the smaller array would reach the provider only at the
+        NEXT turn — by which point the compacted history is warm again, so the
+        change would cost a second full miss. Clearing the latch here, and only
+        when the demotion actually moved something, makes the post-boundary
+        request publish the shrunk array together with its already-cold
+        rewrite. That is the one narrowly scoped exception to "publish once per
+        turn"; nothing else clears the latch mid-turn.
+
+        ``_mcp_cold_boundary_prune`` is installed by
+        ``session_factory.wire_mcp_into_session``; a session with no MCP wiring
+        (or a subagent, which borrows rather than owns the manager) has none.
+        Best-effort: bookkeeping must never fail a run or a compaction.
+        """
+        prune = getattr(self, "_mcp_cold_boundary_prune", None)
+        if prune is None:
+            return False
+        try:
+            changed = bool(prune())
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("MCP cold-boundary demotion failed", exc_info=True)
+            return False
+        if changed:
+            self._published_tools = None
+        return changed
+
     async def _plan_compaction(
-        self, *, respect_threshold: bool
+        self, *, respect_threshold: bool, parked_hint: Any | None = None
     ) -> _CompactionPlan | CompactionOutcome:
         """Everything decided BEFORE a pass commits, for both triggers.
 
@@ -25557,6 +26615,12 @@ class Session:
         prune alone brought back under the line never buys a summary. It also
         means a manual ``/compact`` on a context with nothing to summarize has
         still reclaimed whatever the prune found.
+
+        ``parked_hint`` is the idle pass's validated parked advisor hint
+        (``_run_idle_compaction``; ``validate_hint(parked=True)``) and is the
+        ONLY input that may narrow the verbatim window below the task floor:
+        it replaces that floor with ``max(keep_recent_tokens, min(hint, cap))``.
+        Every other caller passes ``None`` and keeps widen-only exactly.
         """
         try:
             from local_operator.compaction import api as compaction_api
@@ -25687,7 +26751,19 @@ class Session:
         # advisory or not, and introduces no second gate.
         keep_recent = settings.keep_recent_tokens
         boundary_floor: Any = getattr(compaction_api, "task_boundary_floor", None)
-        if callable(boundary_floor):
+        if parked_hint is not None:
+            # IDLE PASS. The task floor measures "since the last genuine user
+            # turn", which on a parked session is often hours of FINISHED work;
+            # the parked advisor read the whole conversation and anchored at
+            # the start of still-open work, with compact_now and >= 0.75
+            # confidence (``validate_hint(parked=True)``). Its window replaces
+            # the floor, clamped by the same cap every hint takes, and never
+            # below ``keep_recent_tokens``.
+            keep_recent = max(
+                keep_recent,
+                min(int(parked_hint.preserve_tokens), self._advisor_floor_cap(settings)),
+            )
+        elif callable(boundary_floor):
             # Resolved by name off the module for the tolerance ``_offloaded``
             # grants its rulers: a partial test double that predates this
             # degrades to plain recency rather than crashing the pass.
@@ -25734,7 +26810,14 @@ class Session:
             keep_recent = max(keep_recent, capped_hint)
 
         cut = await self._offloaded(compaction_api, "find_cut_point", llm_history, keep_recent)
-        if (cut is None or cut <= 0) and keep_recent > settings.keep_recent_tokens:
+        if (
+            (cut is None or cut <= 0)
+            and keep_recent > settings.keep_recent_tokens
+            # Never for an idle pass: plain recency would cut INSIDE the window
+            # the parked advisor said must survive. An idle pass that cannot
+            # honour its anchor refuses (and journals a decline) instead.
+            and parked_hint is None
+        ):
             # A WIDENED PRESERVE WINDOW CAN SPAN THE WHOLE COMPACTABLE
             # WINDOW: the task floor (the incident's source) and a clamped
             # advisor hint both ride this guard. When the last genuine user
@@ -25852,16 +26935,22 @@ class Session:
             # cut, but it is only carried onto the plan when the advice is what
             # made the pass happen. Same predicate as the async routing, so
             # "advisory pass" means one thing across the file.
+            # An idle pass is caused by its parked hint by definition (it has
+            # no size trigger), so the receipt names the advisor's reason.
             advisor_hint=(
-                advisor_hint
-                if advisory_ok
-                and not self._fires_on_size_alone(
-                    compaction_api,
-                    context_tokens,
-                    settings,
-                    self._wire_bytes_of(compaction_api, llm_history),
+                parked_hint
+                if parked_hint is not None
+                else (
+                    advisor_hint
+                    if advisory_ok
+                    and not self._fires_on_size_alone(
+                        compaction_api,
+                        context_tokens,
+                        settings,
+                        self._wire_bytes_of(compaction_api, llm_history),
+                    )
+                    else None
                 )
-                else None
             ),
         )
 
@@ -26002,8 +27091,17 @@ class Session:
             return None
         return hint
 
-    async def _run_compaction(self, plan: _CompactionPlan, *, reason: str) -> CompactionOutcome:
+    async def _run_compaction(
+        self,
+        plan: _CompactionPlan,
+        *,
+        reason: str,
+        before_end: Callable[[CompactionOutcome], Awaitable[None]] | None = None,
+    ) -> CompactionOutcome:
         """Commit one compaction pass — THE pass, for both triggers.
+
+        ``before_end`` (the idle pass only) is awaited with the outcome BEFORE
+        ``compaction_end`` is emitted; see :meth:`_finish_compaction`.
 
         ``reason`` rides the two events so a host can tell an automatic pass
         from one the user asked for while keeping one vocabulary for both
@@ -26024,7 +27122,9 @@ class Session:
         """
         await self._cancel_background_compaction()
         await self._emit(CompactionStartEvent(reason=reason))
-        return await self._finish_compaction(plan, reason=reason, summarized=None)
+        return await self._finish_compaction(
+            plan, reason=reason, summarized=None, before_end=before_end
+        )
 
     async def _cancel_background_compaction(self) -> None:
         """Stop an in-flight background pass so a synchronous one does not double-bill.
@@ -26144,6 +27244,7 @@ class Session:
             plan.compaction_api,
             [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
+            settings=plan.settings,
         )
 
     def _carried_tier_live_state(
@@ -26192,8 +27293,21 @@ class Session:
         *,
         reason: str,
         summarized: tuple[str, dict[str, Any] | None] | None,
+        before_end: Callable[[CompactionOutcome], Awaitable[None]] | None = None,
     ) -> CompactionOutcome:
         """Summarize if needed, then COMMIT — the one commit, for every path.
+
+        ``before_end`` runs a caller's yielding bookkeeping (the idle pass's
+        receipt or failure decline) BEFORE ``compaction_end`` is emitted, on
+        success and failure alike. The end event is the signal a host acts on
+        — the TUI dispatches a prompt it held "until compaction finishes" from
+        that handler — so once it is out, nothing between it and the
+        caller's ``_turn_lock.release()`` may yield. An await there let the
+        held prompt reach ``Session.prompt`` while the lock was still held and
+        be refused with ``TurnInFlight`` (PR #3753 QA Q1 / UX U1). Manual
+        ``/compact`` has no such await, which is why it never showed the bug.
+        The hook must not raise; a raise is logged and swallowed so the event
+        is still emitted and the outcome still returned.
 
         ``summarized`` is the pre-computed output of
         :meth:`_summarize_for_compaction` for the asynchronous path, or ``None``
@@ -26231,7 +27345,9 @@ class Session:
             summary, preserve_data = (
                 summarized
                 if summarized is not None
-                else await self._produce_summary(compaction_api, to_summarize, plan.strategy)
+                else await self._produce_summary(
+                    compaction_api, to_summarize, plan.strategy, settings=plan.settings
+                )
             )
             # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
             # merged once, after either strategy produced its payload, exactly
@@ -26412,6 +27528,7 @@ class Session:
                 carried_asks=carried_asks,
                 carried_decisions=carried_decisions,
                 resume_card=resume_card,
+                trigger="idle" if reason == "idle" else None,
             )
             # Never await speculative capture on the compaction critical path.
             # Binding it to this *committed* marker prevents cancelled/stale
@@ -26737,6 +27854,16 @@ class Session:
             # receipt's own units (see where it is computed above), then the
             # whole figure bounded by what it is reporting a reduction FROM.
             tokens_after = min(plan.context_tokens, tokens_after + frame_correction)
+            # The commit has landed: the next request re-writes the history, so
+            # idle published MCP schemas leave the tools array on THAT request.
+            self._demote_cold_mcp_tools()
+            outcome = CompactionOutcome(
+                ran=True,
+                strategy=plan.strategy,
+                tokens_before=plan.context_tokens,
+                tokens_after=tokens_after,
+            )
+            await _settle_before_end(before_end, outcome)
             await self._emit(
                 CompactionEndEvent(
                     reason=reason,
@@ -26751,16 +27878,15 @@ class Session:
                     detail=_advisor_detail(plan.advisor_hint),
                 )
             )
-            return CompactionOutcome(
-                ran=True,
-                strategy=plan.strategy,
-                tokens_before=plan.context_tokens,
-                tokens_after=tokens_after,
-            )
+            return outcome
         except Exception as exc:
             logger.warning("compaction failed", exc_info=True)
+            failed = CompactionOutcome(
+                ran=False, reason="failed", detail=f"compaction failed: {exc}"
+            )
+            await _settle_before_end(before_end, failed)
             await self._emit(CompactionEndEvent(reason=reason, success=False))
-            return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
+            return failed
 
     def _fires_on_size_alone(
         self, compaction_api: Any, context_tokens: int, settings: Any, wire_bytes: int
@@ -27060,8 +28186,37 @@ class Session:
         except ImportError:
             return "context-full"
 
+    @staticmethod
+    def _snapcompact_threshold_tokens(
+        compaction_api: Any, window: int | None, settings: Any
+    ) -> int | None:
+        """``T_eff`` for sizing a snapcompact archive, or ``None`` (legacy sizing).
+
+        The archive and its verbatim edges are sized against the trigger the
+        committed context must land under (see
+        ``snapcompact.EDGE_THRESHOLD_FRACTION``); on a 1M window the old
+        window-based budget (500k) sat above the 400k trigger itself. Resolved
+        through the ONE rule (``resolve_threshold_tokens``) rather than
+        re-derived here. ``None`` — no settings (a test double calling the
+        pre-threshold shape), no window, or an API without the resolver —
+        keeps the legacy window sizing, so this can only shrink the archive.
+        """
+        resolver = getattr(compaction_api, "resolve_threshold_tokens", None)
+        if settings is None or not window or resolver is None:
+            return None
+        try:
+            return int(resolver(window, settings))
+        except Exception:
+            logger.debug("threshold resolve failed; legacy archive sizing", exc_info=True)
+            return None
+
     async def _produce_summary(
-        self, compaction_api: Any, to_summarize: list[Message], strategy: str
+        self,
+        compaction_api: Any,
+        to_summarize: list[Message],
+        strategy: str,
+        *,
+        settings: Any = None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
 
@@ -27091,6 +28246,17 @@ class Session:
         :meth:`_offloaded`, at a call site that cannot use it (this is not a
         ruler on the module).
         """
+        # The compaction span is a model request in both strategies (the text
+        # summarizer serializes it into the prompt; the archive renders back
+        # into later requests), so it takes the same wire sanitiser as the
+        # turn and the aside — before ``split_leading_marker`` — and the garbled
+        # name never reaches the compaction model, where a summary that kept it
+        # would write it back into durable history through the compaction
+        # marker. Copy-only: the caller's span stays untouched. Other history
+        # builders need no cover: the eval runner's history carries no tool
+        # calls, the mobile relay sends no model request of its own, and a
+        # subagent seeds no parent history.
+        to_summarize = normalise_replay_tool_names(list(to_summarize), self._tools)
         if strategy == "snapcompact":
             try:
                 from local_operator.compaction import snapcompact
@@ -27114,6 +28280,9 @@ class Session:
                     self._previous_archive_text(),
                     context_window=effective.context_window,
                     previous_carry=self._previous_archive_carry(),
+                    threshold_tokens=self._snapcompact_threshold_tokens(
+                        compaction_api, effective.context_window, settings
+                    ),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id
@@ -29343,6 +30512,17 @@ class Session:
         previous = getattr(self, "_wake_deliver_hook", None)
         if previous != self._spool_wake_to_inbox:
             self._wake_hook_before_drain: Callable[[DueWake], Awaitable[None]] | None = previous
+        # Parked wakes are already fired occurrences with no schedule left to
+        # re-arm: hand them durably to the successor the same way a draining
+        # fire is spooled, so retiring the runtime cannot drop them.
+        # ``getattr`` like the hook read above: the cell harnesses borrow this
+        # method onto a host that has no park batch, and that is an empty one.
+        if getattr(self, "_parked_wakes", None):
+            _parked = self._take_parked_wakes()
+            for _msg in _parked:
+                _wid = str(_msg.details.get("wake_id", ""))
+                if _wid:
+                    self._spawn_background(self._spool_parked_wake(_msg))
         # NO per-session re-arm queue any more. The one-shot a retiring fire
         # owes the successor is RESERVED in the scheduler that owns the handle
         # (``WakeScheduler.hold_pending``), so a create in this still-serving
@@ -29397,6 +30577,44 @@ class Session:
         except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
             logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
             return False
+
+    async def _spool_parked_wake(self, wake_message: CustomMessage) -> None:
+        """Spool one parked wake for the successor on retire. Never raises.
+
+        A parked wake is already a fired occurrence with no schedule left to
+        re-arm (the pump advanced it before parking), so the inbox write is
+        the durable handoff — the same vehicle ``_spool_wake_to_inbox`` uses
+        for a fire arriving while draining. The text is the delivery text
+        the parked row carries, so the successor runs the same occurrence.
+        """
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        wake_id = str(wake_message.details.get("wake_id", ""))
+        text = str(wake_message.details.get("text", ""))
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None or not text:
+            logger.warning("parked wake %s could not be spooled (no session dir)", wake_id)
+            return
+        try:
+            written = await asyncio.to_thread(
+                append_inbox,
+                Path(directory),
+                InboxLine(
+                    text=text,
+                    sender={},
+                    mode="mailbox",
+                    written_at=time.time(),
+                    wake=True,
+                    wake_id=wake_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 — a drain must not die on a spool write
+            logger.warning(
+                "parked wake %s could not be spooled while draining", wake_id, exc_info=True
+            )
+            return
+        if not written:
+            logger.warning("parked wake %s could not be spooled while draining", wake_id)
 
     async def _spool_wake_to_inbox(self, due: DueWake) -> None:
         """The draining hook: hand one fired wake to the successor. Never raises.
@@ -31296,7 +32514,22 @@ class Session:
         # to their own delivery, so this gate is defence in depth rather than
         # the only guard: any row that ever carries ``hidden`` reaches the
         # model and no front end, whichever path it arrives by.
-        if not due.schedule.hidden:
+        # A PARKED wake emits NOTHING here: the receipt is emitted at DELIVERY
+        # (the ``prompt()`` fold, or the deadline task just before
+        # ``_prompt_messages``). Emitting at park time painted a wake line
+        # below the operator's exchange for up to W — the reported symptom
+        # minus the model turn — and asserted a delivery that, if the runtime
+        # died in the window, never happened.
+        _will_park = (
+            not busy
+            and not due.schedule.hidden
+            and not self._disposed
+            and not self._leaving_deliveries
+            and not self._one_shot_exit
+            and not _is_cadence_family_wake(due.schedule.id)
+            and self._operator_active()
+        )
+        if not due.schedule.hidden and not _will_park:
             await self._emit(
                 WakeDeliveredEvent(
                     text=text,
@@ -31305,6 +32538,18 @@ class Session:
                     occurrence=due.occurrence,
                 )
             )
+        # WAKE-DEFERRAL: an idle wake landing right after an operator turn
+        # must not open its own turn below the operator's exchange. The
+        # transcript row and the receipt event persist only when the wake is
+        # actually DELIVERED: a parked wake paints nothing at park time, and
+        # materializes as a transcript row + receipt + turn only on fold into
+        # the next operator prompt, or on the deadline.
+        # Leaving arms never park: a disposed/leaving/one-shot session would
+        # never reach the deadline, so the wake must deliver (or be retired
+        # by the leaving path) now.
+        if _will_park:
+            self._park_wake(due.schedule.id, wake_message)
+            return
         if busy:
             # Busy: ride the next successful tool boundary instead of racing
             # the turn — and mark the message COURTESY so the immediate-
@@ -31325,6 +32570,111 @@ class Session:
             self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([wake_message]))
+
+    # -- wake deferral --------------------------------------------------------
+
+    def _operator_active(self) -> bool:
+        """Whether an operator conversation is active enough to park a wake.
+
+        Either an operator turn is OPEN (``prompt()`` holds the turn lock,
+        before streaming starts — brief case (b)) or less than
+        ``WAKE_OPERATOR_QUIET_S`` has passed since the last operator-admitted
+        turn ended. Wake-initiated turns never stamp
+        ``_last_operator_turn_end`` (only operator-admitted messages do),
+        so overnight wake chains leave this False and surface unchanged.
+        """
+        if self._operator_turn_open:
+            return True
+        if self._last_operator_turn_end is None:
+            return False
+        return (time.time() - self._last_operator_turn_end) < WAKE_OPERATOR_QUIET_S
+
+    def _park_wake(self, wake_id: str, wake_message: CustomMessage) -> None:
+        """Park an idle wake until the quiet window closes or the cap hits.
+
+        The newest fire of a wake id replaces the older parked one (one
+        delivery per id while parked). The ONE deadline task sleeps until
+        ``last_end + W`` capped at ``first_park + D``; if an operator turn is
+        still open when it wakes, it re-arms. Delivery itself goes through
+        the existing idle arm (``_prompt_messages``).
+        """
+        now = time.time()
+        if self._parked_wakes_first_park is None or not self._parked_wakes:
+            self._parked_wakes_first_park = now
+        self._parked_wakes[wake_id] = wake_message
+        if self._parked_wake_task is not None and not self._parked_wake_task.done():
+            # An armed deadline already covers this batch; a newer fire only
+            # replaced the message, it does not move the deadline. The cap
+            # is anchored to first_park, so re-arming here would extend the
+            # wait past D.
+            return
+        self._parked_wake_task = self._spawn_background(self._parked_wake_deadline())
+
+    async def _parked_wake_deadline(self) -> None:
+        """Deliver the parked batch at ``min(last_end + W, first_park + D)``.
+
+        Re-arms while an operator turn is open, so a conversation that
+        continues past the quiet window still holds the batch — but the cap
+        bounds the total wait: at ``first_park + D`` the batch delivers even
+        with the operator still active, so no wake starves.
+        """
+        while not self._disposed and self._parked_wakes:
+            first_park = self._parked_wakes_first_park or time.time()
+            last_end = self._last_operator_turn_end
+            if last_end is None:
+                quiet_target = first_park
+            else:
+                quiet_target = last_end + WAKE_OPERATOR_QUIET_S
+            cap_target = first_park + WAKE_PARK_CAP_S
+            target = min(quiet_target, cap_target)
+            wait_s = max(0.0, target - time.time())
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            if self._operator_turn_open and time.time() < cap_target:
+                # Still mid-conversation (brief case (b): the operator's turn
+                # opened after this batch parked). Wait for it to end, then
+                # re-evaluate the quiet window from the new last_end.
+                await asyncio.sleep(0.05)
+                continue
+            break
+        if self._disposed or not self._parked_wakes:
+            return
+        parked = self._take_parked_wakes()
+        if parked:
+            # The receipt event at DELIVERY (see the ``prompt()`` fold for the
+            # other half): the parked wakes painted nothing until now, so the
+            # live wake line lands with the turn that actually runs it.
+            for wake_message in parked:
+                if not wake_message.details.get("hidden"):
+                    await self._emit(
+                        WakeDeliveredEvent(
+                            text=str(wake_message.details["text"]),
+                            catchup=False,
+                            wake_id=str(wake_message.details.get("wake_id", "")),
+                            occurrence=int(wake_message.details.get("occurrence", 0) or 0),
+                        )
+                    )
+            initial: list[AgentMessage] = list(parked)
+            self._spawn_background(self._prompt_messages(initial))
+
+    def _take_parked_wakes(self) -> list[CustomMessage]:
+        """Take (and clear) the parked batch; cancel the deadline task.
+
+        Shared by the ``prompt()`` fold and the deadline delivery — the two
+        delivery points are mutually exclusive, so no wake delivers twice.
+        Cancelling the deadline here is what makes the fold the delivery.
+        Skips the cancel when the caller IS the deadline task (it is already
+        running the delivery).
+        """
+        if not self._parked_wakes:
+            return []
+        parked = list(self._parked_wakes.values())
+        self._parked_wakes = {}
+        self._parked_wakes_first_park = None
+        task, self._parked_wake_task = self._parked_wake_task, None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        return parked
 
     # -- monitor checks and delivery ----------------------------------------
 
@@ -33625,6 +34975,18 @@ class Session:
             self._coalesced_notes.clear()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
+            # A parked wake must not die with the deadline task: take the batch
+            # first and hold it durable (the held-delivery precedent) so a
+            # graceful dispose cannot lose a one-shot reminder the operator
+            # is still owed. Awaiting the hold before the cancel block is the
+            # ordering the deferred-job-results flush uses for the same reason.
+            # ``getattr``: a host that borrows ``Session`` methods without the
+            # park batch reads as an empty one.
+            if getattr(self, "_parked_wakes", None):
+                _parked = self._take_parked_wakes()
+                if _parked:
+                    held: list[AgentMessage] = list(_parked)
+                    await self._hold_deliveries_at_admission(held)
             for task in list(self._background_tasks):
                 if not task.done():
                     task.cancel()
@@ -33673,6 +35035,9 @@ class Session:
             # keep a parent-teardown attestation.
             self._abandon_refused_teardown_stamps(teardown_stamps)
             self._wake.dispose()
+            # The idle timer is a bare ``call_later`` handle (the task it
+            # spawns is a tracked background task, already cancelled above).
+            self._cancel_idle_compaction()
             self._monitors.dispose()
             # A shell receipt can be queued behind a turn that was just aborted.
             # Its normal turn-finally flush should already have run, but this

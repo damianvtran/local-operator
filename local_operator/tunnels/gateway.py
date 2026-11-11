@@ -542,6 +542,8 @@ class Gateway:
         mobile_password: str | None = None,
         opencode_basic: dict[str, str] | None = None,
         connector_ready: Callable[[], bool] | None = None,
+        connector_transport: Callable[[], str] | None = None,
+        cloudflared_running: Callable[[], bool] | None = None,
     ) -> None:
         self.connection = validate_connection(connection)
         self.client = client
@@ -549,6 +551,13 @@ class Gateway:
         self.mobile_password = mobile_password
         self.opencode_basic = opencode_basic
         self.connector_ready = connector_ready or (lambda: False)
+        # Which connector carries public traffic (`relay` or `cloudflare`), and
+        # whether cloudflared is still up beside the relay during the dual-run.
+        # Reported on the loopback health answer only, so `lop tunnel status`
+        # and the desktop setup route can say which path this device is on
+        # without a second source of truth.
+        self.connector_transport = connector_transport or (lambda: "cloudflare")
+        self.cloudflared_running = cloudflared_running or self.connector_ready
         self.authorized_until = time.monotonic() + AUTHORIZATION_LEASE_SECONDS
         self.revoked = False
         # The last reason the poller could not renew the lease, as a `reason`
@@ -663,6 +672,8 @@ class Gateway:
             payload: dict[str, Any] = {
                 "ok": not self.revoked and time.monotonic() < self.authorized_until,
                 "connected": self.connector_ready(),
+                "transport": self.connector_transport(),
+                "cloudflared": self.cloudflared_running(),
             }
             if not payload["ok"]:
                 # The same cause the phone is given, so `lop tunnel status` can

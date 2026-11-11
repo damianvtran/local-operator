@@ -33,6 +33,7 @@ from local_operator.tui import review
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.review_view import ReviewView
+from tests.unit.tui.conftest import BOOT_DEADLOCK_GUARD_S
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 SESSION_ID = "sess"
@@ -947,6 +948,16 @@ async def test_a_paint_restores_the_anchor_after_the_body_has_measured(refreshes
     async with app.run_test(size=(60, 20)) as pilot:
         await _boot(pilot, app)
         view = await _open_review(pilot, app)
+        # _open_review returns at the cached-ready frame, not the end of
+        # _load: its post-scan/forge paints can still overwrite the empty body
+        # below. Join the review worker before manufacturing the first paint.
+        workers = [worker for worker in app.workers if worker.group == "review"]
+        if workers:
+            await asyncio.wait_for(app.workers.wait_for_complete(workers), BOOT_DEADLOCK_GUARD_S)
+        # Worker completion alone does not run _paint's after-refresh anchor.
+        # This FIFO callback barrier follows the last paint's re-anchor; a
+        # pilot.pause can return with that callback still queued (CI 0 != 1).
+        await asyncio.wait_for(view.wait_for_refresh(), BOOT_DEADLOCK_GUARD_S)
         start, _height = view._row_offsets[0]
         assert view._body.scroll_offset.y == start
 
@@ -961,7 +972,9 @@ async def test_a_paint_restores_the_anchor_after_the_body_has_measured(refreshes
         assert view._body.virtual_size.height == view._body.size.height
 
         view._paint()
-        await pilot.pause()
+        # The re-anchor under test is deferred to after the next refresh, so
+        # wait for exactly that rather than a loop turn, as on the initial frame.
+        await asyncio.wait_for(view.wait_for_refresh(), BOOT_DEADLOCK_GUARD_S)
         assert view._body.scroll_offset.y == start
 
 

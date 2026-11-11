@@ -36,7 +36,7 @@ import { SessionStatus, meterFacts } from "../components/session-status";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
-import { Transcript } from "../components/transcript";
+import { Transcript, TranscriptSkeleton } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
 import { SessionHealthControl, useResume } from "../components/session-health";
 import { sessionHealth } from "../lib/session-health";
@@ -742,8 +742,15 @@ export function SessionScreen({
 				    space `<Transcript>` will fill, so rows arriving take room that was
 				    already theirs. The sentence inside is the reader's only signal that
 				    the wait is a wait — it leaves with the first row. */}
-				<div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3">
-					<p className="text-body-sm text-ink-dim">
+				<div className="flex min-h-0 flex-1 flex-col px-3">
+					{/* The skeleton fills the box ABOVE the sentence and is clipped by it:
+					    `justify-end` keeps the rows nearest the sentence the way a
+					    transcript hangs from its bottom, and `overflow-hidden` means a
+					    short column crops the top bars rather than growing the box. */}
+					<div className="flex min-h-0 flex-1 flex-col justify-end overflow-hidden py-2">
+						<TranscriptSkeleton />
+					</div>
+					<p className="shrink-0 py-3 text-center text-body-sm text-ink-dim">
 						{connected
 							? messageRuntime.t("relay.shell.session.waiting")
 							: messageRuntime.t("relay.shell.session.connecting")}
@@ -865,6 +872,10 @@ export function SessionScreen({
 					topInset={0}
 					supplements={projection.supplements}
 					projectionPid={projection.pid}
+					/* A frame with no rows yet but a turn running (the first frame of a
+					   switch, or a decode that dropped every row) used to paint only the
+					   top hairline — a blank column that reads as broken. */
+					emptyContent={projection.streaming ? <TranscriptSkeleton /> : undefined}
 				/>
 			)}
 

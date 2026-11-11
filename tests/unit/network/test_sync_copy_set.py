@@ -586,6 +586,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``<config>/audit/``. None is an entry of a session directory, and the "
         "copy set must neither carry nor exclude them.",
     ),
+    "local_operator/tools/evidence_tool.py": (
+        1,
+        "``TOOL_NAME`` (``evidence``) is the model-facing registry key, not a path or "
+        "an entry of a session directory: the tool writes ONE receipt the child "
+        "authored itself into an allow-listed directory of the BOUND WORKTREE "
+        "(``EVIDENCE_DIRS``, a tuple, names the checkout's own receipt directories), "
+        "so nothing here names a file in the session store and it owns no copy-set "
+        "entry for the copy set to carry or exclude.",
+    ),
     "local_operator/harness_import/manifest.py": (
         1,
         "``INDEX_NAME`` ('index.json') is the O(1) already-imported cache under "
@@ -970,6 +979,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``INDEX_FILENAME``): a DEVICE-LOCAL record store beside ``sessions/``, never an "
         "entry of one and never carried in one — a card records THIS device's consent, "
         "so a move must not transport it",
+    ),
+    "local_operator/profile_proposals.py": (
+        2,
+        "``PROPOSALS_DIRNAME`` (``profile-proposals``) and its ``AUDIT_FILENAME`` "
+        "(``audit.jsonl``): the account-level proposal store under "
+        "``<config>/profile-proposals``, beside ``agents/``/``teams/`` — never a "
+        "session entry and never carried in one; a proposal targets this account's "
+        "profiles and is reviewed in Agents here",
     ),
     "local_operator/network/types.py": (
         1,

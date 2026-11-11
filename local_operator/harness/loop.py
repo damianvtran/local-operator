@@ -32,6 +32,7 @@ import uuid
 from collections import Counter, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar, cast
 
 from pydantic import SecretStr, TypeAdapter, ValidationError
@@ -55,8 +56,13 @@ from local_operator.harness.intent import (
     sanitize_intent,
     scan_streaming_intent,
 )
+from local_operator.harness.provider_empty import is_provider_empty
 from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.tool_names import (
+    near_miss_tool,
+    normalise_replay_tool_names,
+)
 from local_operator.harness.types import (
     FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
@@ -131,6 +137,7 @@ from local_operator.incidents import (
     REASONING_ECHO_MARKERS,
 )
 from local_operator.model.effort import real_rungs
+from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
 #: the byte counter visibly moves (so the row reads as progress rather than as a
@@ -341,16 +348,164 @@ EMPTY_TOOL_RESULT_TEXT = "[tool returned no output]"
 #: exact values.
 _CONTENT_BEARING_DETAIL_KEYS = ("diff",)
 
+
+def _redact_nested_strings(value: Any, redact: Callable[[str], str]) -> Any:
+    """A copy of a JSON-shaped ``value`` with every string VALUE passed through ``redact``."""
+    if isinstance(value, str):
+        return redact(value) if value else value
+    if isinstance(value, dict):
+        return {key: _redact_nested_strings(item, redact) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_nested_strings(item, redact) for item in value]
+    return value
+
+
 # The producer caps diffs at 200 rows; this independent publication budget leaves
 # framing room, not permission to accept unbounded executor metadata. Refusal
 # still walks N slots to preserve container/nonstring identity (not O(cap)).
 _DIFF_DETAIL_ROWS = 256
 _DIFF_DETAIL_BYTES = 128 * 1024
-_DIFF_DETAIL_WITHHELD = "[output withheld: credential redaction requires a complete bounded diff]"
+_DIFF_DETAIL_WITHHELD = DIFF_WITHHELD_TEXT
 _DIFF_HUNK = re.compile(
     r"@@ -([0-9]{1,9})(?:,([0-9]{1,9}))? \+([0-9]{1,9})(?:,([0-9]{1,9}))? @@[^\r\n]*"
 )
 _DIFF_ROW_BREAKS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
+    """Keys of ``rows`` whose text ``result`` (the redaction of their
+    ``"\n"``-join) did not return unchanged.
+
+    Occurrence-anchored, never LCS: a row is kept only when it appears exactly
+    once on each side, in order; every unanchored changed gap is affected
+    whole, so the error direction is over-masking. Raises ``ValueError`` when
+    no safe projection exists (callers withhold).
+    """
+    if any(char in _DIFF_ROW_BREAKS - {"\n"} for char in result):
+        raise ValueError
+    return _anchored_affected(rows, result.split("\n"))
+
+
+def _anchored_affected(rows: list[tuple[int, str]], returned: list[str]) -> set[int]:
+    """The occurrence-anchored projection behind :func:`_changed_rows`.
+
+    ``returned`` is the redacted text already split into rows the SAME way
+    ``rows`` were; split here so the exact-source pass of
+    :func:`_source_affected_lines` can split on every ``splitlines``
+    separator (ends kept) while the seam keeps its ``"\n"`` contract.
+    """
+    original = [text for _, text in rows]
+    if original == returned:
+        return set()
+    # Occurrence grouping, not SequenceMatcher/LCS: duplicate body rows may
+    # never anchor. Across all calls there are <=2R original context rows
+    # and <=3R output rows (combined <=5R); byte populations are <=5B.
+    occurrences = sorted(
+        [(text, 0, index) for index, text in enumerate(original)]
+        + [(text, 1, index) for index, text in enumerate(returned)]
+    )
+    anchors: list[tuple[int, int]] = []
+    at = 0
+    while at < len(occurrences):
+        end = at + 1
+        while end < len(occurrences) and occurrences[end][0] == occurrences[at][0]:
+            end += 1
+        group = occurrences[at:end]
+        if len(group) == 2 and group[0][1] == 0 and group[1][1] == 1:
+            anchors.append((group[0][2], group[1][2]))
+        at = end
+    anchors.sort()
+    if any(a[1] >= b[1] for a, b in zip(anchors, anchors[1:])):
+        raise ValueError
+    affected: set[int] = set()
+    left_old = left_new = 0
+    for old, new in anchors + [(len(original), len(returned))]:
+        old_gap = original[left_old:old]
+        new_gap = returned[left_new:new]
+        if old_gap != new_gap:
+            if not old_gap:
+                raise ValueError  # insertion-only output has no safe source projection
+            affected.update(index for index, _ in rows[left_old:old])
+        # Equal gaps consume each row once; no arbitrary duplicate elsewhere
+        # can justify retaining an original masked body row.
+        left_old, left_new = old + 1, new + 1
+    return affected
+
+
+def _source_affected_lines(text: str, redact: Callable[[str], str]) -> set[int]:
+    """0-based line indices of ``text`` that ``redact`` changes, judged WHOLE.
+
+    Redaction calls over the complete file side (normalized and exact), so a
+    registered value of any height is seen in full; the occurrence-anchored projection maps the
+    output back to source lines and over-masks on ambiguity. Lines come from
+    ``splitlines`` exactly as the rendered diff's do, so indices match the
+    hunk headers' line numbers.
+    """
+    lines = text.splitlines()
+    if not lines:
+        return set()
+    result = redact("\n".join(lines))
+    if not isinstance(result, str):
+        raise ValueError
+    affected = _changed_rows(list(enumerate(lines)), result)
+    # R1-2 (PR #3702): the pass above judges the side with every line break
+    # normalized to ``"\n"``, so a value registered with the file's OWN
+    # separators (``"\r\n"``, ``"\f"``, ``"\x85"``, ...) no longer matches there
+    # and its lines were published. Redact the EXACT original text too, split
+    # both it and its redaction with ``splitlines(keepends=True)`` -- the same
+    # boundaries and indices the rendered diff uses, terminators included so
+    # a separator the redactor consumed still registers as a change -- and
+    # UNION the two projections. Each pass only ever adds masked lines, so the
+    # union is at least as conservative as either; no masked side is re-diffed.
+    exact = redact(text)
+    if not isinstance(exact, str):
+        raise ValueError
+    if exact != text:
+        affected |= _anchored_affected(
+            list(enumerate(text.splitlines(keepends=True))), exact.splitlines(keepends=True)
+        )
+    return affected
+
+
+def _mask_by_source_evidence(
+    rows: Sequence[str], affected_old: set[int], affected_new: set[int]
+) -> list[str]:
+    """Mask every diff row whose source line the whole-side redaction touched.
+
+    Line numbers come from the hunk headers (1-based starts; a zero count names
+    the line before), advanced row by row: `` `` rows are on both sides, ``-``
+    old only, ``+`` new only. A masked row keeps its sign and becomes
+    ``sign + REDACTION_MARKER``, the seam's own masked-row form, so counts and
+    geometry are unchanged. Anything that is not a well-formed diff raises
+    ``ValueError`` (the caller withholds).
+    """
+    from local_operator.redaction_shapes import REDACTION_MARKER
+
+    if len(rows) < 2 or not rows[0].startswith("--- ") or not rows[1].startswith("+++ "):
+        raise ValueError
+    out = list(rows[:2])
+    old_line = new_line = -1
+    for row in rows[2:]:
+        frame = _DIFF_HUNK.fullmatch(row)
+        if frame is not None:
+            old_count = int(frame[2]) if frame[2] is not None else 1
+            new_count = int(frame[4]) if frame[4] is not None else 1
+            old_line = int(frame[1]) - (1 if old_count else 0)
+            new_line = int(frame[3]) - (1 if new_count else 0)
+            out.append(row)
+            continue
+        tag = row[:1]
+        if old_line < 0 or new_line < 0 or tag not in (" ", "-", "+"):
+            raise ValueError
+        hit = (tag in " -" and old_line in affected_old) or (
+            tag in " +" and new_line in affected_new
+        )
+        out.append(tag + REDACTION_MARKER if hit else row)
+        if tag in " -":
+            old_line += 1
+        if tag in " +":
+            new_line += 1
+    return out
 
 
 def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
@@ -418,46 +573,7 @@ def _redact_diff_detail(value: Any, redact: Callable[[str], str]) -> Any:
             raise ValueError
         return result
 
-    def changed_rows(rows: list[tuple[int, str]], result: str) -> set[int]:
-        if any(char in _DIFF_ROW_BREAKS - {"\n"} for char in result):
-            raise ValueError
-        original = [text for _, text in rows]
-        returned = result.split("\n")
-        if original == returned:
-            return set()
-        # Occurrence grouping, not SequenceMatcher/LCS: duplicate body rows may
-        # never anchor. Across all calls there are <=2R original context rows
-        # and <=3R output rows (combined <=5R); byte populations are <=5B.
-        occurrences = sorted(
-            [(text, 0, index) for index, text in enumerate(original)]
-            + [(text, 1, index) for index, text in enumerate(returned)]
-        )
-        anchors: list[tuple[int, int]] = []
-        at = 0
-        while at < len(occurrences):
-            end = at + 1
-            while end < len(occurrences) and occurrences[end][0] == occurrences[at][0]:
-                end += 1
-            group = occurrences[at:end]
-            if len(group) == 2 and group[0][1] == 0 and group[1][1] == 1:
-                anchors.append((group[0][2], group[1][2]))
-            at = end
-        anchors.sort()
-        if any(a[1] >= b[1] for a, b in zip(anchors, anchors[1:])):
-            raise ValueError
-        affected: set[int] = set()
-        left_old = left_new = 0
-        for old, new in anchors + [(len(original), len(returned))]:
-            old_gap = original[left_old:old]
-            new_gap = returned[left_new:new]
-            if old_gap != new_gap:
-                if not old_gap:
-                    raise ValueError  # insertion-only output has no safe source projection
-                affected.update(index for index, _ in rows[left_old:old])
-            # Equal gaps consume each row once; no arbitrary duplicate elsewhere
-            # can justify retaining an original masked body row.
-            left_old, left_new = old + 1, new + 1
-        return affected
+    changed_rows = _changed_rows
 
     try:
         if scalar:
@@ -621,6 +737,32 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: allowance per turn would re-buy the same diagnosis. Each re-ask is one
 #: extra model call.
 MAX_WORDLESS_STOP_RECOVERIES = 1
+
+#: How many times the SAME request is re-issued after a PROVIDER-EMPTY response:
+#: a clean ``stop`` on which the provider sent no content of any kind -- no text,
+#: no call, no reasoning, no output tokens (``provider_empty.is_provider_empty``). The
+#: wordless-stop re-ask above cannot tell that from a model that thought and
+#: said nothing, and its prompt ("your last message arrived with no text") asks
+#: a model to account for a message it never wrote; the remedy for a provider
+#: that sent nothing is to ask the provider again, unchanged.
+#:
+#: ONE, and CONSECUTIVE: a second provider-empty response on the re-issued
+#: request ends the turn as a named failure (model and time) rather than falling
+#: through to the re-ask. Unlike the run-scoped budgets around it the count
+#: resets on any turn that is not provider-empty -- a healthy turn between two
+#: blips proves the provider recovered, so each blip earns its own single retry
+#: and a long run is not failed by its second unrelated one. The cost is bounded
+#: by that: every retry is one extra call, and it is only ever followed by real
+#: progress or by the end of the turn. Not a ``RetrySettings`` knob: those govern
+#: transport errors (``providers.failover``), and this response was a success.
+MAX_EMPTY_PROVIDER_RETRIES = 1
+
+#: The one notice on the first retry. Names the cause (the PROVIDER sent nothing)
+#: so it cannot be read as the wordless re-ask's "the model's reply arrived empty".
+EMPTY_PROVIDER_RETRY_NOTICE_TEXT = (
+    "the provider sent an empty response (no text, no tool calls, no reasoning) — "
+    "re-sending the same request once"
+)
 
 
 #: How many times ONE run re-asks a model whose turn was cut off at the output
@@ -2295,6 +2437,9 @@ class AgentLoop:
         # Run-scoped and topped up by nothing, like the truncation budget
         # above: a fresh allowance per turn would re-buy the same diagnosis.
         wordless_stop_recoveries = 0
+        # CONSECUTIVE provider-empty responses already re-issued -- see
+        # ``MAX_EMPTY_PROVIDER_RETRIES`` for why this one resets on a healthy turn.
+        empty_provider_retries = 0
         # The output contract's budget for THIS run (== per turn: a ``--loop``
         # iteration re-enters ``_run`` fresh). Counted only on the terminal
         # seam, so every non-clean exit -- abort, stream error, continuation
@@ -3324,6 +3469,14 @@ class AgentLoop:
                             has_more_tool_calls = True
                             continue
 
+                    # Whether the provider sent nothing at all this turn. Settled
+                    # once, here, so the consecutive count below resets on EVERY
+                    # other outcome (text, calls, a ``length`` cut, a reasoning-
+                    # only stop) and the wordless arm further down reads it.
+                    turn_provider_empty = stop_reason == "stop" and is_provider_empty(assistant)
+                    if not turn_provider_empty:
+                        empty_provider_retries = 0
+
                     tool_results: list[ToolResult] = []
                     if stop_reason == "length":
                         # Whitespace-only prose counts as NOTHING, which is how
@@ -3654,6 +3807,7 @@ class AgentLoop:
                         and stop_reason == "stop"
                         and not (assistant.text or "").strip()
                     ):
+                        wordless_graceful = _graceful_cancel_requested(config)
                         # A WORDLESS STOP: a clean ``stop`` arrived with no
                         # text and no tool calls, and no arm above claimed it
                         # (not a ``length`` cut-off, not the nameless-call
@@ -3683,7 +3837,52 @@ class AgentLoop:
                         # stop outranks the re-ask (the nameless rule): falling
                         # through ends the turn as it did before this arm
                         # existed.
-                        wordless_graceful = _graceful_cancel_requested(config)
+                        if turn_provider_empty and not wordless_graceful:
+                            # The provider sent NOTHING (see
+                            # ``MAX_EMPTY_PROVIDER_RETRIES``), which is not the
+                            # model's silence: re-issue the same request, add
+                            # no prompt, and do not spend the wordless re-ask.
+                            # Either way the empty row leaves the history, for
+                            # the re-ask's reasons: it is illegal on the
+                            # Anthropic wire and would poison the next request.
+                            if context.messages and context.messages[-1] is assistant:
+                                context.messages.pop()
+                            if new_messages and new_messages[-1] is assistant:
+                                new_messages.pop()
+                            if empty_provider_retries < MAX_EMPTY_PROVIDER_RETRIES:
+                                empty_provider_retries += 1
+                                # Raw English, like the nameless-call notice: a new
+                                # catalogue key would stale every shipped locale's
+                                # ``tui.notices`` (eligibility is hash-bound) until
+                                # each is re-translated and independently audited.
+                                yield NoticeEvent(
+                                    text=EMPTY_PROVIDER_RETRY_NOTICE_TEXT, kind="warning"
+                                )
+                                # No TurnEndEvent, for the wordless re-ask's
+                                # reason: nothing was shown for this turn.
+                                has_more_tool_calls = True
+                                continue
+                            # The re-issued request came back empty too: STOP.
+                            # Not the old re-prompt -- a provider that twice
+                            # sent nothing is not helped by being asked why.
+                            failed_spec = turn_model or self._current_model(config)
+                            failing_model = f"{failed_spec.provider}/{failed_spec.model_id}"
+                            yield AgentEndEvent(
+                                messages=new_messages,
+                                error=(
+                                    f"Empty provider response: {failing_model} returned no "
+                                    "content at all (no text, no tool calls, no reasoning) "
+                                    f"on {empty_provider_retries + 1} consecutive attempts, "
+                                    "the last at "
+                                    f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}. "
+                                    "The harness re-issued the request once and stopped; "
+                                    "retry, or switch models."
+                                ),
+                                failing_model=failing_model,
+                                generation=generation,
+                            )
+                            self._discard_pending_custom(pending)
+                            return
                         if (
                             wordless_stop_recoveries < MAX_WORDLESS_STOP_RECOVERIES
                             and not wordless_graceful
@@ -4476,7 +4675,7 @@ class AgentLoop:
             # compaction's own render
             # or the token estimators, which must keep seeing the transcript as
             # it is: the bound is a property of the request, not of the session.
-            converted = bound_replay_payloads(converted)
+            converted = normalise_replay_tool_names(bound_replay_payloads(converted), context.tools)
             if effort_ceiling is not None:
                 # A retreat is in force -- an empty-truncation step-down, or the
                 # reasoning-echo recovery's switch to thinking off. The host's
@@ -5522,12 +5721,31 @@ class AgentLoop:
         if tool is None and config.resolve_fallback_tool is not None:
             tool = config.resolve_fallback_tool(call.name)
         if tool is None:
+            # No length clip here: the never-run compose frame already bounds
+            # the reason to NOT_RUN_REASON_MAX_CHARS (200), and a pre-clip
+            # would make a long name read as fully spelled while the frame
+            # says it was clipped. The analytics-recorded name is the one
+            # place a 64-char clip survives (see _report_tool_call).
+            near = near_miss_tool(call.name, context.tools)
+            text = f"Tool not found: {call.name}"
+            details: dict[str, object] = {FAULT_KEY: FAULT_UNKNOWN_TOOL}
+            if near is not None:
+                text += f". Did you mean `{near}`?"
+                details["near_miss"] = near
+                # Provider-controlled name: log the real tool and the junk
+                # length only, never the junk itself (it can carry a credential).
+                logger.warning(
+                    "unknown tool name was a near-miss of %s "
+                    "(junk remainder %d chars); call rejected",
+                    near,
+                    len(call.name) - len(near),
+                )
             return _PlannedCall(
                 call=call,
                 failure=self._synthetic_result(
                     call,
-                    f"Tool not found: {call.name}",
-                    details={FAULT_KEY: FAULT_UNKNOWN_TOOL},
+                    text,
+                    details=details,
                 ),
             )
 
@@ -5680,9 +5898,12 @@ class AgentLoop:
 
         A DEFERRED tool (see ``tools/deferral.py``) was called without its schema
         having been sent, so the model guessed the shape. Name the door to the
-        real one — the host publishes the schema from the next turn on the
-        strength of the same failure. No-op for a published schema, or when the
-        text already carries the pointer.
+        real one. For a built-in deferred tool the host also publishes the
+        schema from the next turn on the strength of the same failure; for a
+        deferred MCP tool (dispatched through ``resolve_fallback_tool``) it does
+        NOT — that would re-grow the cache-prefix array — and ``tool://<name>``
+        renders the schema inline instead. No-op for a published schema, or
+        when the text already carries the pointer.
         """
         if cls._schema_was_published(name, config) or f"tool://{name}" in text:
             return text
@@ -6203,6 +6424,19 @@ class AgentLoop:
                         nested_verdict = context.exempt_source_verdicts.pop(nested.id, None)
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
+                    # A write/edit diff is settled from its complete sources (and
+                    # the raw carrier consumed) before this result crosses back
+                    # into arbitrary Python.
+                    # ``_runner_result`` already settled it; this is the
+                    # idempotent backstop, given the popped records explicitly
+                    # (R1-3) so it never judges with emptied ones.
+                    await self._settle_write_diff(
+                        result,
+                        context,
+                        config.redact_tool_result,
+                        arguments=planned.args,
+                        verdict=nested_verdict,
+                    )
                     if config.redact_tool_result is not None:
                         # The same off-loop seam the history path uses: this
                         # result crosses back into arbitrary Python, and the
@@ -6281,6 +6515,17 @@ class AgentLoop:
                 )
             pending_creations = _plan_guard_creations(tool.name, item.args, execution_context)
             result = await tool.execute(call.id, item.args, signal, on_update, execution_context)
+            # R1-1 (PR #3702): settle a write/edit diff on the ORIGINAL result,
+            # right here, before anything copies it. The guard annotation, the
+            # one-turn public copy and a PostToolUse hook note all
+            # ``model_copy`` the result, and every copy deliberately drops the
+            # private raw-source carrier (``ToolResult.__copy__``); settling
+            # after them found no carrier and left the withheld receipt on an
+            # ordinary diff. Settling first keeps that stripping invariant
+            # intact AND means no guard, hook or copy ever sees raw rows. The
+            # arguments/verdict records are still present here (the eval
+            # bridge pops them only after this returns).
+            await self._settle_write_diff(result, context, config.redact_tool_result)
             if pending_creations is not None:
                 # Recorded whatever the exit status: ``mkdir -p a b`` can create
                 # ``a`` and then fail on ``b``. Only directories that exist NOW
@@ -6656,6 +6901,11 @@ class AgentLoop:
                     duration_s=time.monotonic() - started_at,
                 )
                 raise
+            # Idempotent backstop: ``_runner_result`` settles a write/edit diff
+            # right after ``execute`` (before any copy), so this only consumes a
+            # carrier some other path left attached -- still before ``park``,
+            # which feeds the live end event and the persisted row.
+            await self._settle_write_diff(result, context, config.redact_tool_result)
             park(
                 slot,
                 item,
@@ -6700,6 +6950,7 @@ class AgentLoop:
                         text,
                         details={FAULT_KEY: FAULT_ABORTED if aborted else FAULT_SKIPPED},
                     )
+                await self._settle_write_diff(result, context, config.redact_tool_result)
                 park(
                     slot,
                     item,
@@ -7236,7 +7487,7 @@ class AgentLoop:
                 session_id = getattr(tool_context, "session_id", "") or ""
             if not session_id:
                 return
-            name = item.tool.name if item.tool is not None else item.call.name
+            name = item.tool.name if item.tool is not None else item.call.name[:64]
             duration = result.duration_s
             callback(
                 name,
@@ -7355,6 +7606,9 @@ class AgentLoop:
         redact: Callable[[str], str] | None = None,
     ) -> None:
         for result in results:
+            # Idempotent backstop for a path that skipped the runner's step:
+            # consumes any source evidence still attached BEFORE the row persists.
+            await self._settle_write_diff(result, context, redact)
             content: list[Content] = list(result.content)
             details = result.details
             # Redact BEFORE the empty-result backfill: a redacted secret is
@@ -7533,6 +7787,86 @@ class AgentLoop:
                 out.append(item)
         return out
 
+    async def _settle_write_diff(
+        self,
+        result: ToolResult,
+        context: LoopContext,
+        redact: Callable[[str], str] | None,
+        *,
+        arguments: Mapping[str, Any] | None = None,
+        verdict: bool | None = None,
+    ) -> None:
+        """Publish a write/edit diff only after its COMPLETE sources were judged.
+
+        The producer (``tools/builtin._diff_text_result``) leaves the withheld
+        receipt in ``details['diff']`` and the raw ``(before, after, preview)``
+        on the private ``ToolResult._diff_source``. This is the one seam that
+        consumes it (single take, so the raw text stops existing on the result):
+
+        1. Each complete file side is redacted ONCE and projected back to the
+           source lines it touched (:func:`_source_affected_lines`). A hunk
+           holds two context lines, so a multi-line registered value longer
+           than that window, or cut by the 200-row preview, is only provable
+           from the whole side (see ``tools/diff_limits``).
+        2. Every preview row on a touched line is masked, sign kept
+           (:func:`_mask_by_source_evidence`); no re-diff, so counts and signs
+           stay the executor's.
+        3. The ordinary per-hunk seam (:func:`_redact_diff_detail`) then runs
+           on that copy as well, so nothing it masked before is lost.
+
+        Runs in ``_runner_result`` right after ``execute`` -- before the guard
+        annotation, the one-turn public copy and post-tool hooks, each of which
+        copies the result and so drops the carrier -- with idempotent backstops
+        before ``park``, in the nested eval bridge and in ``_append_results``;
+        the live card, the one-turn public copy, the persisted row and an eval
+        result therefore read the same safe diff.
+        Fail-closed: any refusal or error keeps the receipt. With no redactor
+        configured nothing is redacted anywhere, so the raw preview is restored
+        exactly as before.
+        """
+        carried = result.take_diff_source()
+        if carried is None:
+            return
+        before, after, preview = carried
+        details = dict(result.details or {})
+        if redact is None:
+            details["diff"] = list(preview)
+            result.details = details
+            return
+        call_id = result.tool_call_id
+        tool_name = result.tool_name
+        # ``.get``, not the consuming helpers: the history redaction after this
+        # still consumes the same records.
+        # Explicit values win: the eval bridge pops both records before its
+        # backstop call (R1-3).
+        if arguments is None:
+            arguments = context.original_call_args.get(call_id, {})
+        if verdict is None:
+            verdict = context.exempt_source_verdicts.get(call_id)
+        cwd = _session_cwd(context)
+
+        def _run() -> list[str]:
+            with (
+                tool_source(tool_name, arguments),
+                exempt_from_escalation(tool_name, arguments, cwd, verdict),
+            ):
+                masked = _mask_by_source_evidence(
+                    preview,
+                    _source_affected_lines(before, redact),
+                    _source_affected_lines(after, redact),
+                )
+                out = _redact_diff_detail(masked, redact)
+            if not isinstance(out, list):
+                raise ValueError
+            return out
+
+        try:
+            details["diff"] = await asyncio.to_thread(_run)
+        except Exception:  # noqa: BLE001 - no proof, no publication
+            logger.warning("write/edit diff source redaction failed for %s", tool_name)
+            details["diff"] = [_DIFF_DETAIL_WITHHELD]
+        result.details = details
+
     @staticmethod
     async def _redact_details(
         details: dict[str, Any] | None,
@@ -7587,7 +7921,8 @@ class AgentLoop:
         # to mask. See the block in ``_redact_content``.
         if tool_name in PUBLIC_COPY_TOOLS:
             return details
-        if not any(
+        has_server_result = details.get("server_result") is not None
+        if not has_server_result and not any(
             isinstance(details.get(key), str)
             or (
                 isinstance(details.get(key), (list, tuple))
@@ -7605,7 +7940,28 @@ class AgentLoop:
                 out = dict(details)
                 for key in _CONTENT_BEARING_DETAIL_KEYS:
                     if key in details:
-                        out[key] = _redact_diff_detail(details[key], redact)
+                        value = details[key]
+                        if (
+                            tool_name in {"agent", "team", "skill", "profile_proposal"}
+                            and isinstance(value, (list, tuple))
+                            and all(isinstance(row, str) for row in value)
+                        ):
+                            # Profile receipts are semantic field summaries, NOT
+                            # file-tool unified hunks. A new profile's full text
+                            # is its diff. Feed the complete text to credential
+                            # redaction so multiline secrets remain detectable,
+                            # without rejecting valid summaries as malformed hunks.
+                            masked = redact("\n".join(value)).splitlines()
+                            out[key] = tuple(masked) if isinstance(value, tuple) else masked
+                        else:
+                            out[key] = _redact_diff_detail(value, redact)
+                if has_server_result:
+                    # An MCP result's raw server payload
+                    # (``mcp/tool_bridge.py``) rides into the transcript
+                    # beside the masked text, so it was the copy that kept the
+                    # value (PR #3756, QA Q6). Every string in it is masked;
+                    # keys and non-string values keep theirs.
+                    out["server_result"] = _redact_nested_strings(details["server_result"], redact)
                 return out
 
         return await asyncio.to_thread(_run)

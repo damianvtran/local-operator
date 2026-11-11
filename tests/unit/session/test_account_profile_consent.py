@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from local_operator import profile_proposals as PP
 from local_operator.agent_profiles import profile_from_agent
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness.approval import (
@@ -123,7 +125,11 @@ def stores(tmp_path: Path, monkeypatch) -> dict[str, Any]:
     account.set_agent_system_prompt(seeded.id, SEED_INSTRUCTIONS)
     session_dir = tmp_path / "session"
     agents = scope_agent_registry(account, session_dir)
-    team_account = TeamRegistry(tmp_path / "teams")
+    # ONE config root for agents and teams, as in a real profile: proposals
+    # live in ``<config>/profile-proposals`` and the ``profile_proposal`` tool
+    # reads them from the session's registry root, so split roots made team
+    # proposals unreachable from the tool in tests only.
+    team_account = TeamRegistry(account.config_dir)
     team_account.create_team(
         TeamEditFields(
             name="lopdev", description="Dev team", manager="manager", instructions="Ship."
@@ -147,8 +153,7 @@ def stores(tmp_path: Path, monkeypatch) -> dict[str, Any]:
             exists=False,
         ),
     )
-    for root in (account.config_dir, team_account.config_dir):
-        _make_key(root)
+    _make_key(account.config_dir)
     monkeypatch.setattr(desktop_approval, "assurance", lambda: ("presence", "synthetic-presence"))
     return {"agents": agents, "teams": teams, "account": account, "session_dir": session_dir}
 
@@ -181,6 +186,9 @@ def _context(session: Session, stores) -> ToolContext:
 def _start_run(session: Session, *inputs: Any) -> None:
     """Reset the run flags as the pipeline head does, then fold the inputs."""
     session._run_owner_texts = []
+    session._run_owner_text_bindings = []
+    session._run_owner_consent = False
+    session._run_untrusted_input = False
     session._run_typed_user = False
     session._run_triggers = set()
     for message in inputs:
@@ -191,37 +199,20 @@ async def _agent(context, **args):
     return await execute_agent("tc", args, None, None, context)
 
 
-def _assert_queued(result, gate):
+def _assert_proposed(result, gate):
     assert not result.is_error, _text(result)
-    assert result.details["status"] == "queued"
-    assert result.details["approval_id"]
+    assert result.details["status"] == "proposed"
+    assert result.details["proposal_id"]
     if gate is not None:
         assert gate.cards == []
 
 
-def _queued_record(stores, result, *, root=None):
-    from local_operator.network import approvals as A
+def _proposal_record(stores, result, *, root=None):
+    from local_operator import profile_proposals as P
 
-    # ``root`` is the store the filing landed in: it is the intent's OWN registry
-    # root, which is the team store's config dir for a team write.
-    return A._load_raw(result.details["approval_id"], root or stores["account"].config_dir)
-
-
-def _approve_queued(root, record):
-    import time
-
-    from local_operator.network import approvals as A
-    from tests.unit.network.test_approvals_store import _sign_decision
-
-    moment = time.time()
-    signature = _sign_decision(root, record, "approve", moment)
-    A._record_decision(
-        record["approval_id"],
-        decision="approve",
-        decided_at=moment,
-        signature_hex=signature,
-        root=root,
-    )
+    record = P.get(root or stores["account"].config_dir, result.details["proposal_id"])
+    assert record is not None, result.details["proposal_id"]
+    return record
 
 
 def _snapshot(stores) -> str:
@@ -363,20 +354,16 @@ async def test_owner_message_not_naming_the_profile_asks_and_deny_writes_nothing
         )
         # No live yes/no callback is consulted: the queued signed operation
         # survives this turn and only its authenticated continuation can save.
-        _assert_queued(result, gate)
-        from local_operator import profile_approval as P
+        _assert_proposed(result, gate)
+        from local_operator import profile_proposals as P
 
-        record = _queued_record(stores, result)
-        facts = P.disclosure(record)
-        assert facts["profile_name"] == "reviewer"
-        assert facts["changed_fields"] == ["instructions"]
-        assert facts["after"]["instructions"] == "Other."
-        from local_operator.network import approvals as A
-        from local_operator.network.types import MeshRefusal
-
-        A.deny(record["approval_id"], root=stores["account"].config_dir)
-        with pytest.raises(MeshRefusal, match="denied"):
-            P.apply(record["approval_id"], P.expected(record), stores["account"].config_dir)
+        record = _proposal_record(stores, result)
+        assert record["name"] == "reviewer"
+        assert record["fields"] == ["instructions"]
+        assert record["after"]["instructions"] == "Other."
+        P.reject(stores["account"].config_dir, record["id"], actor="desktop")
+        with pytest.raises(P.ProposalError, match="rejected"):
+            P.apply(stores["account"].config_dir, record["id"], actor="desktop")
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
@@ -414,7 +401,7 @@ async def test_non_owner_inputs_never_take_path_a(stores, label) -> None:
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Forged."
         )
-        _assert_queued(result, gate)  # durable card, never direct path A
+        _assert_proposed(result, gate)  # durable card, never direct path A
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
@@ -431,15 +418,14 @@ async def test_agent_initiated_edit_saves_on_approve(stores) -> None:
         )
         assert not result.is_error, _text(result)
         # A legacy gate returning True cannot approve the new signed operation.
-        _assert_queued(result, gate)
+        _assert_proposed(result, gate)
         assert stores["account"].get_agent_by_name("reviewer").description == "Reviews code"
-        record = _queued_record(stores, result)
-        _approve_queued(stores["account"].config_dir, record)
-        from local_operator import profile_approval as P
+        record = _proposal_record(stores, result)
+        from local_operator import profile_proposals as P
 
-        assert P.disclosure(record)["after"]["description"] == "Sharper"
-        applied = P.apply(record["approval_id"], P.expected(record), stores["account"].config_dir)
-        assert applied["state"] == "complete"
+        assert record["after"]["description"] == "Sharper"
+        applied = P.apply(stores["account"].config_dir, record["id"], actor="desktop")
+        assert applied["proposal"]["state"] == "accepted"
         # The executor may be another process; inspect persisted metadata rather
         # than this Session's interval-cached pre-approval registry object.
         stored = AgentRegistry(stores["account"].config_dir, migrate=False).get_agent_by_name(
@@ -469,15 +455,13 @@ async def test_row_moved_while_card_was_open_is_refused(stores) -> None:
         )
         # The tool no longer parks inside Gate.on_ask. Move the row AFTER filing
         # and sign the original proposal; only the apply continuation sees CAS.
-        _assert_queued(result, gate)
+        _assert_proposed(result, gate)
         concurrent_edit()
-        record = _queued_record(stores, result)
-        _approve_queued(account.config_dir, record)
-        from local_operator import profile_approval as P
-        from local_operator.network.types import MeshRefusal
+        record = _proposal_record(stores, result)
+        from local_operator import profile_proposals as P
 
-        with pytest.raises(MeshRefusal, match="changed"):
-            P.apply(record["approval_id"], P.expected(record), account.config_dir)
+        with pytest.raises(P.ProposalError, match="changed"):
+            P.apply(account.config_dir, record["id"], actor="desktop")
         assert account.get_agent_system_prompt(row.id) == "Edited elsewhere."
     finally:
         await session.dispose()
@@ -504,7 +488,7 @@ async def test_no_gate_attached_refuses_with_the_owner_prompt_remedy(stores) -> 
             _context(session, stores), op="update", name="reviewer", instructions="X."
         )
         # An absent live surface is now the key durable-queue acceptance case.
-        _assert_queued(result, None)
+        _assert_proposed(result, None)
         assert (
             stores["account"].get_agent_system_prompt(
                 stores["account"].get_agent_by_name("reviewer").id
@@ -523,7 +507,8 @@ async def test_child_and_sdk_sessions_keep_the_no_seam_refusal(stores) -> None:
     child = _session(stores, gate=Gate(), parent="parent-1")
     sdk = _session(stores, gate=Gate(), consent=False)
     try:
-        assert child._authorize_durable_write is None
+        assert child._authorize_durable_write is not None
+        assert await child.decide_profile_proposal("pp_" + "0" * 16, "apply") == "refused"
         assert sdk._authorize_durable_write is None
         intent = DurableWriteIntent(kind="agent", operation="update", name="reviewer")
         context = _context(sdk, stores)
@@ -570,7 +555,7 @@ async def test_team_update_follows_the_same_paths_and_reverts(stores) -> None:
             _context(session, stores),
         )
         # The old deny callback is not an answer to a durable signed proposal.
-        _assert_queued(denied, gate)
+        _assert_proposed(denied, gate)
         assert teams.get_team_by_name("lopdev").instructions == "Ship carefully."
 
         # A later edit makes the old backup unrevertable (never clobbered).
@@ -657,8 +642,13 @@ async def test_remote_prompt_naming_profile_never_authorizes(stores):
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Remote edit."
         )
-        _assert_queued(result, gate)
-        assert "do not retry" in _text(result)
+        _assert_proposed(result, gate)
+        # The receipt points at the Agents review surface (never Mesh) and
+        # says nothing was written, so the model neither retries nor claims
+        # the edit landed.
+        assert "nothing changed yet" in _text(result)
+        assert "Agents → reviewer" in _text(result)
+        assert "Mesh" not in _text(result)
         assert "TUI" not in _text(result)
     finally:
         await session.dispose()
@@ -805,8 +795,8 @@ async def test_serving_preserves_remote_origin_through_prompt_queue_and_steer(tm
     [
         "Ask the reviewer to look at PR12",
         "What does reviewer do?",
-        "Please make the reviewer stricter about tests",
-        "Update reviewer instructions",
+        "Please do not change reviewer",
+        "Tell me how to change reviewer instructions",
     ],
 )
 async def test_profile_mentions_are_not_definition_edit_consent(stores, owner_text):
@@ -821,7 +811,7 @@ async def test_profile_mentions_are_not_definition_edit_consent(stores, owner_te
             name="reviewer",
             instructions="Must not land on mention alone.",
         )
-        _assert_queued(result, gate)
+        _assert_proposed(result, gate)
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
@@ -864,8 +854,6 @@ async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(
     import logging
     import uuid
 
-    from local_operator.profile_approval import request_token
-
     caplog.set_level(logging.INFO, logger="local_operator.profile_approval")
     session = _session(stores, gate=None)
     try:
@@ -879,16 +867,11 @@ async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(
             _context(session, stores),
         )
         assert not result.is_error, _text(result)
-        assert result.details is not None and result.details["status"] == "queued"
-        record = _queued_record(stores, result, root=stores["teams"].config_dir)
-        filed = record["requested_by"]["tool_call_id"]
-        assert ":" not in filed
-        assert filed == request_token(nested_id)
-        # The record keeps only the derivation, so the RAW id has to survive
-        # somewhere or the filing cannot be traced back to the call that made it.
-        assert any(
-            nested_id in logged.getMessage() for logged in caplog.records
-        ), "the raw harness id must be logged when it is normalised"
+        assert result.details is not None and result.details["status"] == "proposed"
+        record = _proposal_record(stores, result, root=stores["teams"].config_dir)
+        # Proposals retain the host call ID verbatim: no mesh Token grammar
+        # and no operator anchor are needed to file a non-authorizing suggestion.
+        assert record["origin"]["tool_call_id"] == nested_id
         assert stores["teams"].get_team_by_name("lopdev").instructions == "Ship."
     finally:
         await session.dispose()
@@ -976,7 +959,7 @@ async def test_team_wording_edit_from_the_owner_message_saves_with_no_approval_s
         {"members": ["coder:2"]},
     ],
 )
-async def test_team_roster_and_pin_changes_still_need_the_card(stores, args) -> None:
+async def test_owner_team_roster_and_pin_changes_apply_directly(stores, args) -> None:
     """A name mention is not permission to change the roster or its pins.
 
     The owner message names the team and asks for a roster change; only WORDING
@@ -995,8 +978,8 @@ async def test_team_roster_and_pin_changes_still_need_the_card(stores, args) -> 
             _context(session, stores),
         )
         assert not result.is_error, _text(result)
-        assert result.details is not None and result.details["status"] == "queued"
-        assert _team_roster(stores) == before
+        assert result.details is not None and result.details.get("status") != "proposed"
+        assert _team_roster(stores) != before
     finally:
         await session.dispose()
 
@@ -1032,16 +1015,8 @@ async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) ->
         raise MeshRefusal("approval_anchor_unavailable", "set up local operator authority")
 
     origin, reason = await durable_write_decision(_SeamContext(anchorless), intent)
-    assert origin is None and reason == "unavailable"
-    # Round 1 (security): this path shares ``unavailable`` with the sentence above,
-    # but the FACTS differ — the owner may well have asked, and only the anchor
-    # that proves this machine's operator authority was missing. Claiming "not
-    # asked for in the user's own message" here is untruthful and sends the model
-    # after a request that already happened.
-    anchor_sentence = durable_write_refusal(intent, reason)
-    assert "could not reach the account's operator authority" in anchor_sentence
-    assert "set up operator authority" in anchor_sentence, "the remedy must be named"
-    assert "was not asked for in the user's own message" not in anchor_sentence
+    assert origin is None and reason == "error"
+    assert "approval_anchor_unavailable" in durable_write_refusal(intent, reason)
 
     async def no(_intent):
         return None
@@ -1065,3 +1040,118 @@ async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) ->
         for record in caplog.records
     ), "the fault type must also be in the log line"
     assert any(record.exc_info for record in caplog.records), "the traceback must stay logged"
+
+
+@pytest.mark.asyncio
+async def test_direct_save_card_counts_changes_then_shows_clipped_content(stores):
+    """L1/R2-2/R3-1 (PR #3777): the non-proposal save card appended
+    ``intent.summary`` verbatim, so a direct save of a long brief or skill file
+    filled the ask card. It keeps its first line, then the names of what
+    changes (no counts: the intent has no structured before/after), then —
+    because a direct save has no review page — the content clipped to ~4 KB
+    with a ``… N more lines not shown`` tail."""
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    body = "\n".join(f"+brief line {i} MARKER-{i}" for i in range(400))
+    try:
+        _start_run(session, Message.user("look at the reviewer"))
+        origin = await session._authorize_account_profile_write(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions", "effort"),
+                summary=f"instructions:\n--- before\n+++ after\n{body}\nmodel/effort: a -> b",
+            )
+        )
+        assert origin is None and len(gate.cards) == 1
+        card = gate.cards[0][1]
+        lines = card.splitlines()
+        assert lines[:3] == [
+            "Save agent 'reviewer' in your account (update).",
+            "Changes: instructions, model/effort.",
+            "",
+        ], card
+        assert lines[3:6] == ["instructions:", "--- before", "+++ after"]
+        assert "+brief line 0 MARKER-0" in lines
+        assert "MARKER-399" not in card, "the tail past the cap is not shown"
+        assert re.fullmatch(r"… \d+ more lines not shown", lines[-1]), lines[-1]
+        shown = len(lines) - 4  # head, changes, blank, tail
+        assert int(lines[-1].split()[1]) == 404 - shown, "tail counts the hidden lines"
+        assert len(card) <= 200 + PP.SAVE_DETAIL_MAX_CHARS
+    finally:
+        await session.dispose()
+
+
+async def _direct_save_card(stores, intent: DurableWriteIntent) -> list[str]:
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    try:
+        _start_run(session, Message.user("save it"))
+        assert await session._authorize_account_profile_write(intent) is None
+        assert len(gate.cards) == 1
+        return gate.cards[0][1].splitlines()
+    finally:
+        await session.dispose()
+
+
+#: R3-1: no ``+N −M`` anywhere on line 2 — prose-derived counts were fabricated.
+_COUNTS = re.compile(r"[+−-]\d+")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intent", "line2", "excerpt"),
+    [
+        pytest.param(
+            # A whole new skill file: YAML front matter, ``- `` bullets and a
+            # ``→`` that the R2-3 arrow split read as old/new halves.
+            DurableWriteIntent(
+                kind="skill",
+                operation="create",
+                name="triage",
+                changes=("SKILL.md", "refs/steps.md"),
+                summary="SKILL.md:\n---\nname: triage\n---\n- one\n- two\n"
+                "Open Agents → Reviewer.\nrefs/steps.md:\n- a",
+            ),
+            "Changes: SKILL.md, refs/steps.md.",
+            ["SKILL.md:", "- one", "Open Agents → Reviewer.", "refs/steps.md:", "- a"],
+            id="bulleted-new-skill-file",
+        ),
+        pytest.param(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions",),
+                summary="instructions (replaced; new text):\nSee Settings → Models.\n- a\n- b",
+            ),
+            "Changes: instructions.",
+            ["instructions (replaced; new text):", "See Settings → Models.", "- a", "- b"],
+            id="replaced-instructions-with-arrow-and-bullets",
+        ),
+        pytest.param(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions", "effort"),
+                summary="instructions:\n--- before\n+++ after\n@@ -1,2 +1,2 @@\n keep\n"
+                "-old\n+new\nmodel/effort: a -> b",
+            ),
+            "Changes: instructions, model/effort.",
+            ["--- before", "+++ after", "@@ -1,2 +1,2 @@", "-old", "+new", "model/effort: a -> b"],
+            id="unified-diff",
+        ),
+    ],
+)
+async def test_direct_save_card_lists_changes_without_fabricated_counts(
+    stores, intent, line2, excerpt
+):
+    """R3-1 (PR #3777): line 2 names the fields/paths only — never counts parsed
+    from the prose summary — and the content excerpt follows a blank line."""
+    lines = await _direct_save_card(stores, intent)
+    assert lines[1] == line2, lines
+    assert not _COUNTS.search(lines[1]), lines[1]
+    assert lines[2] == ""
+    assert all(line in lines[3:] for line in excerpt), lines

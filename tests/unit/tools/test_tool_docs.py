@@ -261,6 +261,11 @@ _WALK_DEPTH_CAP = 2
 # top-arm raise (32,872 -> 33,364), whose child arm carries neither tool and
 # moves only by the shared ``system.md`` paragraph.
 MEASURED_TOKENS: dict[str, int] = {
+    # Music admission: measured through render_tool_doc/count_text_tokens with
+    # complete availability and isolated config. Existing docs are unchanged.
+    "generate_music": 271,
+    "modify_music": 269,
+    "music_status": 87,
     # RE-MEASURED (agent pictures, local-operator #1533 branch): 1364 -> 1408
     # (+44) on the clean arm and 1393 -> 1437 on the tier arm. The delta is the
     # one bullet telling the model how to set an agent's profile picture, which
@@ -298,7 +303,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (account profile save consent): 1441 -> 1486 (+45). The
     # ``revert`` op row and the ``backup_id`` param it needs; ``team`` gains the
     # same pair (1431 -> 1464, +33).
-    "agent": 1462,
+    # RE-MEASURED (profile proposals, PR #3704): 1462 -> 1498 (+36), the notes
+    # line routing unasked account edits to Agents -> <name> and the
+    # ``profile_proposal`` apply step; ``team`` gains the same line (+36).
+    # RE-MEASURED (PR #3704 context-budget trim): 1498 -> 1471 (-27). Wire
+    # field descriptions (description/tools/saver/delegate/action_class/kind/
+    # backup_id) shortened to win back the start-context budget the deferred
+    # ``skill``/``profile_proposal`` inventory entries cost; the full
+    # action_class/kind rationale stays in this tool's notes. Same printed table.
+    # RE-MEASURED (proposal ask summary): 1471 -> 1500 (+29), the notes line
+    # telling the agent to ask with a 1-3 line summary + proposal id, never
+    # the full instructions (a pasted brief filled the ask card).
+    "agent": 1500,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -308,7 +324,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # yourself", "subagent" and "approved that action", which test_ask_tool.py
     # pins as the last-resort and irreversible-trigger contract; restoring them
     # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
-    "ask": 1083,
+    # 1083 -> 1112 (+29, multi-select recommendation set): `recommended` is
+    # now `int | list[int]` (an extra `array` arm in the schema) and the notes
+    # drop the false "preselected" and say a multi-select may recommend several.
+    # `recommended_all` is derived and hidden (SkipJsonSchema), so it costs 0.
+    "ask": 1112,
     "ask_withdraw": 452,
     # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
     # ("Files to show.") -- re-measured via this test's own print; bash is the only
@@ -611,7 +631,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # 673 -> 677 (round 1 remediation, D2/D4): the verb became mechanism-neutral
     # ("the reason the child ENDED"), because the same slot carries a PAUSE and a
     # paused child is halted-and-resumable, not stopped. Re-measured.
-    "hub": 721,
+    # 721 -> 853 (hub set_model, 2026-11 quota incident): the ``set_model`` op
+    # row, its ``effort``/``cascade`` fields and the subtree clause on
+    # ``pause``, net of the trimmed ``to``/``message``/``steps`` wording that
+    # kept the wire schema inside bench_context_budget.py's budget. Re-measured.
+    # 873 -> 875 (round 2, R2.3 + context-budget): the ops row names the
+    # ``model_choice=model`` a tier needs (+), net of trimming the ``model``
+    # and ``to`` field blurbs that put the wire schema 3 tokens over CI's
+    # budget (-). Re-measured.
+    "hub": 875,
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
@@ -667,6 +695,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # re-measured through this test's own printed table, not pasted.
     "project": 1143,
     "project_delete": 91,
+    # NEW (profile proposals, PR #3704): the deferred list/show/apply/reject
+    # tool for Agents proposals; 116 tokens through this test's printed table.
+    # RE-MEASURED (proposal ask summary): 116 -> 131 (+15), the description's
+    # "ask with a short summary plus the proposal id" sentence.
+    "profile_proposal": 131,
     "read": 345,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
@@ -684,6 +717,10 @@ MEASURED_TOKENS: dict[str, int] = {
     "read_public_copy": 133,
     "read_variable": 67,
     "secret": 186,
+    # NEW in this ledger (profile proposals, PR #3704): ``skill`` became a
+    # deferred DEFAULT tool, so the default surface this test walks now renders
+    # it; 427 tokens through this test's printed table, schema unchanged.
+    "skill": 427,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,
@@ -756,7 +793,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # the same -1 as the agent twin.
     # RE-MEASURED (PR #3143, Radient Saver pins): 1399 -> 1431 (+32), the
     # per-slot ``saver`` member field; the same printed table as ``agent``.
-    "team": 1464,
+    # RE-MEASURED (profile proposals, PR #3704): 1464 -> 1500 (+36), the same
+    # Agents-proposal notes line as ``agent``.
+    # RE-MEASURED (proposal ask summary): 1500 -> 1529 (+29), the same
+    # summary-plus-id notes line as ``agent``.
+    "team": 1529,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -807,7 +848,13 @@ MEASURED_TOKENS: dict[str, int] = {
 #: wording as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3143): agent 1437 -> 1470, the same +33 ``saver`` param
 #: as the canonical arm; ``task`` stays 764 (Saver is not a launch field).
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1491, "task": 764}
+#: RE-MEASURED (profile proposals, PR #3704): agent 1491 -> 1527, the same +36
+#: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
+#: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
+#: -27 field-description trim as the canonical arm; ``task`` stays 764.
+#: RE-MEASURED (proposal ask summary): agent 1500 -> 1529, the same +29
+#: summary-plus-id notes line as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1529, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -1561,3 +1608,52 @@ def test_read_description_advertises_the_tool_scheme() -> None:
     address from the tool it would read the doc with."""
     description = builtin.build_read_tool().description
     assert "tool://" in description
+
+
+def test_a_fallback_resolved_tool_serves_its_doc_without_the_read_hook() -> None:
+    """A deferred MCP tool's doc is served from ``fallback``, never published.
+
+    The loop's invalid-argument hint names ``tool://<name>`` for any tool absent
+    from the published array, including a deferred MCP tool the session
+    dispatches through its fallback resolver. That read must render the schema
+    (not ``Unknown tool``) and must NOT reach ``on_tool_read``, the hook that
+    publishes deferred schemas — the array is the prompt-cache prefix.
+    """
+    held = _tool("read")
+    outside = _tool(
+        "mcp__x_y",
+        description="y on x",
+        parameters={"type": "object", "properties": {"q": {"type": "string"}}},
+    )
+    hooked: list[str] = []
+
+    def hook(name: str) -> str | None:
+        hooked.append(name)
+        return "published"
+
+    resolver = make_tool_doc_resolver(
+        lambda: [held],
+        on_tool_read=hook,
+        fallback=lambda name: outside if name == outside.name else None,
+    )
+
+    doc = resolver("tool://mcp__x_y")
+    assert doc is not None
+    assert doc.startswith("# Tool: `mcp__x_y`")
+    assert "`q`" in doc
+    assert "does not add it to the list" in doc
+    assert "published" not in doc
+    assert hooked == []
+    # A name neither holds is still the actionable miss, not a fallback crash.
+    miss = resolver("tool://mcp__x_z")
+    assert miss is not None and miss.startswith("Unknown tool: mcp__x_z")
+    # An inventory hit still wins over the fallback and still runs the hook.
+    assert resolver("tool://read") is not None
+    assert hooked == ["read"]
+
+    def boom(name: str) -> AgentTool | None:
+        raise RuntimeError("resolver down")
+
+    # A raising fallback is a miss: the resolver contract is "never raises".
+    broken = make_tool_doc_resolver(lambda: [held], fallback=boom)
+    assert (broken("tool://mcp__x_y") or "").startswith("Unknown tool: mcp__x_y")

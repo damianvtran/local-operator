@@ -1,3 +1,4 @@
+import type { SettingsResultWire } from "./lib/settings-defer";
 import type { SupplementBeat } from "./lib/supplement";
 
 /**
@@ -325,8 +326,15 @@ export interface AskQuestion {
 	    question this is `0`). Reading a per-option boolean instead would have
 	    been dead code against a real runtime: the harness `AskOption` model
 	    serialises `{label, description}` and has no such field. `null`/absent
-	    means no recommendation was stated. */
+	    means no recommendation was stated. A multi-select may recommend several
+	    rows: `recommended` is still the first (`0`) and `recommended_all` lists
+	    the whole set (`[0..k-1]`, only when k >= 2) — read both through
+	    `recommendedRows` in `lib/asks.ts`. */
 	recommended?: number | null;
+	/** Every recommended row, `[0..k-1]`; present only for a set of two or more
+	    (`asks/queue._question_shape` omits it otherwise, and older runtimes never
+	    send it, so an absent key means "just `recommended`"). */
+	recommended_all?: number[] | null;
 	/** The credential case: the answer is a masked paste field, and the answer
 	    map holds the KEY the runtime stored, never the value (§4). */
 	secret: boolean;
@@ -658,6 +666,11 @@ export interface SessionProjection {
 	 * (`lib/supplement.ts`, `beatLive`): 0 means a disk rebuild.
 	 */
 	supplements?: Record<string, SupplementBeat>;
+	/** The latest identified settings outcome per kind (`model`/`effort`/`fast`),
+	    each keyed by the `request_id` a deferred pick sent. Absent on an older
+	    owner and on a projection with no identified switch yet — both read as
+	    "no outcome". Reconciled by `lib/settings-defer.ts` (PR #3697 R1-M2). */
+	settings_results?: Record<string, SettingsResultWire>;
 }
 
 /** The opener of an agent workstream, mirroring the desktop contract
@@ -989,8 +1002,11 @@ export type CommandOp =
 			expand_skills?: boolean;
 		}
 	| { op: "abort" }
-	| { op: "set_model"; provider: string; model_id: string }
-	| { op: "set_effort"; effort: string }
+	/* `defer_ok` + `request_id` (both optional): a busy session answers
+	   `detail: "queued"` at once instead of holding the request for a whole
+	   turn step; the change applies at the next step (QUEUED_DETAIL). */
+	| { op: "set_model"; provider: string; model_id: string; defer_ok?: boolean; request_id?: string }
+	| { op: "set_effort"; effort: string; defer_ok?: boolean; request_id?: string }
 	| { op: "slash"; command: string; args: string }
 	/* `slash_result` is the ROUTED slash op — the one the runtime's authority seam
 	   was built for, and the one the desktop backend and the TUI's attached pane

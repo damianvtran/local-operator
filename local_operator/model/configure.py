@@ -4229,6 +4229,15 @@ class SessionStreamFn:
         # It holds the SELECTOR rather than a bare bool so only the model the
         # switch was made to can spend it — see ``preflight_usage`` (review F10).
         self._quota_recheck_for: str | None = None
+        # A re-probe requested from OUTSIDE the turn (``hub op='set_model'`` or
+        # a hub steer on a running subagent). A subagent's whole task is ONE
+        # user message, so ``begin_message`` never fires again for it and a
+        # quota pin placed at its first call was never re-probed: children
+        # stayed on the fallback for hours after the primary's quota returned.
+        # Its own token for the reason ``_quota_recheck_for`` has one: the
+        # message-boundary flag also gates effort CLASSIFICATION, and a hub
+        # nudge must not re-grade the turn. See :meth:`request_reprobe`.
+        self._reprobe_pending = False
         self._primary_selector: str | None = None
         self._usage_checked_selector: str | None = None
         self._usage_checked_at = 0.0
@@ -5124,6 +5133,44 @@ class SessionStreamFn:
         this build is the only boundary at which the fact can be recorded.
         """
         self._route_state.launch_pin = selector
+
+    def clear_launch_pin(self) -> None:
+        """Drop the launch pin: the child now INHERITS rather than owns a model.
+
+        The inverse of :meth:`mark_launch_pin`, used only by ``hub
+        op='set_model' model='inherit'``. Left in place, the pin's same-family
+        descent and cross-vendor refusal would keep steering an inheriting
+        child's failover by a tier it no longer runs on.
+        """
+        self._route_state.launch_pin = None
+
+    def request_reprobe(self, *, withdraw: bool = False) -> None:
+        """Treat the NEXT model call as a quota re-probe boundary.
+
+        Why: a successful fallback stays pinned for the rest of a user message,
+        and a running subagent's whole task is one message, so its pin was
+        never re-decided while it ran. A hub nudge (``set_model``, ``steer``)
+        is the only boundary a running child gets; this arms the preflight's
+        gate for it without spending the effort-classification token.
+
+        ``withdraw`` also drops the pinned route outright (the same silent
+        clear an explicit ``/model`` re-selection uses): an operator saying
+        "go back to the primary" overrides even a transport pin's cooldown, and
+        a primary still out of quota simply fails over again on that call. A
+        plain steer does NOT withdraw: it re-probes exactly as a new user
+        message would, so a transport pin keeps its cooldown.
+
+        Synchronous like :meth:`withdraw_fallback`; the probe itself runs inside
+        the next ``preflight_usage``.
+        """
+        if withdraw:
+            self.withdraw_fallback()
+        self._reprobe_pending = True
+
+    @property
+    def route_quota_pinned(self) -> bool:
+        """Whether the active fallback was pinned on a QUOTA verdict."""
+        return self._route_state.active is not None and self._route_state.quota_pinned
 
     def set_fast_refused_handler(
         self, handler: Callable[[str, str], Awaitable[None] | None] | None
@@ -6072,7 +6119,14 @@ class SessionStreamFn:
         # carrying the pre-switch spec can neither open the gate nor spend the
         # check the new model is owed (review F10).
         recheck_due = self._quota_recheck_for == selector
-        if not self._message_boundary_pending and not recheck_due:
+        # A hub-requested re-probe (``request_reprobe``) opens the gate like a
+        # message boundary for the QUOTA half only, and resets the memo so the
+        # probe is not answered by the reading that placed the pin.
+        reprobe = self._reprobe_pending
+        if reprobe:
+            self._reprobe_pending = False
+            self._usage_checked_at = 0.0
+        if not self._message_boundary_pending and not recheck_due and not reprobe:
             return
         # The boundary token also gates effort CLASSIFICATION in ``__call__``;
         # a switch-time probe (``consume_boundary=False``) must not spend it,

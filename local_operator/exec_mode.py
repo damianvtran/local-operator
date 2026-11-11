@@ -33,7 +33,7 @@ from uuid import uuid4
 
 from local_operator.i18n.keys import wire_exec as _wd
 from local_operator.i18n.text import tr
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import session_python_argv
 from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.procstate import O_BINARY
 
@@ -198,7 +198,9 @@ def slugify(command: str, max_length: int = 40) -> str:
 def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     """Serialize the exec request into ``python -m local_operator.exec_worker``
     argv. Only set flags are passed so defaults stay in one place (worker)."""
-    # ``python_argv``: `exec --background` is launched from wherever the user
+    # ``session_python_argv``: an independent background session follows the
+    # current generation rather than its launcher's pinned build, and
+    # `exec --background` is launched from wherever the user
     # happens to be standing, and the worker imports the whole harness
     # (session_factory, agents, config) — so a run started inside a checkout of
     # this project would execute that checkout rather than the installed build,
@@ -211,7 +213,7 @@ def build_worker_argv(command: str, exec_args: ExecArgs) -> list[str]:
     # terminal ledger row is ever written and reconciliation reports the run as
     # `interrupted`: the vocabulary reserved for a worker killed mid-flight,
     # for a run that never started. The `=` form is unambiguous for any value.
-    argv = python_argv("-m", "local_operator.exec_worker", f"--prompt={command}")
+    argv = session_python_argv("-m", "local_operator.exec_worker", f"--prompt={command}")
     from local_operator.exec_startup import STARTUP_FIELDS
 
     for field in STARTUP_FIELDS:
@@ -750,7 +752,14 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
     # `sys.executable` (see `procname.spawn_identity`).
     from local_operator import procname
 
-    argv0, executable = procname.spawn_identity(procname.LABEL_EXEC, job=job_id)
+    # Branding must describe the selected generation too. Replacing only
+    # argv[0] with this parent's image would silently undo current selection.
+    if argv[0] == sys.executable:
+        argv0, executable = procname.spawn_identity(procname.LABEL_EXEC, job=job_id)
+    else:
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_EXEC, argv[0], job=job_id
+        )
     argv = list(argv)
     argv[0] = argv0
 

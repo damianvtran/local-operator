@@ -285,6 +285,16 @@ async def test_share_typing_only_settings_put_is_local_and_round_trips(rig, monk
             {"expected_account_id": "acc_a", "share_typing": False, "label": "x"},
             id="pref-with-hub-field",
         ),
+        # The state-less branch returns before the screening write, so a
+        # screening choice here would be dropped silently; it is refused instead.
+        pytest.param(
+            {
+                "expected_account_id": "acc_a",
+                "share_typing": False,
+                "screening_model": "openrouter/x",
+            },
+            id="pref-with-screening-model",
+        ),
     ],
 )
 async def test_a_stateless_settings_put_is_only_the_preference(rig, body):
@@ -366,7 +376,11 @@ async def test_combined_settings_put_saves_and_echoes_share_typing(rig, monkeypa
     monkeypatch.setattr(TeamBridgeClient, "put_settings", hub_put)
     response = await rig.http.put(SETTINGS, json=STATE_BODY)
     assert response.status_code == 200, response.text
-    assert response.json()["result"] == {"state": "paused", "share_typing": False}
+    result = response.json()["result"]
+    # The Screening model block rides every state write too (it has its own
+    # tests); popped so the typing contract stays an exact comparison.
+    assert result.pop("screening")["preferred"] is None
+    assert result == {"state": "paused", "share_typing": False}
     assert "share_typing" not in sent  # machine-local, never sent upstream
     assert _local_share_typing(rig.config_dir) is False
 
@@ -403,4 +417,6 @@ async def test_combined_settings_put_local_save_failure_returns_hub_payload(rig,
     response = await rig.http.put(SETTINGS, json=STATE_BODY)
     assert response.status_code == 200, response.text
     # Read back, not echoed: the save failed, so the value that holds is True.
-    assert response.json()["result"] == {"state": "paused", "share_typing": True}
+    result = response.json()["result"]
+    assert result.pop("screening")["preferred"] is None
+    assert result == {"state": "paused", "share_typing": True}
