@@ -384,3 +384,126 @@ def test_physical_cd_into_a_component_relinked_earlier_is_never_low(
     # Review round 2 (pre-existing): ``cd -P`` resolved the CHECK-time link.
     verdict = _classify(home, command.format(pad=lnk))
     assert verdict.risk is not Risk.LOW, verdict.targets
+
+
+# Review round 3 (R3-1, PR #3811): a link this command made and then MOVED or
+# COPIED as a link (``mv``, ``cp -a``/``-P``) keeps its target, so a ``..``
+# through the destination lands where the source pointed. Dropping the target
+# at the destination read the missing destination as a directory, and the
+# own-pad relaxation ranked the lexical ``<pad>/config.yml`` HIGH — below main,
+# which ranks every such shape CRITICAL.
+@pytest.mark.parametrize(
+    ("command", "lands"),
+    [
+        (
+            f"ln -sfn {_STATE}/secrets {{pad}}/a && mv {{pad}}/a {{pad}}/b"
+            " && rm -f {pad}/b/../config.yml",
+            "config.yml",
+        ),
+        (
+            f"ln -sfn {_STATE}/secrets {{pad}}/a && cp -P {{pad}}/a {{pad}}/b"
+            " && rm -f {pad}/b/../config.yml",
+            "config.yml",
+        ),
+        (
+            f"ln -sfn {_STATE}/secrets {{pad}}/a && cp -a {{pad}}/a {{pad}}/b"
+            " && rm -f {pad}/b/../config.yml",
+            "config.yml",
+        ),
+        # Moving INTO the link's directory leaves ``a`` the link it was.
+        (
+            f"ln -sfn {_STATE}/secrets {{pad}}/a && mv {{pad}}/tmpd {{pad}}/a"
+            " && rm -f {pad}/a/../config.yml",
+            "config.yml",
+        ),
+        (
+            f"ln -sfn {_STATE}/sessions/other/sub {{pad}}/a && mv {{pad}}/a {{pad}}/b"
+            " && echo x >> {pad}/b/../asks.jsonl",
+            "sessions/other/asks.jsonl",
+        ),
+        # ``-t DIR``: the link lands as ``DIR/<name>``.
+        (
+            f"mkdir -p {{pad}}/x && ln -sfn {_STATE}/secrets {{pad}}/x/a"
+            " && mv -t {pad} {pad}/x/a && rm -f {pad}/a/../config.yml",
+            "config.yml",
+        ),
+        # A link already on disk carries its ``readlink`` target.
+        ("mv {pad}/slk {pad}/b && rm -f {pad}/b/../config.yml", "config.yml"),
+    ],
+)
+def test_moved_or_copied_link_keeps_its_target(
+    home: Path, slk: Path, command: str, lands: str
+) -> None:
+    verdict = _classify(home, command.format(pad=slk))
+    assert verdict.risk is Risk.CRITICAL, verdict.targets
+    landing = _real(home / ".local-operator") + "/" + lands
+    assert any(t.target.path == landing for t in verdict.targets), verdict.targets
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'mv "$(cat f)" {pad}/b && rm -f {pad}/b/../config.yml',
+        "cp -a {pad}/nope {pad}/b && rm -f {pad}/b/../config.yml",
+        'ln -sfn "$(cat f)" {pad}/a && mv {pad}/a {pad}/b && rm -f {pad}/b/../config.yml',
+    ],
+)
+def test_move_of_an_unknowable_source_keeps_mains_critical(
+    home: Path, lnk: Path, command: str
+) -> None:
+    # The destination may become any link, and its target cannot be known:
+    # the lexical landing under session state keeps main's CRITICAL rule.
+    verdict = _classify(home, command.format(pad=lnk))
+    assert verdict.risk is Risk.CRITICAL, verdict.targets
+
+
+# Review round 3 (R3-2, PR #3811): ``l_k -> l_{k+1}/../l_{k+1}`` made the
+# re-link walk resolve each sibling again at every level — 2^N — and the walker
+# ran it for every named path, before and outside the judge timeout. The kernel
+# gives up after 32/40 links in total, so the walk now shares one hop budget
+# and fails closed (unknown) when it runs out.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -f {pad}/c/l0/x",
+        "rm -f {pad}/nope/../c/l0/x",
+        "ln -sfn {pad}/build {pad}/q && rm -f {pad}/nope/../c/l0/x",
+        "ln -sfn {pad}/c/l0 {pad}/q && rm -f {pad}/q/../x",
+    ],
+)
+def test_nested_link_chain_resolves_in_bounded_time(home: Path, command: str) -> None:
+    import time
+
+    pad = _pad(home)
+    chain = pad / "c"
+    depth = 24
+    (chain / f"l{depth}").mkdir(parents=True)
+    for k in range(depth):
+        (chain / f"l{k}").symlink_to(f"l{k + 1}/../l{k + 1}")
+    start = time.monotonic()
+    verdict = _classify(home, command.format(pad=pad))
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, elapsed
+    if "/../" in command:
+        # Unpinned: never LOW, whether or not the walk ran out of hops.
+        assert verdict.risk is Risk.HIGH, verdict.targets
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"ln -sfn {_STATE} {{pad}}/lnk && cd -P {{pad}} && cd -P lnk && rm -f config.yml",
+        f"ln -sfn {_STATE}/secrets {{pad}}/lnk && cd -P {{pad}} && rm -f lnk/../config.yml",
+    ],
+)
+def test_physical_cwd_still_sees_a_relinked_component(home: Path, lnk: Path, command: str) -> None:
+    # Review R3-3 (PR #3811): after ``cd -P`` the cwd is the realpath
+    # (``/private/var/...`` on macOS), which never prefix-matched the lexical
+    # spelling the ``ln`` recorded, so the re-link was missed and this was LOW.
+    # The pad is spelled through a link here (as ``/var`` is on macOS), since
+    # pytest's ``tmp_path`` is already physical.
+    alias = home.parent / "alias"
+    alias.symlink_to(home)
+    spelled = alias / lnk.relative_to(home)
+    verdict = _classify(home, command.format(pad=spelled))
+    assert verdict.risk is not Risk.LOW, verdict.targets

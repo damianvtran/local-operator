@@ -485,7 +485,14 @@ def _kernel_reason(target: Target, prot: _Protected) -> str | None:
         # Opaque, globbed or unresolvable: no exemption, so the literal path
         # decides; under session state that is CRITICAL.
         lexical = target.path or ""
-        if target.unpinned and any(_in_own_pad(s, prot) for s in _spellings(lexical)):
+        if (
+            target.unpinned
+            # A component an earlier ``mv``/``cp`` filled from a source whose
+            # link target is unknowable may point anywhere: main's rule holds
+            # (resolve.Target.relink_unknown, review R3-1 on PR #3811).
+            and not target.relink_unknown
+            and any(_in_own_pad(s, prot) for s in _spellings(lexical))
+        ):
             # A ``..`` after a component that does not exist yet
             # (``mkdir -p <pad>/n && rm -rf <pad>/n/../build``) whose lexical
             # landing is this session's OWN pad. If ``n`` ends up a directory

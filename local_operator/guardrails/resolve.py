@@ -907,6 +907,12 @@ class Target:
     #: session, stays CRITICAL and the judge is shown that file (review R2-1,
     #: QA Q2-1 on PR #3811). Empty when it equals ``path`` or cannot be built.
     landings: tuple[str, ...] = ()
+    #: An ``unpinned`` word whose re-linked component an earlier ``mv``/``cp``
+    #: filled from a source whose link target cannot be known (a variable, a
+    #: source missing now, or one this command already changed unknowably).
+    #: ``classify`` then denies the own-pad relaxation and keeps main's rule —
+    #: a lexical landing under session state is CRITICAL (review R3-1, PR #3811).
+    relink_unknown: bool = False
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
@@ -1057,8 +1063,21 @@ def _physical(text: str, cwd: str | None) -> tuple[str | None, bool, bool]:
     return path, False, False
 
 
+#: Links :func:`_relinked_landing` follows in ONE walk, in total, before it
+#: gives up — Linux's MAXSYMLINKS (macOS stops at 32), after which the kernel
+#: itself fails the lookup with ELOOP. A bound on nesting alone was not enough:
+#: ``l_k -> l_{k+1}/../l_{k+1}`` resolved each sibling again at every level, so
+#: 16 planted links took ~20 s and 24 would take hours, before and outside the
+#: judge timeout (review R3-2, PR #3811).
+_MAX_RELINK_HOPS = 40
+
+
 def _relinked_landing(
-    raw: str, links: Mapping[str, str], *, follow_last: bool = False, depth: int = 0
+    raw: str,
+    links: Mapping[str, str],
+    *,
+    follow_last: bool = False,
+    memo: dict[str, str] | None = None,
 ) -> str | None:
     """Where the kernel lands the absolute, un-normalised ``raw`` if every
     MISSING component becomes a directory and each component in ``links``
@@ -1078,9 +1097,20 @@ def _relinked_landing(
     ``links``, so it reads as what is on disk now; the target stays unpinned
     and is never ranked below HIGH, which is the conservative answer there.
     ``follow_last``: resolve the final component too (a link's own target).
+    ``memo`` (link path -> where it resolves) is valid only while ``links``
+    and the filesystem are unchanged; the walker clears its copy whenever
+    ``link_targets`` changes. ``None`` too once :data:`_MAX_RELINK_HOPS`
+    links were followed: unknown, which ranks HIGH (CRITICAL if the lexical
+    reading is), the fail-closed answer for a lookup the kernel refuses too.
     """
-    if depth > 40:
-        return None
+    return _relinked_walk(raw, links, follow_last, [_MAX_RELINK_HOPS], {} if memo is None else memo)
+
+
+def _relinked_walk(
+    raw: str, links: Mapping[str, str], follow_last: bool, budget: list[int], memo: dict[str, str]
+) -> str | None:
+    """One :func:`_relinked_landing` walk; ``budget`` is shared by every
+    recursive call of it, so the total number of links followed is bounded."""
     comps = [c for c in raw.split("/") if c not in ("", ".")]
     cur = "/"
     for k, comp in enumerate(comps):
@@ -1100,14 +1130,21 @@ def _relinked_landing(
             # A directory, a file, or missing: missing reads as a directory.
             cur = nxt
             continue
-        resolved = _relinked_landing(
-            pointee if pointee.startswith("/") else os.path.join(cur, pointee),
-            links,
-            follow_last=True,
-            depth=depth + 1,
-        )
+        resolved = memo.get(nxt)
         if resolved is None:
-            return None
+            budget[0] -= 1
+            if budget[0] < 0:
+                return None
+            resolved = _relinked_walk(
+                pointee if pointee.startswith("/") else os.path.join(cur, pointee),
+                links,
+                True,
+                budget,
+                memo,
+            )
+            if resolved is None:
+                return None
+            memo[nxt] = resolved
         cur = resolved
     return cur
 
@@ -1724,6 +1761,12 @@ class _Walker:
         #: spells it) -> target as written. Any later naming of the path drops
         #: its entry (:meth:`_name`), so only the latest known link is used.
         self.link_targets: dict[str, str] = {}
+        #: ``mv``/``cp`` destinations (both spellings) filled from a source
+        #: whose link target cannot be known: see ``Target.relink_unknown``.
+        self.unknown_links: set[str] = set()
+        #: :func:`_relinked_landing` memo for the current ``link_targets``;
+        #: cleared on every change to it (:meth:`_set_link`, :meth:`_name`).
+        self._landing_memo: dict[str, str] = {}
         #: ``for VAR in a b c`` literal lists: a target using $VAR fans out.
         self.for_lists: dict[str, list[str]] = {}
         #: The loop variable each ``for_lists`` entry derives from (itself for
@@ -2034,7 +2077,7 @@ class _Walker:
                     # are reads either way.
                     self._add(dest, "append", name)
                 else:
-                    self._add_overwrite_dest(dest, name, operands[:-1])
+                    self._add_overwrite_dest(dest, name, operands[:-1], flags)
                 if (
                     name != "install"
                     and len(operands) == 2
@@ -2377,10 +2420,8 @@ class _Walker:
                 # A component an earlier part of this command re-linked is
                 # followed at RUN time, not as it is now (review round 2,
                 # PR #3811): unknown cwd, so later relative words rank HIGH.
-                named = self.linked | self.named
-                if raw is not None and any(
-                    os.path.normpath(raw[: m.start()] or "/") in named
-                    for m in re.finditer(r"/|$", raw)
+                if raw is not None and self._names_any(
+                    {os.path.normpath(raw[: m.start()] or "/") for m in re.finditer(r"/|$", raw)}
                 ):
                     path = None
             else:
@@ -2527,10 +2568,15 @@ class _Walker:
             self._add_stdin("mv")
         if target_dir is not None:
             sources = operands
+            if target_dir.text.startswith("--target-directory="):
+                value = target_dir.text.split("=", 1)[1]
+                target_dir = None if target_dir.opaque else Expanded(text=value)
+            if target_dir is not None:
+                self._add_into_dir(target_dir, "mv", sources)
         else:
             sources = operands[:-1]
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], "mv", sources)
+                self._add_overwrite_dest(operands[-1], "mv", sources, flags)
         for w in sources:
             self._add(w, "move", "mv")
 
@@ -2835,8 +2881,7 @@ class _Walker:
         path is named through the link itself and S7 (``_add``) covers it.
         """
         raw = _joined(text, self.state.cwd)
-        named = self.linked | self.named
-        if raw and named and ".." in raw.split("/"):
+        if raw and (self.linked or self.named) and ".." in raw.split("/"):
             parts = raw.split("/")
             last = max(k for k, part in enumerate(parts) if part == "..")
             prefixes = {
@@ -2844,10 +2889,12 @@ class _Walker:
                 for k in range(1, last + 1)
                 if parts[k - 1] not in ("", ".", "..")
             }
-            if prefixes & named:
+            if self._names_any(prefixes):
                 target.unpinned = True
+            if prefixes & self.unknown_links:
+                target.relink_unknown = True
         if target.unpinned and target.raw_path is not None:
-            landing = _relinked_landing(target.raw_path, self.link_targets)
+            landing = self._landing(target.raw_path)
             if landing is not None and landing != target.path:
                 target.landings = (landing,)
         for spelled in (target.path, os.path.normpath(raw) if raw else None):
@@ -2859,10 +2906,52 @@ class _Walker:
         ``named``); it may no longer be the link ``link_targets`` recorded."""
         path = path.rstrip("/") or "/"
         self.named.add(path)
-        self.link_targets.pop(path, None)
-        key = _relinked_landing(path, self.link_targets)
-        if key is not None:
-            self.link_targets.pop(key, None)
+        if not self.link_targets:
+            # Nothing to invalidate: skip the walk, which only maps ``path``
+            # to its ``link_targets`` key (review R3-2, PR #3811).
+            return
+        key = self._landing(path)
+        for stale in (path, key):
+            if stale is not None and self.link_targets.pop(stale, None) is not None:
+                self._landing_memo.clear()
+
+    def _landing(self, path: str, *, follow_last: bool = False) -> str | None:
+        """:func:`_relinked_landing` against this command's ``link_targets``,
+        memoised until they change."""
+        return _relinked_landing(
+            path, self.link_targets, follow_last=follow_last, memo=self._landing_memo
+        )
+
+    def _set_link(self, key: str, pointee: str) -> None:
+        self.link_targets[key] = pointee
+        self._landing_memo.clear()
+        self.unknown_links.discard(key)
+
+    def _names_any(self, prefixes: set[str]) -> bool:
+        """Whether an earlier part of this command named (or linked) any of
+        ``prefixes``, compared by spelling AND by physical location.
+
+        WHY. After ``cd -P`` the cwd is the realpath (``/private/var/…`` on
+        macOS), while a path named before it kept the spelling it was written
+        with (``/var/…``): ``ln -sfn <state> <pad>/lnk && cd -P <pad> &&
+        cd -P lnk`` missed the re-link and ranked a later delete LOW (review
+        R3-3, PR #3811). The final component is kept as spelled — resolving it
+        would follow the very link in question.
+        """
+        named = self.linked | self.named
+        if not named or not prefixes:
+            return False
+        if prefixes & named:
+            return True
+
+        def physical(p: str) -> str:
+            head, tail = os.path.split(p)
+            try:
+                return os.path.join(os.path.realpath(head), tail)
+            except OSError:
+                return p
+
+        return bool({physical(p) for p in prefixes} & {physical(n) for n in named})
 
     def _record_link(self, link: Expanded, pointee: Expanded, flags: list[str]) -> None:
         """Remember ``link -> pointee`` for :func:`_relinked_landing` when both
@@ -2883,9 +2972,58 @@ class _Walker:
             return
         if os.path.isdir(path) and not no_deref:
             return
-        key = _relinked_landing(path, self.link_targets)
+        key = self._landing(path)
         if key is not None:
-            self.link_targets[key] = pointee.text
+            self._set_link(key, pointee.text)
+
+    def _link_state(self, src: Expanded) -> tuple[bool, str | None]:
+        """``(known, link target)`` of what ``mv``/``cp`` of ``src`` puts at
+        its destination: a link to ``target``, or (``target`` ``None``) not a
+        link. Unknown for a non-literal source, one missing now (something
+        unmodelled may create it), or one this command already changed in a
+        way ``link_targets`` does not record.
+
+        ``cp`` without ``-P``/``-a``/``-R`` copies what a link points at, not
+        the link; treating it as a link anyway only ever reads the riskier
+        landing (a copied link-to-directory without ``-R`` fails anyway).
+        """
+        if src.opaque or src.pattern is not None or src.empty or not src.text:
+            return False, None
+        path, _ = _absolute(src.text, self.state.cwd)
+        if path is None:
+            return False, None
+        path = path.rstrip("/") or "/"
+        key = self._landing(path)
+        if key is None:
+            return False, None
+        if key in self.link_targets:
+            return True, self.link_targets[key]
+        if {path, key} & self.unknown_links or self._names_any({path, key}):
+            return False, None
+        try:
+            if os.path.islink(key):
+                return True, os.readlink(key)
+            return os.path.lexists(key), None
+        except OSError:
+            return False, None
+
+    def _carry_link(self, dest: str, state: tuple[bool, str | None]) -> None:
+        """Record at ``dest`` the link ``state`` a move/copy put there.
+
+        WHY (review R3-1, PR #3811). Naming the destination dropped any link
+        it held, so ``ln -sfn <state>/secrets <pad>/a && mv <pad>/a <pad>/b &&
+        rm -f <pad>/b/../config.yml`` read ``b`` as a fresh directory and the
+        own-pad relaxation ranked ``<pad>/config.yml`` HIGH — below main's
+        CRITICAL — while rename(2) keeps the link and the kernel removes the
+        state root's ``config.yml``. The target string moves as written, so a
+        relative one resolves from the new place, as the kernel does.
+        """
+        known, pointee = state
+        key = self._landing(dest)
+        if known and pointee is not None and key is not None:
+            self._set_link(key, pointee)
+        elif not known:
+            self.unknown_links.update(p for p in (dest, key) if p is not None)
 
     def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
         """``(loop vars, {ref name: value})`` for every iteration after the first.
@@ -2950,28 +3088,57 @@ class _Walker:
         ]
 
     def _add_overwrite_dest(
-        self, exp: Expanded, program: str, sources: list[Expanded] | None = None
+        self,
+        exp: Expanded,
+        program: str,
+        sources: list[Expanded] | None = None,
+        flags: list[str] | None = None,
     ) -> None:
         if exp.opaque or exp.pattern is not None:
             return
         path, _ = _absolute(exp.text, self.state.cwd)
-        if path is not None:
+        no_target_dir = _has_short(flags or [], "T") or "--no-target-directory" in (flags or [])
+        # A destination this command itself made a link to an existing
+        # directory stays that link: the move lands INSIDE it (review R3-1).
+        resolved = None if path is None else self._landing(path, follow_last=True)
+        into = not no_target_dir and resolved is not None and os.path.isdir(resolved)
+        kept_link = (
+            into
+            and path is not None
+            and self._landing(path.rstrip("/") or "/") in self.link_targets
+        )
+        if path is not None and not kept_link:
             # The destination may BECOME a link (``mv <link> <dest>`` after an
             # earlier ``rm -rf <dest>``): see ``_unpin_relinked``.
             self._name(path)
-        if path is not None and os.path.isdir(path):
-            # Moving/copying INTO a directory replaces nothing named here, but
-            # it CREATES ``dir/<source name>``: recorded as an append so a
-            # fake session directory moved into ``<state>/sessions/`` is ranked
-            # (``classify._evidence_reason``) and nothing else changes.
-            for src in sources or ():
-                if src.opaque or src.pattern is not None or not src.text:
-                    continue
-                name = os.path.basename(src.text.rstrip("/"))
-                if name:
-                    self._add(Expanded(text=os.path.join(path, name)), "append", program)
+        if path is not None and into:
+            self._add_into_dir(exp, program, sources or [])
             return
+        states = [self._link_state(s) for s in sources or ()]
         self._add(exp, "overwrite", program)
+        if path is not None and len(states) == 1:
+            self._carry_link(path.rstrip("/") or "/", states[0])
+
+    def _add_into_dir(self, exp: Expanded, program: str, sources: list[Expanded]) -> None:
+        """``mv``/``cp`` of ``sources`` INTO the directory ``exp``."""
+        if exp.opaque or exp.pattern is not None:
+            return
+        path, _ = _absolute(exp.text, self.state.cwd)
+        if path is None:
+            return
+        # Moving/copying INTO a directory replaces nothing named here, but
+        # it CREATES ``dir/<source name>``: recorded as an append so a
+        # fake session directory moved into ``<state>/sessions/`` is ranked
+        # (``classify._evidence_reason``) and nothing else changes.
+        for src in sources:
+            if src.opaque or src.pattern is not None or not src.text:
+                continue
+            name = os.path.basename(src.text.rstrip("/"))
+            if name:
+                state = self._link_state(src)
+                landed = os.path.join(path, name)
+                self._add(Expanded(text=landed), "append", program)
+                self._carry_link(landed, state)
 
     def _add_stdin(self, program: str) -> None:
         self.result.targets.append(
