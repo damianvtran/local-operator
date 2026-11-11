@@ -8,5 +8,11 @@
   "wire.settings.keymap.push_to_talk.label": "دبا کر بولیں",
   "wire.settings.keymap.push_to_talk.help": "بولنے کے لیے دبائے رکھیں (ڈیسک ٹاپ)؛ روکنے کے لیے چھوڑ دیں۔",
   "wire.settings.keymap.start_recording.label": "ریکارڈنگ شروع کریں",
-  "wire.settings.keymap.start_recording.help": "ڈیسک ٹاپ ونڈو میں آواز سے متن کی ریکارڈنگ شروع کرتا ہے۔"
+  "wire.settings.keymap.start_recording.help": "ڈیسک ٹاپ ونڈو میں آواز سے متن کی ریکارڈنگ شروع کرتا ہے۔",
+  "wire.settings.keymap.send_steer.label": "ہدایت کے طور پر بھیجیں",
+  "wire.settings.keymap.send_steer.help": "پیغام فوراً بھیجتا ہے اور جاری مرحلے میں مداخلت کرتا ہے۔ Ctrl/Alt/Cmd+Enter صرف ان ٹرمینلز میں کام کرتے ہیں جو بہتر کیز سپورٹ کرتے ہیں؛ Alt+حرف ہر جگہ کام کرتا ہے (macOS ٹرمینلز میں Option-as-Meta درکار ہے)۔",
+  "wire.settings.keymap.send_queue.label": "قطار کے طور پر بھیجیں",
+  "wire.settings.keymap.send_queue.help": "موجودہ مرحلہ مکمل ہونے کا انتظار کرتا ہے اور چلتے ٹولز میں کبھی مداخلت نہیں کرتا۔ Ctrl/Alt/Cmd+Enter صرف ان ٹرمینلز میں کام کرتے ہیں جو بہتر کیز سپورٹ کرتے ہیں؛ Alt+حرف ہر جگہ کام کرتا ہے (macOS ٹرمینلز میں Option-as-Meta درکار ہے)۔",
+  "wire.settings.keymap.send_both.label": "دونوں کے طور پر بھیجیں",
+  "wire.settings.keymap.send_both.help": "قطار کی طرح انتظار کرتا ہے، پھر پیغام زیادہ دیر رکا رہے تو ہدایت کی طرح مداخلت کرتا ہے۔ Ctrl/Alt/Cmd+Enter صرف ان ٹرمینلز میں کام کرتے ہیں جو بہتر کیز سپورٹ کرتے ہیں؛ Alt+حرف ہر جگہ کام کرتا ہے (macOS ٹرمینلز میں Option-as-Meta درکار ہے)۔"
 }

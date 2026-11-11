@@ -8,5 +8,11 @@
   "wire.settings.keymap.push_to_talk.label": "Диктовка по удержанию",
   "wire.settings.keymap.push_to_talk.help": "Удерживайте для диктовки (настольное приложение); отпустите, чтобы остановить.",
   "wire.settings.keymap.start_recording.label": "Начать запись",
-  "wire.settings.keymap.start_recording.help": "Запускает запись речи в текст в окне настольного приложения."
+  "wire.settings.keymap.start_recording.help": "Запускает запись речи в текст в окне настольного приложения.",
+  "wire.settings.keymap.send_steer.label": "Отправить: направить",
+  "wire.settings.keymap.send_steer.help": "Отправляет сообщение сразу и прерывает выполняемый шаг. Ctrl/Alt/Cmd+Enter работают только в терминалах с расширенными клавишами; Alt+буква работает везде (в терминалах macOS нужен режим Option-as-Meta).",
+  "wire.settings.keymap.send_queue.label": "Отправить: очередь",
+  "wire.settings.keymap.send_queue.help": "Ждёт завершения текущего шага и не прерывает работающие инструменты. Ctrl/Alt/Cmd+Enter работают только в терминалах с расширенными клавишами; Alt+буква работает везде (в терминалах macOS нужен режим Option-as-Meta).",
+  "wire.settings.keymap.send_both.label": "Отправить: оба",
+  "wire.settings.keymap.send_both.help": "Ждёт в режиме «очередь», затем прерывает в режиме «направить», если сообщение ждёт слишком долго. Ctrl/Alt/Cmd+Enter работают только в терминалах с расширенными клавишами; Alt+буква работает везде (в терминалах macOS нужен режим Option-as-Meta)."
 }

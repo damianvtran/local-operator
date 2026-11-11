@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "e63432faaadab70b7d7674e51d226dc5dcfa43c27d3b25ce0be0795364df91c2",
+  "history_sha256": "7d72b81ce91681586107a9d9a58dc6fc3c207c1fa40c73ae40560957c71e13fe",
   "entries": [
     {
       "locale": "vi",
@@ -39,6 +39,31 @@
       },
       "status": "passed",
       "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 3 minor, 3 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "7d7c99be977d274ef0cc085e8c39b835deb8610d20b37cdf3f684f83287f6fea",
+      "context_sha256": "46b2338b08fcaefaf543bf874bf5c48d00ed76401c55ee73e8f7aa4f18c4176c",
+      "target_sha256": "2257184884e904641ae9e85b70ff84ec0311ec0d8906862b95a45f4743a21c19",
+      "keys_audited": 6,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts, new keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S3 TUI send-chord rows 5425d7845 (branch feat/tui-send-chords, 2026-11-11): 6 NEW keys wire.settings.keymap.send_steer/send_queue/send_both (label/help); en source and en context sidecar gained the 6 keys in 77d1fa2ba; keys_audited 6. Translator and auditor as row. Audit: vi PASS first pass, 0 findings.  No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }
