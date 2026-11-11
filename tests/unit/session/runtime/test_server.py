@@ -7413,10 +7413,16 @@ async def test_shutdown_cancels_a_switch_still_queued() -> None:
 class _TuiBackedHandle(FakeHandle):
     from local_operator.mobile.tui_handle import TuiSessionHandle as _Tui
 
-    set_model = _Tui.set_model
-    set_model_effort = _Tui.set_model_effort
-    set_effort = _Tui.set_effort
-    run_slash_authoritative = _Tui.run_slash_authoritative
+    # The REAL function objects, not delegating wrappers: the runtime decides
+    # deferral by ``inspect.signature`` (does it take ``request_id``?), so a
+    # hand-copied wrapper signature would keep this test green after
+    # TuiSessionHandle's real signature changed. Pyright rejects the override
+    # only because the bodies' ``self`` is TuiSessionHandle, not FakeHandle;
+    # at runtime they need only the attributes this class stubs below.
+    set_model = _Tui.set_model  # pyright: ignore[reportAssignmentType]
+    set_model_effort = _Tui.set_model_effort  # pyright: ignore[reportAssignmentType]
+    set_effort = _Tui.set_effort  # pyright: ignore[reportAssignmentType]
+    run_slash_authoritative = _Tui.run_slash_authoritative  # pyright: ignore[reportAssignmentType]
 
     def __init__(self) -> None:
         super().__init__()
