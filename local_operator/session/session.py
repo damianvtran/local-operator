@@ -1087,6 +1087,9 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # receives it (`_job_id` is set before the merge, so the builder refuses).
     # Appended last for the same prefix reason as `sessions`.
     "notify",
+    "generate_music",
+    "modify_music",
+    "music_status",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -6738,6 +6741,9 @@ class Session:
         # outlived its runtime gets its check-wake ensured here, before the
         # first turn — see ``_boot_video_jobs``.
         await self._boot_video_jobs()
+        from local_operator.music.jobs import recover as recover_music_jobs
+
+        await recover_music_jobs(self._build_tool_context())
         if self._resume_catchup_text is not None and not self._resume_catchup_sent:
             # A catch-up still pending after the pump: the re-armed fire lands
             # at (or microseconds before) the grace deadline, and a COLD
@@ -21977,6 +21983,8 @@ class Session:
             # rows themselves, and this method is the ONE append path for
             # ``video_job_v1`` records (see ``journal_video_job``).
             journal_video_job=self.journal_video_job,
+            journal_music_job=self.journal_music_job,
+            session_disposed=lambda: self._disposed,
             # The audio lane's late-settlement pair: a cancelled-but-running
             # job may finish minutes after the tool returned, so the settle
             # poll rides the SESSION's background task set (tracked, and
@@ -23554,6 +23562,10 @@ class Session:
         except OSError:
             logger.warning("could not journal credential binding change", exc_info=True)
 
+    async def journal_music_job(self, record: dict[str, Any]) -> None:
+        """Persist music recovery identity without making bookkeeping fresh work."""
+        await self._transcript.append_custom("music_job_v1", record, preserve_mtime=True)
+
     async def journal_video_job(self, record: dict[str, Any]) -> None:
         """Append one durable ``video_job_v1`` record (media wave-2, video phase).
 
@@ -23662,7 +23674,7 @@ class Session:
         # settled video job delivers its review result exactly like a child,
         # and its cancellations never reach here (the manager's task-cancel
         # arm returns before delivery, as for every type).
-        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video"):
+        if getattr(job, "consumed", False) or job.type not in ("task", "bash", "video", "music"):
             return
         if self._leaving_deliveries:
             # A result that arrives AFTER the departure latch must not be
@@ -24175,7 +24187,7 @@ class Session:
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
             details["held"] = True
-        if getattr(job, "type", "") == "video":
+        if getattr(job, "type", "") in ("video", "music"):
             # The video receipt rides the row for the review turn (§5.3 of the
             # video contract): digest/content_type/duration/model/cost are the
             # facts a surface (or the model) needs to find the attachment
@@ -24183,7 +24195,10 @@ class Session:
             # progress channel (``latest_details``), so the delivery path stays
             # generic — task/bash rows keep their exact two-key shape.
             latest = getattr(job, "latest_details", None)
-            receipt = latest.get("video_receipt") if isinstance(latest, dict) else None
+            receipt_key = (
+                "music_receipt" if getattr(job, "type", "") == "music" else "video_receipt"
+            )
+            receipt = latest.get(receipt_key) if isinstance(latest, dict) else None
             if isinstance(receipt, dict):
                 details.update(receipt)
         return CustomMessage(
@@ -26327,11 +26342,52 @@ class Session:
         idle_flush_ms = int(getattr(compaction_api, "IDLE_FLUSH_MS", 5_400_000))
         if int(time.time() * 1000) - last_ms < idle_flush_ms:
             return
+        # The same cold-cache proof licenses shrinking the tools array: this
+        # run's first request re-writes the prefix anyway.
+        self._demote_cold_mcp_tools()
         try:
             llm_history = self._render_for_compaction()
             await self._sweep_stale_outputs(compaction_api, settings, llm_history)
         except Exception:  # noqa: BLE001 — an optimisation must never fail a run
             logger.debug("pre-run idle sweep failed", exc_info=True)
+
+    def _demote_cold_mcp_tools(self) -> bool:
+        """Run the MCP wiring's idle-schema demotion at a cache-cold boundary.
+
+        Called from exactly two places, the only moments a tools-array change
+        costs (close to) nothing: the idle flush in :meth:`_sweep_before_run`
+        (a gap of ``IDLE_FLUSH_MS`` has expired the provider cache) and a
+        compaction COMMIT in :meth:`_finish_compaction` (the history behind the
+        prefix is being rewritten, so the next request is a cache write of the
+        conversation anyway; the tools+system head is the small part of it).
+        Anywhere else a removal is a ``tools_changed`` miss on a warm cache.
+
+        THE SHRINK MUST LAND ON THAT SAME REQUEST. The array is latched once per
+        turn (:meth:`_wire_tools`); a compaction can commit mid-turn, and with
+        the latch held the smaller array would reach the provider only at the
+        NEXT turn — by which point the compacted history is warm again, so the
+        change would cost a second full miss. Clearing the latch here, and only
+        when the demotion actually moved something, makes the post-boundary
+        request publish the shrunk array together with its already-cold
+        rewrite. That is the one narrowly scoped exception to "publish once per
+        turn"; nothing else clears the latch mid-turn.
+
+        ``_mcp_cold_boundary_prune`` is installed by
+        ``session_factory.wire_mcp_into_session``; a session with no MCP wiring
+        (or a subagent, which borrows rather than owns the manager) has none.
+        Best-effort: bookkeeping must never fail a run or a compaction.
+        """
+        prune = getattr(self, "_mcp_cold_boundary_prune", None)
+        if prune is None:
+            return False
+        try:
+            changed = bool(prune())
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a run
+            logger.debug("MCP cold-boundary demotion failed", exc_info=True)
+            return False
+        if changed:
+            self._published_tools = None
+        return changed
 
     async def _plan_compaction(
         self, *, respect_threshold: bool, parked_hint: Any | None = None
@@ -26977,6 +27033,7 @@ class Session:
             plan.compaction_api,
             [m for m in plan.llm_history[: plan.cut] if _is_summarizable(m)],
             plan.strategy,
+            settings=plan.settings,
         )
 
     def _carried_tier_live_state(
@@ -27077,7 +27134,9 @@ class Session:
             summary, preserve_data = (
                 summarized
                 if summarized is not None
-                else await self._produce_summary(compaction_api, to_summarize, plan.strategy)
+                else await self._produce_summary(
+                    compaction_api, to_summarize, plan.strategy, settings=plan.settings
+                )
             )
             # THE ATTACHMENTS MANIFEST, on the session's own compaction path:
             # merged once, after either strategy produced its payload, exactly
@@ -27584,6 +27643,9 @@ class Session:
             # receipt's own units (see where it is computed above), then the
             # whole figure bounded by what it is reporting a reduction FROM.
             tokens_after = min(plan.context_tokens, tokens_after + frame_correction)
+            # The commit has landed: the next request re-writes the history, so
+            # idle published MCP schemas leave the tools array on THAT request.
+            self._demote_cold_mcp_tools()
             outcome = CompactionOutcome(
                 ran=True,
                 strategy=plan.strategy,
@@ -27913,8 +27975,37 @@ class Session:
         except ImportError:
             return "context-full"
 
+    @staticmethod
+    def _snapcompact_threshold_tokens(
+        compaction_api: Any, window: int | None, settings: Any
+    ) -> int | None:
+        """``T_eff`` for sizing a snapcompact archive, or ``None`` (legacy sizing).
+
+        The archive and its verbatim edges are sized against the trigger the
+        committed context must land under (see
+        ``snapcompact.EDGE_THRESHOLD_FRACTION``); on a 1M window the old
+        window-based budget (500k) sat above the 400k trigger itself. Resolved
+        through the ONE rule (``resolve_threshold_tokens``) rather than
+        re-derived here. ``None`` — no settings (a test double calling the
+        pre-threshold shape), no window, or an API without the resolver —
+        keeps the legacy window sizing, so this can only shrink the archive.
+        """
+        resolver = getattr(compaction_api, "resolve_threshold_tokens", None)
+        if settings is None or not window or resolver is None:
+            return None
+        try:
+            return int(resolver(window, settings))
+        except Exception:
+            logger.debug("threshold resolve failed; legacy archive sizing", exc_info=True)
+            return None
+
     async def _produce_summary(
-        self, compaction_api: Any, to_summarize: list[Message], strategy: str
+        self,
+        compaction_api: Any,
+        to_summarize: list[Message],
+        strategy: str,
+        *,
+        settings: Any = None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Summary text + optional ``preserve_data`` for one compaction pass.
 
@@ -27967,6 +28058,9 @@ class Session:
                     self._previous_archive_text(),
                     context_window=effective.context_window,
                     previous_carry=self._previous_archive_carry(),
+                    threshold_tokens=self._snapcompact_threshold_tokens(
+                        compaction_api, effective.context_window, settings
+                    ),
                 )
                 summary = snapcompact.archive_summary(
                     archive, effective.provider, effective.model_id

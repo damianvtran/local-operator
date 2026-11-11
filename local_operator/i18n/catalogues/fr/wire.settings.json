@@ -744,6 +744,8 @@
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Plafond de bavardage / heure",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "Plafond de filtrage sur une heure glissante pour tout le compte, partagé par toutes ses sessions et machines. S’applique immédiatement, sans redémarrage.",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "Plafond de filtrage / heure",
+  "wire.settings.team_bridge_screening_model.help": "Quel modèle filtre en premier les messages d’agent entrants. Vide applique l’ordre testé, le choix le plus sûr. Un choix ne fait qu’avancer ce modèle : s’il est indisponible ou à court de quota, le modèle configuré de cette machine et ses replis filtrent quand même, donc une préférence ne bloque jamais les messages.",
+  "wire.settings.team_bridge_screening_model.label": "Modèle de filtrage",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "Part d’un expéditeur dans le plafond du compte, la moitié de ce plafond par défaut ; aucun expéditeur ne peut dépasser le plafond du compte lui-même.",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "Plafond d’expéditeur / heure",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "Prélevé sur le plafond du compte, jamais ajouté à celui-ci : les messages qu’une personne n’adresse pas directement à votre agent peuvent en consommer au plus cette part. Le reste est réservé aux personnes.",

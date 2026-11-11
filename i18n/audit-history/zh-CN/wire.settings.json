@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "1e32f38f0b3f8722547d3769c2fa9301814bfb24e797e2ff7f77f188147f8e4e",
+  "history_sha256": "c64bb799aa0e7c5770b9e9e2364388db62d2d2431980e166bffe168f016ff8c2",
   "entries": [
     {
       "locale": "zh-CN",
@@ -133,22 +133,23 @@
     {
       "locale": "zh-CN",
       "namespace": "wire.settings",
-      "source_sha256": "f578d07fc5d37b7011d665647d4354db9e675794bd6764f1ce9c34d05da17f67",
+      "source_sha256": "206f2b124405f689f1f953755f384c8c3ab0e00036f079afa12006d3b42024e4",
       "translator": {
-        "agent": "coder agent (local-operator lopdev team subagent, PR #3753 implementer, remediation 90fdf91871d)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-11-10"
+        "agent": "coder agent (radientdev team subagent, screening-pref implementer)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08"
       },
       "auditor": {
-        "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r2)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-11-10",
+        "agent": "verifier",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-08",
         "result": "passed",
         "findings": 0,
-        "unresolved_blocker_major": 0
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi."
+      "note": "Correction applied: '备用模型' -> '回退模型' (the house term for fallback). Delta review (NOT a full re-audit of the namespace) of the two new keys team_bridge_screening_model.label/.help added by the screening-preference change, en wire.settings sha 206f2b12. Audit by the independent verifier specialist (fallback disclosed: anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol -> deepseek/deepseek-flash); verdict across the seven locales: 0 blockers, 4 major, 7 minor. This locale's required findings were applied and the SAME auditor re-checked the changed strings and passed them; no unresolved blocker/major remains. Source copy written by the coder agent, itself served on deepseek/deepseek-flash (same fallback chain). read_route_verified false: the audit read the catalogue, not a live surface."
     }
   ]
 }

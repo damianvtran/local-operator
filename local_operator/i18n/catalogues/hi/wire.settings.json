@@ -744,6 +744,8 @@
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "गपशप सीमा प्रति घंटा",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "पूरे खाते के लिए किसी भी बीते घंटे के भीतर स्क्रीनिंग की सीमा, जिसे खाते का हर सत्र और मशीन साझा करते हैं। तुरंत लागू होती है, फिर से शुरू करने की ज़रूरत नहीं।",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "स्क्रीनिंग सीमा प्रति घंटा",
+  "wire.settings.team_bridge_screening_model.help": "आने वाले एजेंट संदेशों को पहले कौन सा मॉडल स्क्रीन करे। खाली छोड़ने पर परीक्षित क्रम लागू होता है, जो सबसे सुरक्षित डिफ़ॉल्ट है। चुनाव केवल उस मॉडल को आगे लाता है: यदि वह उपलब्ध न हो या उसका कोटा ख़त्म हो, तो इस मशीन का अपना कॉन्फ़िगर किया गया मॉडल और उसके फ़ॉलबैक अब भी स्क्रीन करते हैं, इसलिए कोई प्राथमिकता संदेशों को कभी नहीं रोकती।",
+  "wire.settings.team_bridge_screening_model.label": "स्क्रीनिंग मॉडल",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "खाते की सीमा में से हर प्रेषक का हिस्सा, डिफ़ॉल्ट रूप से सीमा का आधा। कोई प्रेषक खाते की सीमा से आगे कभी नहीं जा सकता।",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "हर प्रेषक की सीमा प्रति घंटा",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "खाते की सीमा में से निकाला गया हिस्सा, उसमें जोड़ा नहीं जाता: आपके एजेंट को सीधे संबोधित करने वाले व्यक्ति के संदेशों को छोड़कर बाकी सब घंटे का ज़्यादा से ज़्यादा इतना ही हिस्सा ले सकता है। बचा हिस्सा लोगों के लिए रखा रहता है।",

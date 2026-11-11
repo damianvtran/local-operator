@@ -767,6 +767,12 @@ export type MessageParams = {
   "wire.memory.sync.help": undefined;
   "wire.memory.sync.label": undefined;
   "wire.memory.title": undefined;
+  "wire.music.cancel_requested": { "job": string };
+  "wire.music.failed": { "error": string };
+  "wire.music.label": undefined;
+  "wire.music.progress": { "completed": string; "total": string };
+  "wire.music.ready": { "job": string };
+  "wire.music.started": { "job": string };
   "wire.notification_sound.cli.add.help": undefined;
   "wire.notification_sound.cli.add.keep_loudness.help": undefined;
   "wire.notification_sound.cli.add.name.help": undefined;
@@ -1647,6 +1653,8 @@ export type MessageParams = {
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": undefined;
   "wire.settings.team_bridge_screening_budget_per_hour.help": undefined;
   "wire.settings.team_bridge_screening_budget_per_hour.label": undefined;
+  "wire.settings.team_bridge_screening_model.help": undefined;
+  "wire.settings.team_bridge_screening_model.label": undefined;
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": undefined;
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": undefined;
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": undefined;

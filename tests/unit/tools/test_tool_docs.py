@@ -261,6 +261,11 @@ _WALK_DEPTH_CAP = 2
 # top-arm raise (32,872 -> 33,364), whose child arm carries neither tool and
 # moves only by the shared ``system.md`` paragraph.
 MEASURED_TOKENS: dict[str, int] = {
+    # Music admission: measured through render_tool_doc/count_text_tokens with
+    # complete availability and isolated config. Existing docs are unchanged.
+    "generate_music": 271,
+    "modify_music": 269,
+    "music_status": 87,
     # RE-MEASURED (agent pictures, local-operator #1533 branch): 1364 -> 1408
     # (+44) on the clean arm and 1393 -> 1437 on the tier arm. The delta is the
     # one bullet telling the model how to set an agent's profile picture, which

@@ -6322,6 +6322,30 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=100_000,
         unit="screenings",
     ),
+    # The one screening row that is NOT a ceiling, and the reason it is not a
+    # violation of the admission-gate invariant (
+    # ``test_no_setting_can_disable_the_admission_gate`` looks at it): it chooses
+    # which EVALUATED screener is tried first and cannot express "off".
+    # ``resolve_screening_chain`` only ever RE-ORDERS the vetted pairs for a
+    # value on the table; an off-table or empty value leaves the chain in its
+    # tested order, and the receiver's own default and fallback chains run
+    # behind the preference either way. So no value of this key can leave a
+    # machine unable to screen, which is the operator directive of 2026-11-04.
+    # TEXT rather than ENUM: the table of evaluated pairs lives in
+    # ``team_bridge.model_boundary`` and this module must not import it, and the
+    # desktop status route carries that vetted list to the renderer that draws
+    # the choice. ``empty_unsets`` because "" is a real choice (no preference),
+    # not a missing value to hide from the page.
+    Setting(
+        key="team_bridge.screening.model",
+        path=("team_bridge", "screening", "model"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_model_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.team_bridge_screening_model_help()),
+        empty_unsets=True,
+    ),
     # -- asks ------------------------------------------------------------------
     # How long a LAPSED (timed-out, unanswered) ask stays shown, measured from
     # its deadline. Display only (D6): the late-answer window and the index

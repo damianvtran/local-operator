@@ -55,6 +55,7 @@ HEADER_PREFIX = "x-radient-cost-"
 #: metered tool type never needs a schema change to be visible.
 _TOOL_TYPE_CHANNELS = {
     "image_generation": "image",
+    "music_generation": "audio",
     "video_generation": "other",
     "speech": "tts",
     "transcription": "stt",
@@ -72,6 +73,7 @@ _UNIT_SPELLINGS = {
     "token": "tokens",
     "char": "chars",
     "second": "seconds",
+    "millisecond": "milliseconds",
     "image": "images",
     "megapixel": "megapixels",
     "search": "searches",

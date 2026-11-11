@@ -744,6 +744,8 @@
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "بات چیت کی فی گھنٹہ حد",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "پورے اکاؤنٹ کے لیے اسکریننگ کی بالائی حد، جو کسی بھی وقت کے پچھلے گھنٹے پر شمار ہوتی ہے اور اکاؤنٹ کے تمام سیشنز اور مشینوں پر مشترک ہے۔ فوراً لاگو ہوتی ہے، دوبارہ شروع کرنے کی ضرورت نہیں۔",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "اسکریننگ کی فی گھنٹہ حد",
+  "wire.settings.team_bridge_screening_model.help": "آنے والے ایجنٹ پیغامات کی اسکریننگ سب سے پہلے کون سا ماڈل کرے۔ خالی چھوڑنے پر آزمودہ ترتیب لاگو ہوتی ہے، جو سب سے محفوظ ڈیفالٹ ہے۔ انتخاب صرف اس ماڈل کو آگے لاتا ہے: اگر وہ دستیاب نہ ہو یا اس کا کوٹہ ختم ہو جائے تو اس مشین کا اپنا مقرر کردہ ماڈل اور اس کے فال بیکس پھر بھی اسکریننگ کرتے ہیں، اس لیے کوئی ترجیح پیغامات کو کبھی نہیں روکتی۔",
+  "wire.settings.team_bridge_screening_model.label": "اسکریننگ ماڈل",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "اکاؤنٹ کی بالائی حد میں ایک بھیجنے والے کا حصہ؛ بطور ڈیفالٹ یہ بالائی حد کا آدھا ہوتا ہے۔ کوئی بھیجنے والا اکاؤنٹ کی بالائی حد سے ہی آگے نہیں جا سکتا۔",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "بھیجنے والے کی فی گھنٹہ حد",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "اکاؤنٹ کی بالائی حد میں سے نکالا گیا حصہ ہے، اس میں کبھی اضافہ نہیں ہوتا: آپ کے ایجنٹ کو مخاطب کرنے والے شخص کے سوا سب کچھ گھنٹے کا زیادہ سے زیادہ اتنا حصہ استعمال کر سکتا ہے۔ بقیہ حصہ لوگوں کے لیے رکھا جاتا ہے۔",
