@@ -986,6 +986,19 @@ class ConversationFeedRef:
         return encoded
 
 
+#: The most ``/``-separated parts a conversation feed ref may carry. The
+#: longest shape the grammar can produce is the 4 fixed locator parts, the
+#: optional positional sender kind, and the four known tags
+#: (``legacy_alias``, ``thread_root``, ``addressed``, ``relation``) —
+#: 4 + 1 + 4 = 9. ``encode`` emits at most 8, because its own rules refuse
+#: the alias-plus-routing combinations the grammar states separately.
+#: 11 is deliberate slack above both: each unknown future tag costs one
+#: part and is ignored by the existing rule, so two of them still parse.
+#: The total only needs to stop a ref from growing without limit; the
+#: positional slots are bounded separately.
+_MAX_CONVERSATION_REF_PARTS = 11
+
+
 def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     """Decode a conversation feed ref value; ``None`` means malformed (skip, never guess).
 
@@ -995,12 +1008,15 @@ def parse_conversation_ref_value(value: str) -> ConversationFeedRef | None:
     from the EXACT full old key's UTF-8 bytes. This preserves distinct pending
     states even when names were the only difference. It is a name-derived
     operational digest, NOT anonymization, authority or forensic erasure.
+    Tags (``thread_root``, ``addressed``, ``relation``) may follow the
+    positionals and add parts beyond seven; the encoder emits up to
+    eight for a threaded reply carrying all three.
     """
 
     if not isinstance(value, str):
         return None
     parts = value.split("/")
-    if len(parts) not in (4, 5, 6, 7):
+    if len(parts) < 4 or len(parts) > _MAX_CONVERSATION_REF_PARTS:
         return None
     conversation_id, message_id, seq_text, mention_text = parts[:4]
     if _CANONICAL_DECIMAL.fullmatch(seq_text) is None:
