@@ -762,7 +762,7 @@
   "wire.settings.tools_search_interception_enabled.label": "拦截无界搜索",
   "wire.settings.tools_search_interception_rg_excludes.help": "为ripgrep生成配置，跳过node_modules/.git/out等目录，让未被守卫拦截的`rg`依然快速。仅适用于ripgrep。",
   "wire.settings.tools_search_interception_rg_excludes.label": "……为ripgrep裁剪vendor目录",
-  "wire.settings.delivery_busy_default.choice.both.description": "先等待，过慢则打断",
+  "wire.settings.delivery_busy_default.choice.both.description": "先等待，过慢则引导",
   "wire.settings.delivery_busy_default.choice.both.label": "排队后引导",
   "wire.settings.delivery_busy_default.choice.queue.description": "等待，绝不打断工具",
   "wire.settings.delivery_busy_default.choice.queue.label": "排队",

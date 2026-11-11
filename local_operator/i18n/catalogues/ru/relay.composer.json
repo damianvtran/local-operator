@@ -8,8 +8,9 @@
   "relay.composer.delivery.label": "доставка",
   "relay.composer.delivery.steer": "направить",
   "relay.composer.delivery.queue": "очередь",
-  "relay.composer.delivery.both": "оба",
+  "relay.composer.delivery.both": "очередь→направить",
   "relay.composer.delivery.steer_hint": "Прервать инструмент сразу",
   "relay.composer.delivery.queue_hint": "Ждать, не прерывая инструменты",
-  "relay.composer.delivery.both_hint": "Ждать, затем прервать, если долго"
+  "relay.composer.delivery.both_hint": "Ждать, затем направить, если ожидание затянется",
+  "relay.composer.delivery.both_chip": "очер.→напр."
 }

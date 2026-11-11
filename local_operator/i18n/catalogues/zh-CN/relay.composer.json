@@ -11,5 +11,6 @@
   "relay.composer.delivery.both": "排队后引导",
   "relay.composer.delivery.steer_hint": "立即打断运行中的工具",
   "relay.composer.delivery.queue_hint": "等待，绝不打断工具",
-  "relay.composer.delivery.both_hint": "先等待，过慢则打断"
+  "relay.composer.delivery.both_hint": "先等待，过慢则引导",
+  "relay.composer.delivery.both_chip": "排队→引导"
 }

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "218b2e38dec3df07d16bdedae637a760b4ce2e7ad6079776dfb42fb2371c13d2",
+  "history_sha256": "5a1b3f68218384a39bec135d948feeb1ad4218a69c5dbb48f35df298b167cc7b",
   "entries": [
     {
       "locale": "es",
@@ -275,6 +275,31 @@
       },
       "status": "passed",
       "note": "S6 re-translation (branch feat/tui-send-chords, HEAD 73bb22ca2 + uncommitted catalogues, 2026-11-11): 2 CHANGED-ENGLISH keys wire.settings.delivery_busy_default.help and wire.settings.delivery_busy_default.choice.steer.description (en source changed in 5425d7845/73bb22ca2); existing translations updated, values changed only in these 2 keys. keys_audited 2. Translator and auditor as row. Audit: es/zh-CN/ru/vi/ur PASS 0/0 first pass; fr FAIL round 1 (3 majors + 1 minor colon-spacing/antecedent) -> auditor replacements applied, round 2 PASS 0/0; hi FAIL round 1 (4 majors: override wording) -> auditor replacements applied, round 2 PASS 0/0. Receipt records round r2 (repo's next round id for this namespace) with final bytes. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "26fb2ec583bb65ac79ce1346123e97a67618e138a371ca79a52ff2577dddbfc1",
+      "context_sha256": "dc630a851848e6545d8a4603ee00430ddb426cbe73444eee185c4ee1674e61ad",
+      "target_sha256": "70eb76c4e1ea5e5eb7e4f487cb220d45eeb1dbf2aa4e8198187cacb05d76c240",
+      "keys_audited": 2,
+      "round": "r4",
+      "translator": {
+        "agent": "task subagent tr8-es (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-es job)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Wave S8 queue-then-steer rename, backend (branch feat/tui-send-chords at ae5669467, English source in 3b2bc7423, translated strings audited while still uncommitted, 2026-11-11): 2 keys in this namespace: wire.settings.delivery_busy_default.choice.both.label (changed), wire.settings.delivery_busy_default.choice.both.description (changed). Translator: task subagent tr8-es (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine); anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-es job). Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit rounds for es until PASS: rounds 1-3 FAIL, round 4 PASS, 0 blocker/major at the final round. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's final verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }

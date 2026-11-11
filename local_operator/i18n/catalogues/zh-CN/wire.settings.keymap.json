@@ -14,5 +14,5 @@
   "wire.settings.keymap.send_queue.label": "排队发送",
   "wire.settings.keymap.send_queue.help": "等待当前步骤，绝不打断工具。覆盖“忙碌时的发送方式”。",
   "wire.settings.keymap.send_both.label": "排队后引导发送",
-  "wire.settings.keymap.send_both.help": "先等待，过慢再打断。覆盖“忙碌时的发送方式”。"
+  "wire.settings.keymap.send_both.help": "先等待，过慢再引导。覆盖“忙碌时的发送方式”。"
 }

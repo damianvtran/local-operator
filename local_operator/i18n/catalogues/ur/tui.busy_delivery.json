@@ -1,4 +1,6 @@
 {
   "tui.busy_delivery.queue_notice": "قطار میں — انتظار، ٹولز چلتے رہیں گے",
-  "tui.busy_delivery.both_notice": "قطار میں — انتظار، دیر ہو تو مداخلت"
+  "tui.busy_delivery.both_notice": "قطار میں — انتظار، پھر دیر ہو تو ہدایت",
+  "tui.busy_delivery.steer_notice": "ہدایت — چلتا ٹول رک سکتا ہے",
+  "tui.busy_delivery.steer_joined_notice": "ہدایت — آپ کی ہدایت کے ساتھ جائے گا"
 }

@@ -1,4 +1,6 @@
 {
   "tui.busy_delivery.queue_notice": "कतार में — प्रतीक्षा, टूल चलते रहेंगे",
-  "tui.busy_delivery.both_notice": "कतार में — प्रतीक्षा, देर हुई तो रोक देगा"
+  "tui.busy_delivery.both_notice": "कतार में — प्रतीक्षा, देर हुई तो दिशा देगा",
+  "tui.busy_delivery.steer_notice": "दिशा दी जा रही है — चल रहा टूल रुक सकता है",
+  "tui.busy_delivery.steer_joined_notice": "दिशा दी जा रही है — आपकी दिशा के साथ जाएगा"
 }

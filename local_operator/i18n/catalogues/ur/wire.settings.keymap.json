@@ -13,6 +13,6 @@
   "wire.settings.keymap.send_steer.help": "فوراً بھیجتا ہے اور مرحلے میں مداخلت کرتا ہے۔ “مصروف ہونے پر ترسیل” کو بدل دیتا ہے۔",
   "wire.settings.keymap.send_queue.label": "قطار کے طور پر بھیجیں",
   "wire.settings.keymap.send_queue.help": "مرحلے کا انتظار کرتا ہے؛ ٹولز میں کبھی مداخلت نہیں کرتا۔ “مصروف ہونے پر ترسیل” کو بدل دیتا ہے۔",
-  "wire.settings.keymap.send_both.label": "دونوں کے طور پر بھیجیں",
-  "wire.settings.keymap.send_both.help": "انتظار، پھر دیر ہو تو مداخلت۔ “مصروف ہونے پر ترسیل” کو بدل دیتا ہے۔"
+  "wire.settings.keymap.send_both.label": "قطار، پھر ہدایت بھیجیں",
+  "wire.settings.keymap.send_both.help": "انتظار، پھر دیر ہو تو ہدایت۔ “مصروف ہونے پر ترسیل” کی جگہ لاگو ہوتا ہے۔"
 }

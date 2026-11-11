@@ -13,6 +13,6 @@
   "wire.settings.keymap.send_steer.help": "Envoyer et interrompre l’étape. Remplace « Envoi quand l’agent est occupé ».",
   "wire.settings.keymap.send_queue.label": "Envoi : file d’attente",
   "wire.settings.keymap.send_queue.help": "Attendre, sans interrompre d’outil. Remplace « Envoi quand l’agent est occupé ».",
-  "wire.settings.keymap.send_both.label": "Envoi : les deux",
-  "wire.settings.keymap.send_both.help": "Attendre, interrompre si ça tarde. Remplace « Envoi quand l’agent est occupé »."
+  "wire.settings.keymap.send_both.label": "Envoi : file, puis orienter",
+  "wire.settings.keymap.send_both.help": "Attendre, puis orienter si ça tarde. Remplace « Envoi quand l’agent est occupé »."
 }

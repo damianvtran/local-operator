@@ -1,4 +1,6 @@
 {
   "tui.busy_delivery.queue_notice": "en file — attend, les outils continuent",
-  "tui.busy_delivery.both_notice": "en file — attend, puis interrompt si ça tarde"
+  "tui.busy_delivery.both_notice": "en file — attend, puis oriente si ça tarde",
+  "tui.busy_delivery.steer_notice": "orientation — peut arrêter un outil en cours",
+  "tui.busy_delivery.steer_joined_notice": "orientation — part avec votre orientation"
 }

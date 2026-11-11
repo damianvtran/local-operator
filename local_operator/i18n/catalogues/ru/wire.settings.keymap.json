@@ -13,6 +13,6 @@
   "wire.settings.keymap.send_steer.help": "Отправить сразу, прервав шаг. Заменяет «Доставка, когда агент занят».",
   "wire.settings.keymap.send_queue.label": "Отправить: очередь",
   "wire.settings.keymap.send_queue.help": "Ждать, не прерывая инструменты. Заменяет «Доставка, когда агент занят».",
-  "wire.settings.keymap.send_both.label": "Отправить: оба",
-  "wire.settings.keymap.send_both.help": "Ждать, затем прервать, если долго. Заменяет «Доставка, когда агент занят»."
+  "wire.settings.keymap.send_both.label": "Отправить: очередь→направить",
+  "wire.settings.keymap.send_both.help": "Ждать, затем направить при долгом ожидании. Приоритетнее настройки «Доставка, когда агент занят»."
 }

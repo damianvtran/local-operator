@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.busy_delivery",
-  "history_sha256": "6043bdc5368c178c2e575eac17159de221148db293bae57db268f794b29f3ea2",
+  "history_sha256": "03fe9f03cd84623e9856c8c26ec46e084d558d7caf905823766614b2956a6168",
   "entries": [
     {
       "locale": "vi",
@@ -53,6 +53,31 @@
       "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 2 keys audited in this namespace (queue_notice/both_notice). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit (same auditor, only the 8 changed/new keys audited): PASS 0 blocker/major, no findings, first pass. Wave-1 accepted minors on steer.description/both_notice/help: the steer.description and both_notice minors are superseded (replaced in wave 2 and re-audited); the help minor stands (help unchanged). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
       "round": "r3",
       "keys_audited": 2
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.busy_delivery",
+      "source_sha256": "36cc49b438a1e3985b31772d69f30a76149c4f03aca5d2fdc2c3e274262955d7",
+      "context_sha256": "268cabb7f783510bb25851c49e937f595ac341f951750be503deab2d6480de24",
+      "target_sha256": "93fea32c3a7222fec954c7047ab5cd1bce3eb76964d095b1ffac163c47097dd9",
+      "keys_audited": 3,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent tr8-vi (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-vi job)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Wave S8 queue-then-steer rename, backend (branch feat/tui-send-chords at ae5669467, English source in 3b2bc7423, translated strings audited while still uncommitted, 2026-11-11): 3 keys in this namespace: tui.busy_delivery.both_notice (changed), tui.busy_delivery.steer_notice (new), tui.busy_delivery.steer_joined_notice (new). Translator: task subagent tr8-vi (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine); anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-vi job). Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit rounds for vi until PASS: round 1 PASS, 0 blocker/major at the final round. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's final verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field."
     }
   ]
 }
