@@ -4410,8 +4410,15 @@ class Session:
         # X (sticky) and the reply says when the schema joins the array. Passed
         # INTO the link rather than wrapped around it, so the value reaching the
         # executor is still the identity-checked ``ToolDocsLink``.
+        # ``fallback`` serves a deferred MCP tool's doc (dispatchable through
+        # the fallback resolver, absent from ``self._tools``) so the loop's
+        # "read tool://<name>" hint never dead-ends in ``Unknown tool``; it is
+        # rendered inline and NOT published (the array is the cache prefix).
         self._skill_resolver = chain_tool_docs(
-            skill_resolver, lambda: self._tools, on_tool_read=self._activate_on_tool_doc
+            skill_resolver,
+            lambda: self._tools,
+            on_tool_read=self._activate_on_tool_doc,
+            fallback=self._resolve_tool_outside_inventory,
         )
         self._request_approval = request_approval
         self._authorize_durable_write = authorize_durable_write
@@ -14146,6 +14153,11 @@ class Session:
         The deferral set minus role pins and minus what the session has
         already activated. Empty when ``tools.defer`` is off, which is the
         inverse canary: the pre-deferral array comes back.
+
+        Built-in names only (``tools/deferral.py``'s static set). MCP tools
+        defer through their own origin sets in ``session_factory``, and that
+        exclusion is load-bearing: the ``tool://`` and invalid-call activation
+        hooks gate on this set, and must never publish an MCP schema.
         """
         if not self._tool_deferral:
             return frozenset()
@@ -14229,6 +14241,11 @@ class Session:
         a VALID direct call does not activate (it already knew the arguments,
         and publishing would only rewrite the prefix). Hooked on the ledger
         callback because that sees every call exactly once, with its fault.
+
+        Built-in ``DEFERRED_TOOLS`` only: a deferred MCP tool's name is never
+        in :meth:`_deferred_now`, so an invalid call to one publishes nothing.
+        Its schema stays out of the cache-prefix array; the loop's hint sends
+        the model to ``tool://<name>``, which renders that schema inline.
         """
         from local_operator.harness.types import FAULT_INVALID_ARGUMENTS
 
