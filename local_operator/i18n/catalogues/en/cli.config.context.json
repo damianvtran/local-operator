@@ -1,0 +1,77 @@
+{
+  "cli.config.created": {
+    "role": "lop config create CLI confirmation line",
+    "tone": "plain, factual, operator-facing, one line",
+    "note": "{path} is a filesystem path printed verbatim; never translate or reorder its contents. 'configuration file' is the config.yml file the program reads at startup."
+  },
+  "cli.config.opened": {
+    "role": "lop config open CLI confirmation line, printed after the editor or system opener was launched",
+    "tone": "plain, factual, operator-facing, one line",
+    "note": "{path} is a filesystem path printed verbatim. Same noun as cli.config.created: keep the term for 'configuration file' identical."
+  },
+  "cli.config.cleared": {
+    "role": "lop config edit CLI confirmation line after an empty value UNSET a setting",
+    "tone": "plain, factual, operator-facing, one line",
+    "note": "{key} is a setting key such as display.terminal_title or model_effort; keep it verbatim (it is typed on the command line). The sentence says the setting is back to its built-in default value."
+  },
+  "cli.config.updated": {
+    "role": "lop config edit CLI confirmation line after a setting was written",
+    "tone": "plain, factual, operator-facing, one line; success, no exclamation",
+    "note": "{key} is a setting key, verbatim. {value} is the stored value or the label of the chosen option, already display-ready (may be True/False, a number, a word such as auto, or a list); insert it verbatim and do not translate booleans here."
+  },
+  "cli.config.running_sessions_unchanged": {
+    "role": "lop config edit CLI follow-up line printed only after tool_approval_mode was set to auto",
+    "tone": "plain, cautionary but calm; a safety clarification, not an alarm",
+    "note": "Safety meaning must survive: a config write does NOT loosen approval for sessions that are already running; the user must type the /approvals auto slash command inside each session. Keep '/approvals auto' verbatim (a typed command), and keep 'auto' as the mode word as it appears in the product. 'ungated' = not requiring tool approval. 'New sessions open at auto' = newly started sessions begin in auto mode. Printed as one line; may wrap on narrow terminals."
+  },
+  "cli.config.list_title": {
+    "role": "lop config list CLI box heading, printed inside a green box-drawing rule: '╭─ <title> ─────'",
+    "tone": "terse title, title case where the language has it",
+    "note": "Title of the table of all settings. Keep it short (under about 30 cells) because it sits in a fixed-width rule drawn by the program."
+  },
+  "cli.config.list_description": {
+    "role": "lop config list CLI row label: the line under each setting key giving what the setting does",
+    "tone": "terse label followed by the description sentence",
+    "note": "{description} is a one-line explanation of a setting; insert it verbatim (its language is chosen elsewhere). The leading word is a field label shown in an indented row under the key; keep it as a short noun followed by a colon (use the locale's colon convention)."
+  },
+  "cli.config.list_unrecognised": {
+    "role": "lop config list CLI text used as the description of a key found in the user's config file that no setting reads",
+    "tone": "plain, factual, lowercase clause; neutral (not blaming the user)",
+    "note": "Inserted after the field label 'Description:' (see cli.config.list_description), so it is a fragment, not a full sentence: it says the key is not a known setting and that nothing in the program reads it."
+  },
+  "cli.config.list_desc_hosting": {
+    "role": "lop config list CLI row: description of one setting, shown under its key after the 'Description:' label",
+    "tone": "terse, neutral, one line; a short noun phrase or sentence without final period",
+    "note": "Provider names (radient, openai, deepseek, anthropic, openrouter) are product/service identifiers; keep them verbatim. 'e.g.,' may be rendered with the locale's equivalent."
+  },
+  "cli.config.list_desc_model_name": {
+    "role": "lop config list CLI row: description of one setting, shown under its key after the 'Description:' label",
+    "tone": "terse, neutral, one line; a short noun phrase or sentence without final period",
+    "note": "Describes the model-name setting."
+  },
+  "cli.config.list_desc_conversation_length": {
+    "role": "lop config list CLI row: description of one setting, shown under its key after the 'Description:' label",
+    "tone": "terse, neutral, one line; a short noun phrase or sentence without final period",
+    "note": "Keep the leading bracket tag as a scannable tag in the locale's word for DEPRECATED, upper-cased where the script has case, in square brackets. 'compaction' is the product's conversation-compaction engine (a setting named compaction): translate it as the product term, not the config key. The retired setting is shown for old configs only."
+  },
+  "cli.config.list_desc_detail_length": {
+    "role": "lop config list CLI row: description of one setting, shown under its key after the 'Description:' label",
+    "tone": "terse, neutral, one line; a short noun phrase or sentence without final period",
+    "note": "Same bracket-tag rule as cli.config.list_desc_conversation_length. 'unsummarized' = not condensed by compaction."
+  },
+  "cli.config.list_desc_max_learnings_history": {
+    "role": "lop config list CLI row: description of one setting, shown under its key after the 'Description:' label",
+    "tone": "terse, neutral, one line; a short noun phrase or sentence without final period",
+    "note": "Same bracket-tag rule as cli.config.list_desc_conversation_length. 'learning entries' = saved lessons the agent keeps between sessions."
+  },
+  "cli.config.list_desc_classification_notice": {
+    "role": "lop config list CLI row: description of one setting, shown under its key after the 'Description:' label",
+    "tone": "terse, neutral, one line; a short noun phrase or sentence without final period",
+    "note": "Bracket tag as above, but without the 'superseded' clause. 'Smart hints' is the product feature name for automatic classification hints; keep one consistent term with the settings page. Says the feature no longer prints a chat line; the model call and its cost are recorded in the session log."
+  },
+  "cli.config.list_desc_auto_save_conversation": {
+    "role": "lop config list CLI row: description of one setting, shown under its key after the 'Description:' label",
+    "tone": "terse, neutral, one line; a short noun phrase or sentence without final period",
+    "note": "Describes a setting that applies to headless REPL launches."
+  }
+}

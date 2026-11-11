@@ -1,0 +1,17 @@
+{
+  "cli.config.created": "Created new configuration file at {path}",
+  "cli.config.opened": "Opened configuration file at {path}",
+  "cli.config.cleared": "Cleared {key}: it reads as its default again",
+  "cli.config.updated": "Successfully updated {key} to {value}",
+  "cli.config.running_sessions_unchanged": "Running sessions are unchanged — a config write cannot loosen one; type /approvals auto in each session you want ungated. New sessions open at auto.",
+  "cli.config.list_title": "Configuration Options",
+  "cli.config.list_description": "Description: {description}",
+  "cli.config.list_unrecognised": "not a recognised key; nothing reads it",
+  "cli.config.list_desc_hosting": "AI provider platform (e.g., radient, openai, deepseek, anthropic, openrouter)",
+  "cli.config.list_desc_model_name": "The specific model to use for interactions",
+  "cli.config.list_desc_conversation_length": "[DEPRECATED — superseded by compaction] Maximum number of messages to keep in conversation history",
+  "cli.config.list_desc_detail_length": "[DEPRECATED — superseded by compaction] Number of recent messages to leave unsummarized in conversation history",
+  "cli.config.list_desc_max_learnings_history": "[DEPRECATED — superseded by compaction] Maximum number of learning entries to retain",
+  "cli.config.list_desc_classification_notice": "[DEPRECATED] Smart hints is silent in the chat; the call and its cost are in the session log",
+  "cli.config.list_desc_auto_save_conversation": "Whether to automatically save conversations"
+}
