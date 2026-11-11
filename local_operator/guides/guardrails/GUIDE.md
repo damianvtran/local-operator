@@ -11,8 +11,10 @@ the call's own result and starts with `BLOCKED by guardrail`. It is final for TH
 action: the same effect on the same targets, by any spelling, tool or path — never
 reword, retry or reroute it; report it. It does not taint later work: a NEW artifact
 from your own fresh work, written to your own worktree's mandated location (a repo's
-`i18n/receipts/`, say), is a different action and needs no approval. Copying or
-importing the blocked material there by another route is still a reroute.
+`i18n/receipts/`, say), is a different action and needs no approval; a reader
+child's `evidence` tool (create-only, content-only) is the sanctioned path for it,
+so using it is fresh work, not a reroute. Copying or importing the blocked material
+there by another route is still a reroute.
 
 **Order, first refusal wins:** (1) the **built-in dangerous-delete** (bash only):
 CRITICAL is refused with no model call, HIGH goes to a forked judge, LOW runs with
