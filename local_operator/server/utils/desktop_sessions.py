@@ -423,7 +423,10 @@ class _OpenFrameSteps:
     WHY: ``a.snap.history`` measures the whole frame read, and on the operator's
     desktop it ran >10x past ``OPEN_FRAME_SNAPSHOT_BUDGET_S`` while its own
     ``page.read`` rows were small, so the overrun lives in a later await. Each
-    call marks the time since the previous one, so the rows sum to the read.
+    call marks the time since the previous one, so the top-level ``a.hist.*``
+    rows sum to the read. ``_frame_source`` keeps its own instance, so its
+    ``frame_source.*`` rows are a split INSIDE whichever top-level step called it
+    (``pages`` or ``frame_source``), not additional time: never add them in.
     Inert (one module-level ``None`` check) unless ``LOP_OPEN_TRACE`` is set.
     """
 
@@ -441,6 +444,28 @@ class _OpenFrameSteps:
             f"a.hist.{name}", (now - self._last) * 1000, session=self._session_id, **fields
         )
         self._last = now
+
+
+def _log_abandoned_proof_read(task: asyncio.Future[Any]) -> None:
+    """Retrieve, and log at debug, the outcome of a bounded proof-join read.
+
+    WHY: ``_with_peer_cycle_records`` stops waiting for its ``discover_records``
+    worker hop at the first frame's deadline (or when the request is cancelled),
+    but deliberately never cancels it mid-I/O. Such an abandoned read has no
+    other awaiter, so without this its failure would vanish -- or surface only as
+    asyncio's "Task exception was never retrieved" at garbage collection, with
+    no request context. A read that is awaited normally re-raises to its caller
+    and is retrieved there too; logging it here once more at debug is harmless.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug(
+            "Display-only proof join read failed (abandoned at the open-frame deadline "
+            "or by a cancelled request; the frame answered 'unavailable')",
+            exc_info=exc,
+        )
 
 
 def _never_retiring() -> bool:
@@ -5076,13 +5101,14 @@ class DesktopSessionBridge:
                         index=index,
                     )
                 )
+                # Attached BEFORE the wait, not in the timeout branch: a request
+                # cancelled mid-wait (the viewer navigated away) abandons the read
+                # too, and either way nobody else retrieves its exception.
+                read.add_done_callback(_log_abandoned_proof_read)
                 done, _pending = await asyncio.wait({read}, timeout=remaining_s)
                 if read in done:
                     records = read.result()
                 else:
-                    read.add_done_callback(
-                        lambda task: None if task.cancelled() else task.exception()
-                    )
                     records = no_proof_yet
             if records is None:
                 return answer

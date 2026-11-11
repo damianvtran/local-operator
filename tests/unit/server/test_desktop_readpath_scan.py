@@ -460,7 +460,12 @@ async def test_the_first_frame_does_not_wait_past_its_deadline_for_the_proof_joi
         trap = _GatedDiscover()
         monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
         try:
-            page = await _open_frame_page(harness, time.monotonic() + 0.05)
+            # 1.0 s, not tighter: the budget must outlast the session open plus
+            # the page read on a loaded CI runner so the frame always REACHES the
+            # join (a 50 ms budget expired first on shard 5, run 43080856512). It
+            # still discriminates: the old unbounded join blocks on the 30 s trap
+            # and ``_open_frame_page``'s 5 s ``wait_for`` fails the test.
+            page = await _open_frame_page(harness, time.monotonic() + 1.0)
         finally:
             trap.gate.set()
         expected = record_id(harness.session_id, "a-last", "root-call")
@@ -527,3 +532,68 @@ async def test_a_deadline_that_is_not_hit_serves_the_same_frame(
         bounded = await _open_frame_page(harness, time.monotonic() + 60)
         assert "peer_cycle_display_records" in bounded
         assert json.dumps(bounded, sort_keys=True) == json.dumps(unbounded, sort_keys=True)
+
+
+class _FailingDiscover(_GatedDiscover):
+    """Blocks until released, then raises: a read abandoned past the deadline."""
+
+    def __call__(self, *_: Any, **__: Any) -> dict[str, Any]:
+        self.calls += 1
+        self.gate.wait(30)
+        raise RuntimeError("archive read failed after the frame left")
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_proof_read_failure_is_logged_not_left_unretrieved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The read left running past the deadline is retrieved and logged once.
+
+    WOULD-HAVE-FAILED-BEFORE: nothing logged the abandoned read's exception, so
+    its failure was invisible (or surfaced only as asyncio's "Task exception was
+    never retrieved" on collection, with no request context).
+    """
+    import gc
+    import logging
+    import time
+
+    from local_operator.harness import peer_cycle_display
+    from local_operator.server.utils import desktop_sessions
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        trap = _FailingDiscover()
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        loop = asyncio.get_running_loop()
+        unretrieved: list[dict[str, Any]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+        caplog.set_level(logging.DEBUG, logger=desktop_sessions.logger.name)
+        try:
+            page = await _open_frame_page(harness, time.monotonic() + 1.0)
+            assert trap.calls == 1
+            assert page["peer_cycle_display_records"]["records"] == []
+            trap.gate.set()
+            # Let the worker raise and the done-callback run on the loop.
+            for _ in range(200):
+                if any(r.exc_info for r in caplog.records):
+                    break
+                await asyncio.sleep(0.01)
+            gc.collect()
+            await asyncio.sleep(0)
+        finally:
+            trap.gate.set()
+            loop.set_exception_handler(previous_handler)
+        failures = [
+            r
+            for r in caplog.records
+            if r.name == desktop_sessions.logger.name
+            and r.exc_info
+            and isinstance(r.exc_info[1], RuntimeError)
+        ]
+        assert len(failures) == 1, "the abandoned read's failure must be logged exactly once"
+        assert failures[0].levelno == logging.DEBUG
+        assert not [
+            c for c in unretrieved if "never retrieved" in str(c.get("message", ""))
+        ], "the abandoned read's exception must be retrieved, not left for GC"
