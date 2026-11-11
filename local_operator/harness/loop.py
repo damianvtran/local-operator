@@ -7948,9 +7948,11 @@ class AgentLoop:
                 exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
                 out = {
-                    key: value
-                    if key in _CONTENT_BEARING_DETAIL_KEYS
-                    else _redact_nested_strings(value, redact)
+                    key: (
+                        value
+                        if key in _CONTENT_BEARING_DETAIL_KEYS
+                        else _redact_nested_strings(value, redact)
+                    )
                     for key, value in details.items()
                 }
                 for key in _CONTENT_BEARING_DETAIL_KEYS:

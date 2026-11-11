@@ -5993,14 +5993,13 @@ def _scrub_guttered_plan(text: str) -> Optional[str]:
         return "".join(gutter + line for gutter, line in zip(gutters, laid))
     if len(new_lines) == len(lines):
         return "".join(gutter + line for gutter, line in zip(gutters, new_lines))
-    # Fallback past the diff budget (see ``_DIFF_MAX_EDITS``). The re-render changed the line count (a masked multi-line value collapses
-    # to one marker; a source-inline array expands). Every line keeps its
-    # ORIGINAL gutter and the output keeps the original line count (round-3
-    # review R3-3): a later ``read`` by range or an edit by line number lands
-    # where the file says. Unchanged lines are aligned from both ends; the
-    # changed middle is laid onto the original middle's slots — padded with
-    # empty lines when it shrank, its overflow joined onto the last slot when
-    # it grew.
+    # Fallback past the diff budget (see ``_DIFF_MAX_EDITS``). The re-render
+    # changed the line count (a masked multi-line value collapses to one
+    # marker; a source-inline array expands). Every line keeps its ORIGINAL
+    # gutter and the output keeps the original line count (round-3 review
+    # R3-3). Unchanged lines are aligned from both ends; the changed middle is
+    # laid onto the original middle's slots — padded with empty lines when it
+    # shrank, its overflow joined onto the last slot when it grew.
     lead = 0
     limit = min(len(new_lines), len(lines))
     while lead < limit and new_lines[lead] == stripped_lines[lead]:

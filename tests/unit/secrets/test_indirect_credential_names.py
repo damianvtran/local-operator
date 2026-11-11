@@ -94,8 +94,9 @@ def test_the_guttered_form_keeps_every_line_and_gutter() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "variables:\n  - key: DEPLOY_TOKEN\n    value: <V>\n  - key: region\n    value: us-east-1\n",
-        "env:\n- name: DB_PASSWORD\n  value: \"SECRET\"\n- name: region\n  value: us-east-1\n",
+        "variables:\n  - key: DEPLOY_TOKEN\n    value: <V>\n"
+        "  - key: region\n    value: us-east-1\n",
+        'env:\n- name: DB_PASSWORD\n  value: "<V>"\n- name: region\n  value: us-east-1\n',
         "vars:\n  AWS_SECRET_KEY:\n    value: <V>\n  region:\n    value: us-east-1\n",
         "env:\n- value: '<V>'\n  name: API_KEY_PROD\n- name: region\n  value: us-east-1\n",
     ],
@@ -120,7 +121,10 @@ def test_yaml_spellings_mask_the_value_only(text: str) -> None:
         # Counts and cache handles are not credentials.
         [{"name": "max_tokens", "value": "4096"}, {"key": "cache_key", "value": OTHER}],
         # A reference, a template and a store NAME are not values.
-        [{"name": "API_TOKEN", "value": "${API_TOKEN}"}, {"name": "DB_PASSWORD", "value": "{{ .Values.db }}"}],
+        [
+            {"name": "API_TOKEN", "value": "${API_TOKEN}"},
+            {"name": "DB_PASSWORD", "value": "{{ .Values.db }}"},
+        ],
         [{"key": "DEPLOY_TOKEN", "value": "MINERVA_DEPLOY_TOKEN"}],
         # A credential-named key whose sibling NAME is ordinary is judged by the sibling.
         {"secrets": {"name": "region", "value": OTHER}},
