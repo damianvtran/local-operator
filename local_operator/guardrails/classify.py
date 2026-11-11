@@ -26,6 +26,7 @@ best-effort ``stat`` calls whose failure never lowers a rank.
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import enum
 import fnmatch
@@ -36,6 +37,7 @@ import stat
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from local_operator.guardrails.resolve import (
     Creation,
@@ -656,7 +658,40 @@ _GLOB_CAP = 2000
 _GLOB_WALK_CAP = 20_000
 
 
+#: One classification's glob expansions, keyed by ``(pattern, globstar)``
+#: (MINOR-4, PR #3802): the evidence check and the worktree-reach check walk
+#: the SAME glob, and on a 20k-entry glob the second walk doubled the cost.
+#: INVARIANT: set only for the duration of one synchronous
+#: ``classify_targets`` call (``_glob_memo_scope``), so a cached expansion is
+#: never older than that call — no staler than either walk alone would be.
+_GLOB_MEMO: contextvars.ContextVar[dict[tuple[str, bool], Any] | None] = contextvars.ContextVar(
+    "lop_glob_memo", default=None
+)
+
+
+def _glob_memo_scope(fn: Any) -> Any:
+    @functools.wraps(fn)
+    def scoped(*args: Any, **kwargs: Any) -> Any:
+        token = _GLOB_MEMO.set({})
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _GLOB_MEMO.reset(token)
+
+    return scoped
+
+
 def _expand_glob(pattern: str, *, globstar: bool = False) -> list[tuple[str, bool]] | None:
+    memo = _GLOB_MEMO.get()
+    if memo is None:
+        return _expand_glob_uncached(pattern, globstar=globstar)
+    key = (pattern, globstar)
+    if key not in memo:
+        memo[key] = _expand_glob_uncached(pattern, globstar=globstar)
+    return memo[key]
+
+
+def _expand_glob_uncached(pattern: str, *, globstar: bool = False) -> list[tuple[str, bool]] | None:
     """Matches of ``pattern`` as BASH would expand it, or ``None`` past a bound.
 
     Bash semantics, because that is what the command will do (review round
@@ -1051,7 +1086,9 @@ def _glob_reaches_git_dir(pattern: str) -> str | None:
     return None
 
 
-def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
+def _rank(
+    target: Target, prot: _Protected, session_id: str = "", globstar: bool = False
+) -> RankedTarget:
     if target.landings:
         # An unpinned ``..``: rank the landing its missing and re-linked parts
         # produce (``Target.landings``) as well as ``path``, and keep the worse.
@@ -1060,10 +1097,10 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         # (review R2-1, QA Q2-1 on PR #3811). ``raw_path`` is the landing too,
         # so ``_kernel_reason`` judges it, not the check-time lookup.
         readings = [
-            _rank(dataclasses.replace(target, path=p, raw_path=p, landings=()), prot, session_id)
+            _rank(dataclasses.replace(target, path=p, raw_path=p, landings=()), prot, session_id, globstar)
             for p in target.landings
         ]
-        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id))
+        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id, globstar))
         return max(readings, key=lambda r: r.risk)
     path = target.path
     notes: list[str] = list(target.empty)
@@ -1231,7 +1268,7 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             worktree_note = f"linked worktree state: {state}; {facts}"
             notes.append(worktree_note)
     if not target.worktree_remove and target.op == "delete" and not target.selected:
-        reached = _reached_worktrees(target, path, prot, session_id)
+        reached = _reached_worktrees(target, path, prot, session_id, globstar=globstar)
         if reached is not None:
             return reached
     # Every spelling is ranked, not just the first with a reason: the verdict
@@ -1292,10 +1329,59 @@ def _changes_phrase(path: str) -> str:
 #: for any foreign tree regardless.
 _MAX_FOREIGN_SHOWN = 4
 _MAX_FOREIGN_STATES = 16
+#: Bounds on the per-tree lookups (``git status`` plus one ``gh``/``glab``
+#: PR lookup each) of one reaching delete (MINOR-5, PR #3802: own trees ran
+#: them serially and uncapped, ~2 s each). CHOICE: a small thread pool —
+#: the lookups are subprocess waits, not CPU — plus a count cap and ONE
+#: deadline for the whole set, all failing closed:
+#:
+#: - more than ``_MAX_OWN_CHECKED`` own trees: the rest are "not checked",
+#:   HIGH (the judge decides; one delete of 16+ of your own trees is rare);
+#: - a lookup unfinished at the deadline: "not checked in time", HIGH.
+#:
+#: The deadline is one tree's own worst case (``_WORKTREE_STATUS_TIMEOUT_S``
+#: + ``_GH_TIMEOUT_S``, both measured bounds in provenance), so a glob over N
+#: trees never waits longer than a literal delete of ONE may. Workers: 4
+#: keeps 16 trees at ~4 lookup rounds (~8 s at the measured 1.3–1.8 s per
+#: ``gh``) without fanning out more ``gh`` processes than a laptop shrugs off.
+_MAX_OWN_CHECKED = 16
+_REACH_LOOKUP_WORKERS = 4
+_REACH_LOOKUP_BUDGET_S = 68.0
+#: A reach scan past its entry budget (``provenance._REACH_MAX_ENTRIES``).
+REACH_TOO_WIDE = "too many entries to rule out a linked worktree under it"
+
+
+def _bounded_lookups(jobs: dict[str, Any]) -> dict[str, Any]:
+    """Run ``jobs`` (key → zero-arg callable) on the pool under one deadline.
+
+    Keys whose call raised or did not finish by ``_REACH_LOOKUP_BUDGET_S`` are
+    ABSENT from the result: every caller treats absent as unknown → HIGH. An
+    unfinished thread is abandoned, not joined — each lookup carries its own
+    subprocess timeout, so it ends on its own.
+    """
+    import concurrent.futures as cf
+
+    if not jobs:
+        return {}
+    pool = cf.ThreadPoolExecutor(
+        max_workers=min(_REACH_LOOKUP_WORKERS, len(jobs)), thread_name_prefix="lop-reach"
+    )
+    try:
+        futures = {pool.submit(fn): key for key, fn in jobs.items()}
+        done, _ = cf.wait(futures, timeout=_REACH_LOOKUP_BUDGET_S)
+        results: dict[str, Any] = {}
+        for fut in done:
+            try:
+                results[futures[fut]] = fut.result()
+            except Exception:  # noqa: BLE001 — a failed lookup is unknown → HIGH
+                continue
+        return results
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _reached_worktrees(
-    target: Target, path: str, prot: _Protected, session_id: str
+    target: Target, path: str, prot: _Protected, session_id: str, *, globstar: bool = False
 ) -> RankedTarget | None:
     """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
 
@@ -1316,34 +1402,62 @@ def _reached_worktrees(
       HIGH. Only own, clean and idle trees fall through to the ordinary
       ranking — the ledger LOW for a literal path, ``ordinary path`` for a
       container.
-    """
-    import glob as _glob
 
+    Cost (MINOR-4/5, PR #3802): a glob is expanded with the SAME bounded walk
+    the evidence check uses (``_expand_glob``; past it, HIGH
+    ``GLOB_TOO_WIDE``), the reach scan has one entry budget per call (past
+    it, HIGH ``REACH_TOO_WIDE``), and the per-tree lookups run under
+    ``_bounded_lookups``.
+    """
     from local_operator.guardrails import provenance as prov
 
     if target.pattern is not None:
-        try:
-            candidates = _glob.glob(target.pattern)
-        except (OSError, ValueError):
-            return None
+        matches = _expand_glob(target.pattern, globstar=globstar)
+        if matches is None:
+            # Fail closed here, not by trusting the evidence check to say the
+            # same (it does, over the same walk; the (path, risk) dedup keeps one row).
+            return RankedTarget(target, Risk.HIGH, GLOB_TOO_WIDE)
+        # Only a match with a link on the way needs ``realpath`` (~8 lstats
+        # each; it dominated a 1258-match ``.pnpm/*``): the rest are real
+        # already, as ``_glob_matches_evidence`` relies on too.
+        # A match that IS a symlink is dropped, as ``linked_worktrees_reached``
+        # drops one: ``rm -rf`` removes the link, not what it points at.
+        candidates = [
+            os.path.realpath(m) if linked else m
+            for m, linked in matches
+            if not (linked and os.path.islink(m))
+        ]
+        roots = prov.linked_worktrees_reached(candidates, resolved=True)
     else:
-        candidates = [path]
-    roots = prov.linked_worktrees_reached(candidates)
+        roots = prov.linked_worktrees_reached([path])
+    if roots is None:
+        return RankedTarget(target, Risk.HIGH, REACH_TOO_WIDE)
     if not roots:
         return None
     foreign: list[str] = []
-    held: list[str] = []
+    own: list[str] = []
     for root in roots:
         owned = (
             session_id
             and not any(_under(root, st) for st in prot.state_roots)
             and prov.owned_record(root, session_id) is not None
         )
-        if not owned:
-            foreign.append(root)
+        (own if owned else foreign).append(root)
+    checked, unchecked = own[:_MAX_OWN_CHECKED], own[_MAX_OWN_CHECKED:]
+    jobs: dict[str, Any] = {}
+    for root in checked:
+        jobs[f"state:{root}"] = lambda r=root: prov.worktree_state(r, own=True)
+        jobs[f"activity:{root}"] = lambda r=root: prov.worktree_activity(r, session_id)
+    for root in foreign[:_MAX_FOREIGN_STATES]:
+        jobs[f"fstate:{root}"] = lambda r=root: prov.worktree_state(r)
+    looked = _bounded_lookups(jobs)
+    held: list[str] = []
+    for root in checked:
+        state = looked.get(f"state:{root}")
+        activity = looked.get(f"activity:{root}")
+        if state is None or activity is None:
+            held.append(f"{root}: created by this session; not checked in time (state unknown)")
             continue
-        state = prov.worktree_state(root, own=True)
-        activity = prov.worktree_activity(root, session_id)
         facts = activity.facts()
         if activity.pr_state == "open":
             return RankedTarget(
@@ -1360,22 +1474,39 @@ def _reached_worktrees(
             held.append(
                 f"{root}: created by this session; linked worktree state: {state}{changes}; {facts}"
             )
+    if unchecked:
+        held.append(
+            f"… and {len(unchecked)} more linked worktrees created by this session, "
+            f"not checked (over {_MAX_OWN_CHECKED})"
+        )
     if not foreign and not held:
         return None
     parts = list(held)
-    states = {root: prov.worktree_state(root) for root in foreign[:_MAX_FOREIGN_STATES]}
+    states = {
+        root: looked.get(f"fstate:{root}", "unknown") for root in foreign[:_MAX_FOREIGN_STATES]
+    }
     # Work at risk first: a dirty/locked/busy tree is what the judge must see.
     foreign.sort(key=lambda r: states.get(r, "not read") == "clean")
-    for root in foreign[:_MAX_FOREIGN_SHOWN]:
+    shown = foreign[:_MAX_FOREIGN_SHOWN]
+    activities = _bounded_lookups(
+        {root: (lambda r=root: prov.worktree_activity(r, session_id)) for root in shown}
+    )
+    for root in shown:
         state = states.get(root, "not read")
         changes = f"; {prov.describe_changes(root)}" if state == "dirty" else ""
         creators = prov.recorded_creators(root)
-        who = "recorded creator: " + ", ".join(creators) if creators else "not in the ledger"
-        facts = prov.worktree_activity(root, session_id).facts()
-        parts.append(
-            f"{root}: not created by this session ({who}); "
-            f"linked worktree state: {state}{changes}; {facts}"
-        )
+        if session_id and session_id in creators:
+            # Its own row, refused by ``owned_record``'s stricter bar (a
+            # nested repository, another session's row inside): never "not
+            # created by this session" (QA Q1, PR #3802).
+            who = "recorded as created by this session, but not provably its own"
+        elif creators:
+            who = "not created by this session (recorded creator: " + ", ".join(creators) + ")"
+        else:
+            who = "not created by this session (not in the ledger)"
+        activity = activities.get(root)
+        facts = activity.facts() if activity is not None else "PR state unknown (lookup timed out)"
+        parts.append(f"{root}: {who}; linked worktree state: {state}{changes}; {facts}")
     if len(foreign) > _MAX_FOREIGN_SHOWN:
         parts.append(f"… and {len(foreign) - _MAX_FOREIGN_SHOWN} more foreign linked worktrees")
     head = f"deletes {len(roots)} linked worktree{'s' if len(roots) != 1 else ''}"
@@ -1461,6 +1592,7 @@ def _is_work_tree(path: str) -> bool:
         return False
 
 
+@_glob_memo_scope
 def classify_targets(
     targets: Sequence[Target],
     opaque_reasons: Sequence[str],
@@ -1530,7 +1662,7 @@ def classify_targets(
     if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
-    ranked = [_rank(t, prot, session_id) for t in targets]
+    ranked = [_rank(t, prot, session_id, globstar) for t in targets]
     # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
     # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
     # row for it would invent a target (review M1 on PR #3816).

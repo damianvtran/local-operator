@@ -38,7 +38,9 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   child of `$HOME`, a repo root, `git clean` of untracked work, every linked
   worktree a delete reaches that this session's ledger does not record — by its
   path, a glob match (`rm -rf <repo>/.worktrees/*`, or a loop over one) or an
-  ancestor (`rm -rf <repo>/.worktrees`); the judge sees each tree's state,
+  ancestor (`rm -rf <repo>/.worktrees`), however it is spelled (matched by
+  file identity, so `.WORKTREES` on a case-insensitive disk counts); a delete
+  too wide to rule a tree out (past 20,000 directory entries) is HIGH too; the judge sees each tree's state,
   uncommitted entries, branch, PR, running owner and recorded creator — and **every target
   the resolver could not pin down** (opaque substitution, empty expansion, unknown
   cwd) — unless it lands on something already critical, as an empty expansion
@@ -95,7 +97,8 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 - **Your own worktree.** A linked worktree the ledger records for this session
   (or a subagent it launched) is yours to remove, by `git worktree remove
   [--force] <exact path>`, `rm -rf <exact path>`, or a glob or ancestor that
-  reaches only your own trees. It ranks LOW, with no judge call, only when it is
+  reaches only your own trees (up to 16 per command; their checks run in
+  parallel under one deadline, and any past either bound goes to the judge). It ranks LOW, with no judge call, only when it is
   clean — no tracked or untracked change, not locked, no live process cwd in
   it, no repository nested in its ignored entries, HEAD on a branch or in some
   ref, and `git status` answered — and idle: no other running session owns it

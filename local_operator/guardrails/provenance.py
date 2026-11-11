@@ -59,6 +59,7 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -368,11 +369,18 @@ class CreationRecord:
         # fact line, and a crafted command could otherwise read as part of this
         # fact (``…; uncommitted changes: none``). One line, own closing tag
         # neutralised, so it stays data inside ``<command>``.
-        command = " ".join(self.command[:200].split()).replace("</command>", "<\\/command>")
+        # Every closing-tag shape (``</COMMAND >``, ``< /command>``, any tag
+        # name; NIT-1, PR #3802), not just the exact lowercase ``</command>``:
+        # a model reads those as a close too.
+        command = _CLOSE_TAG_RE.sub("<\\/", " ".join(self.command[:200].split()))
         return (
             f"ledger: created by {self.creator} (this session or its subagent), "
             f"kind {self.kind}, at {when}, via <command>{command}</command>"
         )
+
+
+#: Any closing-tag opener, however cased or spaced: ``</``, ``< /``.
+_CLOSE_TAG_RE = re.compile(r"<\s*/")
 
 
 _SCHEMA = (
@@ -576,8 +584,16 @@ def owned_link(
 
 def _holds_git(directory: str) -> bool:
     """A ``.git`` anywhere in ``directory`` (bounded; over the bound → True)."""
+    return _git_inside(directory) is not None
+
+
+def _git_inside(directory: str) -> str | None:
+    """Where a ``.git`` sits in ``directory``: its parent's path, ``directory``
+    itself when the bounded walk ran out (unknown counts as holding one), or
+    ``None``. The path is for the judge (MINOR-3, PR #3802): a tree held back
+    for a nested repository must say WHICH one."""
     if not os.path.isdir(directory) or os.path.islink(directory):
-        return False
+        return None
     seen = 0
     stack: list[tuple[str, int]] = [(directory, 0)]
     while stack:
@@ -588,13 +604,13 @@ def _holds_git(directory: str) -> bool:
             continue
         seen += len(entries)
         if seen > _WALK_ENTRIES:
-            return True
+            return directory
         for entry in entries:
             if entry.name == ".git":
-                return True
+                return current
             if depth < _WALK_DEPTH and entry.is_dir(follow_symlinks=False):
                 stack.append((entry.path, depth + 1))
-    return False
+    return None
 
 
 #: Bounds on the work-tree walks (``_foreign_inside``, ``_holds_git``). Hitting either fails
@@ -1117,27 +1133,39 @@ def worktree_state(path: str, *, own: bool = False) -> str:
     return "stale-initializing" if stale_initializing else "clean"
 
 
-#: Bounds on :func:`linked_worktrees_reached`: ancestor levels climbed to
-#: find the enclosing repository, and direct children of a target probed for
-#: a repository of their own. Past the child bound the scan stops and reports
-#: what it found; the target still gets the ordinary ranking (never LOWER).
+#: Bounds on :func:`linked_worktrees_reached`. ``_REACH_MAX_LEVELS``:
+#: ancestor levels climbed to find an enclosing repository or to match a
+#: registered root (deeper than any real path). ``_REACH_MAX_ENTRIES``:
+#: directory entries the WHOLE call may visit while probing targets' children
+#: — one budget per call, not per target (MINOR-4, PR #3802: a per-match
+#: 2000-child probe took a 200×200 ``big/*/*`` from 0.011 s to 9.5 s). The
+#: same value as ``_WALK_ENTRIES`` and ``classify._GLOB_WALK_CAP``, the
+#: guard's existing per-call walk bound. Past it the scan cannot rule a
+#: linked worktree out, so it answers ``None`` (unknown) and the caller ranks
+#: the target HIGH — fail closed, where the old per-target child cap stopped
+#: and reported only what it had found.
 _REACH_MAX_LEVELS = 64
-_REACH_MAX_CHILDREN = 2000
+_REACH_MAX_ENTRIES = 20_000
 
 
 def _common_dir(root: str) -> str | None:
     """The git common directory of a work tree rooted at ``root``, read from files.
 
     No git process: this runs for EVERY delete target, so it must cost a few
-    stats. A ``.git`` directory is its own common dir; a ``.git`` FILE
-    (``gitdir: X``) names a linked worktree's private dir, whose ``commondir``
-    file points at the shared one (a submodule's has none).
+    stats (one when there is no ``.git``). A ``.git`` directory is its own
+    common dir; a ``.git`` FILE (``gitdir: X``) names a linked worktree's
+    private dir, whose ``commondir`` file points at the shared one (a
+    submodule's has none).
     """
     dotgit = os.path.join(root, ".git")
     try:
-        if os.path.isdir(dotgit):
+        mode = os.stat(dotgit).st_mode
+    except OSError:
+        return None
+    try:
+        if stat.S_ISDIR(mode):
             return os.path.realpath(dotgit)
-        if not os.path.isfile(dotgit):
+        if not stat.S_ISREG(mode):
             return None
         with open(dotgit, encoding="utf-8") as fh:
             first = fh.readline().strip()
@@ -1174,41 +1202,93 @@ def _registered_worktrees(common: str) -> list[str]:
     return roots
 
 
-def linked_worktrees_reached(paths: Iterable[str]) -> list[str]:
+def linked_worktrees_reached(paths: Iterable[str], *, resolved: bool = False) -> list[str] | None:
     """Linked worktree roots a recursive delete of ``paths`` would destroy.
+
+    ``resolved``: the caller vouches each path is absolute with no symlink
+    on the way (a glob match ``classify._expand_glob`` saw no link in), so
+    the per-path ``realpath`` is skipped.
+
+    ``None`` = unknown: the scan ran past ``_REACH_MAX_ENTRIES``, so the
+    caller must not treat the delete as reaching nothing.
 
     WHY (security review of PR #3800, pre-existing gap): ``rm -rf
     <repo>/.worktrees/*`` from an unrelated session ranked LOW as an
     "ordinary path", because only the target ITSELF was tested for a
     ``.git``; a glob match or an ancestor (``rm -rf <repo>/.worktrees``)
     deleted every linked worktree under it unjudged. A tree is reached when
-    its root is a path in ``paths`` or lies under one.
+    its root IS a deleted directory or lies under one.
+
+    "Is" means filesystem identity, ``(st_dev, st_ino)``, never a string
+    prefix (MAJOR-1, PR #3802): ``realpath`` keeps the case a command typed,
+    so on case-insensitive APFS ``rm -rf <repo>/.WORKTREES`` deleted the
+    trees while ``…/.WORKTREES/`` was no prefix of the registry's
+    ``…/.worktrees/x``. Each registered root and its ancestors are stat'ed
+    and looked up among the deleted directories' identities; that also holds
+    through firmlinks and bind mounts.
 
     HOW, without spawning git: find the repositories whose registries could
     list such a tree — the one enclosing each path (climbing ancestors) and
     any repository that is a direct child of it — and read their
-    ``worktrees/*/gitdir`` records. CEILING: a worktree registered by a
-    repository that neither encloses the target nor sits directly in it
-    (``rm -rf ~/a`` where ``~/a/b/repo`` registers ``~/a/b/wt``) is not
-    found here; ``~/a`` itself still takes its ordinary ranking.
+    ``worktrees/*/gitdir`` records. The cost is bounded per CALL, not per
+    path (MINOR-4): sibling glob matches share their ancestors, so a
+    directory already climbed or probed ends the climb (its chain is done),
+    and child probes draw on one entry budget. CEILING: a worktree
+    registered by a repository that neither encloses the target nor sits
+    directly in it (``rm -rf ~/a`` where ``~/a/b/repo`` registers
+    ``~/a/b/wt``) is not found here; ``~/a`` itself still takes its ordinary
+    ranking.
 
     A symlink named without a trailing slash is skipped: ``rm -rf link``
-    removes the link, not what it points at.
+    removes the link, not what it points at. (Targets arrive normalised, so
+    ``link/`` is skipped too — the documented non-goal of removing through a
+    symlink, review MINOR-2 of PR #3802, deferred.)
     """
-    reals: list[str] = []
+    deleted: set[tuple[int, int]] = set()
     commons: set[str] = set()
+    # Directories whose ``.git`` was probed; a climb reaching one stops, as
+    # everything above it was climbed when it was first seen.
+    probed: set[str] = set()
+    budget = _REACH_MAX_ENTRIES
     for raw in paths:
         try:
-            if os.path.islink(raw) and not raw.endswith("/"):
+            if not resolved and os.path.islink(raw) and not raw.endswith("/"):
                 continue
-            real = os.path.realpath(raw)
-            if not os.path.isdir(real):
-                continue
+            st = os.stat(raw)
         except OSError:
             continue
-        reals.append(real)
-        here = real
+        if not stat.S_ISDIR(st.st_mode):
+            continue
+        deleted.add((st.st_dev, st.st_ino))
+        real = os.path.normpath(raw) if resolved else os.path.realpath(raw)
+        # The target's own listing answers "is it a work tree?" (a ``.git``
+        # entry) and yields its children: one ``scandir``, no extra stat.
+        try:
+            with os.scandir(real) as it:
+                listing = list(itertools.islice(it, budget + 1))
+        except OSError:
+            listing = None
+        if listing is not None:
+            budget -= len(listing)
+            if budget < 0:
+                return None
+        here: str | None = real
+        if real not in probed:
+            probed.add(real)
+            if listing is None or any(e.name == ".git" for e in listing):
+                common = _common_dir(real)
+                if common is not None:
+                    commons.add(common)
+                    here = None
+            if here is not None:
+                here = os.path.dirname(real)
+                here = None if here == real else here
+        else:
+            here = None
         for _ in range(_REACH_MAX_LEVELS):
+            if here is None or here in probed:
+                break
+            probed.add(here)
             common = _common_dir(here)
             if common is not None:
                 commons.add(common)
@@ -1217,22 +1297,47 @@ def linked_worktrees_reached(paths: Iterable[str]) -> list[str]:
             if parent == here:
                 break
             here = parent
-        try:
-            with os.scandir(real) as it:
-                for n, entry in enumerate(it):
-                    if n >= _REACH_MAX_CHILDREN:
-                        break
-                    if entry.is_dir(follow_symlinks=False):
-                        common = _common_dir(entry.path)
-                        if common is not None:
-                            commons.add(common)
-        except OSError:
-            pass
-    reached: set[str] = set()
-    for common in commons:
-        for root in _registered_worktrees(common):
-            if any(root == r or root.startswith(r.rstrip("/") + "/") for r in reals):
-                reached.add(root)
+        for entry in listing or ():
+            # ``is_dir`` reads the entry's d_type: no syscall, so files cost
+            # only their budget slot.
+            if entry.path in probed or not entry.is_dir(follow_symlinks=False):
+                continue
+            probed.add(entry.path)
+            common = _common_dir(entry.path)
+            if common is not None:
+                commons.add(common)
+    if not deleted or not commons:
+        return []
+    # Per directory: does it, or an ancestor, belong to ``deleted``? Shared
+    # across roots, which share their ancestors.
+    hit: dict[str, bool] = {}
+
+    def _reached(root: str) -> bool:
+        chain: list[str] = []
+        here, found = root, False
+        for _ in range(_REACH_MAX_LEVELS):
+            if here in hit:
+                found = hit[here]
+                break
+            chain.append(here)
+            try:
+                st = os.stat(here)
+            except OSError:
+                st = None
+            if st is not None and (st.st_dev, st.st_ino) in deleted:
+                found = True
+                break
+            parent = os.path.dirname(here)
+            if parent == here:
+                break
+            here = parent
+        for c in chain:
+            hit[c] = found
+        return found
+
+    reached = {
+        root for common in commons for root in _registered_worktrees(common) if _reached(root)
+    }
     return sorted(reached)
 
 
@@ -1296,8 +1401,40 @@ def describe_changes(path: str) -> str:
     if changes is None:
         return "uncommitted changes: unknown (git status failed)"
     if not changes:
-        return "uncommitted changes: none"
+        hidden = _hidden_work(path)
+        return "uncommitted changes: none" + "".join(f"; {h}" for h in hidden)
     return "uncommitted changes: " + ", ".join(changes)
+
+
+def _hidden_work(path: str) -> list[str]:
+    """What makes a tree with no ``git status`` entry still ``dirty``.
+
+    WHY (MINOR-3 / QA Q1, PR #3802): ``worktree_state`` also calls a tree
+    dirty for a nested repository inside an IGNORED entry (its commits may
+    exist nowhere else) — ignored entries are not in ``worktree_changes`` —
+    so the brief read "dirty; uncommitted changes: none" and gave the judge
+    nothing to weigh. Called only for a dirty tree, so the extra status is
+    paid only where the judge is asked anyway.
+    """
+    real = os.path.realpath(path)
+    out = _git(
+        ["status", "--porcelain", "--ignored", "--untracked-files=normal"],
+        real,
+        timeout=_WORKTREE_STATUS_TIMEOUT_S,
+    )
+    facts: list[str] = []
+    for line in (out or "").splitlines():
+        if not line.startswith("!! "):
+            continue
+        entry = line[3:].strip().strip('"').rstrip("/")
+        inside = _git_inside(os.path.join(real, entry))
+        if inside is not None:
+            facts.append(
+                f"nested repository (ignored, its commits may exist nowhere else): {inside}"
+            )
+        if len(facts) >= _MAX_DIRTY_SHOWN:
+            break
+    return facts
 
 
 #: Bound on each ``gh pr list`` that :func:`worktree_activity` runs (one, or
