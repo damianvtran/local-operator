@@ -2841,13 +2841,30 @@ async def test_a_running_payable_refresh_is_never_paused_for_paint(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_cold_payable_view_is_ready_while_its_own_open_is_held(tmp_path):
-    """No self-wait: the view's 0.2 s wait on a payable refresh, under its own
-    open's hold, still answers ``ready``. Mutant: ``may_yield`` dropped -> ``building``."""
+async def test_a_cold_payable_view_is_ready_while_its_own_open_is_held(monkeypatch, tmp_path):
+    """No self-wait: the view's wait on a payable refresh, under its own open's
+    hold, still answers ``ready``. Mutant: ``may_yield`` dropped -> ``building``.
+
+    WHY NOT THE DEFAULT 0.2 s WAIT (main run 42881100283, test (3.12, 3)). With
+    the default, ``ready`` also required the worker-thread ``refresh_index`` plus
+    its cache write and stat to land inside 200 ms of wall time; on a loaded
+    runner they did not, and the view answered ``building`` -- the wager's
+    designed timeout answer, not a self-wait (a 0.25 s delay injected before
+    ``refresh_index`` reproduces it exactly). The property under test is that the
+    scan never PAUSES for its own hold, so the discrimination is moved off the
+    clock: the yield budget and hold-staleness cap are raised past the outer
+    bound, which makes the
+    mutant's pause last as long as the hold itself (released only after the view
+    returns) and so answer ``building`` however fast the host is, while the
+    view's wait on the task's completion is bounded at 4 s, under the outer 5 s.
+    The journal stays payable at that budget too (a few hundred bytes).
+    """
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 30.0)
+    monkeypatch.setattr(ti, "_YIELD_HOLD_STALE_S", 30.0)
     _three_turns(tmp_path)
     release = ti.hold_paint(tmp_path, SID)
     try:
-        view = await asyncio.wait_for(ti.checkpoints_view(tmp_path, SID), 5)
+        view = await asyncio.wait_for(ti.checkpoints_view(tmp_path, SID, wait_s=4.0), 5)
     finally:
         release()
     assert view["index"]["state"] == "ready"
