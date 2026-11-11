@@ -42,6 +42,7 @@ from tests.unit.guardrails.test_own_worktree_removal import (
     _env,
     _git,
     _Judge,
+    _record,
 )
 
 # The synthetic tmp-HOME layout, shared rather than copied (pytest resolves a
@@ -170,7 +171,11 @@ def test_owner_rm_rf_of_own_clean_idle_worktree_is_low(home: Path, mobile: Path)
 def test_owner_rm_rf_of_own_worktree_with_open_pr_is_critical(
     home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [42])
+    # The open PR arrives through the PR-HISTORY lookup, the one main's
+    # ``worktree_activity`` (#3782) consults first; ``_gh_open_prs`` is only the
+    # fallback for a full page of history, so patching it alone left the real
+    # ``gh`` to answer and read "no open PR" (LOW).
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [prov.ForgeChange(42, "open", "")])
     v = _rank(home, f"rm -rf {WT}/markdown-tables", S)
     assert v.risk is Risk.CRITICAL, v.targets[0].reason
     assert "PR #42" in v.targets[0].reason
@@ -214,6 +219,9 @@ def test_owner_rm_rf_of_locked_busy_or_unknown_own_worktree_is_high(
 def test_owner_rm_rf_with_pr_lookup_unknown_is_high(
     home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Both forge lookups fail: the history one is asked first, the open-only
+    # one only on a full page (#3782), and either failing is "state unknown".
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: None)
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: None)
     assert _rank(home, f"rm -rf {WT}/markdown-tables", S).risk is Risk.HIGH
 
@@ -342,6 +350,7 @@ async def test_own_tree_held_for_a_nested_repo_names_it(home: Path, mobile: Path
         fh.write("vendor-clone/\n")
     (wt / "vendor-clone").mkdir()
     _git("init", "-q", cwd=wt / "vendor-clone")
+    _record(home, wt)  # the root changed after recording (Linux ctime stamp)
     phrase = prov.describe_changes(str(wt))
     assert "nested repository" in phrase and "vendor-clone" in phrase, phrase
     v = _rank(home, f"rm -rf {WT}/keyboard-bound", S)
