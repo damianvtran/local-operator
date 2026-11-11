@@ -6730,6 +6730,21 @@ class Store:
         message under the same policy and control generation RESUMES its
         decision instead of minting a second one. The first stage's parsed
         outcome and provenance are persisted HERE, before any privacy await.
+
+        RE-STAMP (round 1 M-1). A row that never entered privacy work -- its
+        trigger is ``first_not_deliver`` or ``preferred_bypass`` and its stage
+        is still ``pending`` -- records only the LATEST first-stage attempt,
+        whose commit may not have landed (``finish_screening`` refused, the
+        process died). The legacy retry re-draws that first stage anyway, so
+        such a row is re-stamped with the CURRENT attempt's trigger and
+        ``first_*`` fields and re-opened. Freezing it instead left a
+        non-preferred retry looping on ``privacy_pending`` (paying the first
+        stage every time) and a preferred retry unable to prove its bypass.
+        A ``nonpreferred_deliver`` row is NEVER re-stamped: once a message's
+        recorded first verdict required the privacy stage, that requirement,
+        its claim and any settled privacy hold stand for the binding, so a
+        re-drawn first stage cannot shop its way out (S-1); the caller
+        routes such a retry through the stored row (``decide_admission``).
         """
 
         from local_operator.team_bridge.privacy_pass import (
@@ -6759,6 +6774,38 @@ class Store:
                 binding,
             ).fetchone()
             if row is not None:
+                if (
+                    row["trigger"] in ("first_not_deliver", "preferred_bypass")
+                    and row["stage_state"] == "pending"
+                    and row["final"] in ("open", "bypass", "first_stage")
+                    and row["hold_code"] is None
+                    and row["reservation_id"] is None
+                ):
+                    # No privacy claim, send or hold was ever recorded on this
+                    # row (the conjunction above), so re-stamping loses no
+                    # evidence and spends nothing.
+                    conn.execute(
+                        "UPDATE privacy_decisions SET policy_epoch = ?, trigger = ?, "
+                        "channel = ?, first_preferred = ?, first_provider = ?, "
+                        "first_model = ?, first_disposition = ?, first_attempt_id = ?, "
+                        "final = 'open', updated_at = ? WHERE decision_id = ?",
+                        (
+                            int(fields["policy_epoch"]),
+                            fields["trigger"],
+                            fields["channel"],
+                            int(bool(fields["first_preferred"])),
+                            fields["first_provider"],
+                            fields["first_model"],
+                            fields["first_disposition"],
+                            fields["first_attempt_id"],
+                            now,
+                            row["decision_id"],
+                        ),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM privacy_decisions WHERE decision_id = ?",
+                        (row["decision_id"],),
+                    ).fetchone()
                 return dict(row)
             decision_id = new_decision_id()
             conn.execute(

@@ -119,9 +119,6 @@ def screening_deliver() -> str:
     return "VERDICT: deliver\nREASON: ordinary."
 
 
-ChainRunner.__init__.__defaults__  # noqa: B018 - keeps the forward helper honest
-
-
 def _enable(tmp_path: Path, value: bool = True) -> privacy_pass.PrivacyAuthority:
     return privacy_pass.write_privacy_pass_enabled(tmp_path, value)
 
@@ -691,7 +688,9 @@ def _crash_screen(tmp_path, owner, factory) -> None:
 @pytest.mark.parametrize(
     ("point", "sends", "code"),
     [
-        ("before_claim", 0, "privacy_commit_interrupted"),
+        # Round 1 M-2: a crash INSIDE the claim transaction rolled it back, so
+        # nothing was sent and the open/pending row RESUMES (one send, total).
+        ("before_claim", 1, "resumed"),
         ("after_claim", 1, "privacy_uncertain"),
         ("after_response", 1, "privacy_uncertain"),
         ("after_completion", 1, None),
@@ -734,6 +733,11 @@ def test_restart_never_sends_again(tmp_path, monkeypatch, point, sends, code) ->
     first_runner = ChainRunner(preferred=False)
     retry_factory = PrivacyFactory()
     result = _screen(tmp_path, owner, first_runner, factory=retry_factory)
+    if code == "resumed":
+        assert (result.disposition, result.hold_code) == ("deliver", None)
+        assert len(retry_factory.calls) == 1 and _privacy_sends(tmp_path) == sends
+        assert _decisions(tmp_path)[0][3:6] == ("completed", "deliver", "admit")
+        return
     assert retry_factory.calls == [], "no new privacy draw"
     assert _privacy_sends(tmp_path) == sends
     if code is None:
@@ -1182,7 +1186,9 @@ def test_stale_first_stage_reservation_refuses_natively(tmp_path) -> None:
 # -- the SHIPPED composition: run_screening_cycle + real wire guard ----------
 
 
-def _real_cycle(tmp_path: Path, monkeypatch: Any, *, preferred: bool, factory: Any) -> Any:
+def _real_cycle(
+    tmp_path: Path, monkeypatch: Any, *, preferred: bool, factory: Any, items: Any = None
+) -> Any:
     """``run_screening_cycle`` with the real chain resolver, factory and wire guard.
 
     Only the vendor client and the physical transport are faked (the
@@ -1220,7 +1226,7 @@ def _real_cycle(tmp_path: Path, monkeypatch: Any, *, preferred: bool, factory: A
         return await _scheduler.run_screening_cycle(
             config_dir=tmp_path,
             owner=owner,
-            items=[_item()],
+            items=items or [_item()],
             auth_store=None,
             status_fetcher=fetch,
             privacy_runner_factory=factory,
@@ -1312,3 +1318,218 @@ def test_shipped_cycle_disable_moves_the_revision_back(tmp_path, monkeypatch) ->
     _real_cycle(tmp_path, monkeypatch, preferred=False, factory=None)
     assert enabled != legacy
     assert _revision(store, owner) == legacy
+
+
+# -- round 1 remediation regressions (PR #3778) -------------------------------
+
+
+def _fail_once(monkeypatch: Any, name: str, *, when: Any = None) -> dict[str, int]:
+    """Make ``Store.<name>`` refuse ``busy`` once (optionally only when ``when``)."""
+
+    real = getattr(Store, name)
+    state = {"n": 0}
+
+    def flaky(self: Store, *a: Any, **k: Any) -> Any:
+        if state["n"] == 0 and (when is None or when(*a, **k)):
+            state["n"] += 1
+            raise StoreRefused("busy", "injected")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Store, name, flaky)
+    return state
+
+
+def test_m1_retry_after_uncommitted_bypass_runs_privacy_once_and_admits(
+    tmp_path, monkeypatch
+) -> None:
+    """M-1: a bypass whose commit never landed must not freeze the row.
+
+    At 654f9658 every non-preferred retry held ``privacy_pending`` (stage
+    claim refused ``stage_taken`` on the settled ``bypass`` row) and paid the
+    first stage again, forever.
+    """
+
+    store, owner = _setup(tmp_path)
+    _enable(tmp_path)
+    _fail_once(monkeypatch, "finish_screening")
+    first = _screen(
+        tmp_path, owner, ChainRunner(preferred=True), factory=PrivacyFactory("TRIPWIRE")
+    )
+    assert first.disposition == "hold"
+    assert _decisions(tmp_path)[0][1] == "preferred_bypass"
+    factory = PrivacyFactory(P_DELIVER)
+    retry = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=factory)
+    assert (retry.disposition, retry.hold_code) == ("deliver", None), _decisions(tmp_path)
+    assert len(factory.calls) == 1 and _privacy_sends(tmp_path) == 1
+    # Re-stamped, not duplicated: one row for the binding, now the privacy admit.
+    assert _decisions(tmp_path) == [
+        ("bmsg_1", "nonpreferred_deliver", 0, "completed", "deliver", "admit", None)
+    ]
+    assert _receipt(tmp_path, owner) == [("allow", "qa/default-model")]
+
+
+def test_m1_preferred_retry_on_a_completed_admit_reuses_it(tmp_path, monkeypatch) -> None:
+    """M-1 reverse: an ``admit`` row then a PREFERRED retry.
+
+    At 654f9658 the retry settled ``bypass`` on a ``first_preferred = 0`` row,
+    the fence refused ``privacy_proof_missing`` and every later replay held
+    ``privacy_commit_interrupted``. Now the completed stage is reused: no new
+    privacy call, and the allow carries the admit proof.
+    """
+
+    store, owner = _setup(tmp_path)
+    _enable(tmp_path)
+    _fail_once(monkeypatch, "finish_screening", when=lambda *a, **k: k.get("receipt") is not None)
+    factory = PrivacyFactory(P_DELIVER)
+    first = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=factory)
+    assert first.disposition == "hold"
+    assert _decisions(tmp_path)[0][5] == "admit"
+    retry_factory = PrivacyFactory("TRIPWIRE")
+    retry = _screen(tmp_path, owner, ChainRunner(preferred=True), factory=retry_factory)
+    assert (retry.disposition, retry.hold_code) == ("deliver", None), _decisions(tmp_path)
+    assert retry_factory.built == 0 and _privacy_sends(tmp_path) == 1
+    assert _decisions(tmp_path)[0][1:6] == (
+        "nonpreferred_deliver",
+        0,
+        "completed",
+        "deliver",
+        "admit",
+    )
+
+
+def test_m1_preferred_retry_cannot_skip_an_owed_privacy_verdict(tmp_path, monkeypatch) -> None:
+    """S-1 kept: a stored non-preferred requirement survives a preferred re-draw.
+
+    The first attempt's privacy claim is refused transiently (row stays open);
+    the retry is answered by a PREFERRED hop. It must still run the privacy
+    stage (and so hold on a privacy hold), never settle a bypass.
+    """
+
+    store, owner = _setup(tmp_path)
+    _enable(tmp_path)
+    _fail_once(monkeypatch, "claim_privacy_send")
+    first = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=PrivacyFactory())
+    assert first.hold_code == "retry_later"
+    factory = PrivacyFactory(P_HOLD)
+    retry = _screen(tmp_path, owner, ChainRunner(preferred=True), factory=factory)
+    assert (retry.disposition, retry.hold_code) == ("hold", "privacy_verdict_hold")
+    assert len(factory.calls) == 1
+    assert _receipt(tmp_path, owner) == []
+
+
+@pytest.mark.parametrize("where", ["renew", "claim"])
+def test_m2_transient_refusal_is_not_a_final_hold(tmp_path, monkeypatch, where) -> None:
+    """M-2: a lost turn / transient claim refusal leaves the decision open.
+
+    At 654f9658 both settled ``final = 'hold'`` and replay re-served
+    ``retry_later`` forever with no further attempt.
+    """
+
+    store, owner = _setup(tmp_path)
+    _enable(tmp_path)
+    if where == "renew":
+        real = Store.renew_screen_turn
+        state = {"armed": False}
+
+        def renew(self: Store, *a: Any, **k: Any) -> Any:
+            if state["armed"]:
+                state["armed"] = False
+                return False
+            return real(self, *a, **k)
+
+        monkeypatch.setattr(Store, "renew_screen_turn", renew)
+        real_render = privacy_pass.render_privacy_prompt
+
+        def render(*a: Any, **k: Any) -> Any:
+            # Arms the refusal for the renew made right after the render,
+            # i.e. the one inside ``decide_admission``, not the first stage's.
+            state["armed"] = not state.get("used")
+            state["used"] = True
+            return real_render(*a, **k)
+
+        monkeypatch.setattr(privacy_pass, "render_privacy_prompt", render)
+    else:
+        _fail_once(monkeypatch, "claim_privacy_send")
+    first = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=PrivacyFactory())
+    assert first.hold_code == "retry_later"
+    assert _decisions(tmp_path)[0][3:] == ("pending", None, "open", None)
+    factory = PrivacyFactory(P_DELIVER)
+    retry = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=factory)
+    assert (retry.disposition, retry.hold_code) == ("deliver", None), _decisions(tmp_path)
+    assert len(factory.calls) == 1 and _privacy_sends(tmp_path) == 1
+
+
+def test_m2_budget_refusal_still_settles(tmp_path) -> None:
+    """M-2 boundary: the S-1 budget hold is one of the codes meant to stick."""
+
+    store, owner = _setup(tmp_path)
+    _budget(tmp_path, sender=1)
+    _enable(tmp_path)
+    _seed_http(tmp_path, owner, sender="acc_sender1", at=time.time())
+    held = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=PrivacyFactory())
+    assert held.hold_code == "privacy_budget_exhausted"
+    assert _decisions(tmp_path)[0][5:] == ("hold", "privacy_budget_exhausted")
+
+
+def test_m2_sync_privacy_runner_is_refused_before_any_send(tmp_path) -> None:
+    """m-2: the deadline bounds only a coroutine, so a sync runner never runs."""
+
+    store, owner = _setup(tmp_path)
+    _enable(tmp_path)
+    calls: list[str] = []
+
+    def factory(hop: Any) -> Any:
+        def run(prompt: str, *, default_model: str) -> tuple[str, str]:
+            calls.append(prompt)
+            return P_DELIVER, hop.model_id
+
+        return run
+
+    held = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=factory)
+    assert held.hold_code == "privacy_unreachable"
+    assert calls == [] and _privacy_sends(tmp_path) == 0
+
+
+def test_q1_one_senders_spent_physical_share_never_opens_the_account_breaker(
+    tmp_path, monkeypatch
+) -> None:
+    """Q-1 (QA Q6c shape, real wire): sender 1 spends its physical share.
+
+    The logical share counts 1 per message, the physical share 2 (first stage
+    + privacy), so messages 5-7 pass the logical check and are refused by the
+    guard's physical check. At 654f9658 each refusal advanced the ACCOUNT
+    breaker (``provider_error``); after three, sender 2 held ``breaker_open``
+    with no send. Now each is a typed ``budget_exhausted`` and sender 2 is
+    screened.
+    """
+
+    from local_operator.team_bridge.settings import ScreeningBudget
+    from tests.unit.team_bridge.test_batch_screening import _write_budget
+
+    store, owner = _setup(tmp_path)
+    _seed_model_config(tmp_path)
+    _write_budget(tmp_path, ScreeningBudget(account=40, ambient=30, unaddressed=35, sender=8))
+    _enable(tmp_path)
+    seen = []
+    for i in range(1, 9):
+        monkeypatch.undo()
+        result, wire = _real_cycle(
+            tmp_path,
+            monkeypatch,
+            preferred=False,
+            factory=PrivacyFactory(P_DELIVER),
+            items=[_item(body=f"{CANARY_BODY} {i}", message_id=f"bmsg_x{i}")],
+        )
+        seen.append((result.disposition, result.hold_code, len(wire.sends)))
+    assert seen[:4] == [("deliver", None, 1)] * 4
+    assert all(code == "budget_exhausted" and sends == 0 for _, code, sends in seen[4:]), seen
+    breaker = store.screening_breaker_state(owner) or {}
+    assert int(breaker.get("failures") or 0) == 0, breaker
+    other = _item(body="hello from someone else", message_id="bmsg_y1")
+    other["sender"] = {"account_id": "acc_sender2"}
+    monkeypatch.undo()
+    result, wire = _real_cycle(
+        tmp_path, monkeypatch, preferred=False, factory=PrivacyFactory(P_DELIVER), items=[other]
+    )
+    assert (result.disposition, result.hold_code) == ("deliver", None)
+    assert len(wire.sends) == 1

@@ -11,8 +11,26 @@ second stage: when the operator enables it, a valid first ``deliver`` from a
 non-preferred answering hop is admitted only if a valid privacy ``deliver``
 follows; every other second-stage result holds locally.
 
-Design memo: ``a8-privacy-pass-design-2026-11-09.md`` (sections 2-8 normative,
-security revisions S-1 and S-2). What slice 1 deliberately is NOT:
+DESIGN SOURCE. An EXTERNAL design document, "A8 privacy pass design"
+(2026-11-09, sections 2-8 plus security revisions S-1 and S-2), not in this
+repository; "memo §N" below cites it. The rules this module enforces from it:
+
+* §1 branch order: disabled -> legacy; a first non-deliver -> existing
+  handling; unknown provenance holds; a trusted preferred hop bypasses;
+  attachments hold; otherwise the privacy stage must return a valid,
+  identity-verified ``deliver`` before an allow.
+* §3 durable stage: one decision row per (message, envelope, revision,
+  control generation, rule); at most ONE privacy send per decision, claimed
+  before I/O; a claimed-but-uncompleted send is ``privacy_uncertain`` and is
+  never resent; a completed stage is reused with no new reservation or I/O;
+  another live owner gets a bounded pending/retry, never a permanent hold.
+* S-1 no verdict shopping: privacy sends are charged to the verified sender's
+  existing physical share (fresh ids and variant bodies share it), and an
+  exhausted share inconveniences that sender only.
+* S-2 stale processes: every gated boundary re-reads the flag and the control
+  generation under ``config_write_lock``; a moved generation refuses.
+
+What slice 1 deliberately is NOT:
 
 * not a change to the chain's failover meaning (a later hop is still failover,
   never a privacy verdict) and not a change to the hub receipt tuple;
@@ -401,9 +419,11 @@ def privacy_verdict_outcome(parsed: Any) -> str | None:
 # -- the async seam ---------------------------------------------------------
 
 #: ``factory(hop) -> runner``: builds the SINGLE-hop runner on the trusted first
-#: answering hop's selection. The runner is ``(prompt, *, default_model) ->
-#: (reply, actual_model)`` (sync or awaitable), the same contract as
-#: ``screening.ScreenRunner``. A factory may raise :class:`PrivacyNoCredential`.
+#: answering hop's selection. The runner is ``async (prompt, *, default_model)
+#: -> (reply, actual_model)``. It MUST be a coroutine function (or an object
+#: with an ``async __call__``): a sync runner is refused before any claim,
+#: because the privacy deadline can bound only a coroutine (round 1 m-2). A
+#: factory may raise :class:`PrivacyNoCredential`.
 PrivacyRunnerFactory = Callable[[Any], Any]
 
 
@@ -529,6 +549,42 @@ async def decide_admission(
             privacy_calls=calls,
         )
 
+    def _unsettled(hold: str) -> AdmissionDecision:
+        # TRANSIENT refusals (round 1 M-2): a lost account turn, another owner,
+        # a moved policy/control generation, an unreadable control row. None
+        # of them is a fact about THIS message, so the row stays ``open`` /
+        # ``pending`` and the next attempt resumes it; settling them made
+        # ``_privacy_replay_hold`` re-serve the code forever. Only outcomes
+        # meant to stick are settled: a privacy verdict or its typed failure,
+        # an uncertain claim, deterministic prewire holds (unknown provenance,
+        # attachments), no runner/credential and the S-1 budget refusal.
+        return AdmissionDecision(
+            trigger,
+            proceed=False,
+            hold_code=hold,
+            decision_id=decision_id,
+            first_preferred=bool(first_preferred),
+        )
+
+    if row.get("trigger") == "nonpreferred_deliver" and trigger != "nonpreferred_deliver":
+        # A RETRY on a binding whose recorded first verdict already required
+        # the privacy stage (round 1 M-1; such rows are never re-stamped, see
+        # ``Store.open_privacy_decision``). The stored requirement governs:
+        # * a re-drawn first NON-deliver holds through the legacy conclusion
+        #   and leaves the row untouched -- the stricter verdict wins and
+        #   nothing is admitted;
+        # * a re-drawn deliver from a PREFERRED hop does not earn a bypass: it
+        #   continues the stored privacy stage (a completed ``admit`` is
+        #   reused with no I/O, an open stage runs once on this trusted hop),
+        #   so a sender cannot re-draw the first stage until a preferred hop
+        #   answers and skip a privacy verdict already owed (S-1).
+        # (A deliver of UNKNOWN provenance never reaches here: the reducer
+        # already maps it to ``nonpreferred_deliver`` + its prewire hold.)
+        if first_disposition != "deliver":
+            return AdmissionDecision(trigger, proceed=True)
+        trigger, prewire = "nonpreferred_deliver", None
+        if has_attachments:
+            prewire = "privacy_unsupported_input"
     if trigger in ("first_not_deliver", "preferred_bypass"):
         final = "bypass" if trigger == "preferred_bypass" else "first_stage"
         return _settle(final, None)
@@ -567,6 +623,15 @@ async def decide_admission(
         return _settle("hold", "privacy_unreachable", privacy_result="unreachable")
     if privacy_runner is None:
         return _settle("hold", "privacy_no_credential", privacy_result="no_credential")
+    if not _is_async_runner(privacy_runner):
+        # Round 1 m-2: the deadline is ``asyncio.wait_for``, which bounds only
+        # a coroutine. A blocking sync runner would hold the event loop and the
+        # account turn past PRIVACY_DEADLINE_S. Refused HERE, before the claim
+        # (nothing sent), rather than run under ``to_thread``: a timed-out
+        # thread cannot be cancelled, so its send would outlive the deadline,
+        # the claim and the turn. The production runner (a later slice) is
+        # async like every screening runner.
+        return _settle("hold", "privacy_unreachable", privacy_result="unreachable")
 
     try:
         rendered = None
@@ -588,11 +653,11 @@ async def decide_admission(
         # Keep the account turn for the second stage (memo §5): renewed BEFORE
         # the claim, which itself re-checks the lease inside its transaction.
         if not store.renew_screen_turn(owner, turn=turn, now=time.time(), ttl=120.0):
-            return _settle("hold", "retry_later", privacy_result="not_run")
+            return _unsettled("retry_later")
         try:
             with fresh_authority(config_dir, store) as live:
                 if not live.enabled or live.generation != authority.generation:
-                    return _settle("hold", "policy_stale", privacy_result="not_run")
+                    return _unsettled("policy_stale")
                 deadline = time.time() + PRIVACY_DEADLINE_S
                 store.claim_privacy_send(
                     owner,
@@ -608,7 +673,7 @@ async def decide_admission(
                     deadline_at=deadline,
                 )
         except PrivacyAuthorityUnavailable:
-            return _settle("hold", "privacy_control_unavailable", privacy_result="not_run")
+            return _unsettled("privacy_control_unavailable")
         except StoreRefused as refusal:
             code = refusal.code
             if code.endswith("_exhausted"):
@@ -616,10 +681,10 @@ async def decide_admission(
                     "hold", "privacy_budget_exhausted", privacy_result="budget_exhausted"
                 )
             if code == "stage_taken":
-                return AdmissionDecision(
-                    trigger, proceed=False, hold_code="privacy_pending", decision_id=decision_id
-                )
-            return _settle("hold", _store_hold(code), privacy_result="not_run")
+                return _unsettled("privacy_pending")
+            # Every other claim refusal maps to a transient code (see
+            # ``_store_hold``): the claim inserted nothing, so resuming is safe.
+            return _unsettled(_store_hold(code))
 
         # ONE dispatch, deadline-bounded. The deadline is persisted with the
         # claim; restart recovery reads the claim, never this timer.
@@ -697,6 +762,14 @@ async def decide_admission(
 
 async def _awaited(value: Any) -> Any:
     return await value
+
+
+def _is_async_runner(runner: Any) -> bool:
+    """Whether calling ``runner`` yields a coroutine ``wait_for`` can bound."""
+
+    return inspect.iscoroutinefunction(runner) or inspect.iscoroutinefunction(
+        getattr(runner, "__call__", None)
+    )
 
 
 def _store_hold(code: str) -> str:

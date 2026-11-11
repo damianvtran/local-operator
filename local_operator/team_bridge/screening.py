@@ -1944,10 +1944,18 @@ def _privacy_replay_hold(
     holds/bounces and preferred bypasses keep their existing retry handling.
     A settled hold re-serves its closed code (no redraw of either stage). A
     claimed-but-uncompleted stage holds ``privacy_uncertain`` (never resent).
-    A decision opened but never claimed (crash before the send) holds
-    ``privacy_commit_interrupted`` rather than re-running a paid first screen
-    whose verdict is already on record. A settled ``admit`` returns ``None``:
-    see the comment at that branch.
+    A decision still ``open`` with its stage ``pending`` (a transient refusal
+    before the claim, or a crash before the send) RESUMES: ``None``, so the
+    retry reaches ``decide_admission`` and claims the stage once. A settled
+    ``admit`` returns ``None`` too: see the comment at that branch. Any other
+    shape holds ``privacy_commit_interrupted``.
+
+    Resuming re-draws the paid FIRST stage (round 1 m-1 / Q-3, deferred to
+    an enable gate): a commit path that concludes from the persisted first
+    verdict without a fresh first-stage attempt does not exist yet. It is a
+    spend cost, not an admission path: the stored ``nonpreferred_deliver``
+    row still governs the retry (see ``decide_admission``) and S-1 bounds
+    the sender's physical sends.
     """
 
     if authority is None or not getattr(authority, "enabled", False):
@@ -1982,6 +1990,10 @@ def _privacy_replay_hold(
         # The one privacy send was claimed and never durably completed: its
         # outcome is unknown and it is never resent (memo §3).
         return "privacy_uncertain"
+    if row.get("final") == "open" and row.get("stage_state") == "pending":
+        # Round 1 M-2: holding here forever turned every transient refusal
+        # (lost turn, moved policy) into a permanent hold.
+        return None
     return "privacy_commit_interrupted"
 
 
@@ -2059,6 +2071,16 @@ def _is_input_refusal(failure: BaseException) -> bool:
     return getattr(failure, "tb_input_refusal", False) is True or (
         isinstance(failure, ProviderError) and is_input_refusal(failure)
     )
+
+
+def _is_sender_budget_refusal(failure: BaseException) -> bool:
+    """Whether the wire guard refused because the verified SENDER's physical
+    share is spent (A8 S-1). A typed boolean the guard stamps and the scrub
+    carries (``model_boundary.SENDER_BUDGET_REFUSAL_ATTR``), never prose."""
+
+    from local_operator.team_bridge.model_boundary import SENDER_BUDGET_REFUSAL_ATTR
+
+    return getattr(failure, SENDER_BUDGET_REFUSAL_ATTR, False) is True
 
 
 def screening_allocation(item: Mapping[str, Any]) -> int:
@@ -2381,6 +2403,23 @@ async def _screen_spend(
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
+        if _is_sender_budget_refusal(failure):
+            # A8 S-1 (PR #3778 round 1 Q-1): the guard refused this sender's
+            # next PHYSICAL send before any byte left. Its typed budget hold,
+            # retried when the pool refills, and NO breaker advance: one
+            # sender's spent share must never park another sender's message.
+            retry_at = store.screening_budget_refill_at(owner, tier=tier)
+            _commit_hold(
+                store,
+                owner,
+                message_id,
+                attempt_id,
+                fingerprint,
+                epoch,
+                "budget_exhausted",
+                failure_class=failure_class,
+            )
+            return ScreenResult("hold", hold_code="budget_exhausted", retry_at=retry_at)
         # An input refusal is THIS submission, not a sick route: it still holds
         # and still charges, but it must not open the account breaker and park
         # every other inbound message for the retry window (#3199 residual).
@@ -4298,6 +4337,11 @@ async def _screen_batch_core(
             return _finish()
         from local_operator.team_bridge.model_boundary import provider_hold_code
 
+        if _is_sender_budget_refusal(failure):
+            # A8 S-1 (round 1 Q-1): the carrier sender's physical share is
+            # spent; a typed budget hold for every message, no breaker advance.
+            _commit_each("budget_exhausted", failure_class=failure_class)
+            return _finish()
         if not _is_input_refusal(failure):
             _record_failure(store, owner, failure_class=failure_class)
         _commit_each(provider_hold_code(failure), failure_class=failure_class)
