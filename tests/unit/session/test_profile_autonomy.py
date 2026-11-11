@@ -220,7 +220,11 @@ async def test_show_pages_the_12582_char_brief_losslessly_on_the_model_wire(loca
 
         unpaged = ToolResult(tool_call_id="t", tool_name="team", content=[TextContent(text=brief)])
         (clipped,) = bound_replay_payloads([HarnessMessage.tool_result(unpaged)])
-        assert "elided on replay" in clipped.content[0].text
+        # Narrow the content union explicitly: the replay bound must keep a
+        # text item, and only TextContent carries .text for the type checker.
+        item = clipped.content[0]
+        assert isinstance(item, TextContent)
+        assert "elided on replay" in item.text
         # A row that moved between pages refuses instead of stitching versions;
         # a part past the end refuses.
         stale = await _team(
