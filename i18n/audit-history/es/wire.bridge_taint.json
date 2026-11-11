@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.bridge_taint",
-  "history_sha256": "b95b833db8b0993721e6a4b378a562116799eaa27fee6b22c0b9cda16e1c48e0",
+  "history_sha256": "503dd9701720049e00f9e2b213e9f0a17f123db8ae479883ad70274f5fb1ff0b",
   "entries": [
     {
       "locale": "es",
@@ -43,6 +43,26 @@
       },
       "status": "passed",
       "note": "FIRST independent audit at re-frozen English 330a1116 (8 keys: 5 changed/new read, 3 byte-equal to 635f122e065a). 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/bridge-taint-primary-r2/record.json (sha256 96b9f3b07a87478b8e8666ad22a429caaa5b9b49865769664e41b5489c3be57e). No findings. Classified high-visibility/safety copy: docs/I18N.md requires a second independent audit, which this receipt does NOT claim. Same model as translator (agent-independent only). Fallback: none."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.bridge_taint",
+      "source_sha256": "330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9",
+      "translator": {
+        "agent": "coder lane (radientdev, i18n translator), commit 08e7c649eaca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "reviewer (radientdev) / second independent safety i18n-auditor dee255be2b29 [es]",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "SECOND independent safety audit, all 8 keys at frozen en 330a1116; 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/bridge-taint-secondary/record.json. Different agent AND different model from translator and first auditor (both anthropic/claude-opus-5-5). No wording changed. Fallback: none."
     }
   ]
 }
