@@ -2837,6 +2837,9 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     # availability signal; the row lets the classifier offer it for "message
     # X's agent" turns instead of Slack/email fan-out.
     "bridge",
+    "generate_music",
+    "modify_music",
+    "music_status",
 )
 
 #: One tool row's description bound — the same scannable-row precedent the
