@@ -485,13 +485,18 @@ async def test_the_lease_heartbeat_outlives_its_ttl(
     # heartbeat waiting ``ttl * 3`` between renewals still lands every one of
     # them, just late, and on a real clock its lease would lapse between beats.
     # So record the timeout of every wait the heartbeat thread makes and pin it
-    # below the TTL. Patched on the class and filtered by thread name, so it
-    # sees the heartbeat's wait however the Event reached it, and nothing else.
+    # below the TTL. Patched on the class, so it sees the heartbeat's wait
+    # however the Event reached it. Filtered by thread name AND by this lease's
+    # own stop event: a heartbeat leaked by another test in the same xdist
+    # worker (test_store.py leaves a default-TTL lease that waits 60 s) carries
+    # the same thread name, and recording its wait would fail the bound below
+    # for a reason unrelated to this lease. ``_beat_stop`` is assigned before
+    # the heartbeat thread starts, so the lease's first wait is never missed.
     beat_waits: list[float | None] = []
     real_wait = threading.Event.wait
 
     def spy_wait(self: threading.Event, timeout: float | None = None) -> bool:
-        if threading.current_thread().name == "hub-lease-heartbeat":
+        if threading.current_thread().name == "hub-lease-heartbeat" and self is lease._beat_stop:
             beat_waits.append(timeout)
         return real_wait(self, timeout)
 
