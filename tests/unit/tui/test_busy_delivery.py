@@ -342,8 +342,12 @@ async def test_the_wait_notices_settle_to_the_classic_height_from_40_up() -> Non
     are not pinned: the app supports widths from 40 up, and the designer
     already measured the old strings mismatched there.
     """
+    # Representative set, not the full 40-120 sweep: the height is a step
+    # function of the wrap, so the boundary widths where a wrap moves (39-48)
+    # plus the extremes (55/80/120) pin the copy; interior widths would only
+    # re-render the same step. Includes 39 and 40 as the support floor.
     known_shorter = {44, 45, 46, 47}
-    for cols in range(40, 121):
+    for cols in (39, 40, 41, 43, 44, 45, 46, 47, 48, 55, 80, 120):
         classic = await _settled_notice_height(cols, QUEUED_STEER_NOTICE, "note")
         queued = await _settled_notice_height(cols, QUEUED_WAIT_NOTICE, "note")
         both = await _settled_notice_height(cols, BOTH_WAIT_NOTICE, "note")

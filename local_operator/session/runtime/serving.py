@@ -4040,14 +4040,14 @@ class ServingSessionHandle(SessionHandle):
         ``documents`` keyword is refused (``DocumentCarriageUnsupported``),
         never forwarded without its files.
 
-        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``). An
-        IDLE prompt opens its own turn, so the mode is ignored there; it is
-        taken only on the path where this prompt can become a steer — the
-        spool row a retiring runtime hands its successor (``process.
-        _run_owner_prompt``'s steer fallback joins the turn in flight). The
-        wire client already refused ``queue``/``both`` against an owner whose
-        record lacked ``busy-delivery-v1`` (``_takes_delivery``), so reaching
-        here with a mode is the claim that the prompt arm honours it.
+        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``),
+        accepted so this handle advertises ``busy-delivery-v1`` (see
+        ``_takes_delivery``) and ignored on the ``prompt`` op; the ``steer``
+        op is where the mode applies. An IDLE prompt opens its own turn, so
+        the mode is ignored there. The wire client already refused
+        ``queue``/``both`` against an owner whose record lacked
+        ``busy-delivery-v1``, so reaching here with a mode is the claim that
+        the handle honours it.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
