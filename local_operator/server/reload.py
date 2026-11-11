@@ -705,19 +705,22 @@ def _ignore_reload_signal() -> Any:
     library's ``signal`` sets it directly; the restorer puts back the exact
     handler pointer it replaced (only reached when the exec FAILED).
     """
-    if RELOAD_SIGNAL is None:
+    # Bind the narrowed value locally: the restorer lambdas would otherwise
+    # re-read the module global, which the type checker cannot narrow.
+    signum = RELOAD_SIGNAL
+    if signum is None:
         return lambda: None
     if threading.current_thread() is threading.main_thread():
-        previous = signal.getsignal(RELOAD_SIGNAL)
-        signal.signal(RELOAD_SIGNAL, signal.SIG_IGN)
-        return lambda: signal.signal(RELOAD_SIGNAL, previous)
+        previous = signal.getsignal(signum)
+        signal.signal(signum, signal.SIG_IGN)
+        return lambda: signal.signal(signum, previous)
     # ``ctypes`` is imported at module scope (review N1): this runs inside a
     # wedged process, where taking the import machinery is one more lock.
     libc = ctypes.CDLL(None, use_errno=True)
     libc.signal.restype = ctypes.c_void_p
     libc.signal.argtypes = (ctypes.c_int, ctypes.c_void_p)
-    raw = libc.signal(int(RELOAD_SIGNAL), 1)  # 1 == SIG_IGN on POSIX
-    return lambda: libc.signal(int(RELOAD_SIGNAL), raw)
+    raw = libc.signal(int(signum), 1)  # 1 == SIG_IGN on POSIX
+    return lambda: libc.signal(int(signum), raw)
 
 
 def _same_tree(left: Path, right: Path) -> bool:
