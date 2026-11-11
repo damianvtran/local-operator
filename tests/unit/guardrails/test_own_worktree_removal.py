@@ -542,5 +542,9 @@ async def test_allow_ledger_for_a_link_checks_the_link_row_not_the_pointee(
     _own_link(home, link, wt, sid=S2)  # someone else's link to S's own tree
     judge = _Judge("ALLOW ledger")
     outcome = await _check(home, f"rm {link}", judge)
-    assert outcome is not None and outcome.blocked, outcome.text
+    # Two statements, not `... and ..., outcome.text`: an assert MESSAGE is
+    # evaluated outside the narrowing its condition performed, so reading
+    # `.text` there is an optional-member access the type gate rejects.
+    assert outcome is not None, "the checker returned no verdict"
+    assert outcome.blocked, outcome.text
     assert "ledger: no row for this session" in judge.prompts[0]
