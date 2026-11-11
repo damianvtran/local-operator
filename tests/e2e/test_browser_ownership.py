@@ -116,6 +116,12 @@ def _control(peer: tuple[int, str], **changes: Any) -> dict[str, Any]:
     return response.json()
 
 
+async def _never_streams(_request: Any, _signal: Any = None) -> AsyncIterator[Any]:
+    """Typed ``stream_fn`` for a child Session that never runs a turn here."""
+    raise AssertionError("this child session must not stream")
+    yield  # pragma: no cover - makes this an async generator
+
+
 def _session(root: Path) -> Session:
     directory = root / "sessions" / "synthetic-browser"
     lease = acquire_session_lease(directory)
@@ -680,7 +686,7 @@ async def test_pending_approval_child_tab_is_handed(
     parent = _parent(headless_tui_env, _child_browser_stream(protocol_peer, retain="", final="")[0])
     child = Session(
         model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
-        stream_fn=lambda *_: None,
+        stream_fn=_never_streams,
         tools=[],
         transcript=Transcript(headless_tui_env / "sessions" / "synthetic-child"),
         system_blocks_provider=lambda *_: [],
@@ -720,7 +726,7 @@ async def test_retain_in_child_names_parent_handoff(
     parent = _parent(headless_tui_env, _child_browser_stream(protocol_peer, retain="", final="")[0])
     child = Session(
         model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
-        stream_fn=lambda *_: None,
+        stream_fn=_never_streams,
         tools=[],
         transcript=Transcript(headless_tui_env / "sessions" / "synthetic-child"),
         system_blocks_provider=lambda *_: [],
@@ -1031,7 +1037,7 @@ async def test_child_open_result_drops_top_level_left_open_reminder(
     parent = _parent(headless_tui_env, _child_browser_stream(protocol_peer, retain="", final="")[0])
     child = Session(
         model=ModelSpec(provider="test", model_id="synthetic", context_window=1000),
-        stream_fn=lambda *_: None,
+        stream_fn=_never_streams,
         tools=[],
         transcript=Transcript(headless_tui_env / "sessions" / "synthetic-child"),
         system_blocks_provider=lambda *_: [],

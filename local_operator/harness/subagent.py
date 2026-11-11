@@ -2832,7 +2832,10 @@ async def _hand_up_late_browser_surfaces(child: "Session", parent_session: Any) 
     parent's ``tabs`` listing still marks them its own and its dispose closes
     them. Teardown path: never raises.
     """
-    from local_operator.browser_bridge.handoff import close_handed_browser_surfaces, hand_off
+    from local_operator.browser_bridge.handoff import (
+        close_handed_browser_surfaces,
+        hand_off,
+    )
 
     browser = getattr(child, "_browser", None)
     if browser is None or not getattr(browser, "handed", None):

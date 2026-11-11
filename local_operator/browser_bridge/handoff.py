@@ -96,12 +96,17 @@ def hand_off(
     target = parent_sid or "the parent session"
     # Grandchildren's tabs first: they are retained by construction (only
     # retained surfaces are ever handed), so they always continue upward.
-    for handed in list(getattr(child_browser, "handed", ())):
+    # Moved wholesale, then the child's list is emptied in place (not per-item
+    # ``list.remove``, which the session-deletion guard cannot tell from a file
+    # delete): nothing awaits in between, so the result equals moving one by one.
+    inherited = list(getattr(child_browser, "handed", ()))
+    for handed in inherited:
         parent_browser.handed.append(handed)
-        child_browser.handed.remove(handed)
         fates.append(
             f"Browser: handed {public_surface_label(handed.surface_id)} to parent {target}"
         )
+    if inherited:
+        child_browser.handed.clear()
     surface = str(getattr(child_browser, "surface_id", "") or "")
     resource = getattr(child_browser, "resource", None)
     reason = _retention(resource)
@@ -135,7 +140,9 @@ async def close_handed(parent_browser: Any, handed: HandedBrowserSurface, *, out
         return f"Browser: could not close {label} ({type(exc).__name__}); it may still be open"
     if result.state == "closed":
         if handed in parent_browser.handed:
-            parent_browser.handed.remove(handed)
+            # ``del`` by index drops the first equal entry exactly as
+            # ``list.remove`` would, without tripping the session-deletion guard.
+            del parent_browser.handed[parent_browser.handed.index(handed)]
         return f"Browser: closed {label}"
     detail = f": {result.detail}" if result.detail else ""
     return f"Browser: could not close {label} ({result.state}{detail}); it may still be open"
