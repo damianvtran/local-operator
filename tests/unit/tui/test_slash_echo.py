@@ -30,8 +30,8 @@ from local_operator.tui.widgets.editor import Editor, InlineCommandRequested
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from local_operator.tui.widgets.usage_panel import UsagePanel
 from local_operator.tui.widgets.welcome import WelcomeView
-from tests.unit.tui.waiting import settle
 from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _factory
+from tests.unit.tui.waiting import settle
 
 #: The settled policy, one row per registry entry.
 #:
