@@ -273,9 +273,12 @@ def test_glob_over_own_clone_git_dir_stays_low(home: Path) -> None:
     assert _classify(home, "rm -rf ~/clone/.gi*").risk is Risk.LOW
 
 
-# Pre-existing over-block (both round-1 reports): a ``..`` after a missing
-# component whose lexical landing is the OWN pad ranked CRITICAL ("session
-# state"), which no judge can lift, for the agent's own cleanup.
+# A ``..`` after a missing component whose lexical landing is the OWN pad
+# keeps main's CRITICAL ("session state"). Rounds 1-3 relaxed it to HIGH for
+# the agent's own cleanup, and every round found one more move/copy shape that
+# used the relaxation to reach the state root (R2-1, R3-1, R4-1 on PR #3811),
+# so it was removed in round 4: name the physical path instead. The over-block
+# is main's behaviour and is deferred to a follow-up.
 
 
 @pytest.mark.parametrize(
@@ -286,12 +289,11 @@ def test_glob_over_own_clone_git_dir_stays_low(home: Path) -> None:
         "rm -rf $LOCAL_OPERATOR_SCRATCHPAD/newdir/../tmp",
     ],
 )
-def test_own_pad_dotdot_after_missing_component_is_high_not_critical(
+def test_own_pad_dotdot_after_missing_component_keeps_mains_critical(
     home: Path, command: str
 ) -> None:
     verdict = _classify(home, command.format(pad=_pad(home)))
-    assert verdict.risk is Risk.HIGH, verdict.targets
-    assert all(t.risk is Risk.HIGH and "unresolved" in t.reason for t in verdict.targets)
+    assert verdict.risk is Risk.CRITICAL, verdict.targets
 
 
 def test_missing_component_landing_outside_own_pad_in_state_stays_critical(home: Path) -> None:
@@ -356,8 +358,7 @@ def test_unpinned_dotdot_is_ranked_by_its_missing_and_relinked_landing(
     [
         # A literal re-link that stays in the own pad: HIGH, never LOW.
         "ln -sfn {pad}/build/deep {pad}/lnk && rm -f {pad}/lnk/../x",
-        # Target unknowable (``mv``/``cp -a`` of a link, a variable): HIGH.
-        "mv ~/w/other/sl {pad}/fresh && rm -f {pad}/fresh/../x",
+        # Target unknowable (a variable) through a link on disk now: HIGH.
         "L=$(cat f); ln -sfn $L {pad}/lnk && rm -f {pad}/lnk/../x",
         # A later unknowable re-link replaces an earlier literal one.
         "ln -sfn {pad}/slk {pad}/lnk && rm -rf {pad}/lnk && mv ~/w/other/sl {pad}/lnk"
@@ -446,6 +447,12 @@ def test_moved_or_copied_link_keeps_its_target(
         'mv "$(cat f)" {pad}/b && rm -f {pad}/b/../config.yml',
         "cp -a {pad}/nope {pad}/b && rm -f {pad}/b/../config.yml",
         'ln -sfn "$(cat f)" {pad}/a && mv {pad}/a {pad}/b && rm -f {pad}/b/../config.yml',
+        # Was HIGH (own-pad relaxation) until round 4; main ranks it CRITICAL.
+        "mv ~/w/other/sl {pad}/fresh && rm -f {pad}/fresh/../x",
+        # Round-2 out-of-scope shape: a program the resolver does not model
+        # (``rsync -l``) re-links the component; main ranks it CRITICAL.
+        f"ln -sfn {_STATE}/secrets {{pad}}/a && rsync -l {{pad}}/a {{pad}}/b"
+        " && rm -f {pad}/b/../config.yml",
     ],
 )
 def test_move_of_an_unknowable_source_keeps_mains_critical(
@@ -485,8 +492,9 @@ def test_nested_link_chain_resolves_in_bounded_time(home: Path, command: str) ->
     elapsed = time.monotonic() - start
     assert elapsed < 1.0, elapsed
     if "/../" in command:
-        # Unpinned: never LOW, whether or not the walk ran out of hops.
-        assert verdict.risk is Risk.HIGH, verdict.targets
+        # Unpinned and missing at check time, landing lexically in session
+        # state: main's CRITICAL, whether or not the walk ran out of hops.
+        assert verdict.risk is Risk.CRITICAL, verdict.targets
 
 
 @pytest.mark.parametrize(
@@ -507,3 +515,26 @@ def test_physical_cwd_still_sees_a_relinked_component(home: Path, lnk: Path, com
     spelled = alias / lnk.relative_to(home)
     verdict = _classify(home, command.format(pad=spelled))
     assert verdict.risk is not Risk.LOW, verdict.targets
+
+
+# Review round 4 (R4-1, PR #3811): moving or copying a DIRECTORY that contains
+# a link (``<pad>/tree/sub -> <state>/secrets`` on disk) keeps that link, but
+# its new path is missing at check time, so ``sub`` read as a fresh directory
+# and the own-pad relaxation ranked ``<pad>/b/config.yml`` HIGH. With the
+# relaxation removed, an unpinned ``..`` landing lexically in session state is
+# main's CRITICAL again, own pad included.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "mv {pad}/tree {pad}/b && rm -f {pad}/b/sub/../config.yml",
+        "cp -a {pad}/tree {pad}/b && rm -f {pad}/b/sub/../config.yml",
+        "mv {pad}/tree {pad}/tmpd && rm -f {pad}/tmpd/tree/sub/../config.yml",
+    ],
+)
+def test_moved_tree_containing_a_link_keeps_mains_critical(
+    home: Path, lnk: Path, command: str
+) -> None:
+    (lnk / "tree").mkdir()
+    (lnk / "tree" / "sub").symlink_to(home / ".local-operator" / "secrets")
+    verdict = _classify(home, command.format(pad=lnk))
+    assert verdict.risk is Risk.CRITICAL, verdict.targets

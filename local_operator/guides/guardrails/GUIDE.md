@@ -132,16 +132,18 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   CRITICAL. A path written with `..` is judged where the kernel lands it
   (`..` resolves after following links): inside your own scratchpad it stays
   LOW, inside another session's scratchpad HIGH, anywhere else in session
-  state CRITICAL. Where it cannot be pinned at check time it is judged (HIGH),
-  never LOW, even in your own scratchpad or `/tmp`: a `..` below a directory
-  that does not exist yet (`mkdir -p <pad>/n && rm -f <pad>/n/../x`), or below
-  one an earlier part of the same command linked, moved or copied onto,
-  deleted or created (`ln -sfn <dir> <pad>/l && rm -f <pad>/l/../x`), because
-  that same command could make the component a link to anywhere. Such a word
-  is ranked by where it lands if every missing part becomes a directory and
-  every part re-linked with a literal `ln -s`/`cp -s` target points there:
-  landing in protected state (the state root's files, another session's
-  transcript or ask store) stays CRITICAL. Write `rm -f <pad>/x` instead.
+  state CRITICAL. Where it cannot be pinned at check time it is never LOW,
+  even in `/tmp`: a `..` below a directory that does not exist yet
+  (`mkdir -p <pad>/n && rm -f <pad>/n/../x`), or below one an earlier part of
+  the same command linked, moved or copied onto, deleted or created
+  (`ln -sfn <dir> <pad>/l && rm -f <pad>/l/../x`), because that same command
+  could make the component a link to anywhere. Inside session state — your
+  own scratchpad included — such a `..` after a missing or re-linked
+  component is CRITICAL; elsewhere it is judged (HIGH). It is also ranked by
+  where it lands if every missing part becomes a directory and every part
+  re-linked with a literal `ln -s`/`cp -s` target points there, so a refusal
+  names the file the kernel would act on. Name the physical path directly
+  instead: write `rm -f <pad>/x`.
   `cd -P` (or `cd` after `set -P`/`set -o physical`) is followed to the
   directory the kernel resolves; through a part the same command re-linked,
   the working directory counts as unknown, so later relative paths rank HIGH. The

@@ -907,12 +907,6 @@ class Target:
     #: session, stays CRITICAL and the judge is shown that file (review R2-1,
     #: QA Q2-1 on PR #3811). Empty when it equals ``path`` or cannot be built.
     landings: tuple[str, ...] = ()
-    #: An ``unpinned`` word whose re-linked component an earlier ``mv``/``cp``
-    #: filled from a source whose link target cannot be known (a variable, a
-    #: source missing now, or one this command already changed unknowably).
-    #: ``classify`` then denies the own-pad relaxation and keeps main's rule —
-    #: a lexical landing under session state is CRITICAL (review R3-1, PR #3811).
-    relink_unknown: bool = False
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
@@ -1761,9 +1755,6 @@ class _Walker:
         #: spells it) -> target as written. Any later naming of the path drops
         #: its entry (:meth:`_name`), so only the latest known link is used.
         self.link_targets: dict[str, str] = {}
-        #: ``mv``/``cp`` destinations (both spellings) filled from a source
-        #: whose link target cannot be known: see ``Target.relink_unknown``.
-        self.unknown_links: set[str] = set()
         #: :func:`_relinked_landing` memo for the current ``link_targets``;
         #: cleared on every change to it (:meth:`_set_link`, :meth:`_name`).
         self._landing_memo: dict[str, str] = {}
@@ -2891,8 +2882,6 @@ class _Walker:
             }
             if self._names_any(prefixes):
                 target.unpinned = True
-            if prefixes & self.unknown_links:
-                target.relink_unknown = True
         if target.unpinned and target.raw_path is not None:
             landing = self._landing(target.raw_path)
             if landing is not None and landing != target.path:
@@ -2925,7 +2914,6 @@ class _Walker:
     def _set_link(self, key: str, pointee: str) -> None:
         self.link_targets[key] = pointee
         self._landing_memo.clear()
-        self.unknown_links.discard(key)
 
     def _names_any(self, prefixes: set[str]) -> bool:
         """Whether an earlier part of this command named (or linked) any of
@@ -2998,7 +2986,7 @@ class _Walker:
             return False, None
         if key in self.link_targets:
             return True, self.link_targets[key]
-        if {path, key} & self.unknown_links or self._names_any({path, key}):
+        if self._names_any({path, key}):
             return False, None
         try:
             if os.path.islink(key):
@@ -3012,18 +3000,18 @@ class _Walker:
 
         WHY (review R3-1, PR #3811). Naming the destination dropped any link
         it held, so ``ln -sfn <state>/secrets <pad>/a && mv <pad>/a <pad>/b &&
-        rm -f <pad>/b/../config.yml`` read ``b`` as a fresh directory and the
-        own-pad relaxation ranked ``<pad>/config.yml`` HIGH — below main's
-        CRITICAL — while rename(2) keeps the link and the kernel removes the
-        state root's ``config.yml``. The target string moves as written, so a
-        relative one resolves from the new place, as the kernel does.
+        rm -f <pad>/b/../config.yml`` read ``b`` as a fresh directory, and the
+        refusal named ``<pad>/config.yml`` while rename(2) keeps the link and
+        the kernel removes the state root's ``config.yml``. The target string
+        moves as written, so a relative one resolves from the new place, as
+        the kernel does. An unknown link state records nothing: the ``..``
+        after ``dest`` is already unpinned (``dest`` is named), and an unpinned
+        ``..`` landing lexically in session state is CRITICAL regardless.
         """
         known, pointee = state
         key = self._landing(dest)
         if known and pointee is not None and key is not None:
             self._set_link(key, pointee)
-        elif not known:
-            self.unknown_links.update(p for p in (dest, key) if p is not None)
 
     def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
         """``(loop vars, {ref name: value})`` for every iteration after the first.
