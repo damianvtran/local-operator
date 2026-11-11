@@ -605,3 +605,20 @@ def test_spelling_guard_skips_only_the_opaque_rule():
         guard_spelling(json.dumps({"body": "card 4111 1111 1111 1111"}))
     with pytest.raises(SensitiveValueError):
         guard_spelling(json.dumps({"body": SYNTH_GITHUB}))
+
+
+def test_public_url_identifiers_are_storable():
+    """Issue #3573: public IDs inside known URL structures must not be refused."""
+    cases = [
+        "https://github.com/org/repo/pull/42/files#diff-a1b2c3d4e5f6789012345678901234567890abcd",
+        "https://github.com/org/repo/pull/42/commits/a1b2c3d4e5f6789012345678901234567890abcd",
+        "https://gist.github.com/user/a1b2c3d4e5f6789012345678901234567890abcd",
+        "CI run https://example.com/actions/runs/a1b2c3d4e5f6789012345678901234567890abcd",
+        "~/.local-operator/attachments/a1b2c3d4e5f6789012345678901234567890abcd.png",
+        "~/.local-operator/attachments/a1b2c3d4e5f6789012345678901234567890abcd.json",
+    ]
+    for text in cases:
+        assert not refused(text), text
+
+    # A secret still wins even inside such a URL.
+    assert refused("api_key https://github.com/org/repo/commits/a1b2c3d4e5f6789012345678901234567890abcd")

@@ -320,6 +320,14 @@ _FILE_SUFFIXES = frozenset(
 _LOCAL_ATTACHMENT_PREFIX = re.compile(
     r"(?:^|[\s(\"'`=])(?:~|\.{1,2}|[A-Za-z]:)?[^\s:]*[/\\]attachments[/\\]\Z"
 )
+# Public identifiers inside URLs (issue #3573): #diff- anchors, /commits/<sha>,
+# /runs/<hex>, gist hosts, and attachment paths with non-.bin extensions.
+# These are locators, not secrets. A secret name in the clause still wins.
+_PUBLIC_URL_ID = re.compile(
+    r"(?:#diff-|/commits/|/runs/|gist\.github\.com/[^/\s]*/|/attachments/)[0-9a-fA-F]{32,}",
+    re.I,
+)
+
 # Back-compat alias: the digest vocabulary is now part of the public-id context.
 _DIGEST_CONTEXT = _PUBLIC_ID_CONTEXT
 _SYMBOLS = set("!@$%^&*")
@@ -749,6 +757,10 @@ def _opaque_verdict(
             # that name and shows it to the agent. A URL (``https://…/attachments/…``)
             # or any other segment stays refused: webhook and signed-URL secrets live
             # there (agent review round 1, m1).
+            return None
+        # Public URL locators (issue #3573): #diff-, /commits/, /runs/, gist, attachments/<hex>.ext
+        # A secret name in the clause still wins (checked earlier).
+        if _PUBLIC_URL_ID.search(text[max(0, start - 80) : end + 16]):
             return None
     tail = _HOST_TAIL.match(text, end)
     # Only a run that CAN be a DNS label gets the hostname reading: hex, or lowercase
