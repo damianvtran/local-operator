@@ -2113,10 +2113,33 @@ def _snapshot_profile_lineage(parent_session: Any) -> tuple[bool, bool]:
     if not callable(lineage):
         return False, True
     try:
-        seam, untrusted = lineage()
+        snapshot = lineage()
     except Exception:  # noqa: BLE001 — unknown provenance fails closed
         return False, True
+    # Validate the shape at runtime instead of trusting the annotation: an
+    # unknown host may return anything, and anything else fails closed.
+    if not isinstance(snapshot, tuple) or len(snapshot) != 2:
+        return False, True
+    seam, untrusted = snapshot
     return bool(seam), bool(untrusted)
+
+
+def _propagate_child_profile_taint(parent_session: Any, child: Any) -> None:
+    """Taint the parent's profile episode when its child ended tainted.
+
+    HOST metadata only (the child's own lineage), never a field of the child's
+    result text, so a model cannot claim a child was clean. A child whose
+    lineage cannot be read is treated as tainted; a parent without the hook
+    (a reduced host) has no autonomous profile writes to protect.
+    """
+    note = getattr(parent_session, "note_child_profile_taint", None)
+    if not callable(note):
+        return
+    if _snapshot_profile_lineage(child)[1]:
+        try:
+            note()
+        except Exception:  # noqa: BLE001 — must never fail the child's job
+            logger.warning("could not record the child's profile taint", exc_info=True)
 
 
 def _redact_child_result(parent_session: "Session", text: str) -> str:
@@ -2434,6 +2457,9 @@ def _make_runner(
                 bridge.cancel()
                 with contextlib.suppress(BaseException):
                     await bridge
+                # Upward, on every settle (completed, failed, cancelled): what
+                # the child read reaches the parent with its result.
+                _propagate_child_profile_taint(parent_session, child)
             if final["error"]:
                 # The child's loop reported a provider/turn error; the job
                 # must settle failed with it, not completed with the partial

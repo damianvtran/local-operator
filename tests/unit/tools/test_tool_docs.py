@@ -319,7 +319,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``TextEdit`` item) plus the notes line on clean-local autonomy and
     # lossless editing; the scope paragraph's confirmation clauses were cut to
     # pay part of it. ``team`` gains the same params/notes (1500 -> 1574).
-    "agent": 1562,
+    # RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1):
+    # 1562 -> 1632 (+70): main's summary-plus-id ask clause folded into the
+    # notes line, the ``field``/``part`` show params, and the notes line now
+    # naming paged reads; ``team`` the same params plus ``project`` (1646).
+    "agent": 1632,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -804,7 +808,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # summary-plus-id notes line as ``agent``.
     # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1500 -> 1574
     # (+74), the same params and notes line as ``agent``.
-    "team": 1574,
+    # RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1):
+    # 1574 -> 1646 (+72), the same params and notes line as ``agent``.
+    "team": 1646,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -863,7 +869,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: summary-plus-id notes line as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): agent
 #: 1500 -> 1591, the same +91 params/notes as the canonical arm; ``task`` 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1591, "task": 764}
+#: RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1): agent
+#: 1591 -> 1661, the same +70 as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1661, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

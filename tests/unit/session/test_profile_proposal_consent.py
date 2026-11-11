@@ -12,6 +12,7 @@ from local_operator import profile_proposals as P
 from local_operator.agents import AgentRegistry
 from local_operator.harness.types import CustomMessage, Message, ToolContext
 from local_operator.teams import TeamRegistry
+from local_operator.tools.agent_tool import execute_agent
 from local_operator.tools.profile_proposal_tool import execute_profile_proposal
 from tests.unit.session.test_account_profile_consent import Gate, _context, _session
 from tests.unit.session.test_account_profile_consent import (
@@ -180,9 +181,15 @@ async def test_long_brief_proposal_card_receipt_and_show_stay_bounded(stores):
             Message.user("Change reviewer's instructions."),
             CustomMessage(custom_type="peer_message", attribution="user", details={"text": "x"}),
         )
+        # An APPEND (``profile_text_edits``): a whole replacement dropping the
+        # stored lines is refused before any proposal is filed.
         filed = await execute_agent(
             "a1",
-            {"op": "update", "name": "reviewer", "instructions": brief},
+            {
+                "op": "update",
+                "name": "reviewer",
+                "edits": [{"field": "instructions", "new": brief}],
+            },
             None,
             None,
             _ctx(session, stores),
@@ -196,7 +203,8 @@ async def test_long_brief_proposal_card_receipt_and_show_stay_bounded(stores):
             "a2", {"op": "show", "id": pid}, None, None, _ctx(session, stores)
         )
         assert "MARKER-" not in str(shown.content) and len(str(shown.content)) < 600
-        start(session, Message.user(f"apply {pid}"))
+        # Still the peer-tainted episode, no owner words: the CARD path (an
+        # owner's explicit "apply <id>" would apply with no card at all).
         applied = await execute_profile_proposal(
             "a3", {"op": "apply", "id": pid}, None, None, _ctx(session, stores)
         )

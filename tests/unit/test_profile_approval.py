@@ -651,6 +651,10 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         "name": "reviewer" if kind == "agent" else "lopdev",
         "instructions": "Approved offline guidance.",
     }
+    if kind == "team":
+        # Review m3: the team ``project`` brief takes the same canonical
+        # count heading as instructions, never a one-line repr of its text.
+        args["project"] = "Approved offline project.\nSecond project line."
     context = ToolContext(
         cwd=".",
         session_dir=str(directory),
@@ -791,6 +795,10 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         assert native[0].result.details["receipt_id"] == queued.details["receipt_id"]
         assert native[0].result.details is not None
         assert native[0].result.details["profile_action"] == applied["profile_action"]
+        if kind == "team":
+            receipt = native[0].result.text
+            assert "project" in receipt and "Second project line" not in receipt, receipt
+            assert "project:" in native[0].result.details["diff"]
         history = Transcript(directory).build_llm_history()
         tool = [
             message

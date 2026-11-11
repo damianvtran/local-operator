@@ -213,10 +213,19 @@ async def test_search_finds_a_role_authored_a_moment_ago(context) -> None:
 
 @pytest.mark.asyncio
 async def test_show_returns_the_full_instructions(context) -> None:
+    """Long instructions come back page by page (``profile_text_edits`` rule 1),
+    not inline, so no replay bound can clip them -- packaged starters too."""
     body = await call(context, op="show", name="reviewer")
-    assert "instructions:" in body
-    assert "BLOCKER" in body
+    assert "instructions: NOT shown here" in body
     assert "not installed" in body
+    pages, part = [], 1
+    while True:
+        page = await call(context, op="show", name="reviewer", field="instructions", part=part)
+        pages.append(page.partition("\n---\n")[2])
+        if "last part" in page.partition("\n---\n")[0]:
+            break
+        part += 1
+    assert "BLOCKER" in "".join(pages)
 
 
 @pytest.mark.asyncio

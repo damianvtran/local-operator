@@ -466,6 +466,7 @@ async def test_non_owner_inputs_never_take_path_a(stores, label) -> None:
             # the agent's own run writes the account row itself -- the delivery
             # text granted nothing, the clean lineage did.
             assert not result.is_error, _text(result)
+            assert result.details is not None
             assert result.details["authorized_by"].startswith("local-agent:")
             assert gate.cards == []
             return
@@ -1127,7 +1128,9 @@ async def test_direct_save_card_counts_changes_then_shows_clipped_content(stores
     session = _session(stores, gate=gate)
     body = "\n".join(f"+brief line {i} MARKER-{i}" for i in range(400))
     try:
-        _start_run(session, Message.user("look at the reviewer"))
+        # TAINT: since the 2026-11 ruling only a run that read untrusted
+        # input reaches the direct-save card (a clean one writes itself).
+        _start_run(session, Message.user("look at the reviewer"), TAINT)
         origin = await session._authorize_account_profile_write(
             DurableWriteIntent(
                 kind="agent",
@@ -1160,7 +1163,7 @@ async def _direct_save_card(stores, intent: DurableWriteIntent) -> list[str]:
     gate = Gate(answer=False)
     session = _session(stores, gate=gate)
     try:
-        _start_run(session, Message.user("save it"))
+        _start_run(session, Message.user("save it"), TAINT)  # card path: see above
         assert await session._authorize_account_profile_write(intent) is None
         assert len(gate.cards) == 1
         return gate.cards[0][1].splitlines()

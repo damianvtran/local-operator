@@ -50,20 +50,26 @@ teams, after which the two sets are independent: editing or deleting one never
 touches the other. Choose the store deliberately: `scope='global'` saves for
 every conversation (the user's account); never promote silently. A clean local
 agent may create, update or revert account teams ITSELF — no owner wording or
-card — and the receipt carries the diff plus `op='revert' backup_id=…`. Only a
-run that read untrusted input (a peer, Team Bridge, a remote prompt) or a
-hub-linked team files a proposal instead; tell the user to review it in
+card — and the receipt carries the diff plus `op='revert' backup_id=…`. A team
+linked to an org hub is no exception: the write changes your local copy, and
+publishing it is a separate step. Only a run that read untrusted input (a peer,
+Team Bridge, a remote prompt) files a proposal instead; tell the user to review it in
 Agents → <team>, or apply it with `profile_proposal op=apply` once they agree.
 On a host with no conversation store, omitting `scope` writes the account.
 `team_delete` removes a conversation team; an account team must be
 deleted from a user surface, which asks its own confirmation.
 
-Editing a brief: `op='show'` returns the whole stored text and a `revision`.
-Change part of it with `edits=[{field, old, new}]` (`old` must match exactly
+Editing a brief: `op='show'` returns a short brief whole and a long one as a
+pointer; read the long one with `field=instructions|project part=1..K` — each
+page states the `revision`, the field's sha256 and its exact span, and the
+pages concatenate exactly (pass `base_revision` to refuse a row that moved
+between pages). Change part of it with `edits=[{field, old, new}]` (`old` must match exactly
 once; omit it to append) — never by retyping a long field. A whole
 `instructions`/`project` value that drops stored lines is refused unless it
-carries `replace=true` and that `base_revision`; text with a tool-output
-truncation or spill marker is always refused.
+carries `replace=true` (your acknowledgement that the removal is intended; not
+`confirm_replace`, the person's confirmation for other operations) and that
+`base_revision`; text with a tool-output truncation, spill or page marker is
+always refused.
 
 A conversation team may roster ACCOUNT roles and specialists: those are not
 copied, and they resolve from the account in every conversation. A conversation

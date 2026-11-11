@@ -13,9 +13,19 @@ THE CONTRACT, every rule structural rather than a size or ratio threshold (no
 distribution exists to calibrate one against, and any ratio both blocks a
 legitimate rewrite and admits a smaller loss):
 
-1. ``show`` returns the stored fields whole, with the row's revision. The
-   field caps (``MAX_TEAM_INSTRUCTIONS_CHARS``, ``MAX_INSTRUCTIONS_CHARS``)
-   already bound what that costs.
+1. ``show`` never hands the model a clipped field it could mistake for the
+   whole. "Whole in the ToolResult" was not enough (QA round 1, Q2): the
+   transcript kept a 13,024-char show complete, yet the NEXT model request
+   carried 4,261 chars of it -- ``harness.replay_bound`` elides any replayed
+   text block over its bound, after the fact, on the wire only. So a field
+   longer than one page is never printed inline: default ``show`` prints it
+   as a pointer (size, line count, sha256, part count), and ``show
+   field=<f> part=<k>`` returns ONE page, sized (:data:`FIELD_PAGE_CHARS`)
+   so header+page stays far below every replay bound. Each page states the
+   row revision, the field's sha256, its exact char/line span and the next
+   part; the bodies concatenate byte-exactly to the stored value
+   (:func:`field_pages`). A ``base_revision`` on a page read refuses a row
+   that moved between pages, so two versions can never be stitched.
 2. ``edits`` -- an exact ``old`` -> ``new`` patch, or an append when ``old``
    is omitted -- is computed against the STORED text, so it cannot drop bytes
    it does not name. Each ``old`` must occur exactly once; the list is
@@ -37,6 +47,7 @@ a receipt, a proposal summary and a refusal can never disagree again.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import re
 from typing import Any, Iterable, Mapping
 
@@ -51,7 +62,97 @@ _PREVIEW_MARKERS = (
     re.compile(r"\[Full output \(\d+ lines\) is SAVED at spill://"),
     re.compile(re.escape("... [output truncated] ...")),
     re.compile(r"\[\.\.\. \d+ characters elided on replay"),
+    # ``show``'s own page header and long-field pointer (below): a value
+    # quoting them is a copied page or pointer, never an intended brief.
+    re.compile(r"part \d+/\d+ · revision \S+ · sha256 [0-9a-f]{16}"),
+    re.compile(r": NOT shown here \(\d+ chars, \d+ lines, sha256 [0-9a-f]{16}\)"),
 )
+
+
+#: Largest page body ``show field=<f> part=<k>`` returns, in characters.
+#: DERIVED, not chosen: ``harness.replay_bound.DEFAULT_REPLAY_BOUND_CHARS``
+#: (8,192) elides any longer replayed text block, and QA round 1 (Q2) measured
+#: a real next request keeping only 4,261 chars of one result -- so a page
+#: must survive a bound of HALF the default with room for its header. 3/8 of
+#: the default (3,072) plus a header under ~300 chars stays under 4,096
+#: (``SHOW_RESULT_BUDGET_CHARS``); the regression test replays every page
+#: through ``bound_replay_payloads`` at both bounds. Not a new knob: it moves
+#: only if that bound moves.
+FIELD_PAGE_CHARS = 3 * 1024
+#: Largest DEFAULT ``show`` result that may print fields inline (half the
+#: replay bound, the same derivation); a longer one points at pages instead.
+SHOW_RESULT_BUDGET_CHARS = 4 * 1024
+
+
+def field_digest(value: str) -> str:
+    """Short sha256 of a whole field value: what proves pages belong together."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def field_pages(value: str, page_chars: int = FIELD_PAGE_CHARS) -> list[str]:
+    """``value`` split into pages that concatenate back to it byte-exactly.
+
+    A page ends after its last newline when that keeps it at least half full
+    (readable pages); otherwise -- one huge paragraph -- it is a hard cut at
+    ``page_chars`` code points. Python strings index code points, so a cut
+    never splits a character; a ``\r\n`` split across two pages still
+    reassembles exactly because nothing is added or removed at the seam.
+    """
+    if not value:
+        return [""]
+    pages: list[str] = []
+    start = 0
+    while start < len(value):
+        end = min(start + page_chars, len(value))
+        if end < len(value):
+            newline = value.rfind("\n", start, end)
+            if newline >= start + page_chars // 2:
+                end = newline + 1
+        pages.append(value[start:end])
+        start = end
+    return pages
+
+
+def field_pointer(field: str, value: str) -> str:
+    """The default-``show`` line for a field too long to print inline."""
+    parts = len(field_pages(value))
+    return (
+        f"{field}: NOT shown here ({len(value)} chars, {len(value.splitlines())} lines, "
+        f"sha256 {field_digest(value)}). Read it whole, page by page: op='show' "
+        f"field={field} part=1..{parts} (pass base_revision to pin one version)."
+    )
+
+
+def render_field_page(
+    field: str, value: str, part: int, revision: str, *, base_revision: str | None = None
+) -> str:
+    """One page of ``field`` with the header that makes it verifiable.
+
+    Raises :class:`TextEditRefusal` for a part out of range or a
+    ``base_revision`` that no longer matches (the row moved between pages).
+    The body follows the header's ``---`` line verbatim: concatenating every
+    part's body gives the stored value, whose sha256 the header states.
+    """
+    if base_revision is not None and base_revision != revision:
+        raise TextEditRefusal(
+            "base_revision does not match the stored revision: the row changed since "
+            "the earlier page, so pages of two versions would not fit together. "
+            "Re-read from part=1."
+        )
+    pages = field_pages(value)
+    if not 1 <= part <= len(pages):
+        raise TextEditRefusal(f"{field} has {len(pages)} part(s); part={part} does not exist.")
+    start = sum(len(page) for page in pages[: part - 1])
+    body = pages[part - 1]
+    first_line = value.count("\n", 0, start) + 1
+    last_line = first_line + body.rstrip("\n").count("\n") if body else first_line
+    nxt = f"next: part={part + 1}" if part < len(pages) else "last part"
+    return (
+        f"{field} part {part}/{len(pages)} · revision {revision} · sha256 "
+        f"{field_digest(value)} · chars {start + 1}-{start + len(body)} of {len(value)} "
+        f"· lines {first_line}-{last_line} of {len(value.splitlines())} · {nxt}. "
+        "Body below the --- line, verbatim; parts concatenate exactly.\n---\n" + body
+    )
 
 
 class TextEditRefusal(ValueError):
@@ -136,9 +237,20 @@ def apply_edits(
         old = edit.old
         new = str(edit.new)
         if not old:
+            if not new:
+                # An empty append changes nothing yet used to add a bare
+                # newline: refuse instead of writing a no-op "edit".
+                raise TextEditRefusal(
+                    f"edits[{index}]: an append (old omitted) needs non-empty new text; "
+                    "nothing was written."
+                )
             # Append on its own line: a brief is line-structured, and gluing the
-            # new text onto the last sentence is never what an append means.
-            joiner = "\n" if current and not current.endswith("\n") else ""
+            # new text onto the last sentence is never what an append means. A
+            # ``new`` that already starts with its own newline brings the
+            # separator itself; adding another would insert a byte nobody wrote.
+            joiner = (
+                "\n" if current and not current.endswith("\n") and not new.startswith("\n") else ""
+            )
             values[field] = current + joiner + new
         else:
             found = current.count(old)
@@ -174,8 +286,9 @@ def replacement_refusal(
     if has_preview_marker(value, stored):
         return (
             f"the new {field} contains a tool-output truncation/spill marker, so it is "
-            "a clipped preview, not the whole text; nothing was written. Re-read with "
-            "op='show' (it returns the full text) and use edits=[...] to append or patch."
+            "a clipped preview or copied page, not the whole text; nothing was written. "
+            "Use edits=[...] to append or patch (they apply to the stored text), or "
+            "read every part with op='show' field=<f> part=k before a rewrite."
         )
     added, removed = field_line_stats(stored, value)
     if removed == 0:
@@ -188,7 +301,9 @@ def replacement_refusal(
         f"replacing {field} would remove {removed} of {len(stored.splitlines())} stored "
         f"lines (+{added}/-{removed}){size}; nothing was written. To add or change part "
         "of it, use edits=[{field, old, new}] (omit old to append). To rewrite it on "
-        "purpose, re-read with op='show' and pass replace=true with its revision as "
+        "purpose, read it in full (op='show' field=<f> part=1..) and pass replace=true "
+        "(your own acknowledgement that the removal is intended; not confirm_replace, "
+        "which is the person's confirmation for other ops) with its revision as "
         "base_revision."
     )
 

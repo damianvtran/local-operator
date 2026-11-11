@@ -172,9 +172,13 @@ class TeamParams(BaseModel):
         default=None,
         description="update: patch/append long text losslessly.",
     )
+    field: Literal["instructions", "project", "description"] | None = Field(
+        default=None, description="show: read this field page by page"
+    )
+    part: int | None = Field(default=None, ge=1, description="show: page, 1-based")
     base_revision: str | None = Field(
         default=None,
-        description="update: show's revision (CAS).",
+        description="show/update: show's revision (CAS).",
     )
     replace: bool = Field(
         default=False,
@@ -421,7 +425,15 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     return _text(tool_call_id, "team", text, details=spill or None)
 
 
-async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+async def _op_show(
+    context: ToolContext | None,
+    tool_call_id: str,
+    name: str,
+    *,
+    field: str | None = None,
+    part: int | None = None,
+    base_revision: str | None = None,
+) -> ToolResult:
     registry = _registry(context)
     if registry is None:
         return _error(tool_call_id, "team", "no team registry attached to this session.")
@@ -444,7 +456,27 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             "conversation starts with a copy of its teams.",
         )
     from local_operator.profile_scope import row_scope, scope_words
+    from local_operator.profile_text_edits import (
+        SHOW_RESULT_BUDGET_CHARS,
+        TextEditRefusal,
+        field_pointer,
+        render_field_page,
+    )
 
+    revision = team_revision(team)
+    if field is not None:
+        # The paged authoring read (``profile_text_edits`` rule 1): ONE page per
+        # result so no replay bound can clip it after the fact.
+        value = {
+            "instructions": team.instructions,
+            "project": team.project,
+            "description": team.description,
+        }[field] or ""
+        try:
+            page = render_field_page(field, value, part or 1, revision, base_revision=base_revision)
+        except TextEditRefusal as exc:
+            return _error(tool_call_id, "team", str(exc))
+        return _text(tool_call_id, "team", page, details={"complete": True, "field": field})
     header = [
         f"{identifier_text(context, display_form(team.name, team.label))}. "
         f"Led by {identifier_text(context, team.manager)}",
@@ -464,21 +496,30 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     header.extend(team.roster_lines(lambda value: identifier_text(context, value)))
     header.extend(_override_lines(team, lambda value: identifier_text(context, value)))
     body = "\n".join(header)
-    if team.instructions.strip():
-        body += "\n\ncollaboration:\n" + team.instructions.strip()
-    else:
-        body += "\n\ncollaboration: (none)"
-    if team.project.strip():
-        body += "\n\nproject:\n" + team.project.strip()
-    else:
-        body += "\n\nproject: (none)"
+    # Inline only while the WHOLE result fits the replay-safe budget; a
+    # longer field becomes a pointer to its pages, and ``complete`` says so,
+    # because a clipped middle read back as the whole brief is how a
+    # 12.5k-char brief lost ~6k chars to one append (``profile_text_edits``).
+    paged: list[str] = []
+    for label, key, value in (
+        ("collaboration", "instructions", team.instructions),
+        ("project", "project", team.project),
+    ):
+        text = value.strip()
+        if not text:
+            body += f"\n\n{label}: (none)"
+        elif len(body) + len(text) + 2 * len(label) + 200 <= SHOW_RESULT_BUDGET_CHARS:
+            body += f"\n\n{label}:\n{text}"
+        else:
+            paged.append(key)
+            body += "\n\n" + field_pointer(key, value)
     body += f"\n\nlaunch with /team {identifier_text(context, team.name)} <request>."
-    # LOSSLESS, never the generic head+tail preview: this is the authoring read
-    # an update is written from, and a clipped middle read back as the whole
-    # brief is how a 12.5k-char brief lost ~6k chars to one append (see
-    # ``profile_text_edits``). Both brief fields are already capped at
-    # ``MAX_TEAM_INSTRUCTIONS_CHARS`` on write, which bounds this output.
-    return _text(tool_call_id, "team", body, details={"complete": True})
+    return _text(
+        tool_call_id,
+        "team",
+        body,
+        details={"complete": not paged, **({"paged_fields": paged} if paged else {})},
+    )
 
 
 def _bounded_field(value: str | None, label: str) -> str | None:
@@ -687,14 +728,16 @@ async def _op_write(
             verb = "created"
         else:
             assert existing is not None  # guarded above
+            # The caller's own ``base_revision`` (a lossless-edit CAS) binds
+            # under the writer lock too, not just at the pre-check above.
+            # Narrowed into a local so the checker sees ``str`` at the call.
+            expected_revision = base_revision or params.base_revision
             team = registry.update_team(
                 existing.id,
                 fields,
-                # The caller's own ``base_revision`` (a lossless-edit CAS) binds
-                # under the writer lock too, not just at the pre-check above.
                 precondition=(
-                    _revision_precondition(base_revision or params.base_revision)
-                    if (base_revision or params.base_revision) is not None
+                    _revision_precondition(expected_revision)
+                    if expected_revision is not None
                     else None
                 ),
             )
@@ -1121,7 +1164,14 @@ async def execute_team(
     if params.op == "list":
         return await _op_list(context, tool_call_id)
     if params.op == "show":
-        return await _op_show(context, tool_call_id, str(params.name))
+        return await _op_show(
+            context,
+            tool_call_id,
+            str(params.name),
+            field=params.field,
+            part=params.part,
+            base_revision=params.base_revision,
+        )
     if params.op == "promote":
         return await _op_promote(context, tool_call_id, params)
     if params.op == "revert":

@@ -430,6 +430,57 @@ def _is_remote_prompt(message: Any) -> bool:
     return isinstance(payload, Mapping) and bool(payload.get(REMOTE_PROMPT_KEY))
 
 
+#: Transcript custom entry carrying the PROFILE-TRUST EPISODE bit (host-only,
+#: never model context; ``details = {"untrusted": bool}``). Why it is durable:
+#: run-scoped taint reset at every run start, so a Bridge-tainted child's job
+#: result waking the parent in a NEW run let a plain profile write go direct
+#: (QA round 1, Q1). Unlisted in the collapsible/bookkeeping sets on purpose:
+#: every entry is kept through file compaction and copied by forks, and the
+#: newest one wins (``latest_custom``).
+PROFILE_TRUST_CUSTOM_TYPE = "profile_trust"
+
+#: Internal inputs that carry no outside party's words (``_note_run_input``).
+_PROFILE_BENIGN_INPUTS = frozenset(
+    {
+        "wake_prompt",
+        "monitor_prompt",
+        "job_result",
+        "session_incident",
+        "session_model_switch",
+        "session_credential_redaction",
+        "todo_reminder",
+        "project_reminder",
+        "profile_proposal_result",
+    }
+)
+
+
+def _profile_input_class(message: Any) -> str:
+    """``owner`` | ``consent`` | ``untrusted`` | ``benign`` for one run input.
+
+    The ONE classifier both the live run (``Session._note_run_input``) and the
+    episode reconstruction of an old transcript (``_reconstruct_profile_trust``)
+    use, so a resume can never classify history differently from the run that
+    lived it. Fails CLOSED: remote prompts, harness injections, unknown internal
+    types and ask answers not provably a person on a local surface are
+    ``untrusted``. ``owner`` is a typed, non-injected, non-remote user row.
+    """
+    custom_type = getattr(message, "custom_type", None)
+    if _is_remote_prompt(message) or is_harness_injection(message):
+        return "untrusted"
+    if custom_type == "ask_response":
+        details = getattr(message, "details", None) or {}
+        by = details.get("answered_by") or {}
+        if ask_answer_is_person(message) and by.get("surface") in {"tui", "desktop", "chat"}:
+            return "consent"
+        return "untrusted"
+    if custom_type is not None:
+        return "benign" if custom_type in _PROFILE_BENIGN_INPUTS else "untrusted"
+    if getattr(message, "role", None) != "user":
+        return "untrusted"
+    return "owner"
+
+
 def _saver_redaction(variables: Any) -> Any:
     """The session's two redaction passes as Radient Saver's ``Redaction``, or ``None``.
 
@@ -3961,6 +4012,19 @@ class Session:
         #: into a plain update. Deliberately NOT ``_run_untrusted_input``: the
         #: owner's bound verbal "yes" to that exact proposal stays valid.
         self._run_untrusted_proposal_read = False
+        #: A subagent of THIS run finished tainted (``note_child_profile_taint``):
+        #: its result is in context, so an owner turn in the same run cannot
+        #: reset the episode past it.
+        self._run_child_profile_taint = False
+        #: The durable PROFILE-TRUST EPISODE bit (``PROFILE_TRUST_CUSTOM_TYPE``):
+        #: ``None`` until first read, then rebuilt from the transcript
+        #: (``_reconstruct_profile_trust``). Survives run resets, wakes, job
+        #: results, resume, compaction and forks; only a genuine top-level
+        #: owner turn with no co-ingested untrusted input clears it.
+        self._profile_episode_untrusted: bool | None = None
+        #: Serialized persistence of that bit: each append awaits the previous
+        #: one, so a clean->tainted pair can never land on disk reversed.
+        self._profile_trust_task: asyncio.Task[None] | None = None
         #: Ask ids a PERSON answered in this run (``ask_answer_is_person``). The
         #: hub-pull consent seam grants only on an answered HOST-FILED consent ask
         #: that arrived in the run doing the write, so a stale yes from an older
@@ -15101,9 +15165,11 @@ class Session:
            untrusted input (:meth:`profile_lineage`) -- creates, updates or
            reverts an account agent/team ITSELF: no owner text, no card. The
            backup/revert receipt and the transaction audit record it. This
-           holds for a row linked to an org hub too: the write changes the
-           LOCAL account copy only, never the hub source -- publish, push and
-           delete are separate gated paths that never inherit this grant.
+           holds for a row linked to an org hub too: this write changes the
+           LOCAL account copy and never publishes, nor enables or grants any
+           push. A link's EXISTING user-set ``auto_push`` may later publish
+           that copy under its own standing grant; publish/push/delete stay
+           separate gated paths that never inherit this one.
         3. The owner's own explicit edit request (top-level, clean run).
         4. Otherwise a proposal (the lineage read untrusted/peer/Bridge input),
            never a grant -- the lineage and origin ride on it.
@@ -15235,8 +15301,157 @@ class Session:
             and self._authorize_durable_write == self._authorize_account_profile_write
         )
         return own, bool(
-            self._spawn_untrusted or self._run_untrusted_input or self._run_untrusted_proposal_read
+            self._spawn_untrusted
+            or self._run_untrusted_input
+            or self._run_untrusted_proposal_read
+            or self._run_child_profile_taint
+            or self._profile_episode_tainted()
         )
+
+    def _profile_episode_tainted(self) -> bool:
+        """The durable episode bit, rebuilt from the transcript on first read."""
+        if self._profile_episode_untrusted is None:
+            self._profile_episode_untrusted = self._reconstruct_profile_trust()
+        return self._profile_episode_untrusted
+
+    def _reconstruct_profile_trust(self) -> bool:
+        """Rebuild the episode bit from THIS session's transcript (host data only).
+
+        Newest ``profile_trust`` record, then every input after it: any
+        untrusted one taints (a taint whose append was lost in a crash is
+        still in the journal as the message itself). No record -- a session
+        from before the bit existed -- walks back to the newest genuine owner
+        row: untrusted input after it, or co-ingested with it (since the
+        previous assistant row), taints; no owner anchor with any untrusted
+        input taints. A corrupt record fails closed. An empty transcript (a
+        fresh session) is clean. Never raises: unreadable history is tainted.
+        """
+        from local_operator.session.transcript import ENTRY_CUSTOM, _entry_to_message
+
+        try:
+            entries = self._transcript.entries()
+            start = 0
+            for index in range(len(entries) - 1, -1, -1):
+                entry = entries[index]
+                if (
+                    entry.type == ENTRY_CUSTOM
+                    and entry.payload.get("custom_type") == PROFILE_TRUST_CUSTOM_TYPE
+                ):
+                    details = entry.payload.get("details")
+                    flag = details.get("untrusted") if isinstance(details, Mapping) else None
+                    if not isinstance(flag, bool):
+                        return True
+                    if flag:
+                        return True
+                    start = index + 1
+                    break
+            else:
+                start = -1
+            messages = [
+                message
+                for entry in entries[max(start, 0) :]
+                if (message := _entry_to_message(entry)) is not None
+            ]
+        except Exception:  # noqa: BLE001 — unknown history fails closed
+            logger.warning("could not rebuild the profile-trust episode", exc_info=True)
+            return True
+        if start >= 0:
+            return any(
+                getattr(message, "role", None) not in {"assistant", "tool"}
+                and _profile_input_class(message) == "untrusted"
+                for message in messages
+            )
+        # No record: classify inputs newest-first until the owner anchor, then
+        # the anchor's own batch (inputs back to the previous assistant row).
+        anchored = False
+        for message in reversed(messages):
+            role = getattr(message, "role", None)
+            if role == "tool":
+                continue
+            if role == "assistant":
+                if anchored:
+                    return False
+                continue
+            kind = _profile_input_class(message)
+            if kind == "untrusted":
+                return True
+            if kind == "owner":
+                anchored = True
+        return False
+
+    def _note_profile_episode(self, input_class: str) -> None:
+        """Advance the episode bit for one run input; persist any change.
+
+        Order-independent within a run: an owner row clears the bit only if
+        nothing untrusted has been noted in this run, and an untrusted row
+        noted later sets it again -- the run flags, not arrival order, decide.
+        A clear is a NEW trusted context, never approval of an untrusted
+        proposal (that still needs the owner's bound yes or the card).
+        """
+        before = self._profile_episode_tainted()
+        if (
+            self._run_untrusted_input
+            or self._run_untrusted_proposal_read
+            or self._run_child_profile_taint
+        ):
+            after = True
+        elif input_class == "owner" and not self._parent_session_id:
+            after = False
+        else:
+            after = before
+        if after != before:
+            self._profile_episode_untrusted = after
+            self._schedule_profile_trust()
+
+    def _taint_profile_episode(self) -> None:
+        if not self._profile_episode_tainted():
+            self._profile_episode_untrusted = True
+            self._schedule_profile_trust()
+
+    def note_child_profile_taint(self) -> None:
+        """HOST hook: a subagent of this session finished tainted.
+
+        Called by ``harness.subagent`` from the child's own lineage, never from
+        anything the child's model wrote. The child's result is now (or will
+        be, via ``job_result``) in this session's context, so a clean parent
+        must not launder it into an autonomous account write.
+        """
+        self._run_child_profile_taint = True
+        self._taint_profile_episode()
+
+    def _schedule_profile_trust(self) -> None:
+        """Append the current bit as a ``profile_trust`` record, serialized.
+
+        ``_note_run_input`` is synchronous while transcript appends are async,
+        so the write is a task chained behind the previous one. The in-memory
+        bit is authoritative meanwhile; a failed append only loses the record,
+        and a lost TAINT record is recovered from the journal on reconstruct.
+        """
+        value = bool(self._profile_episode_untrusted)
+        previous = self._profile_trust_task
+        transcript = self._transcript
+
+        async def persist() -> None:
+            if previous is not None:
+                with contextlib.suppress(BaseException):
+                    await previous
+            try:
+                await transcript.append_custom(PROFILE_TRUST_CUSTOM_TYPE, {"untrusted": value})
+            except Exception:  # noqa: BLE001 - persistence must never break a turn
+                logger.warning("could not persist the profile-trust episode", exc_info=True)
+
+        try:
+            self._profile_trust_task = asyncio.get_running_loop().create_task(persist())
+        except RuntimeError:
+            # No loop (a sync test host): the in-memory bit still governs.
+            self._profile_trust_task = None
+
+    async def flush_profile_trust(self) -> None:
+        """Await the pending ``profile_trust`` append (tests and teardown)."""
+        task = self._profile_trust_task
+        if task is not None:
+            with contextlib.suppress(BaseException):
+                await task
 
     def _profile_lineage_record(self) -> dict[str, Any]:
         """Additive provenance stamped on a proposal (UI-compatible extra key).
@@ -15249,6 +15464,38 @@ class Session:
             "parent_session_id": self._parent_session_id or "",
             "clean": not self.profile_lineage()[1],
         }
+
+    @staticmethod
+    def _prefiled_plan_is_safe(proposal: Mapping[str, Any]) -> bool:
+        """No long-text field of the plan drops a stored line or quotes a preview.
+
+        The structural guards of ``profile_text_edits``: an after-image
+        carrying harness clip/page text, or missing any line of the
+        before-image, is not applied without a person, however it was filed.
+        """
+        from collections import Counter
+
+        from local_operator.profile_text_edits import has_preview_marker
+
+        before = proposal.get("before") or {}
+        after = proposal.get("after") or {}
+        if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+            return False
+        for field, value in after.items():
+            # Only the long-text fields: a one-line description change is a
+            # replacement by nature, not a clipped brief.
+            if field not in {"instructions", "project"} or not isinstance(value, str):
+                continue
+            stored = before.get(field)
+            stored_text = stored if isinstance(stored, str) else ""
+            if has_preview_marker(value, stored_text):
+                return False
+            # LINE LOSS, as a multiset: every stored line must still be in the
+            # plan. A reorder or an insertion is not loss (a positional diff
+            # would call a moved line "removed" and stall a legitimate plan).
+            if Counter(stored_text.splitlines()) - Counter(value.splitlines()):
+                return False
+        return True
 
     def _profile_owner_consent(self) -> bool:
         """Only a top-level owner's clean run may authorize account writes."""
@@ -15301,14 +15548,21 @@ class Session:
                 isinstance(lineage, Mapping) and lineage.get("clean") is not True
             ):
                 self._run_untrusted_proposal_read = True
+                self._taint_profile_episode()
             return "shown"
         # A generic owner input is not approval. A contextual assent binds only
         # to the proposal that was displayed BEFORE that owner text arrived
         # (snapshotted per text in ``_note_run_input``), and an explicit
         # apply/reject instruction must name this exact proposal ID. Model
         # parameters and model-run ``show`` calls never manufacture consent.
+        # A reply naming a DIFFERENT proposal id is about that one, never a
+        # bound yes to this one ("apply pp_other" after this was displayed).
         explicit = any(
-            (binding == proposal_id and owner_text_assents(text))
+            (
+                binding == proposal_id
+                and owner_text_assents(text)
+                and all(named == proposal_id for named in re.findall(r"\bpp_[0-9a-z]+", text))
+            )
             or (
                 proposal_id in text
                 and re.match(r"^\s*(?:please\s+)?(?:apply|accept|approve|reject)\b", text, re.I)
@@ -15327,11 +15581,33 @@ class Session:
             return "granted"
         origin = proposal.get("origin") or {}
         lineage = origin.get("lineage")
+        own_session = bool(self._session_id) and origin.get("session_id") == self._session_id
+        clean_lineage = isinstance(lineage, Mapping) and lineage.get("clean") is True
         trusted_origin = origin.get("trust") in {"agent", "owner"} and (
-            (isinstance(lineage, Mapping) and lineage.get("clean") is True)
-            or (lineage is None and origin.get("session_id") == self._session_id)
+            clean_lineage or (lineage is None and own_session)
         )
-        if trusted_origin and not self.profile_lineage()[1]:
+        if (
+            trusted_origin
+            and not self.profile_lineage()[1]
+            and (clean_lineage or self._prefiled_plan_is_safe(proposal))
+        ):
+            return "autonomous"
+        # OWN PRE-FILED TRUSTED PLAN (2026-11 ruling): a root session may apply
+        # what IT filed while trusted -- or a verified-clean child of it filed
+        # -- even after a later peer receipt tainted the episode, because the
+        # after-image was fixed BEFORE that input arrived and ``apply`` writes
+        # exactly it (CAS on the stored base). A tainted run cannot use this to
+        # approve itself: anything it files is stamped ``untrusted``. Legacy
+        # records (no lineage, own root) qualify only when their after-image
+        # passes the preview-marker and line-loss guards, so an old clipped
+        # plan cannot delete a brief's middle; those go to review/re-author.
+        own_child = clean_lineage and (lineage or {}).get("parent_session_id") == self._session_id
+        if (
+            trusted_origin
+            and not self._parent_session_id
+            and (own_session or own_child)
+            and self._prefiled_plan_is_safe(proposal)
+        ):
             return "autonomous"
         if self._parent_session_id or self._request_approval is None:
             # A child never raises the card itself: what it cannot apply
@@ -17294,30 +17570,13 @@ class Session:
         # entire run, including inputs drained after an owner's typed message.
         # Ask rows currently omit answered_by, so phone answers cannot be
         # distinguished: they require the approval card rather than granting.
-        benign = {
-            "wake_prompt",
-            "monitor_prompt",
-            "job_result",
-            "session_incident",
-            "session_model_switch",
-            "session_credential_redaction",
-            "todo_reminder",
-            "project_reminder",
-            "profile_proposal_result",
-        }
-        if _is_remote_prompt(message) or is_harness_injection(message):
+        # The assistant/tool rows a session appends itself never reach here.
+        input_class = _profile_input_class(message)
+        if input_class == "untrusted":
             self._run_untrusted_input = True
-        elif custom_type == "ask_response":
-            details = getattr(message, "details", None) or {}
-            by = details.get("answered_by") or {}
-            if ask_answer_is_person(message) and by.get("surface") in {"tui", "desktop", "chat"}:
-                self._run_owner_consent = True
-            else:
-                self._run_untrusted_input = True
-        elif custom_type is not None and custom_type not in benign:
-            self._run_untrusted_input = True
-        elif custom_type is None and getattr(message, "role", None) != "user":
-            self._run_untrusted_input = True
+        elif input_class == "consent":
+            self._run_owner_consent = True
+        self._note_profile_episode(input_class)
         if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
             self._run_triggers.add(str(custom_type))
             self._run_last_trigger = str(custom_type)
@@ -19988,6 +20247,7 @@ class Session:
         #: into a plain update. Deliberately NOT ``_run_untrusted_input``: the
         #: owner's bound verbal "yes" to that exact proposal stays valid.
         self._run_untrusted_proposal_read = False
+        self._run_child_profile_taint = False
         self._run_answered_ask_ids = set()
         self._run_last_trigger = None
         self._run_user_text = ""

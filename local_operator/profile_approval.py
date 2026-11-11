@@ -774,12 +774,15 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
     rows: list[str] = []
     counted: list[str] = []
     for field, (old, new) in values.items():
-        if field == "instructions":
+        if field in {"instructions", "project"}:
+            # BOTH long-text fields take the canonical-count heading: a team
+            # ``project`` brief is as long as its instructions, and a one-line
+            # repr of it was an unreadable receipt (review round 1, m3).
             value, _ = _instruction_diff(
-                str(old or ""), str(new), fromfile="before", tofile="after"
+                str(old or ""), str(new or ""), fromfile="before", tofile="after"
             )
-            diff.extend(["instructions:", *value.splitlines()])
-            counted.append(f"{stats_heading(field, str(old or ''), str(new))}:")
+            diff.extend([f"{field}:", *value.splitlines()])
+            counted.append(f"{stats_heading(field, str(old or ''), str(new or ''))}:")
         else:
             diff.append(f"{field}: {old!r} → {new!r}")
             rows.append(diff[-1])

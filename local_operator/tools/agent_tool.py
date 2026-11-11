@@ -201,9 +201,13 @@ class AgentParams(BaseModel):
         default=None,
         description="update: patch/append long text losslessly.",
     )
+    field: Literal["instructions", "description"] | None = Field(
+        default=None, description="show: read this field page by page"
+    )
+    part: int | None = Field(default=None, ge=1, description="show: page, 1-based")
     base_revision: str | None = Field(
         default=None,
-        description="update: show's revision (CAS).",
+        description="show/update: show's revision (CAS).",
     )
     replace: bool = Field(
         default=False,
@@ -741,7 +745,47 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+def _paged_field(
+    tool_call_id: str,
+    values: dict[str, str],
+    revision: str,
+    field: str,
+    part: int | None,
+    base_revision: str | None,
+) -> ToolResult:
+    """One page of a long field (``profile_text_edits`` rule 1)."""
+    from local_operator.profile_text_edits import TextEditRefusal, render_field_page
+
+    try:
+        page = render_field_page(
+            field, values.get(field) or "", part or 1, revision, base_revision=base_revision
+        )
+    except TextEditRefusal as exc:
+        return _error(tool_call_id, "agent", str(exc))
+    return _text(tool_call_id, "agent", page, details={"complete": True, "field": field})
+
+
+def _inline_or_pointer(field: str, value: str, used: int) -> tuple[str, bool]:
+    """``(rendered, paged)``: the field whole while the result stays replay-safe."""
+    from local_operator.profile_text_edits import (
+        SHOW_RESULT_BUDGET_CHARS,
+        field_pointer,
+    )
+
+    if used + len(value) + 200 <= SHOW_RESULT_BUDGET_CHARS:
+        return value, False
+    return field_pointer(field, value), True
+
+
+async def _op_show(
+    context: ToolContext | None,
+    tool_call_id: str,
+    name: str,
+    *,
+    field: str | None = None,
+    part: int | None = None,
+    base_revision: str | None = None,
+) -> ToolResult:
     from local_operator.agent_profiles import resolve_profile
 
     registry = _registry(context)
@@ -752,22 +796,36 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         except Exception:  # noqa: BLE001
             specialist = None
         if specialist is not None and is_specialist(specialist):
-            instructions = registry.get_agent_system_prompt(specialist.id) or "(none)"
+            stored = registry.get_agent_system_prompt(specialist.id) or ""
             from local_operator.profile_scope import row_scope, scope_words
 
-            body = (
+            revision = _agent_revision(registry, specialist)
+            if field is not None:
+                return _paged_field(
+                    tool_call_id,
+                    {"instructions": stored, "description": specialist.description or ""},
+                    revision,
+                    field,
+                    part,
+                    base_revision,
+                )
+            head = (
                 f"{identifier_text(context, specialist.name)} — registered specialist\n"
                 f"scope: {scope_words(row_scope(registry, specialist))}\n"
-                f"revision: {_agent_revision(registry, specialist)}\n"
+                f"revision: {revision}\n"
                 f"when to use: {specialist.description or '(unstated)'}\n"
                 "tools: full inventory\n\n"
-                f"instructions:\n{instructions}\n\n"
-                f"launch with --agent {identifier_text(context, specialist.name)}, "
+            )
+            # Lossless authoring read (``profile_text_edits`` rule 1): whole
+            # while replay-safe, else a pointer to its pages -- never clipped.
+            rendered, paged = _inline_or_pointer("instructions", stored, len(head))
+            body = (
+                head
+                + (f"instructions:\n{rendered or '(none)'}" if not paged else rendered)
+                + f"\n\nlaunch with --agent {identifier_text(context, specialist.name)}, "
                 "or add it to a team roster."
             )
-            # Lossless authoring read (``profile_text_edits``); bounded by
-            # ``MAX_INSTRUCTIONS_CHARS`` on write.
-            return _text(tool_call_id, "agent", body, details={"complete": True})
+            return _text(tool_call_id, "agent", body, details={"complete": not paged})
     if profile is None:
         return _error(
             tool_call_id,
@@ -779,6 +837,8 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         )
     origin = "registered" if profile.agent_id else "packaged starter (not installed)"
     scope_line = ""
+    row_revision: str | None = None
+    stored_instructions: str | None = None
     if profile.agent_id and registry is not None:
         from local_operator.profile_scope import row_scope, scope_words
 
@@ -786,7 +846,12 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
             row = registry.get_agent(profile.agent_id)
             scope_line = f"scope: {scope_words(row_scope(registry, row))}\n"
             # The CAS token an intentional rewrite echoes (``profile_text_edits``).
-            scope_line += f"revision: {_agent_revision(registry, row)}\n"
+            row_revision = _agent_revision(registry, row)
+            scope_line += f"revision: {row_revision}\n"
+            # Page the SAME text ``edits`` patch (``_resolve_text_edits``).
+            stored_instructions = str(
+                registry.definition_revision_fields(str(row.id)).get("instructions") or ""
+            )
         except Exception:  # noqa: BLE001 — the scope line is enrichment only
             scope_line = ""
     # Identifier fields: the role name and label head the body; both are
@@ -803,7 +868,33 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     )
     if profile.effort:
         header.append(f"effort: {profile.effort}")
-    body = "\n".join(header) + "\n\ninstructions:\n" + (profile.instructions or "(none)")
+    if field is not None:
+        if row_revision is None:
+            # A packaged starter (not installed) has no registry revision; its
+            # text is fixed by the release, so its digest pins the pages.
+            from local_operator.profile_text_edits import field_digest
+
+            row_revision = f"packaged:{field_digest(profile.instructions or '')}"
+        return _paged_field(
+            tool_call_id,
+            {
+                "instructions": (
+                    stored_instructions
+                    if stored_instructions is not None
+                    else profile.instructions or ""
+                ),
+                "description": profile.when_to_use or profile.description or "",
+            },
+            row_revision,
+            field,
+            part,
+            base_revision,
+        )
+    head = "\n".join(header) + "\n\n"
+    rendered, instructions_paged = _inline_or_pointer(
+        "instructions", profile.instructions or "", len(head)
+    )
+    body = head + (rendered if instructions_paged else "instructions:\n" + (rendered or "(none)"))
     # Once a packaged role is installed and edited, the SHIPPED guidance is
     # unreachable through every other op: `show` renders the registry copy and
     # `update` asks the reader to retype text they can no longer read. So when
@@ -865,9 +956,10 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     body += "."
     # LOSSLESS, never the generic head+tail preview: ``show`` is the read an
     # ``update`` is written from, and a clipped middle read back as the whole
-    # text silently deletes it (``profile_text_edits``). Instructions are capped
-    # at ``MAX_INSTRUCTIONS_CHARS`` on write, which bounds this output.
-    return _text(tool_call_id, "agent", body, details={"complete": True})
+    # text silently deletes it (``profile_text_edits``). Instructions too long
+    # for one replay-safe result were printed as a pointer to their pages
+    # above, and ``complete`` says which case this is.
+    return _text(tool_call_id, "agent", body, details={"complete": not instructions_paged})
 
 
 def _agent_revision(registry: Any, row: Any) -> str:
@@ -3254,7 +3346,14 @@ async def execute_agent(
     if params.op == "list":
         return await _op_list(context, tool_call_id)
     if params.op == "show":
-        return await _op_show(context, tool_call_id, str(params.name))
+        return await _op_show(
+            context,
+            tool_call_id,
+            str(params.name),
+            field=params.field,
+            part=params.part,
+            base_revision=params.base_revision,
+        )
     if params.op == "search":
         return await _op_search(context, tool_call_id, str(params.query))
     if params.op == "install":
