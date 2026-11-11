@@ -35048,6 +35048,21 @@ class Session:
             # across the restart, via the boot reconcile pass.
             teardown_stamps = self._stamp_teardown_attribution()
             await self.jobs.dispose()
+            # SECOND handed-tab pass (review R1). The first ran in
+            # ``_close_browser_surface`` above, but ``jobs.dispose`` is what
+            # cancels a still-running child, and that child hands its retained
+            # tab to this session on its way out — after the first pass, into a
+            # list nothing would read again. A child whose runner will pass late
+            # arrivals further up (``late_handoff_to_parent``) leaves them for it.
+            if not getattr(self._browser, "late_handoff_to_parent", False):
+                from local_operator.browser_bridge.handoff import (
+                    close_handed_browser_surfaces,
+                )
+
+                try:
+                    await close_handed_browser_surfaces(self._browser, outcome="disposed")
+                except Exception:  # noqa: BLE001 - teardown must always proceed
+                    logger.warning("closing late-handed browser tabs failed", exc_info=True)
             # AFTER dispose has awaited every runner, so each status is final: a
             # child that settled on its own instead of being cancelled must not
             # keep a parent-teardown attestation.

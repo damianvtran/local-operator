@@ -1507,6 +1507,15 @@ def cleanup_disposition(value: dict[str, Any]) -> tuple[bool, str]:
     the behaviour the fence exists to discourage.
     """
     if value.get("retention"):
+        if value.get("handed_to"):
+            # A finished child's retained tab handed to its parent (see
+            # ``browser_bridge.handoff``): the CHILD's record still holds it, so
+            # without this the operator is told to ask a dead session to release
+            # it, when the parent is the one that owns and closes it now.
+            return False, (
+                f"retained: {value['retention']} — handed to parent session "
+                f"{value['handed_to']}, which owns and closes it"
+            )
         return False, f"retained: {value['retention']} — the owning session must release it"
     if not value.get("terminal"):
         # The crash shape: killed before finish_browser_scope, so no terminal

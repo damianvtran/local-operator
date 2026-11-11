@@ -57,12 +57,23 @@ def public_surface_label(surface_id: str) -> str:
 
 
 def surface_matches(surface_id: str, handle: str) -> bool:
-    """Whether ``handle`` (full token, redacted listing token, or ``ui:N``) names it."""
+    """Whether ``handle`` (full token, redacted listing token, or ``ui:N``) names it.
+
+    A redacted token is accepted only in the exact shape the listing prints,
+    ``<host>:<id>:<capability prefix>…`` with a non-empty prefix (review R3):
+    treating ANY trailing ``…`` as a prefix let ``tab='…'`` (an empty prefix)
+    or ``tab='u…'`` match whichever handed tab came first, so a careless close
+    silently closed an arbitrary tab a human might still be using.
+    """
     handle = handle.strip()
     if not handle or not surface_id:
         return False
     if handle.endswith("…"):
-        return surface_id.startswith(handle[:-1])
+        stem = handle[:-1]
+        parts = stem.split(":")
+        if len(parts) < 3 or not all(parts[:3]):
+            return False
+        return surface_id.startswith(stem)
     return handle in (surface_id, public_surface_label(surface_id))
 
 
@@ -96,9 +107,9 @@ def hand_off(
     reason = _retention(resource)
     if surface and resource is not None and reason:
         try:
-            # Durable note on the child's record: `lop browser tabs` and a
-            # later reader of this directory should see WHY a finished child's
-            # record still holds a live tab, and that it is no longer stranded.
+            # Durable note on the child's record: `lop browser tabs`/`cleanup`
+            # read it (``resources.cleanup_disposition``) to say WHY a finished
+            # child's record still holds a live tab and which session owns it.
             resource.record["handed_to"] = parent_sid
             resource._save()
         except (OSError, ValueError, TypeError):

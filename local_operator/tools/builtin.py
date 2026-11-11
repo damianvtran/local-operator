@@ -29172,6 +29172,11 @@ async def execute_browser(
       "left open" claims was rejected: it is a heuristic over free text, and
       the authoritative line already makes the claim harmless.
     """
+    # Deliberately AHEAD of ``_execute_browser_owned`` (review R5): that lane
+    # would refuse ``close tab=`` as an adoption handle, and nothing it guards
+    # applies here — this only closes a tab already in THIS session's own
+    # ``handed`` list (so a confined session that never launched a child has
+    # none), through the child's own ownership record.
     handed_close = await _browser_handed_close(tool_call_id, args, context)
     if handed_close is not None:
         return handed_close
@@ -29205,6 +29210,20 @@ async def _browser_handed_close(
             if fate.startswith("Browser: closed"):
                 return _text(tool_call_id, "browser", text, details={"handed_closed": True})
             return _error(tool_call_id, "browser", text)
+    handed = getattr(browser, "handed", None) or ()
+    if handed:
+        from local_operator.browser_bridge.handoff import public_surface_label
+
+        # A typo or an already-closed handle (QA Q3): the adoption-lane error
+        # ("'tab' is only valid for 'open'") is true but sends the reader
+        # looking at adoption, when what they need is the handles that DO match.
+        labels = ", ".join(public_surface_label(item.surface_id) for item in handed)
+        return _error(
+            tool_call_id,
+            "browser",
+            f"No handed tab matches {handle!r}. Tabs handed to you by finished child "
+            f"sessions: {labels}; close one with action='close' tab='<handle>'.",
+        )
     return None
 
 
@@ -29222,6 +29241,10 @@ def _child_browser_fate_note(
     resource = getattr(state, "resource", None)
     retention = str(((getattr(resource, "record", None) or {}).get("retention")) or "")
     if action == "open" and state.surface_id != before:
+        # The top-level reminder ("…unless the user needs it left open")
+        # contradicts the subagent rule below in the same result (QA Q2): a
+        # child cannot leave a tab open past its own end, only hand it up.
+        result = _replace_result_text(result, f"\n{_BROWSER_OPEN_CLEANUP_REMINDER}", "")
         note = (
             f"You are a subagent: {label} is CLOSED when you finish unless you 'retain' it, "
             f"which hands it to your parent session {parent} (it then owns and closes it). "
@@ -29246,6 +29269,15 @@ def _child_browser_fate_note(
     else:
         return result
     return _append_result_text(result, note)
+
+
+def _replace_result_text(result: ToolResult, old: str, new: str) -> ToolResult:
+    """``result`` with ``old`` replaced by ``new`` in every text block."""
+    content = [
+        TextContent(text=block.text.replace(old, new)) if isinstance(block, TextContent) else block
+        for block in result.content
+    ]
+    return result.model_copy(update={"content": content})
 
 
 def _append_result_text(result: ToolResult, note: str) -> ToolResult:

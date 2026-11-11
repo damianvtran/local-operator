@@ -1781,6 +1781,7 @@ class BrowserSurface:
         "parent_session_id",
         "handed",
         "handed_to",
+        "late_handoff_to_parent",
     )
 
     def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
@@ -1820,9 +1821,18 @@ class BrowserSurface:
         #   byte-identical to the child speaking — no host protocol change.
         # * ``handed_to`` — set on the CHILD once its surface was handed, so its
         #   own disposal does not close the tab the parent now owns.
+        # * ``late_handoff_to_parent`` — set on a CHILD by its runner once a live
+        #   parent took its handoff. A grandchild still RUNNING when this child
+        #   ends is cancelled by this child's dispose and hands its tab here
+        #   AFTER the handoff already ran (review R1); with this set, dispose
+        #   leaves those late arrivals in ``handed`` for the runner to pass up
+        #   (``subagent._hand_up_late_browser_surfaces``) instead of closing a
+        #   tab a human may be using. Unset (top-level, or no live parent),
+        #   dispose closes them, since nobody else would.
         self.parent_session_id = parent_session_id
         self.handed: list[HandedBrowserSurface] = []
         self.handed_to = ""
+        self.late_handoff_to_parent = False
 
 
 @dataclass
