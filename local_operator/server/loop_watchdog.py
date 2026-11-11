@@ -27,7 +27,7 @@ WHAT IT DOES
   An episode opens at that first crossing and closes only after
   :data:`RECOVERY_S` of continuously healthy beats, so a GIL convoy that lets
   the loop beat now and then is still ONE episode (QA Q-1).
-* An episode :data:`RESTART_LAG_S` old, still degraded on
+* An episode :data:`RESTART_LAG_S` old, lagging at least :data:`DUMP_LAG_S` on
   :data:`CONFIRM_CHECKS` consecutive checks, re-execs this process ONCE (per
   episode, at most :data:`MAX_RESTARTS` per :data:`RESTART_WINDOW_S` across
   execs) onto the current build
@@ -120,7 +120,7 @@ HEALTHY_LAG_S = 1.0
 #: does not produce, and Q2's 200 s of normal load never opens an episode at all
 #: (it never reaches :data:`DUMP_LAG_S`), so this cannot create a false fire.
 RECOVERY_S = 30.0
-#: Consecutive degraded checks needed before a restart. One huge sample followed
+#: Consecutive checks lagging >= :data:`DUMP_LAG_S` before a restart. One huge sample followed
 #: by a beat is a PAUSE (SIGSTOP, a debugger attach, review R2), not a wedge:
 #: after SIGCONT the watchdog's expired wait reads the stale stamp before the
 #: loop's overdue timer runs. The second check, one :data:`CHECK_S` later, gives
@@ -177,14 +177,27 @@ def read_restart_history(environ: Mapping[str, str], now: float) -> list[float]:
 def prune_stall_logs(
     logs_dir: Path, keep: int = KEEP_LOGS, current: Path | None = None
 ) -> list[Path]:
-    """Delete all but the newest ``keep`` stall logs; never ``current``. Never raises."""
+    """Delete empty stall logs, then all but the newest ``keep`` non-empty ones.
+
+    Never ``current``; never raises. Every boot creates its own (usually empty)
+    file for the SIGUSR2 lever, so ranking every file by mtime let five ordinary
+    boots evict the one dump that named a wedge's frames (review round 2, M1).
+    An empty file holds no evidence, so it goes unconditionally and only real
+    dumps compete for ``keep``.
+    """
     try:
-        logs = [p for p in logs_dir.iterdir() if _STALL_LOG.fullmatch(p.name) and p != current]
-        logs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        sized = [
+            (p, p.stat())
+            for p in logs_dir.iterdir()
+            if _STALL_LOG.fullmatch(p.name) and p != current
+        ]
     except OSError:
         return []
-    # The current pid's file counts toward ``keep`` whether or not it exists yet.
-    doomed = logs[max(keep - 1, 0) :] if current is not None else logs[keep:]
+    empty = [p for p, st in sized if st.st_size == 0]
+    dumps = [p for p, st in sorted(sized, key=lambda e: e[1].st_mtime, reverse=True) if st.st_size]
+    # The current pid's file counts toward ``keep`` whether or not it exists yet:
+    # it is the one most likely to receive the next dump.
+    doomed = empty + (dumps[max(keep - 1, 0) :] if current is not None else dumps[keep:])
     removed = []
     for path in doomed:
         try:
@@ -313,7 +326,13 @@ class LoopWatchdog:
                 self._reset_episode()
             return None
         self._healthy_since = None
-        self._degraded_streak += 1
+        # Only a sample past the dump threshold confirms (review round 2, m2): a
+        # 1-10 s hiccup keeps the episode open but must not be the second of two
+        # "consecutive" checks that re-exec a loop /health would still answer.
+        if lag >= self.dump_lag_s:
+            self._degraded_streak += 1
+        else:
+            self._degraded_streak = 0
         verdict: str | None = None
         if (
             self._restart is not None
@@ -379,7 +398,7 @@ class LoopWatchdog:
         self.restarts_requested += 1
         previous = list(self.restart_history)
         self.restart_history.append(wall)
-        self._persist_history()
+        self._export_history()
         # Returns only on refusal/failure: a successful exec ends this process.
         restart = self._restart
         assert restart is not None  # ``check`` gates on it
@@ -387,7 +406,7 @@ class LoopWatchdog:
         if reason is None:
             return "restart"
         self.restart_history = previous  # a restart that never happened spends no budget
-        self._persist_history()
+        self._withdraw_history()
         logger.warning(
             "serve event loop stalled %.0fs; self-restart failed, dump-only for this episode: %s",
             age,
@@ -396,12 +415,19 @@ class LoopWatchdog:
         self._last_refusal = reason
         return "refused"
 
-    def _persist_history(self) -> None:
-        if self._environ is None:
-            return
-        if self.restart_history:
+    def _export_history(self) -> None:
+        """Put the budget in the environment for the exec that is about to happen.
+
+        Set only on that path (review round 2, m1): left in ``os.environ`` it
+        leaked to every child (runtimes, tools, a nested ``lop serve``), which
+        then booted with this daemon's spent budget. ``_withdraw_history`` takes
+        it back out if the exec does not happen.
+        """
+        if self._environ is not None and self.restart_history:
             self._environ[RESTARTS_ENV] = ",".join(f"{t:.0f}" for t in self.restart_history)
-        else:
+
+    def _withdraw_history(self) -> None:
+        if self._environ is not None:
             self._environ.pop(RESTARTS_ENV, None)
 
     def _dump(self, lag: float, verdict: str, age: float) -> None:
@@ -505,6 +531,9 @@ def install(app: Any, config_dir: str | Path) -> tuple[LoopWatchdog, asyncio.Tas
         restart_history=read_restart_history(os.environ, time.time()),
         environ=os.environ,
     )
+    # Adopt the budget out of the environment (like the spawn bearer,
+    # ``reload.py``): children of this daemon must not inherit it (m1).
+    os.environ.pop(RESTARTS_ENV, None)
     signum = watchdog.register_dump_signal()
     beat = asyncio.get_running_loop().create_task(watchdog.heartbeat(), name="serve-loop-heartbeat")
     watchdog.start()

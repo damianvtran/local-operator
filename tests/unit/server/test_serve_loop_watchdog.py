@@ -266,6 +266,49 @@ def test_failed_restart_spends_no_budget(tmp_path: Path) -> None:
     assert guard.restart_history == []
 
 
+def test_failed_restart_leaves_no_budget_in_the_environment(tmp_path: Path) -> None:
+    """Round 2 m1: the budget is in the environment only across the exec; a
+    failed attempt with an earlier stamp must not leave it for children."""
+    environ: dict[str, str] = {}
+    seen: list[str | None] = []
+
+    def failing_exec() -> str:
+        seen.append(environ.get(loop_watchdog.RESTARTS_ENV))
+        return "stubbed exec"
+
+    guard, clock, _ = _watchdog(
+        tmp_path,
+        environ=environ,
+        restart=failing_exec,
+        restart_history=[999.0],
+        wall_clock=lambda: 1000.0,
+    )
+    clock.now += 125.0
+    _tick(guard, clock, 2)
+    assert seen == ["999,1000"]  # set for the exec itself
+    assert loop_watchdog.RESTARTS_ENV not in environ
+    assert guard.restart_history == [999.0]
+
+
+def test_sub_threshold_hiccups_do_not_confirm_a_restart(tmp_path: Path) -> None:
+    """Round 2 m2: an episode opened by one blip and kept open by 1-9 s lags
+    (/health still answers) never restarts; lags >= DUMP_LAG_S still do."""
+    guard, clock, restarts = _watchdog(tmp_path)
+    clock.now += 15.0
+    assert guard.check() == "dump"  # the blip opens the episode
+    for _ in range(300):
+        clock.now += 1.0
+        guard.last_beat = clock.now - 3.0  # turning, but never healthy for 30 s
+        guard.check()
+    assert guard.in_episode and restarts == []
+    # Control: the same open episode, now with two lags past the threshold.
+    guard.last_beat = clock.now - 10.0
+    _tick(guard, clock, 1)
+    assert restarts == []  # one confirming sample is not two
+    _tick(guard, clock, 1)
+    assert restarts == [1]
+
+
 def test_dumps_back_off_after_the_per_episode_cap(tmp_path: Path) -> None:
     """R5: a stall held by a blocker for hours stops writing a dump a minute."""
     guard, clock, _ = _watchdog(tmp_path, restart_blocker=lambda: "hub work is active")
@@ -310,6 +353,36 @@ def test_prune_keeps_the_newest_stall_logs(tmp_path: Path) -> None:
     assert len(removed) == 4
 
 
+def test_empty_boot_logs_never_evict_a_real_dump(tmp_path: Path) -> None:
+    """Round 2 M1: every boot creates an empty serve-stall-<pid>.log for the
+    SIGUSR2 lever. Six ordinary boots after a wedge must not prune its dump."""
+    import os
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    dump = logs / "serve-stall-100.log"
+    dump.write_text("Thread 0x1 (most recent call first):\n  File wedge.py, line 1\n")
+    os.utime(dump, (1000, 1000))
+    for index, pid in enumerate(range(200, 206)):
+        current = logs / f"serve-stall-{pid}.log"
+        loop_watchdog.prune_stall_logs(logs, keep=5, current=current)
+        current.touch()  # what register_dump_signal's append-open does
+        os.utime(current, (2000 + index, 2000 + index))
+    left = sorted(p.name for p in logs.iterdir())
+    # The dump survives; earlier empty boot logs are gone; the current one stays.
+    assert left == ["serve-stall-100.log", "serve-stall-205.log"]
+    assert dump.read_text().startswith("Thread 0x1")
+
+
+def test_prune_never_deletes_the_current_log_even_when_empty(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    current = logs / "serve-stall-7.log"
+    current.touch()
+    assert loop_watchdog.prune_stall_logs(logs, keep=1, current=current) == []
+    assert current.exists()
+
+
 def test_dump_signal_writes_all_threads_without_the_watchdog(tmp_path: Path) -> None:
     """R4: ``kill -USR2 <pid>`` dumps from C, the lever for a GIL-starved watchdog."""
     import faulthandler
@@ -344,6 +417,39 @@ async def test_install_without_a_listener_is_dump_only(tmp_path: Path) -> None:
     try:
         assert guard._restart is None
         assert getattr(app.state, loop_watchdog.STATE_ATTR) is guard
+    finally:
+        guard.stop()
+        beat.cancel()
+        if guard.dump_signal is not None:
+            faulthandler.unregister(signal.SIGUSR2)
+            guard.signal_handle.close()
+
+
+@pytest.mark.asyncio
+async def test_install_adopts_the_budget_out_of_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 m1: a nested ``lop serve`` (any child) must not inherit a spent budget."""
+    import faulthandler
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    monkeypatch.setenv(loop_watchdog.RESTARTS_ENV, f"{time.time() - 60:.0f}")
+    app = SimpleNamespace(state=SimpleNamespace())
+    guard, beat = loop_watchdog.install(app, tmp_path)
+    try:
+        assert len(guard.restart_history) == 1  # read before it was dropped
+        assert loop_watchdog.RESTARTS_ENV not in os.environ
+        probe = f"import os; print(os.environ.get({loop_watchdog.RESTARTS_ENV!r}))"
+        child = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert child.stdout.strip() == "None"
     finally:
         guard.stop()
         beat.cancel()
