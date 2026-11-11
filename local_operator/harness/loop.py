@@ -133,6 +133,7 @@ from local_operator.incidents import (
     REASONING_ECHO_MARKERS,
 )
 from local_operator.model.effort import real_rungs
+from local_operator.redaction_shapes import redaction_scope
 from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -360,18 +361,23 @@ def _redact_nested_strings(
     tuple), so a reader comparing a field it did not expect to change — a
     counter, a flag, a ``job_ids`` tuple — sees exactly what it stored.
 
-    ``content_only`` leaves a string with no whitespace, ``=`` or ``:`` untouched:
-    that is an IDENTIFIER (a question id, a model name, a path, a handle) that its
-    reader matches exactly. Measured on the 200 most recent sessions before the
-    filter: the generic walk masked ``questions[].id``, ``question_ids[]`` and
-    ``model`` values through the vendor-prefix rule — an ask answer keyed by
-    that id could no longer be matched. Prose, command output, URLs and
-    ``KEY=value`` lines (where a credential actually travels in details:
-    ``rows``, ``text``, ``prompt``) are still scrubbed.
+    ``content_only`` gives a string with no whitespace, ``=`` or ``:`` only the
+    exact-value pass (``redaction_scope("values")``): that is an IDENTIFIER (a
+    question id, a model name, a path, a handle) that its reader matches
+    exactly. Measured on the 200 most recent sessions before the filter: the
+    shape pass masked ``questions[].id``, ``question_ids[]`` and ``model`` values
+    through the vendor-prefix rule — an ask answer keyed by that id could no
+    longer be matched. A value the session already holds as a credential carries
+    no such risk, so it is still masked there (PR #3789 review R3). Prose,
+    command output, URLs and ``KEY=value`` lines (where a credential actually
+    travels in details: ``rows``, ``text``, ``prompt``) get the full pass.
     """
     if isinstance(value, str):
-        if not value or (content_only and not _is_content_string(value)):
+        if not value:
             return value
+        if content_only and not _is_content_string(value):
+            with redaction_scope("values"):
+                return redact(value)
         return redact(value)
     if isinstance(value, dict):
         return {
@@ -7931,8 +7937,10 @@ class AgentLoop:
 
         **Every string, and only strings.** :data:`_CONTENT_BEARING_DETAIL_KEYS`
         (the file tools' diff) gets the hunk-aware masking below; every other
-        key's strings go through ``redact`` as they are (follow-up to PR #3756:
-        a details string outside the diff was persisted unmasked). Numbers,
+        key's strings go through ``redact`` in place, without registering what
+        they match (follow-up to PR #3756: a details string outside the diff was
+        persisted unmasked); identifier-shaped strings get only the exact-value
+        pass (see :func:`_redact_nested_strings`). Numbers,
         booleans, keys and container types keep their exact values — the
         ``added``/``removed`` counters the diff badge reads, compaction's flags —
         and an ordinary string (a ``path``, a ``spill`` handle) carries no shape,
@@ -7971,16 +7979,23 @@ class AgentLoop:
                 tool_source(tool_name, arguments),
                 exempt_from_escalation(tool_name, arguments, session_cwd, exempt_verdict),
             ):
-                out = {
-                    key: (
-                        value
-                        if key in _CONTENT_BEARING_DETAIL_KEYS
-                        else _redact_nested_strings(
-                            value, redact, content_only=key != "server_result"
+                # IN PLACE, never registered (PR #3789 review R1): details is a
+                # copy of what the result's content already carried, and the
+                # content scan registered everything found there. A match only
+                # these strings show must not become a session-wide value: a
+                # details-only false positive would then mask the same bytes in
+                # every later, unrelated result. The diff keeps base behaviour.
+                with redaction_scope("uncontained"):
+                    out = {
+                        key: (
+                            value
+                            if key in _CONTENT_BEARING_DETAIL_KEYS
+                            else _redact_nested_strings(
+                                value, redact, content_only=key != "server_result"
+                            )
                         )
-                    )
-                    for key, value in details.items()
-                }
+                        for key, value in details.items()
+                    }
                 for key in _CONTENT_BEARING_DETAIL_KEYS:
                     if key in details:
                         value = details[key]

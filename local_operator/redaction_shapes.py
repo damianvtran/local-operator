@@ -120,11 +120,15 @@ import functools
 import json
 import re
 import urllib.parse
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import (
     Any,
     Callable,
     Iterable,
+    Iterator,
+    Literal,
     Mapping,
     Match,
     NamedTuple,
@@ -133,6 +137,47 @@ from typing import (
     Sequence,
     Union,
 )
+
+#: How far a session redactor may act on the text it is handed right now.
+#:
+#: ``"full"`` (the default, every tool result's text): exact values, then the
+#: shape pass, and every shape hit is REGISTERED as a value to scrub for the rest
+#: of the session.
+#:
+#: ``"uncontained"``: the same masking, but nothing is registered. For a COPY of
+#: content the session already scanned — a result's ``details`` (PR #3789 review
+#: R1). A shape match that appears only there must mask that copy in place and
+#: nothing else: registered, a details-only false positive (``kubectl logs -p
+#: <pod-uuid>`` beside a ``psql`` word) masked the same UUID in every later,
+#: unrelated result. This is the stance the plan and indirect-name rules
+#: already take. Anything that also reached the content was registered there.
+#:
+#: ``"values"``: only the exact values the session already holds. For an
+#: IDENTIFIER-shaped string (no whitespace, ``=`` or ``:``) whose reader matches
+#: it exactly: shapes misfire on ids and model names, but a value the session
+#: already knows is a credential carries no false-positive risk (review R3).
+#:
+#: A ContextVar rather than a parameter because the loop holds only an opaque
+#: ``redact(text)`` callable; it rides into the ``to_thread`` worker with the
+#: context copy, like ``harness.redaction.tool_source``.
+RedactionScope = Literal["full", "uncontained", "values"]
+_REDACTION_SCOPE: ContextVar[RedactionScope] = ContextVar("redaction_scope", default="full")
+
+
+def current_redaction_scope() -> RedactionScope:
+    """The :data:`RedactionScope` the caller published, ``"full"`` by default."""
+    return _REDACTION_SCOPE.get()
+
+
+@contextmanager
+def redaction_scope(scope: RedactionScope) -> Iterator[None]:
+    """Publish ``scope`` for the redactor calls made inside the block."""
+    token = _REDACTION_SCOPE.set(scope)
+    try:
+        yield
+    finally:
+        _REDACTION_SCOPE.reset(token)
+
 
 REDACTION_MARKER = "[redacted]"
 """What a credential is replaced with in anything about to be surfaced.
@@ -3016,6 +3061,30 @@ def _query_value_prefix(run: str) -> str:
     return _QUERY_VALUE_STOP.split(run, maxsplit=1)[0]
 
 
+#: A client word (the ``client-inline-password`` alternation) or ``kubectl``,
+#: as a command word. Used to decide which of them OWNS a ``-p`` flag.
+_CLIENT_OR_KUBECTL_WORD = re.compile(
+    r"(?i)(?<![A-Za-z0-9_.\-])(mysql|mysqldump|psql|pg_dump|pg_restore|mongo|mongosh|"
+    r"clickhouse-client|redis-cli|influx|kubectl)(?=[ \t])"
+)
+
+
+def _client_inline_password_guard(match: Match[str]) -> bool:
+    """Refuse a ``-p`` that belongs to ``kubectl``, not to the database client.
+
+    ``kubectl logs -p`` means "previous container", and its argument is a pod
+    name. The rule's 200-character gap let a client word earlier on the line (a
+    ``psql`` in a wake message, then ``kubectl logs -p`` and a pod) claim the
+    flag. The flag belongs to the LAST command word before it, so a ``kubectl``
+    there releases it, while a client named after the ``kubectl`` (``kubectl
+    exec … -- mysql …``) still owns its flag. PR #3789 review R4.
+    """
+    words = _CLIENT_OR_KUBECTL_WORD.findall(match.group(1))
+    if match.group(1).rstrip()[-2:] not in ("-p", "-P") or not words:
+        return True
+    return words[-1].lower() != "kubectl"
+
+
 def _assignment_value_guard(match: Match[str]) -> bool:
     """The checks both spellings of the named-assignment rule share.
 
@@ -3121,6 +3190,37 @@ def _assignment_guard(match: Match[str]) -> bool:
     return _assignment_value_guard(match)
 
 
+#: Field names whose quoted value may be an IDENTIFIER: the NAME of a setting
+#: or variable in a ``{"key": …, "value": …}`` / ``{"name": …}`` record. ``key``
+#: ends in a credential word, so the quoted rule masked ``"key": "setting_1042"``
+#: (2,900 of 3,000 rows in PR #3789 QA's fixture) because its four digits put it
+#: past the word-shaped release (``_WORD_SHAPED_MAX_DIGITS``): a name redacted,
+#: which the redaction policy forbids. The credential in such a record sits
+#: under ``value`` and is judged by the indirect-name rule through this name.
+_IDENTIFIER_FIELD_NAMES = frozenset({"key", "name"})
+
+#: A word-led compound NAME: a 2+-letter word, then segments that are each ALL
+#: letters or ALL digits (``setting_1042``, ``release-20261111``, ``app.v.2``).
+#: The per-segment purity is the discriminator against an opaque value under a
+#: bare ``key``, which the corpus pins as masked (``test_a_weak_name_still_
+#: masks_an_opaque_value``): a UUID starts with a hex run that mixes digits and
+#: letters, a hex/base64 key carries no separator, and a random token's
+#: segments mix both.
+_IDENTIFIER_FIELD_VALUE = re.compile(r"[A-Za-z]{2,}(?:[_.\-](?:[A-Za-z]+|[0-9]+))+")
+
+
+def _is_identifier_field_value(match: Match[str]) -> bool:
+    """Whether a quoted ``"key"``/``"name"`` field holds a word-led NAME."""
+    if match.group("name").lower() not in _IDENTIFIER_FIELD_NAMES:
+        return False
+    value = match.group(4)
+    return (
+        len(value) <= 64
+        and _VENDOR_PATTERN.search(value) is None
+        and _IDENTIFIER_FIELD_VALUE.fullmatch(value) is not None
+    )
+
+
 def _assignment_guard_quoted(match: Match[str]) -> bool:
     """The guard of the QUOTED spelling: group 3 is the delimiter, not a refusal.
 
@@ -3129,6 +3229,8 @@ def _assignment_guard_quoted(match: Match[str]) -> bool:
     rule has a non-empty group 3 by construction, so the shared body is the whole
     of the judgement.
     """
+    if _is_identifier_field_value(match):
+        return False
     return _assignment_value_guard(match)
 
 
@@ -4591,10 +4693,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(?i)((?<![A-Za-z0-9_.\-])(?:mysql|mysqldump|psql|pg_dump|pg_restore|"
             r"mongo|mongosh|clickhouse-client|redis-cli|influx)"
             r"(?=[ \t])"
-            r"[^\n]{0,200}?\s-(?:p|a)(?:\s+)?)(\S{2,})"
+            # ``-p`` followed by an all-digit or UUID-shaped run is a PORT
+            # (psql/pg_dump/pg_restore/redis-cli ``-p 5432``, mysql ``-P``
+            # under ``(?i)``) or a resource id, never a password: the lazy gap
+            # moves on to the next ``-p`` instead (PR #3789 review R4).
+            r"[^\n]{0,200}?\s-(?:a|p(?!\s*(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})(?!\S)))(?:\s+)?)(\S{2,})"
         ),
-        r"\1" + REDACTION_MARKER,
+        None,
         2,
+        guard=_client_inline_password_guard,
     ),
     # ``.npmrc``: its registry key with an ``_authToken`` entry.
     Shape(
@@ -5990,12 +6098,15 @@ def _scrub_guttered_plan(text: str) -> Optional[str]:
     if masked == stripped:
         return None
     new_lines = masked.splitlines(keepends=True)
+    # Same line count: the mask rewrote lines in place, so the zip IS the
+    # alignment and the line diff below would only spend its budget proving it
+    # (PR #3789 review R5).
+    if len(new_lines) == len(lines):
+        return "".join(gutter + line for gutter, line in zip(gutters, new_lines))
     blocks = _changed_line_blocks(stripped_lines, new_lines)
     if blocks is not None:
         laid = _lay_blocks(lines, new_lines, blocks)
         return "".join(gutter + line for gutter, line in zip(gutters, laid))
-    if len(new_lines) == len(lines):
-        return "".join(gutter + line for gutter, line in zip(gutters, new_lines))
     # Fallback past the diff budget (see ``_DIFF_MAX_EDITS``). The re-render
     # changed the line count (a masked multi-line value collapses to one
     # marker; a source-inline array expands). Every line keeps its ORIGINAL
@@ -6232,6 +6343,14 @@ def _indirect_value_is_credential(name: Optional[str], value: str) -> bool:
     # The assignment rule's own value floor: below it a value is a word or a
     # flag (``"x"``, ``"true"``), and masking it hides data while protecting nothing.
     if not name or len(value) < _ASSIGNED_VALUE_MIN_CHARS or REDACTION_MARKER in value:
+        return False
+    # The assignment rule's own value CLASS (``_ASSIGNED_VALUE`` and the quoted
+    # group are runs of non-whitespace): a value with a space is prose — a form
+    # label (``In Progress Review``), a description (``Please set via env
+    # var``), a passphrase example — and ``NAME=<it>`` never masks it. Without
+    # this the sibling spelling masked what the direct one keeps (PR #3789
+    # review R2).
+    if any(char.isspace() for char in value):
         return False
     # The name must be a VARIABLE name: every spelling this rule exists for (HCP
     # and GitLab variables, ``env:`` entries) holds an identifier. A path such as

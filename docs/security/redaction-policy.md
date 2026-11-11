@@ -85,8 +85,9 @@ are masked wherever they appear on a model-visible surface:
   GitLab CI variables API, Kubernetes `env:` entries, generic key/value
   arrays) or the parent key of `{NAME: {"value": V}}`, in JSON (minified,
   pretty, `read` gutter) and YAML. The name is judged by `is_credential_name`
-  and the value by the assignment rule's own value proof; only `V` is masked,
-  in place and unregistered. A URL value stays with the DSN/URL rules (they
+  and the value by the assignment rule's own value proof (a value with
+  whitespace is prose, as it is for `NAME=V`); only `V` is masked, in place
+  and unregistered. A URL value stays with the DSN/URL rules (they
   keep user and host).
 * `is_credential_name` reads a name without its trailing environment
   qualifiers (`_PROD`, `_PRODUCTION`, `_DEV`, `_STAGING`, `_STG`, `_QA`,
@@ -422,7 +423,16 @@ comment.
 * `transcript.jsonl` (and its compaction temp) is created and kept `0600`;
   an older transcript becomes `0600` on its next append. Every string in a
   tool result's `details` is scrubbed before it is persisted, not only the
-  diff and the MCP payload.
+  diff and the MCP payload. The details copy is masked in place and never
+  registered (a match only details shows cannot mask later output), and an
+  identifier-shaped details string (no whitespace, `=` or `:`) gets only the
+  exact values the session already holds.
+* A quoted `"key"`/`"name"` field whose value is a word-led identifier
+  (`setting_1042`, `release-20261111`) is a NAME and is kept; an opaque value
+  there (a UUID, a hex key) is still masked.
+* `client-inline-password` does not read `-p` followed by a port (all digits)
+  or a UUID as a password, and leaves `-p` to `kubectl` when `kubectl` is the
+  last command word before it (`kubectl logs -p <pod>`).
 
 ## 7. Enforcement map
 

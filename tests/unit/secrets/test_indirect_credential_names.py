@@ -388,3 +388,143 @@ def test_the_yaml_walk_is_linear_on_a_log_of_value_lines() -> None:
 )
 def test_resource_names_are_not_variable_names(text: str) -> None:
     assert scrub_shapes(text) == text
+
+
+# --- PR #3789 remediation round 1 -------------------------------------------
+
+POD_UUID = str(uuid.UUID(int=0x3F2B8C1D9A4E4B7F8C2D1E5A6B7C8D9E))
+
+
+@pytest.mark.asyncio
+async def test_a_details_only_match_masks_that_copy_and_registers_nothing(tmp_path: Any) -> None:
+    """R1: details is a COPY; a match only it shows must not mask later output."""
+    from local_operator.harness.loop import AgentLoop
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd=str(tmp_path), env={})
+    details = {"message": f"wake: export DB_PASSWORD={SECRET} then retry"}
+    out = await AgentLoop._redact_details(details, store.redact, "wake", None)
+    assert out is not None and SECRET not in json.dumps(out), "the copy is still masked"
+    # Registered, the value would be masked in every later, unrelated result.
+    assert store.redact(f"later output mentions {SECRET} alone") == (
+        f"later output mentions {SECRET} alone"
+    )
+    # The content path still registers (containment unchanged there).
+    store.redact(f"DB_PASSWORD={OTHER}")
+    assert OTHER not in store.redact(f"later {OTHER}")
+
+
+@pytest.mark.asyncio
+async def test_the_reported_kubectl_pod_uuid_stays_readable_later(tmp_path: Any) -> None:
+    """R1 + R4: the review's repro, end to end through the session redactor."""
+    from local_operator.harness.loop import AgentLoop
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd=str(tmp_path), env={})
+    text = f"wake: verify psql restore then run: kubectl logs -p {POD_UUID} --tail 50"
+    out = await AgentLoop._redact_details({"message": text}, store.redact, "wake", None)
+    assert out == {"message": text}
+    assert store.redact(f"pod {POD_UUID} is Running") == f"pod {POD_UUID} is Running"
+
+
+@pytest.mark.asyncio
+async def test_an_identifier_details_string_gets_the_known_values_pass(tmp_path: Any) -> None:
+    """R3: no shapes on identifiers, but a value the session already holds is masked."""
+    from local_operator.harness.loop import AgentLoop
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd=str(tmp_path), env={})
+    assert store.register_redaction(SECRET)
+    ident = "tvly" + "-" + "abcdefghijklmnop"
+    out = await AgentLoop._redact_details(
+        {"echo": SECRET, "model": ident}, store.redact, "jobs", None
+    )
+    assert out == {"echo": REDACTION_MARKER, "model": ident}
+
+
+@pytest.mark.parametrize(
+    "obj",
+    [
+        {"name": "Token", "value": "In Progress Review"},
+        {"key": "api_key", "value": "Please set via env var"},
+        {"key": "DB_PASSWORD", "value": "correct horse battery staple"},
+        {"vars": {"AWS_SECRET_KEY": {"value": "set this in the vault first"}}},
+    ],
+)
+def test_a_multi_word_value_named_one_step_away_is_prose(obj: Any) -> None:
+    """R2: the indirect rule takes the direct rule's value class (no whitespace)."""
+    for text in _forms(obj):
+        assert scrub_shapes(text) == text
+
+
+def test_a_multi_word_yaml_value_named_one_step_away_is_prose() -> None:
+    text = "api_key:\n  description: shown in the form\n  value: Please set via env var\n"
+    assert scrub_shapes(text) == text
+    twin = f"api_key:\n  description: shown in the form\n  value: {SECRET}\n"
+    assert SECRET not in scrub_shapes(twin) and "api_key:" in scrub_shapes(twin)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "psql -h db.internal -p 5432 -U app appdb",
+        "pg_dump -p 6432 -Fc appdb",
+        "pg_restore -h h -p 5433 -d appdb dump.bin",
+        "redis-cli -h cache -p 6379 ping",
+        "mysql -h h -P 3306 -u app appdb",
+        f"psql -h h -p {POD_UUID}",
+        f"psql restore done; kubectl logs -p {POD_UUID} api",
+        "verify psql restore then run: kubectl logs -p api-7f9c8d-x2k4z --tail 50",
+    ],
+)
+def test_a_port_uuid_or_kubectl_previous_flag_is_not_a_password(text: str) -> None:
+    """R4: ``-p`` owned by a port, an id or ``kubectl logs`` keeps its argument."""
+    assert scrub_shapes(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"mysql -u root -p{SECRET} appdb",
+        f"mysql -h h -P 3306 -u root -p{SECRET} appdb",
+        f"redis-cli -h cache -p 6379 -a {SECRET} ping",
+        f"psql x; kubectl exec pod -- mysql -u r -p{SECRET} db",
+    ],
+)
+def test_a_real_inline_password_still_masks(text: str) -> None:
+    out = scrub_shapes(text)
+    assert SECRET not in out and REDACTION_MARKER in out
+
+
+def test_a_key_or_name_fields_value_is_an_identifier() -> None:
+    """QA pre-existing: ``"key": "setting_1042"`` is a NAME, never masked."""
+    rows = [{"key": f"setting_{n}", "value": f"v{n}"} for n in range(1000, 1100)]
+    rows.append({"key": "STRIPE_API_KEY_PROD", "value": SECRET})
+    rows.append({"name": "release_20261111", "value": "on"})
+    for text in _forms(rows):
+        out = scrub_shapes(text)
+        assert SECRET not in out, "the value under the credential name is still masked"
+        assert out.count(REDACTION_MARKER) == 1
+        assert "setting_1042" in out and "release_20261111" in out
+    # Not a widening past the field name: a credential-named field still masks.
+    assert SECRET not in scrub_shapes(json.dumps({"api_key": SECRET}))
+    assert SECRET not in scrub_shapes(json.dumps({"private_key": SECRET}))
+
+
+def test_a_same_line_count_plan_mask_skips_the_line_diff(monkeypatch: Any) -> None:
+    """R5: equal line counts take the zip; the diff budget is not spent."""
+    import local_operator.redaction_shapes as shapes
+
+    def _fail(*_: Any) -> None:
+        raise AssertionError("line diff ran on an equal-line-count mask")
+
+    monkeypatch.setattr(shapes, "_changed_line_blocks", _fail)
+    monkeypatch.setattr(
+        shapes,
+        "_scrub_plain_terraform_plan_json",
+        lambda text: text.replace(SECRET, REDACTION_MARKER),
+    )
+    text = _gutter(f'{{\n  "a": "{SECRET}",\n  "b": 1\n}}')
+    out = shapes._scrub_guttered_plan(text)
+    assert out is not None and SECRET not in out
+    assert out.splitlines()[1].startswith("     2| ")
