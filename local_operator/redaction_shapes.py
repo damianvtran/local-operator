@@ -127,6 +127,7 @@ from typing import (
     Iterable,
     Mapping,
     Match,
+    NamedTuple,
     Optional,
     Pattern,
     Sequence,
@@ -4966,9 +4967,11 @@ def shape_report(hits: Sequence[ShapeHit]) -> ShapeReport:
 #: Labels for hits produced here. Only ``data:`` (base64) values become hits a
 #: session may REGISTER for exact-value masking; a ``stringData`` value is plain
 #: text (``production``, ``info``) and registering it would mask that word in
-#: every later result, so it is masked in place and never promoted.
-#: Labels for hits produced here. Spelling/structure EVIDENCE, not a name-driven
-#: guess, so they join :data:`_ARGUMENT_EVIDENCE_LABELS`.
+#: every later result, so it is masked in place and never promoted. Of the
+#: three, only :data:`GCP_KEY_ID_LABEL` joins :data:`_ARGUMENT_EVIDENCE_LABELS`:
+#: the structure rules do not run on arguments at all (see
+#: :func:`_scrub_all_with_hits`), and an encoded credential is judged there by
+#: the decoded text's own labels.
 K8S_SECRET_DATA_LABEL = "k8s-secret-data"
 ENCODED_CREDENTIAL_LABEL = "encoded-credential"
 GCP_KEY_ID_LABEL = "gcp-service-account-key-id"
@@ -5169,6 +5172,57 @@ def _scrub_encoded_credentials(
     return text
 
 
+#: A JSON string token on one line; the escaped-JSON pass below reads only the
+#: ones carrying ``\\"`` (JSON inside a JSON string).
+_JSON_STRING_TOKEN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*+"')
+
+
+def _scrub_escaped_json_strings(
+    text: str,
+    hits: list[ShapeHit],
+    reject: "Callable[[str, str, Match[str]], bool] | None",
+    depth: int,
+    budget: _DecodeBudget,
+) -> str:
+    """Run the whole pass INSIDE a JSON string that itself holds JSON (QA round 1, Q5).
+
+    ``aws secretsmanager get-secret-value`` prints ``"SecretString":
+    "{\\"password\\":\\"…\\"}"``: the key-name rules match ``"password": "…"``,
+    and in the escaped spelling every quote is ``\\"``, so nothing matched. The
+    string is decoded, the EXISTING rules run on it (no new keywords), and only
+    a string they mask is re-encoded — every other token keeps its bytes.
+    """
+    if depth >= _DECODE_MAX_DEPTH or '\\"' not in text:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for match in _JSON_STRING_TOKEN_RE.finditer(text):
+        token = match.group(0)
+        # Only a string that IS JSON (``{…}``/``[…]``). A shell command or code
+        # inside a tool call's raw arguments also carries ``\\"``, and the
+        # measurement found 428 such strings the rules would newly rewrite —
+        # ``-u "$USER:$PASS"`` references, prose — none a credential. Checked
+        # on the raw token, before the budget, so those strings cost nothing.
+        if '\\"' not in token or token[1:-1].lstrip()[:1] not in ("{", "["):
+            continue
+        if not budget.take(len(token)):
+            break
+        inner = _decode_json_run(token[1:-1])
+        if inner is None:
+            continue
+        scrubbed, found = _scrub_all_with_hits(inner, reject, depth + 1, budget)
+        if scrubbed.count(REDACTION_MARKER) <= inner.count(REDACTION_MARKER):
+            continue
+        pieces.append(text[cursor : match.start()])
+        pieces.append(json.dumps(scrubbed, ensure_ascii=False))
+        cursor = match.end()
+        hits.extend(found)
+    if not pieces:
+        return text
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _scrub_service_account_key_id(text: str, hits: list[ShapeHit]) -> str:
     """Mask ``private_key_id`` in service-account JSON; keep ``client_email``/``project_id``.
 
@@ -5188,146 +5242,250 @@ def _scrub_service_account_key_id(text: str, hits: list[ShapeHit]) -> str:
 
 
 # --- Kubernetes Secret objects ---------------------------------------------------
+#
+# Both rules below produce SPANS rather than a rewritten text, so the live
+# stream can run them over already-released text plus the new release and apply
+# only what lands in the new part (:func:`scrub_credential_structures_in_context`,
+# round-1 review R1/Q3): a Secret's ``kind`` line and its ``data:`` block often
+# arrive in different reads, and a rule that needs both in one string missed
+# every key order but kubectl's.
 
 _K8S_DATA_KEYS = frozenset({"data", "stringData"})
+#: The ``read`` tool's line-number gutter (``  9| ``), right-aligned to ONE width
+#: per result. A Secret manifest read as a file carries it on every line, and the
+#: YAML rule used to see `` 9| stringData:`` as no key at all (QA round 1, Q4).
+#: Each line is read after its gutter; the width is constant within a result,
+#: so indentation still compares as in the file.
+_READ_GUTTER_RE = re.compile(r"[ ]*+[0-9]++\| ")
 _K8S_YAML_KIND_SECRET_RE = re.compile(
-    r"^[ \t]*(?:-[ \t]+)?kind:[ \t]*[\"']?Secret[\"']?[ \t]*$", re.MULTILINE
+    r"^(?:[ ]*+[0-9]++\| )?[ \t]*+(?:-[ \t]++)?kind:[ \t]*+[\"']?Secret[\"']?[ \t]*+$",
+    re.MULTILINE,
 )
 _K8S_JSON_KIND_SECRET_RE = re.compile(r'\\?"kind\\?"\s*:\s*\\?"Secret\\?"')
-#: One YAML mapping line: indent, optional list-item dash, key, optional value.
+#: One YAML mapping line (after any gutter): indent, optional list-item dash,
+#: key, optional value. Every quantifier is possessive: the lazy key and value
+#: of the first version backtracked over a whitespace run at every position,
+#: and one 200,000-space line under ``kind: Secret`` did not finish in 118 s
+#: (round-1 review, R3). The key cannot contain ``:``, so possessive is exact.
 _YAML_KEY_LINE_RE = re.compile(
-    r"^(?P<indent>[ \t]*)(?P<dash>-[ \t]+)?(?P<key>[^\s:#\"'][^:]*?|\"[^\"]*\"|'[^']*')"
-    r"[ \t]*:(?:[ \t]+(?P<value>.*?))?[ \t]*$"
+    r"(?P<indent>[ \t]*+)(?P<dash>-[ \t]++)?(?P<key>[^\s:#\"'][^:]*+|\"[^\"]*+\"|'[^']*+')"
+    r"[ \t]*+:(?:[ \t]++(?P<value>.*+))?$"
 )
 _YAML_BLOCK_SCALAR_RE = re.compile(r"^[|>][+-]?[0-9]?$")
 _JSON_TOKEN_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"|[{}\[\]:,]')
+#: A whole-value environment/command reference (``${SENTRY_DSN}``, ``$(cat f)``).
+_WHOLE_REFERENCE_RE = re.compile(r"\$\{[^}\s]*\}|\$\([^)\n]*\)")
+
+#: ``(start, end, replacement, hits)``: one rewrite of the text a rule scanned,
+#: with the hits that rewrite is evidence for — reported only if it is applied.
+_Span = tuple[int, int, str, list[ShapeHit]]
 
 
-def _yaml_key(line: str) -> Optional[tuple[int, int, str, str]]:
-    """``(line_indent, key_column, key, value)`` of a YAML key line, else ``None``."""
+class _YamlKey(NamedTuple):
+    indent: int  # after the gutter
+    column: int  # the key's own column (indent + list dash)
+    key: str
+    value: str  # trailing blanks dropped
+    value_start: int  # offset of ``value`` in the line, gutter included
+
+
+def _gutter_width(line: str) -> int:
+    match = _READ_GUTTER_RE.match(line)
+    return match.end() if match is not None else 0
+
+
+def _yaml_content(line: str) -> str:
+    """``line`` without its read gutter and line terminator."""
     body = line.rstrip("\r\n")
-    match = _YAML_KEY_LINE_RE.match(body)
+    return body[_gutter_width(body) :]
+
+
+def _yaml_key(line: str) -> Optional[_YamlKey]:
+    """The YAML key on ``line`` (gutter tolerated), else ``None``."""
+    body = line.rstrip("\r\n")
+    match = _YAML_KEY_LINE_RE.match(body, _gutter_width(body))
     if match is None:
         return None
     indent = len(match.group("indent"))
-    column = indent + len(match.group("dash") or "")
-    return indent, column, match.group("key").strip("\"'"), (match.group("value") or "")
+    raw_value = match.group("value") or ""
+    value = raw_value.rstrip(" \t")
+    return _YamlKey(
+        indent,
+        indent + len(match.group("dash") or ""),
+        match.group("key").strip("\"'"),
+        value,
+        match.start("value") if match.group("value") is not None else len(body),
+    )
 
 
 def _line_indent(line: str) -> int:
     return len(line) - len(line.lstrip(" \t"))
 
 
-def _yaml_mapping_is_secret(lines: list[str], header: int, column: int) -> bool:
-    """Whether the mapping that owns line ``header`` (keys at ``column``) has ``kind: Secret``."""
+def _is_template_value(value: str) -> bool:
+    """A Helm/Go template or a shell/env reference, not a value (round-1 review, R2).
 
-    def _is_secret_kind(parsed: tuple[int, int, str, str]) -> bool:
-        return parsed[2] == "kind" and parsed[3].strip("\"'") == "Secret"
+    A chart's ``templates/secret.yaml`` spells its data as ``{{ .Values.x | b64enc }}``;
+    masking that showed an agent ``[redacted]`` where the code is, and an ``edit``
+    built from the read could not match or wrote the marker back into the chart.
+    """
+    bare = value.strip().strip("\"'")
+    return "{{" in bare or _WHOLE_REFERENCE_RE.fullmatch(bare) is not None
 
+
+def _yaml_mapping_is_secret(
+    contents: list[str], parsed: list[Optional[_YamlKey]], header: int, column: int
+) -> bool:
+    """Whether the mapping that owns line ``header`` (keys at ``column``) has ``kind: Secret``.
+
+    BOUNDED TO THAT ONE OBJECT (QA round 1, Q1/Q2). The first version walked
+    along the column until a ``---`` or a parent, so in ``cat cm.yaml secret.yaml``
+    (no separator) the Secret's ``kind`` claimed the ConfigMap's ``data:`` and
+    masked its package names and image ids; and it re-walked the whole run once
+    per header, which made 2,000 concatenated ConfigMaps take over 600 s. An
+    object ends at its ``apiVersion`` line (every manifest and every kubectl
+    order prints it first) or at a key repeated at the same column (a second
+    object with no separator), so each scan covers its own object only and the
+    whole rule is linear in the text.
+    """
+
+    def _is_secret_kind(entry: _YamlKey) -> bool:
+        return entry.value.strip("\"'") == "Secret"
+
+    first = parsed[header]
+    seen = {first.key} if first is not None else set()
     # The header line itself may open the item (``- data:``): then upward is a
     # previous item and must not be read.
-    first = _yaml_key(lines[header])
-    if first is not None and first[0] < first[1]:
+    if first is not None and first.indent < first.column:
         upward: range = range(0)
     else:
         upward = range(header - 1, -1, -1)
     for index in upward:
-        line = lines[index]
-        if not line.strip() or line.lstrip().startswith("#"):
+        content = contents[index]
+        if not content.strip() or content.lstrip().startswith("#"):
             continue
-        if line.startswith("---"):
+        if content.startswith("---"):
             break
-        parsed = _yaml_key(line)
-        if parsed is None:
-            if _line_indent(line) < column:
+        entry = parsed[index]
+        if entry is None:
+            if _line_indent(content) < column:
                 break
             continue
-        indent, key_column, _, _ = parsed
-        if key_column == column:
-            if _is_secret_kind(parsed):
-                return True
-            if indent < column:
-                break  # the ``- key:`` line that opens this item
+        if entry.column == column:
+            if entry.key == "kind":
+                return _is_secret_kind(entry)
+            if entry.key in seen:
+                break  # the previous object, concatenated without ``---``
+            seen.add(entry.key)
+            if entry.key == "apiVersion" or entry.indent < column:
+                break  # this object's first line, or the ``- key:`` that opens the item
             continue
-        if indent < column:
+        if entry.indent < column:
             break  # a parent
-    for index in range(header + 1, len(lines)):
-        line = lines[index]
-        if not line.strip() or line.lstrip().startswith("#"):
+    for index in range(header + 1, len(contents)):
+        content = contents[index]
+        if not content.strip() or content.lstrip().startswith("#"):
             continue
-        if line.startswith("---"):
+        if content.startswith("---"):
             break
-        indent = _line_indent(line)
-        if indent > column:
+        if _line_indent(content) > column:
             continue
-        parsed = _yaml_key(line)
-        if parsed is None or parsed[1] != column or parsed[0] < column:
+        entry = parsed[index]
+        if entry is None or entry.column != column or entry.indent < column:
             break  # a parent, a new list item, or not a mapping line
-        if _is_secret_kind(parsed):
-            return True
+        if entry.key == "kind":
+            return _is_secret_kind(entry)
+        if entry.key in seen or entry.key == "apiVersion":
+            break  # the next object
+        seen.add(entry.key)
     return False
 
 
-def _scrub_k8s_secret_yaml(text: str, hits: list[ShapeHit]) -> str:
+def _k8s_secret_yaml_spans(text: str) -> list[_Span]:
+    """Spans masking ``data``/``stringData`` values of every YAML ``kind: Secret`` object."""
     if not _K8S_YAML_KIND_SECRET_RE.search(text):
-        return text
+        return []
     lines = text.splitlines(keepends=True)
-    changed = False
-    for header, line in enumerate(lines):
-        parsed = _yaml_key(line)
-        if parsed is None or parsed[2] not in _K8S_DATA_KEYS or parsed[3]:
+    contents = [_yaml_content(line) for line in lines]
+    parsed = [_yaml_key(line) for line in lines]
+    offsets: list[int] = []
+    position = 0
+    for line in lines:
+        offsets.append(position)
+        position += len(line)
+    spans: list[_Span] = []
+    for header, entry in enumerate(parsed):
+        if entry is None or entry.key not in _K8S_DATA_KEYS or entry.value:
             continue
-        column = parsed[1]
-        if not _yaml_mapping_is_secret(lines, header, column):
+        column = entry.column
+        if not _yaml_mapping_is_secret(contents, parsed, header, column):
             continue
         child_column: Optional[int] = None
-        in_block_scalar = False
         for index in range(header + 1, len(lines)):
-            child = lines[index]
-            if not child.strip():
+            content = contents[index]
+            if not content.strip():
                 continue
-            indent = _line_indent(child)
+            indent = _line_indent(content)
             if indent <= column:
                 break
-            ending = child[len(child.rstrip("\r\n")) :]
-            child_parsed = _yaml_key(child)
+            child = parsed[index]
             if child_column is None:
                 child_column = indent
-            if indent == child_column and child_parsed is not None:
-                _, _, _, value = child_parsed
-                in_block_scalar = bool(_YAML_BLOCK_SCALAR_RE.match(value))
-                if value and not in_block_scalar and value != REDACTION_MARKER:
-                    head = child.rstrip("\r\n")[: len(child.rstrip("\r\n")) - len(value)]
-                    lines[index] = head + REDACTION_MARKER + ending
-                    if parsed[2] == "data":
-                        hits.append(
-                            ShapeHit(K8S_SECRET_DATA_LABEL, value.strip("\"'"), window=value)
-                        )
-                    changed = True
+            if indent == child_column and child is not None:
+                value = child.value
+                if (
+                    value
+                    and not _YAML_BLOCK_SCALAR_RE.match(value)
+                    and value != REDACTION_MARKER
+                    and not _is_template_value(value)
+                ):
+                    start = offsets[index] + child.value_start
+                    found = (
+                        [ShapeHit(K8S_SECRET_DATA_LABEL, value.strip("\"'"), window=value)]
+                        if entry.key == "data"
+                        else []
+                    )
+                    spans.append((start, start + len(value), REDACTION_MARKER, found))
             elif indent > child_column:
                 # Continuation of a block scalar (``key: |``) or a folded value:
                 # the value's own text, so the whole line goes.
-                content = child.strip()
-                if content != REDACTION_MARKER:
-                    lines[index] = child[:indent] + REDACTION_MARKER + ending
-                    changed = True
-    return "".join(lines) if changed else text
+                stripped = content.strip()
+                if stripped != REDACTION_MARKER and "{{" not in stripped:
+                    body = lines[index].rstrip("\r\n")
+                    start = offsets[index] + len(body) - len(content.lstrip(" \t"))
+                    end = offsets[index] + len(body.rstrip(" \t"))
+                    spans.append((start, end, REDACTION_MARKER, []))
+    return spans
 
 
-def _scrub_k8s_secret_json(text: str, hits: list[ShapeHit]) -> str:
-    """Mask ``data``/``stringData`` string values of every JSON object with ``"kind": "Secret"``.
+def _k8s_secret_json_spans(text: str) -> list[_Span]:
+    """Spans masking ``data``/``stringData`` string values of every JSON ``"kind": "Secret"``.
 
     A small token walk rather than :func:`json.loads`: tool output wraps the JSON in
     other text (a ``List``, a log prefix, a YAML ``last-applied-configuration``
     annotation), and the rewrite must keep every other byte as it was. A JSON
     STRING that itself carries an escaped Secret (``-o json``'s annotation) is
     decoded, walked and re-encoded.
+
+    An object still OPEN when the text ends is judged on what it has shown: the
+    live stream releases a Secret's ``data`` and ``kind`` before its closing
+    brace (the hold waits for ``kind``, not for the end), so frames are settled
+    at the end of the scan as well as on pop.
     """
     if not _K8S_JSON_KIND_SECRET_RE.search(text):
-        return text
-    replacements: list[tuple[int, int, str]] = []
+        return []
+    replacements: list[_Span] = []
     # frame: [type, key, expecting_value, is_secret, value_spans, is_data_block]
     stack: list[list[Any]] = []
+
+    def _settle(frame: list[Any], parent: Optional[list[Any]]) -> None:
+        if frame[0] != "o":
+            return
+        if frame[5] and parent is not None:
+            parent[4].extend(frame[4])
+        elif frame[3]:
+            replacements.extend(frame[4])
+
     for match in _JSON_TOKEN_RE.finditer(text):
         token = match.group(0)
         top = stack[-1] if stack else None
@@ -5346,11 +5504,7 @@ def _scrub_k8s_secret_json(text: str, hits: list[ShapeHit]) -> str:
                 continue
             frame = stack.pop()
             parent = stack[-1] if stack else None
-            if frame[0] == "o":
-                if frame[5] and parent is not None:
-                    parent[4].extend(frame[4])
-                elif frame[3]:
-                    replacements.extend(frame[4])
+            _settle(frame, parent)
             if parent is not None and parent[0] == "o":
                 parent[2] = False
         elif token == ":":
@@ -5365,32 +5519,80 @@ def _scrub_k8s_secret_json(text: str, hits: list[ShapeHit]) -> str:
                 continue
             if top is not None and top[0] == "o" and top[5]:
                 value = token[1:-1]
-                if value and value != REDACTION_MARKER:
-                    top[4].append((match.start() + 1, match.end() - 1, REDACTION_MARKER))
-                    if top[5] == "data":
-                        hits.append(ShapeHit(K8S_SECRET_DATA_LABEL, value, window=value))
+                if value and value != REDACTION_MARKER and not _is_template_value(value):
+                    found = (
+                        [ShapeHit(K8S_SECRET_DATA_LABEL, value, window=value)]
+                        if top[5] == "data"
+                        else []
+                    )
+                    top[4].append((match.start() + 1, match.end() - 1, REDACTION_MARKER, found))
             elif top is not None and top[0] == "o" and top[1] == "kind" and token == '"Secret"':
                 top[3] = True
             elif '\\"Secret\\"' in token and "kind" in token:
                 inner = _decode_json_run(token[1:-1])
                 if inner is not None:
-                    scrubbed = _scrub_k8s_secret_json(inner, hits)
+                    inner_hits: list[ShapeHit] = []
+                    scrubbed = _apply_spans(inner, _k8s_secret_json_spans(inner), 0, inner_hits)
                     if scrubbed != inner:
                         replacements.append(
-                            (match.start(), match.end(), json.dumps(scrubbed, ensure_ascii=False))
+                            (
+                                match.start(),
+                                match.end(),
+                                json.dumps(scrubbed, ensure_ascii=False),
+                                inner_hits,
+                            )
                         )
-    if not replacements:
-        return text
+    while stack:
+        frame = stack.pop()
+        _settle(frame, stack[-1] if stack else None)
+    return replacements
+
+
+def _apply_spans(text: str, spans: list[_Span], floor: int, hits: list[ShapeHit]) -> str:
+    """``text[floor:]`` with every non-overlapping span at or after ``floor`` applied.
+
+    ``floor`` is where the caller's own text begins inside a longer scanned text
+    (the live stream's lookbehind): a span before it is already published and
+    cannot be rewritten, so it is skipped rather than half-applied.
+    """
+    if not spans:
+        return text[floor:]
     pieces: list[str] = []
-    cursor = 0
-    for start, end, new in sorted(replacements):
+    cursor = floor
+    for start, end, new, found in sorted(spans, key=lambda span: (span[0], span[1])):
         if start < cursor:
             continue
         pieces.append(text[cursor:start])
         pieces.append(new)
+        hits.extend(found)
         cursor = end
     pieces.append(text[cursor:])
     return "".join(pieces)
+
+
+def _scrub_k8s_secret_yaml(text: str, hits: list[ShapeHit]) -> str:
+    return _apply_spans(text, _k8s_secret_yaml_spans(text), 0, hits)
+
+
+def _scrub_k8s_secret_json(text: str, hits: list[ShapeHit]) -> str:
+    return _apply_spans(text, _k8s_secret_json_spans(text), 0, hits)
+
+
+def scrub_credential_structures_in_context(context: str, text: str) -> tuple[str, list[ShapeHit]]:
+    """Mask Secret ``data`` in ``text``, reading ``context`` (released earlier) as lookbehind.
+
+    The live stream's half of the structure rules (round-1 review R1, QA Q3).
+    A manifest prints ``kind: Secret`` long before ``data:``; ``-o json`` prints
+    the object's opening brace in an earlier read than its ``"data"``. Scanning
+    ``context + text`` lets the rule see the owning object, and only spans
+    inside ``text`` are applied — the context is already on screen.
+    """
+    if not text or ("Secret" not in text and "Secret" not in context):
+        return text, []
+    combined = context + text
+    spans = _k8s_secret_json_spans(combined) + _k8s_secret_yaml_spans(combined)
+    hits: list[ShapeHit] = []
+    return _apply_spans(combined, spans, len(context), hits), hits
 
 
 # --- Terraform plan JSON ---------------------------------------------------------
@@ -5516,6 +5718,31 @@ def _tf_mask_plan(plan: dict[str, Any]) -> bool:
     return changed
 
 
+_JSON_INDENT_RE = re.compile(r"\n([ \t]+)\S")
+
+
+def _render_like(plan: dict[str, Any], original: str) -> str:
+    """``plan`` re-serialised in ``original``'s layout (round-1 review, N2).
+
+    The plan is masked as parsed data, so it has to be re-rendered; matching the
+    original's indent (jq's 2, a 4-space ``json.tool``, tabs) and its compact
+    separators (``terraform show -json`` prints no spaces) keeps the rewrite to
+    the masked values plus whatever whitespace :func:`json.dumps` normalises
+    INSIDE a line (key order and string escapes are preserved, ``ensure_ascii``
+    is off). A byte-exact in-place rewrite would need a span-tracking JSON
+    parser for a rule that fires a few times a month.
+    """
+    if "\n" not in original:
+        compact = '": ' not in original and ", " not in original
+        return json.dumps(plan, ensure_ascii=False, separators=(",", ":") if compact else None)
+    match = _JSON_INDENT_RE.search(original)
+    indent: Union[int, str] = 2
+    if match is not None:
+        unit = match.group(1)
+        indent = unit if "\t" in unit else len(unit)
+    return json.dumps(plan, ensure_ascii=False, indent=indent)
+
+
 def _scrub_terraform_plan_json(text: str) -> str:
     """Mask the values a Terraform plan JSON marks sensitive; see the section note."""
     if len(text) > _TF_PLAN_MAX_CHARS or not any(a in text for a in _TF_PLAN_ANCHORS):
@@ -5526,16 +5753,20 @@ def _scrub_terraform_plan_json(text: str) -> str:
     while start >= 0:
         try:
             plan, end = json.JSONDecoder().raw_decode(text, start)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError: a 100k-deep ``[[[…`` next to a plan anchor reached the
+            # settled result path as an exception (round-1 review, R4).
             plan, end = None, -1
         if isinstance(plan, dict) and any(
             key in plan for key in ("resource_changes", "planned_values", "prior_state")
         ):
-            if not _tf_mask_plan(plan):
+            try:
+                masked = _tf_mask_plan(plan)
+            except RecursionError:
+                masked = False
+            if not masked:
                 return text
-            span = text[start:end]
-            rendered = json.dumps(plan, ensure_ascii=False, indent=2 if "\n" in span else None)
-            return text[:start] + rendered + text[end:]
+            return text[:start] + _render_like(plan, text[start:end]) + text[end:]
         if end > start:
             start = text.find("{", end)  # a whole object that is not a plan: skip it
         else:
@@ -5557,44 +5788,310 @@ def _scrub_credential_structures(text: str, hits: list[ShapeHit]) -> str:
     return _scrub_service_account_key_id(text, hits)
 
 
-_SECRET_DATA_HEADER_RE = re.compile(
-    r"^(?P<indent>[ \t]*)(?:-[ \t]+)?\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*\r?$",
-    re.MULTILINE,
+# --- the live stream: holding and lookbehind for the structure rules ------------
+#
+# WHY (round-1 review R1, QA Q3): the structure rules need the whole object, and
+# a pipe releases at every newline. The first version held a ``data:`` block only
+# until its next sibling line, which covered kubectl's sorted YAML and nothing
+# else: a manifest (``kind`` first, ``data`` last), ``-o json`` split across reads
+# (the opening brace went out earlier; the ``},`` closing ``data`` counted as a
+# sibling), and any Terraform plan over the 8 KiB cap all painted live — into
+# the card, ``jobs`` peek and the checkpoint's ``output_tail``. The guard below
+# keeps three things per stream:
+#
+# * a LOOKBEHIND of already-released text, so a release holding a ``data:``
+#   block is judged with its object's ``kind`` and opening brace in view
+#   (:func:`scrub_credential_structures_in_context`);
+# * a HOLD on a ``data:``/``stringData:`` block until its object's ``kind`` line
+#   or the object's end has arrived — only once ``apiVersion`` has appeared,
+#   which every Kubernetes object prints and ordinary JSON ``"data"`` rarely does;
+# * a HOLD on a Terraform plan object (``{"format_version": …,
+#   "terraform_version"``) until its closing brace, so the whole-plan rule sees
+#   one parseable plan.
+#
+# Both holds are bounded by :data:`STRUCTURE_HOLD_LIMIT`. Past it the structure
+# is WITHHELD — dropped with a one-line notice — rather than released
+# unchecked: a value painted live cannot be taken back, and no real object is
+# that large (the API server caps a Secret at 1 MiB). Output with no
+# ``apiVersion`` and no plan opener is released exactly as before.
+
+#: Already-released characters kept as lookbehind (cut back to a line start).
+_STRUCTURE_CONTEXT_CHARS = 256 * 1024
+#: The most one held structure may grow before it is withheld (see above).
+STRUCTURE_HOLD_LIMIT = 4 * 1024 * 1024
+_WITHHELD_SECRET_BLOCK = (
+    "[live output withheld: a Kubernetes data block over 4 MiB cannot be checked "
+    "for Secret values while streaming; select keys with jsonpath]\n"
+)
+_WITHHELD_PLAN = (
+    "[live output withheld: a Terraform plan JSON over 4 MiB cannot be checked for "
+    "sensitive values while streaming; use json-output-redacted or select fields with jq]\n"
 )
 
+_SECRET_DATA_HEADER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<dash>-[ \t]+)?\"?(?:data|stringData)\"?[ \t]*:[ \t]*\{?[ \t]*\r?$",
+    re.MULTILINE,
+)
+_STREAM_KEY_RE = re.compile(r"(?:-[ \t]+)?\"?([A-Za-z_][\w.-]*+)\"?[ \t]*:")
+_JSON_CLOSERS = frozenset({"}", "},", "]", "],"})
+_TF_PLAN_OPEN_RE = re.compile(
+    r'\{[ \t\r\n]*"format_version"[ \t]*:[ \t]*"[^"\n]*"[ \t\r\n]*,[ \t\r\n]*"terraform_version"'
+)
+_TF_PLAN_HEAD = '{"format_version":"'
+_TF_PLAN_NEXT = ',"terraform_version"'
+_JSON_PLAIN_RUN_RE = re.compile(r'[^"{}]*+')
+_JSON_STRING_RUN_RE = re.compile(r'(?:[^"\\]|\\.)*+')
 
-def secret_data_block_hold(text: str, cut: int) -> int:
-    """The earliest offset a live stream must hold back for a pending Secret data block.
 
-    The structure rule above can only mask a ``data:`` block once it has seen the
-    owning object's ``kind: Secret`` — and ``kubectl`` prints ``kind`` AFTER
-    ``data`` (keys are sorted). A pipe redactor that releases at every newline
-    would publish the block before the line that identifies it, so it holds from
-    the block's header line until a later sibling line at the header's own
-    indentation (or a parent's) has arrived. A ``ConfigMap`` is only DELAYED by
-    this, never masked; the redactor's cap still bounds the hold. Returns ``cut``
-    when nothing is pending. Pretty-printed YAML and JSON share the indentation
-    convention this reads.
+def _could_open_a_plan(fragment: str) -> bool:
+    """Whether ``fragment`` (from a line-start ``{``) may still become a plan opener."""
+    compact = "".join(fragment.split())
+    if len(compact) <= len(_TF_PLAN_HEAD):
+        return _TF_PLAN_HEAD.startswith(compact)
+    if not compact.startswith(_TF_PLAN_HEAD):
+        return False
+    rest = compact[len(_TF_PLAN_HEAD) :]
+    quote = rest.find('"')
+    if quote < 0:
+        return len(rest) <= 32  # still inside the version string
+    return _TF_PLAN_NEXT.startswith(rest[quote + 1 :])
+
+
+def _json_scan(text: str, pos: int, depth: int, state: int) -> tuple[int, int, int, int]:
+    """Advance a brace counter over ``text``: ``(end, pos, depth, state)``.
+
+    ``end`` is the offset just past the brace that closes the object, or -1 while
+    it is open (then ``pos`` is ``len(text)``); ``state`` is 0 outside a string,
+    1 inside one, 2 inside one right after a backslash that ended the read. One
+    step per string or brace, never a rescan — a 4 MiB plan is read once.
     """
-    if "data" not in text:
+    size = len(text)
+    while pos < size:
+        if state:
+            if state == 2:
+                pos += 1  # the escaped character the previous read ended before
+            pos = _JSON_STRING_RUN_RE.match(text, pos).end()  # type: ignore[union-attr]
+            if pos >= size:
+                return -1, size, depth, 1
+            if text[pos] != '"':  # a backslash, last in the read
+                return -1, size, depth, 2
+            state = 0
+            pos += 1
+            continue
+        pos = _JSON_PLAIN_RUN_RE.match(text, pos).end()  # type: ignore[union-attr]
+        if pos >= size:
+            break
+        char = text[pos]
+        pos += 1
+        if char == '"':
+            state = 1
+        elif char == "{":
+            depth += 1
+        else:
+            depth -= 1
+            if depth <= 0:
+                return pos, pos, 0, 0
+    return -1, size, depth, state
+
+
+def _data_block_resolution(text: str, column: int, pos: int, limit: int) -> tuple[bool, int]:
+    """Scan whole lines from ``pos`` (ending before ``limit``) for a data block's resolution.
+
+    Resolved at the owning object's ``kind``/``apiVersion`` line, at a line left
+    of the block (the object ended), at ``---``, or at a non-key line in the
+    block's column. A JSON closer at the column is the ``},`` of the block
+    itself, and any other sibling key leaves the object open. Returns
+    ``(resolved, offset)``: the resolving line's start, or where to resume.
+    """
+    while True:
+        line_end = text.find("\n", pos)
+        if line_end < 0 or line_end >= limit:
+            return False, pos
+        line = text[pos:line_end]
+        stripped = line.strip()
+        if stripped:
+            if line.startswith("---"):
+                return True, pos
+            indent = _line_indent(line)
+            if indent < column:
+                return True, pos
+            if indent == column and stripped not in _JSON_CLOSERS:
+                key = _STREAM_KEY_RE.match(stripped)
+                if key is None or key.group(1) in ("kind", "apiVersion"):
+                    return True, pos
+        pos = line_end + 1
+
+
+class StructureStreamGuard:
+    """Per-stream state for the structure rules on a live pipe (see the section note).
+
+    Used by ``tools/builtin._PipeRedactor``: :meth:`discard` first (a withheld
+    structure still streaming), then :meth:`hold` on the release point, then
+    :meth:`scrub_release` on the released text. Offsets are relative to the
+    text of the current read, and :meth:`hold` rebases them on the cut it returns.
+    """
+
+    __slots__ = ("context", "_plan", "_plan_search", "_data", "_data_search", "_drop", "_notice")
+
+    def __init__(self) -> None:
+        self.context = ""
+        #: ``[start, scan, depth, in_string, end]`` of a held plan (``end`` -1 while open).
+        self._plan: Optional[list[Any]] = None
+        self._plan_search = 0
+        #: ``[start, column, scan, search_after]`` of the first unresolved data block.
+        self._data: Optional[list[int]] = None
+        self._data_search = 0
+        #: A structure being withheld from offset ``start``:
+        #: ``("plan", [start, depth, state])`` or
+        #: ``("data", [start, column, unfinished_line, resume_offset])``.
+        #: Bytes before ``start`` are not part of it and are kept.
+        self._drop: Optional[tuple[str, list[Any]]] = None
+        #: The one-line notice owed for a structure just withheld.
+        self._notice = ""
+
+    @property
+    def withholding(self) -> bool:
+        return self._drop is not None
+
+    def withheld_notice(self) -> str:
+        """The notice for a structure withheld since the last call, once; else ``""``."""
+        notice, self._notice = self._notice, ""
+        return notice
+
+    def discard(self, text: str, *, final: bool) -> str:
+        """``text`` without the withheld structure's bytes (all of them on ``final``)."""
+        if self._drop is None:
+            return text
+        kind, state = self._drop
+        start = state[0]
+        keep = text[:start]
+        if final:
+            self._drop = None
+            return keep
+        if kind == "plan":
+            end, _, depth, scan_state = _json_scan(text, start, state[1], state[2])
+            if end >= 0:
+                self._drop = None
+                return keep + text[end:]
+            self._drop = ("plan", [start, depth, scan_state])
+            return keep
+        # The block is judged line by line, so its unfinished last line is kept
+        # here (never in ``pending``, where a cap could release it) — capped,
+        # since only a line's head decides whether it resolves the block.
+        rest = state[2] + text[start:]
+        resolved, pos = _data_block_resolution(rest, state[1], state[3], len(rest))
+        if resolved:
+            self._drop = None
+            return keep + rest[pos:]
+        tail = rest[pos:]
+        self._drop = ("data", [start, state[1], tail[:4096] if len(tail) > 65536 else tail, 0])
+        return keep
+
+    def hold(self, text: str, cut: int, *, final: bool) -> int:
+        """The cut, moved back before a structure that is still open; rebases state on it."""
+        if final:
+            self._plan = self._data = None
+            self._plan_search = self._data_search = 0
+            return cut
+        cut, plan_start = self._hold_plan(text, cut)
+        if self._drop is None:
+            cut = self._hold_data(text, cut, plan_start)
+        self._rebase(cut)
         return cut
-    for match in _SECRET_DATA_HEADER_RE.finditer(text, 0, cut):
-        header_end = match.end()
-        column = len(match.group("indent"))
-        resolved = False
-        position = header_end + 1
-        while position < cut:
-            line_end = text.find("\n", position)
-            if line_end < 0 or line_end >= cut:
-                break  # no complete line after this point inside the cut
-            line = text[position:line_end]
-            if line.strip() and _line_indent(line) <= column:
-                resolved = True
-                break
-            position = line_end + 1
-        if not resolved:
-            return match.start()
-    return cut
+
+    def _hold_plan(self, text: str, cut: int) -> tuple[int, int]:
+        if self._plan is None and '"terraform_version"' in text:
+            match = _TF_PLAN_OPEN_RE.search(text, self._plan_search)
+            if match is not None:
+                self._plan = [match.start(), match.start(), 0, 0, -1]
+        if self._plan is None:
+            # A pretty plan's ``{`` line can arrive a read before its
+            # ``"format_version"``; once released, no later read can parse the plan.
+            brace = text.rfind("{", max(0, cut - 160), cut)
+            if brace >= 0 and (brace == 0 or text[brace - 1] == "\n"):
+                if _could_open_a_plan(text[brace:cut]):
+                    return brace, len(text)
+            return cut, len(text)
+        start, scan, depth, in_string, end = self._plan
+        if end < 0:
+            end, scan, depth, in_string = _json_scan(text, scan, depth, in_string)
+            self._plan = [start, scan, depth, in_string, end]
+        if end >= 0:
+            if cut <= start:
+                return cut, start
+            # The plan is whole: release it whole (a cut inside it moves to its
+            # end — the only place this guard releases MORE than it was offered).
+            self._plan = None
+            self._plan_search = end
+            return max(cut, end), len(text)
+        if len(text) - start > STRUCTURE_HOLD_LIMIT:
+            # ``discard`` (called right after this release) rescans the held
+            # plan once from its brace and keeps scanning as bytes arrive.
+            self._plan = None
+            self._drop = ("plan", [start, 0, 0])
+            self._notice = _WITHHELD_PLAN
+        return min(cut, start), start
+
+    def _hold_data(self, text: str, cut: int, plan_start: int) -> int:
+        limit = min(cut, plan_start)
+        if self._data is None and "apiVersion" not in text and "apiVersion" not in self.context:
+            self._data_search = max(0, text.rfind("\n", 0, limit) + 1)
+            return cut
+        while True:
+            if self._data is None:
+                match = _SECRET_DATA_HEADER_RE.search(text, self._data_search, limit)
+                if match is None:
+                    self._data_search = max(self._data_search, text.rfind("\n", 0, limit) + 1)
+                    return cut
+                column = len(match.group("indent")) + len(match.group("dash") or "")
+                self._data = [match.start(), column, match.end() + 1, match.end()]
+            start, column, scan, after = self._data
+            resolved, scan = _data_block_resolution(text, column, scan, cut)
+            if resolved:
+                # Later headers are looked for from just after THIS header: a
+                # ``stringData:`` sibling inside the same object needs its own hold.
+                self._data = None
+                self._data_search = after
+                continue
+            self._data[2] = scan
+            if len(text) - start > STRUCTURE_HOLD_LIMIT:
+                self._data = None
+                # Resume after the lines already judged (never the header itself:
+                # a ``- data:`` header sits left of its own column).
+                self._drop = ("data", [start, column, "", scan - start])
+                self._notice = _WITHHELD_SECRET_BLOCK
+            return min(cut, start)
+
+    def _rebase(self, cut: int) -> None:
+        if self._plan is not None:
+            self._plan[0] -= cut
+            self._plan[1] -= cut
+            if self._plan[4] >= 0:
+                self._plan[4] -= cut
+        if self._data is not None:
+            self._data = [
+                self._data[0] - cut,
+                self._data[1],
+                self._data[2] - cut,
+                self._data[3] - cut,
+            ]
+        self._plan_search = max(0, self._plan_search - cut)
+        self._data_search = max(0, self._data_search - cut)
+        if self._drop is not None:
+            self._drop[1][0] -= cut  # the cut never passes a withheld structure's start
+
+    def scrub_release(self, ready: str) -> tuple[str, list[ShapeHit]]:
+        """Mask Secret data in ``ready`` with the lookbehind in view; extend the lookbehind."""
+        hits: list[ShapeHit] = []
+        if ready and _SECRET_DATA_HEADER_RE.search(ready):
+            ready, hits = scrub_credential_structures_in_context(self.context, ready)
+        context = self.context + ready
+        if len(context) > _STRUCTURE_CONTEXT_CHARS:
+            context = context[-_STRUCTURE_CONTEXT_CHARS:]
+            newline = context.find("\n")
+            context = context[newline + 1 :] if newline >= 0 else ""
+        self.context = context
+        return ready, hits
 
 
 def scrub_shapes_with_hits(
@@ -5649,6 +6146,7 @@ def _scrub_all_with_hits(
         text = _scrub_credential_structures(text, found)
     else:
         text = _scrub_service_account_key_id(text, found)
+    text = _scrub_escaped_json_strings(text, found, reject, depth, budget)
     text = _scrub_encoded_credentials(text, found, reject, depth, budget)
     scrubbed, hits = _scrub_table_with_hits(text, reject)
     return scrubbed, found + hits
@@ -8302,9 +8800,13 @@ def credential_dump_notice(command: str) -> Optional[str]:
 #: values — the very form the kubectl steer recommends, so steering it is noise
 #: (measured: four real ``… -o json | jq -r '.data | keys[]'`` commands). An
 #: optional stderr redirect may sit before the pipe.
+#: The program may not print anything else first (round-1 review, R5): a comma
+#: (``'.data.PASSWORD, keys'``) emits a value before the keys, and a path into
+#: one entry (``.data.KEY``, ``.data["KEY"]``) is a value however it ends.
 _KEYS_ONLY_PIPELINE = re.compile(
     r"^(?:\s*2>\S+)?\s*\|\s*(?:\S*/)?jq\s+(?:-[A-Za-z]+\s+)*"
-    r"(['\"])[^'\"\n]*\bkeys(?:\[\])?\s*\1(?=\s*(?:$|[|;&)\n]))"
+    r"(['\"])(?![^'\"\n]*(?:,|\.(?:data|stringData)\s*(?:\.[\w\"]|\[\s*[\\\"\w])))"
+    r"[^'\"\n]*\bkeys(?:\[\])?\s*\1(?=\s*(?:$|[|;&)\n]))"
 )
 
 

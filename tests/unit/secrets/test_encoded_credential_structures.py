@@ -27,13 +27,14 @@ import pytest
 
 from local_operator.redaction_shapes import (
     REDACTION_MARKER,
+    StructureStreamGuard,
     _DecodeBudget,
     _scrub_encoded_credentials,
+    _scrub_escaped_json_strings,
     credential_dump_notice,
     scrub_shapes,
     scrub_shapes_for_arguments,
     scrub_shapes_with_hits,
-    secret_data_block_hold,
 )
 
 PASSWORD = "Zx9fake" + "Passw0rdQ"
@@ -333,10 +334,10 @@ def test_configmap_keeps_ordinary_values_and_loses_only_an_encoded_credential() 
 
 def test_stream_hold_keeps_a_data_block_until_its_kind_line_arrives() -> None:
     head = "apiVersion: v1\ndata:\n  MONGO_URI: " + b64("plain-value-one") + "\n"
-    assert secret_data_block_hold(head, len(head)) == len("apiVersion: v1\n")
+    assert StructureStreamGuard().hold(head, len(head), final=False) == len("apiVersion: v1\n")
     whole = head + "kind: Secret\n"
-    assert secret_data_block_hold(whole, len(whole)) == len(whole)
-    assert secret_data_block_hold("plain\nlines\n", 12) == 12
+    assert StructureStreamGuard().hold(whole, len(whole), final=False) == len(whole)
+    assert StructureStreamGuard().hold("plain\nlines\n", 12, final=False) == 12
 
 
 def _published_line_by_line(text: str) -> bytes:
@@ -361,7 +362,7 @@ def test_the_stream_hold_is_load_bearing(monkeypatch: pytest.MonkeyPatch) -> Non
     # arrives and an unshaped Secret value paints live.
     from local_operator.tools import builtin
 
-    monkeypatch.setattr(builtin, "secret_data_block_hold", lambda text, cut: cut)
+    monkeypatch.setattr(builtin.StructureStreamGuard, "hold", lambda self, text, cut, final: cut)
     text = secret_yaml().replace(b64(DSN), b64("plain-value-one"))
     assert b64("plain-value-one").encode() in _published_line_by_line(text)
 
@@ -542,3 +543,388 @@ def test_terraform_and_aws_secret_steers(command: str, fires: bool) -> None:
 )
 def test_steers_fire_on_value_dumps_and_not_on_name_listings(command: str, fires: bool) -> None:
     assert (credential_dump_notice(command) is not None) is fires
+
+
+# --- round 1 remediation (PR #3756 review R1-R5/N2, QA Q1-Q6) -------------------
+#
+# Every value below is synthetic. ``OPAQUE`` decodes to text with no credential
+# shape, so ONLY the structure rule can mask it: a leak of it is a structure-rule
+# leak, not something the decode pass hides.
+
+OPAQUE = b64("zq9-Lm2-pw-for-jobs-77")
+SENSITIVE = "Zq9pw-db-" + "admin-77"
+
+
+def _stream(parts: list[bytes]) -> str:
+    from local_operator.tools.builtin import _PipeRedactor
+
+    redactor = _PipeRedactor([])
+    out = b"".join(redactor.feed(part) for part in parts)
+    return (out + redactor.feed(b"", final=True)).decode()
+
+
+def _secret_json(indent: int) -> str:
+    obj = {
+        "apiVersion": "v1",
+        "data": {"MONGO_URI_B": OPAQUE},
+        "kind": "Secret",
+        "metadata": {"name": "x"},
+        "type": "Opaque",
+    }
+    return json.dumps(obj, indent=indent) + "\n"
+
+
+SPLIT_FIXTURES = {
+    "kubectl yaml (data before kind)": (
+        f"apiVersion: v1\ndata:\n  OTHER: {OPAQUE}\nkind: Secret\nmetadata:\n  name: x\n"
+    ),
+    "manifest, data last": (
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\ntype: Opaque\n"
+        f"data:\n  OTHER: {OPAQUE}\n"
+    ),
+    "manifest, data then a sibling": (
+        f"apiVersion: v1\nkind: Secret\ndata:\n  OTHER: {OPAQUE}\ntype: Opaque\n"
+    ),
+    "stringData after kind": (
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\nstringData:\n"
+        f"  ENDPOINT_AUTH: {OPAQUE[:18]}\n"
+    ),
+    "kubectl -o json, indent 4": _secret_json(4),
+    "kubectl -o json, indent 2": _secret_json(2),
+}
+
+
+@pytest.mark.parametrize("name", sorted(SPLIT_FIXTURES))
+def test_live_stream_masks_a_secret_at_every_split_point(name: str) -> None:
+    # R1/Q3: the first hold covered kubectl's YAML key order in one read and
+    # leaked the rest (193 of 194 split points for pretty JSON).
+    text = SPLIT_FIXTURES[name]
+    secret = OPAQUE[:18] if "stringData" in name else OPAQUE
+    data = text.encode()
+    leaks = [p for p in range(1, len(data)) if secret in _stream([data[:p], data[p:]])]
+    assert leaks == []
+    assert secret not in _stream([line.encode() for line in text.splitlines(keepends=True)])
+
+
+def _plan(count: int, indent: int | None) -> str:
+    changes = [
+        {
+            "address": f"aws_ssm_parameter.p{i}",
+            "change": {
+                "actions": ["create"],
+                "before": None,
+                "after": {"name": f"/app/p{i}", "value": SENSITIVE if i == 0 else f"v{i}"},
+                "after_sensitive": {"value": True} if i == 0 else {},
+                "before_sensitive": False,
+            },
+        }
+        for i in range(count)
+    ]
+    plan = {
+        "format_version": "1.2",
+        "terraform_version": "1.9.5",
+        "resource_changes": changes,
+        "planned_values": {"root_module": {}},
+    }
+    return json.dumps(plan, indent=indent) + "\n"
+
+
+def _large_yaml_secret() -> tuple[str, list[str]]:
+    values = [b64(f"opaque-{i}-" * 60) for i in range(40)] + [b64(SENSITIVE)]
+    body = "".join(f"  K{i}: {value}\n" for i, value in enumerate(values))
+    return f"apiVersion: v1\ndata:\n{body}kind: Secret\nmetadata:\n  name: x\n", values
+
+
+@pytest.mark.parametrize("size", [4096, 65536])
+def test_live_stream_masks_structures_larger_than_the_8k_cap(size: int) -> None:
+    yaml_text, values = _large_yaml_secret()
+    for text, secrets in (
+        (yaml_text, values),
+        (_plan(200, None), [SENSITIVE]),
+        (_plan(200, 2), [SENSITIVE]),
+    ):
+        assert len(text) > 8192
+        data = text.encode()
+        for phase in (0, 1000, 3333):
+            parts = [data[:phase]] + [data[k : k + size] for k in range(phase, len(data), size)]
+            out = _stream([part for part in parts if part])
+            assert not [s for s in secrets if s in out]
+            assert "[live output withheld" not in out
+
+
+def test_a_pretty_plan_whose_brace_arrives_alone_is_still_masked() -> None:
+    text = _plan(3, 2)
+    assert text.startswith("{\n")
+    assert SENSITIVE not in _stream([b"{\n", text[2:].encode()])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "".join(f"2026-11-10T12:00:{i % 60:02d}Z INFO worker {i} batch\n" for i in range(300)),
+        json.dumps({"data": {"items": [{"id": i} for i in range(80)]}, "meta": {}}, indent=2),
+        "data:\n" + "".join(f"  key{i}: value{i}\n" for i in range(100)) + "other: 1\n",
+    ],
+)
+def test_output_without_a_structure_anchor_streams_exactly_as_before(
+    text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No ``apiVersion`` and no plan opener: the guard must not move a single cut,
+    # so every read publishes what it did without the guard (no new latency).
+    from local_operator.tools import builtin
+
+    def per_read() -> list[bytes]:
+        redactor = builtin._PipeRedactor([])
+        data = text.encode()
+        reads = [redactor.feed(data[k : k + 64]) for k in range(0, len(data), 64)]
+        return reads + [redactor.feed(b"", final=True)]
+
+    guarded = per_read()
+    monkeypatch.setattr(builtin.StructureStreamGuard, "hold", lambda self, text, cut, final: cut)
+    assert guarded == per_read()
+
+
+def test_a_structure_over_the_hold_limit_is_withheld_not_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import redaction_shapes
+
+    monkeypatch.setattr(redaction_shapes, "STRUCTURE_HOLD_LIMIT", 4096)
+    yaml_text, values = _large_yaml_secret()
+    for text, secrets in ((_plan(200, 2), [SENSITIVE]), (yaml_text, values)):
+        data = text.encode() + b"after the structure\n"
+        out = _stream([data[k : k + 1024] for k in range(0, len(data), 1024)])
+        assert not [s for s in secrets if s in out]
+        assert out.count("[live output withheld") == 1
+        assert out.endswith("after the structure\n")
+
+
+def test_configmap_before_a_secret_without_a_separator_keeps_its_values() -> None:
+    # Q1: the Secret's ``kind`` used to claim the ConfigMap's ``data:`` block.
+    configmap = (
+        "apiVersion: v1\ndata:\n  package: '@acme/jobs-runner'\n  image: jobs-svc:1.2.3\n"
+        "kind: ConfigMap\nmetadata:\n  name: cfg\n"
+    )
+    out = scrub_shapes(configmap + secret_yaml())
+    assert out.startswith(configmap)
+    assert out[len(configmap) :] == scrub_shapes(secret_yaml())
+    assert scrub_shapes(secret_yaml() + configmap).endswith(configmap)
+
+
+def test_secret_rule_is_linear_in_concatenated_objects() -> None:
+    # Q2: 2,000 ConfigMaps + a Secret took over 600 s. The control is the same
+    # text with the structure rule inert (no ``kind: Secret``), timed in this run.
+    configmap = "apiVersion: v1\ndata:\n  LOG_LEVEL: info\n  MODE: fast\nkind: ConfigMap\n"
+    configmap += "metadata:\n  name: cfg\n" + "  labels:\n    app: jobs\n" * 3
+    text = configmap * 3000 + secret_yaml()
+    assert len(text) > 400_000
+    control = text.replace("kind: Secret", "kind: Opaque")
+    started = time.perf_counter()
+    scrub_shapes(control)
+    base = time.perf_counter() - started
+    started = time.perf_counter()
+    out = scrub_shapes(text)
+    took = time.perf_counter() - started
+    assert out.startswith(configmap * 3000)
+    assert took < 1.5 * base + 1.0, (took, base)
+
+
+def test_secret_rule_reads_through_the_read_tool_gutter() -> None:
+    # Q4: `` 9| stringData:`` was no key at all, so ``read`` skipped the rule.
+    from local_operator.tools.builtin import _number_lines
+
+    text = secret_yaml().replace(b64(DSN), OPAQUE)
+    numbered = _number_lines(text.splitlines(), 1)
+    out = scrub_shapes(numbered)
+    assert OPAQUE not in out
+    assert out.count(REDACTION_MARKER) == scrub_shapes(text).count(REDACTION_MARKER)
+
+
+@pytest.mark.asyncio
+async def test_read_tool_session_masks_a_secret_manifest(tmp_path: Any) -> None:
+    # Q4 on the real path: a ``read`` through a Session, checked in the provider
+    # request and the durable transcript.
+    from local_operator.harness.types import (
+        ModelSpec,
+        StreamEndEvent,
+        StreamTextDelta,
+        StreamToolCallDelta,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.tools.builtin import build_read_tool
+    from local_operator.variables import VariableStore
+
+    manifest = tmp_path / "secret.yaml"
+    manifest.write_text(
+        "apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\nstringData:\n"
+        f"  ENDPOINT_AUTH: {OPAQUE[:18]}\ndata:\n  BLOB: {OPAQUE}\n"
+    )
+    requests: list[Any] = []
+
+    def provider(request: Any, signal: Any = None) -> Any:
+        index = len(requests)
+        requests.append(request)
+
+        async def generate() -> Any:
+            if index == 0:
+                yield StreamToolCallDelta(
+                    index=0,
+                    id="r0",
+                    name="read",
+                    argument_delta=json.dumps({"path": str(manifest)}),
+                )
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return generate()
+
+    session = Session(
+        model=ModelSpec(provider="test", model_id="synthetic", context_window=100_000),
+        stream_fn=provider,
+        tools=[build_read_tool()],
+        transcript=Transcript(tmp_path / "session"),
+        system_blocks_provider=lambda *_: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    await session.prompt("read the manifest")
+    durable = (tmp_path / "session" / "transcript.jsonl").read_text()
+    for secret in (OPAQUE, OPAQUE[:18]):
+        assert secret not in repr(requests[-1])
+        assert secret not in durable
+    assert "ENDPOINT_AUTH: " + REDACTION_MARKER in repr(requests[-1])
+
+
+def test_templated_secret_values_are_left_as_code() -> None:
+    # R2: a Helm chart's template expressions are code, not values.
+    chart = (
+        'apiVersion: v1\nkind: Secret\nmetadata:\n  name: {{ include "app.fullname" . }}\n'
+        "data:\n  DATABASE_URL: {{ .Values.db.url | b64enc | quote }}\n"
+        '  API_KEY: {{ required "apiKey" .Values.apiKey | b64enc }}\n'
+        "stringData:\n  SENTRY_DSN: ${SENTRY_DSN}\n  TOKEN: $(cat /run/token)\n"
+        "  config.yaml: |\n    password: {{ .Values.pw }}\n"
+    )
+    assert scrub_shapes(chart) == chart
+    literal = chart.replace("${SENTRY_DSN}", "literal-value-here")
+    assert "SENTRY_DSN: " + REDACTION_MARKER in scrub_shapes(literal)
+
+
+def test_yaml_key_scan_is_linear_on_long_whitespace() -> None:
+    # R3: a 200,000-space line under ``kind: Secret`` did not finish in 118 s.
+    text = "kind: Secret\ndata:\n  a" + " " * 200_000 + "b\n"
+    started = time.perf_counter()
+    scrub_shapes(text)
+    assert time.perf_counter() - started < 2.0
+
+
+def test_deep_nesting_next_to_a_plan_anchor_does_not_raise() -> None:
+    # R4: RecursionError escaped ``raw_decode`` into the settled result path.
+    text = '{"resource_changes": [], "after_sensitive": ' + "[" * 100_000 + "]" * 100_000 + "}"
+    assert scrub_shapes(text) == text
+
+
+def test_jq_program_printing_a_value_before_keys_is_steered() -> None:
+    # R5: only the LAST step being ``keys`` used to exempt the whole program.
+    base = "kubectl get secret x -o json | jq "
+    assert credential_dump_notice(base + "'.data.PASSWORD, keys'") is not None
+    assert credential_dump_notice(base + "'.data[\"PASSWORD\"] | keys'") is not None
+    assert credential_dump_notice(base + "'.data | keys'") is None
+
+
+@pytest.mark.parametrize("indent", [None, 2, 4, "\t"])
+def test_masked_plan_keeps_its_original_layout(indent: Any) -> None:
+    # N2: the plan was always re-rendered at indent 2.
+    plan = json.loads(_plan(2, None))
+    separators = (",", ":") if indent is None else None
+    text = json.dumps(plan, indent=indent, separators=separators)
+    assert scrub_shapes(text) == text.replace(SENSITIVE, REDACTION_MARKER)
+
+
+def test_existing_key_rules_apply_inside_an_escaped_json_string() -> None:
+    # Q5: ``aws secretsmanager get-secret-value`` prints SecretString as JSON
+    # inside a JSON string; the key-name rule could not see ``\"password\"``.
+    value = "AwsSm" + "Pw55zzKq"
+    inner = json.dumps({"username": "jobs", "password": value})
+    text = json.dumps({"Name": "prod/db", "SecretString": inner}, indent=4)
+    out, hits = scrub_shapes_with_hits(text)
+    assert value not in out
+    assert '\\"username\\": \\"jobs\\"' in out and '"Name": "prod/db"' in out
+    assert value in {hit.value for hit in hits}
+    # A JSON string with no credential inside keeps every byte.
+    plain = json.dumps({"payload": json.dumps({"user": "jobs", "region": "ca-central-1"})})
+    assert scrub_shapes(plain) == plain
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        # Measured false positives of a first cut that decoded EVERY escaped
+        # string: code and commands in a tool call's raw arguments.
+        'curl -sk -u "$OS_USER:$OS_PASS" https://search.example/_cat',
+        'items = ["Datadog MCP credential: " + name]',
+    ],
+)
+def test_escaped_json_pass_reads_only_strings_that_are_json(inner: str) -> None:
+    text = json.dumps({"command": inner})
+    hits: list[Any] = []
+    out = _scrub_escaped_json_strings(text, hits, None, 0, _DecodeBudget())
+    assert out == text and hits == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_result_is_masked_in_stored_details(tmp_path: Any) -> None:
+    # Q6: the raw MCP payload rode into the transcript beside the masked text.
+    from local_operator.harness.loop import AgentLoop
+    from local_operator.variables import VariableStore
+
+    store = VariableStore(cwd=str(tmp_path))
+    server_result = {
+        "content": [{"type": "text", "text": secret_yaml().replace(b64(DSN), OPAQUE)}],
+        "isError": False,
+        "meta": {"count": 1},
+    }
+    out = await AgentLoop._redact_details(
+        {"server_result": server_result}, store.redact, "mcp__qa_dump", None
+    )
+    assert out is not None
+    assert OPAQUE not in json.dumps(out)
+    assert out["server_result"]["meta"] == {"count": 1}
+    assert out["server_result"]["isError"] is False
+    assert OPAQUE in json.dumps(server_result), "the executor's own payload is untouched"
+
+
+def test_subagent_result_is_scrubbed_before_it_is_persisted(tmp_path: Any) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.harness.subagent import _redact_child_result
+    from local_operator.variables import VariableStore
+
+    parent = SimpleNamespace(_variables=VariableStore(cwd=str(tmp_path)))
+    text = "child found:\n" + secret_yaml().replace(b64(DSN), OPAQUE)
+    assert OPAQUE not in _redact_child_result(parent, text)
+    assert _redact_child_result(SimpleNamespace(), "plain") == "plain"
+
+    def broken(_: str) -> str:
+        raise RuntimeError("sink")
+
+    failing = SimpleNamespace(_variables=SimpleNamespace(redact=broken))
+    assert OPAQUE not in _redact_child_result(failing, text)
+
+
+def test_project_rows_scrub_free_text_and_keep_identifiers(tmp_path: Any) -> None:
+    from local_operator.projects import ProjectEdit, ProjectRegistry
+
+    registry = ProjectRegistry(tmp_path)
+    dsn = f"mongodb+srv://fakeuser:{PASSWORD}@cluster0.example.mongodb.net/db"
+    project = registry.create_project(
+        ProjectEdit(name="jobs-rotation", description=f"rotated {dsn}", progress=f"checked {dsn}")
+    )
+    row = (tmp_path / "projects" / f"{project.id}.json").read_text()
+    assert PASSWORD not in row
+    assert '"name": "jobs-rotation"' in row
+    assert "cluster0.example.mongodb.net" in row
+    assert registry.get_project(project.id) is not None

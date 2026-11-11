@@ -50,7 +50,11 @@ are masked wherever they appear on a model-visible surface:
   `kind` is `Secret` (YAML or JSON, `List` items, and the escaped copy in a
   `last-applied-configuration` annotation). The object declares them secret;
   key names, `metadata` and every other field stay readable, and a `ConfigMap`
-  is never touched by this rule;
+  is never touched by this rule — also when it shares one output with a Secret
+  and no `---` (an object ends at its next `apiVersion` or a repeated key).
+  Lines carrying the `read` tool's ` 9| ` gutter are read after the gutter.
+  Template and reference expressions (`{{ … }}`, a whole `${…}` or `$(…)`) are
+  code, not values, and stay readable;
 * an **encoded spelling** of a credential: a base64/base64url, hex, `%xx`, or
   JSON-escaped (`\/`, `\uXXXX`) token is masked whole when its DECODING is
   masked by the rules above (a DSN with an inline password, a PEM key,
@@ -60,6 +64,10 @@ are masked wherever they appear on a model-visible surface:
   a Secret);
 * a service-account key's `private_key_id`. Its `client_email` and
   `project_id` are identifiers and stay readable.
+* inside a JSON string that is itself JSON (`aws secretsmanager
+  get-secret-value`'s `SecretString`), the same rules as above apply to the
+  decoded JSON — no new keywords; a string that is a command or code is not
+  read this way.
 * a value a Terraform plan JSON (`terraform show -json`, Terraform Cloud's
   `/plans/<id>/json-output`) itself marks sensitive: `before_sensitive`/
   `after_sensitive` leaves, `sensitive_values`, a sensitive output, and an
@@ -347,11 +355,16 @@ comment.
   tokens, 4 MiB decoded): past either bound the remainder is not decoded. The
   plaintext rules still run over all of it. Base64 of non-ASCII text is not
   decoded (the cheap pre-check reads base64 of ASCII only).
-* The live `bash` stream holds an open `data:`/`stringData:` block until a
-  sibling line resolves its object's `kind`, within the pipe redactor's
-  existing deferral cap; a block larger than that cap is published before its
-  `kind` line, and only its credential-shaped (or encoded-credential) values
-  are masked live. The settled result is masked whole.
+* The live `bash` stream (card, `jobs` peek, checkpoint `output_tail`) keeps
+  the last 256 KiB it released as lookbehind, and once an `apiVersion` has
+  appeared it holds an open `data:`/`stringData:` block until its object's
+  `kind` line or the object's end; it holds a Terraform plan object (`{
+  "format_version": …, "terraform_version"`) until its closing brace. Output
+  with neither is released exactly as before. One held structure may grow to
+  4 MiB (the API server caps a Secret at 1 MiB); past that it is **withheld**
+  — its bytes are dropped from the stream and from the command's result, and
+  a one-line notice (which names the safer read) takes their
+  place — never released unchecked.
 * Terraform plan JSON is parsed only when it carries a plan anchor and a
   sensitivity marker, and only up to 32 MiB; a larger or truncated plan keeps
   only the plaintext rules. Masked plan values are not registered session-wide
