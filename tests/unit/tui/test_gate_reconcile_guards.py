@@ -61,6 +61,7 @@ from tests.unit.tui.test_gate_resurface_real_entry import (
     _rig,
     _state,
 )
+from tests.unit.tui.waiting import settle
 
 
 @pytest.mark.asyncio
@@ -473,6 +474,23 @@ async def test_a_display_only_frame_is_ready_only_with_a_CORRECTLY_BOUND_card(
                     # from the live compositor.
                     from textual._compositor import LayoutUpdate  # noqa: F401
 
+                    # Wait for the compositor to have PAINTED the card before
+                    # sampling its map. `_pump_until` above returns the moment
+                    # `_ask_screen` is assigned, and on a loaded xdist worker
+                    # one `pilot.pause()` can cover that assignment but not the
+                    # reflow that composes the card (CI job 130784371072, gw3:
+                    # both legs False with the binding assertion above passing).
+                    # A map without the card is a frame the card is NOT on, and
+                    # the predicate refusing it is correct; the product only
+                    # records `_sidebar_displayed_frame` from the map of a frame
+                    # it actually displayed, so it never judges this pre-reflow
+                    # state. The wait mirrors that with an observable edge, not
+                    # a time bet, and both legs below judge the same frame.
+                    await settle(
+                        pilot,
+                        lambda: card in (app.screen._compositor._visible_widgets or {}),
+                        what="the ask card painted into the compositor's visible map",
+                    )
                     visible = app.screen._compositor._visible_widgets
                     assert visible, "the compositor painted nothing; no frame evidence"
                     app._sidebar_displayed_frame = (
