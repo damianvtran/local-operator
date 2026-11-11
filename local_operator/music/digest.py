@@ -30,12 +30,15 @@ _MODEL_ID = "radient/music"
 
 
 def money(amount_usd: float) -> str:
-    """``$0.15`` / ``$0.0075``: two decimals minimum, sub-cent precision kept.
+    """``$0.15`` / ``$0.0075`` / ``$0.07625``: two decimals minimum, micro-dollars kept.
 
     Music quotes are fractions of a cent per second, so rounding to cents would
     turn a 3 s quote ($0.0075) into "$0.01" — a figure the server never stated.
+    Six decimals because the server rounds ``duration_ms × unit_price`` to the
+    micro-dollar (docs/MUSIC.md "Money and cancellation"): a 30 500 ms track is
+    $0.07625, and four decimals would report a billed $0.0763 nobody charged.
     """
-    text = f"{amount_usd:.4f}".rstrip("0")
+    text = f"{amount_usd:.6f}".rstrip("0")
     whole, _, fraction = text.partition(".")
     return f"${whole}.{fraction.ljust(2, '0')}"
 
@@ -63,7 +66,8 @@ def _unit_price_ms(row: dict[str, Any]) -> float | None:
 def _tariff(row: dict[str, Any]) -> str:
     price = _unit_price_ms(row)
     if price is None:
-        return "price not reported by the server"
+        # The caller prefixes "price ", so this reads "price not reported…".
+        return "not reported by the server"
     basis = str((row.get("pricing") or {}).get("basis") or "quote").replace("_", " ")
     version = (row.get("pricing") or {}).get("price_version")
     tail = f", {version}" if version else ""
@@ -76,6 +80,9 @@ def _tariff(row: dict[str, Any]) -> str:
 def models_text(capabilities: Any) -> str:
     """``music_status(action="models")``: availability, tariff, limits, operations."""
     rows = capabilities.get("models", []) if isinstance(capabilities, dict) else []
+    # Read-only diagnostics should survive a malformed row the way job_text
+    # does, rather than raising on ``row.get`` and hiding the good rows.
+    rows = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
     if not rows:
         return "Music models: none reported by the server."
     lines = ["Music models:"]
@@ -86,10 +93,14 @@ def models_text(capabilities: Any) -> str:
             f"- {row.get('id', '?')}: {state}; price {_tariff(row)}."
         )  # i18n: ignore model-facing tool result
         limits = row.get("duration_ms")
+        formats = row.get("formats")
+        # A bare string is one format; joining it would spell it out per letter.
+        formats = [formats] if isinstance(formats, str) else formats
+        formats = [str(f) for f in formats] if isinstance(formats, list) else []
         if isinstance(limits, dict):
             lines.append(  # i18n: ignore model-facing tool result
                 f"  Duration {_seconds(limits.get('min'))}–{_seconds(limits.get('max'))}"
-                + (f"; formats {', '.join(row['formats'])}." if row.get("formats") else ".")
+                + (f"; formats {', '.join(formats)}." if formats else ".")
             )
         operations = row.get("operations") or {}
         reasons = row.get("operation_disabled_reasons") or {}
@@ -201,18 +212,36 @@ def job_text(record: dict[str, Any]) -> str:
         lines.append(f"Error: {record['error']}.")  # i18n: ignore model-facing tool result
     billed_total = 0.0
     any_billed = False
+    # A settled track with no usable cost object is server contract drift; it
+    # must surface as "unknown" in the total rather than silently read as $0
+    # (or understate a partly billed job). Pending tracks are counted apart:
+    # their cost is unknown only because it is not settled yet.
+    unknown = 0
     for index, track in enumerate(tracks, start=1):
         files = [row for row in artifacts if row.get("track_id") == track.get("id")]
         lines.append(_track_line(index, track, files))  # i18n: ignore model-facing tool result
-        _phrase, billed = _cost_text(track)
+        phrase, billed = _cost_text(track)
         if billed is not None:
             billed_total += billed
             any_billed = True
+        elif track.get("settled") and phrase == "cost unknown":
+            unknown += 1
     if tracks:
         pending = sum(1 for track in tracks if not track.get("settled"))
-        total = f"Total billed: {money(billed_total) if any_billed else '$0.00'}"
+        if any_billed:
+            total = f"Total billed: {money(billed_total)}"
+        elif unknown:
+            total = "Total billed: unknown"
+        else:
+            total = "Total billed: $0.00"
+        notes = []
+        if unknown and any_billed:
+            notes.append(f"{unknown} track(s) with unknown cost")
+        if pending:
+            notes.append(f"{pending} track(s) not yet settled")
+        so_far = " so far" if pending else ""
         lines.append(
-            total + (f" so far ({pending} track(s) not yet settled)." if pending else ".")
+            total + so_far + (f" ({'; '.join(notes)})." if notes else ".")
         )  # i18n: ignore model-facing tool result
     if record.get("cancellation_requested"):
         # Same promise as wire.music.cancel_requested and the UI: a request,

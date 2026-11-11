@@ -16,7 +16,7 @@ import pytest
 from local_operator.harness.jobs import AsyncJobManager
 from local_operator.harness.types import ToolContext
 from local_operator.music import jobs as music_jobs
-from local_operator.music.digest import job_text, money
+from local_operator.music.digest import job_text, models_text, money
 from local_operator.tools import music_tool
 
 # The live /tools/music/models payload, captured 2026-11-11 from the server.
@@ -68,6 +68,50 @@ def _text(result) -> str:
 
 def test_money_keeps_sub_cent_quotes_and_two_decimals():
     assert [money(v) for v in (0.15, 0.0075, 0, 1.5)] == ["$0.15", "$0.0075", "$0.00", "$1.50"]
+
+
+def test_money_keeps_micro_dollar_precision():
+    # Review M1: the server rounds duration_ms x $0.0000025 to the micro-dollar,
+    # so a 30 500 ms track is $0.07625 and 2 x 3 001 ms is $0.015005.
+    assert money(2.5e-6 * 30500) == "$0.07625"
+    assert money(2.5e-6 * 3001 * 2) == "$0.015005"
+    assert money(0.015) == "$0.015"
+    assert money(2.5e-6 * 60000) == "$0.15"
+
+
+def test_settled_track_without_cost_makes_the_total_unknown_not_zero():
+    # Review M2: a settled track with no cost object must never total "$0.00".
+    alone = job_text(
+        {
+            "job": "j",
+            "state": "failed",
+            "tracks": [{"id": "a", "settled": True, "status": "FAILED", "error_type": "x"}],
+        }
+    )
+    assert "- Track 1: failed (x); cost unknown." in alone
+    assert alone.endswith("Total billed: unknown.")
+    mixed = job_text(
+        {
+            "job": "j",
+            "state": "completed",
+            "tracks": [
+                {"id": "a", "settled": True, "status": "COMPLETED", "cost": BILLED},
+                {"id": "b", "settled": True, "status": "FAILED", "error_type": "x"},
+            ],
+        }
+    )
+    assert mixed.endswith("Total billed: $0.075 (1 track(s) with unknown cost).")
+
+
+def test_models_text_without_pricing_and_with_malformed_rows():
+    # Review N1/Q-N1 (no "price price") and N2 (non-dict rows skipped, a bare
+    # string ``formats`` is one format, not one per letter).
+    row = {k: v for k, v in LIVE_MODELS["models"][0].items() if k != "pricing"}
+    text = models_text({"models": ["junk", None, {**row, "formats": "mp3"}]})
+    assert "- radient/music: enabled; price not reported by the server." in text
+    assert "price price" not in text
+    assert "  Duration 3 s\u2013300 s; formats mp3." in text
+    assert text.count("\n- ") == 1
 
 
 @pytest.mark.asyncio
