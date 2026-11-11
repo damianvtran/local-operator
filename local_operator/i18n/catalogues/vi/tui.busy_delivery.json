@@ -1,0 +1,4 @@
+{
+  "tui.busy_delivery.queue_notice": "đã xếp hàng — đang chờ, công cụ vẫn chạy",
+  "tui.busy_delivery.both_notice": "đã xếp hàng — chờ, rồi định hướng nếu chờ lâu"
+}

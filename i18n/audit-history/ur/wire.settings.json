@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "6c779ed1c5dff314ec9f12b952fb1be715698ca9e3e2357beeb6e719efac7bfd",
+  "history_sha256": "8451e74b2dca2a8bf66f8dae4e9f83a4a6ed089bfa86648297dde52cde83cbab",
   "entries": [
     {
       "locale": "ur",
@@ -129,6 +129,31 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'اور واپس مکمل پر جانے سے وہ بحال نہیں ہوتے' checked for accuracy, glossary (choice label 'مکمل' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). F1 MAJOR glossary: help 'کمپیکشن' vs glossary/shipped 'کمپریشن' (16 uses, section title) -> fixed. F2 minor glossary drift: 'دوبارہ آغاز' in label and card.description vs 'دوبارہ شروع' (29 shipped uses and this key's own help) -> aligned. F3 minor glossary drift: 'پیغام/پیغامات' for turn vs shipped 'ٹرن' (42 uses) -> aligned in full.description and help. RTL: no embedded Latin runs; Arabic comma/semicolon/full stop (U+060C/U+061B/U+06D4) used throughout; no direction-sensitive tokens. No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "440b3561fe65bd10971369890785ecc7b0383563580385cd19aafd51ad5149d4",
+      "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
+      "target_sha256": "e78e59ca3db203eb639f5b51fe7fa89c0ca35ee0d73805c770e29f008a6757ef",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 8 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: queue.description 'مداخلت' meaning (1 major); steer.description (1 minor); both.description (1 minor). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): minor-only, BLOCKER_MAJOR 0. Accepted minors (not applied, to preserve audited bytes): steer.description nit. en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r2",
+      "keys_audited": 8
     }
   ]
 }

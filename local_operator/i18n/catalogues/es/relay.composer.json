@@ -4,5 +4,9 @@
   "relay.composer.action.stop": "detener",
   "relay.composer.action.stopping": "deteniendo",
   "relay.composer.action.connecting": "Conectando",
-  "relay.composer.action.stop_agent": "detener al agente"
+  "relay.composer.action.stop_agent": "detener al agente",
+  "relay.composer.delivery.label": "entrega",
+  "relay.composer.delivery.steer": "guiar",
+  "relay.composer.delivery.queue": "en cola",
+  "relay.composer.delivery.both": "ambos"
 }

@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "locale": "ur",
+  "namespace": "tui.busy_delivery",
+  "history_sha256": "800ba4f43ba21d24c3dd19fa61ade704fe013bc933ba23fe24cf4eea73a5f920",
+  "entries": [
+    {
+      "locale": "ur",
+      "namespace": "tui.busy_delivery",
+      "source_sha256": "210e58899f7c12c8890d1094de9cbcbbd0ff66c140c412d7bacee711ba510f87",
+      "context_sha256": "15bb9b08af850dd39982912dba48ec7510cd9e4a1c550ff87c595ff0e1ac4901",
+      "target_sha256": "4c1a82522864d0d5174cfad3c4a7f8d54db782337b4f5c042f092fb0ae91393a",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 2 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: both_notice verb form changed established term (1 major). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): minor-only, BLOCKER_MAJOR 0 (no findings). en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r2",
+      "keys_audited": 2
+    }
+  ]
+}

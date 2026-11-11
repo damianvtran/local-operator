@@ -4,5 +4,9 @@
   "relay.composer.action.stop": "dừng",
   "relay.composer.action.stopping": "đang dừng",
   "relay.composer.action.connecting": "Đang kết nối",
-  "relay.composer.action.stop_agent": "dừng tác nhân"
+  "relay.composer.action.stop_agent": "dừng tác nhân",
+  "relay.composer.delivery.label": "cách gửi",
+  "relay.composer.delivery.steer": "định hướng",
+  "relay.composer.delivery.queue": "hàng đợi",
+  "relay.composer.delivery.both": "cả hai"
 }

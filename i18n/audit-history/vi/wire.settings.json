@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "c2f736b66807179ed9b329680dce2cb93e5b9ab4a1c7173cebe9fee2fc15b152",
+  "history_sha256": "6213682416bb19c08a0b7088ed362db0fe77567943bcc50da44d1e91f15371af",
   "entries": [
     {
       "locale": "vi",
@@ -129,6 +129,31 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'và chuyển lại đầy đủ cũng không khôi phục chúng' checked for accuracy, glossary (choice label 'đầy đủ' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass; R2-V1 nit: 'chuyển lại' could read 'chuyển về', accepted unchanged. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). Passed as submitted. N1 nit: help opening 'Những gì một phiên được tiếp tục phát lại sau khi nén' is parseable but slightly heavy; accepted. nén/phiên/tiếp tục/lượt/người vận hành/thẻ/phát lại all match glossary and shipped vi. No placeholders/ICU/plurals."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "440b3561fe65bd10971369890785ecc7b0383563580385cd19aafd51ad5149d4",
+      "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
+      "target_sha256": "001642660398064eb9bc964938d9a09e0537db70694b1a6a125dc7d6daa4a92e",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 8 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: steer.description (1 major); help (1 minor). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): minor-only, BLOCKER_MAJOR 0. Accepted minors (not applied, to preserve audited bytes): steer.description/help idiom nits. en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r2",
+      "keys_audited": 8
     }
   ]
 }

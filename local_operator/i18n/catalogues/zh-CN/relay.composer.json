@@ -4,5 +4,9 @@
   "relay.composer.action.stop": "停止",
   "relay.composer.action.stopping": "正在停止",
   "relay.composer.action.connecting": "正在连接",
-  "relay.composer.action.stop_agent": "停止智能体"
+  "relay.composer.action.stop_agent": "停止智能体",
+  "relay.composer.delivery.label": "发送方式",
+  "relay.composer.delivery.steer": "引导",
+  "relay.composer.delivery.queue": "排队",
+  "relay.composer.delivery.both": "排队后引导"
 }

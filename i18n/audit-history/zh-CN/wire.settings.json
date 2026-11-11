@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "74e4452cd03649d6e6b4580d4a0ce546f63bc89dd677136f4447a47cd8db100c",
+  "history_sha256": "4250fd40739d645f368f714d6d7189ab150fc24ed1377f4978f8791ebcbd10b1",
   "entries": [
     {
       "locale": "zh-CN",
@@ -129,6 +129,31 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause '切换回完整也无法恢复' checked for accuracy, glossary (choice label '完整' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). No blocker/major. F1 minor glossary drift: help '操作者' vs the namespace's '操作员' (6 wire.settings uses incl. subagents_model_choice.choice.operator.label) -> '操作员'. F2 nit: '最近的尾部' slightly literal for 'tail', accepted. 压缩/会话/轮次/卡片/重放 match glossary and shipped zh-CN (cli.global_help.resume 重放). No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "440b3561fe65bd10971369890785ecc7b0383563580385cd19aafd51ad5149d4",
+      "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
+      "target_sha256": "bbff4ce7418c0088476c3452a49ef0aa0e1156e2fb0728c44ac3ec337390edf9",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 8 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: both label '两者' literal (1 major); steer.description (1 minor); both.description (1 minor). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): minor-only, BLOCKER_MAJOR 0. Accepted minors (not applied, to preserve audited bytes): both.description is ~10 cells longer than neighbours (length-parity does not apply to descriptions). en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r2",
+      "keys_audited": 8
     }
   ]
 }

@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "c5276fadd76ad7eaf25284478b72bbe910b159f6c58cf33b5e28eec98b06031d",
+  "history_sha256": "8b7d105b9886744d15985cb50b5dc84792dd6c2f813d4be3ebb5903b8b73f118",
   "entries": [
     {
       "locale": "es",
@@ -129,6 +129,31 @@
       },
       "status": "passed",
       "note": "Round 2 delta audit (PR #3570 head 72ec6acf2dfc) of the extended en .help ('…and switching back to full does not restore them.'), en wire.settings sha a63011819651. Added clause 'y volver a completa no los recupera' checked for accuracy, glossary (choice label 'completa' reused bare, per language.help 'auto' precedent), register and terminal punctuation: pass. Round-1 strings (other 5 keys + .help prefix) verified byte-identical to the round-1 audited values. Round-1 note: Audit of the 6 new compaction_resume_replay keys (PR #3570, head 329764b5bc7b). No blocker/major. F1 minor accuracy: label 'Reanudación' dropped 'replay' -> 'Reproducción al reanudar' (precedent cli.global_help.resume 'reproduciendo'). F2 minor idiom: help 'Tarjeta es mucho más pequeña' lacked the article -> 'La tarjeta es…'. F3 minor idiom: card.description 'la cola reciente' (cola reads as queue) and 'turnos anteriores no literales' (reads as non-literal/figurative) -> 'las entradas recientes; sin turnos anteriores literales'. compactación/sesión/operador/turno/tarjeta match glossary and shipped es. No placeholders/ICU/plurals. Receipt valid only if applied bytes equal expected-final-values.json."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "440b3561fe65bd10971369890785ecc7b0383563580385cd19aafd51ad5149d4",
+      "context_sha256": "4cd74dcfb32abeca23dc4a98e06f17dc887184c8db3d9c39d27856ef88851396",
+      "target_sha256": "87b023b7c4d9e6bb7e52ba367b0f9d9d3e9f9f689ce9afdb2d46dab29dc7497c",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 8 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: queue.description 'Espera a este paso' meaning (1 major); steer.description (1 minor). Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): fr/es/hi PASS 0/0 (no findings). en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r2",
+      "keys_audited": 8
     }
   ]
 }

@@ -4,5 +4,9 @@
   "relay.composer.action.stop": "arrêter",
   "relay.composer.action.stopping": "arrêt en cours",
   "relay.composer.action.connecting": "Connexion",
-  "relay.composer.action.stop_agent": "arrêter l’agent"
+  "relay.composer.action.stop_agent": "arrêter l’agent",
+  "relay.composer.delivery.label": "envoi",
+  "relay.composer.delivery.steer": "orienter",
+  "relay.composer.delivery.queue": "file d’attente",
+  "relay.composer.delivery.both": "les deux"
 }

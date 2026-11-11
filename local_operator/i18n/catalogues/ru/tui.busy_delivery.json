@@ -1,0 +1,4 @@
+{
+  "tui.busy_delivery.queue_notice": "в очереди — ждёт, инструменты работают",
+  "tui.busy_delivery.both_notice": "в очереди — ждёт, при задержке направит"
+}

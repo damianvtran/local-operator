@@ -4,5 +4,9 @@
   "relay.composer.action.stop": "остановить",
   "relay.composer.action.stopping": "останавливаем",
   "relay.composer.action.connecting": "Подключение",
-  "relay.composer.action.stop_agent": "остановить агента"
+  "relay.composer.action.stop_agent": "остановить агента",
+  "relay.composer.delivery.label": "доставка",
+  "relay.composer.delivery.steer": "направить",
+  "relay.composer.delivery.queue": "очередь",
+  "relay.composer.delivery.both": "оба"
 }
