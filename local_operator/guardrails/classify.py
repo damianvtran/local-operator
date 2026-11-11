@@ -40,6 +40,7 @@ from local_operator.guardrails.resolve import (
     Creation,
     Target,
     kernel_path,
+    physical_path,
     resolve_command,
 )
 
@@ -901,6 +902,17 @@ def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = Fa
     try:
         if os.path.isdir(path) and os.path.exists(os.path.join(path, ".git")):
             return "a git repository root"
+        # The repository's history itself: deleting ``<repo>/.git`` loses every
+        # unpushed commit, stash and linked-worktree record just as deleting
+        # the root does, so it ranks with the root. Only a git DIRECTORY (a
+        # linked worktree's ``.git`` is a one-line pointer file).
+        if (
+            os.path.basename(path).casefold() == ".git"
+            and not os.path.islink(path)
+            and os.path.isdir(path)
+            and os.path.exists(os.path.join(path, "HEAD"))
+        ):
+            return "a git repository's .git directory (its history)"
     except OSError:
         return "an unreadable path"
     return None
@@ -1002,6 +1014,11 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         notes.append("contains an unresolvable substitution or variable (opaque)")
     if target.unknown_cwd:
         notes.append("relative to a working directory that cannot be determined")
+    if target.unpinned:
+        notes.append(
+            "a '..' follows a component that does not resolve yet, so where it lands "
+            "cannot be known (unresolved)"
+        )
     if path is None:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes) or "unresolved target")
     ordered = _spelling_order(path, spellings if spellings is not None else _spellings(path))
@@ -1028,8 +1045,12 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
     # The session's own scratchpad is where the agent is TOLD to work, so a
     # timestamped component there (``$(date +%s)``) stays LOW — but only when the
     # substitution's program cannot print a ``..`` that climbs out of the pad.
-    in_own_pad = any(_under(path, pad) for pad in prot.own_scratchpad) and (
-        not target.opaque or target.opaque_contained
+    in_own_pad = (
+        any(_under(path, pad) for pad in prot.own_scratchpad)
+        and (not target.opaque or target.opaque_contained)
+        # ``path`` is only the lexical reading of an unpinned ``..``: the
+        # missing component may become a link out of the pad (resolve.Target).
+        and not target.unpinned
     )
     # R6: ``$(mktemp …)`` names a fresh temp entry — not "unknown" in the sense
     # that matters once CRITICAL ancestry was ruled out above.
@@ -1323,7 +1344,15 @@ def classify_bash(
 ) -> Verdict:
     """Rank a bash command. Pure parse: the command is never executed."""
     home = env.get("HOME") or os.path.expanduser("~")
-    resolution = resolve_command(command, cwd=_norm(cwd) if cwd else None, env=env, home=home)
+    # The process chdir()s to ``cwd`` as given, so a ``..`` in it lands
+    # physically (``abspath`` would collapse it lexically, hence the plain
+    # join); unpinnable means the cwd is unknown (relative words HIGH).
+    resolution = resolve_command(
+        command,
+        cwd=physical_path(os.path.join(os.getcwd(), os.path.expanduser(cwd))) if cwd else None,
+        env=env,
+        home=home,
+    )
     return classify_targets(
         resolution.targets,
         resolution.opaque_reasons,

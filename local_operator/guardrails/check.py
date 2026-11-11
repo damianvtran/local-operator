@@ -714,7 +714,7 @@ def evidence_write_verdict(
         _protected,
     )
     from local_operator.guardrails.classify import _spellings as spellings
-    from local_operator.guardrails.resolve import Target
+    from local_operator.guardrails.resolve import Target, physical_path
 
     key = FILE_DESTINATION_TOOLS.get(tool_name)
     raw = args.get(key) if key else None
@@ -726,7 +726,11 @@ def evidence_write_verdict(
     text = home + raw[1:] if raw == "~" or raw.startswith("~/") else raw
     if not os.path.isabs(text):
         text = os.path.join(ctx.cwd or os.getcwd(), text)
-    target = Target(path=os.path.normpath(text), op="overwrite", program=tool_name)
+    # Named where the kernel writes it (``..`` after links), not the lexical
+    # collapse; ``spellings(text)`` below also judges the raw realpath.
+    target = Target(
+        path=physical_path(text) or os.path.normpath(text), op="overwrite", program=tool_name
+    )
     prot = _protected(ctx.env, ctx.scratchpad, ctx.session_id)
     for spelling in spellings(text):
         reason = _evidence_reason(spelling, target, prot)

@@ -886,6 +886,14 @@ class Target:
     #: opaque word). ``os.path.realpath`` of it resolves ``..`` physically, so
     #: ``classify`` adds that spelling to the ones it judges.
     raw_path: str | None = None
+    #: A ``..`` in the word whose physical landing cannot be pinned now (a
+    #: component before it is missing or unsearchable, or the ``..`` follows a
+    #: glob component): ``path`` is only the lexical reading. ``classify``
+    #: keeps any CRITICAL that reading earns but never ranks the target LOW,
+    #: not even inside this session's scratchpad, because the missing component
+    #: may be created as a link by an earlier part of the same command
+    #: (``ln -s <repo>/sub <pad>/n && rm -rf <pad>/n/../.git``).
+    unpinned: bool = False
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
@@ -976,13 +984,99 @@ def kernel_path(raw: str | None) -> str | None:
     return None
 
 
-def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
-    """``(normalised absolute path, cwd_was_unknown)`` for a word's text."""
+def physical_path(raw: str) -> str | None:
+    """Where ``rm``/``>``/``mv`` act on the absolute word ``raw``: every ``..``
+    applied AFTER the links before it are followed, the FINAL component kept
+    as written (``rm`` removes a trailing link itself, not what it points at;
+    the trailing-slash form is covered by ``classify._spellings`` adding the
+    ``realpath``). ``None`` when a component before a ``..`` cannot be
+    resolved (missing, unsearchable).
+
+    WHY. ``os.path.normpath`` collapses ``..`` lexically, but path lookup does
+    not: with ``~/other/sl -> <repo>/subdir``, ``~/other/sl/../.git`` IS
+    ``<repo>/.git``, while normpath reads ``~/other/.git``. Ranking the lexical
+    form let any CRITICAL or HIGH target be reached at LOW through a link plus
+    ``..`` (security review on PR #3802). A word with no ``..`` cannot differ,
+    so it keeps the lexical form; one whose physical landing is the same place
+    keeps the spelling it was written with, so reasons and provenance read as
+    the agent wrote them.
+    """
+    lexical = os.path.normpath("/" + raw.lstrip("/"))
+    if ".." not in raw.split("/"):
+        return lexical
+    head, _sep, last = raw.rstrip("/").rpartition("/")
+    if last == "..":
+        # ``sl/..`` names the parent of what ``sl`` resolves to.
+        physical = kernel_path(raw)
+    else:
+        parent = kernel_path(head or "/")
+        physical = None if parent is None else os.path.join(parent, last)
+    if physical is None:
+        return None
+    try:
+        same = os.path.realpath(os.path.dirname(lexical)) == os.path.realpath(
+            os.path.dirname(physical)
+        ) and os.path.basename(lexical) == os.path.basename(physical)
+    except OSError:
+        same = False
+    return lexical if same else os.path.normpath(physical)
+
+
+def _physical(text: str, cwd: str | None) -> tuple[str | None, bool, bool]:
+    """``(absolute path, cwd_was_unknown, unpinned)`` for a word's text, ``..``
+    resolved the way the kernel resolves it (:func:`physical_path`).
+
+    ``unpinned``: the word has a ``..`` whose physical landing cannot be known
+    now (a component before it is missing or unsearchable — it may be created
+    as a link by an earlier part of this very command). ``path`` is then the
+    lexical reading, so a protected name it spells is still caught, and the
+    caller must not let that reading earn a LOW (``Target.unpinned``).
+    """
     if text.startswith("/"):
-        return os.path.normpath("/" + text.lstrip("/")), False
-    if cwd is None:
-        return None, True
-    return os.path.normpath(os.path.join(cwd, text)), False
+        raw = text
+    elif cwd is None:
+        return None, True, False
+    else:
+        raw = os.path.join(cwd, text)
+    path = physical_path(raw)
+    if path is None:
+        return os.path.normpath("/" + raw.lstrip("/")), False, True
+    return path, False, False
+
+
+def _physical_pattern(pattern: str) -> tuple[str, bool]:
+    """``(pattern, unpinned)``: an absolute glob with its LITERAL directory
+    prefix resolved by :func:`physical_path` (bash's expansion opens
+    ``sl/../`` through the link, so ``~/other/sl/../.wor*`` matches
+    ``<repo>/.worktrees``). A ``..`` AFTER a glob component (``*/../x``) cannot
+    be pinned before expansion: the lexical form is kept for the CRITICAL
+    name checks and the result is ``unpinned``."""
+    parts = pattern.split("/")
+    cut = next((k for k, part in enumerate(parts) if _GLOB_CHARS.search(part)), len(parts))
+    prefix, rest = "/".join(parts[:cut]) or "/", parts[cut:]
+    if ".." in rest:
+        return os.path.normpath(pattern), True
+    resolved = physical_path(prefix)
+    if resolved is None:
+        return os.path.normpath(pattern), True
+    return os.path.normpath(os.path.join(resolved, *rest)), False
+
+
+def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
+    """``(absolute path, cwd_was_unknown)`` for a word's text: ``..`` resolved
+    physically where it can be (:func:`_physical`), lexically otherwise."""
+    path, unknown, _unpinned = _physical(text, cwd)
+    return path, unknown
+
+
+def _logical(text: str, cwd: str | None) -> str | None:
+    """A LOGICAL ``cd``'s destination: bash (and zsh, ``sh``) canonicalise
+    ``..`` lexically BEFORE ``chdir``, so ``cd ~/other/sl/..`` really lands in
+    ``~/other`` even when ``sl`` is a link (measured 2026-11-11, ``pwd -P``).
+    This is the one place a lexical collapse matches the kernel."""
+    if text.startswith("/"):
+        return os.path.normpath("/" + text.lstrip("/"))
+    return None if cwd is None else os.path.normpath(os.path.join(cwd, text))
 
 
 def _joined(text: str, cwd: str | None) -> str | None:
@@ -999,6 +1093,7 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     opaque = exp.opaque
     contained = opaque and exp.opaque_contained
     climbs = False
+    unpinned = False
     if opaque and OPAQUE_MARK in text:
         # S4: a ``..`` AFTER an unknowable component climbs by an unknown amount
         # from an unknown place; containment is void.
@@ -1025,14 +1120,15 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         literal = literal[: literal.rfind("/") + 1] if "/" in literal else ""
         if opaque:
             pattern = None
-        path, unknown = _absolute(literal or ".", state.cwd)
+        path, unknown, unpinned = _physical(literal or ".", state.cwd)
         if pattern is not None:
             base = state.cwd or ""
             pattern = pattern if pattern.startswith("/") else os.path.join(base, pattern)
-            pattern = os.path.normpath(pattern) if not unknown else None
+            pattern, pattern_unpinned = (None, False) if unknown else _physical_pattern(pattern)
+            unpinned = unpinned or pattern_unpinned
         raw_path = None
     else:
-        path, unknown = _absolute(text or ".", state.cwd)
+        path, unknown, unpinned = _physical(text or ".", state.cwd)
         raw_path = _joined(text or ".", state.cwd)
     is_temp = (
         exp.temp
@@ -1065,6 +1161,7 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         temp=is_temp,
         climbs=climbs,
         dotdot=".." in exp.text.split("/"),
+        unpinned=unpinned and not is_temp,
         raw_path=None if is_temp else raw_path,
     )
 
@@ -2190,7 +2287,8 @@ class _Walker:
                 raw = _joined(w.text, st.cwd)
                 path = kernel_path(raw) if raw is not None else None
             else:
-                path, _unknown = _absolute(w.text, st.cwd)
+                # Logical: lexical, as the shell itself canonicalises it.
+                path = _logical(w.text, st.cwd)
         try:
             searchable = (
                 path is not None
@@ -3655,7 +3753,9 @@ def _mention_path(raw: str, home: str, cwd: str | None) -> str | None:
         if cwd is None:
             return None
         text = os.path.join(cwd, text)
-    return os.path.normpath(text)
+    # Physically where it can be pinned (a ``..`` after a link lands where the
+    # kernel puts it); the lexical spelling otherwise, as before.
+    return (None if _GLOB_CHARS.search(text) else physical_path(text)) or os.path.normpath(text)
 
 
 #: Anything that can make ``**`` recursive for this command (review round 9,
