@@ -804,3 +804,32 @@ def test_group_conflict_across_two_send_ids() -> None:
     assert conflict is not None and "send as queue" in conflict
     assert keymap.group_conflict("keymap.send_queue", "ctrl+enter", values) is None
     assert keymap.group_conflict("keymap.send_both", "alt+s", values) is None
+
+
+def test_send_chord_copy_is_catalogued_and_survives_a_locale_move() -> None:
+    """The registry label/help the refusal names come from the catalogue.
+
+    The `KeyAction` literals stay empty for the i18n ratchet; the copy is
+    resolved at import and re-resolved on a locale move (`_reload_copy`),
+    so `group_conflict` keeps naming the other row in the active language.
+    """
+    from local_operator.i18n import text as i18n_text
+
+    try:
+        i18n_text.set_active_locale("en")
+        assert keymap.BY_ID["keymap.send_queue"].label == "Send as queue"
+        assert keymap.BY_ID["keymap.send_steer"].help.startswith(
+            "Sends the message now and interrupts"
+        )
+        # The settings row and the registry agree: one catalogue, two readers.
+        assert settings_io.BY_KEY["keymap.send_queue"].label == "Send as queue"
+        values = {"keymap.send_queue": "ctrl+enter"}
+        conflict = keymap.group_conflict("keymap.send_steer", "ctrl+enter", values)
+        assert conflict is not None and "send as queue" in conflict
+        i18n_text.set_active_locale("fr")
+        conflict_fr = keymap.group_conflict("keymap.send_steer", "ctrl+enter", values)
+        assert conflict_fr is not None and "file d" in conflict_fr, conflict_fr
+        assert conflict_fr != conflict
+    finally:
+        i18n_text.set_active_locale("en")
+    assert keymap.BY_ID["keymap.send_queue"].label == "Send as queue"

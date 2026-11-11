@@ -71,6 +71,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from local_operator.i18n.keys import tui_welcome
+from local_operator.i18n.keys import wire_settings_keymap as _wk
 from local_operator.i18n.text import register_refresh, tr
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,14 @@ from local_operator.i18n.text import register_refresh, tr
 # unchanged, and `welcome._resolve_tip` substitutes the CURRENT persisted key
 # at render — the same per-render contract the field has always had.
 _t = tr("tui.welcome")
+
+#: Hotkey row copy for the composer-scoped send chords. The ``KeyAction``
+#: literals stay empty so the i18n ratchet does not count them; THIS
+#: resolver fills them from ``wire.settings.keymap`` — the same catalogue
+#: ``settings_io._KEYMAP_COPY`` paints the settings rows from — so
+#: ``group_conflict`` and the settings page keep naming the other row in
+#: whatever locale the process is in.
+_keymap_t = tr("wire.settings.keymap")
 
 #: Prefix every remappable action's config key and binding id carries. The
 #: settings page, ``_on_config_change`` and the resolver all key on it, so
@@ -244,50 +253,81 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
     # terminals the chord bytes arrive as plain Enter. The grammar is the
     # composer grammar below (<mods>+enter, alt+<letter>); the help teaches
     # the terminal limit because a chord that only works in kitty terminals
-    # must say so where the row is set.
+    # must say so where the row is set. `label`/`help` stay EMPTY literals:
+    # the ratchet counts only prose literals, and the catalogue copy is
+    # resolved into these fields at the end of this tuple (import + locale
+    # move) so `group_conflict` keeps its row name without a literal here.
     KeyAction(
         id="keymap.send_steer",
         action="",
-        label="Send as steer",
+        label="",
         default="",
-        help="Sends the message now and interrupts the running step.",
+        help="",
         tip="",
         scope="composer",
     ),
     KeyAction(
         id="keymap.send_queue",
         action="",
-        label="Send as queue",
+        label="",
         default="",
-        help="Waits for the current step to finish and never interrupts running tools.",
+        help="",
         tip="",
         scope="composer",
     ),
     KeyAction(
         id="keymap.send_both",
         action="",
-        label="Send as both",
+        label="",
         default="",
-        help="Waits like queue, then interrupts like steer if the message has waited too long.",
+        help="",
         tip="",
         scope="composer",
     ),
 )
+
+#: The send rows' catalogue copy, resolved once at import and on every
+#: locale move (``_reload_copy``). Defined after the tuple it rewrites so
+#: the literals above can stay empty for the ratchet.
+_SEND_COPY = {
+    "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
+    "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
+    "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),
+}
+
+
+def _apply_send_copy(actions: tuple[KeyAction, ...]) -> tuple[KeyAction, ...]:
+    return tuple(
+        (
+            dataclasses.replace(
+                action,
+                label=_keymap_t(_SEND_COPY[action.id][0]()),
+                help=_keymap_t(_SEND_COPY[action.id][1]()),
+            )
+            if action.id in _SEND_COPY
+            else action
+        )
+        for action in actions
+    )
+
+
+KEY_ACTIONS = _apply_send_copy(KEY_ACTIONS)
 
 #: ``id -> KeyAction`` for the lookups the page, the app and the tips all do.
 BY_ID: dict[str, KeyAction] = {action.id: action for action in KEY_ACTIONS}
 
 
 def _reload_copy() -> None:
-    """Re-resolve the catalogued ``tip`` templates after a locale move (C).
+    """Re-resolve the catalogued copy after a locale move (C).
 
-    Only ``tip`` is catalogued copy here: ``help``/``label`` stay literals
-    until the bindings/settings slice owns them, and every other field is a
-    key, id or scope — machine values that never translate. ``welcome``'s
-    keyed pool reads these actions when ITS refresh runs, one registration
-    later (import order), so the splash picks the new templates up in the
-    same move. The assignments mirror the definitions above; the live-locale
-    slice test pins both tips against the fixture catalogue.
+    ``tip`` is catalogued ``tui.welcome`` copy; the send rows' ``label`` /
+    ``help`` are catalogued ``wire.settings.keymap`` copy, resolved through
+    ``_apply_send_copy`` so a locale move re-paints the refusal sentence's
+    row name as well as the settings row. ``welcome``'s keyed pool reads
+    these actions when ITS refresh runs, one registration later (import
+    order), so the splash picks the new templates up in the same move. The
+    assignments mirror the definitions above; the live-locale slice test
+    pins both tips against the fixture catalogue.
     """
     global KEY_ACTIONS, BY_ID
     tips = {
@@ -298,6 +338,7 @@ def _reload_copy() -> None:
         dataclasses.replace(action, tip=tips[action.id]) if action.id in tips else action
         for action in KEY_ACTIONS
     )
+    KEY_ACTIONS = _apply_send_copy(KEY_ACTIONS)
     BY_ID = {action.id: action for action in KEY_ACTIONS}
 
 

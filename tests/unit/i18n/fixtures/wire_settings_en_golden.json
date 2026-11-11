@@ -1071,5 +1071,11 @@
  "wire.settings.web_tools.description": "Whether the search and fetch tools are offered and allowed to run.",
  "wire.settings.web_tools.title": "Web tools",
  "wire.settings.composer.title": "Message sending",
- "wire.settings.composer.description": "How a message you send while the agent is working is delivered. A change applies at once in the terminal and the desktop app."
+ "wire.settings.composer.description": "How a message you send while the agent is working is delivered. A change applies at once in the terminal and the desktop app.",
+ "wire.settings.keymap_send_steer.label": "Send as steer",
+ "wire.settings.keymap_send_steer.help": "Sends the message now and interrupts the running step. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+ "wire.settings.keymap_send_queue.label": "Send as queue",
+ "wire.settings.keymap_send_queue.help": "Waits for the current step to finish and never interrupts running tools. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta).",
+ "wire.settings.keymap_send_both.label": "Send as both",
+ "wire.settings.keymap_send_both.help": "Waits like queue, then interrupts like steer if the message has waited too long. Ctrl/Alt/Cmd+Enter only work in terminals that support enhanced keys; Alt+letter works everywhere (macOS terminals need Option-as-Meta)."
 }
