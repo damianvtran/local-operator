@@ -403,3 +403,127 @@ async def test_the_bridge_history_serves_proof_once_the_resident_index_is_curren
         assert records is not None, "a warm resident index did not serve the proof join"
         assert records["records"] == []
         assert records["unavailable"] == [expected]
+
+
+# --- The first frame's proof join is bounded by the snapshot's deadline ---------
+#
+# WOULD-HAVE-FAILED-BEFORE. ``_with_peer_cycle_records`` awaited its archive read
+# (``discover_records`` on a worker hop) with no bound, so a snapshot whose own
+# budget (``OPEN_FRAME_SNAPSHOT_BUDGET_S``) had already degraded every other fact
+# to ``building`` still waited for this display-only join. The trap below never
+# returns until released: the old code hangs on it (the ``wait_for`` fails the
+# test), the bounded code answers the explicit "no proof yet" partition.
+
+
+class _GatedDiscover:
+    """A ``discover_records`` stand-in that blocks until released, and counts."""
+
+    SERVED = {
+        "records": [],
+        "remaining": [],
+        "unavailable": [],
+        "bytes": 0,
+        "served": True,
+    }
+
+    def __init__(self, *, release_after_s: float | None = None) -> None:
+        import threading
+
+        self.calls = 0
+        self.gate = threading.Event()
+        self.release_after_s = release_after_s
+
+    def __call__(self, *_: Any, **__: Any) -> dict[str, Any]:
+        self.calls += 1
+        self.gate.wait(self.release_after_s if self.release_after_s is not None else 30)
+        return dict(self.SERVED)
+
+
+async def _open_frame_page(harness: Any, deadline: float | None) -> dict[str, Any]:
+    async with harness.pool.session(harness.session_id) as bridge:
+        return await asyncio.wait_for(
+            bridge.history(limit=100, open_frame=True, deadline=deadline), timeout=5
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_first_frame_does_not_wait_past_its_deadline_for_the_proof_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from local_operator.harness import peer_cycle_display
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        trap = _GatedDiscover()
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        try:
+            page = await _open_frame_page(harness, time.monotonic() + 0.05)
+        finally:
+            trap.gate.set()
+        expected = record_id(harness.session_id, "a-last", "root-call")
+        assert trap.calls == 1, "the join should still have been attempted inside the budget"
+        assert page["entries"][-1]["id"] == "a-last", "degrading the join must keep the page"
+        assert page["peer_cycle_display_records"] == {
+            "records": [],
+            "remaining": [],
+            "unavailable": [expected],
+            "bytes": 0,
+        }, "past the deadline the frame must answer the explicit 'no proof yet' partition"
+
+
+@pytest.mark.asyncio
+async def test_a_spent_deadline_does_not_start_the_proof_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from local_operator.harness import peer_cycle_display
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        trap = _GatedDiscover()
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        trap.gate.set()
+        page = await _open_frame_page(harness, time.monotonic() - 1)
+        assert trap.calls == 0, "a spent budget must not queue a worker hop it will discard"
+        assert page["peer_cycle_display_records"]["unavailable"] == [
+            record_id(harness.session_id, "a-last", "root-call")
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_standalone_history_page_still_waits_for_the_proof_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``/history`` (no caller deadline) is the read the degraded frame points at."""
+    from local_operator.harness import peer_cycle_display
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400)
+        await harness.warm()
+        # Slower than the open frame's whole budget, so a leaked default deadline
+        # would degrade this read too.
+        trap = _GatedDiscover(release_after_s=0.4)
+        monkeypatch.setattr(peer_cycle_display, "discover_records", trap)
+        page = await _open_frame_page(harness, None)
+        assert page["peer_cycle_display_records"] == _GatedDiscover.SERVED
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_that_is_not_hit_serves_the_same_frame(
+    tmp_path: Path,
+) -> None:
+    """Rows, order, cursor fields and the proof join are byte-identical in budget."""
+    import time
+
+    async with _Harness(tmp_path) as harness:
+        harness.seed(rows=400, decoy=True)
+        await harness.warm()
+        unbounded = await _open_frame_page(harness, None)
+        bounded = await _open_frame_page(harness, time.monotonic() + 60)
+        assert "peer_cycle_display_records" in bounded
+        assert json.dumps(bounded, sort_keys=True) == json.dumps(unbounded, sort_keys=True)
