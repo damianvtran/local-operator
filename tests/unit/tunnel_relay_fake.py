@@ -79,6 +79,8 @@ class FakeRelay:
         self.session_ready = asyncio.Event()
         self.refusals: list[tuple[int, str]] = []
         self.handshakes = 0
+        #: Refusals to serve to the next handshakes, oldest first (status, error).
+        self.refuse_next: list[tuple[int, str]] = []
         self._epoch = 0
         self._server: Any = None
         self._public: asyncio.Server | None = None
@@ -132,12 +134,21 @@ class FakeRelay:
         return Response(
             status,
             "refused",
-            Headers({"Content-Type": "application/json", "Content-Length": str(len(body))}),
+            Headers(
+                {
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    # C1.1: 429/503 carry Retry-After; 0 keeps the tests fast.
+                    **({"Retry-After": "0"} if status in (429, 503) else {}),
+                }
+            ),
             body,
         )
 
     def _check(self, connection: ServerConnection, request: Request) -> Response | None:
         self.handshakes += 1
+        if self.refuse_next:
+            return self._refuse(connection, *self.refuse_next.pop(0))
         if PROTOCOL not in request.headers.get("Sec-WebSocket-Protocol", ""):
             return self._refuse(connection, 400, "unsupported_protocol")
         auth = request.headers.get("Authorization", "")

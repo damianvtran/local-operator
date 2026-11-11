@@ -637,6 +637,7 @@ def _relay_service(tmp_path, monkeypatch, relay: FakeRelay, *, binary: bool, off
     URL pin is relaxed ONLY here (the fake listens on ws://127.0.0.1); the pin
     itself is covered by the parse test above.
     """
+    from local_operator.tunnels.errors import LocalPrerequisite
     from tests.unit.test_tunnels import (
         _Connector,
         _service_fixture,
@@ -644,8 +645,6 @@ def _relay_service(tmp_path, monkeypatch, relay: FakeRelay, *, binary: bool, off
         make_connection,
         make_signing_key,
     )
-
-    from local_operator.tunnels.errors import LocalPrerequisite
 
     harness = _synthetic_port()
     connection = make_connection(make_signing_key())
@@ -806,3 +805,119 @@ def test_status_names_the_transport(connector, expected):
         if line.startswith("Transport:")
     ]
     assert lines == ([expected] if expected else [])
+
+
+# -- round 1 remediation (PR #3765) --------------------------------------------
+
+
+def test_the_connector_token_never_appears_in_a_grant_repr():
+    """m1: a traceback with locals or a stray f"{grant}" must not print the token."""
+    grant = RelayGrant("wss://example.invalid/v1/connector", "s3cret-connector-token", 0.0)
+    assert "s3cret-connector-token" not in repr(grant)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_successor_dial_is_retried_before_the_deadline():
+    """m3: one refused successor dial must not wait out S1's deadline."""
+    server, port = await echo_gateway()
+    async with server, FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+        connector = make_connector(relay, grant_for(relay, "tok"), port)
+        async with running(connector):
+            first = await relay.wait_sessions(1)
+            relay.refuse_next.append((503, "draining"))
+            await first.send_control({"type": "drain", "reason": "shutdown", "deadline_s": 60})
+            second = await relay.wait_sessions(2)
+            retire = await first.wait_line("retire")
+            assert retire["successor_session_id"] == second.session_id
+            assert (503, "draining") in relay.refusals
+            assert not first.closed.is_set()  # made before S1 was broken
+
+
+def test_repeated_supersedes_grow_the_backoff(monkeypatch):
+    """m2: consecutive short-lived 4409s back off further each time."""
+    seen: list[int] = []
+    monkeypatch.setattr(relay_connector, "backoff_delay", lambda n: seen.append(n) or 0.0)
+
+    async def no_refresh():
+        return None
+
+    connector = RelayConnector(
+        RelayGrant("wss://x.invalid/v1/connector", "t", time.time() + 600),
+        tunnel_id=TUNNEL,
+        version=7,
+        gateway_port=1,
+        refresh=no_refresh,
+        name="local-operator/test",
+    )
+
+    class Closed:
+        revoked = False
+        close_reason = "superseded"
+
+        def __init__(self, code: int, lived: float) -> None:
+            self.close_code = code
+            self.ready_at = time.monotonic() - lived
+
+    for _ in range(3):
+        connector._after_close(Closed(4409, 1.0))  # type: ignore[arg-type]
+    assert seen == [1, 2, 3]
+    # A session that stayed up past the stable threshold resets the run.
+    connector._after_close(
+        Closed(4409, relay_connector.STABLE_SESSION_SECONDS + 1)  # type: ignore[arg-type]
+    )
+    assert seen[-1] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stale_cloudflared_path_still_runs_relay_only(tmp_path, monkeypatch):
+    """M1: a saved cloudflared_path that no longer exists must not crash-loop the unit."""
+    from local_operator.tunnels import service as service_module
+
+    real_binary = service_module.cloudflared_binary
+    async with FakeRelay({}) as relay:
+        service, served, _, children = _relay_service(tmp_path, monkeypatch, relay, binary=True)
+        monkeypatch.setattr(service, "cloudflared_binary", real_binary)
+        stored = config.load()
+        stored["cloudflared_path"] = str(tmp_path / "removed" / "cloudflared")
+        config.save(stored)
+        task = asyncio.create_task(service.run())
+        health = await _health(served["gateway_port"])
+        assert health["transport"] == "relay" and health["cloudflared"] is False
+        assert children == []
+        assert await _stop(task) == 0
+
+
+def test_a_missing_or_hung_cloudflared_probe_is_a_local_prerequisite(tmp_path, monkeypatch):
+    """M1 at the source: OSError/SubprocessError become LocalPrerequisite."""
+    import subprocess
+
+    from local_operator.tunnels import service as service_module
+    from local_operator.tunnels.errors import LocalPrerequisite
+
+    with pytest.raises(LocalPrerequisite, match="cloudflared"):
+        service_module.cloudflared_binary(str(tmp_path / "gone"))
+
+    def hung(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 10)
+
+    monkeypatch.setattr(service_module.subprocess, "run", hung)
+    with pytest.raises(LocalPrerequisite, match="cloudflared"):
+        service_module.cloudflared_binary("/synthetic/cloudflared")
+
+
+@pytest.mark.asyncio
+async def test_a_crashed_relay_connector_is_logged_before_the_restart(
+    tmp_path, monkeypatch, capsys
+):
+    """m4: a connector bug must not be a silent restart loop."""
+    async with FakeRelay({}) as relay:
+        service, _, _, _ = _relay_service(tmp_path, monkeypatch, relay, binary=False)
+
+        async def boom(self):
+            raise RuntimeError("connector bug")
+
+        monkeypatch.setattr(service.RelayConnector, "run", boom)
+        assert await asyncio.wait_for(service.run(), timeout=15) == 1
+    out = capsys.readouterr().out
+    assert "relay connector crashed: RuntimeError; restarting" in out
+    assert "connector bug" not in out

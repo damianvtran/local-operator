@@ -42,7 +42,7 @@ import json
 import random
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from local_operator.tunnels.relay import yamux
@@ -72,6 +72,11 @@ BACKOFF_CAP = 30.0
 READY_TIMEOUT = 30.0
 #: Opening the WebSocket (TCP + TLS + upgrade); websockets' own default.
 OPEN_TIMEOUT = 10.0
+#: A session that stayed up this long after `ready` was healthy, and its close
+#: resets the reconnect backoff. Above the relay's 60 s superseded/drain close
+#: window (C1.5/C1.6), so a supersede fight (each session ending within that
+#: window) always reads as consecutive failures.
+STABLE_SESSION_SECONDS = 120.0
 #: The relay caps a session at 128 concurrent streams (C1.6); twice that bounds a
 #: misbehaving peer without ever refusing a legitimate request.
 MAX_PIPES = 256
@@ -85,7 +90,9 @@ class RelayGrant:
     """The ``relay`` object from `/connect` (C2.1), validated."""
 
     url: str
-    token: str
+    # repr=False: a traceback with locals, a debugger or a stray f"{grant}"
+    # must never print the connector token.
+    token: str = field(repr=False)
     expires_at: float  # Unix seconds
     protocol: str = PROTOCOL
 
@@ -253,6 +260,7 @@ class RelaySession:
         self.epoch = 0
         self.close_code: int | None = None
         self.close_reason = ""
+        self.ready_at = 0.0
 
     async def open(self) -> None:
         """Handshake, hello, and wait for ``ready``; raise on any failure."""
@@ -403,6 +411,7 @@ class RelaySession:
             self.session_id = str(message.get("session_id") or "")
             epoch = message.get("epoch")
             self.epoch = epoch if isinstance(epoch, int) else 0
+            self.ready_at = time.monotonic()
             self.ready.set()
         elif kind in ("rotate", "drain"):
             self.rotate_reason = f"{kind}:{message.get('reason', '')}"
@@ -471,6 +480,7 @@ class RelayConnector:
         #: Set when a refreshed `/connect` stopped offering a relay at all.
         self.withdrawn = asyncio.Event()
         self.stopping = False
+        self._unstable_closes = 0
 
     @property
     def connected(self) -> bool:
@@ -538,8 +548,19 @@ class RelayConnector:
             session.rotate.clear()
             self.announce(f"relay asked to rotate ({session.rotate_reason})")
             successor = await self._establish(0)
+            retries = 0
+            # Keep dialling (with backoff) while S1 is still open: one failed
+            # dial must not turn make-before-break into break-before-make by
+            # idling until the relay closes S1 at its deadline (C1.5).
+            while (
+                successor is None
+                and not session.closed.is_set()
+                and not (self.revoked.is_set() or self.withdrawn.is_set() or self.stopping)
+            ):
+                retries += 1
+                successor = await self._establish(retries)
             if successor is None:
-                if self.revoked.is_set() or self.withdrawn.is_set():
+                if self.revoked.is_set() or self.withdrawn.is_set() or self.stopping:
                     return None
                 continue
             await session.retire(successor.session_id)
@@ -576,19 +597,24 @@ class RelayConnector:
             self.revoked.set()
             return None
         self.announce(f"relay session closed code={code} reason={session.close_reason}")
+        lived = time.monotonic() - session.ready_at if session.ready_at else 0.0
+        if code in (1000, 1001) or lived >= STABLE_SESSION_SECONDS:
+            # A normal close, or a session that served long enough to count as
+            # healthy, ends any run of failures.
+            self._unstable_closes = 0
         if code == 1000:
             return 0.0
         if code == 1001:
             return random.uniform(0, 1)
-        if code == 4409:
-            # Superseded with no successor of ours: another connector for this
-            # tunnel took the registration. Back off rather than fight it at the
-            # handshake rate limit; if it goes away we take over again.
-            return backoff_delay(1)
+        # Consecutive short-lived abnormal closes grow the backoff. `run()`
+        # resets its dial counter on every `ready`, so without this two
+        # connectors superseding each other (4409) would re-take the tunnel
+        # every 0-2 s until the relay's handshake bucket throttled both.
+        self._unstable_closes += 1
         if code in (4400, 4408):
             # C1.6: back off and call /connect first.
             self.grant = RelayGrant(self.grant.url, self.grant.token, 0.0, self.grant.protocol)
-        return backoff_delay(1)
+        return backoff_delay(self._unstable_closes)
 
     async def _fresh_grant(self, *, force: bool = False) -> RelayGrant | None:
         if not force and self.grant.fresh():

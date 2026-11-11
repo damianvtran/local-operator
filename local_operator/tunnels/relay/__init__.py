@@ -8,8 +8,8 @@ assertion exactly as it verified the Cloudflare Worker's.
 
 The wire protocol is frozen in agent-server ``docs/TUNNEL_RELAY.md`` (C1, C2);
 the golden transcripts it is tested against are vendored under
-``tests/unit/tunnels/relay_fixtures/`` from agent-server
-``internal/relay/testdata`` at 81b48695.
+``tests/fixtures/tunnel_relay/`` from agent-server
+``internal/relay/testdata`` at a8351fc4 (see its PROVENANCE.md).
 
 - :mod:`.yamux` — the yamux v0 server half (the device never opens a request
   stream; it accepts the relay's).

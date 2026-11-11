@@ -191,12 +191,22 @@ def cloudflared_binary(configured: str | None = None) -> str:
         raise LocalPrerequisite(
             "Install cloudflared 2025.4.0 or newer, then run lop tunnel install."
         )
-    result = subprocess.run(
-        [binary, "tunnel", "run", "--help"],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            [binary, "tunnel", "run", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as failure:
+        # A saved `cloudflared_path` that no longer exists (the operator removed
+        # cloudflared, the program's end state) or a hung probe is the same
+        # local prerequisite as "not installed": callers that make cloudflared
+        # optional when the relay is offered catch only LocalPrerequisite, and
+        # an OSError here would crash-loop a device the relay could serve.
+        raise LocalPrerequisite(
+            "Install cloudflared 2025.4.0 or newer, then run lop tunnel install."
+        ) from failure
     if result.returncode or "--token-file" not in result.stdout:
         raise LocalPrerequisite(
             "Update cloudflared to 2025.4.0 or newer (token-file support required)."
@@ -847,6 +857,16 @@ async def run() -> int:
                     # are answered by a fresh `/connect`, i.e. a restart — the
                     # same remedy the poller applies to a version change.
                     restart = True
+                    crash = None if relay_task.cancelled() else relay_task.exception()
+                    if (
+                        crash is not None
+                        and relay is not None
+                        and not (relay.revoked.is_set() or relay.withdrawn.is_set())
+                    ):
+                        # A connector bug must not become a silent restart loop:
+                        # name the exception type (never its args, which could
+                        # carry request bytes) so the service log says why.
+                        _announce(f"relay connector crashed: {type(crash).__name__}; restarting")
                 elif relay_task is None:
                     exited.cancel()
                 await asyncio.gather(stopping, return_exceptions=True)
