@@ -473,7 +473,10 @@ _STATUS_TEXT = {"whitespace": "whitespace only", "reordered": "order changed"}
 
 
 def _counts_text(item: dict[str, Any]) -> str:
-    status = item["status"]
+    # ``status`` is always one of the str literals set above; typing it as
+    # ``str`` (not ``Any``) lets ``.get(status, status)`` resolve to the
+    # ``str`` overload instead of ``str | None``.
+    status: str = str(item["status"])
     if status in {"lines", "items"}:
         return f"+{item['added']} −{item['removed']} {status}"
     return _STATUS_TEXT.get(status, status)
