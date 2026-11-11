@@ -14875,20 +14875,17 @@ class Session:
         # The first line is unchanged (TUI/mobile show the card raw). The
         # second line used to be followed by ``intent.summary`` verbatim — a
         # whole instructions diff or new skill file — so a direct save of a
-        # long brief reproduced the unbounded ask card. It now leads with
-        # per-field counts, in the same ``Changes:`` shape as a proposal card,
-        # then — after a blank line — the change content clipped to
-        # SAVE_DETAIL_MAX_CHARS: a direct save has no review page (skills have
-        # no proposal path), so the card is the only place the approver can
-        # read what they approve (PR #3777 R2-2). Proposal cards stay 3 lines.
-        labels = {profile_field_label(field) for field in intent.changes}
-        items = profile_proposals.summarize_save_text(intent.summary, labels | set(intent.changes))
-        if not items:
-            items = [
-                {"label": label, "added": 0, "removed": 0, "status": "changed"}
-                for label in (profile_field_label(field) for field in intent.changes)
-            ]
-        changed = profile_proposals.changes_line(items) if items else "Changes: (no fields named)"
+        # long brief reproduced the unbounded ask card. Line 2 is now a bounded
+        # list of the fields/paths the save touches (names only: the intent
+        # has no structured before/after, and counts parsed from its prose
+        # summary mis-counted — PR #3777 R3-1), then — after a blank line —
+        # the change content clipped to SAVE_DETAIL_MAX_CHARS: a direct save
+        # has no review page (skills have no proposal path), so the card is
+        # the only place the approver can read what they approve (R2-2).
+        # Proposal cards stay 3 lines with structured counts.
+        changed = profile_proposals.save_changes_line(
+            profile_field_label(field) for field in intent.changes
+        )
         card = (
             f"Save {intent.kind} {intent.name!r} in your account ({intent.operation}).\n"
             f"{changed}."

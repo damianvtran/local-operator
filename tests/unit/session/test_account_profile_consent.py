@@ -1044,11 +1044,12 @@ async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) ->
 
 @pytest.mark.asyncio
 async def test_direct_save_card_counts_changes_then_shows_clipped_content(stores):
-    """L1/R2-2 (PR #3777): the non-proposal save card appended ``intent.summary``
-    verbatim, so a direct save of a long brief or skill file filled the ask
-    card. It keeps its first line, then per-field counts, then — because a
-    direct save has no review page — the content clipped to ~4 KB with a
-    ``… N more lines not shown`` tail."""
+    """L1/R2-2/R3-1 (PR #3777): the non-proposal save card appended
+    ``intent.summary`` verbatim, so a direct save of a long brief or skill file
+    filled the ask card. It keeps its first line, then the names of what
+    changes (no counts: the intent has no structured before/after), then —
+    because a direct save has no review page — the content clipped to ~4 KB
+    with a ``… N more lines not shown`` tail."""
     gate = Gate(answer=False)
     session = _session(stores, gate=gate)
     body = "\n".join(f"+brief line {i} MARKER-{i}" for i in range(400))
@@ -1068,7 +1069,7 @@ async def test_direct_save_card_counts_changes_then_shows_clipped_content(stores
         lines = card.splitlines()
         assert lines[:3] == [
             "Save agent 'reviewer' in your account (update).",
-            "Changes: instructions +400 −0 lines; model/effort changed.",
+            "Changes: instructions, model/effort.",
             "",
         ], card
         assert lines[3:6] == ["instructions:", "--- before", "+++ after"]
@@ -1080,3 +1081,77 @@ async def test_direct_save_card_counts_changes_then_shows_clipped_content(stores
         assert len(card) <= 200 + PP.SAVE_DETAIL_MAX_CHARS
     finally:
         await session.dispose()
+
+
+async def _direct_save_card(stores, intent: DurableWriteIntent) -> list[str]:
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    try:
+        _start_run(session, Message.user("save it"))
+        assert await session._authorize_account_profile_write(intent) is None
+        assert len(gate.cards) == 1
+        return gate.cards[0][1].splitlines()
+    finally:
+        await session.dispose()
+
+
+#: R3-1: no ``+N −M`` anywhere on line 2 — prose-derived counts were fabricated.
+_COUNTS = re.compile(r"[+−-]\d+")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intent", "line2", "excerpt"),
+    [
+        pytest.param(
+            # A whole new skill file: YAML front matter, ``- `` bullets and a
+            # ``→`` that the R2-3 arrow split read as old/new halves.
+            DurableWriteIntent(
+                kind="skill",
+                operation="create",
+                name="triage",
+                changes=("SKILL.md", "refs/steps.md"),
+                summary="SKILL.md:\n---\nname: triage\n---\n- one\n- two\n"
+                "Open Agents → Reviewer.\nrefs/steps.md:\n- a",
+            ),
+            "Changes: SKILL.md, refs/steps.md.",
+            ["SKILL.md:", "- one", "Open Agents → Reviewer.", "refs/steps.md:", "- a"],
+            id="bulleted-new-skill-file",
+        ),
+        pytest.param(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions",),
+                summary="instructions (replaced; new text):\nSee Settings → Models.\n- a\n- b",
+            ),
+            "Changes: instructions.",
+            ["instructions (replaced; new text):", "See Settings → Models.", "- a", "- b"],
+            id="replaced-instructions-with-arrow-and-bullets",
+        ),
+        pytest.param(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions", "effort"),
+                summary="instructions:\n--- before\n+++ after\n@@ -1,2 +1,2 @@\n keep\n"
+                "-old\n+new\nmodel/effort: a -> b",
+            ),
+            "Changes: instructions, model/effort.",
+            ["--- before", "+++ after", "@@ -1,2 +1,2 @@", "-old", "+new", "model/effort: a -> b"],
+            id="unified-diff",
+        ),
+    ],
+)
+async def test_direct_save_card_lists_changes_without_fabricated_counts(
+    stores, intent, line2, excerpt
+):
+    """R3-1 (PR #3777): line 2 names the fields/paths only — never counts parsed
+    from the prose summary — and the content excerpt follows a blank line."""
+    lines = await _direct_save_card(stores, intent)
+    assert lines[1] == line2, lines
+    assert not _COUNTS.search(lines[1]), lines[1]
+    assert lines[2] == ""
+    assert all(line in lines[3:] for line in excerpt), lines

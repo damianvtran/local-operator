@@ -474,65 +474,21 @@ def test_apostrophe_name_card_uses_python_repr_quoting():
     assert card.splitlines()[1] == "Changes: none listed"
 
 
-def test_direct_save_summary_text_is_counted_not_echoed():
-    """L1: the non-proposal save card used to append this text verbatim."""
-    body = "\n".join(f"line {i}: MARKER" for i in range(300))
-    summary = "\n".join(
-        [
-            "model/effort: a -> b",
-            "instructions:",
-            "--- before",
-            "+++ after",
-            "@@ -1,2 +1,3 @@",
-            " keep",
-            "-old",
-            "+new one",
-            "+new two",
-            "SKILL.md:",
-            body,
-            "Remove: refs/old.md",
-        ]
-    )
-    items = PP.summarize_save_text(summary, {"model/effort", "instructions", "SKILL.md"})
-    line = PP.changes_line(items)
-    assert line.startswith(
-        "Changes: model/effort changed; instructions +2 −1 lines; SKILL.md +300 −0 lines"
-    ), line
-    assert "refs/old.md removed" in line or "more" in line
-    assert "MARKER" not in line and len(line) <= PP.CHANGES_LINE_MAX_CHARS
+def test_direct_save_changes_line_lists_names_without_counts():
+    """R3-1: a direct save's line 2 names what changes; it never claims
+    ``+N −M`` counts, which only prose parsing could produce."""
+    line = PP.save_changes_line(["instructions", "model/effort", "SKILL.md", "SKILL.md"])
+    assert line == "Changes: instructions, model/effort, SKILL.md"
+    assert PP.save_changes_line([]) == "Changes: (no fields named)"
 
 
-def test_direct_save_plain_skill_file_counts_bullets_as_added():
-    """R2-1: a new SKILL.md body is not a diff; its ``- `` bullets are content."""
-    summary = (
-        "SKILL.md:\n---\nname: x\ndescription: y\n---\n# X\n\n"
-        "- step one\n- step two\n- step three\nprose"
-    )
-    items = PP.summarize_save_text(summary, {"SKILL.md"})
-    assert PP.changes_line(items) == "Changes: SKILL.md +10 −0 lines"
-
-
-def test_direct_save_replaced_instructions_body_counts_all_lines_added():
-    """R2-1: ``instructions (replaced; new text)`` carries a whole body."""
-    summary = (
-        "instructions (replaced; new text):\nYou are a reviewer.\n- be brief\n"
-        "- cite files\n- no padding"
-    )
-    items = PP.summarize_save_text(summary, {"instructions"})
-    assert PP.changes_line(items) == "Changes: instructions +4 −0 lines"
-
-
-def test_direct_save_diff_counts_removed_double_dash_line_inside_hunk():
-    """R2-4: removing ``-- a rule`` renders ``--- a rule`` inside a hunk."""
-    summary = "instructions:\n--- before\n+++ after\n@@ -1,2 +1,2 @@\n keep\n--- a rule\n+new rule"
-    items = PP.summarize_save_text(summary, {"instructions"})
-    assert PP.changes_line(items) == "Changes: instructions +1 −1 lines"
-
-
-def test_direct_save_multi_line_skill_edit_counts_each_side():
-    """R2-3: ``path: old → new`` continuation lines are split per side."""
-    items = PP.summarize_save_text("SKILL.md: old line\nold2 → new line\nnew2", {"SKILL.md"})
-    assert PP.changes_line(items) == "Changes: SKILL.md +2 −2 lines"
+def test_direct_save_changes_line_collapses_overflow_into_n_more():
+    names = [f"refs/reference-file-{i:02d}.md" for i in range(20)]
+    line = PP.save_changes_line(names)
+    assert len(line) <= PP.CHANGES_LINE_MAX_CHARS, line
+    shown = line.removeprefix("Changes: ").split(", ")
+    assert shown[-1] == f"… {20 - (len(shown) - 1)} more", line
+    assert shown[:-1] == names[: len(shown) - 1]
 
 
 def test_clip_save_detail_keeps_whole_lines_and_names_the_hidden_count():

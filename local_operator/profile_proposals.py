@@ -512,116 +512,40 @@ def changes_line(items: list[dict[str, Any]]) -> str:
     return prefix + "; ".join(kept)
 
 
-def _diff_counts(body: list[str]) -> tuple[int, int] | None:
-    """``(added, removed)`` when ``body`` is a unified diff, else ``None``.
+def save_changes_line(labels: Iterable[str]) -> str:
+    """Line 2 of a DIRECT (non-proposal) save card: ``Changes: a, b, … N more``.
 
-    WHY a structural test rather than "any line starts with +/-": direct-save
-    producers also send plain bodies (a new skill file, an ``instructions
-    (replaced; new text)`` body), whose markdown bullets would otherwise count
-    as removed lines (R2-1). A body is a diff only when it opens with the
-    ``--- ``/``+++ `` header pair or carries an ``@@`` hunk header, which is
-    what ``difflib.unified_diff`` always emits. Inside a hunk every ``+``/``-``
-    line counts, including a removed ``-- rule`` rendered as ``--- rule``
-    (R2-4); the ``---``/``+++`` pair is skipped only as the file header.
+    WHY names only, no ``+N −M`` counts: a direct save carries no before/after
+    images — :class:`~local_operator.harness.types.DurableWriteIntent` exposes
+    only the changed field/path names and ``summary``, a human-readable prose
+    with several producer formats (a unified instructions diff, a replaced
+    body, a whole new skill file, ``path: old → new`` edits, ``Remove:``
+    lines). Every heuristic that recovered counts from that prose mis-counted
+    some shape (PR #3777 R2-1, R2-3, R3-1: bullets read as removals, a ``→``
+    inside a new file split into fake old/new halves). The card shows the
+    clipped content below this line (:func:`clip_save_detail`), so the
+    approver reads the change itself; this line only says what it touches.
+    Proposal cards, which do have structured images, keep
+    :func:`changes_line`'s counts.
+
+    Same bound as :data:`CHANGES_LINE_MAX_CHARS`; names that do not fit
+    collapse into ``… N more``. Duplicate names are listed once, in order.
     """
-    lines = [line for line in body if line.strip()] or body
-    headed = len(lines) >= 2 and lines[0].startswith("--- ") and lines[1].startswith("+++ ")
-    hunked = any(line.startswith("@@") for line in body)
-    if not (headed or hunked):
-        return None
-    added = removed = 0
-    # With hunks, everything before the first ``@@`` is header; without them
-    # (a header-only rendering), only the leading header pair is.
-    in_hunk = not hunked
-    skip = 2 if headed and not hunked else 0
-    for line in body:
-        if skip and line.startswith(("--- ", "+++ ")):
-            skip -= 1
-            continue
-        if line.startswith("@@"):
-            in_hunk = True
-            continue
-        if not in_hunk:
-            continue
-        if line.startswith("+"):
-            added += 1
-        elif line.startswith("-"):
-            removed += 1
-    return added, removed
-
-
-def summarize_save_text(summary: str, labels: Iterable[str]) -> list[dict[str, Any]]:
-    """Per-field counts recovered from a direct-save ``DurableWriteIntent.summary``.
-
-    WHY: the non-proposal ACCOUNT_PROFILE_GATE card (skills, and agent/team
-    saves with no proposal) used to append that summary verbatim — a unified
-    instructions diff or a whole new skill file — reproducing the unbounded
-    ask card. That path has no before/after images, only the producer's text:
-    a ``<label>: old -> new`` line per scalar field, ``<label>:`` (or
-    ``<label> (…):``) followed by diff or body lines, and ``Remove: <path>``.
-    ``labels`` are the changed fields' display labels; only lines starting
-    with one open a field, so a body line such as YAML ``name: x`` cannot.
-    """
-    heads = sorted({str(label) for label in labels if label}, key=len, reverse=True)
-    items: list[dict[str, Any]] = []
-    body: list[str] = []
-    # The text after ``<label>: `` on a head line; a skill edit's old text
-    # starts there (``path: old → new``) and may continue onto body lines.
-    inline = ""
-
-    def close() -> None:
-        if not items or items[-1]["status"] == "removed":
-            return
-        item = items[-1]
-        counts = _diff_counts(body)
-        if counts is not None:
-            item["added"], item["removed"] = counts
-            item["status"] = "lines"
-        elif body and " → " in "\n".join([inline, *body]):
-            # R2-3: a multi-line skill edit, ``path: old → new`` spread over
-            # several lines. Count each side's lines instead of reading every
-            # continuation line as an addition.
-            old, new = "\n".join([inline, *body]).split(" → ", 1)
-            item["removed"], item["added"] = len(old.splitlines()), len(new.splitlines())
-            item["status"] = "lines"
-        elif body:
-            # Not a diff: a whole new file or a replaced body, where every line
-            # is an addition — a markdown bullet (``- step``) is content, not a
-            # removal (R2-1).
-            item["added"], item["status"] = len(body), "lines"
-
-    for line in summary.splitlines():
-        if line.startswith("Remove: "):
-            close()
-            body = []
-            items.append(
-                {"field": "", "label": line[8:], "added": 0, "removed": 0, "status": "removed"}
-            )
-            continue
-        head = next(
-            (h for h in heads if line == f"{h}:" or line.startswith((f"{h}: ", f"{h} ("))), None
-        )
-        if head is not None:
-            close()
-            body = []
-            inline = line[len(head) + 2 :] if line.startswith(f"{head}: ") else ""
-            items.append(
-                {"field": head, "label": head, "added": 0, "removed": 0, "status": "changed"}
-            )
-        elif items:
-            body.append(line)
-    close()
-    if not items and summary.strip():
-        items.append(
-            {
-                "field": "",
-                "label": "details",
-                "added": len(summary.splitlines()),
-                "removed": 0,
-                "status": "lines",
-            }
-        )
-    return items
+    prefix = "Changes: "
+    names = list(dict.fromkeys(str(label) for label in labels if label))
+    if not names:
+        return prefix + "(no fields named)"
+    phrases = [_clip(name, _SUMMARY_LINE_MAX_CHARS) for name in names]
+    kept: list[str] = []
+    for index, phrase in enumerate(phrases):
+        remaining = len(phrases) - index - 1
+        reserve = len(f", … {remaining} more") if remaining else 0
+        candidate = ", ".join([*kept, phrase])
+        if len(prefix) + len(candidate) + reserve > CHANGES_LINE_MAX_CHARS:
+            kept.append(f"… {len(phrases) - index} more")
+            break
+        kept.append(phrase)
+    return prefix + ", ".join(kept)
 
 
 #: Cap on the change content a DIRECT (non-proposal) save card carries below
