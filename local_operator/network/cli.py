@@ -10944,8 +10944,29 @@ def _out_target(out: Path, source: dict[str, str], *, force: bool) -> Path:
     with the same no-overwrite rule applied to THAT file.
     """
     from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
 
     target = out / _source_basename(source) if out.is_dir() else out
+    # NEVER INSIDE LOCAL OPERATOR'S OWN DATA FOLDER (#3794 gate remediation). With
+    # --force this replaced a session's transcript with the pulled bytes (measured),
+    # and the same write reaches network/networks/*.secrets.json, identity/ and the
+    # credential stores — damage no pull is for. Judged on the RESOLVED target:
+    # realpath of the parent plus the final name, so a symlinked parent or a `..`
+    # cannot route around it, and the final component's own resolution too, so a
+    # leaf that is a symlink into the config dir is refused rather than followed by
+    # the --force rename. Before any dial, with or without --force.
+    data = Path(os.path.realpath(config_dir()))
+    parent_text = str(target.parent) if str(target.parent) else "."
+    resolved = (
+        Path(os.path.realpath(parent_text)) / target.name,
+        Path(os.path.realpath(target)),
+    )
+    if any(candidate == data or candidate.is_relative_to(data) for candidate in resolved):
+        raise MeshRefusal(
+            "out_invalid",
+            f"--out can't write inside Local Operator's own data folder ({data}); choose a "
+            "path outside it, so nothing was pulled",
+        )
     if target.is_dir():
         raise MeshRefusal(
             "out_invalid", f"{target} is a directory; give --out a file path or a directory"

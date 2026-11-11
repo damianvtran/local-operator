@@ -697,3 +697,108 @@ def test_unreachable_old_peer_too_large_and_a_bare_name_say_what_to_do_next(
     rc, refused = _pull(capsys, "scratchpad://run.log")
     assert rc == 1 and refused["code"] == "peer_unreachable", refused
     assert "`lop network peers` or `lop network doctor`" in refused["message"], refused
+
+
+# ---------------------------------------------------------------------------
+# Gate remediation (#3794, gate 43014897354): --out never writes inside this
+# device's own config dir. Each cell below was RED on 3932e48d1a25.
+# ---------------------------------------------------------------------------
+
+
+def _frames_to_owner(server_a: Any, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    asked: list[dict[str, Any]] = []
+    serve = server_a._handlers["net_file_get"]  # noqa: SLF001
+    monkeypatch.setitem(
+        server_a._handlers,  # noqa: SLF001
+        "net_file_get",
+        lambda link, frame: (asked.append(frame), serve(link, frame))[1],
+    )
+    return asked
+
+
+def _refused_inside_config(refused: dict[str, Any]) -> None:
+    assert refused["code"] == "out_invalid", refused
+    assert "can't write inside Local Operator's own data folder" in refused["message"], refused
+
+
+def test_out_never_overwrites_a_session_transcript_even_with_force(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_a, server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    asked = _frames_to_owner(server_a, monkeypatch)
+    transcript = Path(server_b.root) / "sessions" / "0a1b2c3d4e5f" / "transcript.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"id": "e0"}\n')
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=transcript, force=True)
+    assert rc == 1, refused
+    _refused_inside_config(refused)
+    assert transcript.read_text() == '{"id": "e0"}\n', "the transcript was overwritten"
+    assert asked == [], "the refusal ran after the transfer"
+
+
+def test_out_never_adds_a_file_to_a_session_folder(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server_a, server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    asked = _frames_to_owner(server_a, monkeypatch)
+    folder = Path(server_b.root) / "sessions" / "0a1b2c3d4e5f"
+    folder.mkdir(parents=True)
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=folder)
+    assert rc == 1, refused
+    _refused_inside_config(refused)
+    assert list(folder.iterdir()) == [] and asked == []
+
+
+def test_out_never_replaces_a_network_secrets_file(
+    mesh: Devices, capsys: pytest.CaptureFixture[str]
+) -> None:
+    server_a, server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    record = store.list_networks(server_b.root)[0]
+    secrets = store.networks_dir(server_b.root) / f"{record.network_id}.secrets.json"
+    before = secrets.read_bytes()
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=secrets, force=True)
+    assert rc == 1, refused
+    _refused_inside_config(refused)
+    assert secrets.read_bytes() == before
+
+
+def test_a_symlinked_parent_or_leaf_cannot_route_out_into_the_config_dir(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    server_a, server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    identity_dir = Path(server_b.root) / "identity"
+    identity_dir.mkdir(exist_ok=True)
+    disguise = tmp_path / "out-looks-safe"
+    disguise.symlink_to(identity_dir, target_is_directory=True)
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=disguise / "device.json", force=True)
+    assert rc == 1, refused
+    _refused_inside_config(refused)
+    leaf = tmp_path / "leaf.log"
+    leaf.symlink_to(Path(server_b.root) / "config.yml")
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=leaf, force=True)
+    assert rc == 1, refused
+    _refused_inside_config(refused)
+    start = tmp_path / "out"
+    start.mkdir(exist_ok=True)
+    # A path that only reaches B's config dir through `..` segments.
+    dotdot = start / os.path.relpath(Path(server_b.root) / "sessions", start) / "x.log"
+    assert ".." in dotdot.parts
+    rc, refused = _pull(capsys, "scratchpad://run.log", out=dotdot)
+    assert rc == 1, refused
+    _refused_inside_config(refused)
+
+
+def test_an_ordinary_path_outside_the_config_dir_still_lands(
+    mesh: Devices, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    server_a, _server_b, _host, _port = mesh
+    (_pad(server_a) / "run.log").write_text(LOG)
+    landing = tmp_path / "downloads"
+    landing.mkdir()
+    rc, receipt = _pull(capsys, "scratchpad://run.log", out=landing)
+    assert rc == 0, receipt
+    assert (landing / "run.log").read_text() == LOG
