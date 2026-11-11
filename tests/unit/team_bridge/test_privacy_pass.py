@@ -252,6 +252,76 @@ def test_render_carries_only_the_body_in_a_fresh_nonce_envelope() -> None:
     assert "hello BODY" not in repr(first)
 
 
+def _tamper(template: str) -> str:
+    """One changed byte, same length: a drifted candidate the pin must catch."""
+
+    return template.replace("deliver: no", "deliver: on", 1)
+
+
+@pytest.mark.parametrize(
+    ("template", "declared"),
+    [
+        # Tampered bytes, honestly-hashed: the pin, not the caller's hash, decides.
+        (
+            _tamper(privacy_pass.PRIVACY_TEMPLATE),
+            hashlib.sha256(_tamper(privacy_pass.PRIVACY_TEMPLATE).encode()).hexdigest(),
+        ),
+        # Tampered bytes carrying the pinned hash label.
+        (_tamper(privacy_pass.PRIVACY_TEMPLATE), privacy_pass.PRIVACY_TEMPLATE_SHA256),
+        # Pinned bytes with a wrong declared hash (it is persisted with the claim).
+        (privacy_pass.PRIVACY_TEMPLATE, "0" * 64),
+        # Arbitrary bytes, e.g. a screening template routed through this door.
+        ("{{nonce}} {{body}} {{nonce}} {{nonce}}", privacy_pass.PRIVACY_TEMPLATE_SHA256),
+    ],
+)
+def test_trusted_privacy_renderer_refuses_any_unpinned_template(template, declared) -> None:
+    """Gate 42969017260: the privacy pass renders through the trust-checked public
+    entry point, so drifted bytes or hash fail closed before substitution."""
+
+    assert template != privacy_pass.PRIVACY_TEMPLATE or declared != (
+        privacy_pass.PRIVACY_TEMPLATE_SHA256
+    )
+    with pytest.raises(screening.PrivacyTemplateUntrusted):
+        screening.render_trusted_privacy_prompt(
+            template, template_sha256=declared, body_text="hello BODY"
+        )
+
+
+def test_trusted_privacy_renderer_matches_the_private_renderer_byte_for_byte() -> None:
+    """The trust check adds a refusal, never a byte: same nonce, same prompt."""
+
+    trusted = screening.render_trusted_privacy_prompt(
+        privacy_pass.PRIVACY_TEMPLATE,
+        template_sha256=privacy_pass.PRIVACY_TEMPLATE_SHA256,
+        body_text="hello BODY",
+        nonce="ab" * 16,
+    )
+    reference = screening._render_with_template(
+        privacy_pass.PRIVACY_TEMPLATE,
+        template_sha256=privacy_pass.PRIVACY_TEMPLATE_SHA256,
+        body_text="hello BODY",
+        sender="",
+        organization="",
+        msg_type="",
+        nonce="ab" * 16,
+        attachments=None,
+    )
+    assert trusted.private_text() == reference.private_text()
+    assert trusted.template_sha256 == privacy_pass.PRIVACY_TEMPLATE_SHA256
+
+
+def test_tampered_embedded_template_holds_without_a_send(tmp_path, monkeypatch) -> None:
+    """End to end: a drifted embedded template is a typed hold, nothing sent."""
+
+    store, owner = _setup(tmp_path)
+    _enable(tmp_path)
+    monkeypatch.setattr(privacy_pass, "PRIVACY_TEMPLATE", _tamper(privacy_pass.PRIVACY_TEMPLATE))
+    factory = PrivacyFactory()
+    held = _screen(tmp_path, owner, ChainRunner(preferred=False), factory=factory)
+    assert (held.disposition, held.hold_code) == ("hold", "privacy_invalid")
+    assert factory.calls == [] and _privacy_sends(tmp_path) == 0
+
+
 @pytest.mark.parametrize(
     ("document", "expected"),
     [

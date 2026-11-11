@@ -451,19 +451,22 @@ def render_privacy_prompt(body_text: str, *, nonce: str | None = None) -> Any:
     Only the verified body: no sender, first-stage reason or reply, history,
     tools or local data (memo §2). Rendered through the SAME single-pass
     substitution and forged-nonce refusal as every screening prompt.
+
+    Goes through ``screening.render_trusted_privacy_prompt``, never screening's
+    private renderer: that one trusts any bytes, so a test fences it off from
+    live modules (the guard matches its name, so it is not spelled here), and
+    the public door re-verifies these bytes and
+    hash against an independent pin, raising ``PrivacyTemplateUntrusted`` (a
+    hold at the caller) on any drift.
     """
 
-    from local_operator.team_bridge.screening import _render_with_template
+    from local_operator.team_bridge.screening import render_trusted_privacy_prompt
 
-    return _render_with_template(
+    return render_trusted_privacy_prompt(
         PRIVACY_TEMPLATE,
         template_sha256=PRIVACY_TEMPLATE_SHA256,
         body_text=body_text,
-        sender="",
-        organization="",
-        msg_type="",
         nonce=nonce,
-        attachments=None,
     )
 
 
@@ -634,10 +637,15 @@ async def decide_admission(
         return _settle("hold", "privacy_unreachable", privacy_result="unreachable")
 
     try:
+        from local_operator.team_bridge.screening import PrivacyTemplateUntrusted
+
         rendered = None
         for _ in range(8):
             try:
                 rendered = render_privacy_prompt(envelope.private_body(), nonce=nonce)
+                break
+            except PrivacyTemplateUntrusted:
+                # Tampered bytes are not cured by a fresh nonce: hold now.
                 break
             except ValueError:
                 if nonce is not None:

@@ -86,7 +86,9 @@ __all__ = [
     "ScreenResult",
     "ScreenRunner",
     "parse_verdict",
+    "PrivacyTemplateUntrusted",
     "render_prompt",
+    "render_trusted_privacy_prompt",
     "screen_message",
     "validate_envelope",
 ]
@@ -902,6 +904,71 @@ def render_prompt(
     )
 
 
+#: The preregistered A8 privacy-pass prompt, pinned HERE independently of the
+#: constant ``privacy_pass`` embeds: 1432 UTF-8 bytes whose sha256 is below
+#: (``evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/
+#: bridge-privacy-pass.txt``, PROTOCOL-ho4.md:54-58). Two literals in two modules
+#: is deliberate: the trust check must not take the hash from the same place it
+#: takes the bytes, or an edit to that one place would vouch for itself.
+_PRIVACY_TEMPLATE_PIN_SHA256 = "5208c727ff308167e58707a7e15ee67b59fbf982668c1884b9199fba00bc8c3b"
+_PRIVACY_TEMPLATE_PIN_LENGTH = 1432
+
+
+class PrivacyTemplateUntrusted(ValueError):
+    """The privacy template's bytes or declared hash are not the pinned prompt.
+
+    A ``ValueError`` so any caller already failing closed on render refusals
+    still does; a distinct type so the privacy pass can hold at once instead of
+    retrying with a fresh nonce (a nonce cannot cure tampered bytes).
+    """
+
+
+def render_trusted_privacy_prompt(
+    template: str,
+    *,
+    template_sha256: str,
+    body_text: str,
+    nonce: str | None = None,
+) -> RenderedPrompt:
+    """Render the A8 privacy prompt only if ``template`` IS the pinned prompt.
+
+    WHY THIS EXISTS. :func:`_render_with_template` performs no trust check, so
+    ``test_only_screening_and_the_eval_reference_the_private_renderer`` keeps it
+    out of every live module but this one and ``local_operator/evaluation``. The
+    privacy pass is a live caller with its own embedded template (not one of
+    :data:`SCREENING_TEMPLATES`, so :func:`render_prompt` cannot select it); this
+    is its narrow door, carrying the trust check that :func:`render_prompt` gets
+    from the version lookup.
+
+    WHY IT IS SAFE. It renders exactly one prompt: the bytes must have the
+    pinned length and sha256, and the caller's declared ``template_sha256`` (the
+    value persisted with the privacy claim) must equal the same pin. Any
+    mismatch raises :class:`PrivacyTemplateUntrusted` BEFORE substitution, so a
+    tampered or drifted template becomes a hold, never a render. Only the body
+    is substituted (memo §2: no sender, organization, history or tools), through
+    the same single-pass substitution and forged-nonce refusal as screening.
+    """
+
+    data = template.encode("utf-8") if isinstance(template, str) else b""
+    if (
+        not isinstance(template, str)
+        or len(data) != _PRIVACY_TEMPLATE_PIN_LENGTH
+        or hashlib.sha256(data).hexdigest() != _PRIVACY_TEMPLATE_PIN_SHA256
+        or template_sha256 != _PRIVACY_TEMPLATE_PIN_SHA256
+    ):
+        raise PrivacyTemplateUntrusted("privacy template is not the pinned prompt")
+    return _render_with_template(
+        template,
+        template_sha256=_PRIVACY_TEMPLATE_PIN_SHA256,
+        body_text=body_text,
+        sender="",
+        organization="",
+        msg_type="",
+        nonce=nonce,
+        attachments=None,
+    )
+
+
 def _render_with_template(
     template: str,
     *,
@@ -926,13 +993,12 @@ def _render_with_template(
     only comparable with the shipped template if it renders through the very
     same single-pass substitution, forged-nonce refusal and three-nonce
     assertion. Copying those rules into the eval would let the two drift, so
-    the eval calls this helper with arbitrary bytes instead. The ONE production
-    caller besides :func:`render_prompt` is the A8 privacy pass
-    (``privacy_pass.render_privacy_prompt``), which passes only its EMBEDDED
-    template constant, whose bytes and hash ``test_privacy_pass.py`` pins
-    against the preregistered prompt. Nothing else on the live connector path
-    may call it, because it performs no trust check on ``template`` and
-    records whatever ``template_sha256`` the caller supplies.
+    the eval calls this helper with arbitrary bytes instead. The only other
+    production caller is :func:`render_trusted_privacy_prompt`, which verifies
+    the A8 privacy template against its pin first. Nothing outside this module
+    on the live connector path may call it (a test enforces that), because it
+    performs no trust check on ``template`` and records whatever
+    ``template_sha256`` the caller supplies.
     """
 
     token = nonce if nonce is not None else secrets.token_hex(_NONCE_BYTES)
