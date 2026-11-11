@@ -16,7 +16,14 @@ def _ignore(_result: object) -> None:
     """``mutate`` wants a ``-> None`` callback; ``_apply`` returns the item for readers."""
 
 
-def _apply(doc, verdict="available", remote="fp1", reason="", classification="remote-only", **kw):
+def _apply(
+    doc,
+    verdict="available",
+    remote="fp1",
+    reason="",
+    classification: str | None = "remote-only",
+    **kw,
+):
     return st.apply_check(
         doc,
         kind="agent",
@@ -222,6 +229,144 @@ def test_an_apply_failure_survives_a_successful_fetch() -> None:
     legacy = _apply(doc, classification="both-changed")
     legacy.pop("error_origin")
     assert st.fetch_recorded_failure(legacy) is False  # not a fetch sentence
+
+
+def _startup_401(doc: dict[str, Any]) -> dict[str, Any]:
+    return _apply(
+        doc,
+        verdict="unavailable",
+        reason="no-credential",
+        reason_subclass="rejected",
+        detail="the hub refused the request (HTTP 401: invalid API key format)",
+    )
+
+
+def test_an_apply_retirement_survives_a_fetch_failure_then_a_200() -> None:
+    """Agent review round 1, M1: ``error_origin`` has one slot, so a startup 401
+    overwrote the apply's origin and the next 200 re-armed a merge-refused row
+    (``NO_AUTO_RETRY``: needs a human) into unattended auto-apply. The 200 may
+    clear the shown error; it must not undo the apply's retirement."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, classification="both-changed")
+    # Behaviour-only assertions (no new field names), so the same test is a
+    # discriminating negative control against the pre-fix store.
+    st.record_failure(item, "merge-refused", "the result was refused: conflict")
+    assert item["auto_retry"] is False
+    item = _startup_401(doc)
+    assert item["error_origin"] == "check"
+    item = _apply(doc, classification="both-changed")
+    assert item["error_class"] is None and item["last_error"] is None
+    assert item["auto_retry"] is False and item["attempts"] == 1
+    assert st.auto_apply_due(item, FIXED) is False
+
+
+def test_a_provider_error_retired_at_max_attempts_survives_a_fetch_failure_then_a_200() -> None:
+    """M1, the counted variant: six apply ``provider-error``s retire the row; a
+    401 then a 200 must not hand it six more unattended (paid) merges."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, classification="both-changed")
+    for _ in range(st.MAX_ATTEMPTS):
+        st.record_failure(item, "provider-error", "the model provider failed", now=FIXED)
+    assert item["auto_retry"] is False and item["attempts"] == st.MAX_ATTEMPTS
+    item = _startup_401(doc)
+    item = _apply(doc, classification="both-changed")
+    assert item["error_class"] is None
+    assert item["auto_retry"] is False and item["attempts"] == st.MAX_ATTEMPTS
+    assert st.auto_apply_due(item, FIXED) is False
+
+
+def test_a_check_hub_error_cannot_launder_an_apply_retirement() -> None:
+    """A counted fetch failure on an apply-retired row crosses MAX_ATTEMPTS again
+    with ``origin="check"``; the apply's stamp must win, so the 200 still keeps it."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, classification="both-changed")
+    for _ in range(st.MAX_ATTEMPTS):
+        st.record_failure(item, "provider-error", "the model provider failed", now=FIXED)
+    item = _apply(
+        doc,
+        verdict="unavailable",
+        reason="hub-error",
+        detail="the hub returned an error (HTTP 502)",
+    )
+    assert item[st.RETIRED_ORIGIN] == "apply"
+    item = _apply(doc, classification="both-changed")
+    assert item["auto_retry"] is False
+
+
+def test_a_legacy_apply_retired_row_is_pinned_before_a_401_overwrites_it() -> None:
+    """A row retired by a merge-refused BEFORE ``retired_origin`` existed has no
+    stamp; the 401 that overwrites its origin must attribute the retirement to
+    the apply first (the error it replaces is not a fetch's)."""
+
+    doc: dict[str, Any] = {"items": {}}
+    item = _apply(doc, classification="both-changed")
+    item.update(
+        error_class="merge-refused", last_error="the result was refused: x", auto_retry=False
+    )
+    item.pop("error_origin", None)
+    item = _startup_401(doc)
+    assert item[st.RETIRED_ORIGIN] == "apply"
+    item = _apply(doc, classification="both-changed")
+    assert item["auto_retry"] is False
+
+
+def test_a_fetch_retirement_then_a_401_then_a_200_still_re_arms() -> None:
+    """The operator's case must keep healing: a row retired by FETCH failures,
+    then a startup 401, then a 200, comes back to automatic updates."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, classification="both-changed")
+    for _ in range(st.MAX_ATTEMPTS):
+        item = _apply(
+            doc, verdict="unavailable", reason="hub-error", detail="could not reach the hub: x"
+        )
+    assert item["auto_retry"] is False and item[st.RETIRED_ORIGIN] == "check"
+    item = _startup_401(doc)
+    item = _apply(doc, classification="both-changed")
+    assert item["auto_retry"] is True and item["attempts"] == 0
+    assert st.RETIRED_ORIGIN not in item and st.auto_apply_due(item, FIXED) is True
+
+
+def test_a_legacy_local_read_failure_heals_and_an_unknown_one_is_logged_once(caplog) -> None:
+    """m2: origin-less rows from the check's local reads heal like their stamped
+    twins; an origin-less ``hub-error`` nothing can attribute stays, and says so
+    once per row instead of failing silently on every check."""
+
+    import logging
+
+    doc: dict[str, Any] = {"items": {}}
+    item = _apply(doc, classification="both-changed")
+    item.update(error_class="hub-error", last_error="could not read the local team: locked")
+    assert st.fetch_recorded_failure(item) is True
+
+    st._UNRECOGNISED_LOGGED.discard("agent:a1")
+    item.update(last_error="Could not pull the team from the Radient Agent Hub")
+    with caplog.at_level(logging.INFO, logger=st.__name__):
+        assert st.fetch_recorded_failure(item) is False
+        assert st.fetch_recorded_failure(item) is False
+    lines = [r for r in caplog.records if "no recorded origin" in r.getMessage()]
+    assert len(lines) == 1 and "agent:a1" in lines[0].getMessage()
+
+
+def test_every_error_clearing_writer_drops_the_stale_origins() -> None:
+    """n1: a row with no error carries no origin; a re-armed row carries no
+    retirement stamp."""
+
+    item: dict[str, Any] = {"state": "available"}
+    st.record_failure(item, "merge-refused", "the result was refused: x")
+    st.clear_failure(item)
+    assert "error_origin" not in item and item[st.RETIRED_ORIGIN] == "apply"
+    st.clear_retry(item)
+    assert st.RETIRED_ORIGIN not in item and item["auto_retry"] is True
+    st.record_failure(item, "merge-refused", "the result was refused: x")
+    st.settle_applied(item, {}, None)
+    assert "error_origin" not in item and st.RETIRED_ORIGIN not in item
+    st.record_failure(item, "merge-refused", "the result was refused: x")
+    st.settle_unchanged(item)
+    assert "error_origin" not in item and st.RETIRED_ORIGIN not in item
 
 
 def test_a_manual_retry_that_computed_retires_the_stale_failure() -> None:
