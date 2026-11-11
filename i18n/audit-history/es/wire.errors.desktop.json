@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.errors.desktop",
+  "history_sha256": "377b80dc26c7096e4726f5e1d1dbd35c6466e9096953ee7e82be8c3d040a9e13",
+  "entries": [
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "b2bef8965912381f5516ff9ce75f91ad8a4ba6a332ca2a8c89c84a075f08b482",
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translator)",
+        "session": "1b1866b4f2ed",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "translator": {
+        "agent": "coder-settings-intents-core",
+        "session": "d0c5356bb4d3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09",
+        "fallback": "Translations authored before quota fallback to openai/gpt-6.1-sol; fallback only used for later product corrections and receipt assembly."
+      },
+      "note": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 1 added key(s) read, 0 findings; 88 unchanged keys byte-identical to the passed row at base. Target 0d3918ccf54b2df43c364684cbc90e7e5a1b6c041c5d1573ebe3cd7a01f84dc5. Evidence: i18n/audits/evidence/es/wire.errors.desktop/settings-1b1866b4f2ed/record.json"
+    }
+  ]
+}

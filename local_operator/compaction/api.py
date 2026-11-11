@@ -60,6 +60,17 @@ from .cutpoint import (
     replay_preserved_turns,
     task_boundary_floor,
 )
+from .idle import (
+    COMPACTION_IDLE_DECLINED_TYPE,
+    COMPACTION_IDLE_PASS_TYPE,
+    IdleDecision,
+    cache_ttl_from_usage,
+    fallback_cache_ttl_s,
+    idle_compaction_due,
+    idle_fire_at_ms,
+    idle_growth_for,
+    idle_threshold_for,
+)
 from .marker import split_leading_marker
 from .pruning import (
     IDLE_FLUSH_MS,
@@ -145,6 +156,15 @@ __all__ = [
     "TOOL_RESULT_MAX_CHARS",
     "USELESS_NOTICE",
     "build_advisor_prompt",
+    "COMPACTION_IDLE_DECLINED_TYPE",
+    "COMPACTION_IDLE_PASS_TYPE",
+    "IdleDecision",
+    "cache_ttl_from_usage",
+    "fallback_cache_ttl_s",
+    "idle_compaction_due",
+    "idle_fire_at_ms",
+    "idle_growth_for",
+    "idle_threshold_for",
     "build_compaction_prompt",
     "clear_estimate_cache",
     "cleared_headroom",

@@ -7059,22 +7059,29 @@ def _pilot_dial_refusal(
 def _pilot_runtime_busy(exc: BaseException) -> bool:
     """True when the runtime was REACHED and is alive, but did not answer in time.
 
-    Three typed outcomes, each established by the far side rather than inferred
-    from a sentence: the sync never came inside the envelope
-    (``RuntimeUnresponsiveError``), the runtime announced it could not prepare
-    this connection (``RuntimeBindFailedError``), or the owner did not ack this
-    request in time (``OwnerAckTimeout``, which is ALSO a ``TimeoutError`` and so
-    must be asked before the timeout rung). All three are subclasses of
-    ``ConnectionError``, which is why they used to fall into the dial-refusal
-    rung and read as a device that produced no session.
+    ONE CLASSIFICATION, THE LADDER'S: the desktop control ladder decides "busy" by
+    ``RuntimeUnresponsiveError`` or the duck-checked ``owner_alive`` mark
+    (``server/routes/desktop_sessions.py::_owner_busy``), and every busy
+    ``ConnectionError`` main defines carries that mark: ``OwnerAckTimeout``, the
+    late welcome (``OwnerWelcomeTimeout``) and the reconnect refusal
+    (``OwnerReconnectingError``). Reading the MARK rather than listing classes is
+    what keeps this verb from drifting when a new busy shape lands; a list here
+    missed the late welcome, which the pilot's own bind raises, and called a busy
+    session a device that "produced no session". The one addition is
+    ``RuntimeBindFailedError`` (the runtime announced it could not prepare this
+    connection), which is deliberately left unmarked so the desktop ladder keeps
+    its existing answer for it. All of these are ``ConnectionError``s, and
+    ``OwnerAckTimeout`` is ALSO a ``TimeoutError``, so this must be asked before
+    either sibling rung.
     """
-    from local_operator.mobile.attach_client import OwnerAckTimeout
     from local_operator.session.attached import (
         RuntimeBindFailedError,
         RuntimeUnresponsiveError,
     )
 
-    return isinstance(exc, (RuntimeUnresponsiveError, RuntimeBindFailedError, OwnerAckTimeout))
+    if isinstance(exc, (RuntimeUnresponsiveError, RuntimeBindFailedError)):
+        return True
+    return bool(getattr(exc, "owner_alive", False))
 
 
 def _pilot_busy_sentence(verb: str, session_id: str, device: str, waited_s: float) -> str:

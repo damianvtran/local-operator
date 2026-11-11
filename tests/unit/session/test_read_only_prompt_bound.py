@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.replay_bound import bound_replay_payloads
+from local_operator.harness.tool_names import normalise_replay_tool_names
 from local_operator.harness.types import Message, TextContent, ToolCall
 from local_operator.session.session import Session
 
@@ -78,6 +79,7 @@ class StubSession:
 
     def __init__(self, history: list[Message]) -> None:
         self._history = history
+        self._tools: list[Any] = []
 
     def _system_blocks(self) -> list[str]:
         return ["you are a helper"]
@@ -124,11 +126,50 @@ async def test_the_aside_is_the_same_bounded_view_the_turn_sends():
     """
     history = build_history()
     turns = [Message.user("and now?")]
-    expected = bound_replay_payloads([*history, *turns])
+    expected = normalise_replay_tool_names(bound_replay_payloads([*history, *turns]), [])
 
     messages = await read_only_prompt(StubSession(history), turns)
 
     assert [m.model_dump() for m in messages] == [m.model_dump() for m in expected]
+
+
+@pytest.mark.asyncio
+async def test_the_aside_sanitises_garbled_names_like_the_turn():
+    """The sanitiser is part of the same deterministic function the turn applies.
+
+    A garbled call in history must ride out the aside path under the real name
+    with the neutral notice — byte-identical to what the turn's request carries
+    — or the two requests diverge at exactly the prefix-cache boundary.
+    """
+    call = Message(
+        role="assistant",
+        content=[TextContent(text="running it")],
+        tool_calls=[ToolCall(id="c1", name="bashLecture", arguments={"command": "echo hi"})],
+    )
+    result = Message(
+        role="tool",
+        content=[TextContent(text="Tool not found: bashLecture")],
+        tool_call_id="c1",
+        tool_name="bashLecture",
+        is_error=True,
+    )
+    history = [Message.user("go"), call, result]
+    turns = [Message.user("and now?")]
+    stub = StubSession(history)
+    stub._tools = ["bash"]
+    expected = normalise_replay_tool_names(bound_replay_payloads([*history, *turns]), ["bash"])
+
+    messages = await read_only_prompt(stub, turns)
+
+    assert [m.model_dump() for m in messages] == [m.model_dump() for m in expected]
+    rewritten_call = next(m for m in messages if m.role == "assistant" and m.tool_calls)
+    rewritten_result = next(m for m in messages if m.role == "tool")
+    assert rewritten_call.tool_calls[0].name == "bash"
+    assert rewritten_result.tool_name == "bash"
+    assert "Lecture" not in rewritten_result.text
+    # And neither half mutated the history the stub was built over.
+    assert call.tool_calls[0].name == "bashLecture"
+    assert result.text == "Tool not found: bashLecture"
 
 
 @pytest.mark.asyncio

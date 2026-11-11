@@ -161,8 +161,8 @@ class AgentParams(BaseModel):
     description: str | None = Field(
         default=None,
         description=(
-            "create/update: when to use this profile. Semantic routing matches "
-            "this, so write the trigger condition, not a job title."
+            "create/update: when to use it. Semantic routing matches this: "
+            "write the trigger, not a job title."
         ),
     )
     instructions: str | None = Field(
@@ -175,8 +175,8 @@ class AgentParams(BaseModel):
     tools: list[str] | None = Field(
         default=None,
         description=(
-            "create/update on a ROLE: restrict the profile to these tools. "
-            "Omit for all. A specialist carries no tool allow-list."
+            "create/update on a ROLE: restrict it to these tools; omit for all. "
+            "Not on a specialist."
         ),
     )
     # A free string rather than a Literal for the same reason as the ``task``
@@ -194,7 +194,7 @@ class AgentParams(BaseModel):
 
     saver: Literal["on", "off", "inherit"] | None = Field(
         default=None,
-        description="create/update: pin Radient Saver for this role; inherit clears the pin.",
+        description="create/update: pin Radient Saver for this role; inherit clears it.",
     )
 
     @field_validator("effort", mode="before")
@@ -257,24 +257,25 @@ class AgentParams(BaseModel):
     delegate: bool | None = Field(
         default=None,
         description=(
-            "create/update on a ROLE: may this profile launch subagents? "
-            "Default no; only coordinating roles should. A specialist cannot delegate."
+            "create/update on a ROLE: may it launch subagents? "
+            "Default no; only coordinating roles should. A specialist cannot."
         ),
     )
     action_class: Literal["reactive", "proactive"] | None = Field(
         default=None,
         description=(
-            "create/update: 'reactive' (default) or 'proactive'. Set proactive "
-            "ONLY when the user clearly asked for a proactive use case: it can "
-            "message them unprompted, so it is sparing by default."
+            # The full rationale lives in the tool:// notes (tool_docs.py); the
+            # wire keeps only the rule, trimmed for the start-context budget.
+            "create/update: 'reactive' (default) or 'proactive' — ONLY when the "
+            "user clearly asked for a proactive use case (it messages them unprompted)."
         ),
     )
     kind: Literal["role", "specialist"] | None = Field(
         default=None,
         description=(
-            "create: 'role' (default; a reusable task(agent=...) target) or "
+            "create: 'role' (default; a task(agent=...) target) or "
             "'specialist' (a durable named agent, may sit on a team roster). "
-            "Ignored on update: kind cannot change."
+            "Fixed after create."
         ),
     )
     scope: Literal["global", "session"] | None = Field(
@@ -292,7 +293,7 @@ class AgentParams(BaseModel):
     )
     backup_id: str | None = Field(
         default=None,
-        description="revert: the backup_id an account save's receipt returned.",
+        description="revert: backup_id from an account save's receipt.",
     )
     # ONE field, not ``replace`` + ``confirm_replace``: on this op the flag IS the
     # confirmation (the desktop body and the TUI's typed ``yes`` carry the same
@@ -2036,29 +2037,72 @@ class _AccountSave:
     post_revision: str | None = None
 
 
-def _queued_profile_receipt(tool_call_id: str, tool_name: str, queued: Any) -> ToolResult:
+#: How an agent should put a filed proposal to the user. WHY: an agent once
+#: pasted a whole proposed team brief into ``ask``; the card then filled the
+#: conversation and hid its own options. The diff is reviewed in Agents.
+PROPOSAL_ASK_GUIDANCE = (
+    "When asking the user, send a 1-3 line summary (what changes, which profile, "
+    "lines added/removed) plus the id {pid}; never paste the full instructions — "
+    "they review the diff in Agents."
+)
+
+
+def _proposed_profile_receipt(tool_call_id: str, tool_name: str, proposed: Any) -> ToolResult:
+    """The receipt for a write the host filed as a proposal instead of applying.
+
+    TOKEN-LEAN AND POINTS AT AGENTS, NEVER MESH: the person reviews proposals in
+    the desktop Agents section (Agents → <name>), or says yes in the
+    conversation and the agent applies it with ``profile_proposal``. The text
+    tells the model exactly those two routes so it neither retries the write nor
+    sends the user to the device approvals tray.
+    """
     from local_operator.profile_scope import profile_diff_summary
 
+    fields = ", ".join(proposed.changes) or "no fields"
+    pid = proposed.proposal_id
+    state = getattr(proposed, "state", "pending")
+    if state == "pending":
+        text = (
+            f"Proposed {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) as "
+            f"{pid}; nothing changed yet. Tell the user to review it in Agents → "
+            f"{proposed.profile_name}, or ask them and call profile_proposal op=apply id={pid} "
+            "after they agree."
+        )
+    else:
+        # An identical idea that was already decided (or lapsed) is reported
+        # as such: it is never revived, and claiming "proposed" would send the
+        # user to an Agents entry that is not pending.
+        text = (
+            f"This exact {proposed.profile_kind} {proposed.profile_name!r} change ({fields}) "
+            f"was already proposed as {pid} and is {state}; nothing changed and it was not "
+            "re-opened. Ask the user before proposing it again with different content."
+        )
+    if getattr(proposed, "summary", ()):
+        text += "\n" + "\n".join(proposed.summary)
+    elif proposed.diff:
+        text += "\n" + profile_diff_summary("\n".join(proposed.diff))
+    if state == "pending":
+        # Producer-side half of the bounded ask card: the model relays what
+        # it was told, so tell it what a good ask looks like.
+        text += f"\n{PROPOSAL_ASK_GUIDANCE.format(pid=pid)}"
     return _text(
         tool_call_id,
         tool_name,
-        f"Queued {queued.profile_kind} {queued.profile_name!r} for durable approval "
-        f"({queued.approval_id}). No profile or backup was changed. "
-        "The signed approval continuation applies it; do not retry this tool call."
-        + ("\n" + profile_diff_summary("\n".join(queued.diff)) if queued.diff else ""),
+        text,
         details={
-            "status": "queued",
-            "fields": list(queued.changes),
-            "diff": list(queued.diff),
-            "approval_id": queued.approval_id,
-            "request_digest": queued.request_digest,
-            "expires_at": queued.expires_at,
-            "receipt_id": queued.receipt_id,
-            "profile_kind": queued.profile_kind,
-            "profile_name": queued.profile_name,
+            "status": "proposed" if state == "pending" else state,
+            "proposal_id": pid,
+            "profile_kind": proposed.profile_kind,
+            "profile_name": proposed.profile_name,
             "scope": "global",
+            "fields": list(proposed.changes),
+            "diff": list(proposed.diff),
         },
     )
+
+
+#: Old name, kept so an out-of-tree import keeps resolving for one release.
+_queued_profile_receipt = _proposed_profile_receipt
 
 
 def _agent_proposal(
@@ -2392,8 +2436,8 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
-    if reason == "queued":
-        return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
+    if reason == "proposed":
+        return _proposed_profile_receipt(tool_call_id, "agent", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
 
@@ -2859,8 +2903,8 @@ async def _op_write(
             tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
-        if reason == "queued":
-            return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
+        if reason == "proposed":
+            return _proposed_profile_receipt(tool_call_id, "agent", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
     try:

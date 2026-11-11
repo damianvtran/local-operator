@@ -44,5 +44,8 @@
   "tui.app.providers.stale_all": "danh sách cũ: mọi nhà cung cấp",
   "tui.app.providers.stale_named": "danh sách cũ: {names}",
   "tui.app.providers.stale_all_error": "danh sách cũ: mọi nhà cung cấp — {error}",
-  "tui.app.providers.no_live_list": "không có danh sách trực tiếp: {names}"
+  "tui.app.providers.no_live_list": "không có danh sách trực tiếp: {names}",
+  "tui.app.compaction.idle_receipt": "đã nén ngữ cảnh khi rảnh · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "đã nén ngữ cảnh khi rảnh",
+  "tui.app.compaction.idle_skipped": "đã bỏ qua nén khi rảnh · không có gì thay đổi"
 }

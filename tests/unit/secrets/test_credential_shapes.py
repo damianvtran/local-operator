@@ -1036,7 +1036,13 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
         "gcp-service-account-value-open",
         "authorization-basic-bare",
         "credential-query-param",
+        # Guarded since PR #3789 (R4): kubectl, not the client, owns ``-p`` there.
+        "client-inline-password",
     }
+    client_value = "Guarded" + "Inline" + "Pw7X9q"
+    assert scrub_shapes(f"mysql -h db -u app -p{client_value} appdb") == (
+        f"mysql -h db -u app -p{REDACTION_MARKER} appdb"
+    )
 
     assignment = scrub_shapes("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
     assert assignment == f"AWS_SECRET_ACCESS_KEY={REDACTION_MARKER}"
@@ -4284,15 +4290,19 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         "named-variable-dump": "printenv MONGO_DSN",
         "kubectl-exec-env": "kubectl exec x -- env",
         "kubectl-secret-read": "kubectl get secret n -o yaml",
+        "kubectl-secret-decode": "kubectl get secret n -o jsonpath='{.data.K}' | base64 -d",
         "docker-inspect": "docker inspect api",
         "docker-exec-env": "docker exec x env",
         "docker-compose-config": "docker compose config",
-        "aws-credentials-read": "aws secretsmanager get-secret-value",
+        "aws-secret-value": "aws secretsmanager get-secret-value --secret-id x",
+        "aws-credentials-read": "aws sts get-session-token",
         "gcloud-token": "gcloud auth print-access-token",
         "github-auth-token": "gh auth token",
         "gitlab-auth-token": "glab auth status -t",
         "vault-read": "vault kv get secret/x",
         "heroku-config": "heroku config",
+        "terraform-plan-json": "curl https://app.terraform.io/api/v2/plans/plan-x/json-output",
+        "terraform-show-json": "terraform show -json plan.tfplan",
         "terraform-output": "terraform output",
         "npm-token-list": "npm token list",
         "credential-file-read": "cat ~/.netrc",

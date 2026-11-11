@@ -197,6 +197,26 @@ HOLD_ALERT_MAX_MINUTES = 10080
 #: OFF, because a release path must never open on a value nobody wrote.
 DEFAULT_HOLD_RELEASE = False
 
+#: ``team_bridge.review_held`` — the owner-review EXIT for a cached screening
+#: ANSWER hold (``hold_release.REVIEW_HOLD_CODES``: ``model_hold``,
+#: ``model_refused``, ``reply_truncated``, ``bounce_without_category``).
+#:
+#: WHY ON BY DEFAULT (operator report 2026-11-09). Such a hold is the model's
+#: answer, cached so a re-draw cannot shop for a ``deliver``; before this it
+#: had no exit at all. All 29 held messages on the operator's machine had sat
+#: up to 9.2 days with nothing re-screening them and the sender told only
+#: "waiting to be screened". With this on, the hold raises the per-message
+#: notice with Deliver/Discard (the B4b signed-release path) the moment it is
+#: written, so every held message ends delivered or not-delivered by a person.
+#: Unlike ``hold_release`` it releases nothing on its own: the screener said
+#: "unsure", and only the receiving person's signed word moves it.
+#:
+#: Turning it OFF restores the old behaviour exactly (cached hold, count-only
+#: 60-minute alert). Only a real ``false`` turns it off; absent/garbled is ON,
+#: because the safe default for a hold is an exit a person controls. No
+#: ``/settings`` row, for the same i18n-ledger reason as ``hold_release``.
+DEFAULT_REVIEW_HELD = True
+
 #: ``team_bridge.share_typing`` — whether this person's composers tell the other
 #: members of a conversation "X is typing" (typing-indicators design §7).
 #:
@@ -264,6 +284,7 @@ DEFAULT_ENROLLMENT_PATH = ("team_bridge", "default_enrollment")
 SESSION_PATH = ("team_bridge", "session")
 HOLD_ALERT_AFTER_PATH = ("team_bridge", "hold_alert_after_minutes")
 HOLD_RELEASE_PATH = ("team_bridge", "hold_release")
+REVIEW_HELD_PATH = ("team_bridge", "review_held")
 SHARE_TYPING_PATH = ("team_bridge", "share_typing")
 #: The SUBTREE the four screening ceilings live under. Readers take this tuple,
 #: so no consumer re-spells "where screening lives" and drifts from the writer.
@@ -275,6 +296,20 @@ SCREENING_BUDGET_LEAF = "budget_per_hour"
 SCREENING_AMBIENT_BUDGET_LEAF = "ambient_budget_per_hour"
 SCREENING_UNADDRESSED_BUDGET_LEAF = "unaddressed_budget_per_hour"
 SCREENING_SENDER_BUDGET_LEAF = "sender_budget_per_hour"
+#: The stored "Screening model" PREFERENCE, a leaf of the same subtree. THE ONE
+#: SCREENING KEY THAT IS NOT A CEILING: it says which evaluated screener to try
+#: FIRST, never whether screening runs (that is the admission-gate invariant the
+#: registry test pins). Its value is one ``provider/model_id`` pair from
+#: ``model_boundary.SCREENING_EVALUATED_MODELS``, spelled with ONE separator so a
+#: hand edit, a CLI argument and the settings page all agree:
+#: ``anthropic/claude-sonnet-5-5``, ``radient/anthropic/claude-sonnet-5.5``.
+#: ``""`` (the shipped default) means "no preference": the chain keeps its own
+#: evaluated order, which is exactly what a machine did before this key existed.
+SCREENING_MODEL_LEAF = "model"
+#: The full path the reader and every writer share, so no consumer re-spells it.
+SCREENING_MODEL_PATH = SCREENING_SUBTREE + (SCREENING_MODEL_LEAF,)
+#: The shipped "no preference": the chain's own order, today's behaviour exactly.
+DEFAULT_TEAM_BRIDGE_SCREENING_MODEL = ""
 #: The largest ceiling the READ path will adopt. It mirrors the ``maximum`` of
 #: the four ``/settings`` rows, which this module cannot import (the registry
 #: stays off this package's import path — see the module docstring), so
@@ -345,6 +380,92 @@ def _screening_ceiling(value: Any, default: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         return default
     return value if value >= 1 else default
+
+
+def _screening_model(value: Any) -> tuple[str, str] | None:
+    """The stored preference as a ``(provider, model_id)`` pair, or ``None``.
+
+    SHAPE ONLY, DELIBERATELY. Whether the pair is on the evaluated table is
+    enforced where the table lives (``model_boundary.resolve_screening_chain``,
+    which re-orders to a listed pair and leaves an unlisted one out): this module
+    is stdlib-only by contract, and re-listing the table here would be the second
+    copy that drifts from the first. So an off-table value survives this parse
+    and is IGNORED one layer up — the same outcome as an unparseable one, which
+    is what "an unusable choice keeps today's chain" means.
+
+    THE SPLIT IS ON THE FIRST ``/``, not the last: a Radient id carries its own
+    slash (``radient/anthropic/claude-sonnet-5.5``), and splitting from the right
+    would read a provider nobody can serve. A value with no separator, an empty
+    side or a non-string reads as "no preference" rather than being coerced into
+    a pair nobody wrote — a screening preference must never be guessed from a
+    typo, because guessing WRONG changes which model reads someone's mail.
+    """
+
+    if not isinstance(value, str):
+        return None
+    provider, separator, model_id = value.partition("/")
+    if not separator:
+        return None
+    provider = provider.strip()
+    model_id = model_id.strip()
+    if not provider or not model_id:
+        return None
+    return provider, model_id
+
+
+def screening_model_from_values(values: Any) -> tuple[str, str] | None:
+    """The preference inside a whole config ``values`` mapping, or ``None``.
+
+    The document twin of :func:`read_screening_model`, for a caller that already
+    holds the parsed document (the desktop status route reads one snapshot and
+    answers every local key from it, so it must not read the file twice).
+    """
+
+    return _screening_model(_walk_subtree(values, SCREENING_MODEL_PATH))
+
+
+def read_screening_model(config_dir: "Path") -> tuple[str, str] | None:
+    """This machine's stored screening preference, or ``None`` for "no choice".
+
+    THE PRODUCTION READER, and the only one that touches the file. It goes
+    through ``config.read_config_values`` for the reason
+    ``store.screening_budget_from_config`` documents at length: that reader never
+    writes, moves or reports, so a receiver polling it cannot catch an editor's
+    non-atomic save mid-write and set the user's whole config aside.
+
+    NEVER RAISES, and every unusable state reads as "no preference": a receiver
+    that stopped on a mistyped key would stop screening altogether, which is
+    strictly worse than screening in the chain's evaluated order. A torn read
+    (``None`` from the reader) also reads as "no preference" — the next turn
+    re-reads and picks the choice up.
+    """
+
+    from local_operator.config import read_config_values
+
+    try:
+        values = read_config_values(Path(config_dir))
+    except Exception:  # noqa: BLE001 — the contract above is "never raises"
+        return None
+    if values is None:
+        return None
+    return screening_model_from_values(values)
+
+
+def write_screening_model_choice(config_dir: "Path", value: str) -> None:
+    """Persist the Screening model choice on this machine (``""`` clears it).
+
+    Why a stored choice can never leave a machine unable to screen: the
+    preference only REORDERS the evaluated pairs. Stage 2 of
+    ``resolve_screening_chain`` (the receiver's own default and its fallback
+    chains) is appended no matter what is stored here, so an empty, off-table or
+    stale value costs a re-ordered first hop and nothing more — the operator
+    directive of 2026-11-04 (the pin must never block a receiver without an
+    Anthropic account) depends on that.
+    """
+
+    if not isinstance(value, str):
+        raise ValueError("screening model choice must be a string")
+    _store_internal(config_dir, SCREENING_MODEL_PATH, value.strip())
 
 
 def _walk_subtree(values: Any, path: tuple[str, ...]) -> Any:
@@ -585,9 +706,13 @@ class TeamBridgeSettings:
     public row would dress session-format state as configuration.
     ``default_enrollment`` is the same kind of internal state: the receipt that
     an earlier opt-out default consented once, not a user preference; under the
-    consent hold nothing writes it and it drives no consent. SCREENING IS
-    NOT HERE AT ALL: it is the admission gate (§8, §13.9), an invariant the
-    implementation enforces — not a setting any write can turn off.
+    consent hold nothing writes it and it drives no consent. SCREENING AS A GATE
+    IS NOT HERE: it is the admission gate (§8, §13.9), an invariant the
+    implementation enforces — not a setting any write can turn off. What IS here
+    is ``screening_model``, and the distinction is the whole point: it chooses
+    which evaluated screener is tried FIRST and cannot express "off". Stage 2 of
+    ``resolve_screening_chain`` runs whatever is stored here, so no value of this
+    key leaves a machine unable to screen.
     """
 
     enabled: bool = DEFAULT_TEAM_BRIDGE_ENABLED
@@ -598,6 +723,14 @@ class TeamBridgeSettings:
     hold_alert_after_minutes: int = DEFAULT_HOLD_ALERT_AFTER_MINUTES
     #: B4b owner release (``hold_release.py``); OFF unless a real ``true``.
     hold_release: bool = DEFAULT_HOLD_RELEASE
+    #: The stored "Screening model" preference as a ``(provider, model_id)``
+    #: pair, or ``None`` for "no preference" (the shipped default). Shape-parsed
+    #: by :func:`_screening_model`; the evaluated-table check happens in
+    #: ``resolve_screening_chain``, which ignores an unlisted pair.
+    screening_model: tuple[str, str] | None = None
+    #: Owner review of cached answer holds (``hold_release.REVIEW_HOLD_CODES``);
+    #: ON unless the file says a real ``false``.
+    review_held: bool = DEFAULT_REVIEW_HELD
     #: Whether this person's composers report "is typing" (sender-side only).
     share_typing: bool = DEFAULT_TEAM_BRIDGE_SHARE_TYPING
     #: Whether ``team_bridge.enabled`` was PRESENT in the document (any value,
@@ -659,6 +792,10 @@ class TeamBridgeSettings:
             ),
             # ``is True``: a release path opens on an explicit boolean only.
             hold_release=get(HOLD_RELEASE_PATH, DEFAULT_HOLD_RELEASE) is True,
+            screening_model=_screening_model(
+                get(SCREENING_MODEL_PATH, DEFAULT_TEAM_BRIDGE_SCREENING_MODEL)
+            ),
+            review_held=get(REVIEW_HELD_PATH, DEFAULT_REVIEW_HELD) is not False,
             share_typing=_share_typing(get(SHARE_TYPING_PATH, _MISSING)),
         )
 

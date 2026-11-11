@@ -214,6 +214,38 @@ def test_an_owner_ack_timeout_is_busy_not_the_bind_budget(
     assert "the steer was not delivered" in payload["message"], payload
 
 
+@pytest.mark.parametrize("welcome", [True, False], ids=["late-welcome", "plain-refusal"])
+def test_main_s_owner_alive_mark_is_the_pilot_s_busy_rule(
+    welcome: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Merge fold with main: the late welcome (``OwnerWelcomeTimeout``) carries only
+    the ``owner_alive`` mark and is raised on the pilot's own bind, so a class list
+    called that busy owner a device that "produced no session". The control: a
+    plain ``ConnectionError`` (no mark) still takes the dial-refusal rung."""
+    from local_operator.mobile.attach_client import OwnerWelcomeTimeout
+
+    error: ConnectionError = (
+        OwnerWelcomeTimeout("owner did not welcome the connection in time")
+        if welcome
+        else ConnectionError("owner socket unreachable")
+    )
+
+    class _Viewer(_FakeViewer):
+        async def bind_runtime(self, **_kwargs: Any) -> None:
+            raise error
+
+    _patch(monkeypatch, _Viewer(), _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
+    payload = _payload(capsys.readouterr().out)
+    if welcome:
+        assert payload["code"] == "session_unreachable", payload
+        assert "produced no session" not in payload["message"], payload
+        assert "too busy" in payload["message"], payload
+    else:
+        # The dial-refusal rung, which asks this device's relay what happened.
+        assert "too busy" not in payload["message"], payload
+
+
 class _DeadlineViewer(_FakeViewer):
     def __init__(self) -> None:
         super().__init__()

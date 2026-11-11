@@ -704,3 +704,205 @@ def test_unsent_model_allow_without_preference_is_still_retired(
     before = len(wire.sends)
     assert _cycle(tmp_path, owner).disposition == "deliver"
     assert len(wire.sends) == before + 1  # genuine fallback really screens again
+
+
+# -- the STORED choice, through the shipped cycle ---------------------------------
+#
+# Above pins the chain given ``preferred=``; these pin the WIRING — that the
+# machine's stored "Screening model" value is what the production cycle hands the
+# chain (nothing passed it before this change, so the choice was unreachable).
+
+
+def _store_choice(tmp_path: Path, value: str) -> None:
+    """Add ``team_bridge.screening.model`` to the document ``_config`` wrote."""
+
+    with (tmp_path / "config.yml").open("a", encoding="utf-8") as handle:
+        handle.write(f"  team_bridge:\n    screening:\n      model: {value}\n")
+
+
+def test_the_stored_choice_screens_first_and_its_verdict_is_preferred(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire({"claude-opus-5-5": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    # The stored pair leads the walk, ahead of Sonnet, because the operator said
+    # so; its verdict is a PREFERRED one, which is what B4b's release gate reads.
+    assert _sends(wire) == [OPUS]
+    assert result.disposition == "deliver"
+    assert result.screener_preferred is True
+    assert result.receipt.model == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize(
+    ("reply", "disposition"),
+    [(DELIVER, "deliver"), ("VERDICT: hold\nREASON: doubt.", "hold")],
+)
+def test_a_blank_stored_choice_uses_the_vetted_fallback_without_verdict_shopping(
+    tmp_path, monkeypatch, credentials, reply, disposition
+) -> None:
+    """#3714's unusable-reply redraw follows #3632's reordered chain.
+
+    The fallback's actual identity owns provenance. A parseable hold is terminal
+    even though the receiver's default would deliver: preference is not bypass.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("reply", ""),
+            "claude-sonnet-5-5": ("reply", reply),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS, OPUS, SONNET]
+    assert result.disposition == disposition
+    if disposition == "deliver":
+        assert result.receipt.model == SONNET[1]
+        assert result.screener_preferred is True
+    else:
+        assert result.hold_code == "model_hold"
+        assert _rows(tmp_path, "SELECT 1 FROM screening_receipts") == []
+
+
+def test_a_stored_choice_with_no_credential_still_screens_on_the_default(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    """The operator directive of 2026-11-04: a preference must never block.
+
+    The stored choice names Anthropic, this machine holds no Anthropic
+    credential, and the message still screens on the receiver's own configured
+    default. A regression here means a user without that account cannot receive
+    anything at all.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"openai"})
+    wire = _Wire({"gpt-6-astra": ("reply", DELIVER)})
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [("openai", "gpt-6-astra")]
+    assert result.disposition == "deliver"
+    # Delivered normally, never reusable: a fallback screener's allow gates
+    # nothing later (B4b D4).
+    assert result.screener_preferred is False
+    assert result.receipt.model == "gpt-6-astra"
+
+
+def test_a_stored_choice_the_route_cannot_serve_falls_through_and_delivers(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    """PR #3632 review R1: a 404 on the pinned hop must not park the message.
+
+    A chosen pair whose route answers 404 -- a retired Radient route, a model
+    the owner's account is not enabled for -- is not the sender's doing and not
+    theirs to fix: no submission can make a provider report a missing model.
+    Before this, the walk stopped on the hard 4xx and every inbound message was
+    held ``provider_error`` until the owner switched back to Automatic: the very
+    state the setting created, and the opposite of the promise the shipped help
+    copy makes. The next table hop now screens, and its verdict is still a
+    PREFERRED one.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("fail", 404),
+            "claude-sonnet-5-5": ("reply", DELIVER),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS, SONNET]
+    assert result.disposition == "deliver"
+    assert result.screener_preferred is True
+    assert result.receipt.model == "claude-sonnet-5-5"
+    assert _rows(tmp_path, "SELECT 1 FROM screening_holds") == []
+
+
+@pytest.mark.parametrize("status", [402, 429])
+def test_a_stored_choice_out_of_credit_or_quota_still_advances(
+    tmp_path, monkeypatch, credentials, status
+) -> None:
+    """Unchanged by the 404 fix: the quota shapes already advanced.
+
+    402 is an empty Radient balance, 429 a rate limit; both were covered by the
+    operator directive of 2026-11-04 and neither decision moves here.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("fail", status),
+            "claude-sonnet-5-5": ("reply", DELIVER),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS, SONNET]
+    assert result.disposition == "deliver" and result.receipt.model == "claude-sonnet-5-5"
+
+
+def test_a_stored_choice_the_account_may_not_use_still_holds_as_a_credential_fault(
+    tmp_path, monkeypatch, credentials
+) -> None:
+    """PR #3632 review R1: a 403 on the pinned hop STILL HOLDS, and says why.
+
+    The split from the 404 is deliberate (see ``_NOT_FOUND_STATUSES``): ONE
+    marker-less 403 carries both a content verdict (OpenRouter's documented
+    shape) and a genuine permission error, and neither the status nor ``kind``
+    separates them. Advancing there would drop a verdict the first provider had
+    already reached AND hide a credential fault the owner must see. So the
+    message stays held, the next hop is never sent, and the record names the
+    credential (``auth_unusable``) rather than the route being unwell: the hold
+    code stays the generic one because no dedicated code exists, but the class
+    the owner's surface reads is the actionable fact.
+    """
+
+    _store, owner = _setup(tmp_path)
+    _config(tmp_path, "openai", "gpt-6-astra")
+    _store_choice(tmp_path, "anthropic/claude-opus-5-5")
+    credentials.update({"anthropic", "openai"})
+    wire = _Wire(
+        {
+            "claude-opus-5-5": ("fail", 403),
+            "claude-sonnet-5-5": ("reply", DELIVER),
+            "gpt-6-astra": ("reply", DELIVER),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+
+    result = _cycle(tmp_path, owner)
+
+    assert _sends(wire) == [OPUS], "a permission error must never fall past the walk"
+    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("auth_unusable",)]

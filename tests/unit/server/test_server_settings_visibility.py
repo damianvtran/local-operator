@@ -85,9 +85,8 @@ async def test_an_eligible_observation_brings_the_section_and_its_rows_back(api)
     sections, rows = await _team_bridge_view(client)
 
     assert sections == ["team_bridge"]
-    # SIX ROWS as of the screening-budget change: the section keeps its two
-    # flags and gains the four spend ceilings, registered in containment order
-    # (account -> unaddressed -> ambient -> sender) right after them.
+    # The two flags, four ceilings in containment order, then the model
+    # preference: an eligible observation must expose the entire section.
     assert rows == [
         "team_bridge.enabled",
         "team_bridge.session",
@@ -95,4 +94,5 @@ async def test_an_eligible_observation_brings_the_section_and_its_rows_back(api)
         "team_bridge.screening.unaddressed_budget_per_hour",
         "team_bridge.screening.ambient_budget_per_hour",
         "team_bridge.screening.sender_budget_per_hour",
+        "team_bridge.screening.model",
     ]

@@ -50,6 +50,22 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for sid in (SID, CHILD, OTHER, ASKER):
         (state / "sessions" / sid / "scratchpad").mkdir(parents=True)
     (state / "config.yml").write_text("version: 1\n")
+    # Synthetic trees are never live process cwd; dedicated worktree-removal
+    # controls cover live/unknown inventory without depending on fleet latency.
+    monkeypatch.setattr(prov, "_live_cwd_inside", lambda _: False)
+    # Nor do they have a GitHub remote: stub "GitHub, no open PR" so the clean
+    # worktree path is reachable. The PR-state controls live in
+    # ``test_worktree_remove_and_refusal_scope.py``.
+    # ``worktree_activity`` asks the history lookup (``_gh_prs``/``_glab_mrs``)
+    # first and falls back to the open-only one only on a full page, so "no open
+    # PR" needs BOTH stubbed: stubbing only the open lookup let these tests reach
+    # the real ``gh``, which passed where an authenticated gh was on PATH and read
+    # "PR state unknown" (HIGH) on CI. Forge-neutral: GitLab is stubbed too.
+    monkeypatch.setattr(prov, "_github_repo", lambda _: "o/r")
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_mrs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_open_mrs", lambda repo, branch: [])
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
     for key in [k for k in os.environ if k.startswith(("CMUX_", "GIT_"))]:
@@ -235,6 +251,33 @@ def test_worktree_remove_clean_low_dirty_forced_primary_high(home: Path, repo: P
     (wt / "untracked").write_text("work")
     assert prov.worktree_state(str(wt)) == "dirty"
     assert _verdict(home, f"git worktree remove {wt}").risk is Risk.HIGH
+
+
+def test_clean_worktree_low_without_any_forge_cli(
+    home: Path, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``home`` stubs alone keep the clean path LOW: no forge CLI is consulted.
+
+    Regression for a fixture that stubbed only the open-PR lookup, so the history
+    lookup ran the real ``gh``: green on a machine with an authenticated gh, HIGH
+    ("PR state unknown") on CI. PATH here holds only ``git`` plus tripwire
+    ``gh``/``glab`` scripts that record any call and fail, so a lookup leaking past
+    the stubs fails this test on every machine, authenticated or not.
+    """
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").symlink_to(real_git)
+    calls = tmp_path / "forge-calls"
+    for name in ("gh", "glab"):
+        tool = bin_dir / name
+        tool.write_text(f'#!/bin/sh\necho {name} "$@" >> "{calls}"\nexit 1\n')
+        tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    wt = repo / ".worktrees" / "wt"
+    assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.LOW
+    assert not calls.exists(), calls.read_text()
 
 
 # -- trusted operator words --------------------------------------------------------------
@@ -1006,9 +1049,12 @@ _READS = [
     # Round 6: sed/sqlite3 are not strict read-only; a session mention is HIGH.
     (f"sed -n 1p ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
     (f"awk 'NR==1' ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
-    (f"sort ~/.local-operator/sessions/{CHILD}/transcript.jsonl | uniq -c", Risk.HIGH),
+    # Plain sort/uniq/shasum only read (operator, 2026-11-09: "Read-only
+    # commands are never dangerous-delete"); ``sort -o`` stays a write.
+    (f"sort ~/.local-operator/sessions/{CHILD}/transcript.jsonl | uniq -c", Risk.LOW),
     (f"xxd ~/.local-operator/sessions/{CHILD}/transcript.jsonl | head", Risk.HIGH),
-    (f"shasum ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.HIGH),
+    # 2026-11-09: a digest only reads its operands (``resolve._DIGEST_READERS``).
+    (f"shasum ~/.local-operator/sessions/{CHILD}/transcript.jsonl", Risk.LOW),
     (f"python3 -m json.tool ~/.local-operator/sessions/{CHILD}/origin.json", Risk.HIGH),
     (f"cp ~/.local-operator/sessions/{CHILD}/transcript.jsonl ~/work/t.jsonl", Risk.LOW),
     (f"rsync -a ~/.local-operator/sessions/{CHILD}/ ~/work/bk/", Risk.LOW),

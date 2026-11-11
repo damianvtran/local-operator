@@ -62,6 +62,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -1010,6 +1011,50 @@ class ToolResult(BaseModel):
     # the native loop must consume it before hooks or events can publish the row.
     _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
 
+    # The write/edit SOURCE EVIDENCE: the complete raw ``before``/``after``
+    # file texts plus the raw rendered diff preview, as
+    # ``(before, after, preview_rows)``. While it is attached,
+    # ``details['diff']`` holds only the withheld receipt. The native loop's
+    # seam (``AgentLoop._settle_write_diff``) redacts each COMPLETE side once,
+    # masks every preview row whose source line the redactor touched, then runs
+    # the ordinary per-hunk seam and publishes that. Hunks hold two context
+    # lines, so a registered multi-line value longer than the hunk window never
+    # appears whole in the diff and the per-hunk seam alone published its
+    # fragments (architect proof on dfc7411: 5 of 10 lines of an edited
+    # literal); only the whole file side carries the proof.
+    #
+    # RAW executor bytes, so it must never reach a public surface: a
+    # PrivateAttr is outside ``model_dump``/JSON, and the hooks below drop it
+    # from every copy (``model_copy``, ``copy``/``deepcopy``, pickle), because
+    # pydantic otherwise carries private state into all of them -- a retained
+    # event copy or deep-copied trajectory row would keep raw file text alive.
+    # Only the ORIGINAL object carries it; a result that never reaches the
+    # seam keeps the withheld receipt (fail-closed by construction).
+    _diff_source: tuple[str, str, tuple[str, ...]] | None = PrivateAttr(default=None)
+
+    def __copy__(self) -> "ToolResult":
+        copied = super().__copy__()
+        _drop_diff_source(copied)
+        return copied
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> "ToolResult":
+        copied = super().__deepcopy__(memo)
+        _drop_diff_source(copied)
+        return copied
+
+    def __getstate__(self) -> dict[Any, Any]:
+        state = super().__getstate__()
+        private = state.get("__pydantic_private__")
+        if isinstance(private, dict) and private.get("_diff_source") is not None:
+            state = {**state, "__pydantic_private__": {**private, "_diff_source": None}}
+        return state
+
+    def take_diff_source(self) -> tuple[str, str, tuple[str, ...]] | None:
+        """Return and CLEAR the raw source-evidence carrier (single consumption)."""
+        source = self._diff_source
+        self._diff_source = None
+        return source
+
     @classmethod
     def one_turn_secret(
         cls,
@@ -1065,6 +1110,17 @@ class ToolResult(BaseModel):
     @property
     def text(self) -> str:
         return "".join(block.text for block in self.content if isinstance(block, TextContent))
+
+
+def _drop_diff_source(result: "ToolResult") -> None:
+    """Clear a copy's raw source-evidence carrier without touching the original's.
+
+    ``super().__copy__`` SHALLOW-copies the private dict, so the copy owns its
+    own dict and rewriting it here cannot clear the original's carrier.
+    """
+    private = getattr(result, "__pydantic_private__", None)
+    if isinstance(private, dict) and private.get("_diff_source") is not None:
+        object.__setattr__(result, "__pydantic_private__", {**private, "_diff_source": None})
 
 
 # ---------------------------------------------------------------------------
@@ -1842,6 +1898,21 @@ class AskOption(BaseModel):
 #
 # The marker indexes `options` AS CARRIED, never the authored order: a consumer
 # that re-sorts the list and keeps the index moves the badge to the wrong row.
+#
+# A MULTI-select may recommend several rows, so the AUTHORED `recommended` is
+# `int | list[int]`. The wire keeps the old contract anyway: after validation
+# `recommended` is ALWAYS `int | None` (0 or None, never a list), so every
+# client and every stored row that only knows the int still shows the first
+# pick correctly. The rest of the set rides a second, derived field,
+# `recommended_all`, which is `[0..k-1]` and present only when k >= 2 — the
+# listed rows are hoisted to the top IN THE ORDER THE MODEL LISTED THEM (that
+# order is its ranking), then everything else in authored order. It is declared
+# (so `model_dump()` -> `model_validate()` is a fixed point; the model forbids
+# extras) but hidden from the published tool schema with `SkipJsonSchema`,
+# because it is derived output, not something the model should author. Nothing
+# is PRE-TICKED: on a multi-select the visible ticks are the answer, and the
+# user builds them (see the pinned picker test). Consumers read
+# `recommended_rows`, never `recommended`, so a set cannot be half-drawn.
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -1859,12 +1930,15 @@ class AskQuestion(BaseModel):
     multi: bool = Field(
         default=False, description="True lets the user pick several options instead of one."
     )
-    recommended: int | None = Field(
+    recommended: int | list[int] | None = Field(
         default=None,
         description=(
-            "0-based index of the option you recommend; it is moved to the top and preselected."
+            "0-based index you recommend (multi-select: a list, best first); "
+            "moved to top, badged, not ticked."
         ),
     )
+    # Derived, never authored: see the comment above the class.
+    recommended_all: SkipJsonSchema[list[int] | None] = None
     secret: bool = Field(
         default=False,
         description=(
@@ -1891,7 +1965,7 @@ class AskQuestion(BaseModel):
                 raise ValueError("a secret question has no options; the answer is a pasted value")
             if self.multi:
                 raise ValueError("a secret question cannot be multi-select")
-            if self.recommended is not None:
+            if self.recommended is not None or self.recommended_all is not None:
                 raise ValueError("a secret question has no options to recommend")
             from local_operator.variables import normalize_credential_key
 
@@ -1908,21 +1982,63 @@ class AskQuestion(BaseModel):
             raise ValueError("persist only applies to a secret question")
         if len(self.options) < 2:
             raise ValueError("at least two answers to pick from")
-        if self.recommended is not None and not 0 <= self.recommended < len(self.options):
-            raise ValueError(
-                f"recommended must index options (0..{len(self.options) - 1}), "
-                f"got {self.recommended}"
-            )
-        if self.recommended is not None:
+        if self.recommended_all is not None:
+            # A previously normalised dump being re-validated. Only the exact
+            # shape `_shape` itself emits is accepted, so a hand-built row
+            # cannot smuggle in a set that disagrees with the hoisted order.
+            if (
+                self.recommended != 0
+                or len(self.recommended_all) < 2
+                or self.recommended_all != list(range(len(self.recommended_all)))
+            ):
+                raise ValueError(
+                    "recommended_all is derived: it must be [0..k-1] (k >= 2) with recommended 0"
+                )
+            picks = list(self.recommended_all)
+        elif isinstance(self.recommended, list):
+            picks = list(self.recommended)
+        elif self.recommended is not None:
+            picks = [self.recommended]
+        else:
+            picks = []
+        if isinstance(self.recommended, list) and not picks:
+            raise ValueError("recommended is an empty list; omit it instead")
+        if len(set(picks)) != len(picks):
+            raise ValueError(f"recommended lists an option twice: {picks}")
+        # Bounds first, before any reordering: see the comment above the class.
+        for pick in picks:
+            if not 0 <= pick < len(self.options):
+                raise ValueError(
+                    f"recommended must index options (0..{len(self.options) - 1}), got {pick}"
+                )
+        if len(picks) > 1 and not self.multi:
+            raise ValueError("several recommendations need multi=true; give one index")
+        if picks:
             # Rotate rather than swap: the authored order of everything the
             # model did NOT recommend is still its ranking, and a swap would
             # promote whatever happened to sit at index 0 over the rest of it.
-            # Rotating by 0 is the identity, so an already-normalised question
-            # passes through untouched however many times it is re-validated.
-            hoisted = self.options.pop(self.recommended)
-            self.options.insert(0, hoisted)
+            # Hoisting an already-normalised [0..k-1] set is the identity, so
+            # a question passes through untouched however many times it is
+            # re-validated.
+            hoisted = [self.options[pick] for pick in picks]
+            rest = [option for index, option in enumerate(self.options) if index not in picks]
+            self.options[:] = hoisted + rest
             self.recommended = 0
+            self.recommended_all = list(range(len(picks))) if len(picks) > 1 else None
         return self
+
+    @property
+    def recommended_rows(self) -> tuple[int, ...]:
+        """Every recommended row index, first pick first; ``()`` when none.
+
+        The one accessor consumers read, so a multi-select's set is drawn whole
+        and pyright never sees ``recommended``'s authored ``list`` arm.
+        """
+        if self.recommended_all:
+            return tuple(self.recommended_all)
+        if isinstance(self.recommended, int):
+            return (self.recommended,)
+        return ()
 
 
 # THE ROW SHAPE. The ask the TOOL takes and the ask a ROW stores are two shapes,
@@ -1993,17 +2109,35 @@ AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]
 
 
 @dataclass(frozen=True)
-class QueuedProfileWrite:
-    """Host-filed durable request, explicitly NOT a grant or a denial."""
+class ProposedProfileWrite:
+    """Host-filed profile PROPOSAL, explicitly NOT a grant or a denial.
 
-    approval_id: str
-    request_digest: str
-    expires_at: float
-    receipt_id: str
+    The consent seam returns this when the account write was not asked for by
+    the owner in their own words: the change is stored in
+    ``local_operator.profile_proposals`` and reviewed in Agents → <name>, or
+    applied with the ``profile_proposal`` tool after the user agrees.
+    """
+
+    proposal_id: str
     profile_kind: str
     profile_name: str
     changes: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    #: Bounded per-field lines (``instructions: +12 −3 lines``) computed by the
+    #: host from the filed record (``profile_proposals.summary_line``). The
+    #: receipt shows THESE, never ``diff``: a replaced brief's ``diff`` is the
+    #: whole new text, and an agent that saw it echoed it into its ask to the
+    #: user, which filled the conversation (operator report 2026-11-10).
+    summary: tuple[str, ...] = ()
+    #: The record's real state. ``pending`` for a fresh filing; an identical
+    #: re-filing of an already-decided or expired proposal reports that state
+    #: so the receipt never claims a pending proposal that does not exist.
+    state: str = "pending"
+
+
+#: Kept for one release so out-of-tree imports of the old name keep resolving;
+#: the signed mesh filing it described is gone (proposals live in Agents now).
+QueuedProfileWrite = ProposedProfileWrite
 
 
 @dataclass(frozen=True)
@@ -2047,7 +2181,7 @@ class DurableWriteIntent:
     they land in the account store.
     """
 
-    kind: Literal["agent", "team"]
+    kind: Literal["agent", "team", "skill"]
     #: ``sync`` is here because syncing rewrites installed account rows and its
     #: hub arm fetches account definitions — both are account mutations the
     #: seam is asked about, even though the tool's own verb is a different one.
@@ -2336,8 +2470,12 @@ class ToolContext(BaseModel):
         default=None, exclude=True
     )
     authorize_durable_write: (
-        Callable[[DurableWriteIntent], Awaitable[str | QueuedProfileWrite | None]] | None
+        Callable[[DurableWriteIntent], Awaitable[str | ProposedProfileWrite | None]] | None
     ) = Field(default=None, exclude=True, repr=False)
+    #: Host-held consent decision, never a model-supplied permission flag.
+    decide_profile_proposal: Callable[[str, str], Awaitable[str]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process
@@ -2469,6 +2607,12 @@ class ToolContext(BaseModel):
     # ``local_operator.video.records.build_record`` returns, and this module
     # must not import that module's way up the graph.
     journal_video_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # Music journals before paid submit so an interrupted HTTP response can be
+    # replayed under the SAME idempotency key, never another purchase.
+    journal_music_job: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    # A lifecycle predicate, not a turn snapshot: teardown stops observation
+    # without authorizing upstream cancellation or discarding purchased audio.
+    session_disposed: Callable[[], bool] | None = Field(default=None, exclude=True)
     # The audio lane's late-settlement writer (``Session.journal_audio_settle``):
     # appends one ``audio_settle_v1`` bookkeeping row after a RUNNING cancel,
     # because a job refused cancellation may finish minutes later and the tool

@@ -103,9 +103,11 @@ from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import (
     _MAX_LINE_BYTES,
+    _SWITCH_SLASH_COMMANDS,
     RuntimeServer,
     fit_frame_for_wire,
 )
+from local_operator.session.runtime.serving import SETTINGS_RESULT_MESSAGE_CHARS
 from local_operator.tui.costs import job_cost
 from tests.unit.session.runtime.test_server import FakeHandle
 
@@ -724,6 +726,14 @@ _BOUNDED_COLLECTION_FIELDS = {
     # `_parse_loop_verdict`, and the user's `goal` at LOOP_GOAL_CHARS in
     # `GoalLoop.start`.
     "loop": "five scalar keys, replaced per publish; both free-text values clipped at entry",
+    # PR #3697: the latest settings outcome PER KIND. One slot per switch kind
+    # (``_SWITCH_SLASH_COMMANDS``: model/effort/fast), OVERWRITTEN by
+    # ``ServingSessionHandle._publish_settings_result`` (``per_kind[kind] =
+    # result``), never appended — so three entries at most, however many
+    # switches a session makes. Each entry is four scalars whose one free-text
+    # value is clipped at that publish (SETTINGS_RESULT_MESSAGE_CHARS); the
+    # ``populated`` entry below charges all three kinds at that clip.
+    "settings_results": "one overwritten slot per switch kind (3); message clipped at publish",
 }
 
 
@@ -1514,6 +1524,17 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         ],
         "asks_open": 20,
         "peer_cycle_display": _busy_peer_cycle_display(session_id="s1", epoch="e1"),
+        # Every switch kind refused at the publish clip, with a UUID-width
+        # request id and the longest refusal code: the field's widest shape.
+        "settings_results": {
+            kind: {
+                "request_id": f"{kind}-" + "0" * 32,
+                "ok": False,
+                "code": "model_unknown",
+                "message": "r" * SETTINGS_RESULT_MESSAGE_CHARS,
+            }
+            for kind in sorted(_SWITCH_SLASH_COMMANDS)
+        },
     }
     missing = _collection_fields() - set(populated)
     assert not missing, (
@@ -1543,7 +1564,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         # what must not grow. The field's own size-policy review is its entry in
         # ``_BOUNDED_COLLECTION_FIELDS``. Re-derive both figures before moving
         # either number.
-        # TWO fixed charges are paid out of the same free-text pool, from the
+        # THREE fixed charges are paid out of the same free-text pool, from the
         # same base (title 323, goal 2,000), and each is paid in the space its
         # own change added to:
         #
@@ -1555,14 +1576,20 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         #    323 bytes including its key and separator. Paid from free-text
         #    goal space (2,000 - 323 = 1,677).
         #
-        # Both preserve the instrument's TOTAL and its existing excess
+        # 3. `settings_results` charges 1,258 B (PR #3697): all three switch
+        #    kinds refused at SETTINGS_RESULT_MESSAGE_CHARS, measured as the
+        #    real `sync_wire_payload` frame with the field populated minus the
+        #    same frame with its default `{}` (2,812 - 1,554 B). Paid from
+        #    free-text goal space (1,677 - 1,258 = 419).
+        #
+        # All three preserve the instrument's TOTAL and its existing excess
         # allowance rather than increasing a wire cap to hide the cost. The
         # charges are additive because the bytes they occupy are additive, so
-        # taking both from the pool is the only way the worst-case TOTAL stays
-        # where it has always been: one side's charge alone would leave the
-        # other's field unbudgeted.
+        # taking each from the pool is the only way the worst-case TOTAL stays
+        # where it has always been: leaving any charge out would leave its
+        # field unbudgeted.
         conversation_title="a" * 196,
-        goal="g" * 1_677,
+        goal="g" * 419,
         cwd="/" + "d" * 500,
         **populated,
     )
@@ -1573,6 +1600,8 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
     }
 
     assert frame["data"]["snapshot"]["attention"] == attention
+    # The settings outcomes ride the frame whole, so the size below charges them.
+    assert frame["data"]["snapshot"]["settings_results"] == populated["settings_results"]
     # The all-year frame already spends its line budget. Complete proof stays
     # in the store/archive, while its optional hot wire copy cannot break attach.
     assert "peer_cycle_display" not in frame["data"]["snapshot"]

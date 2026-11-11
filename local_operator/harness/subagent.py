@@ -1892,6 +1892,24 @@ def missing_worktree_notice(agent: str, prompt: str) -> str | None:
     return MISSING_WORKTREE_NOTICE
 
 
+def reader_evidence_root(agent: str, profile_name: str | None, prompt: str) -> str | None:
+    """The verified worktree a reader child's ``evidence`` tool binds to, or None.
+
+    Only :data:`READER_ROLES` (by launch name, or by resolved profile name for a
+    ``team:`` launch), and only when the brief's ``Worktree:`` field names a
+    real checkout (``tools/evidence_tool.verified_worktree_root``). Coder,
+    manager, plain and top-level sessions never reach this, so they never get
+    the tool: it sanctions one receipt path for roles that review, it is not a
+    general write grant. Blocking (two ``git`` calls); call it off the loop.
+    """
+    from local_operator.tools.evidence_tool import first_verified_root
+
+    roles = {agent.strip().lower(), (profile_name or "").strip().lower()}
+    if not roles & READER_ROLES:
+        return None
+    return first_verified_root(match.group(1) for match in _WORKTREE_FIELD.finditer(prompt or ""))
+
+
 def _effective_prompt(
     prompt: str,
     agent: str,
@@ -2083,6 +2101,23 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
         if blocks
         else ""
     )
+
+
+def _redact_child_result(parent_session: "Session", text: str) -> str:
+    """``text`` through the session store's redactor (known values, then shapes).
+
+    The child shares the parent's store, so a value either side registered is
+    caught here too. Fail closed: a filter that cannot vouch for the text must
+    not persist it.
+    """
+    redact = getattr(getattr(parent_session, "_variables", None), "redact", None)
+    if not text or not callable(redact):
+        return text
+    try:
+        return str(redact(text))
+    except Exception:  # noqa: BLE001 — see the docstring: withholding IS the guard
+        logger.warning("subagent result redaction failed", exc_info=True)
+        return "[subagent result withheld: the credential filter could not read it]"
 
 
 def _make_runner(
@@ -2383,7 +2418,11 @@ def _make_runner(
                 # must settle failed with it, not completed with the partial
                 # text.
                 raise RuntimeError(_describe_child_failure(str(final["error"]), model_spec))
-            result_text = final["text"]
+            # Scrubbed HERE, once, because this one string becomes the comms
+            # record, the job row (the checkpoint's ``result_text``) and the
+            # parent's ``job_result`` message — all persisted history (PR
+            # #3756, QA Q6: a child's own text quoting a value reached disk raw).
+            result_text = _redact_child_result(parent_session, final["text"])
             # Recorded on the comms record, not just the job row: the manager
             # sweeps settled rows after its retention window while comms
             # records outlive them so a child stays resumable, and without
@@ -3441,14 +3480,23 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     still route and still reconnect (``manager._execute_tool_call``); only a schema
     changed mid-run is missed, over a window bounded by one prompt.
 
-    Activation is the parent's lazy path unchanged: ``read mcp://<server>``
-    lists a server, ``read mcp://<server>/<tool>`` activates exactly one tool —
-    into the CHILD's inventory. The child starts from the set the parent has
-    already activated, derived from the parent's live tool list rather than
-    plumbed out of ``wire_mcp_into_session``'s closure: a tool the manager
-    knows is in that list exactly when the parent activated it, so the fact is
-    already public. The parent paid those schemas' token cost for the very task
-    it is now delegating.
+    Selection is the parent's lazy path unchanged: ``read mcp://<server>``
+    lists a server, ``read mcp://<server>/<tool>`` shows one tool's schema
+    inline and DEFERS it — callable through the child's fallback resolver, not
+    published into the child's tools array (only an over-cap schema is
+    published, see ``make_mcp_resolver``). The child starts from two parent
+    sets. PUBLISHED: exactly what is in the parent's live tool list right now,
+    derived from it rather than plumbed out of ``wire_mcp_into_session``'s
+    closure — a tool the manager knows is in that list exactly when the parent
+    has it enabled, so the fact is already public, and it is lean by
+    construction: per-tool reads defer, and the parent's cold-boundary demotion
+    has already taken idle published schemas out. Every schema in it is re-sent
+    on each of the child's requests, which is why nothing beyond the parent's
+    enabled set is published here. DEFERRED: a copy of the parent's
+    ``_mcp_deferred_origins``, which includes everything the parent demoted, so
+    a tool the parent used earlier still resolves in the child by name or via
+    eval ``tool(...)`` — demoted never means unreachable. The copy is the
+    child's own: its discoveries do not leak back into the parent.
 
     ``restricted`` is the tool-allowlist case (a reviewer, a scout). Such a
     child used to get NO MCP at all, which cost it the reads its role is made
@@ -4156,6 +4204,21 @@ async def _construct_child_session(
         tools = _with_readonly_shell_floor(tools, available_tools, shell_root=shell_write_root)
     if restricted and hub_tool is not None and not any(tool.name == "hub" for tool in tools):
         tools = list(tools) + [hub_tool]
+    # Same post-allowlist spare shape as ``hub``, for the receipt a reader is
+    # REQUIRED to file: a reviewer's allowlist has no write/edit, and a shell
+    # redirect into the repo reads as the reroute a careful auditor refuses, so
+    # without this it had no sanctioned way to put its own receipt where the
+    # repository mandates (session 4e70660bd1bf). Added AFTER the allowlist so
+    # no seed or registry row has to name it, and only here, so its schema
+    # costs nothing anywhere else.
+    # It binds to the brief's verified worktree; it does not sandbox ``bash``.
+    evidence_root = await asyncio.to_thread(
+        reader_evidence_root, agent, profile.name if profile is not None else None, prompt
+    )
+    if evidence_root is not None and not any(tool.name == "evidence" for tool in tools):
+        from local_operator.tools.evidence_tool import build_evidence_tool
+
+        tools = list(tools) + [build_evidence_tool(evidence_root)]
     # A restricted role receives the MCP tools its PARENT had already enabled
     # (see :func:`_child_mcp_wiring` for why inheriting is the honest line and
     # activation is not): withholding them cost a reviewer or scout the reads

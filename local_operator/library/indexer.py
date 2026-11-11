@@ -55,6 +55,7 @@ from local_operator.library.store import (
     STATE_SESSIONS_TOTAL,
     IndexUnavailable,
     LibraryStore,
+    release_keepers,
 )
 from local_operator.session_files import ledger
 from local_operator.session_files import service as files_service
@@ -221,6 +222,9 @@ def reset_for_tests() -> None:
         _LIVE.clear()
     for instance in targets:
         instance.stop()
+    # The held idle connections belong to the process, not an indexer; a test's
+    # temporary index must not stay open into the next test.
+    release_keepers()
 
 
 def _titles(
@@ -797,8 +801,6 @@ class LibraryIndexer:
         title = str(entry.get("title") or "") or title_key or session_id
         rows = _occurrence_rows(session_id, entry, title)
         assets = {row["asset_id"]: (row["key"], row["name"]) for row in rows if row["asset_id"]}
-        previous = self.store.occurrence_assets(session_id)
-        affected = set(assets) | previous
         # Outside the write transaction on purpose: MetadataStore opens its own
         # connection, and a writer waiting on its own lock is a deadlock, not a
         # slow write.
@@ -806,7 +808,12 @@ class LibraryIndexer:
             (asset_id, assets[asset_id][0], assets[asset_id][1] or None) for asset_id in assets
         )
         with self.store.write() as connection:
-            self.store.replace_session_occurrences(connection, session_id, rows)
+            # Only the assets whose occurrence rows actually changed are
+            # recomputed: a rescan that found the same records (a roster
+            # sidecar replaced by a sibling's heartbeat, an append that touched
+            # no file) must not rewrite the session's whole slice of the
+            # catalog. See ``replace_session_occurrences`` for the measurement.
+            affected = self.store.replace_session_occurrences(connection, session_id, rows)
             self.store.recompute_assets(connection, affected)
             self.store.record_session(
                 connection,
@@ -818,7 +825,23 @@ class LibraryIndexer:
                 complete=bool(entry.get("complete")),
                 revision=revision,
             )
-            revision = self.store.bump_revision(connection)
+            # The catalog revision is what tells a listing its cursor is stale
+            # (``cursor_reset``), so it moves only when something a listing
+            # shows moved: an asset row, a new session, its title or its
+            # completeness (the scanned/total progress). A rescan that changed
+            # none of those — the common case at ~2 rescans/s — keeps the
+            # revision, sparing the idx_state write and a needless client
+            # refetch, the same rule ``_forget`` applies to a no-op removal.
+            listing_moved = (
+                bool(affected)
+                or known is None
+                or bool(known.get("complete")) != bool(entry.get("complete"))
+                or str(known.get("title") or "") != title
+            )
+            if listing_moved:
+                revision = self.store.bump_revision(connection)
+            else:
+                revision = self.store._revision(connection)
         self._enqueue_thumbs(assets)
         # The revision ``bump_revision`` returned, not a fresh read: that would
         # open another connection per session (623 of them on a cold backfill).

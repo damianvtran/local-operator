@@ -46,6 +46,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import logging
 import re
 import secrets
 import weakref as _weakref
@@ -59,16 +60,24 @@ from local_operator.team_bridge.client import (
     SCREENING_VERSION_V1,
     SCREENING_VERSION_V3,
     SCREENING_VERSION_V4,
+    SCREENING_VERSION_V5,
     screening_template_sha256,
 )
-from local_operator.team_bridge.store import Store, StoreRefused
+from local_operator.team_bridge.privacy_pass import (
+    PRIVACY_HOLD_CODES as _PRIVACY_HOLD_CODES,
+)
+from local_operator.team_bridge.store import Store, StoreRefused, is_owner_principal
 from local_operator.team_bridge.types import (
     DELIVERY_STATES,
+    FEED_ADDRESSED_VALUES,
+    FEED_RELATION_VALUES,
     SCREENING_CATEGORIES,
     OwnerSnapshot,
     ScreeningObservation,
     ScreeningReceipt,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "HOLD_CODES",
@@ -77,7 +86,9 @@ __all__ = [
     "ScreenResult",
     "ScreenRunner",
     "parse_verdict",
+    "PrivacyTemplateUntrusted",
     "render_prompt",
+    "render_trusted_privacy_prompt",
     "screen_message",
     "validate_envelope",
 ]
@@ -110,6 +121,8 @@ HOLD_CODES = (
     "model_identity_unknown",
     "model_identity_mismatch",
     "parse_failed",
+    # Every hop answered blank, even after the re-draw: NOT cached, retried.
+    "empty_reply",
     "bounce_without_category",
     "model_hold",
     "policy_stale",
@@ -155,6 +168,13 @@ HOLD_CODES = (
     # never a verdict: never answer-cached, never releasable, re-screened on
     # the retry pass, which re-resolves the chain.
     "screening_model_unavailable",
+    # A8 privacy pass (``privacy_pass.PRIVACY_HOLD_CODES``; default OFF). Local
+    # holds only: never a transport reject, never answer-cached, never a B4b
+    # release. ``privacy_proof_missing`` is the native fence refusing an allow
+    # that carries no matching conjunction proof.
+    *_PRIVACY_HOLD_CODES,
+    "privacy_proof_missing",
+    "privacy_commit_interrupted",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
@@ -175,10 +195,13 @@ _REASON_LINE = re.compile(r"^REASON: (\S.*)$")
 #: the text that follows it). The names are listed literally, not matched generically, so
 #: an unknown placeholder in a future template stays literal text — which the screener
 #: would read as content someone controls. The renderer asserts none survives.
-_PLACEHOLDER = re.compile(r"\{\{(nonce|body|sender|organization|type|attachments|files)\}\}")
+_PLACEHOLDER = re.compile(
+    r"\{\{(nonce|body|sender|organization|type|attachments|files|addressed|relation)\}\}"
+)
 #: Any other ``{{name}}`` in a template is a slot nothing fills.
 _UNKNOWN_PLACEHOLDER = re.compile(
-    r"\{\{(?!(?:nonce|body|sender|organization|type|attachments|files)\}\})[a-z_]+\}\}"
+    r"\{\{(?!(?:nonce|body|sender|organization|type|attachments|files|addressed|relation)\}\})"
+    r"[a-z_]+\}\}"
 )
 #: The hub's per-message image bound; a carrier claiming more is malformed.
 _ATTACHMENTS_MAX = 4
@@ -226,6 +249,18 @@ class PolicySnapshot:
     #: snapshot so the job mint never re-resolves a second, later config
     #: (R7/Q3: one capture certifies the dispatch).
     provider: str = ""
+    #: The addressed-aware template the hub OFFERS beside the policy template
+    #: (``client.screening_addressed_version``: ``bridge-screen-v5`` or ``""``).
+    #: A per-message RENDER option, never the policy: the published row, the
+    #: local receipt and every store fence keep ``screening_version``. Part of
+    #: the snapshot so ``matches_live`` refuses a run whose offer changed mid-flight.
+    addressed_version: str = ""
+    #: A8 (privacy pass): the operator control generation the publisher minted
+    #: this policy under while ENABLED, ``0`` while off. Captured so a run whose
+    #: authority moved is refused by ``matches_live`` AND so the decision seam
+    #: can compare it with a FRESH authority read (S-2) — a frozen policy
+    #: object alone cannot see a disable, which is why both exist.
+    privacy_generation: int = 0
 
     @classmethod
     def capture(cls, policy: ScreeningPolicy) -> "PolicySnapshot":
@@ -238,6 +273,8 @@ class PolicySnapshot:
             admission_revision=str(getattr(policy, "admission_revision", "")),
             approved_serving_identities=frozenset(str(i) for i in identities),
             provider=provider,
+            addressed_version=str(getattr(policy, "addressed_version", "") or ""),
+            privacy_generation=int(getattr(policy, "privacy_generation", 0) or 0),
         )
 
     def matches_live(self, policy: ScreeningPolicy) -> bool:
@@ -465,6 +502,19 @@ class Envelope:
     #: residual). Empty is unknown provenance — an account with no stated kind
     #: is not attributable, and must never be charged as one.
     sender_kind: str = ""
+    #: How the message reached this agent, in the hub's v5 vocabulary
+    #: (``direct``/``thread``/``everyone``/``ambient``; ``""`` = not stated): the
+    #: hub's ``events[].ids.addressed`` when it sent one, else a value the
+    #: CONNECTOR derived from server fields
+    #: (``connector.conversation.screening_addressed``) — never from the body.
+    #: Rendered only into a template with an ``{{addressed}}`` slot (v5).
+    addressed: str = ""
+    #: The sender's relation to the recipient (``owner``/``member``; ``""`` =
+    #: not stated, rendered as ``member``, the hub's default). Hub-stated only.
+    relation: str = ""
+    #: Whether the HUB stated the routing (vs. the connector deriving it). Only a
+    #: stated routing joins the envelope digest — see ``validate_envelope``.
+    routing_stated: bool = False
 
     def private_images(self) -> ScreeningAttachments | None:
         """The image set for the single dispatch, or ``None`` (text-only)."""
@@ -702,6 +752,27 @@ def validate_envelope(
             return None, "envelope_malformed"
         files = raw_files
 
+    # Routing (bridge-screen-v5): closed values only; anything else reads as
+    # "not stated", so the message falls back to the policy template.
+    addressed = (
+        item["addressed"]
+        if isinstance(item.get("addressed"), str) and item["addressed"] in ADDRESSED_VALUES
+        else ""
+    )
+    relation = (
+        item["relation"]
+        if isinstance(item.get("relation"), str) and item["relation"] in RELATION_VALUES
+        else ""
+    )
+    if relation == "owner" and not is_owner_principal(owner, sender_account, sender_kind):
+        # CLAMPED (code review round 1, R2). v5 tells the screener ``owner`` means
+        # "the recipient sent it", which switches off the scope categories. A hub
+        # that states ``owner`` per ACCOUNT also says it for the owner's OTHER
+        # agent -- which can relay a stranger's words -- or a classless sender.
+        # The owner-as-person is admitted before any model call (A1), so every
+        # screened ``owner`` claim is one of those: render it as ``member``.
+        relation = "member"
+    routing_stated = bool(addressed) and item.get("routing_stated") is True
     digest_payload = json.dumps(
         {
             "sender": sender_account,
@@ -730,6 +801,20 @@ def validate_envelope(
             # itself is not hashed here — ``files_hash`` already covers every byte of
             # every file through the hub's own commitment.
             **({"files_hash": files.files_hash} if files is not None else {}),
+            # HUB-STATED routing only (bridge-screen-v5). The digest keys the
+            # content-addressed verdict and answer caches, and v5's verdict
+            # depends on who was asked: a byte-identical "can you build X?" may
+            # be room context when ambient and new_work_request when direct, so
+            # the two must never share a cached answer. Present ONLY when the hub
+            # stated it, so every digest from an older hub — and every row queued
+            # before this build — stays byte-identical (no re-screen, no orphaned
+            # owner release). A connector-DERIVED routing stays out on purpose:
+            # it exists only for those older rows.
+            **(
+                {"routing": {"addressed": addressed, "relation": relation or "member"}}
+                if routing_stated
+                else {}
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -747,6 +832,9 @@ def validate_envelope(
         attachments_hash=attachments.attachments_hash if attachments is not None else None,
         files_hash=files.files_hash if files is not None else None,
         sender_kind=sender_kind,
+        addressed=addressed,
+        relation=relation,
+        routing_stated=routing_stated,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
@@ -767,6 +855,8 @@ def render_prompt(
     version: str = SCREENING_VERSION_V1,
     attachments: str | None = None,
     files: str | None = None,
+    addressed: str = "",
+    relation: str = "",
 ) -> RenderedPrompt:
     """Single-pass substitution over an EMBEDDED template — the ONLY renderer.
 
@@ -809,6 +899,73 @@ def render_prompt(
         nonce=nonce,
         attachments=attachments,
         files=files,
+        addressed=addressed,
+        relation=relation,
+    )
+
+
+#: The preregistered A8 privacy-pass prompt, pinned HERE independently of the
+#: constant ``privacy_pass`` embeds: 1432 UTF-8 bytes whose sha256 is below
+#: (``evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/
+#: bridge-privacy-pass.txt``, PROTOCOL-ho4.md:54-58). Two literals in two modules
+#: is deliberate: the trust check must not take the hash from the same place it
+#: takes the bytes, or an edit to that one place would vouch for itself.
+_PRIVACY_TEMPLATE_PIN_SHA256 = "5208c727ff308167e58707a7e15ee67b59fbf982668c1884b9199fba00bc8c3b"
+_PRIVACY_TEMPLATE_PIN_LENGTH = 1432
+
+
+class PrivacyTemplateUntrusted(ValueError):
+    """The privacy template's bytes or declared hash are not the pinned prompt.
+
+    A ``ValueError`` so any caller already failing closed on render refusals
+    still does; a distinct type so the privacy pass can hold at once instead of
+    retrying with a fresh nonce (a nonce cannot cure tampered bytes).
+    """
+
+
+def render_trusted_privacy_prompt(
+    template: str,
+    *,
+    template_sha256: str,
+    body_text: str,
+    nonce: str | None = None,
+) -> RenderedPrompt:
+    """Render the A8 privacy prompt only if ``template`` IS the pinned prompt.
+
+    WHY THIS EXISTS. :func:`_render_with_template` performs no trust check, so
+    ``test_only_screening_and_the_eval_reference_the_private_renderer`` keeps it
+    out of every live module but this one and ``local_operator/evaluation``. The
+    privacy pass is a live caller with its own embedded template (not one of
+    :data:`SCREENING_TEMPLATES`, so :func:`render_prompt` cannot select it); this
+    is its narrow door, carrying the trust check that :func:`render_prompt` gets
+    from the version lookup.
+
+    WHY IT IS SAFE. It renders exactly one prompt: the bytes must have the
+    pinned length and sha256, and the caller's declared ``template_sha256`` (the
+    value persisted with the privacy claim) must equal the same pin. Any
+    mismatch raises :class:`PrivacyTemplateUntrusted` BEFORE substitution, so a
+    tampered or drifted template becomes a hold, never a render. Only the body
+    is substituted (memo §2: no sender, organization, history or tools), through
+    the same single-pass substitution and forged-nonce refusal as screening.
+    """
+
+    data = template.encode("utf-8") if isinstance(template, str) else b""
+    if (
+        not isinstance(template, str)
+        or len(data) != _PRIVACY_TEMPLATE_PIN_LENGTH
+        or hashlib.sha256(data).hexdigest() != _PRIVACY_TEMPLATE_PIN_SHA256
+        or template_sha256 != _PRIVACY_TEMPLATE_PIN_SHA256
+    ):
+        raise PrivacyTemplateUntrusted("privacy template is not the pinned prompt")
+    return _render_with_template(
+        template,
+        template_sha256=_PRIVACY_TEMPLATE_PIN_SHA256,
+        body_text=body_text,
+        sender="",
+        organization="",
+        msg_type="",
+        nonce=nonce,
+        attachments=None,
     )
 
 
@@ -823,6 +980,8 @@ def _render_with_template(
     nonce: str | None,
     attachments: str | None,
     files: str | None = None,
+    addressed: str = "",
+    relation: str = "",
 ) -> RenderedPrompt:
     """The substitution and nonce rules behind :func:`render_prompt`.
 
@@ -834,8 +993,10 @@ def _render_with_template(
     only comparable with the shipped template if it renders through the very
     same single-pass substitution, forged-nonce refusal and three-nonce
     assertion. Copying those rules into the eval would let the two drift, so
-    the eval calls this helper with arbitrary bytes instead. That is its ONLY
-    other caller: nothing on the live connector path may call it, because it
+    the eval calls this helper with arbitrary bytes instead. The only other
+    production caller is :func:`render_trusted_privacy_prompt`, which verifies
+    the A8 privacy template against its pin first. Nothing outside this module
+    on the live connector path may call it (a test enforces that), because it
     performs no trust check on ``template`` and records whatever
     ``template_sha256`` the caller supplies.
     """
@@ -854,6 +1015,14 @@ def _render_with_template(
         "type",
         *(("attachments",) if attachments is not None else ()),
         *(("files",) if files is not None else ()),
+        # The v5 routing slots. A template without them (v1-v4) ignores the
+        # values. ``{{addressed}}`` needs one of the hub's closed tokens: the
+        # template DEFINES what each means, so an invented "unknown" would be
+        # a fact nobody stated — no value is a refused render, and the
+        # pipeline only selects v5 when it has one. ``{{relation}}`` always
+        # has a value: absent is the hub's documented default, ``member``.
+        *(("addressed",) if addressed in ADDRESSED_VALUES else ()),
+        "relation",
     }
     if unexpected:
         raise ValueError("embedded template slot without a supplied value")
@@ -871,6 +1040,16 @@ def _render_with_template(
         "type": msg_type,
         "body": body_text,
     }
+    if "{{addressed}}" in template:
+        if template.count("{{addressed}}") != 1:
+            raise ValueError("embedded template delimiter contract changed")
+        values["addressed"] = addressed
+    if "{{relation}}" in template:
+        if template.count("{{relation}}") != 1:
+            raise ValueError("embedded template delimiter contract changed")
+        if relation and relation not in RELATION_VALUES:
+            raise ValueError("relation outside the closed vocabulary")
+        values["relation"] = relation or "member"
     if attachments is not None:
         if template.count("{{attachments}}") != 1:
             raise ValueError("embedded template delimiter contract changed")
@@ -910,6 +1089,56 @@ def _render_with_template(
     # can reach the body text (H3-Q7).
     rendered.__dict__["_private_text"] = text
     return rendered
+
+
+#: The closed ``{{addressed}}`` / ``{{relation}}`` vocabularies: the hub's own
+#: (agent-server ``bridge.ScreenAddressed*`` / ``bridge.ScreenRelation*``),
+#: shared with the feed-ref parser so the two can never drift.
+ADDRESSED_VALUES = FEED_ADDRESSED_VALUES
+RELATION_VALUES = FEED_RELATION_VALUES
+
+
+def text_screening_version(
+    snapshot: "PolicySnapshot", envelope: "Envelope", *, images: Any, files: Any
+) -> str:
+    """The ONE template a screen renders under: v4 files, v3 images, v5 or policy text.
+
+    A FILE envelope ALWAYS renders under v4 — the only embedded template whose
+    wrapper tells the screener that the file text which follows is submission
+    data, and the only one the hub accepts a files_hash under. An image-only
+    envelope renders under v3. A TEXT-ONLY envelope renders under the
+    addressed-aware v5 when the hub offers it with bytes this client embeds
+    (``snapshot.addressed_version``) AND the envelope carries a routing value;
+    otherwise under the served policy template (v1/v2), byte-for-byte as before.
+    v5 covers no attachments, so an image/file message never reaches it. Used by
+    the render AND by the outcome's ``rendered_version`` so the two cannot differ.
+    """
+
+    if files is not None:
+        return SCREENING_VERSION_V4
+    if images is not None:
+        return SCREENING_VERSION_V3
+    if (
+        snapshot.addressed_version == SCREENING_VERSION_V5
+        and envelope.addressed in ADDRESSED_VALUES
+    ):
+        return SCREENING_VERSION_V5
+    return snapshot.screening_version
+
+
+def unusable_reply_code(reply: Any) -> str:
+    """The NON-cached hold for a reply no parser accepts: blank vs. garbled.
+
+    ``empty_reply`` is its own code so the owner's status can say "the screener
+    answered nothing" (a provider/route symptom) apart from ``parse_failed``
+    (it answered, off-grammar). Neither is in :data:`_ANSWER_HOLD_CACHEABLE`.
+    """
+
+    return "empty_reply" if not isinstance(reply, str) or not reply.strip() else "parse_failed"
+
+
+def _reply_parses(reply: str) -> bool:
+    return parse_verdict(reply) is not None
 
 
 def parse_verdict(reply: str) -> tuple[str, tuple[str, ...], str, str] | None:
@@ -966,6 +1195,8 @@ _HOLD_FOR_SCHEMA = {
     "state_unreadable": "schema_damaged",
 }
 _HOLD_FOR_COMMIT = {
+    "privacy_proof_missing": "privacy_proof_missing",
+    "control_unavailable": "privacy_control_unavailable",
     "stale_generation": "owner_changed",
     "not_enrolled": "owner_changed",
     "busy": "retry_later",
@@ -1037,7 +1268,10 @@ _ANSWER_HOLD_CACHEABLE = frozenset(
         "model_hold",
         "model_refused",
         "reply_truncated",
-        "parse_failed",
+        # ``parse_failed`` and ``empty_reply`` are deliberately ABSENT (operator
+        # report 2026-11-09): an unreadable reply describes the draw, not the
+        # message, and the chain has already re-drawn and failed over before
+        # one is recorded. Caching it parked messages with no exit.
         "bounce_without_category",
         # B4b security review S-4 / decision D5: today a v2 bounce is a TERMINAL
         # reject; converted into a hold it would be due on every pass, and the
@@ -1160,8 +1394,15 @@ async def screen_message_async(
     policy: ScreeningPolicy,
     runner: ScreenRunner | None = None,
     nonce: str | None = None,
+    privacy_runner_factory: Any = None,
 ) -> ScreenResult:
     """One account's serialized screening entry (ONE in flight per account).
+
+    ``privacy_runner_factory`` is the A8 composition-boundary injection
+    (``privacy_pass.PrivacyRunnerFactory``): it builds the ONE second-stage
+    runner from the trusted first answering hop. It supplies raw replies and
+    typed failures only; it can never mark a hop preferred or skip a check.
+    ``None`` (production today) means an ENABLED pass holds before any send.
 
     Concurrent callers for the same account wait on the in-process lock —
     the cross-process equivalent is the native screen_turn lease; the frozen
@@ -1235,6 +1476,7 @@ async def screen_message_async(
                 runner=runner,
                 nonce=nonce,
                 turn=turn,
+                privacy_runner_factory=privacy_runner_factory,
             )
         finally:
             # Whole-ENTRY lifetime (R5/R6): the runner's owned client/stream
@@ -1370,6 +1612,10 @@ def _screen_prepare(
                     default_model=snapshot.default_model,
                     revision=snapshot.admission_revision,
                     create_only=True,
+                    # Bootstrap publishes under the caller's captured A8
+                    # generation; the native fence refuses one that disagrees
+                    # with the durable control row.
+                    privacy_generation=snapshot.privacy_generation,
                 )
             except StoreRefused as race:
                 if race.code != "policy_exists":
@@ -1403,6 +1649,16 @@ def _screen_prepare(
         _persist_hold(store, owner, message_id, "ack_recovery")
         return ScreenResult("hold", hold_code="ack_recovery")
 
+    # 5a. OWNER PRINCIPAL: the receiver's own owner, posting as a person, is
+    #     admitted with no model call and no charge (see
+    #     ``store.OWNER_PRINCIPAL_SHA256`` for the incident and the invariant).
+    #     AFTER the intent reconciliation (an existing intent is never a fresh
+    #     admission) and BEFORE both caches, so a ``model_hold`` an older build
+    #     cached on the owner's own message no longer replays.
+    principal = _admit_owner_principal(store, owner, envelope, epoch)
+    if principal is not None:
+        return principal
+
     # 5b. OWNER RELEASE (B4b DESIGN §3.2 step 4, operator decision a-3f46). A
     #     person's signed Deliver/Discard for THIS message is its answer. It
     #     runs BEFORE both caches: the model's cached ``work_scope_hold`` stays
@@ -1412,7 +1668,14 @@ def _screen_prepare(
     released = _consume_owner_release(store, owner, envelope, snapshot, epoch)
     if released is not None:
         return released
-    replayed = _replay_work_scope_decision(store, owner, envelope, epoch, prepared_item=item)
+    replayed = _replay_work_scope_decision(
+        store,
+        owner,
+        envelope,
+        epoch,
+        prepared_item=item,
+        template_sha256=snapshot.template_sha256,
+    )
     if replayed is not None:
         return replayed
 
@@ -1524,6 +1787,19 @@ def _screen_prepare(
             # reservation below re-verifies owner, policy and turn before any
             # spend, so a miss here can never launder a stale answer.
             cached_answer = None
+        if (
+            cached_answer is not None
+            and cached_answer[0] in _REVIEW_HOLD_CODES()
+            and cached_answer[0] != "work_scope_hold"
+        ):
+            # An identical re-send of a body an earlier message's REVIEW hold
+            # covers: it gets its own decision row (and so its own notice and
+            # Deliver/Discard), copied from that source, never a re-draw.
+            copied = _copy_work_scope_decision(
+                store, owner, envelope, item, code=cached_answer[0], failure_class=cached_answer[1]
+            )
+            if copied is not None:
+                return copied
         if cached_answer is not None and cached_answer[0] == "work_scope_hold":
             # A NEW message whose body+envelope a converted decision already
             # covered (an identical re-send; code review #3443 M2 / QA Q1). It
@@ -1651,8 +1927,12 @@ async def _screen_core(
     runner: ScreenRunner | None = None,
     nonce: str | None = None,
     turn: str = "",
+    privacy_runner_factory: Any = None,
 ) -> ScreenResult:
     """The ONE screening pipeline. At most one runner dispatch per call.
+
+    (With A8 enabled, the decision seam may add exactly ONE privacy dispatch
+    for a non-preferred first deliver — see :mod:`privacy_pass`.)
 
     Order is the contract: owner authority → template floor → envelope
     validation (all pre-spend) → policy publish/epoch → H2 intent
@@ -1664,6 +1944,12 @@ async def _screen_core(
     """
 
     store = Store(config_dir)
+    authority = _entry_authority(config_dir, store, policy)
+    if isinstance(authority, str):
+        message_id = _item_message_id(item)
+        if message_id:
+            _persist_hold(store, owner, message_id, authority)
+        return ScreenResult("hold", hold_code=authority)
     prepared = _screen_prepare(owner, item, config_dir=config_dir, policy=policy, runner=runner)
     if isinstance(prepared, ScreenResult):
         return prepared
@@ -1677,6 +1963,161 @@ async def _screen_core(
         nonce=nonce,
         turn=turn,
         tier=tier,
+        config_dir=config_dir,
+        authority=authority,
+        privacy_runner_factory=privacy_runner_factory,
+    )
+
+
+def _item_message_id(item: Mapping[str, Any]) -> str:
+    message = item.get("message") if isinstance(item, Mapping) else None
+    value = message.get("id") if isinstance(message, Mapping) else None
+    return value if isinstance(value, str) else ""
+
+
+def _entry_authority(config_dir: Path, store: Store, policy: ScreeningPolicy) -> Any:
+    """A8 / S-2 at NEW DECISION ENTRY: one fresh authority read, or a hold code.
+
+    Returns the :class:`privacy_pass.PrivacyAuthority` for this decision, or
+    a closed hold code: ``privacy_control_unavailable`` when the authority
+    cannot be read consistently, ``policy_stale`` when the caller's policy was
+    minted under a different control generation than the one in force now (a
+    stale publisher's enabled ``_CyclePolicy`` after a disable, or an off one
+    after an enable). A never-initialized machine with the key absent reads
+    OFF and takes the legacy path unchanged.
+    """
+
+    from local_operator.team_bridge import privacy_pass
+
+    try:
+        authority = privacy_pass.read_authority(config_dir, store)
+    except privacy_pass.PrivacyAuthorityUnavailable:
+        return "privacy_control_unavailable"
+    except StoreRefused:
+        return "schema_damaged"
+    minted = int(getattr(policy, "privacy_generation", 0) or 0)
+    if minted != authority.policy_generation:
+        return "policy_stale"
+    return authority
+
+
+def _privacy_replay_hold(
+    store: Store, owner: OwnerSnapshot, prepared: "_Prepared", authority: Any
+) -> str | None:
+    """A8 root replay: the hold an EXISTING non-preferred decision forces, or ``None``.
+
+    Only ``nonpreferred_deliver`` decisions are consulted, so first-stage
+    holds/bounces and preferred bypasses keep their existing retry handling.
+    A settled hold re-serves its closed code (no redraw of either stage). A
+    claimed-but-uncompleted stage holds ``privacy_uncertain`` (never resent).
+    A decision still ``open`` with its stage ``pending`` (a transient refusal
+    before the claim, or a crash before the send) RESUMES: ``None``, so the
+    retry reaches ``decide_admission`` and claims the stage once. A settled
+    ``admit`` returns ``None`` too: see the comment at that branch. Any other
+    shape holds ``privacy_commit_interrupted``.
+
+    Resuming re-draws the paid FIRST stage (round 1 m-1 / Q-3, deferred to
+    an enable gate): a commit path that concludes from the persisted first
+    verdict without a fresh first-stage attempt does not exist yet. It is a
+    spend cost, not an admission path: the stored ``nonpreferred_deliver``
+    row still governs the retry (see ``decide_admission``) and S-1 bounds
+    the sender's physical sends.
+    """
+
+    if authority is None or not getattr(authority, "enabled", False):
+        return None
+    from local_operator.team_bridge.privacy_pass import PRIVACY_RULE_VERSION
+
+    envelope = prepared.envelope
+    try:
+        row = store.find_privacy_decision(
+            owner,
+            message_id=envelope.message_id,
+            envelope_digest=envelope.envelope_digest,
+            admission_revision=prepared.snapshot.admission_revision,
+            control_generation=int(authority.generation),
+            rule_version=PRIVACY_RULE_VERSION,
+        )
+    except StoreRefused:
+        return "schema_damaged"
+    if row is None or row.get("trigger") != "nonpreferred_deliver":
+        return None
+    if row.get("final") == "hold" and row.get("hold_code"):
+        return str(row["hold_code"])
+    if row.get("final") == "admit":
+        # A completed privacy DELIVER is reused, never redrawn: the legacy
+        # flow proceeds (re-screening a non-preferred message's first stage
+        # is the existing behaviour — ``_screen_prepare`` frees its write-once
+        # slot) and the decision seam finds the completed stage, so neither a
+        # receipt resend nor a crash after completion buys a second privacy
+        # call.
+        return None
+    if row.get("stage_state") == "claimed":
+        # The one privacy send was claimed and never durably completed: its
+        # outcome is unknown and it is never resent (memo §3).
+        return "privacy_uncertain"
+    if row.get("final") == "open" and row.get("stage_state") == "pending":
+        # Round 1 M-2: holding here forever turned every transient refusal
+        # (lost turn, moved policy) into a permanent hold.
+        return None
+    return "privacy_commit_interrupted"
+
+
+def _prewire_privacy_hold(config_dir: Path | None, store: Store, authority: Any) -> str | None:
+    """A8 / S-2 before the first stage's wire: ``None`` or the hold to take."""
+
+    if config_dir is None or authority is None or not getattr(authority, "enabled", False):
+        return None
+    from local_operator.team_bridge import privacy_pass
+
+    try:
+        live = privacy_pass.read_authority(config_dir, store)
+    except privacy_pass.PrivacyAuthorityUnavailable:
+        return "privacy_control_unavailable"
+    if not live.enabled or live.generation != authority.generation:
+        return "policy_stale"
+    return None
+
+
+async def _decide(
+    store: Store,
+    owner: OwnerSnapshot,
+    prepared: "_Prepared",
+    *,
+    config_dir: Path | None,
+    authority: Any,
+    attempt_id: str,
+    parsed: "tuple[str, tuple[str, ...], str, str]",
+    actual_model: str | None,
+    runner: Any,
+    factory: Any,
+    turn: str,
+    channel: str,
+) -> Any:
+    """Call the production decision step (:func:`privacy_pass.decide_admission`).
+
+    A caller with no authority (an internal path that never read one) is the
+    legacy path: ``disabled``. Every enabled outcome goes through the one
+    production state machine, never a copy of it.
+    """
+
+    from local_operator.team_bridge import privacy_pass
+
+    if authority is None or config_dir is None or not getattr(authority, "enabled", False):
+        return privacy_pass.AdmissionDecision("disabled", proceed=True)
+    return await privacy_pass.decide_admission(
+        store=store,
+        owner=owner,
+        config_dir=config_dir,
+        prepared=prepared,
+        authority=authority,
+        attempt_id=attempt_id,
+        first_disposition=parsed[0],
+        actual_model=actual_model,
+        runner=runner,
+        factory=factory,
+        turn=turn,
+        channel=channel,
     )
 
 
@@ -1696,6 +2137,16 @@ def _is_input_refusal(failure: BaseException) -> bool:
     return getattr(failure, "tb_input_refusal", False) is True or (
         isinstance(failure, ProviderError) and is_input_refusal(failure)
     )
+
+
+def _is_sender_budget_refusal(failure: BaseException) -> bool:
+    """Whether the wire guard refused because the verified SENDER's physical
+    share is spent (A8 S-1). A typed boolean the guard stamps and the scrub
+    carries (``model_boundary.SENDER_BUDGET_REFUSAL_ATTR``), never prose."""
+
+    from local_operator.team_bridge.model_boundary import SENDER_BUDGET_REFUSAL_ATTR
+
+    return getattr(failure, SENDER_BUDGET_REFUSAL_ATTR, False) is True
 
 
 def screening_allocation(item: Mapping[str, Any]) -> int:
@@ -1747,6 +2198,9 @@ async def _screen_spend(
     nonce: str | None,
     turn: str,
     tier: int,
+    config_dir: Path | None = None,
+    authority: Any = None,
+    privacy_runner_factory: Any = None,
 ) -> ScreenResult:
     """Steps 9-14 for ONE message: reserve, mint, render, dispatch, commit."""
 
@@ -1755,6 +2209,17 @@ async def _screen_spend(
     _canonical_provider = prepared.provider
     message_id = envelope.message_id
     import time as _time
+
+    # 8c. A8 ROOT REPLAY (memo §3): a message whose non-preferred privacy
+    #     decision already exists under this exact binding never buys another
+    #     model draw — neither stage. Its settled hold is re-served; an
+    #     unsettled or committed-but-unreceipted decision holds rather than
+    #     restarting the first screen (possible underdelivery is preferred to
+    #     duplicate spend or verdict shopping).
+    replay = _privacy_replay_hold(store, owner, prepared, authority)
+    if replay is not None:
+        _persist_hold(store, owner, message_id, replay)
+        return ScreenResult("hold", hold_code=replay)
 
     # 9. Durable LOGICAL reservation BEFORE inference I/O. Exhaustion/busy/
     #    schema failures are typed holds; never a reset.
@@ -1829,12 +2294,17 @@ async def _screen_spend(
     bind = getattr(runner, "bind_job", None)
     if callable(bind):
         bind(job)
+    # The chain re-draws, then fails over, on a reply this parser cannot read
+    # (operator report 2026-11-09, R2); a bare runner has no such attribute.
+    if runner is not None and hasattr(runner, "reply_usable"):
+        setattr(runner, "reply_usable", _reply_parses)
 
     # 10. Fresh nonce render. A polluted token or a changed delimiter
     #     contract refuses; regeneration is bounded (H3 hostile-input control).
     images = envelope.private_images()
     files = envelope.private_files()
     rendered: RenderedPrompt | None = None
+    text_version = text_screening_version(snapshot, envelope, images=images, files=files)
     for _ in range(8):
         try:
             rendered = render_prompt(
@@ -1843,18 +2313,11 @@ async def _screen_spend(
                 organization=envelope.organization,
                 msg_type=envelope.type_label,
                 nonce=nonce,
-                # A FILE envelope ALWAYS renders under v4 — the only embedded template
-                # whose wrapper tells the screener that the file text which follows is
-                # submission data, and the only one the hub accepts a files_hash under.
-                # An image-only envelope still renders under v3. The served policy
-                # (v1/v2) governs the text-only path and the local policy/receipt
-                # binding; the attachment sets are bound by the envelope digest instead
-                # (see validate_envelope).
-                version=(
-                    SCREENING_VERSION_V4
-                    if files is not None
-                    else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
-                ),
+                # The template choice (v4 files, v3 images, v5 addressed text, else
+                # the policy's) lives in ``text_screening_version``. The attachment
+                # sets are bound by the envelope digest, and v5's routing is bound
+                # there too when the hub stated it (see validate_envelope).
+                version=text_version,
                 attachments=(
                     images.listing()
                     if images is not None
@@ -1865,6 +2328,8 @@ async def _screen_spend(
                     else "" if files is not None else None
                 ),
                 files=files.private_listing() if files is not None else None,
+                addressed=envelope.addressed,
+                relation=envelope.relation,
             )
             break
         except ValueError:
@@ -1882,6 +2347,13 @@ async def _screen_spend(
         code = "owner_changed" if not store.current_generation_is_live(owner) else "retry_later"
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
         return ScreenResult("hold", hold_code=code)
+    # 10c. A8 / S-2 BEFORE THE WIRE (enabled runs only): fresh authority. The
+    #      native reservation re-checks the control row inside its own write
+    #      for every physical send, so an OFF run needs no extra read here.
+    stale = _prewire_privacy_hold(config_dir, store, authority)
+    if stale is not None:
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, stale)
+        return ScreenResult("hold", hold_code=stale)
 
     # 11. ONE dispatch. Provider failures are typed holds AND advance the
     #     durable breaker; nothing of the exception's prose is kept.
@@ -1977,12 +2449,43 @@ async def _screen_spend(
                     # The hop that ANSWERED owns the answer: the chain tags its
                     # refusal with the serving model (never a fallback's hold
                     # cached under the primary's key).
-                    answered_model=getattr(failure, "serving_model", None),
+                    answered_model=_answer_key_model(
+                        runner, getattr(failure, "serving_model", None), snapshot
+                    ),
                     failure_class=screening_failure_class(failure),
+                )
+                serving = getattr(failure, "serving_model", None)
+                _record_review_decision(
+                    store,
+                    owner,
+                    prepared,
+                    answered,
+                    actual_model=serving,
+                    served_provider=_served_provider(runner, serving, prepared),
+                    served_hop=_served_hop(runner, serving, prepared),
+                    screener_preferred=False,
+                    screener_verdict="hold",
                 )
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
+        if _is_sender_budget_refusal(failure):
+            # A8 S-1 (PR #3778 round 1 Q-1): the guard refused this sender's
+            # next PHYSICAL send before any byte left. Its typed budget hold,
+            # retried when the pool refills, and NO breaker advance: one
+            # sender's spent share must never park another sender's message.
+            retry_at = store.screening_budget_refill_at(owner, tier=tier)
+            _commit_hold(
+                store,
+                owner,
+                message_id,
+                attempt_id,
+                fingerprint,
+                epoch,
+                "budget_exhausted",
+                failure_class=failure_class,
+            )
+            return ScreenResult("hold", hold_code="budget_exhausted", retry_at=retry_at)
         # An input refusal is THIS submission, not a sick route: it still holds
         # and still charges, but it must not open the account breaker and park
         # every other inbound message for the retry window (#3199 residual).
@@ -2042,11 +2545,39 @@ async def _screen_spend(
     # 14. Strict parse → write-once metadata-only outcome.
     parsed = parse_verdict(reply)
     if parsed is None:
-        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "parse_failed")
-        _remember_answer_hold(
-            store, owner, envelope, snapshot, "parse_failed", epoch, answered_model=actual_model
-        )
-        return ScreenResult("hold", hold_code="parse_failed")
+        # NOT AN ANSWER, so NOT CACHED (operator report 2026-11-09, R2): the
+        # chain already re-drew and failed over, so this is every hop answering
+        # nothing usable. Caching it replayed one blank draw as a final verdict
+        # on every retry for up to 9.2 days. Left uncached, the hold row is due
+        # again on the connector's backoff and the next pass draws afresh.
+        code = unusable_reply_code(reply)
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
+        logger.info("bridge: screening reply unusable on every hop code=%s", code)
+        review = _unusable_review_hold(store, owner, prepared, runner, actual_model)
+        if review is not None:
+            return review
+        return ScreenResult("hold", hold_code=code)
+    # 13b. A8 ADMISSION DECISION (the production seam, shared with the batch
+    #      path): disabled -> legacy; first non-deliver -> existing handling;
+    #      trusted preferred hop -> bypass; otherwise the privacy pass.
+    decision = await _decide(
+        store,
+        owner,
+        prepared,
+        config_dir=config_dir,
+        authority=authority,
+        attempt_id=attempt_id,
+        parsed=parsed,
+        actual_model=actual_model,
+        runner=runner,
+        factory=privacy_runner_factory,
+        turn=turn,
+        channel="single",
+    )
+    if not decision.proceed:
+        code = decision.hold_code or "privacy_invalid"
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, code)
+        return ScreenResult("hold", hold_code=code)
     return _conclude_parsed(
         store,
         owner,
@@ -2057,19 +2588,99 @@ async def _screen_spend(
         actual_model=actual_model,
         policy=policy,
         turn=turn,
+        privacy_decision_id=decision.decision_id,
+        privacy_gate=(config_dir, authority),
         screened_bytes=rendered.screened_bytes,
-        rendered_version=(
-            SCREENING_VERSION_V4
-            if files is not None
-            else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
-        ),
+        rendered_version=text_version,
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,
         served_provider=_served_provider(runner, actual_model, prepared),
         served_hop=_served_hop(runner, actual_model, prepared),
         screener_preferred=_answered_preferred(runner, actual_model),
         observation=_answered_observation(runner, actual_model),
+        answer_model=_answer_key_model(runner, actual_model, snapshot),
     )
+
+
+#: Passes on which EVERY hop answered unusably before the hold becomes a person's
+#: review (code review round 1, R4). Measured before capping: ``parse_failed`` was
+#: ~2.2% of ~721 screens/week on the operator's receiver (~16 messages/week; figure
+#: from the operator's 2026-11-09 report as briefed, not re-measured here), and
+#: until this PR each of those was ONE blank draw cached as final. With the
+#: re-draw + failover, a pass that still ends unusable has already spent 2 draws on
+#: every hop, so a third such pass is no longer a transient blip. The connector's
+#: retry ladder (``connector/loop.py``: ``RETRY_BASE_S`` 60 s doubling, capped at
+#: ``RETRY_MAX_S`` 3600 s) puts pass 3 at ~+180 s (60 + 120) after the first: a
+#: provider hiccup still gets two fresh chances, while a body that blanks every
+#: hop reaches Deliver/Discard within minutes instead of riding the ladder for
+#: hours at 2 x hops draws a pass.
+UNUSABLE_PASSES_BEFORE_REVIEW = 3
+
+
+def _unusable_review_hold(
+    store: Store,
+    owner: OwnerSnapshot,
+    prepared: "_Prepared",
+    runner: Any,
+    actual_model: str | None,
+) -> ScreenResult | None:
+    """Turn the Nth all-unusable pass into a review hold, or ``None`` to keep retrying.
+
+    The review hold is ``model_hold`` -- a REVIEW_HOLD_CODES member the holds list,
+    notice, wire class (``awaiting_review``) and Deliver/Discard path already know --
+    recorded with a per-message decision row, which ``_replay_work_scope_decision``
+    replays with no model call. It is deliberately NOT written to the answer cache:
+    no model answered, so an identical later message still gets its own draws.
+    With ``review_held`` off, nothing changes (the hold keeps retrying, as before).
+    """
+
+    from local_operator.team_bridge import hold_release as hr
+
+    if actual_model is None or not hr.review_enabled(store.config_dir):
+        return None
+    message_id = prepared.envelope.message_id
+    try:
+        passes = store.note_unusable_screening_pass(owner, message_id)
+    except StoreRefused:
+        return None
+    if passes < UNUSABLE_PASSES_BEFORE_REVIEW:
+        return None
+    code = "model_hold"
+    _persist_hold(store, owner, message_id, code)
+    _record_review_decision(
+        store,
+        owner,
+        prepared,
+        code,
+        actual_model=actual_model,
+        served_provider=_served_provider(runner, actual_model, prepared),
+        served_hop=_served_hop(runner, actual_model, prepared),
+        screener_preferred=False,
+        screener_verdict="hold",
+    )
+    logger.info("bridge: screening unusable passes=%d converted code=%s", passes, code)
+    return ScreenResult("hold", hold_code=code)
+
+
+def _answer_key_model(
+    runner: Any, actual_model: str | None, snapshot: "PolicySnapshot"
+) -> str | None:
+    """The model a hold this pass produced is CACHED under (code review round 1, R1).
+
+    Normally the model that answered, so ``_remember_answer_hold``'s primary-only
+    rule drops a fallback's answer: a ROUTE failover must not park the message
+    under the primary's key once the primary recovers. The exception is a pass on
+    which hop 0 itself ANSWERED, just unusably (empty or off-grammar). The primary
+    was up; the chain advanced because of the reply, which a sender can provoke
+    with injected text. Leaving the fallback's parseable hold uncached then made
+    every backoff pass re-draw it until one said ``deliver`` -- verdict shopping,
+    and never terminal. That hold is the message's answer, so it is cached under
+    the primary's key exactly as hop 0's own hold would be.
+    """
+
+    if getattr(runner, "primary_answered_unusably", False) is True and actual_model is not None:
+        return snapshot.default_model
+    return actual_model
 
 
 def _answered_preferred(runner: Any, actual_model: str | None) -> bool:
@@ -2122,8 +2733,21 @@ def _conclude_parsed(
     served_hop: int | None = None,
     screener_preferred: bool = False,
     observation: ScreeningObservation | None = None,
+    answer_model: str | None = None,
+    privacy_decision_id: str | None = None,
+    privacy_gate: "tuple[Path | None, Any] | None" = None,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
+
+    ``privacy_decision_id`` is the A8 conjunction proof the native allow fence
+    (``Store._require_privacy_proof``) verifies; ``privacy_gate`` is
+    ``(config_dir, captured authority)`` so an ENABLED allow re-reads the
+    authority under the config lock around the receipt transaction (S-2
+    precommit). This function never decides the conjunction itself.
+
+    ``answer_model`` is the model a cacheable hold is REMEMBERED under
+    (:func:`_answer_key_model`); ``None`` means ``actual_model``, the
+    primary-only rule every batch verdict keeps.
 
     Shared by the single-message spend and the batch, so a batch verdict
     meets exactly the hold/bounce/quarantine/turn/receipt fences a single
@@ -2143,6 +2767,7 @@ def _conclude_parsed(
     envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
     message_id = envelope.message_id
     disposition, categories, reason, _verdict = parsed
+    cache_model = actual_model if answer_model is None else answer_model
     if disposition == "hold" and _work_scope_hold_conversion(
         store,
         snapshot,
@@ -2170,11 +2795,23 @@ def _conclude_parsed(
             served_hop=served_hop,
             screener_preferred=screener_preferred,
             screener_verdict="hold",
+            answer_model=cache_model,
         ).set_private_reason(reason)
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
         _remember_answer_hold(
-            store, owner, envelope, snapshot, "model_hold", epoch, answered_model=actual_model
+            store, owner, envelope, snapshot, "model_hold", epoch, answered_model=cache_model
+        )
+        _record_review_decision(
+            store,
+            owner,
+            prepared,
+            "model_hold",
+            actual_model=actual_model,
+            served_provider=served_provider,
+            served_hop=served_hop,
+            screener_preferred=screener_preferred,
+            screener_verdict="hold",
         )
         return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
     if disposition == "bounce" and not categories:
@@ -2191,7 +2828,18 @@ def _conclude_parsed(
             snapshot,
             "bounce_without_category",
             epoch,
-            answered_model=actual_model,
+            answered_model=cache_model,
+        )
+        _record_review_decision(
+            store,
+            owner,
+            prepared,
+            "bounce_without_category",
+            actual_model=actual_model,
+            served_provider=served_provider,
+            served_hop=served_hop,
+            screener_preferred=screener_preferred,
+            screener_verdict="bounce",
         )
         return ScreenResult("hold", hold_code="bounce_without_category").set_private_reason(reason)
     if disposition == "bounce":
@@ -2228,6 +2876,7 @@ def _conclude_parsed(
                 served_hop=served_hop,
                 screener_preferred=screener_preferred,
                 screener_verdict="bounce",
+                answer_model=cache_model,
             ).set_private_reason(reason)
     # 12b. Final admission fence (R6/Q15): the receipt may only be admitted
     #      while THIS call still owns the account turn — a successor that
@@ -2244,9 +2893,11 @@ def _conclude_parsed(
         # fences receipts, jobs and cache hits on policy == receipt template).
         # For an image envelope the rendered template is v3 by construction
         # and the image set is bound through the envelope digest; the v3 hash
-        # the hub requires is added by the connector at admit time. Text-only
-        # envelopes render the policy template, so this equals
-        # ``rendered.template_sha256`` exactly as before.
+        # the hub requires is added by the connector at admit time. A text-only
+        # envelope rendered under the addressed-aware v5 is the same case: the
+        # receipt keeps the policy template, ``rendered_template_sha256`` and the
+        # outcome's ``rendered_version`` record v5, and the connector's admit
+        # carries the v5 hash (``conversation._text_admit_template``).
         template_sha256=snapshot.template_sha256,
         body_sha256=envelope.body_sha256,
         categories=categories,
@@ -2258,7 +2909,8 @@ def _conclude_parsed(
         # the tuple, never stored, never compared.
         observation=observation,
     )
-    try:
+
+    def _finish() -> None:
         store.finish_screening(
             owner,
             message_id,
@@ -2274,7 +2926,26 @@ def _conclude_parsed(
             turn=turn,
             verify=lambda: snapshot.matches_live(policy),
             rendered_template_sha256=prompt_template_sha256,
+            privacy_decision_id=privacy_decision_id,
         )
+
+    try:
+        gate_dir, gate_authority = privacy_gate if privacy_gate is not None else (None, None)
+        if gate_dir is not None and gate_authority is not None and gate_authority.enabled:
+            # A8 / S-2 PRECOMMIT: config lock -> fresh read -> receipt write.
+            # A disable that linearized first makes this refuse; one that
+            # waits for the lock linearizes after this bounded commit.
+            from local_operator.team_bridge import privacy_pass
+
+            try:
+                with privacy_pass.fresh_authority(gate_dir, store) as live:
+                    if not live.enabled or live.generation != gate_authority.generation:
+                        raise StoreRefused("policy_stale", "privacy authority moved")
+                    _finish()
+            except privacy_pass.PrivacyAuthorityUnavailable:
+                raise StoreRefused("control_unavailable", "privacy authority unreadable")
+        else:
+            _finish()
     except StoreRefused as failure:
         code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
         _persist_hold(store, owner, message_id, code)
@@ -2322,7 +2993,7 @@ def _consume_owner_release(
     from local_operator.team_bridge import hold_release as hr
 
     release = store.owner_release(owner, envelope.message_id)
-    if release is None or not hr.enabled(store.config_dir):
+    if release is None or not hr.enabled_for(store.config_dir, str(release.get("hold_code") or "")):
         return None
     import time as _time
 
@@ -2357,6 +3028,73 @@ def _consume_owner_release(
         _persist_hold(store, owner, envelope.message_id, "body_hash_mismatch")
         return ScreenResult("hold", hold_code="body_hash_mismatch")
     return _commit_release_receipt(store, owner, envelope, epoch, release, deliver=deliver)
+
+
+def _admit_owner_principal(
+    store: Store, owner: OwnerSnapshot, envelope: Envelope, epoch: int
+) -> ScreenResult | None:
+    """An ``allow`` for the owner's OWN human-authored message, or ``None``.
+
+    Identity is the envelope's HUB-STORED participant (account + kind), never a
+    display name: a member who copies the owner's name is still screened, and
+    so is an agent under the owner's account (``store.is_owner_principal``).
+    The receipt is committed through the same fenced write-once path an owner
+    release uses (live owner, generation, policy epoch; deletes the hold rows),
+    so every downstream fence treats it as a verdict of this policy moment.
+    Its template is a fixed sentinel no cache lookup can select, so it never
+    becomes a cached decision for any other sender.
+
+    HUB-SIDE PROVENANCE IS KNOWINGLY APPROXIMATE (code review round 1, R3). The
+    LOCAL receipt says ``owner_principal``; the hub's admit carries no such
+    marker -- its admit body has no field for one -- so the connector presents
+    the template it would for a screened message (none for text, which the hub
+    reads as its ``screening`` slot's; v3/v4 for an image/file grant). The hub's
+    admission row therefore names a prompt no model actually ran for this message.
+    Accepted: the bytes are the owner's own, posted as a person, and the grant
+    binds the exact hashes the hub stored, so nothing is admitted that the owner did not send.
+    Carrying a real marker (the ``owner_released`` shape) needs an agent-server
+    field first.
+    """
+
+    from local_operator.team_bridge.store import (
+        OWNER_PRINCIPAL_MODEL,
+        OWNER_PRINCIPAL_PROMPT_VERSION,
+        OWNER_PRINCIPAL_SHA256,
+    )
+
+    if not is_owner_principal(owner, envelope.sender_account, envelope.sender_kind):
+        return None
+    receipt = ScreeningReceipt(
+        verdict="allow",
+        model=OWNER_PRINCIPAL_MODEL,
+        prompt_version=OWNER_PRINCIPAL_PROMPT_VERSION,
+        template_sha256=OWNER_PRINCIPAL_SHA256,
+        body_sha256=envelope.body_sha256,
+        categories=(),
+        observation=None,
+    )
+    try:
+        store.commit_owner_release(
+            owner,
+            envelope.message_id,
+            receipt=receipt,
+            envelope_digest=envelope.envelope_digest,
+            expected_epoch=epoch,
+        )
+    except StoreRefused as failure:
+        code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
+        _persist_hold(store, owner, envelope.message_id, code)
+        return ScreenResult("hold", hold_code=code)
+    return ScreenResult(
+        "deliver",
+        receipt=receipt,
+        screened_bytes=len(envelope.private_body().encode("utf-8")),
+        # The owner's own images and files are the owner's: screening exists to
+        # protect the owner from OTHER people's content, so the sets the owner
+        # attached are granted with the text rather than withheld forever.
+        attachments_hash=envelope.attachments_hash,
+        files_hash=envelope.files_hash,
+    )
 
 
 def _replay_consumed_release(
@@ -2471,6 +3209,7 @@ def _replay_work_scope_decision(
     epoch: int,
     *,
     prepared_item: Mapping[str, Any],
+    template_sha256: str = "",
 ) -> ScreenResult | None:
     """A converted hold's OWN decision, settled per message with no model call (D5).
 
@@ -2501,6 +3240,23 @@ def _replay_work_scope_decision(
         or decision.get("envelope_digest") != envelope.envelope_digest
     ):
         return None
+    review_code = str(decision.get("hold_code") or "")
+    if review_code in hold_release.REVIEW_HOLD_CODES:
+        # A REVIEW decision replays its own hold while it waits for the person.
+        # With ``review_held`` off it is inert: the answer cache below replays
+        # the same code exactly as before the setting existed.
+        if not hold_release.review_enabled(store.config_dir):
+            return None
+        # Bound to the policy moment that answered, exactly like the answer
+        # cache it sits beside: a republished template or a moved epoch is a
+        # NEW question and is asked again (the person's pending review is not
+        # a reason to skip it).
+        if str(decision.get("template_sha256") or "") != template_sha256 or int(
+            decision.get("policy_epoch") or -1
+        ) != int(epoch):
+            return None
+        _persist_hold(store, owner, envelope.message_id, review_code)
+        return ScreenResult("hold", hold_code=review_code)
     if hold_release.enabled(store.config_dir):
         _persist_hold(store, owner, envelope.message_id, hold_release.WORK_SCOPE_HOLD)
         return ScreenResult("hold", hold_code=hold_release.WORK_SCOPE_HOLD)
@@ -2570,7 +3326,13 @@ def _settle_without_release(
 
 
 def _copy_work_scope_decision(
-    store: Store, owner: OwnerSnapshot, envelope: Envelope, item: Mapping[str, Any]
+    store: Store,
+    owner: OwnerSnapshot,
+    envelope: Envelope,
+    item: Mapping[str, Any],
+    *,
+    code: str = "work_scope_hold",
+    failure_class: str | None = None,
 ) -> ScreenResult | None:
     """An identical re-send's own decision row, from the source decision (M2/Q1, S-4).
 
@@ -2586,14 +3348,15 @@ def _copy_work_scope_decision(
 
     from local_operator.team_bridge import hold_release as hr
 
-    if not hr.enabled(store.config_dir):
+    if not hr.enabled_for(store.config_dir, code):
         return None
     source = store.work_scope_decision_for_content(
         owner, body_sha256=envelope.body_sha256, envelope_digest=envelope.envelope_digest
     )
-    if source is None:
+    if source is None or str(source.get("hold_code") or "") != code:
         return None
-    _persist_hold(store, owner, envelope.message_id, hr.WORK_SCOPE_HOLD)
+    # The cached answer's closed class rides along, as on a plain cache replay.
+    _persist_hold(store, owner, envelope.message_id, code, failure_class=failure_class)
     try:
         store.record_work_scope_decision(
             owner,
@@ -2612,10 +3375,86 @@ def _copy_work_scope_decision(
             screener_verdict=str(source.get("screener_verdict") or ""),
             screener_hop=_hop_of(source),
             screener_preferred=bool(source.get("screener_preferred")),
+            hold_code=code,
         )
     except StoreRefused:
         pass
-    return ScreenResult("hold", hold_code=hr.WORK_SCOPE_HOLD)
+    return ScreenResult("hold", hold_code=code)
+
+
+def _REVIEW_HOLD_CODES() -> frozenset[str]:
+    # Lazy: hold_release imports model_boundary, which imports this module.
+    from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
+
+    return REVIEW_HOLD_CODES
+
+
+def _record_review_decision(
+    store: Store,
+    owner: OwnerSnapshot,
+    prepared: "_Prepared",
+    code: str,
+    *,
+    actual_model: str | None,
+    served_provider: str,
+    served_hop: int | None,
+    screener_preferred: bool,
+    screener_verdict: str,
+    categories: Sequence[str] = (),
+) -> None:
+    """Give a fresh cached-answer hold its EXIT: a per-message review decision row.
+
+    Operator report 2026-11-09 (R1): a ``model_hold`` (and its answered siblings,
+    ``hold_release.REVIEW_HOLD_CODES``) was cached as final and replayed forever
+    with no per-message exit. The row is what the desktop holds list offers
+    Deliver/Discard on and what the connector raises the owner notice from, the
+    moment the hold is written. The cached answer stays: the person's signed
+    word, not a re-draw, is the only thing that moves the message. Best effort:
+    a refused write leaves the old behaviour (a hold the 60-minute alert counts).
+    """
+
+    import time as _time
+
+    from local_operator.team_bridge import hold_release as hr
+
+    if code not in hr.REVIEW_HOLD_CODES or not hr.review_enabled(store.config_dir):
+        return
+    envelope, snapshot = prepared.envelope, prepared.snapshot
+    if actual_model is None:
+        # No evidenced screener: nothing answered that a person could review.
+        return
+    # ANY HOP (QA round 1 Q2 / code review R1). This used to be primary-only,
+    # mirroring the answer cache, so a fallback's hold had no row, no notice and
+    # no Deliver/Discard -- and in production hop 0 is the Radient preferred
+    # screener, so every 402/429/5xx advance turned a hold into a message re-drawn
+    # on the backoff forever (the "stuck" symptom). The row is PER MESSAGE and
+    # records the hop that actually answered (``screener_model``/``screener_hop``),
+    # so it parks nothing under the primary's identity; the content-keyed answer
+    # cache stays primary-only for exactly that reason. While the row waits,
+    # ``_replay_work_scope_decision`` replays its hold with no model call, so the
+    # fallback's hold is terminal and is never re-drawn hoping for ``deliver``.
+    try:
+        store.record_work_scope_decision(
+            owner,
+            envelope.message_id,
+            conversation_id=prepared.conversation_id,
+            body_sha256=envelope.body_sha256,
+            envelope_digest=envelope.envelope_digest,
+            screener_provider=served_provider,
+            screener_model=str(actual_model or snapshot.default_model or ""),
+            template_sha256=snapshot.template_sha256,
+            prompt_version=snapshot.screening_version,
+            categories=tuple(c for c in categories if c in SCREENING_CATEGORIES),
+            policy_epoch=prepared.epoch,
+            sender_digest=hr.sender_digest(prepared.sender_account_id),
+            now=_time.time(),
+            screener_verdict=screener_verdict,
+            screener_hop=-1 if served_hop is None else int(served_hop),
+            screener_preferred=screener_preferred,
+            hold_code=code,
+        )
+    except StoreRefused:
+        logger.info("bridge: review decision unrecorded code=store_refused")
 
 
 def _hop_of(row: Mapping[str, Any]) -> int:
@@ -2751,8 +3590,11 @@ def _commit_work_scope_hold(
     served_hop: int | None,
     screener_preferred: bool,
     screener_verdict: str,
+    answer_model: str | None = None,
 ) -> ScreenResult:
     """Record the converted hold, its answer-cache row and its decision row.
+
+    ``answer_model`` keys the answer-cache row (see :func:`_conclude_parsed`).
 
     The decision row is the release's authority source (D4/D7): the answering
     hop's identity, the template and the real categories, written NOW. Its
@@ -2770,7 +3612,13 @@ def _commit_work_scope_hold(
     if attempt_id is not None:
         _commit_hold(store, owner, envelope.message_id, attempt_id, fingerprint, epoch, code)
         _remember_answer_hold(
-            store, owner, envelope, snapshot, code, epoch, answered_model=actual_model
+            store,
+            owner,
+            envelope,
+            snapshot,
+            code,
+            epoch,
+            answered_model=actual_model if answer_model is None else answer_model,
         )
     else:
         _persist_hold(store, owner, envelope.message_id, code)
@@ -3271,8 +4119,13 @@ async def screen_batch_async(
     policy: ScreeningPolicy,
     runner: ScreenRunner | None = None,
     nonce: str | None = None,
+    privacy_runner_factory: Any = None,
 ) -> "list[ScreenResult]":
     """Screen several messages in ONE model call; one result per item, in order.
+
+    ``privacy_runner_factory``: see :func:`screen_message_async`. With A8
+    enabled, each message of an all-deliver batch gets its OWN privacy call
+    over its own body only — never one joint privacy prompt.
 
     The account-serialised entry of :func:`screen_message_async` (same lock,
     same native turn), wrapped around :func:`_screen_batch_core`. One item is
@@ -3282,7 +4135,13 @@ async def screen_batch_async(
     if len(items) == 1:
         return [
             await screen_message_async(
-                owner, items[0], config_dir=config_dir, policy=policy, runner=runner, nonce=nonce
+                owner,
+                items[0],
+                config_dir=config_dir,
+                policy=policy,
+                runner=runner,
+                nonce=nonce,
+                privacy_runner_factory=privacy_runner_factory,
             )
         ]
 
@@ -3337,6 +4196,7 @@ async def screen_batch_async(
                 runner=runner,
                 nonce=nonce,
                 turn=turn,
+                privacy_runner_factory=privacy_runner_factory,
             )
         finally:
             try:
@@ -3360,6 +4220,7 @@ async def _screen_batch_core(
     runner: ScreenRunner | None,
     nonce: str | None,
     turn: str,
+    privacy_runner_factory: Any = None,
 ) -> "list[ScreenResult]":
     """Steps 1-14 over N messages with ONE reservation unit and ONE dispatch.
 
@@ -3377,10 +4238,22 @@ async def _screen_batch_core(
     store = Store(config_dir)
     results: list[ScreenResult | None] = [None] * len(items)
     pending: list[tuple[int, _Prepared]] = []
+    # A8 / S-2 entry: ONE fresh authority read for the whole call.
+    authority = _entry_authority(config_dir, store, policy)
+    if isinstance(authority, str):
+        for item in items:
+            message_id = _item_message_id(item)
+            if message_id:
+                _persist_hold(store, owner, message_id, authority)
+        return [ScreenResult("hold", hold_code=authority) for _ in items]
     for index, item in enumerate(items):
         prepared = _screen_prepare(owner, item, config_dir=config_dir, policy=policy, runner=runner)
         if isinstance(prepared, ScreenResult):
             results[index] = prepared
+        elif (replay := _privacy_replay_hold(store, owner, prepared, authority)) is not None:
+            # A8 root replay, per message (see _screen_spend 8c): no new spend.
+            _persist_hold(store, owner, prepared.envelope.message_id, replay)
+            results[index] = ScreenResult("hold", hold_code=replay)
         elif prepared.envelope.attachments_hash is not None:
             # Never batched (see the module note). The connector routes image
             # messages to the single path; one reaching here is held without
@@ -3481,6 +4354,11 @@ async def _screen_batch_core(
             "owner_changed" if not store.current_generation_is_live(owner) else "retry_later"
         )
         return _finish()
+    # 10c. A8 / S-2 before the wire (enabled runs only).
+    stale = _prewire_privacy_hold(config_dir, store, authority)
+    if stale is not None:
+        _commit_each(stale)
+        return _finish()
 
     # 11. ONE dispatch for the whole batch.
     lost = {"flag": False}
@@ -3525,6 +4403,11 @@ async def _screen_batch_core(
             return _finish()
         from local_operator.team_bridge.model_boundary import provider_hold_code
 
+        if _is_sender_budget_refusal(failure):
+            # A8 S-1 (round 1 Q-1): the carrier sender's physical share is
+            # spent; a typed budget hold for every message, no breaker advance.
+            _commit_each("budget_exhausted", failure_class=failure_class)
+            return _finish()
         if not _is_input_refusal(failure):
             _record_failure(store, owner, failure_class=failure_class)
         _commit_each(provider_hold_code(failure), failure_class=failure_class)
@@ -3576,6 +4459,32 @@ async def _screen_batch_core(
             )
             results[index] = ScreenResult("hold", hold_code=HOLD_BATCH_UNRESOLVED)
             continue
+        # 13b. A8 decision PER MESSAGE (memo §1): the first-stage item verdict
+        #      is persisted in its decision row before its own privacy call,
+        #      which sees ONLY this message's body. A privacy failure is that
+        #      message's typed hold — never ``batch_unresolved``, which would
+        #      buy a fresh paid first screen.
+        decision = await _decide(
+            store,
+            owner,
+            prepared,
+            config_dir=config_dir,
+            authority=authority,
+            attempt_id=attempt_id,
+            parsed=parsed,
+            actual_model=actual_model,
+            runner=runner,
+            factory=privacy_runner_factory,
+            turn=turn,
+            channel="batch",
+        )
+        if not decision.proceed:
+            code = decision.hold_code or "privacy_invalid"
+            _commit_hold(
+                store, owner, prepared.envelope.message_id, attempt_id, digest, epoch, code
+            )
+            results[index] = ScreenResult("hold", hold_code=code)
+            continue
         results[index] = _conclude_parsed(
             store,
             owner,
@@ -3588,6 +4497,8 @@ async def _screen_batch_core(
             turn=turn,
             screened_bytes=len(prepared.envelope.private_body().encode("utf-8")),
             prompt_template_sha256=SCREENING_BATCH_TEMPLATE_SHA256,
+            privacy_decision_id=decision.decision_id,
+            privacy_gate=(config_dir, authority),
             served_provider=_served_provider(runner, actual_model, prepared),
             served_hop=_served_hop(runner, actual_model, prepared),
             screener_preferred=_answered_preferred(runner, actual_model),

@@ -7231,3 +7231,60 @@ class TestMcpRequestTimeoutDefault:
         monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
         assert resolve_mcp_timeout_s(MCPStdioServerConfig(command="srv", timeout=0)) is None
         assert resolve_mcp_timeout_s(MCPStdioServerConfig(command="srv", timeout=-1)) is None
+
+
+class TestOnToolCalledHook:
+    """R1-4 (#3749 follow-up): the use stamp fires from the REAL call path.
+
+    ``session_factory`` demotes published MCP schemas that went uncalled for
+    ``MCP_DEMOTE_AFTER_IDLE_RUNS`` runs, and "called" is known only through
+    ``McpManager.on_tool_called``. The session-level lifecycle tests drive a
+    fake manager whose tools invoke the hook themselves, so deleting the hook
+    from ``_execute_tool_call`` would leave them green while every in-use tool
+    became demotable. This drives the real manager instead.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_stamps_server_and_raw_tool_name(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = McpManager(str(project))
+        server_session = FakeSession()
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            return _make_conn(name, cfg, server_session if name == "fast" else FakeSession())
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        await manager.discover_and_connect()
+        stamped: list[tuple[str, str]] = []
+        manager.on_tool_called = lambda server, raw: stamped.append((server, raw))
+
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+        result = await tool.execute("c1", {"q": "x"}, None, None, ToolContext())
+
+        assert result.is_error is False
+        assert server_session.calls == [("search", {"q": "x"})]
+        assert stamped == [("fast", "search")]
+        await manager.disconnect_all()
+
+    @pytest.mark.asyncio
+    async def test_a_raising_hook_never_fails_the_call(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = McpManager(str(project))
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        await manager.discover_and_connect()
+
+        def boom(server: str, raw: str) -> None:
+            raise RuntimeError("bookkeeping down")
+
+        manager.on_tool_called = boom
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+        result = await tool.execute("c1", {"q": "x"}, None, None, ToolContext())
+        assert result.is_error is False
+        assert result.text == "ok"
+        await manager.disconnect_all()

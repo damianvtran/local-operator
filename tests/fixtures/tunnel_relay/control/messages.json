@@ -1,0 +1,93 @@
+{
+  "contract": "docs/TUNNEL_RELAY.md C1.4",
+  "encoding": "UTF-8 JSON object per line, LF-terminated, no BOM, no CR, compact separators, key order as listed (emitters MUST match it byte-for-byte; parsers MUST NOT depend on it)",
+  "valid": [
+    {
+      "sender": "device",
+      "type": "hello",
+      "line": "{\"type\":\"hello\",\"protocol\":\"radient-tunnel.v1\",\"connector\":\"local-operator/2026.11.10\",\"tunnel_id\":\"0123456789abcdef0123456789abcdef\",\"version\":7}\n"
+    },
+    {
+      "sender": "relay",
+      "type": "ready",
+      "line": "{\"type\":\"ready\",\"session_id\":\"5f0c2a8e-9b1d-4c3e-8f7a-1b2c3d4e5f60\",\"epoch\":42,\"rotate_after_s\":3000,\"drain_timeout_s\":60}\n"
+    },
+    {
+      "sender": "relay",
+      "type": "rotate",
+      "line": "{\"type\":\"rotate\",\"reason\":\"lifetime\",\"deadline_s\":60}\n"
+    },
+    {
+      "sender": "relay",
+      "type": "drain",
+      "line": "{\"type\":\"drain\",\"reason\":\"shutdown\",\"deadline_s\":60}\n"
+    },
+    {
+      "sender": "device",
+      "type": "retire",
+      "line": "{\"type\":\"retire\",\"successor_session_id\":\"c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f\"}\n"
+    },
+    {
+      "sender": "relay",
+      "type": "superseded",
+      "line": "{\"type\":\"superseded\",\"epoch\":43}\n"
+    },
+    {
+      "sender": "relay",
+      "type": "revoked",
+      "line": "{\"type\":\"revoked\",\"reason\":\"suspended\",\"version\":7}\n"
+    },
+    {
+      "sender": "relay",
+      "type": "error",
+      "line": "{\"type\":\"error\",\"code\":\"hello_mismatch\",\"message\":\"hello does not match the connector token\"}\n"
+    }
+  ],
+  "invalid": [
+    {
+      "sender": "device",
+      "line": "{\"type\":\"hello\",\"protocol\":\"radient-tunnel.v1\",\"connector\":\"local-operator/2026.11.10\",\"tunnel_id\":\"ffffffffffffffffffffffffffffffff\",\"version\":7}\n",
+      "relay_action": "send error{code:hello_mismatch}, close 4400",
+      "why": "tunnel_id differs from the connector token claim"
+    },
+    {
+      "sender": "device",
+      "line": "{\"type\":\"hello\",\"protocol\":\"radient-tunnel.v1\",\"connector\":\"local-operator/2026.11.10\",\"tunnel_id\":\"0123456789abcdef0123456789abcdef\",\"version\":6}\n",
+      "relay_action": "send error{code:hello_mismatch}, close 4400",
+      "why": "version differs from the connector token claim"
+    },
+    {
+      "sender": "device",
+      "line": "{\"type\":\"hello\",\"protocol\":\"radient-tunnel.v2\",\"connector\":\"x/1\",\"tunnel_id\":\"0123456789abcdef0123456789abcdef\",\"version\":7}\n",
+      "relay_action": "send error{code:unsupported_protocol}, close 4400",
+      "why": "protocol is not radient-tunnel.v1"
+    },
+    {
+      "sender": "device",
+      "line": "{\"type\":\"retire\"}\n",
+      "relay_action": "send error{code:hello_required}, close 4400",
+      "why": "first device line must be hello"
+    },
+    {
+      "sender": "device",
+      "line": "not json\n",
+      "relay_action": "send error{code:bad_message}, close 4400",
+      "why": "not a JSON object"
+    },
+    {
+      "sender": "device",
+      "line_repeat": {
+        "char": "a",
+        "count": 4097
+      },
+      "relay_action": "send error{code:line_too_long}, close 4400",
+      "why": "line longer than 4096 bytes before LF"
+    },
+    {
+      "sender": "relay",
+      "line": "{\"type\":\"future_thing\",\"x\":1}\n",
+      "device_action": "ignore the line",
+      "why": "unknown type is forward-compatible, never an error"
+    }
+  ]
+}

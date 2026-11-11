@@ -146,7 +146,7 @@ from local_operator.imaging import (
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
 )
-from local_operator.interpreter import python_argv
+from local_operator.interpreter import python_argv, session_python_argv
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
 from local_operator.procstate import (
@@ -163,6 +163,7 @@ from local_operator.redaction_shapes import (
     REDACTION_MARKER,
     ShapeHit,
     ShapeReport,
+    StructureStreamGuard,
     credential_dump_notice,
     credential_forms,
     has_shape_anchor,
@@ -210,6 +211,7 @@ from local_operator.tools.confinement import (
     shell_sandbox_unavailable_reason_async,
     shell_write_confinement_of,
 )
+from local_operator.tools.diff_limits import DIFF_WITHHELD_TEXT, fits_source_evidence
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -2752,6 +2754,9 @@ class BashParams(BaseModel):
 #: mirrors rather than imports (the tool layer must not depend on the TUI layer);
 #: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
 _LIVE_PENDING_TEXT = "no output yet"
+#: The live card's line while a Terraform plan is held whole for the credential
+#: check (round-2 review R2-1 (c)): the output is coming, not withheld.
+_LIVE_HELD_TEXT = "[output held for a credential check]"
 
 #: What the live view carries once the pipe filter has faulted. The text is
 #: withheld rather than guessed at: a filter that cannot vouch for the bytes must
@@ -2852,6 +2857,10 @@ class _BashOutput:
         #: output yet" instead of the settled "``(empty)``" while a command is
         #: demonstrably producing output (see ``_LIVE_PENDING_TEXT``).
         self.withheld = 0
+        #: Whether those bytes include a Terraform plan parked for the credential
+        #: check (``StructureStreamGuard.park``): the live card says so, since a
+        #: multi-MiB plan can keep it quiet for a second or more.
+        self.held_for_check = False
 
     @property
     def retained_bytes(self) -> int:
@@ -3091,6 +3100,15 @@ class _PipeRedactor:
         self._set(values)
         self.pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        #: Holds and lookbehind for the Kubernetes Secret / Terraform plan rules,
+        #: which need a whole object a newline-aligned release does not give them
+        #: (see the section note above ``StructureStreamGuard``).
+        self._structures = StructureStreamGuard()
+
+    @property
+    def held_for_check(self) -> int:
+        """Characters of a Terraform plan parked for the whole-plan check, else 0."""
+        return self._structures.parked_chars
 
     def _set(self, values: Iterable[str]) -> None:
         self.secrets = sorted({value for value in values if value}, key=len, reverse=True)
@@ -3159,11 +3177,45 @@ class _PipeRedactor:
             return b""
 
     def _feed_scrubbed(self, chunk: bytes, *, final: bool = False) -> bytes:
-        text = self.pending + self.decoder.decode(chunk, final=final)
+        structures = self._structures
+        decoded = self.decoder.decode(chunk, final=final)
+        lead = ""
+        if structures.parked:
+            # An open Terraform plan is parked in the guard: scan only this read
+            # and publish nothing until its closing brace, so holding it stays
+            # linear (re-joining it into ``pending`` re-searched the whole plan
+            # on every read — round-2 review R2-1). ``absorb`` hands back the
+            # whole text once the plan is complete, over the bound, or final.
+            whole = structures.absorb(self.pending, decoded, final=final)
+            if whole is None:
+                return b""
+            text = whole
+            # Past the bound the plan goes to the ordinary rules; its notice
+            # LEADS the release so the sink's head keeps it (a notice after a
+            # 32 MiB release would land in the middle the sink drops).
+            lead = structures.withheld_notice()
+        else:
+            text = self.pending + decoded
+        # A data block too large to hold is WITHHELD, not released unchecked:
+        # its bytes are dropped here as they arrive (notice already sent).
+        text = structures.discard(text, final=final)
         cut = self._release_point(text, final=final)
+        # Applied AFTER the cap: these holds have their own, larger bound
+        # (``STRUCTURE_HOLD_LIMIT``) because a Secret or a plan is only
+        # judgeable whole, and the 8 KiB cap is exactly what split them.
+        cut = structures.hold(text, cut, final=final)
         ready, self.pending = text[:cut], text[cut:]
+        notice = ""
+        if structures.withholding:
+            self.pending = structures.discard(self.pending, final=final)
+            notice = structures.withheld_notice()
+        elif not final:
+            self.pending = structures.park(self.pending)
         ready = self._mask_open_key_block(ready)
+        ready, structure_hits = structures.scrub_release(ready)
         scrubbed, hits = scrub_secrets_with_hits(ready, self.secrets)
+        hits = structure_hits + hits
+        scrubbed = lead + scrubbed + notice
         # REPORT FROM HERE. This filter is the only layer that sees a credential
         # that exists only in a command's OUTPUT — the production case this
         # feature was written for — and it masks the bytes before the result
@@ -4699,7 +4751,10 @@ async def execute_bash(
                     continue
                 redactor.refresh(values)
                 safe = redactor.feed(chunk)
-                sink.withheld = len(redactor.pending)
+                # A parked Terraform plan is held too; counted so the card does
+                # not read ``(empty)`` while it waits, and flagged so it can say why.
+                sink.withheld = len(redactor.pending) + redactor.held_for_check
+                sink.held_for_check = redactor.held_for_check > 0
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
@@ -4757,6 +4812,9 @@ async def execute_bash(
             # Bytes are arriving and being held; ``(empty)`` would tell the
             # operator the opposite of what is happening.
             stdout = _LIVE_PENDING_TEXT
+        if stdout_chunks.held_for_check or stderr_chunks.held_for_check:
+            # Live view only (this snapshot is never the settled result).
+            stdout = f"{stdout}\n{_LIVE_HELD_TEXT}" if stdout else _LIVE_HELD_TEXT
         summary = _bash_output_summary(stdout, stderr)
         # The soft (memory.high) advisory is carried as its OWN field, not
         # prepended to the output text (design review D1). Prepended, it rode the
@@ -10909,11 +10967,11 @@ async def execute_edit(
     if pad_advisory:
         text = f"{text}\n{pad_advisory}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "edit",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -11121,7 +11179,7 @@ def _edit_file_result_locked(
             )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
-    details = _diff_details(str(path), original, current)
+    details = _with_diff_source(_diff_details(str(path), original, current), original, current)
     if pad_advisory:
         # The worker thread already returns ``details``; this private, popped key
         # carries the receipt line without changing that transaction's shape.
@@ -11251,6 +11309,11 @@ _MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
 #: It is popped before rendering, so the structured diff remains unchanged.
 _SCRATCHPAD_ADVISORY_KEY = "_scratchpad_advisory"
 
+#: The same one-way worker-to-result channel for the complete raw file sides.
+#: Popped by ``_diff_text_result`` onto a private ``ToolResult`` attribute, so
+#: it never reaches the persisted details.
+_DIFF_SOURCE_KEY = "_diff_source"
+
 
 #: One unified-diff hunk header. Counts default to 1 when omitted, which the
 #: grammar allows for a single-line side.
@@ -11335,6 +11398,48 @@ def _diff_details(path: str, before: str, after: str) -> dict[str, Any]:
     if omitted:
         details[DIFF_TRUNCATED_ROWS_KEY] = omitted
     return details
+
+
+def _with_diff_source(details: dict[str, Any], before: str, after: str) -> dict[str, Any]:
+    """Attach the complete sides as source evidence for the loop's seam.
+
+    Called by the write/edit transactions with the exact bytes they diffed.
+    The scratch key is popped onto a private ``ToolResult`` attribute by
+    ``_diff_text_result`` (see ``tools/diff_limits`` for why the per-hunk
+    judgement alone is not enough). Over the bound no complete-side proof is
+    possible, so the diff is withheld instead; counters and path stay exact.
+    """
+    if not isinstance(details.get("diff"), list):
+        return details
+    if fits_source_evidence(before, after):
+        details[_DIFF_SOURCE_KEY] = (before, after)
+    else:
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    return details
+
+
+def _diff_text_result(
+    tool_call_id: str, tool_name: str, text: str, details: dict[str, Any]
+) -> ToolResult:
+    """``_text`` for write/edit, moving the raw source evidence off ``details``.
+
+    ``details`` is serialized everywhere, so the raw sides must leave it before
+    a ``ToolResult`` exists. They ride the private ``_diff_source`` together
+    with the raw preview, and the public preview becomes the withheld receipt
+    until the loop's seam (``AgentLoop._settle_write_diff``) publishes the
+    source-masked copy. A path that never reaches that seam (a direct
+    ``execute`` caller, a copy that dropped the private attribute) therefore
+    publishes the receipt, never raw rows.
+    """
+    source = details.pop(_DIFF_SOURCE_KEY, None)
+    preview = details.get("diff")
+    if source is not None and isinstance(preview, list):
+        details["diff"] = [DIFF_WITHHELD_TEXT]
+    result = _text(tool_call_id, tool_name, text, details=details)
+    if source is not None and isinstance(preview, list):
+        before, after = source
+        result._diff_source = (before, after, tuple(preview))
+    return result
 
 
 def _utf8_size(rows: Sequence[str]) -> int:
@@ -12004,11 +12109,11 @@ async def execute_write(
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
-    return _text(
+    return _diff_text_result(
         tool_call_id,
         "write",
         f"{text}\n{hint}" if hint else text,
-        details=details,
+        details,
     )
 
 
@@ -12036,7 +12141,7 @@ def _write_file_result_locked(path: Path, content: str) -> tuple[bool, dict[str,
             previous = ""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    details = _diff_details(str(path), previous, content)
+    details = _with_diff_source(_diff_details(str(path), previous, content), previous, content)
     introduced = _marker_introduced(previous, content)
     if introduced:
         details[_MARKER_INTRODUCED_KEY] = introduced
@@ -20106,22 +20211,22 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
 async def _sessions_launch(
     argv: list[str], env: dict[str, str], cwd: str | None
 ) -> tuple[int, str]:
-    """Run THIS build's CLI (``python -P -m local_operator.cli …``) and return
-    ``(returncode, stderr)``.
+    """Run the new session's CLI and return ``(returncode, stderr)``.
 
-    Not ``shutil.which("lop")``: the ``lop`` on PATH may be a different build
-    (a global install, a generation pointer) than the session that spawned
-    it, and the two could disagree about a flag the argv above uses.
-    ``python_argv`` adds ``-P`` so a checkout that merely happens to be the
-    cwd cannot shadow the installed package — the same spelling
-    ``update.py``'s relaunch and ``tui/session_move.py``'s nested run use.
+    A generation-installed parent resolves the concrete CURRENT interpreter
+    for this independent session, not its own pinned old build. Developer and
+    legacy installs stay on their own interpreter. Never use PATH's ``lop``:
+    it may belong to an unrelated install. ``session_python_argv`` also keeps
+    ``-P`` so a checkout in the cwd cannot shadow the selected distribution.
+    This boundary intentionally follows updates; same-session helpers and mesh
+    protocol calls continue to use their parent's build.
 
     The child is its own process group so a fired bound can reap the whole
     tree; ``stdin`` is /dev/null because an exec run is never interactive
     (``--control`` is deliberately not exposed by this tool).
     """
     process = await asyncio.create_subprocess_exec(
-        *python_argv(*_SESSIONS_CLI, *argv),
+        *session_python_argv(*_SESSIONS_CLI, *argv),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -35349,8 +35454,8 @@ class AskParams(BaseModel):
 #: marked an option ``recommended`` has already stated what it would do.
 ASK_UNANSWERED_TEXT = (
     "The user closed the question without answering, so nothing was chosen. "
-    "Do not ask again: decide yourself (take your recommended option where you "
-    "gave one), then say in one line what you assumed and carry on."
+    "Do not ask again: decide yourself (take your recommended option(s) where you "
+    "gave any), then say in one line what you assumed and carry on."
 )
 
 

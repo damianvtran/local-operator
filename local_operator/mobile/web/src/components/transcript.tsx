@@ -480,6 +480,103 @@ function clauseText(fact: string): string {
 	}
 }
 
+/* THE SHAPE OF A CONVERSATION THAT HAS NOT ARRIVED. Bars, not text: the pane
+   it stands in for has no content to sketch, so the bars only say "rows are
+   coming here". `bg-elevated` because `bg-sunken` sits near 1.3:1 on the
+   canvas and vanishes in a still (design D2); the pulse is `.lo-pulse`, whose
+   keyframes end at full opacity, so reduced motion (capped globally in
+   index.css) rests on a visible bar rather than a stranded frame. Decorative
+   (`aria-hidden`): the sentence or the working line beside it is the
+   announcement. Sized by its content, so the owner's box keeps its geometry. */
+export function TranscriptSkeleton() {
+	const bar = "lo-pulse h-3 rounded-full bg-elevated";
+	return (
+		<div aria-hidden data-transcript-skeleton="" className="flex flex-col gap-5">
+			{[0, 1, 2].map((turn) => (
+				<div key={turn} className="flex flex-col gap-3">
+					<div className="flex justify-end">
+						<span className="lo-pulse h-9 w-2/3 rounded-md bg-elevated" />
+					</div>
+					<div className="flex flex-col gap-2">
+						<span className={cn(bar, "w-full")} />
+						<span className={cn(bar, "w-5/6")} />
+						<span className={cn(bar, "w-2/5")} />
+					</div>
+				</div>
+			))}
+		</div>
+	);
+}
+
+/* THE ONE ROW AT THE TOP THAT SAYS WHAT IS HAPPENING TO THE HISTORY. It
+   replaces a 2px loading bar and a 1px hairline: the bar was `flex h-0.5` with
+   the default `flex-shrink` inside a scroll column and measured 0px (not one
+   accent pixel in three frames), and the hairline said nothing at all. A long
+   session's projection is the opening message plus the newest rows, so the
+   reader needs to be told that more exists, that it is coming, that it failed,
+   or that the top really is the start. Modelled on the desktop's
+   `OlderHistorySlot`; count-free because the wire carries no count of what is
+   missing and a guessed one would be a lie.
+
+   ONE HEIGHT FOR EVERY STATE (44px, also the tap target of the two operable
+   states) and `shrink-0`. The slot sits above the oldest row, so each pixel it
+   changes by moves the whole conversation under the reader's thumb — and the
+   anchor hold's compensating write fires `scroll`, which near the top used to
+   fetch again (the 13-page cascade measured on the S6 deep cell). `justify-center`
+   alignment, so nothing in it is left or right. */
+type SlotState = "idle" | "loading" | "failed" | "start";
+function HistorySlot({ state, onActivate }: { state: SlotState; onActivate: () => void }) {
+	const box = "flex h-11 shrink-0 items-center justify-center gap-2 text-meta text-ink-dim";
+	if (state === "idle") {
+		return (
+			<div data-history-slot="idle" className={box}>
+				<button type="button" className="h-11 w-full truncate px-3 text-ink-muted" onClick={onActivate}>
+					{messageRuntime.t("relay.transcript.older.load")}
+				</button>
+			</div>
+		);
+	}
+	if (state === "failed") {
+		return (
+			<div data-history-slot="failed" className={box} role="status">
+				<span className="min-w-0 truncate">{messageRuntime.t("relay.transcript.older.failed")}</span>
+				<button type="button" className="h-11 shrink-0 px-1.5 text-ink-muted" onClick={onActivate}>
+					{messageRuntime.t("relay.account_policy.retry")}
+				</button>
+			</div>
+		);
+	}
+	if (state === "loading") {
+		/* `.lo-spinner` is the ring itself; the `Spinner` component carries its own
+		   "working" label, which would announce a second, wrong thing here. */
+		return (
+			<div data-history-slot="loading" className={box} role="status">
+				<span aria-hidden className="lo-spinner inline-block size-3 shrink-0 rounded-full" />
+				<span className="min-w-0 truncate">{messageRuntime.t("relay.transcript.older.loading")}</span>
+			</div>
+		);
+	}
+	return (
+		<div data-history-slot="start" className={box} role="status">
+			<span className="min-w-0 truncate">{messageRuntime.t("relay.transcript.older.start")}</span>
+		</div>
+	);
+}
+
+/* THE LINE WHERE ROWS ARE MISSING: directly under the pinned opening message,
+   which sits against a disjoint tail. Without it the opener reads as the thing
+   the tail's first row answers (and, being the first message, as the true
+   start). Two kinds of rows can be missing here and they are the same place —
+   rows not fetched yet, and rows fetched but outside the mounted window (the
+   window drops the OLDEST). Decorative: the slot above says what is happening. */
+function SeamLine() {
+	return (
+		<div aria-hidden data-history-seam="" className="flex h-4 shrink-0 items-center">
+			<span className="w-full border-t border-dashed border-hairline" />
+		</div>
+	);
+}
+
 export function Transcript({
 	pid,
 	entries,
@@ -569,6 +666,8 @@ export function Transcript({
 	const pinnedRef = useRef(true);
 	/* Auto-load trigger guard: one in-flight page at a time. */
 	const loadingRef = useRef(false);
+	/* The pinned case's one mount-time fetch (see its effect). Per scroll key. */
+	const mountFetchedRef = useRef(false);
 	/* Each hash route owns its history and scroll position. Browser Back/Forward
 	   remounts a route, so preserving it outside React state is what returns the
 	   reader to the row they left instead of the latest token. */
@@ -583,6 +682,7 @@ export function Transcript({
 		latchSeenRef.current = { seen: false, tailId: null };
 		headCompletionRef.current = 0;
 		userPagedRef.current = false;
+		mountFetchedRef.current = false;
 		heldRowsRef.current = [];
 		setOlderError(false);
 		setHasMore(true);
@@ -624,7 +724,12 @@ export function Transcript({
 	const liveTail = pinnedOpener ? entries.slice(1) : entries;
 	for (const entry of liveTail) heldMap.set(rowKey(entry), entry);
 	const openerJoined = pinnedOpener !== null && older.some((entry) => rowKey(entry) === rowKey(pinnedOpener));
-	const detachedOpener = pinnedOpener && !openerJoined && older.length > 0 ? pinnedOpener : null;
+	/* DETACHED FROM THE FIRST PAINT, not only once a page lands. Left in the merged
+	   list the opener and the disjoint tail are ADJACENT rows, so the fold would
+	   read the opener plus the tail's first rows as one turn and there would be no
+	   place between them to say rows are missing. Out of it, the seam can sit
+	   exactly where the hole is. */
+	const detachedOpener = pinnedOpener && !openerJoined ? pinnedOpener : null;
 	if (detachedOpener) heldMap.delete(rowKey(detachedOpener));
 	/* Only unsolicited live retention is capped. Explicitly fetched history
 	   must survive the join: trimming its oldest page here both hides the
@@ -660,8 +765,9 @@ export function Transcript({
 	   (``transcript_head_pinned``), which is the only reliable signal: the frame
 	   cap can publish a pinned tail of 16 rows, so length cannot stand in for it.
 	   Skipping the head costs at most one already-held row on a projection that
-	   merely STARTS with a user turn, which the merge's rowKey de-dup discards. */
-	const cursorStart = cappedProjection ? 1 : 0;
+	   merely STARTS with a user turn, which the merge's rowKey de-dup discards.
+	   A DETACHED opener is not in `merged` at all, so nothing is skipped then. */
+	const cursorStart = cappedProjection && !detachedOpener ? 1 : 0;
 	const oldestId =
 		older.length > 0
 			? older[0].id
@@ -716,6 +822,30 @@ export function Transcript({
 		renderItems.push(item);
 	}
 	const pagedItems = renderItems.slice(-windowSize);
+	/* THE SLOT AND THE SEAM. Rows the reader cannot see sit between the pinned
+	   opener and the oldest MOUNTED row in two shapes: held but outside the window
+	   (`windowHidden`) and not fetched yet (`hasMore`). Both are directly under the
+	   opener, so one line marks them and the slot's tap acts in the order `onScroll`
+	   already uses: reveal what is held, then fetch. The slot exists only where a
+	   hole can exist — a capped projection, or a session whose older rows were
+	   paged in — so a short session paints nothing new at its top. A FAILED page
+	   is the one exception: without the row there would be no Try again, and
+	   nothing left that re-requests (see `onScroll`). */
+	const windowHidden = renderItems.length - pagedItems.length;
+	const slotState: SlotState | null = !(cappedProjection || older.length > 0 || olderError)
+		? null
+		: loadingOlder
+			? "loading"
+			: olderError
+				? "failed"
+				: windowHidden > 0 || hasMore
+					? "idle"
+					: "start";
+	const seamOpen = detachedOpener !== null && (windowHidden > 0 || hasMore);
+	const onSlot = () => {
+		if (slotState === "idle" && windowHidden > 0) setWindowSize((n) => n + PAGE);
+		else void loadOlder();
+	};
 
 	/* One row's box + anchor attrs, shared by the plain rows and a group's
 	   receipts so the two can never disagree about the follow contract. A
@@ -868,7 +998,7 @@ export function Transcript({
 	const topRun = condensed.runs[0];
 	const topHeadCut = topRun !== undefined && !topRun.run.opensWithUserRow;
 	useEffect(() => {
-		if (!topHeadCut || live || !topRun?.collapses || !hasMore || loadingOlder || userPagedRef.current) return;
+		if (!topHeadCut || live || !topRun?.collapses || !hasMore || loadingOlder || olderError || userPagedRef.current) return;
 		if (headCompletionRef.current >= 3) return;
 		const timer = window.setTimeout(() => {
 			if (userPagedRef.current || loadingRef.current || headCompletionRef.current >= 3) return;
@@ -876,7 +1006,21 @@ export function Transcript({
 			void loadOlder();
 		}, 0);
 		return () => window.clearTimeout(timer);
-	}, [topHeadCut, live, topRun?.collapses, hasMore, loadingOlder, oldestId]);
+	}, [topHeadCut, live, topRun?.collapses, hasMore, loadingOlder, olderError, oldestId]);
+
+	/* THE PINNED CASE FETCHES ITS MIDDLE WITHOUT A GESTURE. The list opens at the
+	   bottom, so `onScroll`'s near-top trigger never fires for a reader who just
+	   arrived, and the auto-fill above needs a head-cut run — with the opener
+	   pinned the top run opens with a user row, so it never qualifies. One page,
+	   once per scroll key (`mountFetchedRef`, not a timer or a cap): a failure
+	   leaves the slot's Try again, and a live turn waits for it to settle so the
+	   prepend does not land under a streaming tail. */
+	useEffect(() => {
+		if (!cappedProjection || !hasMore || live || olderError || !oldestId || mountFetchedRef.current || loadingRef.current) return;
+		mountFetchedRef.current = true;
+		void loadOlder();
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [cappedProjection, hasMore, live, olderError, oldestId]);
 
 	const onScroll = () => {
 		userPagedRef.current = true;
@@ -896,9 +1040,14 @@ export function Transcript({
 		   reader). Growing first means the reader's upward gesture always moves
 		   the transcript, and a fetch only ever happens once there is nothing
 		   left held above them. */
+		/* AFTER A FAILURE THE ONLY THING THAT RE-REQUESTS IS THE RETRY BUTTON. The
+		   failed state's own row used to push `scrollTop` from 0 to ~53, which is
+		   still under 120, so this handler fetched again, cleared the error and
+		   repeated: 203 requests in 4 s against a dead server, with "Try again"
+		   never tappable. Revealing rows already held is not a request and stays. */
 		if (el.scrollTop < 120 && !loadingRef.current) {
 			if (hiddenCount > 0) setWindowSize((n) => n + PAGE);
-			else if (hasMore) void loadOlder();
+			else if (hasMore && !olderError) void loadOlder();
 		}
 	};
 
@@ -1058,39 +1207,13 @@ export function Transcript({
 					style={{ height: `${topInset}px` }}
 				/>
 			) : null}
-			{/* History loads automatically as the user scrolls up — no button. A
-			   subtle top indicator is the only chrome: a thin accent bar that
-			   fills while a page is in flight, plus a hairline when more history
-			   exists. Nothing tappable, nothing blocky.
-
-			   THE TWO STATES ARE THE SAME HEIGHT (2px), and that is load-bearing
-			   rather than tidy. The bar used to be 2px and the hairline 1px, so
-			   each swap moved the rows below it by a pixel — and the anchor-hold
-			   wrote `scrollTop` to compensate, which fired `scroll`, which saw
-			   `scrollTop < 120` and fetched again: measured on the S6 deep cell,
-			   23 of 27 transitions in one open were that 1px oscillation against
-			   a rig scrolling once every 300 ms, and the cascade pulled 13 pages
-			   (2.24 MB) into a window the reader could not see. */}
+			{/* History loads automatically as the user scrolls up. The slot below is the
+			   only chrome, and it is ONE height in every state (see `HistorySlot`):
+			   the old 2px bar / 1px hairline pair moved the rows by a pixel per swap
+			   and the anchor hold's compensating write re-fired `scroll` into a fetch. */}
+			{slotState !== null ? <HistorySlot state={slotState} onActivate={onSlot} /> : null}
 			{detachedOpener ? <div data-detached-opener="true"><Entry entry={detachedOpener} pid={pid} /></div> : null}
-			{olderError ? (
-				<div className="flex min-h-11 items-center justify-center gap-1.5 text-meta text-ink-dim" role="status">
-					<span className="min-w-0 truncate">{messageRuntime.t("relay.transcript.older.failed")}</span>
-					<button type="button" className="min-h-11 shrink-0 px-1.5 text-ink-muted" onClick={() => void loadOlder()}>
-						{messageRuntime.t("relay.account_policy.retry")}
-					</button>
-				</div>
-			) : null}
-			{loadingOlder ? (
-				<div className="flex h-0.5 justify-center" aria-hidden>
-					<span className="lo-loadbar h-full w-16 overflow-hidden rounded-full bg-sunken">
-						<span className="lo-loadbar-fill block h-full w-1/2 rounded-full bg-accent" />
-					</span>
-				</div>
-			) : hasMore ? (
-				<div className="flex h-0.5 items-center justify-center" aria-hidden>
-					<span className="h-px w-10 bg-hairline" />
-				</div>
-			) : null}
+			{seamOpen ? <SeamLine /> : null}
 			{pagedItems.map((item) => {
 				if (item.kind === "quiet") {
 					return <RowBoundary key={item.key}>

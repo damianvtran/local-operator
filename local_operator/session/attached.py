@@ -24,6 +24,7 @@ import inspect
 import logging
 import math
 import time
+import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -74,10 +75,13 @@ from local_operator.harness.types import (
     Usage,
     WakeDeliveredEvent,
 )
+from local_operator.i18n.keys import tui_notices as _nt
+from local_operator.i18n.messages import Msg
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
     BIND_FAILED_REASON,
     MOVED_REASON,
+    QUEUED_DETAIL,
     RETIRING_REASON,
     STOPPED_REASON,
     AttachClient,
@@ -172,6 +176,20 @@ from local_operator.session.usage_seed import (
 from local_operator.session_lease import SessionLeaseHeldError
 
 logger = logging.getLogger(__name__)
+
+
+def _settings_notice(message: Msg, *, kind: Literal["info", "error"]) -> NoticeEvent:
+    """A viewer-local notice about this viewer's own settings switch.
+
+    Same envelope rule as the owner's notices (``session._notice``): ``text``
+    pinned to ``en`` and ``code``/``params`` carried, so a locale-aware viewer
+    re-renders it in the active language from the catalogue id. Pinned rather
+    than rendered here because this package's envelopes are policed as
+    possibly persisted (``tests/unit/i18n/test_envelope_locale_ratchet.py``).
+    """
+    body = message.envelope(locale="en")
+    return NoticeEvent(text=body["text"], code=body["code"], params=body["params"], kind=kind)
+
 
 #: User-facing refusal for a routed slash submitted while the owner is being
 #: recovered. One string, formatted with the command, so every seam that can
@@ -660,6 +678,28 @@ def _sync_disconnect_error(reason: str) -> ConnectionError:
     if reason == BIND_FAILED_REASON:
         return RuntimeBindFailedError(reason)
     return ConnectionError(reason)
+
+
+class OwnerReconnectingError(ConnectionError):
+    """This viewer is between connections to an owner the registry still lists live.
+
+    WHY IT EXISTS (the Aida incident, 2026-11-09): a model pick and two ask
+    answers arrived while the desktop viewer was re-dialling a live, busy owner
+    after its stream dropped, and were refused with a plain ``ConnectionError``
+    — which the desktop control ladder (``routes/desktop_sessions.py::errors``)
+    answers ``runtime_unreachable``, "Reconnect and reconcile before
+    retrying". The runtime was there the whole time and a hand retry worked.
+
+    Raised ONLY by :meth:`AttachedSession._refusal_while_reconnecting`, after
+    the owner seam reported a live, non-leaving record for this session, and
+    only at sites where nothing has reached the owner yet — so a resend is
+    safe. ``owner_alive`` is the duck-checked mark the ladder already reads for
+    ``OwnerAckTimeout``; it is deliberately NOT ``runtime_alive``, which the TUI
+    reads to switch its notice register. The sentence is unchanged, so the
+    TUI's copy is too.
+    """
+
+    owner_alive = True
 
 
 _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
@@ -1633,6 +1673,9 @@ class AttachedSession:
         # later phase for the same id must always pass.
         self._live_message_phase: dict[str, int] = {}
         self._handlers: list[EventHandler] = []
+        #: In-flight owner switch requests (``_switch_on_owner``), held so the
+        #: tasks are not collected before their notice is delivered.
+        self._switch_tasks: set[asyncio.Task[None]] = set()
         # Events arriving before OperatorApp adopts/subscribes are retained;
         # otherwise a fast owner can stream between factory return and app
         # adoption and the first visible delta vanishes.
@@ -4193,7 +4236,10 @@ class AttachedSession:
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
-            raise ConnectionError(self._unavailable_reason())
+            # ``_ensure_bound`` returns quietly while a recovery owns the dial,
+            # so this is the ask answer that lands mid-reconnect. Nothing was
+            # sent; the owner's liveness decides busy vs gone.
+            raise await self._refusal_while_reconnecting(self._unavailable_reason())
         method = getattr(client, name)
         if tail:
             return await method(ask_id, *tail)
@@ -5047,7 +5093,22 @@ class AttachedSession:
                 # attempt 2 then finding no record must not downgrade the
                 # diagnosis to this generic sentence. Same rule as the two
                 # disposal arms above, which is why all three read alike.
+                #
+                # The reason survives; a stale DISPOSITION does not (agent
+                # review round 1, R1-1). An ``owner_alive`` error from an
+                # earlier attempt (``OwnerWelcomeTimeout``: the owner accepted
+                # the socket and welcomed late) was true THEN, but this arm is
+                # newer, definitive evidence — no record and no lease holder —
+                # that the owner has since gone. Rethrowing it unchanged would
+                # report a known-gone owner as ``runtime_busy`` and invite a
+                # resend into nothing. Re-raise the same sentence (the TUI's
+                # resume retry matches it) as a plain ``ConnectionError``,
+                # chained so the earlier attempt stays visible. The disposal
+                # arms above deliberately keep the error as-is: disposal says
+                # nothing about whether the owner lives.
                 if last_error is not None:
+                    if getattr(last_error, "owner_alive", False):
+                        raise ConnectionError(str(last_error)) from last_error
                     raise last_error
                 raise ConnectionError("could not start a runtime for this session")
             try:
@@ -5212,7 +5273,10 @@ class AttachedSession:
             if retain_unsynced:
                 store = self._frontend_store
                 assert store is not None, "_install_frontend just installed the store"
-                store.replace_and_notify(frontend.snapshot)
+                # The CURRENT state, never ``frontend.snapshot`` again: see
+                # ``_publish_read_rollover`` for the rewind that killed live
+                # connections to busy owners (Aida, 2026-11-09).
+                self._publish_read_rollover(store)
         except BaseException:
             # A failed/cancelled sync is not an attached viewer. Retrying must
             # not leak the half-open socket or inherit its queued epoch suffix.
@@ -5333,11 +5397,36 @@ class AttachedSession:
             # rollover to a live state that does not exist yet.
             store = self._frontend_store
             assert store is not None, "_install_frontend just installed the store"
-            store.replace_and_notify(frontend.snapshot)
+            self._publish_read_rollover(store)
         except BaseException:  # noqa: BLE001 — a refused late sync is a cold read
             logger.debug("late frontend sync for %s was refused", self._session_id, exc_info=True)
             if not self._disposed and self._frontend_future is pending_sync:
                 self._discard_rejected_client()
+
+    @staticmethod
+    def _publish_read_rollover(store: FrontendStateStore) -> None:
+        """Publish a read's rollover from the store's CURRENT state.
+
+        WHY NOT THE SYNC'S SNAPSHOT (the Aida incident, 2026-11-09): both read
+        installs (``_bind_to`` with ``retain_unsynced`` and the late-landing
+        task) used to re-install ``frontend.snapshot`` here, AFTER
+        ``_install_frontend`` had replayed the deltas buffered behind the sync
+        and AFTER the ``_load_frontend_history`` await had let further live
+        deltas apply. On a busy owner those deltas are always there, so the
+        store REWOUND to the snapshot's older sequence while the transport's
+        own counter (``AttachClient._frontend_sequence``) stayed current. The
+        very next delta was then ``transport+1`` but not ``store+1``;
+        ``FrontendStateStore.apply_update`` refused it ("frontend update is not
+        the next state sequence"), the pump tore down a healthy socket, and
+        every control call in the recovery window answered 503.
+
+        The current state already contains the snapshot plus exactly the
+        in-order deltas applied on top of it, so publishing it carries the same
+        rollover to subscribers without moving the sequence backwards. Nothing
+        out of order can be applied: the install itself, the buffer replay and
+        ``apply_update``'s exact ``+1`` check are unchanged.
+        """
+        store.replace_and_notify(store.state)
 
     async def _settle_landed_sync(
         self, pending_sync: asyncio.Future[FrontendSync]
@@ -7623,6 +7712,12 @@ class AttachedSession:
         """
         self._streaming = state.streaming
         self._generation = state.generation
+        if (
+            changed_fields is None
+            or "settings_result" in changed_fields
+            or "settings_results" in changed_fields
+        ):
+            self._consume_settings_result(state)
         self._model = state.selected_model
         # Keep the concrete primary seen at birth OR on an attached owner. A
         # speculatively warmed owner can retire before its first durable row;
@@ -10027,7 +10122,7 @@ class AttachedSession:
                 # cannot express a WITHDRAWAL; ``auto`` is the owner's word for
                 # "no level chosen" and ``set_model_effort`` accepts it.
                 chosen = "auto" if effort_choice is None else str(effort_choice)
-                asyncio.create_task(client.set_model(model.provider, model.model_id, effort=chosen))
+                self._switch_on_owner(client, model, effort=chosen, announce=True)
             elif model.reasoning_effort != old.reasoning_effort:
                 # A LEVEL moved but this caller stated no DECISION (a carried
                 # spec, an adoption). `set_effort` is an explicit choice on the
@@ -10038,9 +10133,134 @@ class AttachedSession:
                 # its own choice, which is the local Session's semantics for a
                 # level change with no decision; a spec whose level did not move
                 # (`/fast`) sends nothing at all.
-                asyncio.create_task(client.set_model(model.provider, model.model_id))
+                self._switch_on_owner(client, model, announce=explicit)
         else:
-            asyncio.create_task(client.set_model(model.provider, model.model_id))
+            self._switch_on_owner(client, model, announce=True)
+
+    def _consume_settings_result(self, state: FrontendSessionState) -> None:
+        """Render OUR switch outcomes once: a refusal as an error, success silently.
+
+        SUCCESS IS SILENT (PR #3697 review R1-M3). The ``selected_model`` repaint
+        already shows a landed switch, and the owner's receipt (``model: X``)
+        printed beside it was a second line saying the same thing. A refusal is
+        the one outcome nothing else shows, so it is the one notice.
+
+        Reads the per-kind ``settings_results`` as well as ``settings_result``:
+        the latter is last-writer-wins across kinds, so after a redial (a full
+        snapshot) a model refusal followed by an effort success would otherwise
+        be lost (R1-m2). Entries another viewer sent, and replays of one already
+        consumed, are ignored because only ids still in our pending map match.
+        """
+        pending: dict[str, tuple[str, str]] = self.__dict__.get("_settings_pending", {})
+        if not pending:
+            return
+        results = list(state.settings_results.values())
+        if state.settings_result is not None:
+            results.append(state.settings_result)
+        for result in results:
+            entry = pending.pop(result.request_id, None)
+            if entry is None:
+                continue
+            label, _kind = entry
+            if not result.ok:
+                self._deliver(
+                    _settings_notice(
+                        _nt.model_switch_refused(model=label, reason=result.message), kind="error"
+                    )
+                )
+
+    def _track_settings_request(self, request_id: str, label: str, kind: str) -> None:
+        """Remember an identified switch BEFORE sending it (outcomes can race the ack).
+
+        LAST-WINS PRUNING keeps the map bounded by the number of setting kinds,
+        without a tuned cap: a newer pick of the same kind replaces the older
+        one, so the older outcome is moot (its refusal would describe a choice
+        the user already changed) and is dropped here rather than left to leak
+        when its result is overwritten on the single-slot wire field.
+        """
+        pending: dict[str, tuple[str, str]] = self.__dict__.setdefault("_settings_pending", {})
+        for older_id, (_label, older_kind) in list(pending.items()):
+            if older_kind == kind:
+                pending.pop(older_id, None)
+        pending[request_id] = (label, kind)
+
+    def _switch_on_owner(
+        self, client: AttachClient, model: ModelSpec, *, effort: str | None = None, announce: bool
+    ) -> None:
+        """Send one model switch to the owner WITHOUT waiting on its turn work.
+
+        WHY ``defer_ok``. ``set_model`` here is synchronous for the TUI (the
+        picker repaints at once), so the owner request was always fire-and-
+        forget — but the owner's answer still waited for its session loop, so
+        a switch made mid-tool or mid-eval sat unanswered for the whole step,
+        and a refusal was swallowed with the task. A current runtime acks EVERY
+        ``defer_ok`` switch ``queued`` before running it, idle or busy, and
+        publishes the outcome later as ``settings_result`` keyed by
+        ``request_id``; :meth:`_consume_settings_result` shows a refusal.
+
+        THE QUEUED LINE IS SHOWN ONLY WHILE THE OWNER IS STREAMING (R1-M3). The
+        ack says nothing about busyness, so announcing every ack claimed a busy
+        session on idle switches too. The viewer's own last state says whether
+        a turn is running: then the switch genuinely waits for the next step and
+        the neutral "queued" line is true; idle, it lands at once and the
+        repaint is the only feedback needed. Never shown after the outcome has
+        already been consumed (a state push can overtake the ack's resumption).
+
+        ``announce`` is False for a level carried with no user decision (an
+        adoption, a failover carry): no "queued" line for a change the user
+        never asked for. A refusal is still reported, so it is still tracked.
+
+        A lost connection stays silent, as before: the attach layer already
+        reports the owner going away, and a second line here would duplicate it.
+        """
+        request_id = uuid.uuid4().hex
+        label = f"{model.provider}/{model.model_id}"
+        if effort:
+            # Name the level the user picked (R1-n2): an effort-only change
+            # otherwise read as a re-selection of the same model.
+            label = f"{label} · {effort}"
+        self._track_settings_request(request_id, label, "model")
+
+        def pending() -> dict[str, tuple[str, str]]:
+            return cast(dict[str, tuple[str, str]], self.__dict__.get("_settings_pending", {}))
+
+        async def run() -> None:
+            try:
+                detail = await client.set_model(
+                    model.provider,
+                    model.model_id,
+                    effort,
+                    defer_ok=True,
+                    request_id=request_id,
+                )
+            except (ConnectionError, TimeoutError):
+                pending().pop(request_id, None)
+                logger.debug("attach: model switch to %s not answered", label, exc_info=True)
+                return
+            except Exception as exc:  # noqa: BLE001 — the refusal IS the notice
+                if pending().pop(request_id, None) is None:
+                    return  # the outcome push already reported it
+                self._deliver(
+                    _settings_notice(
+                        _nt.model_switch_refused(model=label, reason=str(exc)), kind="error"
+                    )
+                )
+                return
+            if detail != QUEUED_DETAIL:
+                # An older owner answered on landing: the reply IS the outcome.
+                pending().pop(request_id, None)
+                return
+            if announce and request_id in pending() and getattr(self, "_streaming", False):
+                self._deliver(_settings_notice(_nt.model_switch_queued(model=label), kind="info"))
+
+        task = asyncio.create_task(run())
+        # Strong reference until it settles: a bare create_task can be
+        # collected mid-await, dropping the notice with it.
+        # ``setdefault`` because several tests build this facade with
+        # ``__new__`` and only the attributes they exercise.
+        tasks: set[asyncio.Task[None]] = self.__dict__.setdefault("_switch_tasks", set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     @property
     def goal(self) -> str:
@@ -10475,6 +10695,9 @@ class AttachedSession:
         command: str,
         args: str,
         images: Sequence[ImageContent] | None = None,
+        *,
+        defer_ok: bool = False,
+        request_id: str | None = None,
     ) -> Any:
         """Run a conversation-mutating slash command on the authoritative host.
 
@@ -10508,18 +10731,31 @@ class AttachedSession:
             await self._ensure_bound()
         client = self._client
         if client is None or self._recovering or not client.connected:
-            raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command))
+            # Nothing was sent: the owner's liveness decides busy vs gone.
+            raise await self._refusal_while_reconnecting(
+                _RECONNECTING_SLASH_NOTICE.format(command=command)
+            )
         if command == "model":
             # A forwarded model switch pays the SAME owner-record admission as
             # the facade's own (``_require_routed_model_admission``): the owner
             # cannot be relied on to refuse, because a pre-Muse build's
             # ``_model_slash`` predates the gate entirely (review round 1, R1-1).
             self._require_routed_model_admission(args)
+        # An opted-in switch's result may race the receipt; identify it first
+        # so the ordinary state hook can show its later applied/refused outcome.
+        if defer_ok and request_id:
+            self._track_settings_request(request_id, args or command, command)
+        settings_kwargs: dict[str, Any] = {}
+        if defer_ok:
+            settings_kwargs["defer_ok"] = True
+        if request_id:
+            settings_kwargs["request_id"] = request_id
         try:
             return await client.slash_result(
                 command,
                 args,
                 [_image_to_wire(image) for image in (images or [])],
+                **settings_kwargs,
             )
         except ConnectionError as error:
             # An ACK expiry is not a disconnect: the authenticated socket is
@@ -10529,6 +10765,33 @@ class AttachedSession:
             if getattr(error, "owner_alive", False):
                 raise
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
+
+    async def _refusal_while_reconnecting(self, sentence: str) -> ConnectionError:
+        """The refusal for a call that found no usable connection: busy or gone.
+
+        Busy (:class:`OwnerReconnectingError`) ONLY when the owner seam — the
+        same ``locate`` every bind reads, which for a local runtime is
+        ``find_runtime_record`` (a record whose pid is alive and whose
+        heartbeat is fresh) and for a peer's is the peer's own answer — returns
+        a record that is not ``leaving``. A dead pid, a stale heartbeat, no
+        record, a draining owner, a deliberate stop or a disposed viewer all
+        keep the plain ``ConnectionError`` and therefore ``runtime_unreachable``.
+        A wedged owner (lease held, no live record) also stays plain: this
+        side has not established that it is serving anything.
+
+        Read only on this failure path, so the registry read costs nothing on
+        a healthy call; a failed read is not evidence of life.
+        """
+        if self._disposed or self._deliberate_stop:
+            return ConnectionError(sentence)
+        try:
+            record, _owner = await asyncio.to_thread(self._owner.locate)
+        except Exception:  # noqa: BLE001 — an unreadable registry proves nothing
+            logger.debug("liveness read for %s failed", self._session_id, exc_info=True)
+            return ConnectionError(sentence)
+        if record is not None and not str(getattr(record, "leaving", "") or ""):
+            return OwnerReconnectingError(sentence)
+        return ConnectionError(sentence)
 
     def _require_routed_model_admission(self, args: str) -> None:
         """The ``model`` arm's admission for a slash FORWARDED to the owner.

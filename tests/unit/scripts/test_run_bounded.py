@@ -231,8 +231,17 @@ def test_a_group_that_outlives_its_leader_is_reaped_with_no_bound_at_all(reap_ma
 
     result = _wrapper(["--", *_spawning_inner(token, linger=False)])
 
-    assert result.returncode == 0
-    assert _wait_until_gone(token) == [], "the leader exited and left its children running"
+    # STDERR IN THE MESSAGE (the #3368 precedent above, for the signal test): CI
+    # keeps only the assertion text, and pytest elides a CompletedProcess repr to
+    # its first and last ~100 characters. PR #3761 full-suite job 130208451068
+    # failed here with rc 126 -- the wrapper's EXIT_CLEANUP_UNPROVEN, not an exec
+    # failure -- and the elision cut the `[run_bounded] <phase> refused: <reason>`
+    # line, the only record of WHICH strict-cleanup proof was refused (the
+    # per-run JSON lives in the runner's tmp and is gone with it).
+    assert result.returncode == 0, f"rc={result.returncode}, stderr={result.stderr!r}"
+    assert (
+        _wait_until_gone(token) == []
+    ), f"the leader exited and left its children running; stderr={result.stderr!r}"
 
 
 @pytest.mark.parametrize("forwarded", [signal.SIGTERM, signal.SIGHUP])
