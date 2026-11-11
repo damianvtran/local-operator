@@ -731,6 +731,40 @@ describe("AskCard", () => {
 		expect(screen.getByText(/· recommended/)).toBeTruthy();
 	});
 
+	it("badges every row of a multi-select's recommendation set, and ticks none", () => {
+		renderCard(
+			ask({
+				questions: [
+					question({
+						multi: true,
+						options: [
+							{ label: "yes", description: "" },
+							{ label: "maybe", description: "" },
+							{ label: "no", description: "" },
+						],
+						recommended: 0,
+						recommended_all: [0, 1],
+					}),
+				],
+			}),
+		);
+		expect(screen.getAllByText(/· recommended/)).toHaveLength(2);
+		for (const name of [/yes/, /maybe/, /no/]) {
+			expect(screen.getByRole("button", { name }).getAttribute("aria-pressed")).toBe("false");
+		}
+	});
+
+	it("badges one row when a multi-select payload carries only `recommended: 0`", () => {
+		/* An older runtime, or a stored row from before the set existed. */
+		renderCard(ask({ questions: [question({ multi: true, recommended: 0 })] }));
+		expect(screen.getAllByText(/· recommended/)).toHaveLength(1);
+	});
+
+	it("badges nothing for a single-select with no recommendation", () => {
+		renderCard(ask({ questions: [question({ recommended: null })] }));
+		expect(screen.queryByText(/· recommended/)).toBeNull();
+	});
+
 	it("says why an ask with nothing left to answer cannot be sent", () => {
 		/* R6 (agent review round 1): `draft_question_ids` had every question, so
 		   the card rendered no fields and a disabled send with no explanation. */

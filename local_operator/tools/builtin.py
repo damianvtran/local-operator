@@ -35397,8 +35397,8 @@ class AskParams(BaseModel):
 #: marked an option ``recommended`` has already stated what it would do.
 ASK_UNANSWERED_TEXT = (
     "The user closed the question without answering, so nothing was chosen. "
-    "Do not ask again: decide yourself (take your recommended option where you "
-    "gave one), then say in one line what you assumed and carry on."
+    "Do not ask again: decide yourself (take your recommended option(s) where you "
+    "gave any), then say in one line what you assumed and carry on."
 )
 
 
