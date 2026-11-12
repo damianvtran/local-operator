@@ -301,6 +301,55 @@ async def test_s60_mesh_peek_rows_latch_fail_closed(
     _assert_fetch_asks(outbound, gate)
 
 
+def _owner_journal_payload(root: Path, frame: dict[str, Any]) -> dict[str, Any]:
+    """What ``lop network sessions --json --peek`` prints for a current owner:
+    the owner's real ``net_session_peek`` body plus the viewer CLI's receipt."""
+    from local_operator.network import cli as net_cli
+    from local_operator.network import peek as net_peek
+
+    answer = net_peek.serve(root, frame, own_label="owner-box")
+    payload, _lines = net_cli._peek_journal_receipt(answer, frame["session_id"], "owner-box")
+    return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("window", "latched"),
+    [
+        ({"steps": 2}, True),
+        ({"head": 1}, True),
+        ({"digest": True}, True),
+        ({"query": "no-such-needle"}, False),
+    ],
+)
+async def test_s60_mesh_peek_journal_window_latches_fail_closed(
+    store: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window: dict[str, Any],
+    latched: bool,
+) -> None:
+    """PR #3831 convergence with #3796: a current owner answers a journal window
+    (``source: journal``), rendered by ``_sessions_peek_mesh_journal`` — which
+    the merge left stamping ``bool(rows)``, a name only the tail renderer binds,
+    so every remote journal peek raised NameError. Any returned step latches,
+    fail closed like the tail; a window that matched nothing carries no step."""
+    from local_operator.tools.builtin import execute_sessions
+
+    owner = tmp_path / "owner"
+    _journal(owner, "ffff87654321", latched=False)
+    _fake_mesh(monkeypatch, _owner_journal_payload(owner, {"session_id": "ffff87654321", **window}))
+    result = await execute_sessions(
+        "p2",
+        {"op": "peek", "session": "ffff87654321", "peer": "cloud-node-1", **window},
+        None,
+        None,
+        _reader_context(store),
+    )
+    assert not result.is_error, result.text
+    assert ((result.details or {}).get(be.BRIDGE_TAINT_DETAILS_KEY) is True) is latched
+
+
 def test_s60_network_sessions_send_reply_is_stamped() -> None:
     from local_operator.network.tool import _stamp_mesh_reply
 

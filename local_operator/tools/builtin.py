@@ -19347,7 +19347,11 @@ async def _sessions_peek_mesh(
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
-    return _text(tool_call_id, "sessions", text, details=details)
+    from local_operator.harness.bridge_egress import stamp_details
+
+    # S-60, fail closed: no mesh peer reports its session's Team Bridge latch
+    # today, so any peeked rows count as a teammate's agent message.
+    return _text(tool_call_id, "sessions", text, details=stamp_details(details, bool(rows)))
 
 
 def _sessions_peek_mesh_journal(
@@ -19369,6 +19373,9 @@ def _sessions_peek_mesh_journal(
     mode = str(payload.get("mode") or "")
     name = str(payload.get("name") or f"session {session_id}")
     details: dict[str, Any] = {"op": "peek", "mode": mode, "session_id": session_id, "peer": peer}
+    # Whether the owner handed back any of the session's own content: the
+    # S-60 stamp below keys on it, as the tail renderer keys on ``rows``.
+    peeked: bool
     if mode == "digest":
         raw_digest = payload.get("digest")
         digest: dict[str, Any] = raw_digest if isinstance(raw_digest, dict) else {}
@@ -19378,6 +19385,8 @@ def _sessions_peek_mesh_journal(
             has_older=digest.get("has_older"),
         )
         text = str(digest.get("text") or "")
+        # Fail closed: only an owner's explicit "zero steps" counts as empty.
+        peeked = digest.get("steps_seen") != 0
     else:
         window = window_from_wire(payload.get("window") or {})
         details.update(
@@ -19389,6 +19398,9 @@ def _sessions_peek_mesh_journal(
             details["scanned_bytes"] = window.scanned_bytes
         if window.match_id:
             details["match_id"] = window.match_id
+        # A miss is this harness's own sentence about an empty window; any
+        # step the owner returned is transcript content.
+        peeked = bool(window.steps)
         if window.miss:
             text = window.miss
         else:
@@ -19408,9 +19420,11 @@ def _sessions_peek_mesh_journal(
         details.update(spill)
     from local_operator.harness.bridge_egress import stamp_details
 
-    # S-60, fail closed: no mesh peer reports its session's Team Bridge latch
-    # today, so any peeked rows count as a teammate's agent message.
-    return _text(tool_call_id, "sessions", text, details=stamp_details(details, bool(rows)))
+    # S-60, fail closed, as for the tail above: no mesh peer reports its
+    # session's Team Bridge latch today, so any peeked step counts as a
+    # teammate's agent message. This is the one deliberate difference from a
+    # local peek's details, which judges the target journal's own latch.
+    return _text(tool_call_id, "sessions", text, details=stamp_details(details, peeked))
 
 
 async def _sessions_peek(

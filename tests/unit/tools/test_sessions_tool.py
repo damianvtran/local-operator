@@ -3627,10 +3627,17 @@ async def test_remote_peek_windows_match_the_owners_local_peek(
         assert not local.is_error, (case, local.text)
         assert not remote.is_error, (case, remote.text)
         assert remote.text == local.text, case
-        local_details = {k: v for k, v in local.details.items() if k != "peer"}
-        remote_details = {k: v for k, v in remote.details.items() if k != "peer"}
+        # ``bridge_taint`` is the one deliberate difference (#3796, S-60): the
+        # local peek judges the journal's own Team Bridge latch, while a mesh
+        # peer reports none, so any step it returns latches fail closed.
+        skip = {"peer", "bridge_taint"}
+        local_details = {k: v for k, v in local.details.items() if k not in skip}
+        remote_details = {k: v for k, v in remote.details.items() if k not in skip}
         assert remote_details == local_details, case
         assert remote.details["peer"] == PEER
+        assert "bridge_taint" not in local.details, case
+        shown = remote.details.get("steps_shown") or remote.details.get("steps_seen")
+        assert remote.details.get("bridge_taint") is (True if shown else None), case
     # The head read really is the ORIGINAL request end of the journal.
     head = await _peek(root, {"op": "peek", "session": "abab12121212", "peer": PEER, "head": 2})
     assert _rows_in(head.text) == {1, 2}, head.text
