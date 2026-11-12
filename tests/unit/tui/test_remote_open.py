@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -25,7 +24,6 @@ import pytest
 from local_operator.network.mobility import MOVE_RESULT_PHASES
 from local_operator.resume import SessionRow
 from local_operator.session.catalog import CatalogEntry
-from local_operator.session.runtime.registry import scan as record_scan
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_move import (
     AMBIGUOUS_MOVE,
@@ -2333,24 +2331,20 @@ async def _phone_dial(record: Any, *, locality: Any = "remote") -> tuple[Any, An
     send (``0``, ``""``, ``"LOCAL"``) to prove the reader refuses to guess: only the
     exact expected value may take the local lane.
 
-    The record is selected by PID rather than by position: ``registry.scan()`` lists
-    every live runtime on this machine, and dialling the first one reaches a
-    FOREIGN session's socket (measured) instead of this test's host.
+    ``record`` is the TEST SERVER'S OWN record (``server.record``), dialled
+    directly. It is never looked up in ``registry.scan()``, by position or by pid:
+    position reaches a FOREIGN session's socket (measured), and pid is not unique
+    to this server either. The app under test starts its OWN mobile registrant at
+    adoption (``OperatorApp._mobile_adopted``), and both servers publish the one
+    pid-keyed file ``<pid>.json``, so whichever republished last (the registrant's
+    15 s heartbeat, a busy bit) is what a pid scan returns. Dialling the app's
+    registrant instead of this server is invisible until the bare ``/stop`` cell:
+    ``_stop_local_session`` tears that registrant down (``_mobile_teardown``) by
+    design, closing the phone's socket, and the next call reads EOF as
+    ``JSONDecodeError`` (CI run 43215539671, reproduced by forcing the republish).
     """
-    deadline = asyncio.get_running_loop().time() + 20
-    target = None
-    while asyncio.get_running_loop().time() < deadline:
-        for candidate, liveness in record_scan():
-            if liveness == "live" and candidate.pid == os.getpid():
-                target = candidate
-                break
-        if target is not None:
-            break
-        await asyncio.sleep(0.05)
-    seen = [(r.pid, live) for r, live in record_scan()]
-    assert (
-        target is not None
-    ), f"this process published no live runtime record: scanned {seen}, mine={os.getpid()}"
+    assert record is not None and record.control_port, f"no published record to dial: {record!r}"
+    target = record
     auth: dict[str, Any] = {"key": target.control_key}
     if locality is not None:
         auth["locality"] = locality
@@ -2486,7 +2480,7 @@ async def test_a_phone_shaped_connection_runs_its_slash_commands_through_the_tui
         server.start()
         try:
             assert await server.wait_until_published(timeout=15), "no record published"
-            reader, writer = await _phone_dial(record=None)
+            reader, writer = await _phone_dial(record=server.record)
             req = 500
             try:
                 # THE FOUR THE REVIEW NAMED, and the lane each must reach. The
@@ -2576,7 +2570,7 @@ async def test_a_phone_shaped_connection_runs_its_slash_commands_through_the_tui
             # asks for the one command that PROVES the lane: `/move` runs in the owner's
             # terminal iff the connection was read as local.
             for spelling in ("loopback", "", 0, "LOCAL", "Local", "remote "):
-                reader3, writer3 = await _phone_dial(record=None, locality=spelling)
+                reader3, writer3 = await _phone_dial(record=server.record, locality=spelling)
                 try:
                     terminal.clear()
                     dispatched.clear()
@@ -2599,7 +2593,7 @@ async def test_a_phone_shaped_connection_runs_its_slash_commands_through_the_tui
 
             # THE CONTROL: an unmarked loopback connection is still LOCAL, and every
             # one of those same commands runs in the terminal exactly as before.
-            reader2, writer2 = await _phone_dial(record=None, locality=None)
+            reader2, writer2 = await _phone_dial(record=server.record, locality=None)
             try:
                 terminal.clear()
                 dispatched.clear()
