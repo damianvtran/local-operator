@@ -9649,6 +9649,47 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
         # noise the operator learns to skip.
         excluded=re.compile(r"(?i)\.env\.(?:example|sample|template|dist|example\.[a-z]+)\b"),
     ),
+    # A third-party secret CLI printing a raw value to this result: `op read`
+    # and `security find-generic-password -w` emit the secret on stdout, and
+    # unlike `lop secret get` nothing registers it with the mask, so only a
+    # recognised SHAPE would hide it. Steer, never block (operators asked that
+    # secret work stay autonomous): the piped/captured spellings are the
+    # sanctioned consumer forms and do not fire — the segment after the verb
+    # must reach the end of its command with no `|` or `>`, and `$(op read …)`
+    # is not a command position here.
+    DumpShape(
+        "secret-cli-read",
+        re.compile(
+            r"(?i)(?:^|[;&]\s*|\(\s+)"
+            r"(?:op\s+read\b|security\s+find-(?:generic|internet)-password\b[^;&|>\n]*\s-w\b)"
+            r"[^;&|>\n]*(?=$|[;&\n])"
+        ),
+        "pipe the value into the command that needs it, e.g. "
+        "`op read op://vault/item/field | docker login --password-stdin`, or capture it "
+        "with `$(op read …)` inside that command",
+        excluded=re.compile(r"(?i)\bop\s+read\b[^;&|\n]*\s(?:--out-file|-o)\s"),
+    ),
+    # Staging or committing a credential FILE by name: the classic irreversible
+    # mistake (a pushed secret has to be rotated). A steer, not a refusal: a
+    # repo may legitimately track an encrypted or example file, and a new block
+    # would need a new mechanism nobody asked for. Only an unquoted path
+    # argument counts, so `git commit -m "drop .env"` (a message) stays quiet;
+    # `.env.example`/`.sample`/`.template`/`.dist` and `*.pub` are not secrets.
+    # `*.env` counts as well as `.env`: `prod.env`/`f.env` are the same file.
+    DumpShape(
+        "git-add-credential-file",
+        re.compile(
+            r"(?i)\bgit\s+(?:add|commit)\b(?:\s+[^\s'\";&|]+)*?\s+(?:[^\s'\";&|]*/)?"
+            r"(?:[^\s'\";&|/]*\.env(?:\.(?!example\b|sample\b|template\b|dist\b)[\w-]+)?"
+            r"|[^\s'\";&|/]*\.(?:pem|p12|pfx|key)"
+            r"|id_(?:rsa|ed25519|ecdsa|dsa)"
+            r"|[^\s'\";&|/]*service-account[^\s'\";&|/]*\.json"
+            r"|credentials(?:\.json)?|\.netrc|\.npmrc)"
+            r"(?=$|[\s;&|)])"
+        ),
+        "keep credential files out of git: add the file to `.gitignore`, unstage it "
+        "with `git rm --cached FILE`, and rotate any value that was ever pushed",
+    ),
 )
 
 #: A pipeline that prints only NAMES is the form the notice itself recommends,
@@ -9690,6 +9731,8 @@ _BRIEF_ADVICE: dict[str, str] = {
     "terraform-output": "read one output: `terraform output <name>`",
     "npm-token-list": "revoke unused tokens: `npm token revoke <id>`",
     "credential-file-read": "read one field: `grep -c .`, `jq .field`",
+    "secret-cli-read": "pipe it: `op read … | cmd --password-stdin`",
+    "git-add-credential-file": "keep it out: .gitignore, `git rm --cached`",
 }
 
 
@@ -9719,6 +9762,8 @@ _BRIEF_LABEL: dict[str, str] = {
     "terraform-output": "terraform",
     "npm-token-list": "npm",
     "credential-file-read": "file",
+    "secret-cli-read": "secret cli",
+    "git-add-credential-file": "git",
 }
 
 

@@ -100,6 +100,7 @@ from local_operator.harness.approval import (
 from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
+from local_operator.harness.secret_sinks import steer_text as _secret_sink_steer
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -3829,6 +3830,88 @@ def _stream_redaction_values(store: Any, credential_env: dict[str, str]) -> list
 _REDACTION_SEAM_BROKEN: list[str] = ["\x00redaction-seam-broken\x00"]
 
 
+def _preregister_printed_secrets(scan: Any, command: str, context: ToolContext | None) -> bool:
+    """Register the exact value of every secret this command reads, BEFORE it runs.
+
+    Why the bash warn path needs this on top of :func:`secret_redaction_live`:
+    the live seam only scrubs values it has been TOLD about, and the telling is
+    the broker's notice to this session (``secrets/session.py``). That notice
+    is not guaranteed: ``access.retrieve_secret`` deliberately degrades to an
+    UNNOTIFIED local decrypt when no broker is reachable (keyfile tier, a
+    broker that died), and then the child prints a value nothing scrubs.
+    Reading each named value here and registering it makes the mask
+    independent of the broker for exactly the call that is about to print it.
+
+    ``False`` (so the caller refuses, as before this change) whenever that
+    cannot be guaranteed: a source whose name is not a literal (`"$k"` in a
+    loop), a command that points ``lop`` at another store (``--config-dir``,
+    ``LOCAL_OPERATOR_CONFIG_DIR=``), no store, an unreadable or missing secret,
+    or an empty value. ``read_for_copy`` is used because this read is not a
+    USE (no ``last_used`` touch); the child's own ``get`` audits the use.
+    """
+    store = getattr(context, "variables", None) if context is not None else None
+    register = getattr(store, "register_redaction", None)
+    if not callable(register):
+        return False
+    if "config-dir" in command or "LOCAL_OPERATOR_CONFIG_DIR" in command:
+        return False
+    # Every source the text fetches, plus any name a finding attributes; an
+    # unattributed finding (a read-back of a file names no secret) can only
+    # print what the sources fetched, so it adds nothing to register.
+    names = list(
+        dict.fromkeys([*scan.sources, *(f.secret_name for f in scan.findings if f.secret_name)])
+    )
+    if not names:
+        return False
+    try:
+        from local_operator.secrets.access import open_store
+
+        secret_store = open_store()
+        for name in names:
+            # `read_for_copy` validates the name: `"$k"` or `?` raises here.
+            _record, value = secret_store.read_for_copy(name)
+            text = value.decode("utf-8", errors="replace")
+            if not text.strip():
+                return False
+            register(text)
+    except Exception:  # noqa: BLE001 — any doubt keeps the pre-existing refusal
+        logger.debug("secret sink: could not pre-register a printed secret", exc_info=True)
+        return False
+    return True
+
+
+def secret_redaction_live(context: ToolContext | None) -> bool:
+    """Is the whole redaction chain live for a value a child fetches mid-call?
+
+    The single predicate the secret-sink scan's warn/refuse split hangs on
+    (``bash`` here, ``eval`` in ``tools/eval.py``). A VERBATIM print of a
+    stored value is allowed to RUN, with a steer, only when every one of these
+    holds, because each is a link the masking depends on:
+
+    * the session has a variable store exposing ``redaction_values`` — the
+      seam through which the broker announces a value a child fetched, and the
+      list the live pipe filter, the peek buffer and the final result scrub;
+    * that seam can actually be read now (not :data:`_REDACTION_SEAM_BROKEN`);
+    * the platform can run the broker at all (peer authentication on darwin
+      and linux); elsewhere a child's ``lop secret get`` is never announced.
+
+    A bare ``ToolContext`` without a store (unit-test fixtures, third-party
+    embedders) fails the first test and keeps the pre-existing refusal, which
+    is the safe default: no mask means the raw value would reach the provider
+    and only a rotation could undo it.
+    """
+    store = getattr(context, "variables", None) if context is not None else None
+    if not callable(getattr(store, "redaction_values", None)):
+        return False
+    if _stream_redaction_values(store, {}) is _REDACTION_SEAM_BROKEN:
+        return False
+    # Imported here: `secrets.peer` is light, but this keeps the bash module's
+    # import graph unchanged for callers that never touch a secret.
+    from local_operator.secrets.peer import PEER_AUTHENTICATION_SUPPORTED
+
+    return bool(PEER_AUTHENTICATION_SUPPORTED)
+
+
 def _shape_containment_sink(
     store: Any,
 ) -> Callable[[Sequence[ShapeHit]], None] | None:
@@ -4336,13 +4419,32 @@ async def execute_bash(
     # The source is the store: a command that never names `lop secret` is
     # untouched, so ordinary work — and the session-credential flow, which rides
     # the child's environment and is the mask's business — is unaffected.
+    #
+    # Refuse vs. warn: operators reported the blanket refusal blocked routine
+    # secret work (rotation, verification, reading back a rotated file). A
+    # VERBATIM print (`echo "$v"`, `lop secret get K`, `set -x`) runs when the
+    # redaction chain is live — the stream, peek and result all show
+    # `[redacted]` — and the result carries one steering line instead. What
+    # stays refused is what the mask cannot see: a re-spelled value (`| rev`,
+    # `| base64`, `${v:0:8}`), an inline interpreter, unclassifiable text, and
+    # every print on a host with no live mask (``scan.refused`` there).
     scan = _scan_secret_sinks(params.command)
+    secret_steer: str | None = None
     if scan.refused:
-        return _error(
-            tool_call_id,
-            "bash",
-            _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
-        )
+        if (
+            scan.blocking
+            or not secret_redaction_live(context)
+            # Off the event loop: opening the store may wait on the broker.
+            or not await asyncio.to_thread(
+                _preregister_printed_secrets, scan, params.command, context
+            )
+        ):
+            return _error(
+                tool_call_id,
+                "bash",
+                _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
+            )
+        secret_steer = _secret_sink_steer(scan)
     # The pad cap, BEFORE the child exists. A shell cannot be refused after the
     # fact like ``write`` can, and once a pad is over its cap every creating
     # command made it worse — so a command that would create a path under an
@@ -5617,6 +5719,12 @@ async def execute_bash(
         0,
     )
     insert_at = head_index + 1
+    # The secret-sink steer ranks FIRST: it is about a stored value this very
+    # call printed (masked), which is the most specific thing the model can
+    # learn from the result; the shape-based credential notice follows it.
+    if secret_steer:
+        parts.insert(insert_at, secret_steer)
+        insert_at += 1
     if notice:
         parts.insert(insert_at, notice)
         insert_at += 1

@@ -42,11 +42,34 @@ echo "$(lop secret get GITHUB_TOKEN)"          # prints it
 TOKEN=$(lop secret get GITHUB_TOKEN); echo $TOKEN   # same, one step later
 ```
 
-A bash call that does this is **refused before it runs**, with an error naming
-the rule, the offending span and the rewrite — the same is true of a `set -x`
-trace over a command that carries a secret, a `ps` of an argv the value was
-passed in, and a cell that prints one. Re-spell the call as one of the forms
-below; a refusal here is the guard working, not a bug to route around.
+What happens to such a call depends on whether the harness can mask it:
+
+- **Warn (it runs).** A *verbatim* print — `echo "$v"`, a bare
+  `lop secret get NAME`, `| cat`, a `set -x` trace, an env dump,
+  `lop secret file NAME -- cat "$GOOGLE_APPLICATION_CREDENTIALS"`, reading back
+  a file the value was just written into, or an eval cell's `print(token)` —
+  runs when the session's redaction chain is live (a store with a redaction
+  seam on macOS or Linux). The value shows as `[redacted]` in the stream, in
+  `jobs` peeks and in the result, and one `[secret sink] ran: …` line under
+  `exit code:` steers you to the better form. Treat it as a nudge, not a
+  channel: the mask matches only the exact value.
+- **Refused (nothing runs).** Anything that defeats the mask: a re-spelled
+  value (`| base64`, `| rev`, `| xxd`, `| tr`, `| cut`, `head -c`,
+  `${v:0:8}`, `token[::-1]`, `.upper()`), a value handed to an inline
+  interpreter (`python3 -c …`, `sh -c 'echo …'`), text the scanner cannot
+  classify around a `lop secret get`, and **every** print when the redaction
+  chain is not live. The error names the rule, the span and the rewrite;
+  re-spell the call rather than route around it.
+- **Not a print at all (no message).** `sed -i`/`perl -i`/`gawk -i inplace`
+  rewriting a file with `$(lop secret get NAME)`, `| wc -c`, piping into a
+  consumer, and `secrets["A"] == secrets["B"]` (a rotation check) all pass.
+
+Other routine secret work — `lop secret update|rotate`, `gh secret set`,
+`aws secretsmanager put-secret-value`, reading or editing a `.env` (its values
+are masked on read) — is never blocked. Some shapes get a one-line
+`[credential guard]` advisory and still run: `cat .env`, a bare `op read` or
+`security find-generic-password -w` whose output is not piped, and
+`git add`/`git commit` of a credential file (`.env`, `*.pem`, `id_*`).
 
 `lop secret get` writes the value to stdout with no trailing newline and exits
 non-zero with empty stdout on any failure, which is what makes `$( )` safe: a
@@ -57,7 +80,8 @@ A FILE is a different matter. `lop secret get NAME > /tmp/token` puts the value
 on disk unencrypted, which is **not** treated as a compromise — the model never
 sees it — but it is a cleanup debt: delete the copy afterwards **without
 reading it**, because reading it is what would turn a contained value into a
-leaked one (and a read of that copy in the same command is refused outright).
+leaked one (a read of that copy in the same command runs masked, with a steer,
+only where the redaction chain is live, and is refused elsewhere).
 Prefer a form that never leaves a copy at all:
 
 For a secret that is a FILE (a service-account JSON, a PEM), use the form that
@@ -183,8 +207,9 @@ The value is a real `str`, so f-strings, concatenation and `.encode()` all work.
 Its `repr` shows `[redacted]`, and anything it does reach — stdout, stderr,
 `display`, the cell's result — is scrubbed before the model sees it. **Do not
 rely on that as permission to print it**: a cell that prints or logs a retrieved
-value is REFUSED before the kernel sees it, and the scrub is the second layer
-behind that refusal rather than a channel. A value you deliberately write to a
+value verbatim runs only behind that scrub (with a steer), and one that prints a
+re-spelled value (a slice, an encoding) or runs where the scrub is not live is
+REFUSED before the kernel sees it. A value you deliberately write to a
 file or post to a service has left the harness entirely.
 
 ## When to store a secret

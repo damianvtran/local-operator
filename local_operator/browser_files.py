@@ -919,15 +919,37 @@ def classify_download(path: Path, *, declared_mime: str = "", policy: Policy = D
 # ---------------------------------------------------------------------------
 
 
+#: Armour that marks private-key material, whatever the file is called.
+_PRIVATE_KEY_ARMOUR = (b"PRIVATE KEY", b"PRIVATE-KEY", b"PuTTY-User-Key-File")
+
+
+def _is_public_key_file(path: Path) -> bool:
+    """Does this file read as public-key material only (no private armour)?"""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(_SNIFF_HEAD_BYTES)
+    except OSError:
+        return False
+    return not any(marker in head for marker in _PRIVATE_KEY_ARMOUR)
+
+
 def _credential_refusal(path: Path) -> str:
     """Why this resolved path may not be uploaded, or "" when it may.
 
     Both halves are checked because either alone is escapable: a basename can be
     innocent inside a `secrets/` directory, and a path can leave `~/.ssh/` by
-    being copied out. The BASENAME patterns are globs, so `id_rsa.pub` is as
-    refused as `id_rsa` — a public key names its private twin's location.
+    being copied out.
+
+    One exception, checked first: a PUBLIC key (`*.pub`, wherever it lives,
+    `~/.ssh` included) whose bytes carry no private-key armour. Uploading
+    `id_ed25519.pub` to a web console is what SSH-key rotation IS, and refusing
+    it blocked that routine task; a public key is meant to be shared. The
+    content check keeps a private key renamed `.pub` refused. An unreadable
+    file falls through to the ordinary checks (refused by name or directory).
     """
     lowered = path.name.lower()
+    if lowered.endswith(".pub") and _is_public_key_file(path):
+        return ""
     for pattern in CREDENTIAL_NAME_PATTERNS:
         if fnmatch.fnmatchcase(lowered, pattern):
             return f"refused: '{path.name}' matches the credential deny-list ({pattern})"

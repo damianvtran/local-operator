@@ -425,7 +425,15 @@ async def test_the_builtin_branch_is_what_the_checkpoint_does(
         assert allowed is None or allowed.blocked is False, "a LOW call never asks the judge"
     elif branch == "refuse-credential":
         assert allowed is not None and allowed.blocked is True
-        assert "unresolvable target" in allowed.text, "a secret-derived target is refused as such"
+        # The refusal names the VARIABLE (never its value), says no `ask` can
+        # lift it, and hands over the literal-path rewrite. It used to name the
+        # cwd as the target and send the agent to `ask`, a dead end.
+        assert "$AWS_SECRET_ACCESS_KEY" in allowed.text, allowed.text
+        assert "no `ask` or approval can lift" in allowed.text
+        assert "literal path" in allowed.text
+        assert "ask the operator" not in allowed.text
+        assert str(guarded_home) not in allowed.text, "the variable's value must not be shown"
+        assert ctx.cwd not in allowed.text, "the cwd is not the target"
     else:
         assert allowed is not None and allowed.blocked is True
         assert allowed.rule == "dangerous-delete"

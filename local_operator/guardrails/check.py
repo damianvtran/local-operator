@@ -392,6 +392,39 @@ def builtin_branch(verdict: Verdict, *, critical_override: bool) -> str:
     return BUILTIN_JUDGE
 
 
+def credential_refusal_text(command: str) -> str:
+    """The refusal for a delete whose target expands from a credential-named variable.
+
+    Why its own text rather than :func:`review_text`: that text named the
+    session's CWD as the target (the masked variable leaves no literal path
+    behind, so the deepest literal directory was all that remained) and told the
+    agent to ``ask`` — but no answer lifts this branch (see the call site), so
+    the remedy was a dead end. What the agent CAN do is spell the path
+    literally, after which the ordinary ranking applies. Only variable NAMES
+    are quoted, never a value: the variable may hold the secret itself.
+    Model-facing English, like the other guard refusals (see ``review_text``).
+    """
+    import re
+
+    from local_operator.tools.shell_env import is_credential_shaped
+
+    names = [
+        name
+        for name in dict.fromkeys(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", command or ""))
+        if is_credential_shaped(name)
+    ]
+    source = ", ".join(f"${name}" for name in names) or "a credential-named variable"
+    return (
+        f"BLOCKED by guardrail {DANGEROUS_DELETE_RULE}: the target is spelled through "
+        f"{source}. The guard never expands a credential-named variable (its value may be "
+        "the secret itself), so where this delete would land cannot be shown or checked, "
+        "and no `ask` or approval can lift this refusal. If the path is not itself secret, "
+        "re-run the command with the literal path written out (e.g. `rm -f ~/proj/sa.json`); "
+        "it is then ranked like any other path. Replacing a stored credential needs no "
+        "delete: `lop secret update NAME` or `lop secret rotate NAME`."
+    )
+
+
 def _git_bearing(path: str) -> bool:
     """Is ``path`` a repository/worktree root, a ``.git`` entry or inside one?
 
@@ -774,7 +807,7 @@ async def _dangerous_delete(
         _journal(DANGEROUS_DELETE_RULE, "high", "block", 0.0, targets)
         return GuardOutcome(
             blocked=True,
-            text=review_text(DANGEROUS_DELETE_RULE, "an unresolvable target", targets),
+            text=credential_refusal_text(command),
             rule=DANGEROUS_DELETE_RULE,
             risk="high",
             destructive=True,
