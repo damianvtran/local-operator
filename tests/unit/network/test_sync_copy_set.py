@@ -947,6 +947,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/skillsync.py": (
+        1,
+        "``RECEIPTS_NAME`` (``skills-sync.json``): the sender's last-push receipt per "
+        "peer at ``<config>/network/``, beside the extraction stage "
+        "(``<config>/network/skill-stage``, built inline, not a constant) and next to the "
+        "``<config>/skills/`` root it fills -- per-DEVICE config-root state, never an "
+        "entry of a session directory (apply refuses any path under ``sessions/``). It "
+        "must NOT travel with a session: the receipt describes THIS device's pushes to "
+        "its peers, and skills are synced to the config root by their own channel",
+    ),
     "local_operator/network/relay.py": (
         1,
         "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
