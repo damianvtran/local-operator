@@ -381,6 +381,7 @@ if TYPE_CHECKING:
     # Type-only: the consent intent is a harness value, held without being
     # constructed here.
     from local_operator.harness.types import DurableWriteIntent
+    from local_operator.harness.verifier import VerifierLimits, VerifierVerdict
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -22850,6 +22851,194 @@ class Session:
             effort=effort,
             model_selector=model,
         )
+
+    async def verify_completion(
+        self,
+        *,
+        request: str,
+        claim: str,
+        observation: str | None = None,
+        host_tools: "Sequence[AgentTool]" = (),
+        limits: "VerifierLimits | None" = None,
+        on_started: "Callable[[dict[str, Any]], None] | None" = None,
+        label: str = "Verify completion",
+    ) -> "VerifierVerdict":
+        """Run the harness completion verifier against a claimed-finished task.
+
+        WHY A SESSION PRIMITIVE. The check must be independent of the model
+        that did the work (fresh context, read-only reach), and it must be the
+        HARNESS's decision to run it: the model that most needs checking is the
+        one that never delegates (``harness/verifier.py`` has the measurement).
+        It reuses the ordinary child machinery (``run_subagent``) so the
+        verifier is a real child session: its own transcript, its request rows
+        attributed by ``job_id`` and ``actor_role="verifier"`` into whatever
+        accounting the root tree feeds, its job cancelled with this session.
+
+        What differs from a ``task`` launch, and why:
+
+        * the role is code-defined (``verifier_profile``), never the registry's;
+        * a :class:`ChildSurface` ceiling of the verifier allowlist, so the
+          child gets no ``web_*`` floor, no ``hub``/``task``, no inherited MCP;
+        * ``host_tools`` -- whatever lets it SEE the deliverable -- exist in
+          that child only, wrapped to count against ``max_commands``;
+        * ``announce=False``: the result is returned here, never injected into
+          this session's conversation;
+        * bounded by :class:`VerifierLimits`; whichever cap fires first cancels
+          the child and is reported as ``ended_by``.
+
+        Never raises for an expected refusal (closing session, memory
+        admission, no request observation to enforce the request cap): those
+        return ``INCONCLUSIVE`` with ``ended_by="refused"`` so the caller can
+        record a skip and carry on exactly as if no verifier existed. Blocks
+        until the verdict; the caller decides what the worker sees.
+        """
+
+        from local_operator import memory_guard
+        from local_operator.harness.subagent import ChildSurface, run_subagent
+        from local_operator.harness.verifier import (
+            VERIFIER_ROLE,
+            VERIFIER_TOOL_ALLOWLIST,
+            VerifierLimits,
+            VerifierVerdict,
+            build_verifier_prompt,
+            counted_host_tools,
+            parse_verdict,
+            verifier_profile,
+        )
+
+        limits = limits or VerifierLimits()
+        started = time.monotonic()
+
+        def refused(reason: str) -> VerifierVerdict:
+            return VerifierVerdict(
+                status="INCONCLUSIVE",
+                findings=reason,
+                ended_by="refused",
+                wall_s=time.monotonic() - started,
+            )
+
+        if self._disposed or self._owned_work_closing:
+            return refused("this session is shutting down")
+        # The same admission every child pays (``_launch_subagent``): a verifier
+        # is resident work in this process like any other child.
+        admission = memory_guard.admission_check("a completion verifier")
+        if not admission.admitted:
+            return refused(admission.reason or "memory admission refused")
+
+        state: dict[str, Any] = {"job_id": None, "requests": 0, "ended_by": None}
+        stop = asyncio.Event()
+
+        def end(reason: str) -> None:
+            if state["ended_by"] is None:
+                state["ended_by"] = reason
+            stop.set()
+
+        def observe(observation: Any) -> None:
+            # Request-final rows of the WHOLE root tree arrive here; only the
+            # verifier's own job counts. Synchronous, append-and-return.
+            if state["job_id"] is None or observation.job_id != state["job_id"]:
+                return
+            state["requests"] += 1
+            if state["requests"] >= limits.max_requests:
+                end("requests")
+
+        try:
+            unsubscribe = self.subscribe_requests(observe)
+        except RuntimeError:
+            # Without request observation the request cap cannot be enforced,
+            # and an uncapped verifier is not one this method may launch.
+            return refused("request observation unavailable; the request cap cannot be enforced")
+        wrapped, command_count = counted_host_tools(
+            host_tools,
+            limit=limits.max_commands,
+            on_call=lambda _count: None,
+            on_exhausted=lambda: end("commands"),
+        )
+        surface = ChildSurface(ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST), host_tools=wrapped)
+        prompt = build_verifier_prompt(request=request, claim=claim, observation=observation)
+        try:
+            try:
+                job_id = run_subagent(
+                    label,
+                    prompt,
+                    parent_session=self,
+                    jobs_manager=self.jobs,
+                    agent=VERIFIER_ROLE,
+                    profile_override=verifier_profile(),
+                    surface=surface,
+                    announce=False,
+                )
+            except Exception as error:  # noqa: BLE001 -- a refused launch is a skip
+                logger.warning("completion verifier could not launch", exc_info=True)
+                return refused(f"launch refused: {error}")
+            # Set before the first await: the runner has not run yet, so no
+            # request of this job can have finished unobserved.
+            state["job_id"] = job_id
+            job = self.jobs.get(job_id)
+            if on_started is not None:
+                on_started(
+                    {
+                        "job_id": job_id,
+                        "model": getattr(job, "model_label", None),
+                        "tools": sorted(
+                            surface.declaration(getattr(self, "_declared_tools", None)) or ()
+                        ),
+                        "limits": limits.as_record(),
+                    }
+                )
+            settled = self.jobs.settled_event(job_id)
+            settle_wait = asyncio.ensure_future(settled.wait())
+            stop_wait = asyncio.ensure_future(stop.wait())
+            try:
+                await asyncio.wait(
+                    {settle_wait, stop_wait},
+                    timeout=float(limits.wall_s),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for waiter in (settle_wait, stop_wait):
+                    waiter.cancel()
+            if not settled.is_set():
+                end("wall")
+                await self.jobs.cancel(job_id)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(settled.wait(), timeout=10.0)
+            job = self.jobs.get(job_id)
+            status_text = getattr(job, "status", None)
+            usage = getattr(job, "usage", None)
+            common: dict[str, Any] = {
+                "job_id": job_id,
+                "requests": state["requests"],
+                "commands": command_count(),
+                "wall_s": time.monotonic() - started,
+                "model": getattr(job, "model_label", None),
+                "tools": tuple(sorted(surface.declaration(getattr(self, "_declared_tools", None)) or ())),
+                "transcript_dir": (
+                    str(directory)
+                    if (comms := getattr(self, "subagent_comms", None)) is not None
+                    and (directory := comms.session_dir_of(job_id)) is not None
+                    else None
+                ),
+                "usage": usage.model_dump(mode="json") if usage is not None else None,
+            }
+            # A child that answered wins over a cap that fired on the very
+            # request that produced the answer: the verdict exists, so use it.
+            if status_text == "completed" and job is not None:
+                verdict_status, findings = parse_verdict(job.result_text)
+                return VerifierVerdict(
+                    status=verdict_status, findings=findings, ended_by="verdict", **common
+                )
+            ended_by = state["ended_by"] or "failed"
+            detail = (
+                (getattr(job, "error_text", None) or "the verifier did not finish")
+                if ended_by == "failed"
+                else f"the verifier was stopped by its {ended_by} cap before giving a verdict"
+            )
+            return VerifierVerdict(
+                status="INCONCLUSIVE", findings=detail, ended_by=ended_by, **common
+            )
+        finally:
+            unsubscribe()
 
     def _record_divergence_notice(self, payload: dict[str, Any]) -> None:
         """Paint a divergence notice into the transcript, from the judge's callback.
