@@ -73,10 +73,7 @@ WHAT THIS DOES NOT DO. Phone push reads ``attention.db``, not this inbox
 records, cursor and deferral), and nothing here writes the origin's
 ``attention.db`` — a remote completion does not reach the phone yet; the
 follow-up is a second push source in that worker reading ``remote-done:`` rows.
-The done banner also inherits the item store's per-row banner cooldown
-(``BANNER_COOLDOWN_MS``), so a remote session finishing turns minutes apart
-banners once per cooldown, while each completion still updates the unread row.
-And the completion carries no end time: the owner's completion store records
+The completion carries no end time: the owner's completion store records
 none, so no ``ended_at`` is invented here.
 
 BEST-EFFORT BY CONTRACT, like the park module: nothing here raises.
@@ -122,8 +119,9 @@ NOT_FORWARDED_PREFIXES: tuple[str, ...] = (
 #: M2: carrying only the newest lost every earlier unread notice, ``high`` ones
 #: included). WHY 8: the owner's inbox is never read on the node, so its unread
 #: items persist and EVERY catalogue read for the origin carries the full list
-#: for every peer-originated session — at most 8 x (256-char key + 200-char
-#: title + small fields), about 4 KB per session, which keeps a listing of tens
+#: for every peer-originated session — at most 8 x (the owner store's 120-char
+#: ``KEY_MAX`` key + 120-char ``TITLE_MAX`` title + small fields), measured at
+#: ≤2.5 KB of JSON per session (2,453 B worst case), which keeps a listing of tens
 #: of such sessions well inside a relay frame. A notice is lost only when more
 #: than 8 newer forwardable notices land between two origin reads; the origin
 #: reads every 5 s against a 20 s listing cache, so that is >8 notices inside
@@ -197,7 +195,7 @@ def stamp_rows_for_viewer(
         states = AttentionStore(Path(root) / "attention.db").state_many(identities)
     except Exception:  # noqa: BLE001 — a listing without attention is still a listing
         logger.debug("remote attention: completion read failed", exc_info=True)
-        states = {}
+        states = None
     store: Any = None
     try:
         from local_operator.notifications.store import NotificationStore
@@ -207,7 +205,16 @@ def stamp_rows_for_viewer(
         logger.debug("remote attention: inbox open failed", exc_info=True)
     for row in mine:
         session_id = str(row["session_id"])
-        state = states.get(f"session/{session_id}") or {}
+        if states is None:
+            # A FAILED READ IS NOT "NOTHING UNSEEN" (review round 2, R2-m2): a
+            # row with no ``attention`` is what an acknowledgement looks like,
+            # and the origin settles its done row on it — losing the badge of a
+            # completion nobody saw. Saying "unknown" makes the origin leave
+            # its row alone until a read that could see the store.
+            row["attention_unknown"] = True
+            state: dict[str, Any] = {}
+        else:
+            state = states.get(f"session/{session_id}") or {}
         token = state.get("completion_token")
         # ``notify`` False is the completion's own "do not tell anyone" (§14 of
         # the attention contract): honoured here exactly as the local legs do.
@@ -375,7 +382,9 @@ def settle_done_item(root: Path, *, session_id: str, device_id: str, token: str)
         return False
 
 
-def settle_unclaimed_done_items(root: Path, rows: Iterable[Any]) -> int:
+def settle_unclaimed_done_items(
+    root: Path, rows: Iterable[Any], *, listed_at_ms: int | None = None
+) -> int:
     """Mark READ every unread done row the CURRENT listing no longer claims.
 
     QA round 1, Q1: the settle used to fire only when a key left the watcher's
@@ -389,13 +398,29 @@ def settle_unclaimed_done_items(root: Path, rows: Iterable[Any]) -> int:
     acknowledgement. A row whose session claims a DIFFERENT token is also left:
     the same read raises that newer completion as an update. Returns how many
     rows were settled. Never raises.
+
+    ONLY A LISTING NEWER THAN THE ROW MAY SETTLE IT (QA round 2, Q3).
+    ``listed_at_ms`` is the wall-clock moment the listing's relay read STARTED
+    (``peer_rows.listing_read_at_ms``); a row whose ``updated_at`` is not older
+    than that was written from a later read than this one, so this listing's
+    "no claim" predates the completion rather than acknowledging it. Without
+    the check, ``lop serve``'s 20 s-cached listing, fetched just before a turn
+    finished, marked the row the TUI had just raised READ ~5 s later. Both
+    times are this device's own clock, so no skew between devices enters.
+    ``None`` — a listing of unknown age — settles nothing. A row whose owner
+    could not read its attention store (``remote_attention_unknown``) is left
+    alone too (R2-m2).
     """
+    if listed_at_ms is None:
+        return 0
     try:
         listed: dict[str, str] = {}
         for row in rows:
             device_id = str(getattr(row, "owner_device", "") or "")
             session_id = str(getattr(row, "id", "") or "")
             if not device_id or not session_id:
+                continue
+            if getattr(row, "remote_attention_unknown", False):
                 continue
             claim = getattr(row, "remote_attention", None)
             listed[done_key(device_id, session_id)] = str(claim[0]) if claim else ""
@@ -412,6 +437,9 @@ def settle_unclaimed_done_items(root: Path, rows: Iterable[Any]) -> int:
             if listed[key]:
                 # Still claimed (this token, or a newer one ``raise_done_item``
                 # moves the row to on this same read): not acknowledged.
+                continue
+            if int(item.get("updated_at") or 0) >= int(listed_at_ms):
+                # Written from a read newer than this listing (Q3, above).
                 continue
             result: Any = store.apply(
                 "read",
@@ -608,7 +636,9 @@ def _deliver_done_banner(
             if row is None or int(row["revision"]) != int(revision):
                 # Superseded by a newer completion: that write raises its own.
                 return
-            if not store.claim_delivery(item_id, DONE_BANNER_CLAIMANT):
+            # ``per_revision``: one banner per completion with no cooldown, the
+            # local leg's per-token rule (R2-M1; see ``claim_delivery``).
+            if not store.claim_delivery(item_id, DONE_BANNER_CLAIMANT, per_revision=True):
                 return
             banner_title = (
                 notify_copy.sanitize_text(title) or notify_copy.BACKGROUND_FALLBACK_TITLE
@@ -657,16 +687,35 @@ class RemoteAttentionWatcher:
         self._done: dict[tuple[str, str], str] = {}
         self._notice: dict[tuple[str, str, str], int] = {}
 
-    def observe(self, rows: Iterable[Any], unanswered: Iterable[str] = ()) -> None:
-        """Apply one listing read's completion and notice edges. Never raises."""
-        try:
-            from local_operator.session.peer_rows import completion_edges, notice_edges
+    def observe(
+        self,
+        rows: Iterable[Any],
+        unanswered: Iterable[str] = (),
+        *,
+        listed_at_ms: int | None = None,
+    ) -> None:
+        """Apply one listing read's completion and notice edges. Never raises.
 
+        ``listed_at_ms`` is when the listing's read started (wall clock, ms);
+        omitted, it is looked up for ``rows`` from ``peer_rows``' cache, which
+        answers only for the very tuple ``read_listing`` handed out — so both
+        TUI callers and ``lop serve`` get it without threading a timestamp
+        through the sidebar. Unknown means no settle (Q3).
+        """
+        try:
+            from local_operator.session.peer_rows import (
+                completion_edges,
+                listing_read_at_ms,
+                notice_edges,
+            )
+
+            if listed_at_ms is None:
+                listed_at_ms = listing_read_at_ms(self.root, rows)
             rows = tuple(rows)
             silent = tuple(unanswered)
             done, done_state = completion_edges(self._done, rows, unanswered=silent)
             self._done = done_state
-            settle_unclaimed_done_items(self.root, rows)
+            settle_unclaimed_done_items(self.root, rows, listed_at_ms=listed_at_ms)
             for edge in done:
                 raise_done_item(
                     self.root,
@@ -765,7 +814,14 @@ def record_forwarding_origin(root: Path, device_id: str) -> None:
                 known[device_id] = time.time()
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-                tmp.write_text(json.dumps(known, sort_keys=True), encoding="utf-8")
+                # 0600 like its siblings (``attention.db``, ``notifications.db``):
+                # it names the mesh devices this one serves (review round 2,
+                # R2-m3). Created with the mode rather than chmod-ed after, so
+                # no umask-wide window exists; ``os.replace`` keeps the mode.
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(known, sort_keys=True))
+                os.chmod(tmp, 0o600)
                 os.replace(tmp, path)
             _recorded_origins.add(marker)
     except Exception:  # noqa: BLE001 — a marker is a hint for one sentence

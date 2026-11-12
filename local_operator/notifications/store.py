@@ -1369,7 +1369,9 @@ class NotificationStore:
 
         return self._read(body, [], "undelivered")
 
-    def claim_delivery(self, item_id: str, by: str, *, now: int | None = None) -> bool:
+    def claim_delivery(
+        self, item_id: str, by: str, *, now: int | None = None, per_revision: bool = False
+    ) -> bool:
         """Claim the banner for an item's current revision, once, machine-wide.
 
         ``delivered_rev`` is the watermark a banner leg (desktop feed, TUI, the
@@ -1384,6 +1386,18 @@ class NotificationStore:
         one suppression the grace allows. It suppresses nothing permanently: a
         later content change bumps ``revision``, which makes the row unread and
         claimable again (``notifications/delivery.py`` states the rule).
+
+        ``per_revision=True`` skips the per-row banner cooldown and keeps every
+        other arm (watermark, read, dismissed). It is for a writer whose every
+        revision is a DISTINCT EVENT rather than a watcher re-describing one
+        topic: the remote-done claimant (``notifications/remote_attention``),
+        where each revision is one finished turn on a peer. A local completion
+        banners once per completion token with no time window
+        (``AttentionStore.claim_delivery``), and a remote one must match it
+        (review round 2, R2-M1 / QA Q4: two turns 5 minutes apart bannered once
+        remotely, twice locally). The watermark still makes it one banner per
+        revision across the TUI and ``lop serve``. Every other caller keeps the
+        cooldown (D15).
         """
 
         stamp = now if now is not None else now_ms()
@@ -1402,7 +1416,7 @@ class NotificationStore:
             # stays unread and badged; the SECOND update inside the window is
             # simply not news a banner can carry.
             last = row["delivered_at"]
-            if last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
+            if not per_revision and last is not None and stamp - int(last) < BANNER_COOLDOWN_MS:
                 return False
             if int(row["read_rev"]) >= int(row["revision"]):
                 return False

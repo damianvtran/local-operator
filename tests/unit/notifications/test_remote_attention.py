@@ -33,11 +33,12 @@ import pytest
 
 from local_operator.network.projection import PeerRow
 from local_operator.notifications import remote_attention as ra
+from local_operator.notifications import store as store_mod
 from local_operator.notifications.delivery import (
     PARK_ITEM_PREFIXES,
     announced_by_its_park,
 )
-from local_operator.notifications.store import NotificationStore, content_hash
+from local_operator.notifications.store import NotificationStore, content_hash, now_ms
 from local_operator.resume import SessionRow
 from local_operator.session import peer_rows
 from local_operator.session.attention import AttentionStore
@@ -100,6 +101,11 @@ def _row(
         remote_attention=attention,
         remote_notices=(notice,) if notice else notices,
     )
+
+
+def _later() -> int:
+    """A listing read that started after every row written so far (Q3)."""
+    return now_ms() + 1
 
 
 def _items(root: Path) -> list[dict[str, Any]]:
@@ -175,7 +181,7 @@ def test_an_acknowledged_completion_marks_the_row_read(root: Path) -> None:
     """The owner stops stamping once the receipt landed: the origin row reads."""
     watcher = ra.RemoteAttentionWatcher(root)
     watcher.observe([_row(attention=(TOK1, "complete"))])
-    watcher.observe([_row()])
+    watcher.observe([_row()], listed_at_ms=_later())
     [item] = _items(root)
     assert item["read"] is True and item["dismissed"] is False
 
@@ -530,11 +536,14 @@ def test_q1_a_receipt_between_two_watchers_still_settles_the_row(root: Path) -> 
     fresh = ra.RemoteAttentionWatcher(root)
     # Absence is not acknowledgement: a silent device or an unlisted session
     # leaves the row unread.
-    fresh.observe([], unanswered=[NODE])
-    fresh.observe([_row(session_id="f" * 12)])
+    fresh.observe([], unanswered=[NODE], listed_at_ms=_later())
+    fresh.observe([_row(session_id="f" * 12)], listed_at_ms=_later())
     assert _items(root)[0]["read"] is False
-    # Listed with no claim: the owner acknowledged it.
+    # A listing of unknown age settles nothing (Q3).
     fresh.observe([_row()])
+    assert _items(root)[0]["read"] is False
+    # Listed with no claim, by a read newer than the row: acknowledged.
+    fresh.observe([_row()], listed_at_ms=_later())
     [after] = _items(root)
     assert after["read"] is True and after["dismissed"] is False
 
@@ -638,3 +647,200 @@ def test_q1_the_prefix_query_matches_literally(tmp_path: Path) -> None:
     assert [r["key"] for r in store.unread_with_key_prefix("remote_done:")] == [
         "remote_done:d_x:s1"
     ]
+
+
+# ---------------------------------------------------------------------------
+# Round 2 remediation
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """The store's wall clock, moved by hand (``store.now_ms`` is its one source)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, start: int = 1_800_000_000_000) -> None:
+        self.ms = start
+        monkeypatch.setattr(store_mod, "now_ms", lambda: self.ms)
+
+
+def test_r2_m1_two_completions_five_minutes_apart_banner_twice(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-M1 / Q4: per completion token, no cooldown — the local leg's rule.
+
+    The REAL banner leg and the real store claim run (synchronously); only the
+    OS notifier is a recorder, because a test may not raise a real banner.
+    """
+    from local_operator.notifications import delivery
+
+    monkeypatch.setattr(delivery, "gates_refuse", lambda: "")
+    sent: list[dict[str, Any]] = []
+
+    def notifier(title: str, body: str, **kw: Any) -> bool:
+        sent.append({"title": title, **kw})
+        return True
+
+    monkeypatch.setattr(
+        ra,
+        "_deliver_done_banner",
+        lambda root, **kw: _REAL_DONE_BANNER(root, **kw, notify=notifier, background=False),
+    )
+    clock = _Clock(monkeypatch)
+    tui, serve = ra.RemoteAttentionWatcher(root), ra.RemoteAttentionWatcher(root)
+    tui.observe([_row(attention=(TOK1, "complete"))])
+    serve.observe([_row(attention=(TOK1, "complete"))])
+    assert len(sent) == 1, "one banner per token across both hosts"
+    clock.ms += 5 * 60 * 1000
+    tui.observe([_row(attention=(TOK2, "complete"))])
+    serve.observe([_row(attention=(TOK2, "complete"))])
+    assert len(sent) == 2, "a second completion 5 min later banners again"
+    [row] = _items(root)
+    assert row["delivered_rev"] == row["revision"] == 2
+    assert row["delivered_by"] == ra.DONE_BANNER_CLAIMANT
+
+
+def test_r2_m1_every_other_claimant_keeps_the_cooldown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``per_revision`` is opt-in: a watcher item updating 5 min later stays quiet (D15)."""
+    clock = _Clock(monkeypatch)
+    store = NotificationStore(tmp_path)
+    first = store.notify("s1", title="Build 1 red", priority="high", key="ci")
+    assert store.claim_delivery(first.item_id, "tui")
+    clock.ms += 5 * 60 * 1000
+    store.notify("s1", title="Build 2 red", priority="high", key="ci")
+    assert not store.claim_delivery(first.item_id, "tui")
+    assert store.claim_delivery(first.item_id, "tui", per_revision=True)
+    assert not store.claim_delivery(first.item_id, "tui", per_revision=True), "once per revision"
+
+
+def test_q3_a_stale_cached_listing_never_settles_a_newer_row(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2, Q3: serve's cached listing predates the completion the TUI raised.
+
+    Driven through ``read_listing``'s real cache: watcher Y (serve) reads a
+    claim-less listing, watcher X (the TUI) then raises TOK1 from a fresh one,
+    and Y's next poll is handed the SAME cached tuple. The row must stay unread
+    until a listing that started after it says "no claim".
+    """
+    clock = _Clock(monkeypatch)
+
+    class _Peer:
+        device_id = NODE
+        name = "lop-remote-node-2"
+        network_id = "n_test"
+        reachable = True
+        reason = ""
+
+    class _Catalog:
+        def peers(self) -> list[Any]:
+            return [_Peer()]
+
+        def rows(self) -> list[Any]:
+            return [PeerRow.from_json({"session_id": SID, "state": "live"}, device_id=NODE)]
+
+    peer_rows.clear_cache()
+    # Only the listing's wall-clock stamp moves; its TTL keeps the real
+    # monotonic clock, so the second read is still a cache hit.
+    monkeypatch.setattr(peer_rows, "_wall_ms", lambda: clock.ms)
+    try:
+        catalog = _Catalog()
+        stale, _ = peer_rows.read_listing(root, catalog=catalog)
+        y = ra.RemoteAttentionWatcher(root)
+        y.observe(stale)
+        clock.ms += 200
+        ra.RemoteAttentionWatcher(root).observe([_row(attention=(TOK1, "complete"))])
+        clock.ms += 5_000
+        again, _ = peer_rows.read_listing(root, catalog=catalog)
+        assert again is stale, "the 20 s cache hands Y the pre-completion listing"
+        y.observe(again)
+        [item] = _items(root)
+        assert item["read"] is False, "a listing older than the row is not a receipt"
+        # A read that STARTED after the row: the owner really stopped claiming it.
+        clock.ms += 1
+        fresh, _ = peer_rows.read_listing(root, catalog=catalog, ttl_s=0)
+        assert fresh is not stale
+        y.observe(fresh)
+        [after] = _items(root)
+        assert after["read"] is True
+    finally:
+        peer_rows.clear_cache()
+
+
+def test_q3_listing_age_answers_only_for_the_tuple_it_handed_out(root: Path) -> None:
+    peer_rows.clear_cache()
+    try:
+        assert peer_rows.listing_read_at_ms(root, ()) is None
+        peer_rows.seed_peer_row(root, _row())
+        seeded = peer_rows._CACHE[str(root)]
+        assert peer_rows.listing_read_at_ms(root, seeded[1]) == 0, "a create is not a listing"
+        assert peer_rows.listing_read_at_ms(root, list(seeded[1])) is None
+    finally:
+        peer_rows.clear_cache()
+
+
+def test_r2_m2_a_failed_attention_read_is_unknown_not_acknowledged(
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _owner(tmp_path)
+
+    def broken(self: Any, identities: Any) -> Any:
+        raise RuntimeError("database disk image is malformed")
+
+    monkeypatch.setattr(AttentionStore, "state_many", broken)
+    rows = [_catalog_row()]
+    ra.stamp_rows_for_viewer(owner, rows, HEAD)
+    assert rows[0]["attention_unknown"] is True and "attention" not in rows[0]
+    parsed = PeerRow.from_json({**rows[0], "state": "live"}, device_id=NODE)
+    assert parsed.attention_unknown is True and parsed.attention is None
+    # Only a real ``True`` counts; an old owner carries no key at all.
+    for claim in ({"attention_unknown": 1}, {}):
+        old = PeerRow.from_json({"session_id": SID, **claim}, device_id=NODE)
+        assert old.attention_unknown is False
+
+    watcher = ra.RemoteAttentionWatcher(root)
+    watcher.observe([_row(attention=(TOK1, "complete"))])
+    unknown = SessionRow(
+        SID,
+        0.0,
+        "Port the parser",
+        locality="remote",
+        owner_device=NODE,
+        remote_attention_unknown=True,
+    )
+    watcher.observe([unknown], listed_at_ms=_later())
+    assert _items(root)[0]["read"] is False, "an unreadable store is not a receipt"
+    watcher.observe([_row()], listed_at_ms=_later())
+    assert _items(root)[0]["read"] is True
+
+
+def test_r2_m1_minor_a_batch_of_notices_lands_oldest_first(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every store write a distinct millisecond, so ``updated_at`` order is the
+    # write order rather than a tie broken by id.
+    ticks = iter(range(1_800_000_000_000, 1_800_000_001_000))
+    monkeypatch.setattr(store_mod, "now_ms", lambda: next(ticks))
+    # The wire list is newest first.
+    ra.RemoteAttentionWatcher(root).observe(
+        [
+            _row(
+                notices=(
+                    ("k-new", 1, "normal", "Deploy done (newer)"),
+                    ("k-old", 1, "normal", "Tests failed (older)"),
+                )
+            )
+        ]
+    )
+    unread, _ = NotificationStore(root).list_items(state="unread", limit=10)
+    assert [row["title"] for row in unread] == ["Deploy done (newer)", "Tests failed (older)"]
+
+
+def test_r2_m3_the_origins_file_is_owner_only(tmp_path: Path) -> None:
+    import stat
+
+    ra._recorded_origins.clear()
+    ra.record_forwarding_origin(tmp_path, HEAD)
+    mode = stat.S_IMODE((tmp_path / ra.ORIGINS_FILE).stat().st_mode)
+    assert mode == 0o600, oct(mode)
+    assert HEAD in ra.forwarding_origins(tmp_path)

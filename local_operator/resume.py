@@ -2786,6 +2786,10 @@ class SessionRow(NamedTuple):
     #: ``notify`` items for that session (newest first, bounded by
     #: ``remote_attention.NOTICES_ON_WIRE``), under the same origin-only rule.
     remote_notices: tuple[tuple[str, int, str, str], ...] | None = None
+    #: The owner could NOT read its completion store for this row (review round
+    #: 2, R2-m2), so a missing ``remote_attention`` is not an acknowledgement:
+    #: the origin's forwarder settles nothing on such a row.
+    remote_attention_unknown: bool = False
 
     @property
     def is_remote(self) -> bool:

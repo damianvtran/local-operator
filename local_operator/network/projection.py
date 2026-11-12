@@ -374,6 +374,9 @@ class PeerRow:
     #: parsed by :func:`_attention_block`/:func:`_notices_block`. ``None`` is no claim.
     attention: tuple[str, str] | None = None
     notices: tuple[tuple[str, int, str, str], ...] | None = None
+    #: ``attention_unknown: true`` — the owner's completion read failed, so a
+    #: missing ``attention`` says nothing (R2-m2). Only a real ``True`` counts.
+    attention_unknown: bool = False
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -504,6 +507,7 @@ class PeerRow:
             # completion is a stored fact and rides either way.
             attention=_attention_block(data.get("attention")),
             notices=None if stale else _notices_block(data.get("notices")),
+            attention_unknown=data.get("attention_unknown") is True,
         )
 
     def to_row_json(self) -> dict[str, Any]:
