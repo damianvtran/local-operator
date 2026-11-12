@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import relay, types
+from local_operator.network import definitions, relay, types
 from local_operator.network.create_keys import CreateKeyIndex
 
 REQUESTER_DEVICE = "d_" + "b" * 32
@@ -62,10 +62,18 @@ class _Wire:
         self.drop = drop_create_replies
         self.lookup = "ok"
         self.sent: list[dict[str, Any]] = []
+        self.definition_frames: list[dict[str, Any]] = []
 
     def request(self, frame: dict[str, Any], timeout: float | None = None) -> dict[str, Any] | None:
-        self.sent.append(dict(frame))
         op = frame["op"]
+        if op == "net_definitions":
+            self.definition_frames.append(dict(frame))
+            assert frame.get("phase") == "state", frame
+            return {
+                "op": "reply",
+                "detail": definitions.definition_state(self.owner.root, names=frame.get("names")),
+            }
+        self.sent.append(dict(frame))
         if op == "net_session_create_lookup" and self.lookup == "unknown_op":
             return {"op": "error", "code": "unknown_op", "message": "not an operation"}
         handler = {
