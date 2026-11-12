@@ -1656,7 +1656,8 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # A TEMPORARY CHAT (``session/temporary.py``): bare toggles, ``on`` asks
     # before marking a chat that has messages, ``off`` keeps it. A WORD like
     # `/fast`: one token is the command, so a sentence stays a message. No
-    # desktop destination: the desktop has its own pill and menu verbs.
+    # desktop destination: the desktop has its own pill and menu verbs
+    # (`test_desktop_controls.py` pins the withheld set).
     SlashCommand(
         "temporary",
         **_desc(wire_slash.temporary()),
