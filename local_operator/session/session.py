@@ -5765,7 +5765,12 @@ class Session:
         # the agent could never close. dispose() closes whatever is still open.
         from local_operator.browser_bridge.resources import BrowserResource
 
-        self._browser = BrowserSurface(BrowserResource(transcript.directory, self._session_id))
+        self._browser = BrowserSurface(
+            BrowserResource(transcript.directory, self._session_id),
+            # A child's retained tab is handed to this id when it ends (see
+            # ``BrowserSurface.handed``); "" for a top-level session.
+            parent_session_id=self._parent_session_id,
+        )
         # Connections and overlapping read requests are owned by the conversation.
         # This avoids rebuilding pools for every tool call without allowing one
         # child's disposal to close a sibling's active transport.
@@ -34726,6 +34731,19 @@ class Session:
         ``CancelledError``), so the timeout does not trade a stranded tab for an
         orphaned process.
         """
+        # Tabs children handed to this session are this session's to close now:
+        # a top-level session ending is the last owner that could, and a child
+        # parent hands them further up in ``_finish_child_browser`` BEFORE its
+        # dispose, which empties this list. Settled first and independently, so
+        # a fault in this session's own surface cannot strand a handed one.
+        from local_operator.browser_bridge.handoff import close_handed_browser_surfaces
+
+        await close_handed_browser_surfaces(self._browser, outcome="disposed")
+        if self._browser.handed_to:
+            # This session's own surface now belongs to its parent: closing it
+            # here would recreate the bug the handoff fixes (the human is sent
+            # to a tab disposal already closed).
+            return
         resource = self._browser.resource
         if resource.generation or resource.path.exists():
             # Disposal is a fallback for process exit, not a claim that an idle
@@ -35516,6 +35534,21 @@ class Session:
             # across the restart, via the boot reconcile pass.
             teardown_stamps = self._stamp_teardown_attribution()
             await self.jobs.dispose()
+            # SECOND handed-tab pass (review R1). The first ran in
+            # ``_close_browser_surface`` above, but ``jobs.dispose`` is what
+            # cancels a still-running child, and that child hands its retained
+            # tab to this session on its way out — after the first pass, into a
+            # list nothing would read again. A child whose runner will pass late
+            # arrivals further up (``late_handoff_to_parent``) leaves them for it.
+            if not getattr(self._browser, "late_handoff_to_parent", False):
+                from local_operator.browser_bridge.handoff import (
+                    close_handed_browser_surfaces,
+                )
+
+                try:
+                    await close_handed_browser_surfaces(self._browser, outcome="disposed")
+                except Exception:  # noqa: BLE001 - teardown must always proceed
+                    logger.warning("closing late-handed browser tabs failed", exc_info=True)
             # AFTER dispose has awaited every runner, so each status is final: a
             # child that settled on its own instead of being cancelled must not
             # keep a parent-teardown attestation.

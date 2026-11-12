@@ -22933,7 +22933,9 @@ def _validate_adoption_handle(action: str, params: BrowserParams) -> str:
     if action != "open":
         return (
             f"'tab' is only valid for 'open' (got it on '{action}'): it names a tab "
-            "to ADOPT, and adoption happens once, when the surface is taken"
+            "to ADOPT, and adoption happens once, when the surface is taken. "
+            "('close' also takes 'tab', but only for a tab a child session handed "
+            "to this one — 'tabs' marks those '(yours — handed from child …)'.)"
         )
     if not NON_CMUX_SURFACE_HANDLE_RE.fullmatch(handle):
         return (
@@ -26872,7 +26874,7 @@ def _owns_redacted_tab(own_surface: str, redacted: str) -> bool:
     return own_surface == redacted
 
 
-def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
+def _format_bridge_tab(entry: dict[str, Any], own_surface: str, handed: Any = ()) -> str:
     """One listed tab: handle, page, recency — the caller's own marked.
 
     The "(yours)" marker matters because the listing shows EVERY session's
@@ -26886,6 +26888,22 @@ def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
     title = str(entry.get("title", "")).strip() or "(untitled)"
     url = str(entry.get("url", "")).strip() or "(no URL)"
     mine = " (yours)" if _owns_redacted_tab(own_surface, token) else ""
+    if not mine:
+        # A tab a finished CHILD handed to this session is this session's now
+        # (see `browser_bridge.handoff`), even though it never opened it. Marked
+        # with where it came from and the one call that closes it, because
+        # nothing else in the listing would tell the parent it owns it.
+        for item in handed or ():
+            if _owns_redacted_tab(item.surface_id, token):
+                from local_operator.browser_bridge.handoff import public_surface_label
+
+                label = public_surface_label(item.surface_id)
+                why = f": {item.reason}" if item.reason else ""
+                mine = (
+                    f" (yours — handed from child {item.from_session}{why}; "
+                    f"close it with action='close' tab='{label}')"
+                )
+                break
     when = ""
     last_used = entry.get("lastUsedAt")
     if isinstance(last_used, (int, float)) and last_used > 0:
@@ -26924,7 +26942,8 @@ async def _bridge_tabs(
             f"{_BROWSER_TABS_CLEANUP_FOOTER}",
             details={"tab_count": 0},
         )
-    lines = [_format_bridge_tab(entry, state.surface_id) for entry in entries]
+    handed = getattr(state, "handed", None) or ()
+    lines = [_format_bridge_tab(entry, state.surface_id, handed) for entry in entries]
     return _text(
         tool_call_id,
         "browser",
@@ -29140,6 +29159,22 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
 
 async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
     if not state.surface_id:
+        handed = getattr(state, "handed", None) or ()
+        if handed:
+            from local_operator.browser_bridge.handoff import public_surface_label
+
+            # Without this, a parent holding only a child's handed sign-in tab
+            # was told "No browser surface open." and could reasonably conclude
+            # nothing needed closing — the stranding this handoff exists to end.
+            labels = ", ".join(public_surface_label(item.surface_id) for item in handed)
+            return _text(
+                tool_call_id,
+                "browser",
+                "No browser surface of your own is open. Tabs handed to you by "
+                f"finished child sessions: {labels}. Close one with action='close' "
+                "tab='<handle>'.",
+                useless=True,
+            )
         return _text(tool_call_id, "browser", "No browser surface open.", useless=True)
     surface = state.surface_id
     problem = await close_browser_surface(state)
@@ -29155,6 +29190,152 @@ async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> To
 
 @_guard("browser")
 async def execute_browser(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """The browser tool: handed-tab closes, the owned lane, and a child's fate note.
+
+    Two concerns of the child → parent handoff (``browser_bridge.handoff``) sit
+    HERE, around the owned lane, rather than inside it:
+
+    * ``close tab=<handle>`` for a tab a child handed to this session is served
+      before the lane, because the lane speaks with THIS session's ownership
+      record and the handed tab lives under the child's;
+    * in a SUBAGENT, the results of ``open``/``retain``/``release`` and a pending
+      access request carry one sentence stating what happens to the tab when
+      the child finishes. This is the enforceable point the brief asked for: a
+      child that tells a human "the tab is open" must have been told, at the
+      moment it acted, that an unretained tab is closed when it ends — and the
+      runner's fate line (``Browser: closed ui:N``) contradicts any such claim
+      to the parent in the same result. Parsing the child's final prose for
+      "left open" claims was rejected: it is a heuristic over free text, and
+      the authoritative line already makes the claim harmless.
+    """
+    # Deliberately AHEAD of ``_execute_browser_owned`` (review R5): that lane
+    # would refuse ``close tab=`` as an adoption handle, and nothing it guards
+    # applies here — this only closes a tab already in THIS session's own
+    # ``handed`` list (so a confined session that never launched a child has
+    # none), through the child's own ownership record.
+    handed_close = await _browser_handed_close(tool_call_id, args, context)
+    if handed_close is not None:
+        return handed_close
+    # Read, never created, here: a holder created up front would turn a
+    # read-only inspection into state (the inner lane creates one when it
+    # genuinely needs it), which the inspection contract forbids.
+    before = getattr(getattr(context, "browser", None), "surface_id", "")
+    result = await _execute_browser_owned(tool_call_id, args, signal, on_update, context)
+    state = getattr(context, "browser", None)
+    if state is None:
+        return result
+    return _child_browser_fate_note(state, args, result, before)
+
+
+async def _browser_handed_close(
+    tool_call_id: str, args: dict[str, Any], context: ToolContext | None
+) -> ToolResult | None:
+    """Close a tab a finished child handed to this session, or ``None`` to pass."""
+    if str(args.get("action", "")).strip().lower() != "close":
+        return None
+    handle = str(args.get("tab", "") or "").strip()
+    browser = getattr(context, "browser", None) if context is not None else None
+    if not handle or browser is None:
+        return None
+    from local_operator.browser_bridge.handoff import close_handed, surface_matches
+
+    for item in list(getattr(browser, "handed", None) or ()):
+        if surface_matches(item.surface_id, handle):
+            fate = await close_handed(browser, item, outcome="completed")
+            text = f"{fate} (handed from child {item.from_session})."
+            if fate.startswith("Browser: closed"):
+                return _text(tool_call_id, "browser", text, details={"handed_closed": True})
+            return _error(tool_call_id, "browser", text)
+    handed = getattr(browser, "handed", None) or ()
+    if handed:
+        from local_operator.browser_bridge.handoff import public_surface_label
+
+        # A typo or an already-closed handle (QA Q3): the adoption-lane error
+        # ("'tab' is only valid for 'open'") is true but sends the reader
+        # looking at adoption, when what they need is the handles that DO match.
+        labels = ", ".join(public_surface_label(item.surface_id) for item in handed)
+        return _error(
+            tool_call_id,
+            "browser",
+            f"No handed tab matches {handle!r}. Tabs handed to you by finished child "
+            f"sessions: {labels}; close one with action='close' tab='<handle>'.",
+        )
+    return None
+
+
+def _child_browser_fate_note(
+    state: BrowserSurfaceProtocol, args: dict[str, Any], result: ToolResult, before: str
+) -> ToolResult:
+    """In a subagent, append the tab's end-of-task fate to the result text."""
+    parent = str(getattr(state, "parent_session_id", "") or "")
+    if not parent or result.is_error or not state.surface_id:
+        return result
+    from local_operator.browser_bridge.handoff import public_surface_label
+
+    action = str(args.get("action", "")).strip().lower()
+    label = public_surface_label(state.surface_id)
+    resource = getattr(state, "resource", None)
+    retention = str(((getattr(resource, "record", None) or {}).get("retention")) or "")
+    if action == "open" and state.surface_id != before:
+        # The top-level reminder ("…unless the user needs it left open")
+        # contradicts the subagent rule below in the same result (QA Q2): a
+        # child cannot leave a tab open past its own end, only hand it up.
+        result = _replace_result_text(result, f"\n{_BROWSER_OPEN_CLEANUP_REMINDER}", "")
+        note = (
+            f"You are a subagent: {label} is CLOSED when you finish unless you 'retain' it, "
+            f"which hands it to your parent session {parent} (it then owns and closes it). "
+            "A tab a human must use belongs with the parent: retain it before you finish. "
+            f"Report its fate as 'closed {label}' or 'handed {label} to parent {parent}' — "
+            "never as 'left open'."
+        )
+    elif action == "retain" and retention:
+        note = (
+            f"When you finish, {label} is HANDED to your parent session {parent}, which owns "
+            f"and closes it from then on. Report it as 'handed {label} to parent {parent}', "
+            "never as 'left open'."
+        )
+    elif action == "release":
+        note = f"Released: {label} is now CLOSED when you finish; report it as 'closed {label}'."
+    elif action in ("request_access", "await_access") and retention:
+        note = (
+            f"While this approval is pending, {label} is retained: if you finish now it is "
+            f"handed to your parent session {parent}; report it as 'handed {label} to parent "
+            f"{parent}'."
+        )
+    else:
+        return result
+    return _append_result_text(result, note)
+
+
+def _replace_result_text(result: ToolResult, old: str, new: str) -> ToolResult:
+    """``result`` with ``old`` replaced by ``new`` in every text block."""
+    content = [
+        TextContent(text=block.text.replace(old, new)) if isinstance(block, TextContent) else block
+        for block in result.content
+    ]
+    return result.model_copy(update={"content": content})
+
+
+def _append_result_text(result: ToolResult, note: str) -> ToolResult:
+    """``result`` with ``note`` appended to its last text block."""
+    content = list(result.content)
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
+        if isinstance(block, TextContent):
+            content[index] = TextContent(text=f"{block.text}\n\n{note}")
+            break
+    else:
+        content.append(TextContent(text=note))
+    return result.model_copy(update={"content": content})
+
+
+async def _execute_browser_owned(
     tool_call_id: str,
     args: dict[str, Any],
     signal: AbortSignal | None = None,
@@ -30460,7 +30641,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
             "navigate it. Call 'close' before your final response unless a pending "
             "interaction needs it; 'tabs' lists every tab (handles redacted) and 'close' "
-            "ends only your own tab. "
+            "ends only your own tab. A subagent's unretained tab closes when it ends; "
+            "'retain' hands it to the parent. "
             "An unapproved site fails with origin_not_allowed: call 'request_access', "
             "NOTIFY the operator, then 'await_access' before retrying. "
             "Never install or script a browser engine instead. Playbook: `guide://browser`."
