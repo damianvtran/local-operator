@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.errors.desktop",
-  "history_sha256": "2758e4f85026b2594a233d92bac681973df2c4b50bd306ffe90c387308d96015",
+  "history_sha256": "f723cad6d332633fb08c0aab0d922cfde517b158ca569d9cb11e7dc9d56934e4",
   "entries": [
     {
       "locale": "ru",
@@ -27,6 +27,54 @@
         "fallback": "Translations authored before quota fallback to openai/gpt-6.1-sol; fallback only used for later product corrections and receipt assembly."
       },
       "note": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 1 added key(s) read, 0 findings; 88 unchanged keys byte-identical to the passed row at base. Target a15f96ef55f6debec45a0ccd294ab9ec90952230028f08674ef1b7ea25d1adc1. Evidence: i18n/audits/evidence/ru/wire.errors.desktop/settings-1b1866b4f2ed/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "32c48d06ac2670b076f2915584de4bfbe8363cf923b622ce934305d1f72474e3",
+      "target_sha256": "13b3b2426bc161db17e0aaa7c0cdec26a040c4094d11edeac3d9556ff69f6178",
+      "translator": {
+        "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+        "session": "e06b4314cec3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+      },
+      "translators_other": [
+        {
+          "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+          "session": "f4c08c15c058",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12",
+          "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+        },
+        {
+          "agent": "round-1 i18n auditor (I1-4 corrected values)",
+          "session": "a3fade2429f4",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12"
+        }
+      ],
+      "auditor": {
+        "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+        "session": "187b766ab67d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "findings": 0
+      },
+      "status": "passed",
+      "prior_audit": {
+        "agent": "round-1 i18n auditor",
+        "session": "a3fade2429f4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "result": "passed",
+        "comment": "damianvtran/local-operator#3872 issuecomment-6830034892"
+      },
+      "note": "PR #3872 r2 audit 187b766ab67d (claude-opus-5-5, no fallback) at 14d8601fd: 6 en-changed/new key(s) retranslated + 1 I1-4 correction(s) verified (second independent read) + 9 PR-added key(s) re-read; 0 finding(s), 0 blocker/major. Target 13b3b2426bc1. Evidence: i18n/audits/evidence/ru/wire.errors.desktop/rfp-187b766ab67d/record.json"
     }
   ]
 }

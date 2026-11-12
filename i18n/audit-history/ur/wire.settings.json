@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.settings",
-  "history_sha256": "6b3eda02396dd376b030947c1a8656cc87b5c6fdc8ffa977dd2a1dce58f27134",
+  "history_sha256": "dc6692101c6c706026945a260a3e58db4793f7854c56df402afa2d41b1cb230b",
   "entries": [
     {
       "locale": "ur",
@@ -190,6 +190,62 @@
       },
       "status": "passed",
       "note": "Round 3 hash-convergence receipt for PR #3753 after merging origin/main 9cd230511fb1 at a7473381ab6. This is not a new linguistic audit. en wire.settings is 00b3277b15a0. This locale's target is ea272afda3c1aca91f26a7d97fe02f535842d50ae527c12bb72dfd0fba0da1f9. It has 859 keys: 851 are byte-identical to main 9cd230511fb1, covered by main's row with source 206f2b124405 (#3632 dbcbb0455aee, which added team_bridge_screening_model.label/.help; delta-reviewed by verifier on deepseek/deepseek-flash, passed, 0 unresolved). The other 8 are the wire.settings.compaction_idle_* leaves, byte-identical to 90fdf91871d, which round 2 (i18n-audit-idle-r2, source f578d07fc5d3, target f590d4e79869ffb0) passed. No other value changed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+      "target_sha256": "d74ae8e4990fec484faa1321df1f185f65011e17709b042aad0f420166889028",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev, job 485ea7afeea9)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "provenance_source": "manager ce618964c88e subagent-roster.v1.json record 485ea7afeea9 (model_label)"
+      },
+      "translators_other": [
+        {
+          "agent": "round-1 i18n auditor (I1-4 corrected values)",
+          "session": "a3fade2429f4",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12"
+        },
+        {
+          "agent": "coder (PR #3872 core round-1 remediation, lopdev, job b449e9fdc5b7)",
+          "session": "e06b4314cec3",
+          "model": "anthropic/claude-opus-5-5",
+          "date": "2026-11-12",
+          "provenance_source": "self-reported served model, no fallback: PR #3872 issuecomment-6831178771"
+        }
+      ],
+      "auditor": {
+        "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+        "session": "187b766ab67d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "unresolved_blocker_major": 0,
+        "findings": 0
+      },
+      "status": "passed",
+      "prior_audit": {
+        "agent": "round-1 i18n auditor",
+        "session": "a3fade2429f4",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "result": "passed",
+        "comment": "damianvtran/local-operator#3872 issuecomment-6830034892"
+      },
+      "note": "PR #3872 r2 audit 187b766ab67d (claude-opus-5-5, no fallback) at 14d8601fd: 1 I1-4 correction(s) verified (second independent read) + 2 PR-added key(s) re-read; 0 finding(s), 0 blocker/major. Target d74ae8e4990f. Evidence: i18n/audits/evidence/ur/wire.settings/rfp-187b766ab67d/record.json",
+      "second_audit": {
+        "agent": "i18n auditor (lopdev reviewer role, task core-r2-i18n-audit, job 52eba838ea60; independent of translators f4c08c15c058/e06b4314cec3 and of round-1 auditor a3fade2429f4)",
+        "session": "187b766ab67d",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12",
+        "result": "passed",
+        "scope": "the 1 auditor-corrected value(s) (I1-4) in local_operator/i18n/catalogues/ur/wire.settings.json, read against en, glossary.md and the ur style guide"
+      }
     }
   ]
 }

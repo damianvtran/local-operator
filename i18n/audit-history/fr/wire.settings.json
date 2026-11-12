@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "4e1bce07f189514071c08c9b01d2e58bf124dcac7e6e6a4d246c1fcf09c0b9d5",
+  "history_sha256": "fae9ac85d232867b79219055ed6a60ba648836e41ee552f63f79d8c859691db6",
   "entries": [
     {
       "locale": "fr",
@@ -190,6 +190,30 @@
       },
       "status": "passed",
       "note": "Round 3 hash-convergence receipt for PR #3753 after merging origin/main 9cd230511fb1 at a7473381ab6. This is not a new linguistic audit. en wire.settings is 00b3277b15a0. This locale's target is 611069ad2e4babfdb8c4110da8db5f7adbaff7912727dfcec5c2a557130cbe50. It has 859 keys: 851 are byte-identical to main 9cd230511fb1, covered by main's row with source 206f2b124405 (#3632 dbcbb0455aee, which added team_bridge_screening_model.label/.help; delta-reviewed by verifier on deepseek/deepseek-flash, passed, 0 unresolved). The other 8 are the wire.settings.compaction_idle_* leaves, byte-identical to 90fdf91871d, which round 2 (i18n-audit-idle-r2, source f578d07fc5d3, target 589bff152b91971e) passed. No other value changed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "5ddafb0e761c12afdcaaa7743ddb584927bdc874bf7eecefb34009574d4a7152",
+      "target_sha256": "316b556e3c01ab59d57c67678e0f41ec844804e086d7205aeb82219737834a0e",
+      "translator": {
+        "agent": "coder (PR #3872 core implementer, lopdev)",
+        "session": "f4c08c15c058",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n auditor (lopdev reviewer role, task core-r1-i18n-copy; independent of the PR #3872 coder/translator)",
+        "session": "a3fade2429f4",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3872 r1 audit a3fade2429f4 (claude-opus-5-5, no fallback): 2 added keys, 0 finding(s). Target 316b556e3c01. Evidence: i18n/audits/evidence/fr/wire.settings/rfp-a3fade2429f4/record.json"
     }
   ]
 }
