@@ -5916,17 +5916,20 @@ class Session:
         # that carry something are decoded.
         # Required-media callers must not turn a transport repair into a false
         # text-only success. Ordinary sessions keep their existing degradation.
-        required_images = getattr(self, "_required_image_evidence", False) and not keep_images
+        required_media = getattr(self, "_required_image_evidence", False) and not keep_images
         required_count = (
             sum(
                 isinstance(block, ImageContent) for message in rendered for block in message.content
             )
-            if required_images
+            if required_media
             else 0
         )
+        # Typed verification can acquire images from a counted inspection after
+        # a text-only start. Admit pixels at every model-facing projection, not
+        # just when the initial envelope happened to contain an image.
+        required_images = required_media and bool(required_count)
         if required_images and (
-            not required_count
-            or self._images_rejected
+            self._images_rejected
             or not self._model.supports_images
             or not self._model.supports_images_stated
         ):
@@ -23116,10 +23119,7 @@ class Session:
             ceiling=verifier_ceiling(host_names),
             host_tools=wrapped,
             initial_images=typed_evidence.images if typed_evidence is not None else (),
-            require_images=(
-                typed_evidence is not None
-                and (bool(typed_evidence.images) or "image" in typed_evidence.required_modalities)
-            ),
+            require_images=typed_evidence is not None,
             readonly_shell=True,
             on_assistant_message=on_message,
             # The child's own tools (read/grep/bash) get the same cue on the

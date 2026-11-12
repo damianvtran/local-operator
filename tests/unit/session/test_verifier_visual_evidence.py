@@ -413,3 +413,148 @@ async def test_legacy_verifier_does_not_run_typed_decoder_or_required_media_vali
     result = await parent.verify_completion(request="Check", claim="done")
     assert result.status == "PASS", result
     await parent.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capped", [False, True])
+@pytest.mark.parametrize(
+    "supports,corrupt,reject,expected",
+    [
+        (False, False, False, "INCONCLUSIVE"),
+        (True, True, False, "INCONCLUSIVE"),
+        (True, False, True, "INCONCLUSIVE"),
+        (True, False, False, "PASS"),
+    ],
+)
+async def test_late_inspection_requires_actual_image_delivery(
+    tmp_path, config_dir, monkeypatch, capped, supports, corrupt, reject, expected
+):
+    """An initially text-only envelope cannot exempt later inspection pixels."""
+    import asyncio
+
+    from local_operator.evaluation.completion_verifier import VerifierInspector
+    from local_operator.harness import subagent
+    from local_operator.harness.verifier import VerifierLimits
+
+    if capped:
+        finish = subagent._finish_child_browser
+
+        async def delayed(child, comms, job_id, status, *, parent_session=None):
+            if status == "completed":
+                await asyncio.sleep(30)
+            return await finish(child, comms, job_id, status, parent_session=parent_session)
+
+        monkeypatch.setattr(subagent, "_finish_child_browser", delayed)
+
+    captured = []
+    requests = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        captured.append(body)
+        if reject and len(captured) > 1:
+            return httpx.Response(400, json={"error": {"message": "unsupported image input"}})
+        if len(captured) == 1:
+            delta = {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "late-image",
+                        "type": "function",
+                        "function": {
+                            "name": "inspect_command",
+                            "arguments": '{"artifact_id":"late"}',
+                        },
+                    }
+                ]
+            }
+            reason = "tool_calls"
+        else:
+            delta = {"content": answer(refs=["inspection-2"])}
+            reason = "stop"
+        chunks = [
+            {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": reason}]},
+        ]
+        return httpx.Response(
+            200,
+            text="".join("data: " + json.dumps(c) + "\n\n" for c in chunks)
+            + "data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://late-image.invalid/v1", http_client=http)
+
+        class WireTree(TreeStream):
+            def fork(self, _name):
+                return WireTree(self.reply, root=self.root)
+
+            def __call__(self, request, signal):
+                requests.append(request)
+
+                async def generate():
+                    try:
+                        async for event in client.stream(request, "synthetic-key"):
+                            yield event
+                    finally:
+                        for callback in list(self.root.observers):
+                            callback(
+                                SimpleNamespace(
+                                    request_id="late",
+                                    job_id=self.job_id,
+                                    actor_role=self.actor_role,
+                                )
+                            )
+
+                return generate()
+
+        async def forbidden(*_args):
+            raise AssertionError("artifact inspection performed IO")
+
+        inspector = VerifierInspector(run_command=forbidden, window=lambda: 1)
+        inspector.evidence = VerifierEvidence(
+            (VerifierEvidenceItem("late", ImageContent(data="YnJva2Vu") if corrupt else image()),)
+        )
+        parent = make_parent(tmp_path, WireTree(lambda _: []))
+        parent._model = parent.model.model_copy(
+            update={"supports_images": supports, "supports_images_stated": True}
+        )
+        try:
+            result = await parent.verify_completion(
+                request="Verify appearance",
+                claim="done",
+                typed_evidence=VerifierEvidence(),
+                host_tools=[inspector.tool()],
+                limits=VerifierLimits(wall_s=1 if capped else 10),
+            )
+            assert result.status == expected, result
+            image_counts = [
+                sum(
+                    block.get("type") == "image_url"
+                    for message in body["messages"]
+                    if isinstance(message.get("content"), list)
+                    for block in message["content"]
+                )
+                for body in captured
+            ]
+            assert image_counts == ([0] if not supports or corrupt else [0, 1])
+            assert [r.required_image_count for r in requests] == image_counts
+            assert all(r.model.supports_images == supports for r in requests)
+            assert result.commands == 1
+            assert all(t.name not in {"read", "glob", "grep", "bash"} for t in requests[0].tools)
+            if supports and not corrupt:
+                urls = [
+                    block["image_url"]["url"]
+                    for message in captured[-1]["messages"]
+                    if isinstance(message.get("content"), list)
+                    for block in message["content"]
+                    if block.get("type") == "image_url"
+                ]
+                assert urls == ["data:image/png;base64," + image().data]
+            if expected == "PASS":
+                assert "inspection-2" in json.dumps(captured[-1])
+                if capped:
+                    assert "wall" in result.caps_hit
+        finally:
+            await parent.dispose()
