@@ -797,6 +797,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
         "<config>/run after a failed write or replace",
     ),
+    # The owner-side create-key index (`network/create_keys.py`): ONE fixed-name
+    # FILE, `<config>/network/create-keys.json`, rewritten atomically from a
+    # mkstemp sidecar in the same directory. A sibling of `sessions/`, never a
+    # parent of it, and never a directory.
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.replace",
+        "Atomic replacement of the fixed config-root FILE <config>/network/create-keys.json "
+        "from this call's own mkstemp sidecar; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.unlink",
+        "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
+        "<config>/network after a failed write or replace",
+    ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
         "<path>.unlink",

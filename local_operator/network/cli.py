@@ -48,6 +48,7 @@ import os
 import re
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -531,6 +532,16 @@ def add_parser(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
     )
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
+    # IDEMPOTENCY FOR A RETRY (``network/create_keys.py``). Every create carries a
+    # key the relay mints; this flag lets a retry of a create whose reply was LOST
+    # send the key it was told, so the owner answers with the session it already
+    # made instead of creating a second one.
+    net_sessions.add_argument(
+        "--create-key",
+        default="",
+        metavar="KEY",
+        help="with --create: retry a create whose reply was lost, without duplicating it",
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
@@ -591,6 +602,26 @@ def add_parser(
         metavar="SESSION",
         default="",
         help="deliver a turn to that session on its device, and wait for the outcome",
+    )
+    # THE MAILBOX SPELLING OF ``--send`` (PR #3827 A1): what the agent ``send
+    # peer=`` tool runs. ``--send`` alone drives a TURN (``prompt``) and waits for
+    # it, which a busy owner parks behind its running turn; ``--mailbox`` delivers
+    # a ``peer_message`` instead, exactly as a local ``lop send`` does, and answers
+    # on mailbox admission. ``--no-wake``/``--now`` are that path's two modes.
+    net_sessions.add_argument(
+        "--mailbox",
+        action="store_true",
+        help="with --send: deliver as a peer message to its mailbox, not as a turn",
+    )
+    net_sessions.add_argument(
+        "--no-wake",
+        action="store_true",
+        help="with --send --mailbox: a quiet drop that does not wake an idle session",
+    )
+    net_sessions.add_argument(
+        "--now",
+        action="store_true",
+        help="with --send --mailbox: steer it into the running turn at the next tool call",
     )
     net_sessions.add_argument(
         "--steer",
@@ -7229,6 +7260,15 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
             file=sys.stderr,
         )
         return 2
+    mailbox: _MailboxMode | None = None
+    if verb == "send" and bool(getattr(args, "mailbox", False)):
+        mailbox = _MailboxMode(
+            wake=not bool(getattr(args, "no_wake", False)),
+            now=bool(getattr(args, "now", False)),
+        )
+    elif getattr(args, "no_wake", False) or getattr(args, "now", False):
+        print("--no-wake and --now go with --send --mailbox", file=sys.stderr)
+        return 2
     steps = getattr(args, "steps", None)
     # The RANGE was validated where the flag was read (``_cmd_sessions``); this
     # is only the default, for every verb — the driving acts merely ignore it.
@@ -7252,6 +7292,7 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
                     text=text,
                     config_dir=Path(config_dir()),
                     steps=int(steps),
+                    mailbox=mailbox,
                 ),
                 # ONE bound around the whole act, at the number its parts add up
                 # to — the sum of the rungs alone is not a bound on the act,
@@ -7278,6 +7319,7 @@ async def _pilot_act(
     text: str,
     config_dir: Path,
     steps: int = _PEEK_DEFAULT_STEPS,
+    mailbox: "_MailboxMode | None" = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Open the target on the peer as its viewer, perform ONE act, report it.
 
@@ -7417,6 +7459,8 @@ async def _pilot_act(
             # driving acts, because the rows come from the same synced display
             # window an attached terminal paints.
             payload, lines = await _pilot_peek(viewer, session_id, device, steps)
+        elif verb == "send" and mailbox is not None:
+            payload, lines = await _pilot_mailbox(viewer, session_id, device, text, mailbox)
         elif verb == "send":
             payload, lines = await _pilot_send(viewer, session_id, device, text)
         elif verb == "steer":
@@ -7448,31 +7492,201 @@ async def _pilot_act(
     return payload, lines
 
 
+class _MailboxMode:
+    """How a ``--send --mailbox`` lands: the local ``send`` tool's two switches.
+
+    ``now`` is the ``steer`` mode (read at the next tool-call boundary of the
+    running turn); otherwise ``mailbox``, where ``wake`` decides whether an idle
+    session starts a turn for it or simply finds it next time.
+    """
+
+    __slots__ = ("wake", "now")
+
+    def __init__(self, *, wake: bool, now: bool) -> None:
+        self.wake = wake
+        self.now = now
+
+
+#: The advisory sender fields that mean something on ANOTHER device. ``pid`` and
+#: ``cwd`` name this machine's process and directory; the owner drops them for a
+#: relayed card anyway (``server._stamp_peer_sender``), so they are not sent.
+_MESH_SENDER_FIELDS = ("session_id", "conversation_name", "model_label")
+
+
+async def _pilot_mailbox(
+    viewer: Any, session_id: str, peer: str, text: str, mode: _MailboxMode
+) -> tuple[dict[str, Any], list[str]]:
+    """Deliver ``text`` to the peer session's MAILBOX — local ``send`` parity.
+
+    WHY NOT A TURN (PR #3827 A1): ``_pilot_send``'s ``prompt`` is parked behind a
+    busy owner's running turn, unacknowledged and in memory only. A
+    ``peer_message`` is what a local ``lop send`` delivers: a row read at the
+    next tool-call boundary, honouring wake/steer, and acknowledged at mailbox
+    admission — so "delivered" here means the row exists there.
+
+    The sending SESSION is advisory (read off this machine's registry by
+    ancestry: the tool's own session, or nothing from a plain shell). The
+    sending DEVICE is never claimed: the owner stamps it from the link.
+
+    AN OWNER WITHOUT THE MAILBOX (``MESH_PEER_MESSAGE_CAPABILITY`` absent) gets
+    today's prompt path for a plain send, with ``fallback: "prompt"`` and that
+    path's honest receipt. A quiet drop or a steer cannot be expressed as a turn
+    — a turn always wakes — so those are refused rather than silently changed.
+    """
+    from local_operator.mobile.peer_send import (
+        mint_peer_message_id,
+        peer_sender_identity_async,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    if not viewer.owner_takes_mesh_peer_message():
+        if mode.now or not mode.wake:
+            asked = "a steer (now)" if mode.now else "a quiet drop (no wake)"
+            raise MeshRefusal(
+                "mailbox_unsupported",
+                f"{peer}'s build cannot take a mesh peer message, so {asked} cannot be "
+                f"delivered to {session_id} there; a plain send would run as a turn "
+                "instead — send without that switch, or update that device first",
+            )
+        payload, lines = await _pilot_send(viewer, session_id, peer, text)
+        payload["fallback"] = "prompt"
+        return payload, [*lines, prompt_fallback_line(peer)]
+
+    identity = await peer_sender_identity_async(os.getpid())
+    sender = {key: identity[key] for key in _MESH_SENDER_FIELDS if identity.get(key)}
+    message_id = mint_peer_message_id()
+    wire_mode = "steer" if mode.now else "mailbox"
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "peer": peer,
+        "verb": "send",
+        "delivery_path": "mailbox",
+        "mode": wire_mode,
+        "wake": bool(mode.wake),
+        "message_id": message_id,
+    }
+    try:
+        reply = await asyncio.wait_for(
+            viewer.send_peer_message(
+                text, mode=wire_mode, wake=bool(mode.wake), sender=sender, message_id=message_id
+            ),
+            timeout=PILOT_REPLY_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        # NOT CONFIRMED IS NOT DELIVERED: the owner's loop did not answer the
+        # admission in time, which is a failure the caller must see.
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{session_id} on {peer} was too busy to confirm the message within "
+            f"{PILOT_REPLY_TIMEOUT_S:.0f}s (id {message_id}); it is not confirmed "
+            f"delivered — check `lop network sessions --peer {peer} --peek {session_id}` "
+            "before you retry",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    except RuntimeError as exc:
+        # The owner's own refusal (unengaged window, retiring runtime, …).
+        raise MeshRefusal("message_refused", f"{peer} refused the message: {exc}") from exc
+    delivery = reply.get("delivery") if isinstance(reply.get("delivery"), dict) else {}
+    duplicate = bool(delivery.get("duplicate"))
+    payload.update(
+        ok=True,
+        outcome="duplicate" if duplicate else "delivered",
+        delivery=delivery,
+        receipt=str(reply.get("detail") or "").strip(),
+    )
+    return payload, mailbox_receipt_lines(payload)
+
+
+def mailbox_receipt_lines(payload: dict[str, Any]) -> list[str]:
+    """The sentences for a ``--send --mailbox`` receipt that DELIVERED.
+
+    One builder for the CLI and the agent tool (``tool._pilot_receipt_lines``),
+    so "delivered" is worded once and always names the mode actually used.
+    """
+    session_id = str(payload.get("session_id") or "")
+    peer = str(payload.get("peer") or "")
+    message_id = str(payload.get("message_id") or "")
+    if payload.get("outcome") == "duplicate":
+        head = f"{session_id} on {peer} already had this message (id {message_id})."
+    elif payload.get("mode") == "steer":
+        head = (
+            f"delivered to {session_id} on {peer} as a steer (id {message_id}): its running "
+            "turn reads it at the next tool call."
+        )
+    elif payload.get("wake"):
+        head = (
+            f"delivered to {session_id}'s mailbox on {peer} (id {message_id}): it reads it at "
+            "the next tool call, or wakes for it if idle."
+        )
+    else:
+        head = (
+            f"delivered to {session_id}'s mailbox on {peer} (id {message_id}), quietly: an idle "
+            "session reads it on its next turn."
+        )
+    lines = [head]
+    because = str(payload.get("receipt") or "")
+    if because:
+        lines.append(f"{peer}: {because}")
+    return lines
+
+
+#: The receipt for a prompt-path send whose wait ended before the owner admitted
+#: it (PR #3827 A1). Shared by the CLI and the agent tool.
+def queued_behind_turn_lines(session_id: str, peer: str) -> list[str]:
+    return [
+        f"{session_id} on {peer} is busy: the message is queued behind its running "
+        "turn and was NOT delivered yet.",
+        f"After {PILOT_TURN_TIMEOUT_S:.0f}s it is still waiting in that runtime's "
+        "memory, and is lost if the runtime stops first. Check "
+        f"`lop --resume {session_id}` before sending it again.",
+    ]
+
+
+#: The note a mailbox send carries when the owner was too old and it ran as a turn.
+def prompt_fallback_line(peer: str) -> str:
+    return f"({peer}'s build has no mesh mailbox, so this was sent as a turn.)"
+
+
 async def _pilot_send(
     viewer: Any, session_id: str, peer: str, text: str
 ) -> tuple[dict[str, Any], list[str]]:
-    """Deliver a turn and wait for the owner's terminal outcome.
+    """Deliver a TURN (a ``prompt`` frame) and wait for the owner's terminal outcome.
 
-    ``prompt_and_wait`` rather than ``prompt`` for exactly the reason its own
-    docstring gives: ``prompt`` returns on durable ADMISSION, which a shell
-    caller cannot tell from completion. It also routes the frame to the owner's
-    ``steer`` op when the peer is already streaming — the reconciliation the
-    composer makes, kept here rather than re-decided, so a message sent into a
-    live turn is delivered rather than refused for a race the client owns.
+    ``prompt_and_wait`` sends a plain ``prompt`` (``send_command(streaming=False)``)
+    and correlates the owner's events on the id it carries. It does NOT steer: a
+    BUSY owner parks the prompt in its in-memory prompt queue and acks only when
+    the running turn ends, and a runtime disposed meanwhile loses it (PR #3827
+    A1, from a live trace). So stopping the wait proves nothing by itself, and
+    the timeout below asks the window whether the row exists before saying which
+    of the two it was. The agent ``send peer=`` tool takes ``_pilot_mailbox``
+    instead; this path serves ``sessions resume peer= prompt=``, a shell's
+    ``--send`` and an owner too old for the mailbox.
     """
     from local_operator.session.errors import RuntimeRetiring
 
     payload: dict[str, Any] = {"session_id": session_id, "peer": peer, "verb": "send"}
+    # OUR id on the user row, so a stopped wait can tell admitted from parked.
+    message_id = str(uuid.uuid4())
     try:
-        await asyncio.wait_for(viewer.prompt_and_wait(text), timeout=PILOT_TURN_TIMEOUT_S)
+        await asyncio.wait_for(
+            viewer.prompt_and_wait(text, message_id=message_id), timeout=PILOT_TURN_TIMEOUT_S
+        )
     except TimeoutError:
-        payload.update(ok=False, outcome="running", code="turn_running")
-        return payload, [
-            f"{session_id} on {peer} took the turn and is still running it.",
-            "It was admitted there, so the work is happening — this command simply "
-            f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
-            f"`lop --resume {session_id}`",
-        ]
+        holds = getattr(viewer, "holds_message", None)
+        if callable(holds) and holds(message_id):
+            payload.update(ok=False, outcome="running", code="turn_running")
+            return payload, [
+                f"{session_id} on {peer} took the turn and is still running it.",
+                "Its message row is there, so the work is happening — this command "
+                f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
+                f"`lop --resume {session_id}`",
+            ]
+        # NOT ADMITTED: parked behind the turn already running there (or the
+        # owner never answered). Never reported as delivered — it is in that
+        # runtime's memory only, and a runtime that goes away first loses it.
+        payload.update(ok=False, outcome="queued", code="queued_behind_turn")
+        return payload, queued_behind_turn_lines(session_id, peer)
     except RuntimeRetiring as exc:
         payload.update(ok=False, outcome="queued", code="runtime_retiring", error=str(exc))
         return payload, [
@@ -8012,6 +8226,23 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--create needs --peer: the peer mints the session id"
             )
+        typed_key = str(getattr(args, "create_key", "") or "").strip()
+        if typed_key:
+            from local_operator.network.create_keys import normalize_key
+
+            if not normalize_key(typed_key):
+                # A KEY THE CALLER NAMED ON PURPOSE IS NEVER SILENTLY REPLACED
+                # (review round 1, R1-m3 / QA Q1): the relay mints a fresh key for
+                # a malformed one, so a truncated copy-paste would create a SECOND
+                # session and re-send the first prompt — the duplicate the flag
+                # exists to prevent. Refused before anything is dialled.
+                print(
+                    f"--create-key {typed_key!r} is not a create key this device sent; "
+                    "copy the key from the create receipt whole, or drop the flag to "
+                    "make a new session",
+                    file=sys.stderr,
+                )
+                return 2
         # ``--yolo`` IS FORWARDED, NOT JUDGED HERE, and that is the granted model
         # (design §2 OQ4): the device that would RUN the session decides, checking
         # ITS member row for us — a fact this side does not hold, so a check here
@@ -8123,6 +8354,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 agent_id=agent_id,
                 team=team,
                 effort=effort,
+                # ONE KEY FOR BOTH ATTEMPTS when the caller named one: the yolo
+                # fallback's first attempt was refused above the owner's mint,
+                # which reserves nothing, so the key is still free for the second.
+                create_key=str(getattr(args, "create_key", "") or ""),
                 timeout=120.0,  # a spawn plus its first turn's admission
             )
 
@@ -8161,6 +8396,13 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        if (detail.get("create_unconfirmed") or detail.get("replayed")) and not prompt:
+            # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
+            # owner confirmed the id by key, or this was a retry the owner matched
+            # to the session it had already made. Either way the first turn's fate
+            # is not something this receipt saw, and the sentence says so. (With a
+            # prompt, the prompt branch below prints this same sentence.)
+            lines.append(str(detail.get("detail") or ""))
         if unattended_notice:
             # THE FALLBACK IS SAID OUT LOUD. The same sentence rides the payload
             # (``**detail`` below carries ``unattended_notice``), so a ``--json``
