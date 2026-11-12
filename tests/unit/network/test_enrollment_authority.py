@@ -728,7 +728,7 @@ def _verify_report(*extra: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _row(capability: str, *, ok: bool, code: str = "", device: str = "d_target") -> dict:
+def _row(capability: str, *, ok: bool, code: str = "", device: str = "d_target") -> dict[str, Any]:
     return {
         "check": "readiness",
         "class": "equipment",
