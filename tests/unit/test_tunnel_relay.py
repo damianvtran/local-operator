@@ -1042,3 +1042,104 @@ def test_the_reset_log_counts_what_it_suppressed():
         "relay stream reset by this device: first",
         "relay stream reset by this device: fourth (+2 more in the previous 0.05 s)",
     ]
+
+
+# -- 2026-11-11: an abnormal drop, an empty refresh error ------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        # `str(TimeoutError())` is "", which is what the service log printed.
+        (TimeoutError(), "relay token refresh failed: TimeoutError (no message)"),
+        (httpx.ReadTimeout(""), "relay token refresh failed: ReadTimeout (no message)"),
+    ],
+)
+async def test_a_refresh_failure_names_its_type_even_when_its_text_is_empty(
+    monkeypatch, failure, expected
+):
+    monkeypatch.setattr(relay_connector, "backoff_delay", lambda _attempt: 0.0)
+    log: list[str] = []
+    server, port = await echo_gateway()
+    async with server, FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+
+        async def refresh():
+            raise failure
+
+        # Already expired, so the first dial must call /connect (C1.6).
+        connector = make_connector(
+            relay, grant_for(relay, "tok", expires_in=0), port, refresh=refresh, log=log
+        )
+        async with running(connector):
+            for _ in range(200):
+                if any(line.startswith("relay token refresh failed") for line in log):
+                    break
+                await asyncio.sleep(0.01)
+    refresh_lines = [line for line in log if line.startswith("relay token refresh failed")]
+    assert refresh_lines and refresh_lines[0] == expected
+
+
+def test_a_wrapped_refresh_failure_names_the_chain_by_type_only():
+    from local_operator.providers.auth_store import AuthStoreBusyError
+
+    inner = AuthStoreBusyError("Timed out acquiring AuthStore bootstrap process guard")
+    outer = ValueError("This computer's credential store was busy.")
+    outer.__cause__ = inner
+    assert relay_connector.describe_failure(outer) == (
+        "ValueError: This computer's credential store was busy. <- AuthStoreBusyError"
+    )
+    # An inner link's text never reaches the log: it may be third-party prose.
+    secret = RuntimeError("https://example.invalid/?token=do-not-log")
+    wrapper = ValueError("x")
+    wrapper.__cause__ = secret
+    assert "example.invalid" not in relay_connector.describe_failure(wrapper)
+
+
+@pytest.mark.asyncio
+async def test_an_abnormal_drop_redials_with_a_still_valid_token_without_connect(monkeypatch):
+    """C1.6 token reuse: a 1006 drop with >= 60 s left on the token redials at once
+    with that token; `/connect` is not called first."""
+    monkeypatch.setattr(relay_connector, "backoff_delay", lambda _attempt: 0.0)
+    calls = 0
+    server, port = await echo_gateway()
+    async with server, FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+
+        async def refresh():
+            nonlocal calls
+            calls += 1
+            return grant_for(relay, "tok")
+
+        connector = make_connector(relay, grant_for(relay, "tok"), port, refresh=refresh)
+        async with running(connector):
+            first = await relay.wait_sessions(1)
+            await until_connected(connector)
+            # No close frame: the TCP connection just dies, as at 18:59:10.
+            first.ws.transport.abort()
+            second = await relay.wait_sessions(2)
+            assert second.epoch == first.epoch + 1
+            await until_connected(connector)
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_an_abnormal_drop_with_an_expiring_token_calls_connect_first(monkeypatch):
+    """The other side of the same rule: under 60 s left, /connect gates the redial."""
+    monkeypatch.setattr(relay_connector, "backoff_delay", lambda _attempt: 0.0)
+    calls = 0
+    server, port = await echo_gateway()
+    async with server, FakeRelay({"tok": Claims(TUNNEL, 7)}) as relay:
+
+        async def refresh():
+            nonlocal calls
+            calls += 1
+            return grant_for(relay, "tok")
+
+        connector = make_connector(relay, grant_for(relay, "tok"), port, refresh=refresh)
+        async with running(connector):
+            first = await relay.wait_sessions(1)
+            await until_connected(connector)
+            connector.grant = grant_for(relay, "tok", expires_in=30)
+            first.ws.transport.abort()
+            await relay.wait_sessions(2)
+    assert calls == 1

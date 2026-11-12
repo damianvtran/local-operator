@@ -3088,7 +3088,9 @@ class SubagentComms:
 
     def send(self, job_id: str, text: str) -> Delivery:
         """Deliver a note to a child. No answer is expected or waited for."""
-        return self._deliver(job_id, self._to_child_message(text, expects_reply=False))
+        return self._deliver(
+            job_id, self._to_child_message(text, expects_reply=False, job_id=job_id)
+        )
 
     def steer(self, job_id: str, text: str) -> Delivery:
         """Change what a child is doing.
@@ -3108,9 +3110,11 @@ class SubagentComms:
             # building its session. Either way a course change has to reach a
             # child that has not read its prompt yet, so buffer it as a note.
             # It arrives before any work is done, which is the point.
-            record.pending.append(self._to_child_message(text, expects_reply=False, steer=True))
+            record.pending.append(
+                self._to_child_message(text, expects_reply=False, steer=True, job_id=job_id)
+            )
             return Delivery(job_id, record.label, "queued")
-        message = self._to_child_message(text, expects_reply=False, steer=True)
+        message = self._to_child_message(text, expects_reply=False, steer=True, job_id=job_id)
         self._journal_communication(
             record,
             direction="to_child",
@@ -3282,7 +3286,7 @@ class SubagentComms:
                     future = asyncio.get_running_loop().create_future()
                     record.ask = future
                     record.armed = False
-                    message = self._to_child_message(text, expects_reply=True)
+                    message = self._to_child_message(text, expects_reply=True, job_id=job_id)
                     record.pending.append(message)
                     # Bound to the MESSAGE, not just to ``record.ask``: a
                     # buffered question that times out leaves its message in
@@ -3317,7 +3321,7 @@ class SubagentComms:
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         record.ask = future
         record.armed = False
-        message = self._to_child_message(text, expects_reply=True)
+        message = self._to_child_message(text, expects_reply=True, job_id=job_id)
         record.child.queue_aside(self._thunk(record, message, awaiting=future))
         try:
             # Whatever is LEFT of the caller's budget after the attach wait,
@@ -4173,19 +4177,55 @@ class SubagentComms:
         return watcher
 
     def _to_child_message(
-        self, text: str, *, expects_reply: bool, steer: bool = False
+        self,
+        text: str,
+        *,
+        expects_reply: bool,
+        steer: bool = False,
+        job_id: str | None = None,
     ) -> CustomMessage:
-        return CustomMessage(
-            custom_type=HUB_MESSAGE_TYPE,
-            attribution="user",
-            details={
-                "direction": "to_child",
-                "body": text,
-                "expects_reply": expects_reply,
-                "steer": steer,
-                "text": self._format_to_child(text, expects_reply=expects_reply, steer=steer),
-            },
-        )
+        details: dict[str, Any] = {
+            "direction": "to_child",
+            "body": text,
+            "expects_reply": expects_reply,
+            "steer": steer,
+            "text": self._format_to_child(text, expects_reply=expects_reply, steer=steer),
+        }
+        if job_id is not None and self._sender_bridge_latched(job_id):
+            # ``hub`` is read-tier, so a latched parent can write a
+            # teammate's agent message into a child with no card (review R1,
+            # S-67). The stamp makes the delivered row a source: the child
+            # latches when it lands, durably, even if it is still queued
+            # behind the capacity gate. A live child is also marked now.
+            from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+            details[BRIDGE_TAINT_DETAILS_KEY] = True
+            self._mark_child_bridge_latched(job_id)
+        return CustomMessage(custom_type=HUB_MESSAGE_TYPE, attribution="user", details=details)
+
+    def _sender_bridge_latched(self, job_id: str) -> bool:
+        """Whether the session writing to ``job_id`` holds bridge content.
+
+        The sender is the child's live parent (else the root, the same
+        resolution replies use). A sender that does not track taint reads as
+        clean; a lookup that raises reads as latched (fail closed).
+        """
+        try:
+            sender = self._parent_session_of(self._record(job_id))
+            return bool(getattr(sender, "bridge_latched", False))
+        except Exception:  # noqa: BLE001 - fail closed: an undeterminable sender is latched
+            logger.warning("bridge taint of hub sender undeterminable; stamping", exc_info=True)
+            return True
+
+    def _mark_child_bridge_latched(self, job_id: str) -> None:
+        record = self._record(job_id)
+        child = record.child if record is not None else None
+        latch = getattr(child, "bridge_taint_latch", None)
+        if latch is not None:
+            from local_operator.harness.bridge_egress import SOURCE_OTHER_SESSION
+
+            # The child got it from its parent: wording only (UX r1 U1).
+            latch.mark(SOURCE_OTHER_SESSION)
 
     @staticmethod
     def _format_to_child(text: str, *, expects_reply: bool, steer: bool) -> str:

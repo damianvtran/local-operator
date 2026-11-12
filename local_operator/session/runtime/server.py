@@ -9451,6 +9451,12 @@ class RuntimeServer:
                 # updated is not forced into a lockstep change, and one that
                 # cannot accept the set is left at the flat behaviour it had.
                 kwargs["capabilities"] = capabilities
+            if frame.get("bridge_ack") is True and _accepts_kw(run, "bridge_ack"):
+                # Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"), forwarded
+                # only
+                # when literally ``true``. Absent means "not acknowledged",
+                # which refuses a loosening for a latched conversation.
+                kwargs["bridge_ack"] = True
             # The settings switch's identity, so the owner can publish its
             # outcome as ``settings_result`` (a ``defer_ok`` ack may have
             # answered before it landed). Same optional probe as above.

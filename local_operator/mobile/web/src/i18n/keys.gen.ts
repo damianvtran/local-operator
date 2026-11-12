@@ -495,6 +495,14 @@ export type MessageParams = {
   "relay.usage_reset.refused": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
+  "wire.bridge_taint.ack_refused": undefined;
+  "wire.bridge_taint.ack_refused_other_session": undefined;
+  "wire.bridge_taint.card_notice": undefined;
+  "wire.bridge_taint.card_notice_other_session": undefined;
+  "wire.bridge_taint.card_options_off": undefined;
+  "wire.bridge_taint.full_request": { "request": string };
+  "wire.bridge_taint.grant_suspended": undefined;
+  "wire.bridge_taint.grant_suspended_other_session": undefined;
   "wire.console.description": undefined;
   "wire.console.max_live.help": undefined;
   "wire.console.max_live.label": undefined;

@@ -734,6 +734,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # withdraw its own record; the legacy fixed `delivery.json` is read but no
     # longer written.
     (
+        "local_operator/server/loop_watchdog.py::prune_stall_logs",
+        "<path>.unlink",
+        "Removes only ``serve-stall-<pid>.log`` FILES directly inside <config>/logs "
+        "(iterdir + fullmatch); never recurses, never reaches sessions/, and unlink "
+        "rejects directories (the OSError is swallowed).",
+    ),
+    (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
         "os.replace",
         "Atomic replacement of THIS process's own <instance_id>.json record FILE "
