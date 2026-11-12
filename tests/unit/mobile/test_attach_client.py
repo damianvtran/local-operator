@@ -1787,3 +1787,143 @@ async def test_a_reset_with_no_announcement_is_still_a_reset() -> None:
     await asyncio.wait_for(pump, timeout=5)
 
     assert disconnected == ["owner connection reset"], disconnected
+
+
+# ---------------------------------------------------------------------------
+# bind_failed carries its cause (2026-11-12)
+# ---------------------------------------------------------------------------
+#
+# A coordinator on a mesh node was refused with "owner could not prepare this
+# view" and no cause: the client dropped the owner's message and the owner's
+# traceback lived only in a rotating shared log. These pin both halves — the
+# viewer surfaces the (sanitised, redacted) message, and the owner keeps a
+# bounded per-session record.
+
+
+async def _bind_fail_then_drop(
+    r: RuntimeServer, messages: list[BaseException] | None, *, raw: dict[str, Any] | None = None
+) -> None:
+    """On the owner's loop: announce each failure (or send ``raw``), then drop.
+
+    The real emitter (``_announce_bind_failure``) and the real drop, in the order
+    ``_serve_frontend_sync``'s failure branch runs them.
+    """
+    conn = next(c for c in r._clients.values() if c.kind == "attach")
+
+    async def run() -> None:
+        if raw is not None:
+            await r._send_to(conn, raw)
+        for exc in messages or ():
+            await r._announce_bind_failure(conn, exc)
+        r._drop_client(conn, reason="frontend bind failed")
+
+    await _on_runtime_loop(r, run())
+
+
+async def _await_disconnect(disconnected: list[str]) -> None:
+    deadline = asyncio.get_running_loop().time() + _STRUCTURAL_WAIT_S
+    while asyncio.get_running_loop().time() < deadline and not disconnected:
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_bind_failed_reason_names_the_owner_cause(config: Path) -> None:
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        secret = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        await _bind_fail_then_drop(
+            r,
+            [RuntimeError(f"profile store locked\x1b[2J\nby pid 4242 token {secret}" + "x" * 900)],
+        )
+        await _await_disconnect(disconnected)
+        assert len(disconnected) == 1, disconnected
+        reason = disconnected[0]
+        assert reason.startswith("owner could not prepare this view: profile store locked"), reason
+        assert "by pid 4242" in reason
+        assert reason.endswith("; the session is alive — reconnect to retry"), reason
+        # Untrusted text: no control bytes, no line break, no credential, bounded.
+        assert "\x1b" not in reason and "\n" not in reason
+        assert secret not in reason
+        detail = reason.split(": ", 1)[1].rsplit("; the session is alive", 1)[0]
+        assert len(detail) <= attach_client._BIND_FAILED_DETAIL_LIMIT
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_bind_failed_without_message_keeps_the_old_reason(config: Path) -> None:
+    """An older owner sends the op with no ``message``: the sentence is unchanged."""
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        await _bind_fail_then_drop(r, None, raw={"op": "bind_failed"})
+        await _await_disconnect(disconnected)
+        assert disconnected == [attach_client.BIND_FAILED_REASON], disconnected
+        # Blank/non-string messages are the same "absent" case.
+        assert attach_client.bind_failed_reason("  ") == attach_client.BIND_FAILED_REASON
+        assert attach_client.bind_failed_reason(None) == attach_client.BIND_FAILED_REASON
+        assert attach_client.bind_failed_reason(42) == attach_client.BIND_FAILED_REASON
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_records_bind_failures_bounded(config: Path, tmp_path: Path) -> None:
+    """Each bind failure lands in ``bind-failures.json``; only the newest N are kept."""
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import journal
+
+    conv = tmp_path / "conv" / "sess-a"
+    conv.mkdir(parents=True)
+    handle = FakeHandle("sess-a")
+    handle._session = SimpleNamespace(  # type: ignore[attr-defined]
+        session_id="sess-a", _transcript=SimpleNamespace(directory=conv)
+    )
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        secret = "ghp_" + "Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2"
+        failures: list[BaseException] = []
+        for i in range(journal.BIND_FAILURES_KEEP + 2):
+            try:
+                raise ValueError(f"bind failure {i} with {secret}")
+            except ValueError as exc:  # a real traceback, as the bind path has
+                failures.append(exc)
+        await _bind_fail_then_drop(r, failures)
+        await _await_disconnect(disconnected)
+
+        path = conv / journal.BIND_FAILURES_NAME
+        data = json.loads(path.read_text())
+        assert data["kind"] == journal.BIND_FAILURES_KIND
+        assert data["session_id"] == "sess-a"
+        rows = data["failures"]
+        assert len(rows) == journal.BIND_FAILURES_KEEP
+        # Newest last; the two oldest were dropped.
+        assert [row["message"].split(" with ")[0] for row in rows] == [
+            f"bind failure {i}" for i in range(2, journal.BIND_FAILURES_KEEP + 2)
+        ]
+        for row in rows:
+            assert row["exc_type"] == "ValueError"
+            assert isinstance(row["ts"], float)
+            assert "Traceback" in row["traceback"] and "ValueError" in row["traceback"]
+        assert secret not in path.read_text()
+        assert (path.stat().st_mode & 0o777) == 0o600
+        assert journal.read_bind_failures(conv) == rows
+    finally:
+        r.close()

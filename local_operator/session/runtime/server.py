@@ -5037,10 +5037,63 @@ class RuntimeServer:
         Best-effort: a failure to announce must never stop the drop that
         follows, and the send path drops the client itself when the write fails.
         """
+        message = self._redacted_bind_failure_text(str(exc))[:400]
+        # REMOTE COORDINATORS WERE BLIND HERE (2026-11-12): the viewer dropped
+        # this message and the traceback went only to the shared rotating
+        # runtime.log, gone within minutes. The client now surfaces the message;
+        # this keeps a durable per-session record on the owner as well. Written
+        # before the announce so it exists even when the socket write fails.
+        self._record_bind_failure(conn, exc, message)
         try:
-            await self._send_to(conn, {"op": "bind_failed", "message": str(exc)[:400]})
+            await self._send_to(conn, {"op": "bind_failed", "message": message})
         except Exception:  # noqa: BLE001 — announcing is best-effort
             logger.debug("bind-failure announcement write failed", exc_info=True)
+
+    def _redacted_bind_failure_text(self, text: str) -> str:
+        """``text`` with known secret values and credential shapes masked.
+
+        The exception text LEAVES THIS PROCESS (to a viewer, possibly on another
+        device) and lands on disk, so it gets the same side-effect-free passes
+        ``supplements._metadata_text`` uses: the runtime's retrieved-secret
+        ledger, then the shape scrubber. Not the session's tool-result redactor,
+        which also writes report rows into the transcript.
+        """
+        import sys
+
+        from local_operator.redaction_shapes import scrub_shapes
+
+        safe = text
+        runtime = sys.modules.get("local_operator.secrets.runtime")
+        if runtime is not None:
+            try:
+                safe = runtime.scrub(safe)
+            except Exception:  # noqa: BLE001 — the shape pass below still runs
+                logger.debug("bind-failure secret scrub failed", exc_info=True)
+        return scrub_shapes(safe)
+
+    def _record_bind_failure(self, conn: _ClientConn, exc: BaseException, message: str) -> None:
+        """Persist this bind failure beside ``runtime-exit.json`` (best-effort)."""
+        try:
+            import traceback
+            from pathlib import Path
+
+            from local_operator.session.runtime import journal
+
+            session = getattr(self._handle, "_session", None)
+            directory = getattr(getattr(session, "_transcript", None), "directory", None)
+            if directory is None:
+                return
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            journal.record_bind_failure(
+                Path(directory),
+                session_id=str(getattr(session, "session_id", "") or ""),
+                exc_type=type(exc).__name__,
+                message=message,
+                traceback_text=self._redacted_bind_failure_text(tb),
+                surface=str(getattr(conn, "surface", "") or ""),
+            )
+        except Exception:  # noqa: BLE001 — an instrument never breaks the drop
+            logger.debug("bind-failure record write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
         """Release a bind's eventual subscription once nothing will receive it.

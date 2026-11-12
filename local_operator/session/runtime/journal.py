@@ -875,6 +875,118 @@ def read_exit_record(conversation_dir: Path | None) -> "ExitRecord | None":
 
 
 # ---------------------------------------------------------------------------
+# The bind-failure record
+# ---------------------------------------------------------------------------
+
+#: ``sessions/<id>/bind-failures.json``: the last few times this session's
+#: runtime could not BIND a viewer's connection (its canonical
+#: ``frontend_sync`` never reached that viewer, so the runtime sent
+#: ``bind_failed`` and dropped the one connection).
+#:
+#: WHY IT EXISTS (2026-11-12): a coordinator on a mesh node dialing a session
+#: on another Mac was refused with "owner could not prepare this view" and no
+#: cause. The owner's traceback went only to the shared, rotating
+#: ``runtime.log``, which ~25 concurrent sessions overwrote within about four
+#: minutes, so by the time anyone asked the evidence was gone. A remote
+#: coordinator was blind to why it could not see a head session. This record is
+#: the durable, per-session account a later ``lop`` on the owner can read.
+#:
+#: Beside ``runtime-exit.json`` for the same reason that record sits in the
+#: conversation directory: it is evidence about THIS session's runtime, it must
+#: outlive pid-keyed namespaces, and every reader already holds the directory.
+#: It does NOT travel with a move (``network/sync.EXCLUDED_ENTRIES``): the
+#: failures are this device's runtime failing this device's binds, and on a
+#: destination they would read as the new owner's own history.
+BIND_FAILURES_NAME = "bind-failures.json"
+
+#: What the record says it is, namespaced like the exit record.
+BIND_FAILURES_KIND = "runtime-bind-failures"
+
+#: How many failures are kept, newest last. Enough to see whether a failure is
+#: one-off or repeating (a redialing coordinator hits it every attempt) while
+#: keeping the file a few KiB at most; older rows are dropped, never appended.
+BIND_FAILURES_KEEP = 5
+
+#: Per-field bounds. The message matches what the owner already sends on the
+#: wire (400); the traceback keeps its TAIL, which is where the raising frame
+#: and the exception line are.
+_BIND_FAILURE_MESSAGE_LIMIT = 400
+_BIND_FAILURE_TRACEBACK_LIMIT = 4000
+
+
+def bind_failures_path(conversation_dir: Path) -> Path:
+    """Where one conversation's bind-failure record lives (a resolver; creates nothing)."""
+    return Path(conversation_dir) / BIND_FAILURES_NAME
+
+
+def read_bind_failures(conversation_dir: Path | None) -> list[dict[str, Any]]:
+    """The kept bind failures, oldest first; ``[]`` for none or an unreadable file."""
+    if conversation_dir is None:
+        return []
+    try:
+        data = json.loads(bind_failures_path(Path(conversation_dir)).read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("kind") != BIND_FAILURES_KIND:
+        return []
+    rows = data.get("failures")
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def record_bind_failure(
+    conversation_dir: Path | None,
+    *,
+    session_id: str,
+    exc_type: str,
+    message: str,
+    traceback_text: str,
+    surface: str = "",
+) -> Path | None:
+    """Append one bind failure, keeping the newest :data:`BIND_FAILURES_KEEP`.
+
+    NEVER RAISES, same contract as :func:`write_exit_record`: it runs on the
+    failure path of a bind, and an instrument must not turn one dropped viewer
+    into a broken runtime. The directory is NOT created (a runtime with no
+    conversation directory has nothing to report about). The write is
+    ``registry._staged_write`` — 0600, same-directory temp, ``os.replace`` — so
+    a reader sees the old record or the new one, never a torn one.
+
+    The CALLER redacts ``message`` and ``traceback_text``; this only bounds them.
+    """
+    if conversation_dir is None:
+        return None
+    directory = Path(conversation_dir)
+    try:
+        if not directory.is_dir():
+            return None
+        rows = read_bind_failures(directory)
+        rows.append(
+            {
+                "ts": time.time(),
+                "pid": os.getpid(),
+                "surface": str(surface)[:64],
+                "exc_type": str(exc_type)[:200],
+                "message": str(message)[:_BIND_FAILURE_MESSAGE_LIMIT],
+                "traceback": str(traceback_text)[-_BIND_FAILURE_TRACEBACK_LIMIT:],
+            }
+        )
+        payload = {
+            "kind": BIND_FAILURES_KIND,
+            "v": 1,
+            "session_id": str(session_id),
+            "failures": rows[-BIND_FAILURES_KEEP:],
+        }
+        target = bind_failures_path(directory)
+        registry._staged_write(target, payload, prefix=f".{BIND_FAILURES_NAME}.")
+        return target
+    except Exception:  # noqa: BLE001 — a failure path never fails over an instrument
+        logger.debug("session runtime: could not record a bind failure", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # The run record
 # ---------------------------------------------------------------------------
 
