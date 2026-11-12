@@ -1728,6 +1728,21 @@ async def stop_session(
         monitors = await _park_monitors(record, root, mark)
         _recover_record(record, root)
         method = "gone"
+        if _park:
+            # The stamps written above are ``parked_at`` (``mark``), so the
+            # wakes and monitors are ARMED: reporting this as a dormant stop
+            # painted a stop receipt and logged a refusal for a session that
+            # is in fact parked (review round 1, R1-4).
+            return StopOutcome(
+                pid=record.pid,
+                session_id=record.session_id,
+                name=name,
+                method=method,
+                line=parked_line(name, wakes, monitors),
+                parked=True,
+                wakes_armed=wakes,
+                monitors_armed=monitors,
+            )
         return StopOutcome(
             pid=record.pid,
             session_id=record.session_id,
@@ -1758,6 +1773,20 @@ async def stop_session(
             # stop and one that is silently dropped.
             wakes = await _park_wakes(record, root, mark)
             monitors = await _park_monitors(record, root, mark)
+            if _park:
+                # Same as the ``gone`` rung (R1-4): the owner accepted the park
+                # and is leaving, and its entries carry ``parked_at`` — armed.
+                return StopOutcome(
+                    pid=record.pid,
+                    session_id=record.session_id,
+                    name=name,
+                    method="pending",
+                    line=f"{parked_line(name, wakes, monitors)} (it had not exited after "
+                    f"{bound_text(timeout_s)}; no signal was sent)",
+                    parked=True,
+                    wakes_armed=wakes,
+                    monitors_armed=monitors,
+                )
             return StopOutcome(
                 pid=record.pid,
                 session_id=record.session_id,
@@ -2035,11 +2064,11 @@ def parked_line(name: str, wakes: int, monitors: int) -> str:
 
 
 def armed_counts(root: Path, session_id: str) -> tuple[int, int]:
-    """``(wakes, monitors)`` a STOP would make dormant, read from the indexes.
+    """``(wakes, monitors)`` a stop would make dormant (a park keeps armed).
 
-    Used BEFORE a stop so the receipt can say plainly what the stop costs and
-    offer park instead (the 2026-11-12 field gap: the operator's agent learned
-    the wakes went dormant only after the fact). Same counting rules as the
+    Read BEFORE the session's runtime ends: the self-park path
+    (``_sessions_park_self``) uses it to tell the caller what stays armed, since
+    its own park lands only after the turn ends. Same counting rules as the
     dormant stamps themselves: scheduled wake rows only (patience timers are
     internal), every monitor row; an entry already held counts 0 because a
     stop changes nothing for it, and an engine-owned duty session counts 0

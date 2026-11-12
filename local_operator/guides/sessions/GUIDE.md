@@ -91,6 +91,13 @@ The stop receipt says how many wakes and monitors it made dormant and names
 `park` as the alternative. Free memory with `park`; reserve `stop` for ending
 work. Reopening the session (any engage) clears either stamp.
 
+**A park lasts until the next reopen.** Once a wake or a monitor change brings
+the session back, it is an ordinary session again: when it later goes idle and
+its runtime exits on its own, nothing is stamped, and its monitors go back to
+reopening it on every due tick (the cold-session behaviour). Park it again if
+you want the memory back for longer. A session watched by MCP or web monitors
+is reopened on every due tick even while parked, so parking it saves little.
+
 **Self-park.** `sessions(op='park')` with no address parks the calling session
 once the current turn ends: a detached helper waits for the owner's idle latch
 and then parks it, so the turn is never cut. It is refused (nothing scheduled)
@@ -102,7 +109,11 @@ reaches its act line, or swap on the data volume outgrows the free space (or
 free space drops under 2 GiB), the wake supervisor parks idle, detached
 sessions — oldest-idle first, never a busy one, one a viewer is attached to,
 the chief of staff (Aida) or an engine duty session — before it would end a
-build. Each park logs one `pressure park:` line in the supervisor log.
+build. It also leaves alone a runtime inside its keep-alive window (just
+opened, reopened by a wake or monitor, warmed for a viewer, or just left by
+one; at least 5 minutes) and a session with an armed MCP or web monitor, which
+parking would only reopen every tick. Each park logs one `pressure park:` line
+in the supervisor log, and so does each monitor-based skip.
 
 ## Resume — the canonical flow
 

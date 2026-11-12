@@ -20,9 +20,10 @@ first idle moment parks the session through the same idle-only ladder every
 other park uses, and the helper exits. It gives up — leaving the session up,
 never signalling it — on any other refusal (a wake due inside the hold window,
 an old owner, a silent socket), when the runtime is already gone, or after
-:data:`DEADLINE_S` of continuous work (a new turn the operator started after
-the park request is their decision to keep the session, not ours to override
-indefinitely).
+:data:`DEADLINE_S` of continuous work. A new turn started after the park
+request does NOT cancel it: the helper parks at the first idle moment after
+that turn as well, provided it comes within :data:`DEADLINE_S`; only work that
+outlasts the deadline keeps the session up (review round 1, R1-8).
 
 One log line per outcome goes to ``<log_dir>/park-after-turn.log``.
 """
@@ -37,6 +38,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+from local_operator.session.runtime.park_pressure import plural_noun
 
 logger = logging.getLogger("local_operator.session.runtime.park_after_turn")
 
@@ -122,11 +125,11 @@ async def run(
         )
         if outcome.parked:
             logger.info(
-                "self-park %s (pid %s): parked — %s wakes and %s monitors stay armed",
+                "self-park %s (pid %s): parked — %s and %s stay armed",
                 session_id,
                 pid,
-                outcome.wakes_armed,
-                outcome.monitors_armed,
+                plural_noun(outcome.wakes_armed, "wake"),
+                plural_noun(outcome.monitors_armed, "monitor"),
             )
             return "parked"
         if outcome.method == "refused" and outcome.reason == control.REASON_BUSY:

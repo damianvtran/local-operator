@@ -171,3 +171,83 @@ async def test_a_monitor_mid_failure_episode_engages(tmp_path: Path) -> None:
     )
     outcome = await parked.probe_session(tmp_path, SID, now_ms=NOW)
     assert outcome["verdict"] == "engage" and "episode" in outcome["why"]
+
+
+@pytest.mark.asyncio
+async def test_a_session_committing_during_the_check_wins_the_quiet_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: the probe never writes its stale counters over a reopened session's commit."""
+    watched = tmp_path / "watched.txt"
+    watched.write_text("thread: 3 replies\n", encoding="utf-8")
+    row = _row("read", {"path": str(watched)}, str(tmp_path))
+    _arm(tmp_path, row)
+    baseline = await _baseline(tmp_path, row)
+    monitor_state.write_counters(
+        tmp_path,
+        SID,
+        "m1",
+        {
+            "schema": 1,
+            "monitor_id": "m1",
+            "next_due_at": NOW - 1,
+            "content_hash": baseline,
+            "checks": 4,
+            "last_check_at": NOW - 60_000,
+        },
+    )
+    # What the reopened session's scheduler commits mid-check: a delivered
+    # change (new hash), and the open-time rewrite cleared ``parked_at``.
+    session_commit = {
+        "schema": 1,
+        "monitor_id": "m1",
+        "next_due_at": NOW + 60_000,
+        "content_hash": "the-session-delivered-a-change",
+        "checks": 5,
+        "last_check_at": NOW - 5,
+    }
+    real_build = parked._build_tool
+
+    def _build(name: str) -> Any:
+        tool = real_build(name)
+        real_execute = tool.execute
+
+        async def _execute(*args: Any, **kwargs: Any) -> Any:
+            result = await real_execute(*args, **kwargs)
+            monitor_state.write_counters(tmp_path, SID, "m1", dict(session_commit))
+            return result
+
+        monkeypatch.setattr(tool, "execute", _execute)
+        return tool
+
+    monkeypatch.setattr(parked, "_build_tool", _build)
+    outcome = await parked.probe_session(tmp_path, SID, now_ms=NOW)
+    assert outcome["verdict"] == "quiet" and outcome["why"] == "unchanged"
+    # The session's commit survives byte-for-byte: nothing was written over it.
+    assert monitor_state.read_counters(tmp_path, SID, "m1") == session_commit
+
+    # Same race, but the entry stopped being parked (the session reopened)
+    # while its counters happened to be untouched: also no write.
+    monitor_state.write_counters(
+        tmp_path,
+        SID,
+        "m1",
+        {**session_commit, "content_hash": baseline, "next_due_at": NOW - 1},
+    )
+    before = monitor_state.read_counters(tmp_path, SID, "m1")
+
+    def _build_unpark(name: str) -> Any:
+        tool = real_build(name)
+        real_execute = tool.execute
+
+        async def _execute(*args: Any, **kwargs: Any) -> Any:
+            result = await real_execute(*args, **kwargs)
+            monitor_store.write_entry(tmp_path, SID, cwd=row["cwd"], monitors=[row])
+            return result
+
+        monkeypatch.setattr(tool, "execute", _execute)
+        return tool
+
+    monkeypatch.setattr(parked, "_build_tool", _build_unpark)
+    await parked.probe_session(tmp_path, SID, now_ms=NOW)
+    assert monitor_state.read_counters(tmp_path, SID, "m1") == before

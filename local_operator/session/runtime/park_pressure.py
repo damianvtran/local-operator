@@ -22,7 +22,23 @@ WHO IS NEVER PARKED HERE:
   session (``control._engine_owner``: Aida, the Librarian) — their recurring
   passes are the machine's own attention;
 * a runtime already leaving, a TUI-owned session, or any runtime with a viewer
-  attached (the owner's latch does not count viewers, so this filter must).
+  attached (the owner's latch does not count viewers, so this filter must) —
+  both ``detached`` (visibility) and ``watching`` (attachment): a multiplexing
+  TUI switched to another tab leaves ``detached=True, watching=True``, and that
+  viewer is still there (review round 1, R1-1);
+* a runtime inside its residency window (:func:`_residency_hold_s`): just
+  started, warm-engaged for a viewer that has not attached yet (``engaged_at``),
+  or recently left by one (``detached_at``). The disk rule below can stay true
+  for hours (2026-11-12: 13 GiB of swap files against ~9 GiB free), so without
+  this every pass would park the runtime a person just asked for — the
+  "runtime joining, then gone" failure ``engaged_at`` exists to prevent — and a
+  session the supervisor just reopened for a wake or a monitor change would be
+  re-parked before it finished (QA round 1 saw a re-park 34 s after the turn);
+* a session with an armed monitor the supervisor's probe cannot run
+  (anything outside ``monitors.parked.HEADLESS_TOOLS``: MCP, web). A parked
+  session is cold-engaged for every due tick of such a monitor, so parking it
+  under sustained pressure would cycle park → reopen → park once per monitor
+  period: the churn costs a cold spawn each time and saves nothing.
 
 DISK PRESSURE (:func:`measure_disk_pressure`). On macOS swap files live on the
 ``/System/Volumes/VM`` APFS volume, which shares its container's free space with
@@ -142,6 +158,76 @@ def measure_disk_pressure(
     return DiskPressure(free, swap, shares, False, f"{gib:.1f} GiB free")
 
 
+def plural_noun(count: Any, noun: str) -> str:
+    """``1 wake`` / ``2 wakes`` for log lines (QA round 1, Q-2)."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _residency_hold_s() -> float:
+    """How long a just-started / engaged / just-left runtime is exempt.
+
+    The configured ``runtime.keep_alive_seconds`` — a pressure park must never be
+    more aggressive than the residency policy the operator chose — floored at
+    ``process.DEFAULT_KEEP_ALIVE_SECONDS`` (300 s). The floor is the hysteresis:
+    an operator who set keep-alive to 0 asked for no WARM residency, not for a
+    session the supervisor just reopened for a wake to be parked again on the
+    next 60 s pass. No new number: it is the same window the residency policy
+    already treats as "a person is still involved with this runtime".
+    """
+    from local_operator.session.runtime.process import (
+        DEFAULT_KEEP_ALIVE_SECONDS,
+        _keep_alive_seconds,
+    )
+
+    return max(float(_keep_alive_seconds()), float(DEFAULT_KEEP_ALIVE_SECONDS))
+
+
+def _residency_claim(record: Any, now: float, hold_s: float) -> str:
+    """Why ``record`` is inside its residency window, or ``""``."""
+    for field_name, why in (
+        ("engaged_at", "engaged for a viewer"),
+        ("detached_at", "viewer just left"),
+        ("started_at", "just opened"),
+    ):
+        stamp = getattr(record, field_name, None)
+        if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and stamp > 0:
+            if now - float(stamp) < hold_s:
+                return f"{why} (keep-alive window)"
+    return ""
+
+
+def _unprobeable_monitors(root: Path, session_id: str) -> list[str]:
+    """Armed monitors of ``session_id`` the supervisor's probe cannot run.
+
+    Mirrors ``monitors.parked.probe_session``'s own row filters (disabled and
+    expired rows are never checked) so a skip names only monitors that would
+    actually reopen the session.
+    """
+    import time
+
+    from local_operator.monitors import store as monitor_store
+    from local_operator.monitors.parked import HEADLESS_TOOLS
+
+    try:
+        entry = monitor_store.read_entry(root, session_id)
+    except Exception:  # noqa: BLE001 — unreadable index: nothing to protect here
+        return []
+    if not isinstance(entry, dict):
+        return []
+    now_ms = int(time.time() * 1000)
+    names: list[str] = []
+    for row in entry.get("monitors") or ():
+        if not isinstance(row, dict) or row.get("disabled"):
+            continue
+        until = row.get("until_at")
+        if isinstance(until, int) and not isinstance(until, bool) and now_ms >= until:
+            continue
+        tool = str(row.get("tool") or "")
+        if tool and tool not in HEADLESS_TOOLS:
+            names.append(f"{row.get('id') or '?'}:{tool}")
+    return names
+
+
 @dataclass
 class ParkPassReport:
     parked: list[str] = field(default_factory=list)
@@ -172,9 +258,20 @@ def park_candidates(
     records: Sequence[Any],
     *,
     exclude_pids: frozenset[int] = frozenset(),
+    now: float | None = None,
+    hold_s: float | None = None,
 ) -> tuple[list[Any], list[tuple[str, str]]]:
-    """Idle, parkable records oldest-idle first, and ``(session, why)`` skips."""
+    """Idle, parkable records oldest-idle first, and ``(session, why)`` skips.
+
+    ``now``/``hold_s`` are test seams for the residency window (defaults: the
+    wall clock and :func:`_residency_hold_s`).
+    """
+    import time
+
     from local_operator.session.runtime.control import _engine_owner
+
+    now = time.time() if now is None else now
+    hold_s = _residency_hold_s() if hold_s is None else hold_s
 
     try:
         from local_operator.aida.state import is_aida_session
@@ -202,14 +299,32 @@ def park_candidates(
         # pressure park would end a conversation under the operator's eyes — a
         # TUI owner most of all, whose session would end beneath its terminal.
         # Only runtimes nobody is attached to are the guard's to park.
-        if getattr(record, "kind", "") == "tui" or not getattr(record, "detached", False):
+        if (
+            getattr(record, "kind", "") == "tui"
+            or not getattr(record, "detached", False)
+            or getattr(record, "watching", False)
+        ):
             skipped.append((sid, "viewer attached"))
+            continue
+        claim = _residency_claim(record, now, hold_s)
+        if claim:
+            skipped.append((sid, claim))
             continue
         if is_aida_session is not None and is_aida_session(root, sid):
             skipped.append((sid, "chief of staff"))
             continue
         if _engine_owner(root, sid):
             skipped.append((sid, "engine duty session"))
+            continue
+        unprobeable = _unprobeable_monitors(root, sid)
+        if unprobeable:
+            why = "monitors only a session can check (" + ", ".join(unprobeable) + ")"
+            skipped.append((sid, why))
+            logger.info(
+                "pressure park: skipping %s — %s; parking it would reopen it every tick",
+                sid,
+                why,
+            )
             continue
         keep.append((_idle_since(root, record), record))
     keep.sort(key=lambda pair: pair[0])
@@ -258,12 +373,12 @@ async def park_idle_sessions(
         if getattr(outcome, "parked", False):
             report.parked.append(record.session_id)
             logger.warning(
-                "pressure park: parked %s (pid %s) — %s; %s wakes and %s monitors stay armed",
+                "pressure park: parked %s (pid %s) — %s; %s and %s stay armed",
                 record.session_id,
                 record.pid,
                 reason or "fleet under pressure",
-                getattr(outcome, "wakes_armed", 0),
-                getattr(outcome, "monitors_armed", 0),
+                plural_noun(getattr(outcome, "wakes_armed", 0), "wake"),
+                plural_noun(getattr(outcome, "monitors_armed", 0), "monitor"),
             )
         else:
             why = getattr(outcome, "reason", "") or getattr(outcome, "method", "")

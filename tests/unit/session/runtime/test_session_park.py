@@ -35,6 +35,9 @@ def _rec(session_id: str = SID, **overrides: Any) -> SessionRecord:
         control_port=0,
         control_key="k",
         detached=True,
+        # Long-running by default: a fresh ``started_at`` is inside the
+        # residency window and is (correctly) never a pressure-park candidate.
+        started_at=1.0,
     )
     fields.update(overrides)
     return SessionRecord(**fields)
@@ -127,6 +130,71 @@ async def test_park_session_over_a_real_socket(busy: bool, monkeypatch: pytest.M
         assert (outcome.wakes_dormant, outcome.monitors_dormant) == (0, 0)
         assert wake.get("parked_at") and not wake_store.is_held(wake)
         assert outcome.line.startswith(f'parked "{record.conversation_name}"')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rung", ["gone", "pending"])
+async def test_a_park_landing_on_the_gone_or_pending_rung_reports_parked(
+    rung: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-4: those rungs stamp ``parked_at`` too, so the outcome must say parked/armed."""
+    _arm(tmp_path)
+    rec = _rec()
+    answer = control._GracefulAsk(acked=(rung == "pending"), exited=False)
+    monkeypatch.setattr(control, "_graceful_stop", AsyncMock(return_value=answer))
+    monkeypatch.setattr(control.registry, "pid_alive", lambda _pid: rung == "pending")
+    monkeypatch.setattr(control, "_recover_record", lambda *_a: None)
+    monkeypatch.setattr(
+        control, "_signal_and_confirm", AsyncMock(side_effect=AssertionError("never signals"))
+    )
+    outcome = await control.park_session(rec, timeout_s=1, _root=tmp_path)
+    assert outcome.method == rung
+    assert outcome.parked
+    assert (outcome.wakes_armed, outcome.monitors_armed) == (1, 1)
+    assert (outcome.wakes_dormant, outcome.monitors_dormant) == (0, 0)
+    assert outcome.line.startswith('parked "parkable" — 1 wake and 1 monitor stay armed')
+    wake = wake_store.read_entry(tmp_path, SID)
+    assert wake and wake.get("parked_at") and not wake_store.is_held(wake)
+
+
+@pytest.mark.asyncio
+async def test_a_stop_on_the_gone_rung_still_reports_dormant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for R1-4: stop's gone rung is unchanged."""
+    _arm(tmp_path)
+    monkeypatch.setattr(
+        control,
+        "_graceful_stop",
+        AsyncMock(return_value=control._GracefulAsk(acked=False, exited=False)),
+    )
+    monkeypatch.setattr(control.registry, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(control, "_recover_record", lambda *_a: None)
+    outcome = await control.stop_session(_rec(), timeout_s=1, _root=tmp_path, graceful_only=True)
+    assert outcome.method == "gone" and not outcome.parked
+    assert (outcome.wakes_dormant, outcome.monitors_dormant) == (1, 1)
+
+
+def test_self_park_log_pluralises_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q-2: the park-after-turn log says "1 wake and 1 monitor"."""
+    import asyncio
+
+    rec = _rec()
+    monkeypatch.setattr(park_after_turn, "_find_record", lambda *_a: rec)
+    monkeypatch.setattr(
+        control,
+        "park_session",
+        AsyncMock(
+            return_value=control.StopOutcome(
+                rec.pid, SID, "x", "socket", "", parked=True, wakes_armed=1, monitors_armed=1
+            )
+        ),
+    )
+    with caplog.at_level("INFO", logger="local_operator.session.runtime.park_after_turn"):
+        assert asyncio.run(park_after_turn.run(rec.pid, SID, root=tmp_path, poll_s=0)) == "parked"
+    assert "1 wake and 1 monitor stay armed" in caplog.text
 
 
 # -- deferred self-park -------------------------------------------------------
@@ -228,6 +296,109 @@ def test_candidates_are_oldest_idle_first_and_never_busy_cos_or_watched(
     assert reasons["aida00000001"] == "chief of staff"
     assert reasons["tui000000001"] == "viewer attached"
     assert reasons["seen00000001"] == "viewer attached"
+
+
+def test_candidates_skip_a_switched_away_viewer_that_is_still_attached(tmp_path: Path) -> None:
+    """R1-1: ``detached=True, watching=True`` is a TUI tab switched away — attached."""
+    records = [_rec("tab000000001", pid=21, detached=True, watching=True)]
+    keep, skipped = park_pressure.park_candidates(tmp_path, records)
+    assert keep == []
+    assert dict(skipped)["tab000000001"] == "viewer attached"
+
+
+def test_candidates_skip_runtimes_inside_their_residency_window(tmp_path: Path) -> None:
+    """R1-3/Q-3: just opened, warm-engaged or just left — never parked; old ones are."""
+    now = 100_000.0
+    hold = 300.0
+    records = [
+        _rec("open00000001", pid=31, started_at=now - 34),  # reopened by a wake 34 s ago
+        _rec("warm00000001", pid=32, engaged_at=now - 10),
+        _rec("left00000001", pid=33, detached_at=now - 60),
+        _rec("cold00000001", pid=34, started_at=now - 3600, detached_at=now - 3000),
+    ]
+    keep, skipped = park_pressure.park_candidates(tmp_path, records, now=now, hold_s=hold)
+    assert [r.session_id for r in keep] == ["cold00000001"]
+    reasons = dict(skipped)
+    assert reasons["open00000001"].startswith("just opened")
+    assert reasons["warm00000001"].startswith("engaged for a viewer")
+    assert reasons["left00000001"].startswith("viewer just left")
+
+
+def test_residency_hold_is_floored_at_the_default_keep_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """keep_alive_seconds=0 drops WARM residency, not the anti-churn hysteresis."""
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(process, "_keep_alive_seconds", lambda: 0.0)
+    assert park_pressure._residency_hold_s() == float(process.DEFAULT_KEEP_ALIVE_SECONDS)
+    monkeypatch.setattr(process, "_keep_alive_seconds", lambda: 3600.0)
+    assert park_pressure._residency_hold_s() == 3600.0
+
+
+def test_candidates_skip_sessions_whose_monitors_only_a_session_can_check(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q-3: an MCP/web monitor would reopen a parked session every tick — skip, and log."""
+    monitor_store.write_entry(
+        tmp_path,
+        "mcp000000001",
+        cwd="/tmp",
+        monitors=[
+            {"id": "m1", "name": "n", "tool": "bash", "arguments": {}, "every_ms": 60000},
+            {"id": "m2", "name": "n", "tool": "slack_read", "arguments": {}, "every_ms": 60000},
+        ],
+    )
+    # A disabled MCP monitor never ticks, so it does not block the park.
+    monitor_store.write_entry(
+        tmp_path,
+        "off000000001",
+        cwd="/tmp",
+        monitors=[
+            {
+                "id": "m1",
+                "name": "n",
+                "tool": "web_fetch",
+                "arguments": {},
+                "every_ms": 60000,
+                "disabled": True,
+            }
+        ],
+    )
+    _arm(tmp_path, "bash00000001")
+    records = [
+        _rec("mcp000000001", pid=41),
+        _rec("off000000001", pid=42),
+        _rec("bash00000001", pid=43),
+    ]
+    with caplog.at_level("INFO", logger="local_operator.session.runtime.park_pressure"):
+        keep, skipped = park_pressure.park_candidates(tmp_path, records)
+    assert sorted(r.session_id for r in keep) == ["bash00000001", "off000000001"]
+    assert dict(skipped)["mcp000000001"] == "monitors only a session can check (m2:slack_read)"
+    assert "skipping mcp000000001" in caplog.text
+
+
+def test_pressure_park_log_pluralises_counts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q-2: "1 wake and 1 monitor", never "1 wakes and 1 monitors"."""
+    import asyncio
+
+    async def _park(record: Any, **_kw: Any) -> Any:
+        return control.StopOutcome(
+            record.pid,
+            record.session_id,
+            "x",
+            "socket",
+            "",
+            parked=True,
+            wakes_armed=1,
+            monitors_armed=2,
+        )
+
+    with caplog.at_level("WARNING", logger="local_operator.session.runtime.park_pressure"):
+        asyncio.run(park_pressure.park_idle_sessions(tmp_path, records=[_rec()], park=_park))
+    assert "1 wake and 2 monitors stay armed" in caplog.text
 
 
 @pytest.mark.asyncio

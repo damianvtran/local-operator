@@ -418,3 +418,42 @@ async def test_an_unparked_cold_monitor_is_never_probed(
     monkeypatch.setattr(sup, "_parked_monitors_quiet", probe)
     _arm(tmp_path, "coldmonitor2", index_due=NOW_MS - 1_000, counters_due=NOW_MS - 1_000)
     assert await fire_due_wakes(tmp_path, now_ms=NOW_MS) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_parked_probe_is_reaped_and_the_cancellation_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5: shutdown mid-probe kills the probe's group and never engages the session."""
+    import asyncio
+    import os
+    import signal
+    import sys
+
+    async def cold(config_dir, session_id):  # noqa: ANN001, ANN202
+        return False
+
+    real_exec = asyncio.create_subprocess_exec
+    started: list[Any] = []
+
+    async def slow_probe(*_args: Any, **kwargs: Any) -> Any:
+        # A real child in its own session, standing in for a check that hangs.
+        proc = await real_exec(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
+        started.append(proc)
+        return proc
+
+    monkeypatch.setattr(sup, "_has_live_runtime", cold)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_probe)
+    task = asyncio.ensure_future(sup._parked_monitors_quiet(tmp_path, "cancelme0001"))
+    for _ in range(200):
+        if started:
+            break
+        await asyncio.sleep(0.01)
+    assert started, "probe subprocess never started"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    proc = started[0]
+    assert proc.returncode == -signal.SIGKILL
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc.pid, 0)

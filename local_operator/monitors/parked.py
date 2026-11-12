@@ -104,6 +104,7 @@ async def _check_one(
     counters = monitor_state.read_counters(config_dir, session_id, spec.id)
     if not counters or not counters.get("content_hash"):
         return ENGAGE, "no baseline yet"
+    snapshot = dict(counters)  # the pre-check view the quiet commit compares against
     if any(counters.get(key) for key in _EPISODE_KEYS) or counters.get("consecutive_failures"):
         return ENGAGE, "monitor is in a failure/blind episode"
     tool = _build_tool(spec.tool)
@@ -156,8 +157,38 @@ async def _check_one(
     if handle:
         counters["last_handle"] = handle
     counters["next_due_at"] = advance_due(spec, now)
+    # COMPARE BEFORE COMMIT (review round 1, R1-2). ``counters`` was read before
+    # ``tool.execute``, which can take up to ``run_timeout_ms``. If the session
+    # was opened meanwhile (an operator, a ``send``, a wake from another path),
+    # its own scheduler may have run this check, delivered a change and stored
+    # a new ``content_hash``; writing our stale dict back would restore the OLD
+    # hash and the next tick would deliver the same delta twice. So re-read the
+    # entry and the counters and commit only if nothing moved; otherwise drop
+    # the write — whoever moved them owns this tick. Not an atomic CAS (the
+    # counters file has no lock), but it shrinks the race from the whole check
+    # to the microseconds between this read and the write.
+    if not _unchanged_since(config_dir, session_id, spec.id, snapshot):
+        return QUIET, "superseded by a concurrent check; nothing written"
     monitor_state.write_counters(config_dir, session_id, spec.id, counters)
     return QUIET, "unchanged"
+
+
+#: Counter fields that move whenever anyone commits a check: the comparison set
+#: for :func:`_unchanged_since`.
+_CAS_KEYS = ("content_hash", "last_check_at", "checks", "next_due_at")
+
+
+def _unchanged_since(
+    config_dir: Path, session_id: str, monitor_id: str, snapshot: Mapping[str, Any]
+) -> bool:
+    """Whether the entry is still parked and the counters still match ``snapshot``."""
+    from local_operator.monitors import state as monitor_state
+    from local_operator.monitors import store as monitor_store
+
+    if not is_parked(monitor_store.read_entry(config_dir, session_id)):
+        return False
+    fresh = monitor_state.read_counters(config_dir, session_id, monitor_id) or {}
+    return all(fresh.get(key) == snapshot.get(key) for key in _CAS_KEYS)
 
 
 async def probe_session(

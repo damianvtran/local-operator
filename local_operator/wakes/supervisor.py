@@ -1109,6 +1109,22 @@ def _is_parked_monitor_entry(entry: Any) -> bool:
     )
 
 
+async def _reap_probe(proc: Any) -> None:
+    """SIGKILL the probe's own process group and collect it.
+
+    The wait is shielded: on the cancellation path a second cancel arriving
+    mid-wait must not leave a zombie (or a still-running tool call) behind.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        await asyncio.shield(proc.wait())
+    except asyncio.CancelledError:
+        pass
+
+
 async def _parked_monitors_quiet(config_dir: Path, session_id: str) -> bool:
     """Run a parked session's due monitor checks WITHOUT reopening it.
 
@@ -1148,14 +1164,18 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str) -> bool:
         return False
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=PARKED_PROBE_TIMEOUT_S)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        await proc.wait()
+    except asyncio.TimeoutError:
+        await _reap_probe(proc)
         logger.warning("parked monitors %s: probe timed out; engaging", session_id)
         return False
+    except asyncio.CancelledError:
+        # SHUTDOWN, NOT A VERDICT (review round 1, R1-5). Swallowing the
+        # cancellation returned False, and the caller then went on to
+        # ``_engage_one`` — opening a parked session while the supervisor was
+        # stopping. Reap the probe's group so nothing outlives us, then let the
+        # cancellation propagate.
+        await _reap_probe(proc)
+        raise
     verdict: dict[str, Any] = {}
     for line in reversed((out or b"").decode("utf-8", "replace").splitlines()):
         try:
