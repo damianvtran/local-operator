@@ -523,6 +523,18 @@ def remote_park_hints(device: str, kind: str) -> tuple[str, ...]:
     )
 
 
+def remote_session_location(device: str) -> str:
+    """ "runs on <device>" — where a FORWARDED inbox row's session lives.
+
+    The remote-attention rows (``notifications/remote_attention``) need one
+    clause that says the finished turn or the ``notify`` happened on another
+    device. The park card's floor rung is exactly that sentence, already keyed
+    and translated, so it is reused rather than minting a second spelling of
+    the same fact.
+    """
+    return _t_park(_rp.ask_hint_floor(device=device))
+
+
 def background_digest_title(total: int) -> str:
     """``total`` sessions finished, as the DIGEST banner's title.
 

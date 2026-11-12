@@ -8645,8 +8645,29 @@ class RelayServer:
                 "name": self._own_label(),
             },
             "generated_at": time.time(),
-            "sessions": self.local_session_rows(),
+            "sessions": self._rows_for_viewer(link),
         }
+
+    def _rows_for_viewer(self, link: PeerLink) -> list[dict[str, Any]]:
+        """The catalogue rows as THIS link's viewer may see them.
+
+        ``local_session_rows`` stays viewer-blind (the federated listing, the
+        row lookups and the local surfaces call it); only the PEER catalogue op
+        knows who is asking, so the origin-only completion/notice fields are
+        added here (``notifications/remote_attention``). Both conditions are the
+        authenticated link's: the viewer advertised ``REMOTE_ATTENTION_V1`` (an
+        older viewer gets the exact rows it always did), and the per-row origin
+        match on ``link.device_id`` happens inside the stamp — so one member can
+        never read another member's completions by asking.
+        """
+        rows = self.local_session_rows()
+        if wire.REMOTE_ATTENTION_V1 in link.capabilities:
+            from local_operator.notifications.remote_attention import (
+                stamp_rows_for_viewer,
+            )
+
+            stamp_rows_for_viewer(self.root, rows, str(link.device_id or ""))
+        return rows
 
     def local_session_rows(self) -> list[dict[str, Any]]:
         """This device's rows: every LIVE session, then every stored one.

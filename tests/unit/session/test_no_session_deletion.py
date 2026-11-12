@@ -907,6 +907,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # call minted. Every replace target and every unlink target is a regular FILE
     # (or a symlink planted in a sound's slot, unlinked as the link itself); no
     # call names a directory, and none can resolve under `sessions/`.
+    # `record_forwarding_origin`: the target is `_origins_path(root)` =
+    # <config>/remote-attention-origins.json (a fixed basename joined to the relay's
+    # config root, never a session id), and the source is the sibling
+    # `.remote-attention-origins.json.<pid>.tmp` FILE this same call created with
+    # O_CREAT. `os.replace` onto a regular file cannot displace a directory, and
+    # neither path can resolve under `sessions/`.
+    (
+        "local_operator/notifications/remote_attention.py::record_forwarding_origin",
+        "os.replace",
+        "Atomic replace of <config>/remote-attention-origins.json from its sibling "
+        "pid-suffixed tmp FILE; never a directory and never under sessions/",
+    ),
     (
         "local_operator/notifications/custom_sounds.py::_write_index",
         "os.replace",

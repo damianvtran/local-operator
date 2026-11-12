@@ -18371,13 +18371,35 @@ class Session:
             agent_id=self._agent_id or "",
         )
         self._run_notified = True
+        forwarded = ""
+        if outcome.action in ("created", "updated", "revived"):
+            # A session ANOTHER device placed here: the row is in THIS device's
+            # inbox and reaches the operator only when the origin forwards it
+            # (``notifications/remote_attention``), so a bare "Notified" would
+            # tell the model the operator was told. Empty for every local session.
+            #
+            # READ BEFORE THE BANNER ROUTE, never after it: ``_route_item_banner``
+            # spawns the held-banner task, and its hold must start only once this
+            # tool call has returned (the in-view receipt that may cancel it
+            # needs the call's result row on screen). Any await between that
+            # spawn and the return yields the loop, so a slow disk read here
+            # would let the task finish inside the call and flip
+            # ``_run_notified_banner`` early (PR #3830 CI race).
+            from local_operator.notifications.remote_attention import (
+                forwarded_notice_sentence,
+            )
+
+            forwarded = await asyncio.to_thread(
+                forwarded_notice_sentence, root, self.session_id, key
+            )
         # THE BANNER, decided here because this is the only place that knows
         # the write's action, revision and priority. Best-effort: a banner is
         # chrome and the item is already durable, so a delivery failure leaves
         # an unread row rather than failing the tool call the model made.
+        # Nothing may await after this call before the return (see above).
         if raise_banner and outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
-        return _notify_sentence(outcome)
+        return _notify_sentence(outcome) + forwarded
 
     def _notification_owner(self) -> "Session | None":
         """The session whose inbox an item raised for THIS one belongs in.
