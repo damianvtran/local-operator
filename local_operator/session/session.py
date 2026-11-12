@@ -17958,7 +17958,18 @@ class Session:
         # an unread row rather than failing the tool call the model made.
         if raise_banner and outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
-        return _notify_sentence(outcome)
+        sentence = _notify_sentence(outcome)
+        if outcome.action in ("created", "updated", "revived"):
+            # A session ANOTHER device placed here: the row is in THIS device's
+            # inbox and reaches the operator only when the origin forwards it
+            # (``notifications/remote_attention``), so a bare "Notified" would
+            # tell the model the operator was told. Empty for every local session.
+            from local_operator.notifications.remote_attention import (
+                forwarded_notice_sentence,
+            )
+
+            sentence += await asyncio.to_thread(forwarded_notice_sentence, root, self.session_id)
+        return sentence
 
     def _notification_owner(self) -> "Session | None":
         """The session whose inbox an item raised for THIS one belongs in.

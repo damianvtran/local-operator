@@ -223,6 +223,40 @@ class PeerFacts:
     age_s: float = 0.0
 
 
+def _attention_block(value: Any) -> tuple[str, str] | None:
+    """``attention: {token, outcome}`` as ``(token, outcome)``, else no claim.
+
+    A peer's row is input from another machine: anything but a dict with a
+    non-empty string token is NO claim (never a raise, never a coerced value),
+    which is also what an older owner's row — no key at all — reads as.
+    """
+    if not isinstance(value, dict):
+        return None
+    token = value.get("token")
+    if not isinstance(token, str) or not token:
+        return None
+    outcome = value.get("outcome")
+    return token[:128], (outcome if isinstance(outcome, str) else "")[:32]
+
+
+def _notice_block(value: Any) -> tuple[str, int, str, str] | None:
+    """``notice: {key, revision, priority, title}`` as a tuple, else no claim.
+
+    Same refusal rule as :func:`_attention_block`; the revision must be a real
+    positive integer (a bool is not one) because it is the episode identity the
+    origin dedupes on.
+    """
+    if not isinstance(value, dict):
+        return None
+    key, title, revision = value.get("key"), value.get("title"), value.get("revision")
+    if not isinstance(key, str) or not key or not isinstance(title, str) or not title:
+        return None
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        return None
+    priority = value.get("priority")
+    return key[:256], revision, (priority if isinstance(priority, str) else "normal"), title[:200]
+
+
 def _binding_name(binding: Any, key: str) -> str:
     """One name out of a peer row's ``binding`` block, or ``""`` (no claim).
 
@@ -311,6 +345,10 @@ class PeerRow:
     version: str = ""
     source_ref: str = ""
     native_provider_ids: tuple[str, ...] | None = None
+    #: The origin-only completion/notice facts (``notifications/remote_attention``),
+    #: parsed by :func:`_attention_block`/:func:`_notice_block`. ``None`` is no claim.
+    attention: tuple[str, str] | None = None
+    notice: tuple[str, int, str, str] | None = None
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -437,6 +475,10 @@ class PeerRow:
             archived=(bool(data["archived"]) if isinstance(data.get("archived"), bool) else None),
             team=_binding_name(data.get("binding"), "team"),
             agent=_binding_name(data.get("binding"), "agent"),
+            # A STALE row's runtime is gone, so its live notice claim is too; the
+            # completion is a stored fact and rides either way.
+            attention=_attention_block(data.get("attention")),
+            notice=None if stale else _notice_block(data.get("notice")),
         )
 
     def to_row_json(self) -> dict[str, Any]:

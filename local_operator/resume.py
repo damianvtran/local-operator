@@ -2775,6 +2775,16 @@ class SessionRow(NamedTuple):
     #: answer to one question. Appended last and defaulted, the file's rule.
     team: str = ""
     agent: str = ""
+    #: ``(completion token, outcome kind)`` of the owner's newest UNACKNOWLEDGED
+    #: completion, present only on a REMOTE row whose session THIS device
+    #: started (the owner stamps it for the origin alone; ``notifications/
+    #: remote_attention``). Tuples rather than dicts so the row stays hashable.
+    #: ``None`` is no claim — every local row, every other member's row, and
+    #: every row from an owner that predates ``wire.REMOTE_ATTENTION_V1``.
+    remote_attention: tuple[str, str] | None = None
+    #: ``(key, revision, priority, title)`` of the owner's newest unread
+    #: ``notify`` item for that session, under the same origin-only rule.
+    remote_notice: tuple[str, int, str, str] | None = None
 
     @property
     def is_remote(self) -> bool:

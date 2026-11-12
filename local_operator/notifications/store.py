@@ -759,8 +759,21 @@ class NotificationStore:
         agent_id: str = "",
         team_id: str = "",
         now: int | None = None,
+        episode: str = "",
     ) -> NotifyOutcome:
         """Create or update one item (collapse table: contract §1.3).
+
+        ``episode`` is a WRITER-OWNED identity folded into the collapse digest,
+        for a writer whose same key and same words can describe two different
+        events. The remote-attention forwarder (``notifications/
+        remote_attention``) is the one user: two turns that finish on a peer
+        read "Finished on <device>" both times, and without this the second
+        completion would collapse into the first as ``unchanged`` and never
+        reach the operator. Passing the completion token here makes a NEW
+        completion an update (unread again) while a REPEAT of the same token —
+        a restarted watcher, or the TUI and ``lop serve`` both forwarding —
+        stays ``unchanged``. Empty (every other caller) leaves the digest
+        byte-identical to before, so no existing row's collapse changes.
 
         Every changed revision starts unread: session presence cannot prove
         the new callout rendered. Only a subsequent per-item receipt or an
@@ -776,7 +789,9 @@ class NotificationStore:
         body_md = str(body_md or "")[:BODY_MAX]
         key = str(key or "").strip()[:KEY_MAX]
         links_json = json.dumps(normalize_links(links), separators=(",", ":"), ensure_ascii=False)
-        digest = content_hash(title, body_md, links_json, priority)
+        digest = content_hash(
+            title, body_md, links_json + (f"\x1e{episode}" if episode else ""), priority
+        )
         stamp = now if now is not None else now_ms()
 
         def body(conn: sqlite3.Connection) -> NotifyOutcome:

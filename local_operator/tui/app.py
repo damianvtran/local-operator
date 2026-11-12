@@ -5290,6 +5290,14 @@ class OperatorApp(App[None]):
         #: is deliberate: the alternative is a park that began before the
         #: restart staying silent forever (design note §2).
         self._remote_park_episodes: dict[tuple[str, str], str] = {}
+        #: The completion/notice forwarder (``notifications/remote_attention``),
+        #: fed by the same two park callers. Its root is resolved once here, as
+        #: the park rows' writer resolves ``config_dir()`` per call: an app
+        #: never changes config root mid-run.
+        from local_operator.notifications.remote_attention import RemoteAttentionWatcher
+        from local_operator.paths import config_dir as _attention_root
+
+        self._remote_attention = RemoteAttentionWatcher(_attention_root())
         #: `(device id, session id) -> the toast OWNER OBJECT` for episodes
         #: whose card was raised. Kept because `Toast.withdraw` retires by
         #: identity (`remote_park_notice_owner`): the object shown is the only
@@ -38544,6 +38552,12 @@ class OperatorApp(App[None]):
         Never raises: a notice is chrome, and both callers run where a raise
         would be reported as a failed catalog or a failed poll.
         """
+        # FINISHED TURNS AND NOTIFY ITEMS ride the same rows (remote-session
+        # parity): the shared watcher ``lop serve`` also hosts, so the head gets
+        # them whether or not a TUI is open. Edge-only writes like the park rows
+        # below, idempotent against serve's copy by the store's episode digest;
+        # ``observe`` never raises.
+        self._remote_attention.observe(rows, [peer.device_id for peer in unanswered])
         try:
             from local_operator.session.peer_rows import park_edges
 
