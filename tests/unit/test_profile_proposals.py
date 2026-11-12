@@ -8,6 +8,7 @@ records are byte-identical to what an older runtime files.
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any
 
@@ -188,6 +189,100 @@ def test_team_proposal_accept(root):
     assert TeamRegistry(root).get_team(str(team.id)).instructions == "New team brief."
 
 
+def _agent_create_image(name="fresh-role", agent_id="11111111-2222-3333-4444-555555555555"):
+    return {
+        "id": agent_id,
+        "name": name,
+        # The shape agent_tool._agent_proposal files: label already derived,
+        # model "" (the stored value) rather than None.
+        "label": "Fresh Role",
+        "description": "A role proposed from a conversation.",
+        "tags": ["role"],
+        "categories": ["role"],
+        "model": "",
+        "instructions": "Do the new thing.",
+    }
+
+
+def test_create_agent_proposal_accept(root):
+    """A create has no before image, so apply must mint the row's own metadata.
+
+    ``AgentImage`` carries only authored fields; ``created_date`` and ``version``
+    are required on ``AgentData`` and belong to the registry, not to the proposal.
+    """
+    from local_operator.profile_approval import snapshot
+
+    image = _agent_create_image()
+    record = PP.file(
+        root,
+        profile_kind="agent",
+        operation="create",
+        target_id=image["id"],
+        name=image["name"],
+        before=None,
+        after=image,
+        session_id="sess-c",
+    )
+    assert snapshot(root, "agent", image["id"]) is None
+    result = PP.apply(root, record["id"], actor="desktop")
+    assert result["proposal"]["state"] == PP.STATE_ACCEPTED
+    registry = AgentRegistry(root, migrate=False)
+    row = registry.get_agent(image["id"])
+    assert row.name == "fresh-role"
+    assert row.created_date is not None and row.version
+    assert registry.get_agent_system_prompt(image["id"]) == "Do the new thing."
+    # The written row round-trips to exactly the proposed authored image.
+    assert snapshot(root, "agent", image["id"]) == image
+    # ...and the files on disk load back through the model that rejected them.
+    import yaml
+
+    from local_operator.agents import AgentData
+
+    folder = root / "agents" / image["id"]
+    loaded = AgentData.model_validate(yaml.safe_load((folder / "agent.yml").read_text()))
+    assert loaded.id == image["id"] and loaded.created_date and loaded.version
+    assert (folder / "system_prompt.md").read_text() == "Do the new thing."
+
+
+def test_create_team_proposal_accept(root):
+    from local_operator.profile_approval import snapshot
+
+    image = {
+        "id": "team-fresh",
+        "name": "freshteam",
+        "label": "Freshteam",
+        "description": "",
+        "manager": "manager",
+        "members": [],
+        "aliases": [],
+        "instructions": "Brief.",
+        "project": "",
+    }
+    record = PP.file(
+        root,
+        profile_kind="team",
+        operation="create",
+        target_id=image["id"],
+        name=image["name"],
+        before=None,
+        after=image,
+        session_id="sess-ct",
+    )
+    result = PP.apply(root, record["id"], actor="desktop")
+    assert result["proposal"]["state"] == PP.STATE_ACCEPTED
+    team = TeamRegistry(root).get_team(image["id"])
+    assert team.created_date is not None
+    assert snapshot(root, "team", image["id"]) == image
+    import yaml
+
+    from local_operator.teams import Team
+
+    folder = root / "teams" / image["id"]
+    loaded = Team.model_validate(yaml.safe_load((folder / "team.yml").read_text()))
+    assert loaded.id == image["id"] and loaded.created_date
+    assert (folder / "instructions.md").read_text() == "Brief."
+
+
 # --- legacy mesh records ----------------------------------------------------
 
 
@@ -286,3 +381,122 @@ def test_legacy_import_skips_lapsed_request_stored_as_requested(root):
     assert PP.import_legacy(root) == 0
     assert PP.list_proposals(root) == []
     assert PP.list_proposals(root, state=None) == []
+
+
+# --- approval card summary (operator report 2026-11-10) --------------------
+#: The UI's contract regex for the card's first line (local-operator-ui links
+#: Agents → <name> from it); kept verbatim so a drift fails here first.
+_CARD_HEAD = r"^Apply proposal (pp_[0-9a-f]+) to (agent|team|skill) '([^']+)'\?"
+
+
+def _card_record(**over: Any) -> dict[str, Any]:
+    record = {
+        "id": "pp_7abf6b3116c87a99",
+        "kind": "team",
+        "name": "minervadev",
+        "origin": {"trust": "agent"},
+    }
+    record.update(over)
+    return record
+
+
+def test_long_brief_card_is_bounded_with_correct_counts():
+    import re
+
+    before = "\n".join(f"keep {i}" for i in range(50))
+    after = "\n".join(
+        [*(f"keep {i}" for i in range(40)), *(f"NEW {i} " + "x" * 60 for i in range(200))]
+    )
+    rows = PP.changes({"instructions": before}, {"instructions": after}, ["instructions"])
+    [item] = PP.summarize_changes(rows)
+    assert (item["added"], item["removed"], item["status"]) == (200, 10, "lines")
+    card = PP.approval_card_text(_card_record(), rows)
+    assert len(after) > 10_000 and len(card) <= PP.APPROVAL_CARD_MAX_CHARS
+    assert "NEW 1" not in card and "keep" not in card
+    match = re.match(_CARD_HEAD, card)
+    assert match and match.groups() == ("pp_7abf6b3116c87a99", "team", "minervadev")
+    assert card.splitlines() == [
+        "Apply proposal pp_7abf6b3116c87a99 to team 'minervadev'?",
+        "Changes: instructions +200 −10 lines",
+        "Origin: agent. Review changes in Agents → minervadev.",
+    ]
+
+
+def test_scalar_and_create_fields_report_status_not_line_counts():
+    rows = PP.changes(
+        {"model": "a", "label": ""},
+        {"model": "b", "label": "Lead", "instructions": "one\ntwo\nthree"},
+        ["model", "label", "instructions"],
+    )
+    lines = PP.approval_card_text(_card_record(kind="agent", name="reviewer"), rows).splitlines()
+    assert lines[1] == "Changes: model changed; label set; instructions +3 −0 lines"
+    created = PP.changes(None, {"instructions": "a\nb"}, ["instructions"])
+    [item] = PP.summarize_changes(created)
+    assert (item["added"], item["removed"]) == (2, 0)
+
+
+def test_many_fields_collapse_into_n_more_on_one_changes_line():
+    fields = [f"field_{i:02d}_" + "y" * 60 for i in range(40)]
+    rows = PP.changes({}, {f: f"v{i}" for i, f in enumerate(fields)}, fields)
+    card = PP.approval_card_text(_card_record(), rows)
+    assert len(card) <= PP.APPROVAL_CARD_MAX_CHARS
+    lines = card.splitlines()
+    assert len(lines) == 3 and lines[1].startswith("Changes: ")
+    assert len(lines[1]) <= PP.CHANGES_LINE_MAX_CHARS
+    assert re.search(r"; … \d+ more$", lines[1]), lines[1]
+
+
+def test_whitespace_only_change_is_not_reported_as_zero_lines():
+    """M3: "+0 −0 lines" on an apply card reads as "nothing changed"."""
+    rows = PP.changes({"instructions": "a\nb"}, {"instructions": "a\nb\n"}, ["instructions"])
+    [item] = PP.summarize_changes(rows)
+    assert item["status"] == "whitespace"
+    assert PP.summary_line(item) == "instructions: whitespace only"
+    assert "instructions whitespace only" in PP.approval_card_text(_card_record(), rows)
+
+
+def test_json_list_field_counts_items_not_pretty_printed_lines():
+    """N2: adding one item to ``["a"]`` used to read ``+3 −1 lines``."""
+    rows = PP.changes({"members": ["a"]}, {"members": ["a", "b"]}, ["members"])
+    [item] = PP.summarize_changes(rows)
+    assert (item["added"], item["removed"], item["status"]) == (1, 0, "items")
+    assert PP.summary_line(item) == "members: +1 −0 items"
+    reordered = PP.summarize_changes(
+        PP.changes({"members": ["a", "b"]}, {"members": ["b", "a"]}, ["members"])
+    )
+    assert reordered[0]["status"] in {"items", "reordered"}
+
+
+def test_apostrophe_name_card_uses_python_repr_quoting():
+    """M1: the UI parses both repr forms; core keeps ``!r`` quoting."""
+    card = PP.approval_card_text(_card_record(name="Damian's team"), [])
+    assert card.splitlines()[0] == 'Apply proposal pp_7abf6b3116c87a99 to team "Damian\'s team"?'
+    assert card.splitlines()[1] == "Changes: none listed"
+
+
+def test_direct_save_changes_line_lists_names_without_counts():
+    """R3-1: a direct save's line 2 names what changes; it never claims
+    ``+N −M`` counts, which only prose parsing could produce."""
+    line = PP.save_changes_line(["instructions", "model/effort", "SKILL.md", "SKILL.md"])
+    assert line == "Changes: instructions, model/effort, SKILL.md"
+    assert PP.save_changes_line([]) == "Changes: (no fields named)"
+
+
+def test_direct_save_changes_line_collapses_overflow_into_n_more():
+    names = [f"refs/reference-file-{i:02d}.md" for i in range(20)]
+    line = PP.save_changes_line(names)
+    assert len(line) <= PP.CHANGES_LINE_MAX_CHARS, line
+    shown = line.removeprefix("Changes: ").split(", ")
+    assert shown[-1] == f"… {20 - (len(shown) - 1)} more", line
+    assert shown[:-1] == names[: len(shown) - 1]
+
+
+def test_clip_save_detail_keeps_whole_lines_and_names_the_hidden_count():
+    """R2-2: the direct-save card's content excerpt is bounded with a tail."""
+    text = "\n".join(f"line {i:04d}" for i in range(1000))  # 9 chars + newline each
+    clipped = PP.clip_save_detail(text, limit=100)
+    lines = clipped.splitlines()
+    assert lines[:-1] == [f"line {i:04d}" for i in range(10)]
+    assert lines[-1] == "… 990 more lines not shown"
+    assert PP.clip_save_detail("short\ntext") == "short\ntext"
+    assert PP.clip_save_detail("x" * 50, limit=10).splitlines()[0] == "x" * 9 + "…"

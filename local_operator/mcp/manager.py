@@ -1989,6 +1989,15 @@ class McpManager:
         # recovery TUI-toast-only) is the bug it fixes. Signature:
         # (server_name, registered_tool_count).
         self.on_recovery: Callable[[str, int], None] | None = None
+        # Session-installed USE clock: fired with (server_name, mcp_tool_name)
+        # every time a tools/call is attempted, whichever route resolved the
+        # tool (an advertised schema, the deferred fallback resolver, or eval's
+        # nested ``tool(...)``). ``wire_mcp_into_session`` stamps the origin's
+        # last-use run from it so the cold-boundary demotion never drops a
+        # schema the model is actively using. Installed by the OWNING session
+        # only; a borrowing child never replaces it, so a delegated call counts
+        # as use by the delegator — which is what kept the tool on the task.
+        self.on_tool_called: Callable[[str, str], None] | None = None
         # UI-installed sink fired when a server needs an OAuth login. The
         # startup toast only covers failures that land INSIDE the 250 ms gate;
         # HTTP OAuth servers connect AFTER it, so their auth failures (and
@@ -4524,6 +4533,12 @@ class McpManager:
     ) -> ToolResult:
         """One tools/call with arg hygiene, abort racing, and one retry."""
         tool_label = create_mcp_tool_name(server_name, mcp_tool_name)
+        use_hook = self.on_tool_called
+        if use_hook is not None:
+            try:
+                use_hook(server_name, mcp_tool_name)
+            except Exception:  # noqa: BLE001 — bookkeeping must never fail a call
+                logger.debug("MCP on_tool_called hook raised", exc_info=True)
         if context.job_id is not None and server_own_turn_only(self._configs.get(server_name)):
             # ``ownTurnOnly``: the call is running for DELEGATED work (a child
             # job), and the servers that declare this rule are the ones whose

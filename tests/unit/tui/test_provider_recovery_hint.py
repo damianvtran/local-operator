@@ -17,12 +17,24 @@ stays byte-identical.
 The store and the probe seams are injected — no test reads the operator's
 credentials or the network — and the app object is built the same way
 ``test_usage_continuity`` builds it, without a running Textual app.
+
+HOW "NEVER BLOCKS" IS ASSERTED. The sync arm's non-blocking claim used to be a
+wall-clock ceiling (``elapsed < 0.5``). That ceiling was a proxy, and a loaded
+runner crossed it: one CI head took 0.99 s to make the same call and failed a
+test whose subject had not changed. The latency of a call that does no work is
+the host's, not the product's, so the assertion now states the property that
+makes the call non-blocking: the arm renders through the CACHE-ONLY producer and
+never reaches the probing one, never runs a probe twin, and never sleeps. Those
+are the only things on the path that could block, so catching them by identity
+is stronger than any clock: a regression back to the inline probe fails here on
+every machine, fast or loaded.
 """
 
 from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -94,28 +106,93 @@ async def test_the_awaited_arm_gains_the_usage_limit_remedy(
     assert calls == ["tok-1"]
 
 
+def _observed_sync_path(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record which recovery producer the sync arm chose, and forbid the slow ones.
+
+    Why a spy rather than a clock: the sync arm is non-blocking BECAUSE it calls
+    the cache-only producer, so that call is the property. Both producers are
+    RECORDED (the probing one is legitimate for the awaited arm this test also
+    exercises, so it cannot be a tripwire), the two network entry points raise,
+    and the sync call's record is asserted before the awaited arm runs. These
+    are attributes of ``radient_recovery`` alone, so holding them for the test's
+    lifetime touches nothing outside that module.
+
+    The probe TWINS are deliberately NOT patched: each test arms them itself (a
+    recording tripwire in one, five-second sleepers in the other), and this
+    helper must not silently replace an arm a test set up.
+
+    ``time.sleep`` is NOT patched here: see :func:`_sync_call_without_sleep`.
+    """
+    from local_operator.providers import radient_recovery as rr
+
+    seen: list[str] = []
+    real_cached = rr.usage_limit_recovery_line_cached
+    real_probing = rr.usage_limit_recovery_line
+
+    def spy_cached(*, store=None):
+        seen.append("cached")
+        return real_cached(store=store)
+
+    async def spy_probing(*args, **kwargs):
+        seen.append("probing")
+        return await real_probing(*args, **kwargs)
+
+    def network_must_not_run(*_args, **_kwargs):
+        raise AssertionError("the recovery arm reached the network — the sync arm is cache-only")
+
+    monkeypatch.setattr(rr, "usage_limit_recovery_line_cached", spy_cached)
+    monkeypatch.setattr(rr, "usage_limit_recovery_line", spy_probing)
+    monkeypatch.setattr(rr, "fetch_me_verification_sync", network_must_not_run)
+    monkeypatch.setattr(rr, "fetch_me_verification", network_must_not_run)
+    return seen
+
+
+def _sync_call_without_sleep(monkeypatch: pytest.MonkeyPatch, call: Callable[[], str]) -> str:
+    """Run one synchronous arm call with ``time.sleep`` turned into a tripwire.
+
+    ``rr.time`` IS the global ``time`` module, so this patch is process-wide:
+    any thread in the worker that sleeps while it is in force raises too. It is
+    therefore held only for the duration of ``call`` (``monkeypatch.context()``
+    reverts it on exit), never across the awaited arm or the rest of the test.
+    """
+
+    def sleeping_must_not_run(*_args, **_kwargs):
+        raise AssertionError("the sync arm slept — a sync handler must never block its loop")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(time, "sleep", sleeping_must_not_run)
+        return call()
+
+
 @pytest.mark.asyncio
 async def test_the_sync_arm_is_cache_only_and_never_blocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review round 1, R1: the sync path must not wait on a probe.
 
-    Cold: the text renders unchanged, promptly, with the (armed) sync tripwire
-    untouched. Warm: the shared cache serves the sentence with no new probe.
+    Cold: the text renders unchanged with the CACHE producer reached and the
+    probing producer untouched. Warm: the shared cache serves the sentence with
+    no new probe.
+
+    The non-blocking claim is asserted by provenance (see
+    :func:`_observed_sync_path`), not by a wall clock — the property is which
+    producer ran, and that is the same answer on a fast host and a loaded one.
     """
     calls: list[str] = []
     app = _app(monkeypatch, tmp_path, arm_probe=True, calls=calls)
+    producers = _observed_sync_path(monkeypatch)
 
-    started = time.monotonic()
-    cold = app._with_recovery_hint(RENDERED_QUOTA)
-    elapsed = time.monotonic() - started
+    cold = _sync_call_without_sleep(monkeypatch, lambda: app._with_recovery_hint(RENDERED_QUOTA))
     assert cold == RENDERED_QUOTA
-    assert elapsed < 0.5, f"the sync arm took {elapsed:.2f}s — it must not wait"
+    assert producers == ["cached"], (
+        "the sync arm must render from the cache-only producer, exactly once — "
+        f"reached {producers}"
+    )
     assert calls == [], "the sync arm must not spend a probe"
 
     await app._with_recovery_hint_async(RENDERED_QUOTA)  # warms the shared cache
 
-    warm = app._with_recovery_hint(RENDERED_QUOTA)
+    warm = _sync_call_without_sleep(monkeypatch, lambda: app._with_recovery_hint(RENDERED_QUOTA))
     assert "Check your inbox" in warm and "$5 in free credits" in warm
     assert calls == ["tok-1"], "the warm render must come from the cache"
 
@@ -124,7 +201,13 @@ def test_a_deliberately_slow_probe_does_not_delay_the_sync_arm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R1's regression shape: arm probes that would burn five seconds and
-    assert the sync arm returns promptly without touching either of them."""
+    assert the sync arm never enters either of them.
+
+    "Does not delay" is derived rather than timed: the only slow things on this
+    path are the two probe twins, so proving neither was entered proves the arm
+    cannot be delayed by them. The cache producer's call is recorded as positive
+    evidence that the arm took the branch it is supposed to take.
+    """
     calls: list[str] = []
     app = _app(monkeypatch, tmp_path, arm_probe=False, calls=calls)
     store = AuthStore(tmp_path / "slow.db")
@@ -146,13 +229,12 @@ def test_a_deliberately_slow_probe_does_not_delay_the_sync_arm(
 
     monkeypatch.setattr(auth_store_module, "shared_auth_store", lambda *a, **k: store)
     rr.reset_recovery_cache()
+    producers = _observed_sync_path(monkeypatch)
 
-    started = time.monotonic()
-    out = app._with_recovery_hint(RENDERED_QUOTA)
-    elapsed = time.monotonic() - started
+    out = _sync_call_without_sleep(monkeypatch, lambda: app._with_recovery_hint(RENDERED_QUOTA))
 
     assert out == RENDERED_QUOTA
-    assert elapsed < 0.5, f"the sync arm took {elapsed:.2f}s with a slow probe armed"
+    assert producers == ["cached"], f"the sync arm reached {producers}, not the cache"
     assert calls == [], "neither probe twin may run on the sync path"
 
 

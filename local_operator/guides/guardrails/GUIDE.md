@@ -11,8 +11,10 @@ the call's own result and starts with `BLOCKED by guardrail`. It is final for TH
 action: the same effect on the same targets, by any spelling, tool or path — never
 reword, retry or reroute it; report it. It does not taint later work: a NEW artifact
 from your own fresh work, written to your own worktree's mandated location (a repo's
-`i18n/receipts/`, say), is a different action and needs no approval. Copying or
-importing the blocked material there by another route is still a reroute.
+`i18n/receipts/`, say), is a different action and needs no approval; a reader
+child's `evidence` tool (create-only, content-only) is the sanctioned path for it,
+so using it is fresh work, not a reroute. Copying or importing the blocked material
+there by another route is still a reroute.
 
 **Order, first refusal wins:** (1) the **built-in dangerous-delete** (bash only):
 CRITICAL is refused with no model call, HIGH goes to a forked judge, LOW runs with
@@ -61,7 +63,10 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   the session's own `git worktree add`/`git clone` leaf is recorded). A glob
   ranks LOW only when every current match is recorded. A primary checkout stays
   HIGH unless this session cloned it. `$HOME`, the state root and the protected
-  roots are never recorded.
+  roots are never recorded. A symlink you made (`ln -s[f] SRC LINK`) is
+  recorded too: `rm LINK` or `unlink LINK` by its exact path (no trailing slash)
+  removes only the link and ranks LOW while it is still that link; `rm -r LINK/`
+  reaches the pointee and is ranked as the pointee.
 - **Clean linked worktree.** `git worktree remove <exact path>` (no `--force`)
   is LOW when the path is a registered linked worktree with no tracked or
   untracked change, no ignored entry beyond regenerable output (`node_modules`,
@@ -79,6 +84,12 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   `rm -rf .worktrees/<name>`. A worktree this session created is its own:
   through the ledger it ranks LOW even dirty or with `--force`, so commit or
   push what you want to keep before removing your own tree.
+
+  Before you `ask` to remove a worktree, preview `git worktree remove <exact path>`
+  with `preview_tool_call` and quote its worktree facts verbatim in the ask: branch,
+  open PR/MR state, the newest PR/MR with its state and date (merged, closed
+  unmerged, or none found), and whether an owning session is running. The newest
+  PR is shown, never ranked: a merged PR does not prove nobody works in the tree.
 - **History evidence.** A HIGH delete goes to a judge forked from the session's
   own prefix. Before it runs, the checkpoint extracts real tool calls: this
   session's from the harness's memory, its descendants' (found by `origin.json`

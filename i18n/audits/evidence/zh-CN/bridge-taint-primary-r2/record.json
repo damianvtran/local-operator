@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "audit_id": "primary-r2-b854fe58034a",
+  "audit_kind": "bounded_namespace_independent_semantic_audit",
+  "locale": "zh-CN",
+  "namespace": "wire.bridge_taint",
+  "audit_date": "2026-11-11",
+  "audited_revision": "08e7c649eaca0d01a55294669b47e68c75370b15",
+  "key_count": {
+    "en": 8,
+    "target": 8,
+    "context": 8
+  },
+  "auditor": {
+    "agent": "reviewer (radientdev team) / independent i18n-auditor",
+    "session": "b854fe58034a",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session model header",
+    "fallback": "none",
+    "independent_from_translator_session": true,
+    "independence": "No authorship or remediation of audited catalogue/context bytes; translator was the coder lane on anthropic/claude-opus-5-5 (commit 08e7c649eaca). Same model as the translator: agent-independent, not model-independent."
+  },
+  "translator": {
+    "agent": "coder lane (radientdev), commit 08e7c649eaca",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-11"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.bridge_taint.json",
+      "sha256": "330a111628350378ede70f1ec5d9a432239d59716b5ee1b0e668de39696ef4d9"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.bridge_taint.context.json",
+      "sha256": "bdc6e370fc801cc9aaaf9e70e837b4ac14e9ace9990bcecda28fd1f1d94f31cd"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.bridge_taint.json",
+      "sha256": "d07cd0b934bef7f335edb4e11e8dadf854234618cc3cd656b92303724cb3bbda"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "deferred_non_gating_finding_ids": [
+      "N3"
+    ]
+  },
+  "keys_semantically_audited": [
+    "grant_suspended",
+    "ack_refused",
+    "card_notice_other_session",
+    "grant_suspended_other_session",
+    "ack_refused_other_session"
+  ],
+  "keys_byte_equal_to_prior_audit": {
+    "revision": "635f122e065af8f59940bee9673ae4b4ef18d8ea",
+    "keys": [
+      "card_notice",
+      "card_options_off",
+      "full_request"
+    ],
+    "result": "byte-equal"
+  },
+  "semantic_reason": "'另一个会话或设备' = user's own; '其中可能有' possibility; '批准' plain verb; scope '可能向外发送数据或进行更改的工具调用'; '一位队友的智能体'; title '智能体消息' exact; 你; full-width punctuation, no CJK/Latin spaces.",
+  "context_comparison": "passed; all 8 keys read against wire.bridge_taint.context.json (sha above): another session or device = the user's own; may contain = possibility; approve = plain verb, no label quoted; teammate's agent = another person's agent; title match; /approvals auto, /new, {request} verbatim; 'auto' Latin; 'in the terminal' kept.",
+  "mechanical": "key order = en; NFC; no bidi/zero-width controls; no ASCII apostrophe; /approvals auto, /new, {request} counts equal to en; per-locale punctuation per style guide.",
+  "safety_classification": "high-visibility/safety copy (approval-gate egress latch); docs/I18N.md step 3 requires a SECOND independent audit. This record is the FIRST audit at source 330a1116 only; no second-audit approval is claimed or manufactured.",
+  "supersedes": "i18n/audits/evidence/zh-CN/bridge-taint-primary/record.json (source b1a7ea57, now stale)",
+  "artifacts": [
+    {
+      "path": "~/.local-operator/sessions/b854fe58034a/scratchpad/bt-audit/report.md",
+      "sha256": "344511dda266aa27722c763e04f25e1edfd38d754934461b0bcb5b509f52a403"
+    }
+  ],
+  "limitations": "Linguistic/copy audit only; no native rendered-flow/RTL paint proof for target locales. Second independent audit pending."
+}

@@ -22353,6 +22353,11 @@
             "title": "Hotkey Scope",
             "default": ""
           },
+          "clearable": {
+            "type": "boolean",
+            "title": "Clearable",
+            "default": false
+          },
           "unit": {
             "type": "string",
             "title": "Unit",

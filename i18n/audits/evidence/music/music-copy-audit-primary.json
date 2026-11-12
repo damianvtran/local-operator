@@ -1,0 +1,53 @@
+{
+  "kind": "Manager-retained primary independent audit report data; not a new audit execution",
+  "source_job": "3fc2d895c4cc",
+  "previous_T1_job": "8238442188bf",
+  "auditor": {
+    "agent": "reviewer",
+    "session": "c6abfadb3c9f",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-09",
+    "checked_at_utc": "2026-11-09T06:28:33Z",
+    "fallback": "none"
+  },
+  "verdict": "passed",
+  "unresolved_findings": 0,
+  "runtime": {
+    "namespace": "wire.music",
+    "root": "/Users/damian/local-operator/.worktrees/music",
+    "source_sha256": "e875d1719377ecb3daa5823c616276c522f5204190ce154e5fd56f005af5ff19",
+    "targets": {
+      "en": "e875d1719377ecb3daa5823c616276c522f5204190ce154e5fd56f005af5ff19",
+      "fr": "d00435dea8bd1d6ca602e10fa5c2a671a7c1086c14b4c3137d1fb036eabce38e",
+      "es": "122382ac3db92f44d86c035aa282c59185ecec4565a5f6811db7ee456d95fdaa",
+      "zh-CN": "5d14e046cf85da39734b4b0b75ef5c6be10b66e530cf513286f5410f619894b9",
+      "ru": "34b3279de473c2c9543288d7c9de023c443b0d91ced6dd996511be651deb2211",
+      "vi": "de679e1e9e29bcdad432e279a169637fa25386fd03f8c6183d8fe6648555949a",
+      "ur": "80be4d6550622578f2b64468e56101a51bfe3d65e64ce6902c5225020f7a2303",
+      "hi": "ebe5a2596c1346e3c6078f64902056aae28921a7d319bf3b8507dde3875731b8"
+    },
+    "T1": "Seven glossary corrections independently verified; original three target hashes retained in earlier report; do not erase audit history.",
+    "context_sha256": "b4a9628643b0a8c29921f64d09b5acf4edbc4b49a4c21d9a2a9c40b9fececd9f"
+  },
+  "ui": {
+    "namespace": "ui.music",
+    "root": "/Users/damian/local-operator-ui/.worktrees/music",
+    "source_sha256": "e4bfc1ac870036a1efd34cbd0b79e9c23cf92f360eb6325fdaa8451a1c25f1af",
+    "targets": {
+      "en": "e4bfc1ac870036a1efd34cbd0b79e9c23cf92f360eb6325fdaa8451a1c25f1af",
+      "fr": "8b33521b964c26260e52bf793bc9c86ac9710001797864110f935a20033d16bf",
+      "es": "e18186c45fe5a0922b29ddb2016358b56db79f7d9180225067a15dc0c466dc7e",
+      "zh-CN": "eefa96f3854ef64790aa4e2266b40f5b1379708023b4c3caee85c94eea6c3a7f",
+      "ru": "36bf0442156598f4c858a2d06b1e58101abf0dfcd0484be562b0b369bc4ea040",
+      "vi": "0c0b58cd2851b72ab711d0574083b0fdd67e9f8bbf8d23bd91ca6267d3ec7423",
+      "ur": "355efb29e8d89fd2cb09192379e82e9ab273b626f548b4fefa9c6e8c2f072ff5",
+      "hi": "032c95246831de66bf5e8e55179cd6b7f27ed240ce4df92dc9043da11ee89ada"
+    },
+    "context_sha256": "6bd4f8752a91f6df0bdbcdaf01bb0b83035f580852a6cc55e4a4a53f811f9a0e"
+  },
+  "limitations": [
+    "Catalogue semantic/mechanical audit only, not native RTL/rendered fit or runtime QA.",
+    "Second independent financial-warning audit is separate.",
+    "Append receipts using each repository current helper/schema, never edit immutable legacy snapshots."
+  ]
+}

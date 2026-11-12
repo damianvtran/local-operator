@@ -1403,6 +1403,14 @@ class Command(Input):
     command: str = Field(pattern=r"^/?[A-Za-z]+$", max_length=64)
     args: str = Field(default="", max_length=200_000)
     images: list[Image] = Field(default_factory=list, max_length=8)
+    #: Capability marker, not authority (team-bridge-egress.md: "bridge_ack"): set by a desktop
+    #: build
+    #: that knows Team Bridge taint, and only from the ``/approvals`` picker
+    #: after it rendered the latched sentence -- never from a card escape. A
+    #: loosening ``approvals auto`` for a latched conversation is refused
+    #: without it, which is what keeps an older build's "Set auto" from
+    #: re-loosening a latched session in one press.
+    bridge_ack: bool = False
 
     @model_validator(mode="after")
     def wire_budget(self):
@@ -4716,11 +4724,20 @@ async def command(session_id: str, body: Command, request: Request):
             await bridge.stage_ingested_images(
                 [{"data_b64": block.data, "mime_type": block.mime_type} for block in slash_images]
             )
-            outcome = await bridge.remote.route_shared_slash(
-                spec.name,
-                body.args,
-                images=slash_images,
-            )
+            # ``bridge_ack`` rides only when set (team-bridge-egress.md: "bridge_ack"):
+            # an unmarked command keeps the pre-taint call shape, so a remote
+            # whose ``route_shared_slash`` predates the keyword is not handed a
+            # TypeError for every ordinary slash. Omitting it is the fail-closed
+            # default — the owner reads absence as "not acknowledged" and still
+            # refuses a loosening ``approvals auto`` for a latched conversation.
+            if body.bridge_ack:
+                outcome = await bridge.remote.route_shared_slash(
+                    spec.name, body.args, images=slash_images, bridge_ack=True
+                )
+            else:
+                outcome = await bridge.remote.route_shared_slash(
+                    spec.name, body.args, images=slash_images
+                )
             if outcome is None or outcome.get("kind") == "noop":
                 return {"command": spec.name, "result": native_action(spec, session_id, body.args)}
             outcome = SlashResult.model_validate(outcome)

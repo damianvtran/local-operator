@@ -32,6 +32,11 @@ from local_operator.tools.image_tool import build_generate_image_tool
 from local_operator.tools.library_tool import build_library_tool
 from local_operator.tools.lsp import build_lsp_tool
 from local_operator.tools.memory_tools import build_memory_tool
+from local_operator.tools.music_tool import (
+    build_generate_music_tool,
+    build_modify_music_tool,
+    build_music_status_tool,
+)
 from local_operator.tools.profile_proposal_tool import build_profile_proposal_tool
 from local_operator.tools.project_tool import (
     build_project_delete_tool,
@@ -229,6 +234,10 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # Kept in the SAME relative order as ``DEFAULT_TOOL_NAMES`` below so both
     # tables share one tail (pinned by test_the_newest_appends_stay_last...).
     "skill": lambda context: build_skill_tool(context),
+    # Appended: existing provider schema prefixes remain stable.
+    "generate_music": build_generate_music_tool,
+    "modify_music": build_modify_music_tool,
+    "music_status": build_music_status_tool,
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -294,6 +303,9 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "notify",
     "profile_proposal",
     "skill",
+    "generate_music",
+    "modify_music",
+    "music_status",
 ]
 
 

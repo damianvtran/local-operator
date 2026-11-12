@@ -3110,6 +3110,13 @@ def _question_shape(question: Any) -> dict[str, Any]:
         # when present — an ask without it keeps the exact pre-scope shape, so
         # existing logs fold and serialize byte-identically.
         shape["bridge"] = dict(bridge)
+    recommended_all = raw.get("recommended_all")
+    if recommended_all is not None:
+        # A multi-select's recommendation SET (`AskQuestion.recommended_all`),
+        # added ONLY when present: `recommended` stays the int the log has
+        # always carried, and every ask without a set keeps the exact prior
+        # shape, so existing logs fold byte-identically. Never emit it as None.
+        shape["recommended_all"] = list(recommended_all)
     return shape
 
 

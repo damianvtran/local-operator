@@ -121,6 +121,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # Music tools resolve their own shipped copy without changing audited
+        # neighboring namespaces; exact-set and mutation checks still apply.
+        "wire.music",
         # Notification sounds (#3398): the settings section, rows, the built-in
         # sound names and `lop sound` help, in its own namespace so the audited
         # wire.settings hashes are untouched.
@@ -142,6 +145,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; the
         # translation wave lands its seven locales in a follow-up.
         "wire.tool_rows.bridge",
+        # The Team Bridge egress latch (S-38, PR #3796): the latched approval
+        # card's caution, the missing-Allow-all line, the full-request label,
+        # the suspended-grant notice and the refused `approvals auto` receipt.
+        # Its own namespace so no audited catalogue's hash moves.
+        "wire.bridge_taint",
         # The reply guard's skipped double send (#3377 follow-up, design D1/D2):
         # a dedicated verb and expanded sentence as a CHILD of the bridge rows,
         # so the 85 audited `wire.tool_rows.bridge` bytes and their ledger

@@ -854,7 +854,7 @@ def _critical_by_pattern(target: Target, prot: _Protected) -> str | None:
     return None
 
 
-def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
+def _high_reason(path: str, target: Target, prot: _Protected, *, link: bool = False) -> str | None:
     if target.op == "append":
         # An append destroys nothing; it is ranked only as forged evidence,
         # which ``_critical_reason`` already decided.
@@ -892,6 +892,10 @@ def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
                 return "another session's files"
             return "inside the local-operator state root"
     for home in prot.homes:
+        if link and os.path.dirname(path) == home:
+            # ``link_entry`` proved only the link goes; say so, so a refusal
+            # does not read as the pointee directory being deleted.
+            return "a symlink at the top level of the home directory; only the link is removed"
         if os.path.dirname(path) == home and not os.path.isfile(path):
             return "a top-level directory of the home directory"
     try:
@@ -902,9 +906,94 @@ def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
     return None
 
 
+#: Programs that remove a symlink operand's ENTRY without following it. Not
+#: ``rmdir`` (fails on a link), ``shred`` (writes through it) or ``find``.
+_LINK_REMOVERS = frozenset({"rm", "grm", "unlink", "gunlink"})
+
+
+def link_entry(target: Target) -> str | None:
+    """The canonical link path when ``target`` removes a symlink ENTRY only, else ``None``.
+
+    WHY LINK AND POINTEE DIFFER (q1029 incident, remote node 0.101.44). ``rm
+    ~/q1029`` where ``q1029 -> <own scratchpad>`` unlinks the alias and
+    leaves the scratchpad alone, yet the guard ranked and verified the
+    POINTEE's realpath: the judge's citation of the ``ln -s`` call could
+    never cover a scratchpad born long before it, so the session's own link
+    was refused. Such a target is ranked and verified on the link entry.
+
+    Narrow on purpose — anything that may traverse into the pointee keeps
+    the pointee ranking: a trailing slash or ``.``/``..`` last component
+    (``rm -r link/`` deletes the pointee's contents), a ``..`` anywhere
+    (resolved physically), globs, opaque or empty expansions, an unknown cwd
+    and programs other than ``rm``/``unlink``. POSIX ``rm -r`` does not
+    follow a symlink operand, so ``-r``/``-f`` on the bare link are fine.
+    """
+    if target.op != "delete" or target.program not in _LINK_REMOVERS:
+        return None
+    if (
+        target.pattern is not None
+        or target.opaque
+        or target.unknown_cwd
+        or target.climbs
+        or target.dotdot
+        or target.empty
+        or target.credential_derived
+    ):
+        return None
+    raw = target.raw_path
+    if not raw or raw.endswith("/") or os.path.basename(raw) in ("", ".", ".."):
+        return None
+    if not os.path.islink(raw):
+        return None
+    from local_operator.guardrails.provenance import link_path
+
+    return link_path(raw)
+
+
+def _link_spellings(path: str, link: str) -> set[str]:
+    """``_spellings`` without following the link itself: the lexical path and
+    the canonical link path (parent resolved), each re-cased from disk.
+
+    Only the PARENT goes through ``_on_disk_case``: handed the link entry
+    itself, it opens the path (``F_GETPATH``) or tests ``isdir``, and both
+    follow the link, so the pointee's path leaked in as a "spelling" of the
+    link. ``rm LINK`` never touches the pointee, and a pointee in another
+    session's scratchpad made the refusal say "another session's files" on
+    some hash seeds and the link reason on others (#3793's flake). The leaf
+    is re-cased from the parent's listing, which never dereferences it.
+    """
+    out = {_norm(path), link}
+    for spelled in list(out):
+        parent, name = os.path.split(spelled)
+        cased_parent = _on_disk_case(parent) or parent
+        try:
+            names = os.listdir(cased_parent)
+        except OSError:
+            names = []
+        if name not in names:
+            name = next((n for n in names if n.casefold() == name.casefold()), name)
+        out.add(os.path.join(cased_parent, name))
+    return out
+
+
+def _spelling_order(path: str, spellings: set[str]) -> list[str]:
+    """``spellings`` in a stable order: the caller's own (normalised) spelling
+    first, the resolved and re-cased forms after it, sorted.
+
+    ``_rank`` returns the first spelling's reason, so iterating the bare set
+    made the refusal text depend on ``PYTHONHASHSEED``; an agent reading a
+    refusal must get the same answer for the same command. The lexical
+    spelling leads because it names what the command actually addresses.
+    """
+    lexical = _norm(path)
+    return sorted(spellings, key=lambda s: (s != lexical, s))
+
+
 def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
     path = target.path
     notes: list[str] = list(target.empty)
+    link = link_entry(target) if path is not None else None
+    spellings = _link_spellings(path, link) if path is not None and link else None
     worktree_note = ""
     if target.climbs:
         # S2-5b: say where the ``..`` starts from, not that it is inside it.
@@ -915,7 +1004,10 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         notes.append("relative to a working directory that cannot be determined")
     if path is None:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes) or "unresolved target")
-    for spelling in _spellings(path):
+    ordered = _spelling_order(path, spellings if spellings is not None else _spellings(path))
+    # A link's OWN path that is protected (``~/.local-operator``, config.yml,
+    # the install layout) is still CRITICAL here: those spellings are lexical.
+    for spelling in ordered:
         if target.glob_children and not target.glob_all and not target.opaque:
             # R2-5: ``rm *.log`` at $HOME removes matching CHILDREN; it is
             # CRITICAL only when the pattern itself can reach a protected name.
@@ -1016,29 +1108,40 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             # ranking applies, but the state stays in whatever reason it gives.
             worktree_note = f"linked worktree state: {state}; {facts}"
             notes.append(worktree_note)
-    for spelling in _spellings(path):
-        reason = _high_reason(spelling, target, prot)
-        if reason is not None:
-            in_state = any(_under(spelling, st) for st in prot.state_roots)
-            if target.selected and not in_state and _is_work_tree(spelling):
-                # S2-3: a find with a selecting predicate (``-name '*.pyc'``)
-                # removes a SUBSET of a working tree — the R6 cleanup shape. It
-                # overrides ONLY the working-tree reasons: a repo root, even one
-                # at $HOME's top level (``~/<project>``). State-root children,
-                # other sessions and non-repo home dirs (``~/Documents``) stay
-                # HIGH, because their contents are the data a confused
-                # predicate would destroy.
-                return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
-            owned = _owned_by_session(target, path, prot, session_id)
-            if owned is not None:
-                reason, matches = owned
-                shown = ""
-                if target.pattern is not None:
-                    shown = ", ".join(matches[:4]) + (
-                        f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
-                    )
-                return RankedTarget(target, Risk.LOW, reason, shown)
-            return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
+    # Every spelling is ranked, not just the first with a reason: the verdict
+    # must not hinge on which spelling is looked at first. The most severe
+    # outcome wins (the selecting-find exemption applies only when EVERY
+    # spelling that has a reason qualifies for it); the reason text is the
+    # first in ``ordered``, i.e. the lexical spelling's when it has one.
+    reasons = [
+        (spelling, reason)
+        for spelling in ordered
+        if (reason := _high_reason(spelling, target, prot, link=link is not None)) is not None
+    ]
+    if reasons:
+        reason = reasons[0][1]
+        if target.selected and all(
+            not any(_under(spelling, st) for st in prot.state_roots) and _is_work_tree(spelling)
+            for spelling, _ in reasons
+        ):
+            # S2-3: a find with a selecting predicate (``-name '*.pyc'``)
+            # removes a SUBSET of a working tree — the R6 cleanup shape. It
+            # overrides ONLY the working-tree reasons: a repo root, even one
+            # at $HOME's top level (``~/<project>``). State-root children,
+            # other sessions and non-repo home dirs (``~/Documents``) stay
+            # HIGH, because their contents are the data a confused
+            # predicate would destroy.
+            return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+        owned = _owned_by_session(target, path, prot, session_id)
+        if owned is not None:
+            reason, matches = owned
+            shown = ""
+            if target.pattern is not None:
+                shown = ", ".join(matches[:4]) + (
+                    f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
+                )
+            return RankedTarget(target, Risk.LOW, reason, shown)
+        return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     if worktree_note:
@@ -1064,6 +1167,15 @@ def _owned_by_session(
     if not session_id or target.credential_derived or target.opaque or target.unknown_cwd:
         return None
     from local_operator.guardrails import provenance
+
+    link = link_entry(target)
+    if link is not None:
+        if any(_under(link, st) for st in prot.state_roots):
+            return None
+        record = provenance.owned_link(link, session_id)
+        if record is None:
+            return None
+        return f"a symlink {record.describe()}; only the link is removed", [path]
 
     if target.pattern is not None:
         import glob as _glob

@@ -496,6 +496,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
     {
         "net_session_move",
         "net_sync",
+        "net_file_get",
         "net_broker",
         "net_session_lifecycle",
         "net_session_receipt",
@@ -519,6 +520,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
     {
         "session_move",
         "session_sync",
+        "session_file_pull",
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
@@ -551,6 +553,9 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
 SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.mobility",
     "local_operator.network.sync",
+    # The single-file pull. After ``sync`` because it reuses that module's chunk
+    # framing and containment primitives; it starts no thread of its own.
+    "local_operator.network.files",
     "local_operator.network.credentials",
     "local_operator.network.definitions",
     "local_operator.network.readiness",
@@ -1560,14 +1565,17 @@ def adopt_members(
     rows: Sequence[Any],
     *,
     sender_device_id: str = "",
+    allow_new: bool = True,
 ) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
-    THE SAME TRUST DECISION THE JOIN ALREADY MAKES, made again where it is needed.
-    A joiner adopts the inviter's full member list verbatim when it pairs
-    (``network/cli.py:_persist_join``); this is that list, read again from a member
-    that holds it — not a second source of truth. The wire has exactly one
-    membership read (``net_member_list``, §6.4) and this is its merge.
+    The authenticated supplier, not a row's ``added_by`` or claimed role,
+    determines who may assert it. Resolve standing ONCE from the receiver's
+    pre-merge record: otherwise an early row could authorise a later forgery.
+    A joined member may assert its own bounded standing; only an active admin
+    may introduce another device. Unknown rows arrive only in receiver-initiated
+    pulls (``allow_new``), never in unsolicited change notifications. No new
+    wire field is needed: the link already authenticates the answering peer.
 
     THE RULES, and each one is a refusal to guess:
 
@@ -1575,9 +1583,13 @@ def adopt_members(
       never revived. Removal is the epoch path's decision (§8.1) and a peer's
       stale snapshot must not be able to undo it — the frame that carries a
       removal is a rotation, and it is the only one that can.
+    * The receiver's OWN row is never taken from a peer: this device is the
+      authority on itself, and every table carries that row, so it is skipped
+      silently rather than refused.
     * A row this device already holds keeps its LOCAL role, capabilities and
       public key. Authority is not something a peer gets to assert about a third
-      device; the row's own declaration is the only thing a peer can relay.
+      device; the row's own declaration (its endpoints) is the only thing a peer
+      can relay, and ANY active supplier may relay it (``_adopt_relayed_metadata``).
     * ONE EXCEPTION TO THAT, and it is a name: a row's ``name`` is applied from the
       frame only when the frame's SENDER is the device that row names. A name is
       the device's own statement about itself (design §3.1), the link's
@@ -1585,10 +1597,9 @@ def adopt_members(
       table may therefore rename anybody — including the rotating device, whose
       statement signs ids and the new key only. Empty and identical names are
       ignored, so this rule never erases a name and never marks a no-op changed.
-    * A row this device does NOT hold is adopted as the frame carries it, exactly
-      as an admission frame's rows are, because without it the member is invisible
-      to every surface here — listings, dialling, and the authoriser that has to
-      recognise its frames.
+    * An unknown row is adopted only from an authorised supplier in a pull.
+      Existing receiver-local authority is never overwritten by a table answer;
+      explicit grants remain receiver-local (``set_member_capabilities``).
     * A row that names one of OUR OWN rows as its past self is a ROTATION CLAIM, and
       it is the one case where this merge moves a row rather than adding one:
       the superseded row is retired, and the claim is believed only where the row
@@ -1602,6 +1613,12 @@ def adopt_members(
     """
     changed = False
     added: list[str] = []
+    sender = record.member(sender_device_id)
+    if sender is None or not sender.active:
+        return False, []
+    sender_caps = frozenset(sender.capabilities)
+    sender_role = sender.role
+    sender_is_admin = "admin" in sender_caps
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -1612,8 +1629,53 @@ def adopt_members(
         device_id = incoming.device_id
         if not device_id or device_id in record.removed_ids:
             continue
+        # THIS DEVICE IS THE AUTHORITY ON ITS OWN ROW. Every peer's table carries
+        # a row for the receiver, so this is routine, never a refusal: skip it
+        # silently, before any standing check, rather than logging one per pull.
+        if record.self_device_id and device_id == record.self_device_id:
+            continue
         existing = record.member(device_id)
+        # A table is not admission evidence. In particular, copied ``added_by``
+        # metadata cannot let a reader mint a third identity or promote itself.
+        # Keep the refusal free of supplier identity: no caller attribution leaks.
+        own_assertion = device_id == sender_device_id
+        if not own_assertion and not sender_is_admin:
+            # A signed key rotation is still the supplier speaking for itself,
+            # not a third-device grant. The predecessor's key must cover the hop.
+            proven, predecessors = _rotation_retirements(
+                record, incoming, survivor=existing or incoming
+            )
+            own_assertion = proven and any(row is sender for row in predecessors)
+            if not own_assertion:
+                # ENDPOINT RELAY SURVIVES THE STANDING CHECK for a member this
+                # device already holds: a relayed table is how a peer learns a
+                # moved device's address when it cannot reach that device itself,
+                # and in the default topology most suppliers are not admins.
+                # Taking it from a non-admin grants nothing: only the declaring
+                # device's metadata moves (never role, key, capabilities,
+                # ``previous_ids`` retirements or provenance), and a wrong relayed
+                # endpoint is harmless because every link authenticates the
+                # device's key in the handshake before anything is trusted.
+                if existing is not None:
+                    if _adopt_relayed_metadata(existing, incoming, sender_device_id):
+                        changed = True
+                    continue
+                logger.warning("Refused member row: third-device assertion requires admin standing")
+                continue
+        # A peer does not learn a receiver-local capability revoke. On an
+        # existing owned row its stale capability declaration is ignored below,
+        # not a reason to discard the endpoint/name that keeps it reachable.
+        # New identities (including signed successors) still need bounded claims;
+        # a role promotion is refused in either case. Standing stays pre-merge.
+        if own_assertion and (
+            incoming.role != sender_role
+            or (existing is None and not set(incoming.capabilities) <= sender_caps)
+        ):
+            logger.warning("Refused member row: self assertion exceeds admitted standing")
+            continue
         if existing is None:
+            if not allow_new:
+                continue
             adopt, retired = _rotation_retirements(record, incoming, survivor=incoming)
             if not adopt:
                 continue
@@ -1634,21 +1696,8 @@ def adopt_members(
             added.append(device_id)
             changed = True
             continue
-        # The address list is the declaring device's OWN answer, relayed: it is
-        # the only thing a third party can pass on that this device cannot see for
-        # itself, and the row it lands on is the only place `_ensure_link` dials.
-        if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
-            existing.endpoints = list(incoming.endpoints)
+        if _adopt_relayed_metadata(existing, incoming, sender_device_id):
             changed = True
-        # RULE N1 (naming design §3.3): the name is applied only from the device the
-        # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
-        # signature or wire op is needed for a cosmetic label — and a third device,
-        # including one relaying somebody else's table, cannot rename a device here.
-        if sender_device_id and incoming.device_id == sender_device_id and incoming.name:
-            accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
-            if accepted != existing.name:
-                existing.name = accepted
-                changed = True
         # THE SAME RETIREMENT RUNS HERE, against the row this record already holds as
         # the successor: a record that learned the rotated row before it had the
         # proof (or from a build without one) still retires the row the proof covers
@@ -1658,6 +1707,37 @@ def adopt_members(
             _retire_superseded_rows(record, retired, survivor=existing)
             changed = True
     return changed, added
+
+
+def _adopt_relayed_metadata(
+    existing: MemberRecord, incoming: MemberRecord, sender_device_id: str
+) -> bool:
+    """Apply a peer row's relayable metadata to a row this device holds. Returns changed.
+
+    THE ONE METADATA PATH for an existing row, whatever the supplier's standing:
+    the supplier's own row, a row from an admin, and a known third device's row
+    relayed by a read/drive member all land here, so they cannot drift apart.
+    It moves ``endpoints`` and (rule N1) the supplier's own ``name`` and nothing
+    else — authority fields stay receiver-local (``SYNC_DIGEST_LOCAL_FIELDS``),
+    and rotation retirements are the caller's decision because they need standing.
+    """
+    changed = False
+    # The address list is the declaring device's OWN answer, relayed: it is
+    # the only thing a third party can pass on that this device cannot see for
+    # itself, and the row it lands on is the only place `_ensure_link` dials.
+    if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
+        existing.endpoints = list(incoming.endpoints)
+        changed = True
+    # RULE N1 (naming design §3.3): the name is applied only from the device the
+    # row NAMES. ``sender_device_id`` is the link's authenticated peer id, so no
+    # signature or wire op is needed for a cosmetic label — and a third device,
+    # including one relaying somebody else's table, cannot rename a device here.
+    if sender_device_id and incoming.device_id == sender_device_id and incoming.name:
+        accepted = _accepted_name(incoming.name, existing.name, source=sender_device_id)
+        if accepted != existing.name:
+            existing.name = accepted
+            changed = True
+    return changed
 
 
 def _own_relay_listen(root: Path | None) -> dict[str, Any]:
@@ -6568,7 +6648,9 @@ class RelayServer:
             link.member_snapshot_sequence = sequence
         return ""
 
-    def _adopt_member_rows(self, link: PeerLink, rows: list[Any]) -> bool:
+    def _adopt_member_rows(
+        self, link: PeerLink, rows: list[Any], *, allow_new: bool = True
+    ) -> bool:
         """Use the SAME authority-preserving merge for answers and change pushes."""
         # THE MERGE IS A READ-MODIFY-WRITE of the member table, so it reads inside
         # the lock: ``adopt_members`` merges INTO the record it is handed, so a
@@ -6576,7 +6658,9 @@ class RelayServer:
         # be merged away — reverted on disk, with the higher sequence ``save``
         # stamps hiding it.
         with store.mutate(link.network_id, self.root) as record:
-            changed, added = adopt_members(record, rows, sender_device_id=link.device_id)
+            changed, added = adopt_members(
+                record, rows, sender_device_id=link.device_id, allow_new=allow_new
+            )
             link.member_pull_added = list(added)
             if not changed:
                 return False
@@ -8915,7 +8999,19 @@ class RelayServer:
             with link.member_table_lock:
                 if sequence <= link.member_snapshot_sequence:
                     return None  # Already applied, or overtaken by a newer pull/push.
-                changed = self._adopt_member_rows(link, rows)
+                # A push can refresh known rows, but only a solicited answer may
+                # introduce identities. Leave its sequence unsettled so the next
+                # pull actually obtains those rows instead of accepting a digest.
+                has_unknown = any(
+                    isinstance(row, dict) and record.member(str(row.get("device_id", ""))) is None
+                    for row in rows
+                )
+                changed = self._adopt_member_rows(link, rows, allow_new=False)
+                if has_unknown:
+                    link.member_push_unverified = True
+                    link.member_pull_interval_s = MEMBERSHIP_PULL_MIN_INTERVAL_S
+                    self._membership_wake.set()
+                    return None
                 link.member_snapshot_sequence = sequence
                 # Record revisions also advance for liveness/metadata. A late
                 # snapshot that changes no mergeable row must not undo an equal
@@ -11352,6 +11448,14 @@ class RelayServer:
                     "model_id": str(model.get("model_id")),
                     **({"effort": level} if level else {}),
                     "offered_only": True,
+                    # DELIBERATELY NO ``defer_ok`` (PR #3697 review R1-M1). A
+                    # runtime acks every ``defer_ok`` switch ``queued`` BEFORE
+                    # the switch body runs, so the ``offered_only`` admission
+                    # below (``model_unknown``, a provider with no credential)
+                    # would be decided after this receipt was written and the
+                    # create would report a model it never got. A just-created
+                    # session is idle, so the synchronous answer costs nothing
+                    # and is the only one that can carry the refusal.
                 },
                 timeout_s=self.settings.op_wait_s,
             )
@@ -15096,6 +15200,7 @@ def _owning_document(op: str) -> str:
     owners = {
         "net_forward": "mesh-session-mobility.md",
         "net_sync": "mesh-session-mobility.md (R22)",
+        "net_file_get": "mesh-file-transfer.md (S1)",
         "net_broker": "mesh-credentials.md",
         "net_session_lifecycle": "mesh-session-mobility.md",
         "net_session_receipt": "mesh-session-mobility.md",
@@ -15106,6 +15211,7 @@ def _owning_document(op: str) -> str:
         # sentence, not "this relay does not know the action".
         "session_move": "mesh-session-mobility.md",
         "session_sync": "mesh-session-mobility.md (R22)",
+        "session_file_pull": "mesh-file-transfer.md (S1)",
         "session_lifecycle": "mesh-session-mobility.md",
         "session_receipt": "mesh-session-mobility.md",
         "credential_grant": "mesh-credentials.md",

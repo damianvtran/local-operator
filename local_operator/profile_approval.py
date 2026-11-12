@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal, Mapping
 
@@ -421,8 +422,43 @@ def write_image(
         )
         if current is None:
             # Preallocated identity is signed; create_agent's random id cannot
-            # replace it. Preserve its ordinary defaults via AgentData schema.
-            row = AgentData.model_validate(dict(image, id=target_id))
+            # replace it, so build the row the way create_agent does. The image
+            # is AUTHORED fields only: created_date/version are required on
+            # AgentData and registry-owned, so they are minted here (feeding the
+            # bare image to model_validate raised "created_date/version Field
+            # required" and an image `model` of None is not a valid str).
+            from importlib.metadata import version
+
+            from local_operator.paths import default_agent_cwd
+
+            now = datetime.now(timezone.utc)
+            row = AgentData(
+                id=target_id,
+                created_date=now,
+                version=version("local-operator"),
+                name=image["name"],
+                label=image["label"],
+                description=image["description"],
+                tags=list(image["tags"]),
+                categories=list(image["categories"]),
+                model=image["model"] or "",
+                # pyright reads AgentData's Field(...) defaults as required
+                # parameters, so the unauthored fields are spelled out as
+                # create_agent spells them.
+                security_prompt="",
+                hosting="",
+                last_message="",
+                last_message_datetime=now,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                max_tokens=None,
+                stop=None,
+                frequency_penalty=None,
+                presence_penalty=None,
+                seed=None,
+                current_working_directory=default_agent_cwd(),
+            )
             r.save_agent(row)
         else:
             r.update_agent(target_id, AgentEditFields(**fields))
@@ -437,7 +473,9 @@ def write_image(
                 r.delete_team(target_id)
             return
         if current is None:
-            r.save_team(Team.model_validate(image))
+            # TeamImage is authored fields only; created_date is required on
+            # Team and registry-owned (create_team mints it the same way).
+            r.save_team(Team.model_validate(dict(image, created_date=datetime.now(timezone.utc))))
         else:
             fields = {key: value for key, value in image.items() if key != "id"}
             r.update_team(target_id, TeamEditFields(**fields))
@@ -727,14 +765,27 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
     # tools/delegate/class are not raw image keys. Use the same value pairs for
     # both projected agents and raw team fields so publication cannot fail after
     # a valid signed mutation has already committed.
+    from local_operator.profile_text_edits import stats_heading
+
+    #: What the receipt TEXT summarizes: the plain rows, then each long-text
+    #: field as one canonical-count heading (``profile_diff_summary`` reads
+    #: those and skips bodies). ``diff`` itself keeps its ``<field>:`` header
+    #: contract for the signed details.
+    rows: list[str] = []
+    counted: list[str] = []
     for field, (old, new) in values.items():
-        if field == "instructions":
+        if field in {"instructions", "project"}:
+            # BOTH long-text fields take the canonical-count heading: a team
+            # ``project`` brief is as long as its instructions, and a one-line
+            # repr of it was an unreadable receipt (review round 1, m3).
             value, _ = _instruction_diff(
-                str(old or ""), str(new), fromfile="before", tofile="after"
+                str(old or ""), str(new or ""), fromfile="before", tofile="after"
             )
-            diff.extend(["instructions:", *value.splitlines()])
+            diff.extend([f"{field}:", *value.splitlines()])
+            counted.append(f"{stats_heading(field, str(old or ''), str(new or ''))}:")
         else:
             diff.append(f"{field}: {old!r} → {new!r}")
+            rows.append(diff[-1])
     from local_operator.profile_scope import profile_diff_summary
 
     details = {
@@ -751,7 +802,7 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
     if p.before is not None:
         details["profile_action"] = signed_descriptor(verified)
     text = f"Saved {p.profile_kind} {p.name!r} in your account after signed approval."
-    summary = profile_diff_summary("\n".join(diff))
+    summary = profile_diff_summary("\n".join(rows + counted))
     if summary:
         text += "\n" + summary
     return ToolResult(

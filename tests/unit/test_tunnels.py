@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
+import httpcore
 import httpx
 import jwt
 import pytest
@@ -1839,6 +1840,95 @@ async def test_the_relay_names_a_lost_network_instead_of_one_flat_refusal(connec
     origin.assert_not_called()
 
 
+async def _wait_for_supervisor_health(client: httpx.AsyncClient, port: int) -> dict[str, Any]:
+    """Wait for startup, without confusing listener readiness with network state."""
+    health: dict[str, Any] | None = None
+    last_error: httpx.ConnectError | None = None
+    # run() is merely scheduled by the caller: even its early bind may not have
+    # happened yet. Retry only connection failures, not a bound server's read or
+    # protocol errors. Bound the requests too, not just the existing 200 sleeps.
+    try:
+        async with asyncio.timeout(10):
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                try:
+                    reply = await client.get(f"http://127.0.0.1:{port}/_lop_tunnel/health")
+                except httpx.ConnectError as failure:
+                    last_error = failure
+                    continue
+                # A fresh local: assigning Any to the declared `dict | None` would
+                # leave pyright treating it as possibly None.
+                body: dict[str, Any] = reply.json()
+                health = body
+                if body.get("reason"):
+                    return body
+    except TimeoutError:
+        pass
+    if health is None:
+        error = f"{type(last_error).__name__}: {last_error}" if last_error else "none recorded"
+        pytest.fail(
+            f"the gateway never answered the health readiness wait within 10 s; last error: {error}"
+        )
+    # A listener that answers with the wrong state must reach the caller's
+    # original supervisor assertions, not be relabelled as a startup failure.
+    assert health is not None
+    return health
+
+
+@pytest.mark.asyncio
+async def test_supervisor_health_wait_retries_connection_refusal():
+    attempts = 0
+
+    def respond(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise httpx.ConnectError("listener has not bound", request=request)
+        return httpx.Response(200, json={"ok": False, "reason": UNREACHABLE})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        health = await _wait_for_supervisor_health(client, 12345)
+    assert attempts == 3
+    assert health == {"ok": False, "reason": UNREACHABLE}
+
+
+@pytest.mark.asyncio
+async def test_supervisor_health_wait_names_the_last_refusal():
+    attempts = 0
+
+    def refuse(request):
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError(f"listener still closed, attempt {attempts}", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+        with pytest.raises(pytest.fail.Exception) as failure:
+            await _wait_for_supervisor_health(client, 12345)
+    assert str(failure.value) == (
+        "the gateway never answered the health readiness wait within 10 s; "
+        f"last error: ConnectError: listener still closed, attempt {attempts}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectTimeout, httpx.ReadError],
+)
+async def test_supervisor_health_wait_does_not_retry_backend_errors(error_type):
+    attempts = 0
+
+    def fail(request):
+        nonlocal attempts
+        attempts += 1
+        raise error_type("not a refused connection", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as client:
+        with pytest.raises(error_type, match="not a refused connection"):
+            await _wait_for_supervisor_health(client, 12345)
+    assert attempts == 1
+
+
 @pytest.mark.asyncio
 async def test_the_supervisor_reports_a_lost_network_on_both_status_surfaces(
     tmp_path, monkeypatch, connection, signing_key
@@ -1876,36 +1966,29 @@ async def test_the_supervisor_reports_a_lost_network_on_both_status_surfaces(
         service.asyncio, "create_subprocess_exec", AsyncMock(return_value=_Connector())
     )
     task = asyncio.create_task(service.run())
-    async with httpx.AsyncClient(trust_env=False) as client:
-        health: dict[str, Any] = {}
-        for _ in range(200):
-            await asyncio.sleep(0.05)
-            reply = await client.get(
-                f"http://127.0.0.1:{served['gateway_port']}/_lop_tunnel/health"
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            health = await _wait_for_supervisor_health(client, served["gateway_port"])
+            assert health.get("ok") is False, health
+            assert health["reason"] == "control_plane_unreachable", health
+            assert "network" in health["detail"]
+
+            # Reached over the real listener the way the edge reaches it: loopback
+            # TCP, public Host. The gateway refuses before proof verification, which
+            # is the point — the phone never gets as far as its harness.
+            refused = await client.get(
+                f"http://127.0.0.1:{served['gateway_port']}/api/sessions",
+                headers={"host": HOST, PROOF_HEADER: proof(signing_key)},
             )
-            health = reply.json()
-            if health.get("reason"):
-                break
-        assert health.get("ok") is False, health
-        assert health["reason"] == "control_plane_unreachable", health
-        assert "network" in health["detail"]
-
-        # Reached over the real listener the way the edge reaches it: loopback
-        # TCP, public Host. The gateway refuses before proof verification, which
-        # is the point — the phone never gets as far as its harness.
-        refused = await client.get(
-            f"http://127.0.0.1:{served['gateway_port']}/api/sessions",
-            headers={"host": HOST, PROOF_HEADER: proof(signing_key)},
-        )
-        assert refused.status_code == 503
-        assert refused.json()["reason"] == "control_plane_unreachable"
-
-    # End it the way an operator's `lop tunnel stop` does, so the supervisor is
-    # not left running inside the test session.
-    stopped = config.load()
-    stopped["stopped"] = True
-    config.save(stopped)
-    assert await asyncio.wait_for(task, timeout=15) == 0
+            assert refused.status_code == 503
+            assert refused.json()["reason"] == "control_plane_unreachable"
+    finally:
+        # End it the way an operator's `lop tunnel stop` does, so the supervisor is
+        # not left running inside the test session.
+        stopped = config.load()
+        stopped["stopped"] = True
+        config.save(stopped)
+        assert await asyncio.wait_for(task, timeout=15) == 0
 
 
 @pytest.mark.asyncio
@@ -4172,3 +4255,238 @@ async def test_a_lease_ending_under_backpressure_still_completes_the_response(
     # The chunked terminator is the clean end-of-stream: present only when the
     # response COMPLETED rather than being abandoned mid-body.
     assert received.endswith(b"0\r\n\r\n")
+
+
+# -- 2026-11-11: honest status for local causes ---------------------------------
+#
+# A loaded machine (load ~50) showed `Connector: not serving — control plane
+# unreachable` while the API answered every request. Two local causes reached the
+# UNREACHABLE arm: httpx timeouts (a `TransportError` subclass) and the credential
+# store's bootstrap lock timing out under contention from other `lop` processes.
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ReadTimeout(""),
+        httpx.WriteTimeout(""),
+        httpx.PoolTimeout(""),
+        TimeoutError(),
+    ],
+    ids=["read", "write", "pool", "builtin"],
+)
+def test_a_timeout_reads_as_a_timeout_not_an_unreachable_control_plane(failure):
+    from local_operator.tunnels import gateway, service
+
+    assert service.authorization_failure_reason(failure) == gateway.CONTROL_PLANE_TIMEOUT
+    # Wrapped the way `RadientTunnels.request` wraps a refresh failure.
+    wrapped = ValueError("The tunnel's Radient login could not be refreshed.")
+    wrapped.__cause__ = failure
+    assert service.authorization_failure_reason(wrapped) == gateway.CONTROL_PLANE_TIMEOUT
+    verdict = service.classify_failure(wrapped)
+    assert verdict.kind == "transient"
+    assert verdict.reason == gateway.CONTROL_PLANE_TIMEOUT
+    # The retrying-exit line names the state even when the timeout's text is empty.
+    assert (
+        service._retry_detail(verdict, failure)
+        == gateway.TERMINAL_DETAIL[gateway.CONTROL_PLANE_TIMEOUT]
+    )
+    assert gateway.REASON_LABEL[gateway.CONTROL_PLANE_TIMEOUT] == "request to Radient timed out"
+
+
+def test_a_real_connection_failure_still_reads_as_unreachable():
+    from local_operator.tunnels import service
+
+    for failure in (httpx.ConnectError("refused"), httpx.ConnectTimeout("")):
+        # A connect timeout made no connection at all: that IS unreachable.
+        assert service.authorization_failure_reason(failure) == UNREACHABLE
+        assert service.classify_failure(failure).reason == UNREACHABLE
+
+
+def test_a_busy_credential_store_reads_as_local_not_as_radient():
+    from local_operator.providers.auth_store import AuthStoreBusyError
+    from local_operator.tunnels import gateway, service
+
+    wrapped = ValueError("This computer's credential store was busy.")
+    wrapped.__cause__ = AuthStoreBusyError("Timed out acquiring AuthStore bootstrap process guard")
+    assert service.authorization_failure_reason(wrapped) == gateway.CREDENTIAL_STORE_BUSY
+    verdict = service.classify_failure(wrapped)
+    assert verdict.kind == "transient", "it clears by itself, so it must never park"
+    assert verdict.reason == gateway.CREDENTIAL_STORE_BUSY
+    assert gateway.REASON_LABEL[gateway.CREDENTIAL_STORE_BUSY] == "local credential store busy"
+    for code in (gateway.CREDENTIAL_STORE_BUSY, gateway.CONTROL_PLANE_TIMEOUT):
+        # Every surface can render it: phone body, terminal sentence, check command.
+        assert code in gateway.RELAY_DETAIL and code in gateway.TERMINAL_DETAIL
+        assert gateway.TERMINAL_REMEDY[code] == "lop tunnel status"
+        for sentence in (gateway.RELAY_DETAIL[code], gateway.TERMINAL_DETAIL[code]):
+            assert "unreachable" not in sentence
+            assert "lop " not in sentence and "/login" not in sentence
+
+
+@pytest.mark.asyncio
+async def test_a_busy_store_is_retried_briefly_then_reported_as_a_value_error(monkeypatch):
+    """The 16:58 outage: one lock timeout at /connect crashed the unit with a
+    traceback (a bare AuthStoreError escaped `main`'s ValueError arm, and the
+    poller's), costing a supervisor restart. Now it is retried, and if it
+    persists it arrives as the ValueError every caller already handles."""
+    from local_operator.providers.auth_store import AuthStoreBusyError
+    from local_operator.tunnels import api
+
+    monkeypatch.setattr(api, "STORE_BUSY_RETRY_DELAYS", (0.0, 0.0))
+    opened: list[int] = []
+    sentinel = object()
+
+    def busy_then(times: int):
+        def make():
+            opened.append(1)
+            if len(opened) <= times:
+                raise AuthStoreBusyError("Timed out acquiring AuthStore bootstrap process guard")
+            return sentinel
+
+        return make
+
+    monkeypatch.setattr(api, "AuthStore", busy_then(2))
+    assert await api._open_store() is sentinel
+    assert len(opened) == 3
+
+    opened.clear()
+    monkeypatch.setattr(api, "AuthStore", busy_then(99))
+    with pytest.raises(ValueError) as failure:
+        await api._open_store()
+    assert len(opened) == 3, "bounded: the delays plus one final attempt"
+    assert isinstance(failure.value.__cause__, AuthStoreBusyError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "label"),
+    [
+        ("credential_store_busy", "local credential store busy"),
+        ("control_plane_timeout", "request to Radient timed out"),
+    ],
+)
+async def test_tunnel_status_names_a_local_cause_instead_of_an_unreachable_control_plane(
+    tmp_path, monkeypatch, connection, code, label
+):
+    """`lop tunnel status`, end to end from the gateway's health answer."""
+    from local_operator.tunnels import cli, report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection))
+    api = AsyncMock()
+    api.request.return_value = connection["tunnel"]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs): ...
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": False,
+                    "connected": True,
+                    "reason": code,
+                    "detail": RELAY_DETAIL[code],
+                },
+            )
+
+    fake = SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
+    monkeypatch.setattr(cli, "httpx", fake)
+    monkeypatch.setattr(report, "httpx", fake)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+    assert f"Connector: not serving — {label}" in receipt
+    assert TERMINAL_DETAIL[code] in receipt
+    assert "unreachable" not in receipt
+
+
+def _chained(*links: BaseException) -> BaseException:
+    """`links[0]` raised from `links[1]` raised from ..., like the real raise sites."""
+    for outer, inner in zip(links, links[1:]):
+        outer.__cause__ = inner
+    return links[0]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # The shape httpx 0.28 / httpcore 1.0 actually produce (round 1, R1-1).
+        lambda: _chained(httpx.ConnectTimeout(""), httpcore.ConnectTimeout(""), TimeoutError()),
+        lambda: _chained(
+            ValueError("wrapped"),
+            httpx.ConnectTimeout(""),
+            httpcore.ConnectTimeout(""),
+            TimeoutError(),
+        ),
+        lambda: _chained(httpx.ConnectError(""), httpcore.ConnectError(""), OSError(61, "x")),
+    ],
+    ids=["connect-timeout", "wrapped-connect-timeout", "connect-error"],
+)
+def test_a_chained_connect_failure_reads_as_unreachable_not_timed_out(failure):
+    from local_operator.tunnels import service
+
+    built = failure()
+    assert service.authorization_failure_reason(built) == UNREACHABLE
+    assert service.classify_failure(built).reason == UNREACHABLE
+
+
+@pytest.mark.asyncio
+async def test_a_real_connect_timeout_reads_as_unreachable(monkeypatch):
+    """The real path: httpx's own connect timeout, chain and all, from a dial that
+    cannot complete inside its connect budget (the socket layer is made to stall)."""
+    import anyio
+
+    from local_operator.tunnels import service
+
+    async def never_connects(*_args, **_kwargs):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(anyio, "connect_tcp", never_connects)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=0.05)) as client:
+        with pytest.raises(httpx.ConnectTimeout) as caught:
+            await client.get("http://127.0.0.1:9/")
+    chain = {type(link) for link in service._failure_chain(caught.value)}
+    assert TimeoutError in chain, "the builtin TimeoutError that misled the first draft"
+    assert service.authorization_failure_reason(caught.value) == UNREACHABLE
+
+
+@pytest.mark.asyncio
+async def test_a_store_opened_for_a_cancelled_caller_is_closed(monkeypatch):
+    """R1-2: cancelling the caller cannot stop the worker thread, so the store it
+    finishes opening must be closed rather than left for GC."""
+    import threading
+
+    from local_operator.tunnels import api
+
+    release = threading.Event()
+    started = threading.Event()
+    closed: list[bool] = []
+
+    class SlowStore:
+        def __init__(self):
+            started.set()
+            release.wait(5)
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(api, "AuthStore", SlowStore)
+    task = asyncio.create_task(api._open_store())
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    for _ in range(200):
+        if closed:
+            break
+        await asyncio.sleep(0.01)
+    assert closed == [True]

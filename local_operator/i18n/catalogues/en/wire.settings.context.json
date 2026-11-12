@@ -294,5 +294,16 @@
     "note": "Two claims to preserve: one sender's share defaults to HALF the account ceiling ('half' is a ratio, so it may be expressed in the locale's own words, but it is not a number to transliterate), and no sender can ever exceed the account ceiling itself — the share is capped by the total, so one busy sender cannot monopolise the hour. No ICU arguments.",
     "role": "Settings row help",
     "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_model.label": {
+    "maxCells": 29,
+    "note": "WHICH model performs the automatic safety check a message passes before an agent sees it — never whether the check runs, which is not optional. Not a strictness level and not a 'screen messages' switch: the value is a model name, and the help carries the fall-through promise. No ICU arguments.",
+    "role": "Settings row label",
+    "tone": "concise, neutral"
+  },
+  "wire.settings.team_bridge_screening_model.help": {
+    "note": "Three claims to preserve. (1) The choice is tried FIRST, so it RE-ORDERS the tested list (Sonnet first, then Opus) and never narrows it. (2) Empty means the tested order, which is the safest default — say that, because an unset row is a real recommendation, not a missing value. (3) A choice can never block delivery: if the chosen model is unavailable or out of quota, this machine's own configured model and its fallbacks still screen. Do not transliterate model ids or numbers into this copy. No ICU arguments.",
+    "role": "Settings row help",
+    "tone": "concise, neutral"
   }
 }

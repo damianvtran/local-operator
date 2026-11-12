@@ -7491,3 +7491,64 @@ async def test_ask_agent_running_is_false_only_for_a_stopped_idle_session(tmp_pa
     await session.prompt("hello")  # a fresh prompt clears the stop
     assert session.ask_agent_running() is True
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_never_receives_the_garbled_tool_name(tmp_path):
+    """The compaction span is sanitised before the summary prompt is built.
+
+    ``build_compaction_prompt`` renders each call's name and each error's
+    tool name and text, so an unsanitised span handed the compaction model the
+    raw garble — and a summary that kept it re-entered durable history in the
+    compaction marker (review round 1, R1). The span the summarizer sees must
+    be the sanitised view; the caller's list stays untouched.
+    """
+    from local_operator.compaction import api as compaction_api
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    executed: list[str] = []
+    session = make_session(tmp_path, stream, tools=[echo_tool(executed, name="bash")])
+    try:
+        span = [
+            Message.user("go"),
+            Message(
+                role="assistant",
+                content=[TextContent(text="running it")],
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name="bashLecture",
+                        arguments={"command": "echo hi"},
+                    )
+                ],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="Tool not found: bashLecture")],
+                tool_call_id="c1",
+                tool_name="bashLecture",
+                is_error=True,
+            ),
+        ]
+        seen: list[list[Message]] = []
+
+        async def summarize(messages, complete_fn, previous_summary=None):
+            seen.append(list(messages))
+            return "SUMMARY"
+
+        fake_api = types.SimpleNamespace(
+            split_leading_marker=compaction_api.split_leading_marker,
+            summarize_messages=summarize,
+        )
+        summary, _ = await session._produce_summary(fake_api, list(span), "context-full")
+        assert summary == "SUMMARY"
+        assert len(seen) == 1
+        prompt = compaction_api.build_compaction_prompt(seen[0])
+        assert "Lecture" not in prompt
+        names = [c.name for m in seen[0] if m.role == "assistant" for c in m.tool_calls]
+        assert names == ["bash"]
+        # The caller's history is untouched (request-copy only).
+        assert span[1].tool_calls[0].name == "bashLecture"
+        assert span[2].text == "Tool not found: bashLecture"
+    finally:
+        await session.dispose()

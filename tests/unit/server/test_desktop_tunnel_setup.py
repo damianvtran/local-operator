@@ -414,6 +414,42 @@ async def test_real_cloudflared_preflight_refuses_before_any_mutation(
 
 
 @pytest.mark.asyncio
+async def test_a_relay_offer_skips_the_cloudflared_preflight_and_reports_relay(
+    desktop, upstream, monkeypatch
+):
+    """C1/C2: once /connect offered the AWS relay, cloudflared is not a prerequisite.
+
+    The same host as the test above (no cloudflared anywhere) with the marker the
+    tunnel service leaves after such a /connect: setup must not stop at
+    `blocked_on: "cloudflared"`, and the route names the transport for the UI.
+    """
+    client, _app, _root = desktop
+    monkeypatch.setattr(setup, "_cloudflared_preflight", REAL_CLOUDFLARED_PREFLIGHT)
+    monkeypatch.setattr("shutil.which", lambda name, *a, **k: None)
+    config.record_relay_offer(True)
+    result = (await client.post(PATH, json={"action": "plan", "credential_id": 17})).json()[
+        "result"
+    ]
+    assert result["blocked_on"] != "cloudflared", result
+    assert result["transport"] == "relay"
+
+
+@pytest.mark.asyncio
+async def test_the_kill_switch_restores_the_cloudflared_preflight(desktop, upstream, monkeypatch):
+    client, _app, root = desktop
+    monkeypatch.setattr(setup, "_cloudflared_preflight", REAL_CLOUDFLARED_PREFLIGHT)
+    monkeypatch.setattr("shutil.which", lambda name, *a, **k: None)
+    config.record_relay_offer(True)
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "config.yml").write_text("values:\n  tunnel.transport: cloudflare\n")
+    result = (await client.post(PATH, json={"action": "plan", "credential_id": 17})).json()[
+        "result"
+    ]
+    assert result["blocked_on"] == "cloudflared"
+    assert result["transport"] == "cloudflare"
+
+
+@pytest.mark.asyncio
 async def test_run_uses_real_connected_producer_and_healthy_noop(desktop, upstream):
     client, _app, _root = desktop
     result = (await client.post(PATH, json={"action": "run", "credential_id": 17})).json()["result"]

@@ -120,7 +120,7 @@ def _question(
     labels: tuple[str, ...] = ("Drop them", "Backfill from the audit log"),
     descriptions: tuple[str, ...] = ("nothing reads the column", "slower, keeps history"),
     multi: bool = False,
-    recommended: int | None = None,
+    recommended: int | list[int] | None = None,
 ) -> AskQuestion:
     return AskQuestion(
         id=qid,
@@ -777,6 +777,77 @@ async def test_a_multi_select_recommendation_is_first_but_nothing_is_preticked()
         await pilot.press("enter")
         await pilot.pause()
     assert app.answered == [{"stale": ["Dual-write", "Drop them"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_multi_select_set_is_badged_on_every_row_and_nothing_is_preticked() -> None:
+    """The sibling of the pinned test above for a SET: both recommended rows are
+    promoted and badged, the cursor starts on the first, and still nothing is
+    ticked — Enter on the untouched card is refused, and the answer is whatever
+    the user ticks, in row order."""
+    app = _AskHost(
+        [
+            _question(
+                labels=("Drop them", "Backfill", "Dual-write", "Add a filter"),
+                descriptions=("cheapest", "keeps history", "safest", "hides it"),
+                multi=True,
+                recommended=[2, 0],
+            )
+        ]
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        assert screen.selected_index == 0
+        assert screen.checked_indexes == []
+        lines = screen.render_lines_for_test()
+        text = "\n".join(lines)
+        assert sum(_is_badge_line(line) for line in lines) == 2
+        # Hoisted in the order the model listed them, the rest in authored order.
+        assert (
+            text.index("Dual-write")
+            < text.index("Drop them")
+            < text.index("Backfill")
+            < text.index("Add a filter")
+        )
+        # Enter with nothing ticked is refused rather than answering the set.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.answered == []
+        await pilot.press("space")
+        await pilot.press("down")
+        await pilot.press("space")
+        assert screen.checked_indexes == [0, 1]
+        await pilot.press("enter")
+        await pilot.pause()
+    assert app.answered == [{"stale": ["Dual-write", "Drop them"]}]
+
+
+@pytest.mark.asyncio
+async def test_a_two_row_set_fits_the_card_at_the_pinned_widths() -> None:
+    """k badge lines now compete with descriptions on a short screen: at the
+    widths the layout pins (100x30, 80x30) the first row is never cut off, both
+    badges are drawn, and no line passes the card's column or its line budget."""
+    question = _question(
+        labels=("Drop them", "Backfill", "Dual-write", "Add a filter"),
+        descriptions=("cheapest", "keeps history", "safest", "hides it"),
+        multi=True,
+        recommended=[2, 0],
+    )
+    for size in ((100, 30), (80, 30)):
+        app = _AskHost([question])
+        async with app.run_test(size=size) as pilot:
+            card = await app.open_picker()
+            await pilot.pause()
+            layout = card._layout()
+            budget = card._body_rows(len(card._question_lines(layout.width, reveal=False)))
+            lines = card.render_lines_for_test()
+            assert len(lines) <= budget, (size, len(lines), budget)
+            # The first row (the first pick) is drawn, not cut off by the badges.
+            assert any("Dual-write" in line for line in lines), (size, lines)
+            assert sum(_is_badge_line(line) for line in lines) == 2, (size, lines)
+            for line in lines:
+                assert cell_len(line) <= card.size.width, (size, line)
 
 
 @pytest.mark.asyncio
@@ -5820,7 +5891,7 @@ async def test_a_badge_line_at_the_viewport_edge_is_not_marked_as_a_clipped_desc
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
         layout = card._layout()
-        row = card.question.recommended
+        row = card.question.recommended_rows[0]
         assert row is not None
 
         # Precondition 1: the plan gives the row exactly its label and its
@@ -5880,7 +5951,7 @@ async def test_a_badge_line_marked_as_a_clipped_description_is_caught() -> None:
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
         layout = card._layout()
-        row = card.question.recommended
+        row = card.question.recommended_rows[0]
         assert row is not None
         assert layout.body_line_budget == 2, layout.body_line_budget
 
@@ -5926,7 +5997,7 @@ async def test_the_badge_line_is_not_counted_as_a_rows_prose() -> None:
     app, card = await _real_app_card(size, [question])
     async with app.run_test(size=size) as pilot:
         await _show(app, pilot, card)
-        row = card.question.recommended
+        row = card.question.recommended_rows[0]
         assert row is not None
         layout = card._layout()
         assert layout.row_draws_badge_line(row), "the fixture must draw a badge line"
@@ -5962,7 +6033,7 @@ async def test_the_recommended_badge_survives_the_band_where_it_used_to_vanish()
         async with app.run_test(size=size) as pilot:
             await _show(app, pilot, card)
             layout = card._layout()
-            row = card.question.recommended
+            row = card.question.recommended_rows[0]
             assert row is not None
             assert layout.body_line_budget == budget, (size, layout.body_line_budget)
 
