@@ -500,7 +500,14 @@ def test_push_text_agrees_with_ready_and_names_the_member(
     row = payload["peers"][0]
     assert row["name"], row
     assert "holds 0 of this device's 1 sendable skills" in row["message"], row
+    # Q-7: the summary line agrees with the per-peer counts (it said "1 of 1
+    # device holds this device's skills" beside "holds 0 of 1; 1 kept").
     capsys.readouterr()
+    net_cli.main(
+        _parser().parse_args(["network", "skills", "push", "--peer", server_b.identity.name])
+    )
+    summary = capsys.readouterr().out.splitlines()[0]
+    assert summary == "0 of 1 device holds all of this device's sendable skills", summary
     net_cli.main(_parser().parse_args(["network", "skills", "state"]))
     text = capsys.readouterr().out
     assert f"last push to {row['name']}:" in text, text
@@ -523,6 +530,110 @@ def test_a_crash_leftover_stage_is_swept_but_a_live_one_is_not(tmp_path: Path) -
     assert removed == 1
     assert not (stage / "deadbeef").exists()
     assert fresh.exists(), "a stage younger than the cutoff belongs to a live apply"
+
+
+def test_the_sweep_never_follows_a_symlinked_stage(tmp_path: Path) -> None:
+    """R2-2: a linked ``network/skill-stage`` made the sweep delete in its target."""
+    victim = tmp_path / "victim" / "olddir"
+    victim.mkdir(parents=True)
+    old = 1_000_000.0
+    os.utime(victim, (old, old))
+    root = tmp_path / "root"
+    (root / "network").mkdir(parents=True)
+    os.symlink(tmp_path / "victim", root / "network" / "skill-stage")
+    sweep = skillsync._sweep_stage  # noqa: SLF001 — the crash-recovery seam under test
+    assert sweep(root, now=old + skillsync.STAGE_STALE_S + 1) == 0
+    assert victim.exists(), "the sweep followed a symlinked stage into its target"
+
+
+def _own_skill_at(root: Path, folder: str, name: str, body: str) -> Path:
+    path = root / "skills" / folder
+    path.mkdir(parents=True)
+    (path / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: receiver OWN {body}\n---\n{body}\n", encoding="utf-8"
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    ("folder", "name"),
+    [
+        ("tools/foo", "foo"),  # grouped: deeper, so the peer's skills/foo used to win
+        ("my-foo", "foo"),  # folder != name, sorting AFTER the name (peer won)
+        ("zzzz-folder", "abc"),  # QA's Q-6 repro
+        ("aaa-folder", "abc"),  # reverse order: own wins, but the head was told "installed"
+    ],
+)
+def test_a_peer_skill_never_lands_beside_the_receivers_own_declared_elsewhere(
+    tmp_path: Path, folder: str, name: str
+) -> None:
+    """R2-1 / Q-6: the keep check keyed on folders while discovery keys on names."""
+    receiver = tmp_path / "r"
+    _own_skill_at(receiver, folder, name, "kept")
+    sender = tmp_path / "s"
+    honest = _write_skill(sender, name, body="peer")
+
+    # The receiver's state names it as its own, so the sender keeps it unasked.
+    held = skillsync.skill_state(receiver)["skills"][name]
+    assert held["origin"] == "" and held["folder"] == folder, held
+
+    answer = skillsync.apply_skill(receiver, _payload_from(honest, name), origin_device="dev-a")
+    assert answer["outcome"] == "conflicts", answer
+    assert f"skills/{folder}" in answer["reason"], answer
+    assert not (receiver / "skills" / name).exists(), "the peer's copy landed beside the own one"
+    found, _warnings = discover_skills([receiver / "skills"], config_dir=receiver)
+    assert {skill.name: skill for skill in found}[name].description == "receiver OWN kept"
+
+
+def test_a_push_over_the_mesh_reports_an_own_skill_in_another_folder_as_kept(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Q-6 over two real relays: kept, never installed, and the node's own resolves."""
+    server_a, server_b = _linked(request, monkeypatch)
+    _write_skill(server_a.root, "abc", body="head")
+    _own_skill_at(server_b.root, "zzzz-folder", "abc", "kept")
+    rc, payload = _run_json(capsys, "push", "--peer", server_b.identity.name)
+    assert rc == 0, payload
+    row = payload["peers"][0]
+    assert row["installed"] == [] and [kept["name"] for kept in row["kept"]] == ["abc"], row
+    assert "in skills/zzzz-folder" in row["kept"][0]["reason"], row
+    assert not (server_b.root / "skills" / "abc").exists()
+    server_b.stop()
+
+
+def test_the_own_declared_elsewhere_check_is_redecided_under_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: an own declaration created during extraction still wins the swap."""
+    receiver = tmp_path / "r"
+    (receiver / "skills").mkdir(parents=True)
+    sender = tmp_path / "s"
+    honest = _write_skill(sender, "late", body="peer")
+    real_extract = skill_bundle.extract_archive
+
+    def _extract_then_edit(*args: Any, **kwargs: Any) -> Any:
+        landed = real_extract(*args, **kwargs)
+        _own_skill_at(receiver, "group/late", "late", "kept")
+        return landed
+
+    monkeypatch.setattr(skill_bundle, "extract_archive", _extract_then_edit)
+    answer = skillsync.apply_skill(receiver, _payload_from(honest, "late"), origin_device="dev-a")
+    assert answer["outcome"] == "conflicts", answer
+    assert not (receiver / "skills" / "late").exists()
+
+
+def test_a_grouped_twin_of_a_top_level_skill_is_named_as_shadowed(tmp_path: Path) -> None:
+    """R2-3: "move it to skills/foo" pointed at the folder the twin already holds."""
+    root = tmp_path / "head"
+    _write_skill(root, "foo")
+    _own_skill_at(root, "tools/foo", "foo", "grouped")
+    rows = [skill for skill in skillsync.local_skills(root) if skill.name == "foo"]
+    assert {row.status for row in rows} == {"ready", "refused"}, rows
+    (grouped,) = [row for row in rows if row.status == "refused"]
+    assert "shadowed here by ~/.local-operator/skills/foo" in grouped.reason, grouped
+    assert "move it" not in grouped.reason, grouped
 
 
 def test_net_skills_needs_admin_at_the_authoriser() -> None:

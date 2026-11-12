@@ -249,7 +249,46 @@ def _frontmatter_name(skill_md: Path) -> str:
         return ""
 
 
-def _grouped_rows(group: str, path: Path) -> list[LocalSkill]:
+def _declared_elsewhere(root: Path, name: str) -> Path | None:
+    """The first skill under ``skills/`` declaring ``name`` outside ``skills/<name>``.
+
+    WHY: discovery registers a skill by its frontmatter ``name`` anywhere in its
+    bounded walk, shallower first then sorted (``discovery._walk_skill_dirs``),
+    while the receiver installs by folder. A device's own ``skills/tools/foo``
+    (grouped) or ``skills/my-foo`` (folder != name) declaring ``foo`` is
+    invisible to a folder-keyed check, so an incoming ``foo`` landed beside it
+    and either shadowed it or was itself shadowed, with the conflict policy never
+    asked (review round 2, R2-1; QA round 2, Q-6). Such a skill is always the
+    node's OWN: a mirror is installed only at ``skills/<its name>`` with a
+    matching frontmatter (``expected_name``), and an edit that renamed one is the
+    node's work. Uses discovery's own walk and depth so the set checked is the
+    set that resolves.
+    """
+    from local_operator.skills.discovery import _walk_skill_dirs, skill_max_depth
+
+    base = skills_root(root)
+    dest = os.path.normpath(base / name)
+    try:
+        walked = [found[0] for found in _walk_skill_dirs(base, skill_max_depth())]
+    except Exception:  # noqa: BLE001 — the walk never raises; belt and braces
+        return None
+    for skill_dir in walked:
+        if os.path.normpath(skill_dir) == dest:
+            continue
+        if _frontmatter_name(Path(skill_dir) / "SKILL.md") == name:
+            return Path(skill_dir)
+    return None
+
+
+def _own_elsewhere_reason(root: Path, path: Path) -> str:
+    try:
+        where = path.relative_to(skills_root(root)).as_posix()
+    except ValueError:
+        where = str(path)
+    return f"this device has its own skill by that name (in skills/{where}), so it was kept"
+
+
+def _grouped_rows(group: str, path: Path, taken: frozenset[str] = frozenset()) -> list[LocalSkill]:
     """Name the skills inside a grouping folder, by the names discovery gives them.
 
     Discovery walks ``<root>/<group>/<skill>/SKILL.md`` (bounded depth), so a
@@ -268,17 +307,19 @@ def _grouped_rows(group: str, path: Path) -> list[LocalSkill]:
         nested = []
     for skill_dir in sorted(nested):
         name = _frontmatter_name(skill_dir / "SKILL.md") or skill_dir.name
-        rows.append(
-            LocalSkill(
-                name=name,
-                tree_hash="",
-                status="refused",
-                reason=(
-                    f"it sits in the grouping folder '{group}', and nested skill folders "
-                    f"don't sync yet; move it to ~/.local-operator/skills/{name} to sync it"
-                ),
+        if name in taken:
+            # "Move it to skills/<name>" would point at a folder that is already
+            # taken by the top-level skill that wins here (review round 2, R2-3).
+            reason = (
+                f"it sits in the grouping folder '{group}' and is shadowed here by "
+                f"~/.local-operator/skills/{name}, which syncs under that name"
             )
-        )
+        else:
+            reason = (
+                f"it sits in the grouping folder '{group}', and nested skill folders "
+                f"don't sync yet; move it to ~/.local-operator/skills/{name} to sync it"
+            )
+        rows.append(LocalSkill(name=name, tree_hash="", status="refused", reason=reason))
     return rows
 
 
@@ -344,7 +385,13 @@ def _measure(name: str, path: Path) -> LocalSkill:
 def local_skills(root: Path) -> list[LocalSkill]:
     """Every skill directory under ``<config>/skills``, measured (cached by stat)."""
     out: list[LocalSkill] = []
-    for name, path, is_link in _skill_dirs(root, with_links=True):
+    entries = _skill_dirs(root, with_links=True)
+    top_level = frozenset(
+        name
+        for name, path, is_link in entries
+        if not is_link and os.path.lexists(path / "SKILL.md")
+    )
+    for name, path, is_link in entries:
         if is_link:
             out.append(
                 LocalSkill(
@@ -359,7 +406,7 @@ def local_skills(root: Path) -> list[LocalSkill]:
             )
             continue
         if not os.path.lexists(path / "SKILL.md"):
-            grouped = _grouped_rows(name, path)
+            grouped = _grouped_rows(name, path, top_level)
             if grouped:
                 out.extend(grouped)
                 continue
@@ -441,6 +488,27 @@ def skill_state(root: Path) -> dict[str, Any]:
             "tree_hash": current,
             "origin": origin,
             "edited": bool(recorded is not None and current != str(recorded.get("landed") or "")),
+        }
+    # THE SAME KEY DISCOVERY USES: a skill this device declares from another
+    # folder (grouped, or folder != name) is reported under its declared name as
+    # the node's own, so the sender says "kept" exactly when ``apply`` would
+    # (review round 2, R2-1 / QA Q-6). It overrides a ``skills/<name>`` row: the
+    # apply refuses that name for the same reason.
+    from local_operator.skills.discovery import _walk_skill_dirs, skill_max_depth
+
+    base = skills_root(root)
+    for skill_dir, _stat in _walk_skill_dirs(base, skill_max_depth()):
+        path = Path(skill_dir)
+        declared = _frontmatter_name(path / "SKILL.md")
+        if not declared or os.path.normpath(path) == os.path.normpath(base / declared):
+            continue
+        if declared in rows and rows[declared].get("folder"):
+            continue  # walk order: the first declaration is the one that resolves
+        rows[declared] = {
+            "tree_hash": _tree_hash(path),
+            "origin": "",
+            "edited": False,
+            "folder": path.relative_to(base).as_posix(),
         }
     return {"kind": BUNDLE_KIND, "version": BUNDLE_VERSION, "skills": rows}
 
@@ -533,6 +601,9 @@ def _apply_locked(root: Path, name: str, ref: Any, data: bytes, origin: str) -> 
     index = definitions.read_index(root)
     recorded = _recorded(index, name)
     bucket, reason = _decide(recorded, _current_tree(dest), ref.tree_hash, origin)
+    elsewhere = None if bucket else _declared_elsewhere(root, name)
+    if elsewhere is not None:
+        bucket, reason = "conflicts", _own_elsewhere_reason(root, elsewhere)
     if bucket:
         return {"outcome": bucket, "name": name, **({"reason": reason} if reason else {})}
     stage = _stage_root(root) / uuid.uuid4().hex
@@ -564,6 +635,11 @@ def _apply_locked(root: Path, name: str, ref: Any, data: bytes, origin: str) -> 
         with config_write_lock(root):
             current = _current_tree(dest)
             bucket, reason = _decide(recorded, current, ref.tree_hash, origin)
+            # Re-checked under the lock for the same reason as ``_decide``: an
+            # editor may have created the other declaration meanwhile (R2-1).
+            elsewhere = None if bucket else _declared_elsewhere(root, name)
+            if elsewhere is not None:
+                bucket, reason = "conflicts", _own_elsewhere_reason(root, elsewhere)
             if bucket:
                 return {"outcome": bucket, "name": name, **({"reason": reason} if reason else {})}
             skills_root(root).mkdir(parents=True, exist_ok=True)
@@ -762,7 +838,12 @@ def _push_locked(server: "RelayServer", device_id: str) -> dict[str, Any]:
             # under its lock anyway; this is economy, not authority.
             held_origin = str(held.get("origin") or "")
             if not held_origin:
-                reason = f"{label} has its own skill by that name, so it was kept"
+                folder = str(held.get("folder") or "")
+                reason = (
+                    f"{label} has its own skill by that name (in skills/{folder}), so it was kept"
+                    if folder
+                    else f"{label} has its own skill by that name, so it was kept"
+                )
             elif held_origin != own_id:
                 reason = f"that skill on {label} is a copy of another device's, so it was kept"
             elif held.get("edited"):
@@ -838,6 +919,13 @@ def _push_locked(server: "RelayServer", device_id: str) -> dict[str, Any]:
         "code": code,
         "message": "; ".join(parts),
         "in_sync": in_sync,
+        "sendable": sendable,
+        # HOLDS = every sendable skill is now on the peer as this device's copy;
+        # the push summary counts these so it cannot say "1 of 1 device holds"
+        # beside a per-peer "holds 0 of 1; 1 kept" (QA round 2, Q-7).
+        "holds_all": bool(
+            not problems and sendable and in_sync + sent == sendable and not outcome["kept"]
+        ),
         **outcome,
     }
 
@@ -971,9 +1059,14 @@ def local_sync_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
                 "nothing to push to: this device is in no network with another member"
                 if not results
                 else (
-                    f"{sum(1 for item in results if item.get('ok'))} of {len(results)} "
-                    f"{'device holds' if len(results) == 1 else 'devices hold'} "
-                    "this device's skills"
+                    "none of this device's skills can travel"
+                    if all(item.get("ok") and not item.get("sendable") for item in results)
+                    else (
+                        f"{sum(1 for item in results if item.get('holds_all'))} of "
+                        f"{len(results)} "
+                        f"{'device holds' if len(results) == 1 else 'devices hold'} "
+                        "all of this device's sendable skills"
+                    )
                 )
             ),
         }
@@ -1013,6 +1106,15 @@ def _sweep_stage(root: Path, *, now: float | None = None) -> int:
     Best effort: a sweep failure must never stop the relay installing the op.
     """
     base = _stage_root(root)
+    # NEVER THROUGH A LINK: ``scandir`` would resolve a symlinked stage (or a
+    # symlinked ``network/``) and the sweep would delete aged entries in its
+    # target (review round 2, R2-2). The apply's own stage never is one.
+    try:
+        if base.is_symlink() or base.parent.is_symlink():
+            return 0
+        _assert_inside_root(base, root)
+    except (OSError, MeshRefusal):
+        return 0
     cutoff = (time.time() if now is None else now) - STAGE_STALE_S
     removed = 0
     try:
