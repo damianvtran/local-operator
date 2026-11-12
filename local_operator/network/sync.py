@@ -4050,7 +4050,7 @@ class SyncWatcher(threading.Thread):
         # METHOD that CPython 3.12's ``join()``/``is_alive()`` call once the thread
         # has ended (``_wait_for_tstate_lock``). An Event under that name made both
         # raise ``TypeError: 'Event' object is not callable`` for a finished
-        # thread, so no stop could ever be joined or confirmed (3.14 no longer
+        # thread, so no stop could ever be joined or confirmed (3.13+ no longer
         # calls it; 3.12 is the floor and CI's interpreter).
         self._halt = threading.Event()
 
@@ -4058,11 +4058,14 @@ class SyncWatcher(threading.Thread):
         self._halt.set()
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._halt.wait(self._settings.tick_s):
-            try:
-                self.tick(now=time.time())
-            except Exception:  # noqa: BLE001 — a watcher must never kill the relay
-                logger.debug("sync: watcher tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick(now=time.time())
+                except Exception:  # noqa: BLE001 — a watcher must never kill the relay
+                    logger.debug("sync: watcher tick failed", exc_info=True)
+        finally:
+            _release_registration("watcher", self._server, self)
 
     def tick(self, *, now: float) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, reason)`` per push, so cadence is testable.
@@ -4228,11 +4231,14 @@ class ReplicaRefresher(threading.Thread):
                 self._marked[session_id] = reason
 
     def run(self) -> None:  # pragma: no cover — the tick is what tests drive
-        while not self._halt.wait(self._settings.tick_s):
-            try:
-                self.tick()
-            except Exception:  # noqa: BLE001 — a refresher must never kill the relay
-                logger.debug("sync: replica refresh tick failed", exc_info=True)
+        try:
+            while not self._halt.wait(self._settings.tick_s):
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001 — a refresher must never kill the relay
+                    logger.debug("sync: replica refresh tick failed", exc_info=True)
+        finally:
+            _release_registration("refresher", self._server, self)
 
     def tick(self) -> list[tuple[str, str]]:
         """One pass. Returns ``(session_id, outcome)`` per attempt, so it is testable.
@@ -4304,7 +4310,9 @@ def ensure_refresher(server: "RelayServer") -> ReplicaRefresher:
             # not start a fresh thread afterwards: that thread would be the leak
             # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
             # instance keeps the caller's ``.mark()`` harmless and holds nothing.
-            return ReplicaRefresher(server)
+            # Defaults, not ``from_config``: it never ticks, so reading
+            # ``config.yml`` for it was disk I/O on every late push.
+            return ReplicaRefresher(server, settings=SyncSettings())
         existing = _refreshers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4335,7 +4343,8 @@ def ensure_watcher(server: "RelayServer") -> SyncWatcher:
             # not start a fresh thread afterwards: that thread would be the leak
             # this module's ``on_stop`` closes, re-opened. An unstarted, UNREGISTERED
             # instance keeps the caller's ``.mark()`` harmless and holds nothing.
-            return SyncWatcher(server)
+            # Defaults, not ``from_config``, for the refresher's reason.
+            return SyncWatcher(server, settings=SyncSettings())
         existing = _watchers.get(id(server))
         if existing is not None and existing.is_alive():
             return existing
@@ -4411,6 +4420,31 @@ def stop_threads(server: "RelayServer", *, timeout: float = SYNC_THREAD_STOP_JOI
             if table.get(key) is thread:
                 del table[key]
             _survivor_warned.pop((kind, key), None)
+
+
+def _release_registration(kind: str, server: "RelayServer", thread: threading.Thread) -> None:
+    """A sync thread's exit drops its OWN registry entry (and its warning row).
+
+    WHY (#3719 review R1-1): :func:`stop_threads` keeps a survivor's entry so a later
+    stop can retry it, but on the normal path no later stop comes — and a tick can
+    legitimately outlive the join (a ``_push`` to a wedged peer: links close only
+    after the stop hooks run). When that tick finally returned, the exited thread
+    stayed in the registry, holding its ``_server``, and the stopped relay was
+    pinned for the life of the process: the leak ``on_stop`` exists to close.
+
+    IDENTITY-MATCHED UNDER THE LOCK: an entry that is no longer this thread (a
+    restart registered a successor) is not this thread's to drop. Runs from
+    ``run``'s ``finally``, so an unstarted stand-in never reaches it.
+    """
+    lock, table = (
+        (_watcher_lock, _watchers) if kind == "watcher" else (_refresher_lock, _refreshers)
+    )
+    key = id(server)
+    with lock:
+        if table.get(key) is thread:
+            del table[key]
+        if _survivor_warned.get((kind, key)) is thread:
+            del _survivor_warned[(kind, key)]
 
 
 # ---------------------------------------------------------------------------
