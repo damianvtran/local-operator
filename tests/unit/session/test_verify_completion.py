@@ -274,6 +274,7 @@ async def test_request_cap_cancels_the_child(tmp_path, config_dir):
     assert verdict.ended_by == "requests"
     assert verdict.status == "INCONCLUSIVE"
     made = len(stream.by_job[verdict.job_id])
+    assert limits.max_requests is not None
     assert limits.max_requests <= made <= limits.max_requests + 1, made
     assert verdict.job_id is not None
     job = parent.jobs.get(verdict.job_id)
@@ -527,11 +528,12 @@ async def test_cancelling_the_caller_cancels_the_verifier_job(tmp_path, config_d
 async def test_a_verdict_on_the_capped_request_is_kept(tmp_path, config_dir):
     """Q2: the answer given ON request ``max_requests`` wins over the cap."""
 
-    limits = VerifierLimits(max_requests=3, max_commands=1, wall_s=30)
+    max_requests = 3
+    limits = VerifierLimits(max_requests=max_requests, max_commands=1, wall_s=30)
 
     def reply(request: ChatRequest) -> list[Any]:
         done = sum(1 for m in request.messages if m.role in ("tool", "toolResult"))
-        if done < limits.max_requests - 1:
+        if done < max_requests - 1:
             return tool_turn("glob", {"pattern": "*.nothing"})
         return text_turn("all met\nVERDICT: PASS")
 
@@ -539,7 +541,7 @@ async def test_a_verdict_on_the_capped_request_is_kept(tmp_path, config_dir):
     parent = make_parent(tmp_path, stream)
     verdict = await parent.verify_completion(request="r", claim="c", limits=limits)
 
-    assert len(stream.by_job[verdict.job_id]) == limits.max_requests
+    assert len(stream.by_job[verdict.job_id]) == max_requests
     assert (verdict.status, verdict.ended_by) == ("PASS", "verdict"), verdict
     await parent.dispose()
 
@@ -701,6 +703,7 @@ async def test_a_verdict_already_given_survives_a_wall_cancel(tmp_path, config_d
         request="r", claim="c", limits=VerifierLimits(wall_s=1.5)
     )
 
+    assert verdict.job_id is not None
     job = parent.jobs.get(verdict.job_id)
     assert job is not None and job.status == "cancelled", getattr(job, "status", None)
     assert (verdict.status, verdict.findings, verdict.ended_by) == (
@@ -763,6 +766,7 @@ async def test_a_partial_answer_from_a_failed_job_is_never_a_verdict(tmp_path, c
         request="r", claim="c", limits=VerifierLimits(wall_s=20)
     )
 
+    assert verdict.job_id is not None
     job = parent.jobs.get(verdict.job_id)
     assert job is not None and job.status == "failed", getattr(job, "status", None)
     assert (verdict.status, verdict.ended_by) == ("INCONCLUSIVE", "failed"), verdict
