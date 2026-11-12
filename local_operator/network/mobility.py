@@ -6425,26 +6425,46 @@ def _push_move_definitions(
             "mobility: definitions push before moving %s failed", session_id, exc_info=True
         )
         pushed = {"ok": False, "message": str(exc)}
-    if pushed.get("ok"):
+    report = pushed.get(definitions.OPERATOR_INSTRUCTIONS_KIND)
+    report = report if isinstance(report, dict) else {}
+    outcome = str(report.get("outcome") or "")
+    # A KEPT-OWN-COPY IS ITS OWN SENTENCE, with its remedy (R1-2): the peer chose to
+    # keep its instructions, which is not "could not be refreshed". Informational —
+    # the move still completes.
+    kept_own = str(report.get("notice") or "") if outcome == "conflict" else ""
+    # THE INSTRUCTIONS ARE NAMED ONLY WHEN THEY ARE WHAT FAILED (R1-4). ``ok`` is
+    # False for an agent/team conflict or a transport failure; the instructions
+    # outcome never sets it, so naming them on every failure blamed them for a
+    # team conflict. No report at all (the push never reached the peer) leaves
+    # them unknown, so they stay named then.
+    instructions_stale = not kept_own and outcome not in definitions.INSTRUCTIONS_SETTLED_OUTCOMES
+    parts: list[str] = []
+    if not pushed.get("ok") or instructions_stale:
+        named = [
+            part
+            for part in (f"team {team!r}" if team else "", f"agent {agent!r}" if agent else "")
+            if part
+        ]
+        if instructions_stale:
+            named.append("the custom instructions")
+        if not pushed.get("ok"):
+            reason = str(pushed.get("message") or pushed.get("code") or "no answer")
+        else:
+            reason = str(report.get("reason") or outcome or "no answer")
+        if named:
+            subject = " and ".join(named)
+            parts.append(
+                f"{subject} on {target_label} may be an older copy — "
+                f"{'it' if len(named) == 1 else 'they'} could not be refreshed before the "
+                f"move ({reason})"
+            )
+    if kept_own:
+        parts.append(kept_own)
+    if not parts:
         return ""
-    named = ", ".join(
-        part
-        for part in (f"team {team!r}" if team else "", f"agent {agent!r}" if agent else "")
-        if part
-    )
-    subject = f"{named} and the custom instructions" if named else "the custom instructions"
-    reason = str(pushed.get("message") or pushed.get("code") or "no answer")
-    logger.warning(
-        "mobility: %s on %s may be stale after moving %s: %s",
-        subject,
-        target_label,
-        session_id,
-        reason,
-    )
-    return (
-        f"{subject} on {target_label} may be an older copy — they could not be refreshed "
-        f"before the move ({reason})"
-    )
+    notice = "; ".join(parts)
+    logger.warning("mobility: after moving %s to %s: %s", session_id, target_label, notice)
+    return notice
 
 
 def _await_own_progress(

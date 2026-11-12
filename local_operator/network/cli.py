@@ -8061,6 +8061,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # worked" report this slice exists to make impossible. The reconciliation block
         # is the relay's (it is the half that saw the push) and is printed whenever it is
         # not clean; ``--json`` carries the whole block either way (``**detail``).
+        # The peer kept its own custom instructions (R1-2): informational, the
+        # session was created, but it runs without this device's standing rules.
+        if detail.get("custom_instructions_notice"):
+            lines.append(str(detail["custom_instructions_notice"]))
         notes = detail.get("definitions")
         if isinstance(notes, dict) and not notes.get("ok"):
             lines.append(
@@ -10926,9 +10930,15 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                 "refused",
                 "withheld",
             ):
+                # A kept-own-copy conflict reads in the push's own peer-naming
+                # sentence with its remedy (Q-2): the receiver's reason says "this
+                # device", which on the head reads as the head.
+                notice = str(instructions.get("notice") or "")
                 why = str(instructions.get("reason") or "")
                 lines.append(
-                    f"  custom instructions: {instructions.get('outcome')}"
+                    f"  custom instructions: {notice}"
+                    if notice
+                    else f"  custom instructions: {instructions.get('outcome')}"
                     + (f" ({why})" if why else "")
                 )
         return _emit(
@@ -10968,11 +10978,19 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
         )
     elif status == "authored":
         lines.append("custom instructions: yours")
+    elif status == "unreadable":
+        lines.append("custom instructions: present but could not be read")
     conflict = instructions.get("conflict")
     if isinstance(conflict, dict):
         reason = str(conflict.get("reason") or "this device kept its own copy")
         lines.append(
             f"custom instructions from {conflict.get('origin') or '?'} not installed: {reason}"
+            # The remedy, on the device where it is run (R1-2).
+            + (
+                "; delete or blank them here to receive those"
+                if status in ("authored", "edited", "unreadable")
+                else ""
+            )
         )
     if not lines:
         lines = ["no agent or team definitions on this device"]

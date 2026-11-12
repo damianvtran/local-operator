@@ -689,47 +689,95 @@ def _operator_instructions_path(root: Path) -> Path:
 
 
 def _operator_instructions_row(text: Any) -> dict[str, Any]:
-    """The singleton row for ``text``, normalised the same way on both ends."""
+    """The singleton row for ``text``, normalised the same way on both ends.
+
+    THE ``aida:profile`` SECTION NEVER TRAVELS (review round 1, R1-1): it is the
+    identity of whoever signed in on the sending device (``lop login`` writes it),
+    so it is device- and account-specific. Stripping it HERE — the one normaliser
+    both the sender's bundle and the receiver's apply go through — means a head
+    never ships it and a receiver never installs one, whichever build sent it.
+    Bounded before the final ``rstrip`` so a truncated text re-reads to the same
+    digest on the node (no re-send loop on an oversize file).
+    """
+    from local_operator.aida.profile import split_profile_section
+
+    outside, _ = split_profile_section(str(text or ""))
     return {
         "kind": OPERATOR_INSTRUCTIONS_KIND,
         "name": OPERATOR_INSTRUCTIONS_KIND,
-        "text": _bounded_text(text, _max_operator_instructions()),
+        "text": _bounded_text(outside, _max_operator_instructions()).rstrip(),
     }
+
+
+def _operator_instructions_on_disk(root: Path) -> tuple[dict[str, Any] | None, str, bool]:
+    """``(row or None, this device's profile section, unreadable)`` for the file.
+
+    THREE DIFFERENT FACTS, kept apart (QA round 1, Q-1): a file that is absent or
+    BLANK OUTSIDE ITS PROFILE SECTION has no instructions of the operator's to
+    protect, so the row is ``None`` and a mirror may be installed; a file that
+    could not be READ (permissions, bad encoding) may hold anything, so it is
+    ``unreadable`` and never written over. Blank used to share ``None`` with
+    unreadable, so a ``"\\n"`` left by clearing the Settings field was refused as
+    "could not be read" and re-sent every tick. A directory at the path is not
+    "unreadable" here: the write fails on it and is reported as refused.
+
+    The profile section is returned so an install can put the node's OWN sign-in
+    identity back (R1-1).
+    """
+    from local_operator.aida.profile import split_profile_section
+
+    path = _operator_instructions_path(root)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, "", False
+    except (OSError, UnicodeDecodeError):
+        try:
+            unreadable = path.is_file() and path.stat().st_size > 0
+        except OSError:
+            unreadable = True
+        return None, "", unreadable
+    outside, section = split_profile_section(text)
+    if not outside:
+        return None, section, False
+    return _operator_instructions_row(outside), section, False
 
 
 def _read_operator_instructions(root: Path) -> dict[str, Any] | None:
     """This device's custom instructions as a row, or ``None`` when it has none.
 
-    A BLANK FILE IS \"NONE\": it puts nothing in front of a session, so there is
-    nothing of the operator's for a mirror to overwrite and nothing worth sending.
-    An unreadable file is also ``None`` here, but the receiver never takes that as
-    permission to write (see :func:`_apply_operator_instructions_locked`).
+    A FILE BLANK OUTSIDE ITS PROFILE SECTION IS "NONE": it puts nothing of the
+    operator's rules in front of a session, so there is nothing for a mirror to
+    overwrite and nothing worth sending. An unreadable file is also ``None`` here,
+    but the receiver never takes that as permission to write (see
+    :func:`_operator_instructions_on_disk`).
     """
-    path = _operator_instructions_path(root)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    if not text.strip():
-        return None
-    return _operator_instructions_row(text)
+    return _operator_instructions_on_disk(root)[0]
 
 
 def operator_instructions_state(root: Path) -> dict[str, Any]:
     """What this device holds for the singleton, for the peer's state reply and the CLI.
 
-    ``status`` is one of ``absent`` (no file, or a blank one), ``authored`` (the
-    operator's own \u2014 never mirrored here), ``mirror`` (installed from ``origin`` and
-    untouched since) or ``edited`` (a mirror the operator changed, which makes it
-    theirs). ``conflict`` is the last revision this device REFUSED, if any.
+    ``status`` is one of ``absent`` (no file, or one blank outside its profile
+    section), ``unreadable`` (present but could not be read — never written over),
+    ``authored`` (the operator's own \u2014 never mirrored here), ``mirror`` (installed
+    from ``origin`` and untouched since) or ``edited`` (a mirror the operator
+    changed, which makes it theirs). Status and digest judge only the text OUTSIDE
+    the ``aida:profile`` section (R1-1): a sign-in on this device neither makes the
+    file "authored" nor turns an untouched mirror into "edited". ``conflict`` is the
+    last revision this device REFUSED, if any.
     """
     index = read_index(root)
-    row = _read_operator_instructions(root)
+    row, _, unreadable = _operator_instructions_on_disk(root)
     recorded = index.get(OPERATOR_INSTRUCTIONS_INDEX_KEY)
     recorded = recorded if isinstance(recorded, Mapping) else None
     conflict = index.get(OPERATOR_INSTRUCTIONS_CONFLICT_KEY)
     digest = digest_of(row) if row is not None else ""
-    if row is None:
+    if unreadable:
+        # Not "absent": the sender's re-send exemption is for absent files only, so
+        # a node that cannot read its own file is not offered the same row per tick.
+        status = "unreadable"
+    elif row is None:
         status = "absent"
     elif recorded is None:
         status = "authored"
@@ -1190,48 +1238,66 @@ def _apply_operator_instructions_locked(
     recorded = recorded_in if isinstance(recorded_in, Mapping) else None
     recorded_digest = str(recorded.get("digest") or "") if recorded is not None else ""
 
-    def conflict(reason: str) -> dict[str, Any]:
+    def conflict(reason: str, code: str) -> dict[str, Any]:
+        # ``reason`` is this device's own sentence (``definitions state`` here prints
+        # it); ``code`` lets the SENDER say the same fact in its own voice, naming
+        # this device (QA round 1, Q-2) — see :func:`instructions_conflict_notice`.
         previous = index.get(OPERATOR_INSTRUCTIONS_CONFLICT_KEY)
-        record = {"origin": origin, "offered": incoming, "reason": reason}
+        record = {"origin": origin, "offered": incoming, "reason": reason, "code": code}
         changed = not (
             isinstance(previous, Mapping)
             and all(previous.get(key) == value for key, value in record.items())
         )
         if changed:
             index[OPERATOR_INSTRUCTIONS_CONFLICT_KEY] = {**record, "at": time.time()}
-        return {"outcome": "conflict", "reason": reason, "index_dirty": changed}
+        return {"outcome": "conflict", "reason": reason, "code": code, "index_dirty": changed}
 
     if path.is_symlink():
         return conflict(
             "the custom instructions here are a link to another file, so they were not "
-            "overwritten"
+            "overwritten",
+            "symlink",
         )
-    exists = path.exists()
-    current = _read_operator_instructions(root)
-    if exists and current is None and path.stat().st_size and path.is_file():
-        # Non-blank but unreadable (permissions, bad encoding): not "absent".
-        return conflict("the custom instructions here could not be read, so they were not replaced")
+    current, profile_section, unreadable = _operator_instructions_on_disk(root)
+    if unreadable:
+        # Non-blank but unreadable (permissions, bad encoding): not "absent". A file
+        # that READS as blank ("\n") is not this, and is installed over (Q-1).
+        return conflict(
+            "the custom instructions here could not be read, so they were not replaced",
+            "unreadable",
+        )
     if current is not None:
         current_digest = digest_of(current)
         if recorded is None:
             return conflict(
-                "this device has its own custom instructions, so they were not overwritten"
+                "this device has its own custom instructions, so they were not overwritten",
+                "own",
             )
         if str(recorded.get("origin") or "") != origin:
             return conflict(
                 f"the custom instructions here are a copy of {recorded.get('origin')}'s, so "
-                f"{origin or 'the sender'}'s were not installed"
+                f"{origin or 'the sender'}'s were not installed",
+                "other_origin",
             )
         if current_digest != recorded_digest:
             return conflict(
                 "the copy of the custom instructions here has local edits, so it was not "
-                "overwritten"
+                "overwritten",
+                "edited",
             )
         if current_digest == incoming:
             return {"outcome": "unchanged"}
     # Absent/blank, a deleted mirror (re-installed: nothing of the operator's is
     # lost — the team rule), or an untouched mirror from this origin.
-    _write_instructions_file(path, str(row.get("text") or ""))
+    #
+    # THIS DEVICE'S OWN ``aida:profile`` SECTION IS PUT BACK (R1-1): it is who signed
+    # in HERE, which the incoming row never carries (``_operator_instructions_row``
+    # strips the sender's). Appended after the instructions, where ``lop login``
+    # appends it on a file without one; status and digest ignore it either way.
+    text = str(row.get("text") or "")
+    if profile_section:
+        text = f"{text}\n\n{profile_section}" if text else profile_section
+    _write_instructions_file(path, text + "\n" if text else "")
     index[OPERATOR_INSTRUCTIONS_INDEX_KEY] = {
         "origin": origin,
         "digest": incoming,
@@ -1762,11 +1828,21 @@ def push_to_peer(
         row for row in bundle["teams"] if remote_teams.get(str(row["name"])) != digest_of(row)
     ]
     instructions_out, instructions_report = _instructions_to_send(bundle, remote)
+    peer_label = _peer_sentence(server, device_id)
     if not missing_agents and not missing_teams and instructions_out is None:
+        _attach_instructions_notice(instructions_report, peer_label=peer_label)
         return {
             "ok": True,
             "code": "in_sync",
-            "message": self_sentence(server) + " and this device hold the same definitions",
+            "message": self_sentence(server)
+            + " and this device hold the same "
+            # A refused instructions revision is not "the same definitions" (Q-2):
+            # the agent/team rows are, and the notice says the rest.
+            + (
+                "agent and team definitions"
+                if instructions_report.get("outcome") == "conflict"
+                else "definitions"
+            ),
             "device_id": device_id,
             "pushed": False,
             "agents": {str(row["name"]): digest_of(row) for row in bundle["agents"]},
@@ -1817,18 +1893,30 @@ def push_to_peer(
             {
                 "outcome": str(answered.get("outcome") or ""),
                 **({"reason": str(answered["reason"])} if answered.get("reason") else {}),
+                **({"code": str(answered["code"])} if answered.get("code") else {}),
             }
             if isinstance(answered, Mapping)
             else {"outcome": "no_answer"}
         )
+    _attach_instructions_notice(instructions_report, peer_label=peer_label)
     ok = not conflicts and not refused
+    # WHAT WAS SENT, named by what actually moved (QA round 1, Q-2): a push that
+    # carried only the instructions used to read "sent 0 agents and 0 team
+    # definitions", which says nothing happened on exactly the push that did.
+    sent: list[str] = []
+    if missing_agents or missing_teams:
+        sent.append(
+            f"{len(missing_agents)} {'agent' if len(missing_agents) == 1 else 'agents'}"
+            f" and {len(missing_teams)} team "
+            f"{'definition' if len(missing_teams) == 1 else 'definitions'}"
+        )
+    if instructions_out is not None:
+        sent.append("the custom instructions")
     return {
         "ok": ok,
         "code": "applied" if ok else "conflict",
         "message": (
-            f"sent {len(missing_agents)} {'agent' if len(missing_agents) == 1 else 'agents'}"
-            f" and {len(missing_teams)} team "
-            f"{'definition' if len(missing_teams) == 1 else 'definitions'}"
+            "sent " + " and ".join(sent)
             if ok
             else "that device would not take every definition: "
             + _describe_rows(conflicts + refused)
@@ -1885,8 +1973,87 @@ def _instructions_to_send(
         # was about a file that no longer exists.
         and str(remote_in.get("status") or "") != "absent"
     ):
-        return None, {"outcome": "conflict", "reason": str(prior.get("reason") or "")}
+        return None, {
+            "outcome": "conflict",
+            "reason": str(prior.get("reason") or ""),
+            **({"code": str(prior["code"])} if prior.get("code") else {}),
+        }
     return dict(ours), {"outcome": "sent"}
+
+
+#: The instructions outcomes that mean the peer now holds (or deliberately needs)
+#: nothing further from this push. ``unsupported`` is an older peer that cannot
+#: hold them at all: not "an older copy", so a move notice must not claim one.
+INSTRUCTIONS_SETTLED_OUTCOMES = frozenset(
+    {"installed", "updated", "unchanged", "in_sync", "none", "unsupported"}
+)
+
+
+def instructions_conflict_notice(
+    conflict: Mapping[str, Any], *, peer_label: str, sender_label: str = ""
+) -> str:
+    """The sentence, in the SENDER's voice, for a peer that kept its own instructions.
+
+    WHY IT EXISTS (review round 1, R1-2; QA round 1, Q-2): the receiver's reason is
+    written for the receiver ("this device has its own…"), so printed on the head
+    it read as if the head were the one refusing, and it only ever showed in
+    ``definitions state`` on the node. The operator acts on two facts: WHICH device
+    kept its own copy, and how to get the head's rules there. One spelling, shared
+    by the push CLI, the create and move receipts and the readiness row, so the
+    remedy cannot drift between them. Informational everywhere it appears: a node's
+    own instructions never fail a create, a move or readiness.
+
+    ``conflict`` is a push report or a node's recorded conflict (``code`` +
+    ``reason``); an older node's report carries no ``code`` and reads through its
+    own reason.
+    """
+    code = str(conflict.get("code") or "")
+    theirs = f"{sender_label}'s" if sender_label else "this device's"
+    remedy = (
+        f"delete or blank the custom instructions on {peer_label} (system_prompt.md in "
+        f"its config directory) to receive {theirs}"
+    )
+    if code == "own":
+        return (
+            f"{peer_label} keeps its own custom instructions, so {theirs} were not "
+            f"installed; {remedy}"
+        )
+    if code == "edited":
+        return (
+            f"{peer_label} keeps its own edited copy of the custom instructions, so {theirs} "
+            f"update was not installed; {remedy}"
+        )
+    if code == "other_origin":
+        return (
+            f"{peer_label} keeps a copy of another device's custom instructions, so {theirs} "
+            f"were not installed; {remedy}"
+        )
+    if code == "unreadable":
+        return (
+            f"{peer_label} could not read its own custom instructions file, so {theirs} "
+            f"were not installed over it; {remedy}"
+        )
+    if code == "symlink":
+        return (
+            f"{peer_label}'s custom instructions are a link to another file, so {theirs} "
+            "were not installed; replace the link with a file, or edit its target there"
+        )
+    reason = str(conflict.get("reason") or "it kept its own copy")
+    return f"{peer_label} did not install {theirs} custom instructions ({reason})"
+
+
+def _attach_instructions_notice(report: dict[str, Any], *, peer_label: str) -> None:
+    """Stamp a push report's ``notice`` when the peer kept its own instructions."""
+    if report.get("outcome") == "conflict":
+        report["notice"] = instructions_conflict_notice(report, peer_label=peer_label)
+
+
+def _peer_sentence(server: "RelayServer", device_id: str) -> str:
+    """The peer's member name for a sentence, falling back to its device id."""
+    try:
+        return server._member_name(device_id) or device_id  # noqa: SLF001 — the mesh's own name
+    except Exception:  # noqa: BLE001 — a sentence must not raise
+        return device_id
 
 
 def self_sentence(server: "RelayServer") -> str:

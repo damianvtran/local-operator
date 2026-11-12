@@ -423,6 +423,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the peer's recorded custom-instructions conflict sentence, relayed into the report",
     ),
+    # The peer-voiced kept-own-copy sentence falls back to the peer's own reason only
+    # for an older node whose report carries no ``code`` (PR #3829 round 1, Q-2).
+    ("local_operator/network/definitions.py", "instructions_conflict_notice", "reason"): (
+        1,
+        "an older node's custom-instructions conflict sentence, quoted when it sent no code",
+    ),
+    # The move notice quotes the instructions report's own sentence (a withheld or
+    # refused revision) when only the instructions failed to refresh (R1-4).
+    ("local_operator/network/mobility.py", "_push_move_definitions", "reason"): (
+        1,
+        "the push report's custom-instructions sentence, relayed onto the move receipt",
+    ),
     # The mobility slice's wire transport reads the ACK'S ``detail`` key - the
     # envelope field itself, never rendered to anyone: what a surface renders is the
     # ``message`` INSIDE it, and the codes beside it are what a front end branches on.

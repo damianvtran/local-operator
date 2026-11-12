@@ -46,9 +46,10 @@ def _root(tmp_path: Path, name: str) -> Path:
 class _PeerLink:
     """A link whose far end is ``peer_root``, served by the real handler bodies."""
 
-    def __init__(self, peer_root: Path, *, legacy: bool = False) -> None:
+    def __init__(self, peer_root: Path, *, legacy: bool = False, origin: str = HEAD_DEVICE) -> None:
         self.peer_root = peer_root
         self.legacy = legacy
+        self.origin = origin
         self.frames: list[dict[str, Any]] = []
 
     def request(self, frame: dict[str, Any], timeout: float = 0) -> Any:
@@ -60,7 +61,7 @@ class _PeerLink:
                 detail.pop(definitions.OPERATOR_INSTRUCTIONS_KIND)
             return {"op": "ok", "detail": detail}
         summary = definitions.apply_bundle(
-            self.peer_root, frame["bundle"], origin_device=HEAD_DEVICE
+            self.peer_root, frame["bundle"], origin_device=self.origin
         )
         return {"op": "ok", "detail": summary}
 
@@ -331,3 +332,265 @@ def test_the_move_receipt_prints_the_stale_definitions_notice() -> None:
     notice = "team 'lopdev' and the custom instructions on node may be an older copy"
     assert _carry_lines({"carry": {"definitions_notice": notice}}) == [notice]
     assert _carry_lines({"carry": {}}) == []
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation (PR #3829): the ``aida:profile`` section, blank files, and
+# where a kept-own-copy is said. Every cell below failed on c038053.
+# ---------------------------------------------------------------------------
+
+
+def _login(root: Path, name: str, email: str) -> None:
+    """What ``lop login`` writes: the sign-in identity, through the real writer."""
+    from local_operator.aida.profile import record_account_identity
+
+    assert record_account_identity(name, email, config_dir=root) == "recorded"
+
+
+def test_a_login_before_pairing_does_not_block_the_heads_rules(tmp_path: Path) -> None:
+    """R1-1 (a): install -> ``lop login`` -> pair. The node's file holds ONLY its
+    profile section, which is not instructions, so the head's install and the node
+    keeps its own sign-in identity; the head's identity never travels."""
+    from local_operator.aida.profile import SECTION_START
+
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _instructions(head).write_text(HEAD_RULES, encoding="utf-8")
+    _login(head, "Head Operator", "head@example.test")
+    _login(node, "Node Operator", "node@example.test")
+    assert definitions.operator_instructions_state(node)["status"] == "absent"
+    # The head's outgoing row carries no profile section at all.
+    row = definitions.local_bundle(head)[definitions.OPERATOR_INSTRUCTIONS_KIND]
+    assert SECTION_START not in row["text"] and "head@example.test" not in row["text"]
+    link = _PeerLink(node)
+
+    result = definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+
+    assert result[definitions.OPERATOR_INSTRUCTIONS_KIND] == {"outcome": "installed"}, result
+    text = _instructions(node).read_text(encoding="utf-8")
+    assert HEAD_RULES.strip() in text
+    assert "node@example.test" in text and "head@example.test" not in text, text
+    assert definitions.operator_instructions_state(node)["status"] == "mirror"
+    link.frames.clear()
+    again = definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+    assert again["code"] == "in_sync" and link.applies() == [], again
+
+
+def test_a_login_after_the_mirror_keeps_it_following_the_head(tmp_path: Path) -> None:
+    """R1-1 (b): the mirror landed, then the node signs in with ANOTHER account.
+    The mirror is still untouched (status ``mirror``), so the head's next edit
+    updates it, and the node's new identity survives the update."""
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _instructions(head).write_text(HEAD_RULES, encoding="utf-8")
+    _login(head, "Head Operator", "head@example.test")
+    link = _PeerLink(node)
+    definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+    _login(node, "Other Account", "other@example.test")
+    assert definitions.operator_instructions_state(node)["status"] == "mirror"
+
+    _instructions(head).write_text(
+        _instructions(head).read_text(encoding="utf-8") + "\n- Release once per window.\n",
+        encoding="utf-8",
+    )
+    updated = definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+
+    assert updated[definitions.OPERATOR_INSTRUCTIONS_KIND] == {"outcome": "updated"}, updated
+    text = _instructions(node).read_text(encoding="utf-8")
+    assert "Release once per window" in text and "other@example.test" in text, text
+    assert "head@example.test" not in text
+    assert definitions.operator_instructions_state(node)["status"] == "mirror"
+
+
+def test_a_login_only_node_cannot_seed_a_third_node_first(tmp_path: Path) -> None:
+    """R1-1 (c): a node that only signed in has nothing to send, so it cannot reach
+    a blank third node before the head and lock the head out by origin."""
+    head, n1, n2 = _root(tmp_path, "head"), _root(tmp_path, "n1"), _root(tmp_path, "n2")
+    _instructions(head).write_text(HEAD_RULES, encoding="utf-8")
+    _login(n1, "Node Operator", "node@example.test")
+    n1_device = "d_" + "c" * 32
+
+    from_n1 = definitions.push_to_peer(
+        _Server(n1, _PeerLink(n2, origin=n1_device)), NODE_DEVICE  # type: ignore[arg-type]
+    )
+    assert from_n1[definitions.OPERATOR_INSTRUCTIONS_KIND] == {"outcome": "none"}, from_n1
+    assert not _instructions(n2).exists()
+
+    head_server = _Server(head, _PeerLink(n2))
+    from_head = definitions.push_to_peer(head_server, NODE_DEVICE)  # type: ignore[arg-type]
+    assert from_head[definitions.OPERATOR_INSTRUCTIONS_KIND] == {"outcome": "installed"}
+    state = definitions.operator_instructions_state(n2)
+    assert state["status"] == "mirror" and state["origin"] == HEAD_DEVICE, state
+
+
+def test_a_whitespace_only_node_file_is_installed_over_once(tmp_path: Path) -> None:
+    """Q-1: ``"\n"`` (a cleared Settings field) is blank, not unreadable: the head
+    installs, and the next push is ``in_sync`` with no apply."""
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _instructions(head).write_text(HEAD_RULES, encoding="utf-8")
+    _instructions(node).write_text("\n", encoding="utf-8")
+    link = _PeerLink(node)
+
+    first = definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+    assert first[definitions.OPERATOR_INSTRUCTIONS_KIND] == {"outcome": "installed"}, first
+    assert _instructions(node).read_text(encoding="utf-8") == HEAD_RULES
+    link.frames.clear()
+    second = definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+    assert second[definitions.OPERATOR_INSTRUCTIONS_KIND] == {"outcome": "in_sync"}, second
+    assert link.applies() == []
+
+
+def test_an_unreadable_node_file_is_kept_and_not_re_sent(tmp_path: Path) -> None:
+    """The other half of Q-1: a file that cannot be decoded is never written over,
+    reports ``unreadable`` (not ``absent``), so the same revision is not re-sent."""
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _instructions(head).write_text(HEAD_RULES, encoding="utf-8")
+    _instructions(node).write_bytes(b"\xff\xfe\xfa not utf-8")
+    link = _PeerLink(node)
+
+    first = definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+    report = first[definitions.OPERATOR_INSTRUCTIONS_KIND]
+    assert report["outcome"] == "conflict" and report["code"] == "unreadable", first
+    assert _instructions(node).read_bytes() == b"\xff\xfe\xfa not utf-8"
+    assert definitions.operator_instructions_state(node)["status"] == "unreadable"
+    link.frames.clear()
+    definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+    assert link.applies() == []
+
+
+class _NamedServer(_Server):
+    def _member_name(self, device_id: str) -> str:
+        return "device-b" if device_id == NODE_DEVICE else ""
+
+
+def test_the_head_names_the_peer_that_kept_its_own_and_what_was_sent(tmp_path: Path) -> None:
+    """Q-2: the head's sentence names the PEER and the remedy, and a push that only
+    carried the instructions does not read "sent 0 agents and 0 team definitions"."""
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _instructions(head).write_text(HEAD_RULES, encoding="utf-8")
+    _instructions(node).write_text(NODE_RULES, encoding="utf-8")
+    link = _PeerLink(node)
+
+    kept = definitions.push_to_peer(_NamedServer(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+    notice = kept[definitions.OPERATOR_INSTRUCTIONS_KIND]["notice"]
+    assert notice.startswith("device-b keeps its own custom instructions"), notice
+    assert "delete or blank the custom instructions on device-b" in notice
+    assert "this device has" not in notice
+    assert "sent 0" not in kept["message"], kept
+    # The suppressed re-offer (same revision) still names the peer.
+    named = _NamedServer(head, link)
+    again = definitions.push_to_peer(named, NODE_DEVICE)  # type: ignore[arg-type]
+    assert again[definitions.OPERATOR_INSTRUCTIONS_KIND]["notice"] == notice, again
+    assert "agent and team definitions" in again["message"], again
+
+    blank = _root(tmp_path, "blank")
+    to_blank = _NamedServer(head, _PeerLink(blank))
+    sent = definitions.push_to_peer(to_blank, NODE_DEVICE)  # type: ignore[arg-type]
+    assert sent["message"] == "sent the custom instructions", sent
+
+
+def test_readiness_names_a_node_that_kept_its_own_instructions(tmp_path: Path) -> None:
+    """R1-2: ``lop network ready`` carries the kept-own-copy with its remedy, as a
+    non-gating ``warn`` row; no row when there is nothing to name."""
+    from types import SimpleNamespace
+
+    from local_operator.network import readiness
+
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _instructions(head).write_text(HEAD_RULES, encoding="utf-8")
+    member = SimpleNamespace(device_id=NODE_DEVICE, name="device-b")
+
+    def labels(device_id: str) -> str:
+        return "head" if device_id == HEAD_DEVICE else ""
+
+    definitions.push_to_peer(_Server(head, _PeerLink(node)), NODE_DEVICE)  # type: ignore[arg-type]
+    facts = {"custom_instructions": readiness.custom_instructions_fact(node)}
+    assert (
+        readiness.custom_instructions_row(member, facts, peer_label="device-b", origin_label=labels)
+        is None
+    )
+    assert (
+        readiness.custom_instructions_row(member, {}, peer_label="x", origin_label=labels) is None
+    )
+
+    own = _root(tmp_path, "own")
+    _instructions(own).write_text(NODE_RULES, encoding="utf-8")
+    definitions.push_to_peer(_Server(head, _PeerLink(own)), NODE_DEVICE)  # type: ignore[arg-type]
+    facts = {"custom_instructions": readiness.custom_instructions_fact(own)}
+    row = readiness.custom_instructions_row(
+        member, facts, peer_label="device-b", origin_label=labels
+    )
+    assert row is not None
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN, row
+    assert row["detail"].startswith("device-b keeps its own custom instructions, so head's"), row
+    assert "delete or blank" in row["detail"]
+    assert readiness.onboarding_failures([row]) == []
+    # Names only: never the text.
+    assert NODE_RULES.strip() not in json.dumps(facts)
+
+
+def test_an_unnamed_create_receipt_carries_the_kept_own_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1-2: the create reply carries the notice and the session is still created."""
+    from local_operator.network import relay
+
+    server = relay.RelayServer(
+        root=_root(tmp_path, "head"),
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+    )
+    notice = "device-b keeps its own custom instructions, so this device's were not installed"
+
+    def push(srv: Any, device_id: str, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "code": "in_sync",
+            definitions.OPERATOR_INSTRUCTIONS_KIND: {"outcome": "conflict", "notice": notice},
+        }
+
+    monkeypatch.setattr(definitions, "push_to_peer", push)
+    monkeypatch.setattr(server, "_resolve_peer", lambda peer: NODE_DEVICE)
+    monkeypatch.setattr(
+        server, "_local_peer_call", lambda *a, **k: {"ok": True, "session_id": "s1"}
+    )
+
+    reply = server._ctl_peer_create({"peer": "device-b", "prompt": ""})
+
+    assert reply["session_id"] == "s1" and reply["custom_instructions_notice"] == notice, reply
+
+
+def _move_notice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pushed: dict[str, Any]) -> str:
+    from types import SimpleNamespace
+
+    from local_operator.network import mobility
+
+    monkeypatch.setattr(definitions, "push_to_peer", lambda *a, **k: pushed)
+    server = SimpleNamespace(root=str(tmp_path))
+    return mobility._push_move_definitions(
+        server, "sess", NODE_DEVICE, "device-b"  # type: ignore[arg-type]
+    )
+
+
+def test_the_move_notice_names_only_what_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-4 and R1-2 on the move receipt."""
+    kind = definitions.OPERATOR_INSTRUCTIONS_KIND
+    # A row conflict with the instructions installed: the instructions are not blamed.
+    # (No attachment here, so no team is named either; the reason carries the row.)
+    row_only = _move_notice(
+        monkeypatch,
+        tmp_path,
+        {"ok": False, "message": "team 'x' (local edits)", kind: {"outcome": "installed"}},
+    )
+    assert "custom instructions" not in row_only, row_only
+    # Transport failure: the instructions' fate is unknown, so they are named.
+    lost = _move_notice(monkeypatch, tmp_path, {"ok": False, "message": "link dropped"})
+    assert lost.startswith("the custom instructions on device-b may be an older copy"), lost
+    # The peer kept its own: the shared sentence with its remedy, nothing "stale".
+    kept = _move_notice(
+        monkeypatch,
+        tmp_path,
+        {"ok": True, kind: {"outcome": "conflict", "notice": "device-b keeps its own …"}},
+    )
+    assert kept == "device-b keeps its own …", kept
+    # Clean: nothing.
+    assert _move_notice(monkeypatch, tmp_path, {"ok": True, kind: {"outcome": "in_sync"}}) == ""
