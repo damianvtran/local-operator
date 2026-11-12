@@ -25,6 +25,7 @@ from local_operator.hub_sync.identity import Kind, LinkIdentity, Visibility
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.hub_links_panel import HubLinksPanel
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.waiting import settle
 
 HUB = "https://api.radienthq.com/v1"
 
@@ -1296,9 +1297,20 @@ async def test_a_failed_post_write_reread_keeps_the_session_and_reports(
 
         app._hub_links_snapshot_sync = flaky  # type: ignore[method-assign]
         await pilot.press("s")
-        await pilot.pause()
-        await pilot.pause()
-        await pilot.pause()
+        # The policy write and the failing re-read are two `asyncio.to_thread`
+        # hops inside the `hub-links` worker (`app.py`
+        # `on_hub_links_panel_policy_toggle_requested.run`); the save-failed
+        # notice is painted only after the second hop raises. A fixed number of
+        # `pilot.pause()`s is a CPU-idle bet that a loaded CI shard loses (job
+        # 130849333737 saw `_notice == ''`). Join the worker, and wait for the
+        # card to leave `Saving…`: `show_save_failed` clears `_refreshing`
+        # before painting. The notice text is left to the assertion below.
+        await settle(
+            pilot,
+            lambda: not _mounted_panel(app)._refreshing,
+            what="the policy write and the failed re-read",
+            workers=("hub-links",),
+        )
         assert app.is_running, "a failed re-read must not kill the session (U1)"
         panel = _mounted_panel(app)
         assert panel.is_open
