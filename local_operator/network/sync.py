@@ -55,6 +55,7 @@ import re
 import stat
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -1120,10 +1121,59 @@ def referenced_attachments_in(directory: Path) -> list[str]:
         resolved = compression.transcript_for_read(Path(directory))
         if resolved is None:
             return []
-        payload = resolved.read_bytes()
+        info = resolved.stat()
     except (OSError, compression.ArchiveError):
         return []
-    return sorted({match.decode("ascii") for match in _ATTACHMENT_REF.findall(payload)})
+    # MEMOISED ON THE FILE'S IDENTITY (docs/design/remote-files-parity.md §4, C1): the
+    # owner authorises EVERY phase of a pull by this set, and a 32 MiB pull has 65
+    # phases — rescanning a 64 MiB transcript each time cost 58 ms and 64 MiB of
+    # transient allocation per 512 KiB chunk. Any append moves size/mtime_ns, a
+    # rewrite-and-rename moves the inode, so a stale set is never served.
+    key = (str(resolved), info.st_size, info.st_mtime_ns, info.st_ino)
+    with _REFERENCE_MEMO_LOCK:
+        cached = _REFERENCE_MEMO.get(key)
+        if cached is not None:
+            _REFERENCE_MEMO.move_to_end(key)
+            return list(cached)
+    try:
+        found = _scan_references(resolved)
+    except OSError:
+        return []
+    with _REFERENCE_MEMO_LOCK:
+        _REFERENCE_MEMO[key] = found
+        _REFERENCE_MEMO.move_to_end(key)
+        while len(_REFERENCE_MEMO) > _REFERENCE_MEMO_SIZE:
+            _REFERENCE_MEMO.popitem(last=False)
+    return list(found)
+
+
+#: Entries kept by ``referenced_attachments_in``'s memo. Eight covers a family a
+#: precache pass walks (the parent plus a few children) without holding stale sets
+#: for every session a long-lived relay ever served; each entry is a tuple of digests.
+_REFERENCE_MEMO_SIZE = 8
+_REFERENCE_MEMO: OrderedDict[tuple[str, int, int, int], tuple[str, ...]] = OrderedDict()
+_REFERENCE_MEMO_LOCK = threading.Lock()
+#: The scan's window and overlap. A reference row is at most ~50 bytes as the
+#: harness writes it (``"attachment": "<32 hex>"``), so a 64-byte overlap carried
+#: into the next window finds one that straddles a boundary; RAM stays ~4 MiB however
+#: long the transcript is.
+_SCAN_WINDOW = 4 * 1024 * 1024
+_SCAN_OVERLAP = 64
+
+
+def _scan_references(path: Path) -> tuple[str, ...]:
+    """Every digest ``path`` references, read in bounded windows (never whole)."""
+    found: set[str] = set()
+    tail = b""
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(_SCAN_WINDOW)
+            if not chunk:
+                break
+            window = tail + chunk
+            found.update(match.decode("ascii") for match in _ATTACHMENT_REF.findall(window))
+            tail = window[-_SCAN_OVERLAP:]
+    return tuple(sorted(found))
 
 
 def referenced_attachments(root: Path, session_id: str) -> list[str]:
