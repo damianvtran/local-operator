@@ -111,11 +111,15 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     assert _sessions(owner) == [minted]
     assert "lost" in first["detail"] and minted in first["detail"], first
     key = first["create_key"]
+    # Unnamed creates first reconcile operator instructions, best effort. The
+    # create-only wire cannot serve that preflight, but it must still observe
+    # it before the create whose lost reply is settled by the keyed lookup.
     assert [f["op"] for f in wire.sent] == [
+        "net_definitions",
         "net_session_create",
         "net_session_create_lookup",
     ]
-    assert wire.sent[0]["create_key"] == key and wire.sent[1]["create_key"] == key
+    assert wire.sent[1]["create_key"] == key and wire.sent[2]["create_key"] == key
 
     retry = requester._ctl_peer_create({"peer": "node-2", "create_key": key})  # noqa: SLF001
     assert retry["session_id"] == minted, retry
