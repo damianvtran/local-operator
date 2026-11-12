@@ -1641,7 +1641,7 @@ class SessionTable:
                     "section": "active" if is_active else "previous",
                     "pinned": session_id in self.pins,
                     "temporary": temporary_rows.info(
-                        session_id, bool(row.temporary) if row else None
+                        session_id, bool(getattr(row, "temporary", False)) if row else None
                     ),
                     # Tag decoration, from the same registry snapshot for every
                     # row in this listing. Always present (see the docstring).
