@@ -1693,6 +1693,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
     ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "os.replace",
+        "mkstemp-created temp FILE -> <config>/system_prompt.md (the only caller "
+        "passes aida.profile.instruction_file(root)); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "<path>.unlink",
+        "only the mkstemp temp FILE this write created, on a failed write",
+    ),
     # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
     # the marker FILE beside the transcript, whose name is the fixed
     # `DESKTOP_MARKER_NAME` basename joined onto the session directory the bridge

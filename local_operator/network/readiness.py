@@ -44,7 +44,16 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, NamedTuple, Protocol, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    NamedTuple,
+    Protocol,
+    Sequence,
+)
 
 from local_operator.network import wire
 

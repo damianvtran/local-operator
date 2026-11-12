@@ -1834,8 +1834,7 @@ def push_to_peer(
         return {
             "ok": True,
             "code": "in_sync",
-            "message": self_sentence(server)
-            + " and this device hold the same "
+            "message": self_sentence(server) + " and this device hold the same "
             # A refused instructions revision is not "the same definitions" (Q-2):
             # the agent/team rows are, and the notice says the rest.
             + (
