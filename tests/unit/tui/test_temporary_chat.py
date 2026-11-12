@@ -109,9 +109,12 @@ def test_the_slash_command_is_registered() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_band_segment_is_dropped_just_before_approvals() -> None:
+def test_the_band_segment_sheds_late_but_never_outlives_an_alarm() -> None:
+    """Just ahead of ``fork`` (the other state rung), behind every reading."""
     for ladder in (status_line._DROP_LADDER, status_line._DROP_LADDER_QUIET):
-        assert ladder.index("temporary") == ladder.index("approvals") - 1
+        assert ladder.index("temporary") == ladder.index("fork") - 1
+        assert ladder.index("temporary") > ladder.index("context")
+        assert ladder.index("temporary") < ladder.index("approvals")
 
 
 def test_the_sidebar_files_temporary_chats_in_their_own_group_first() -> None:

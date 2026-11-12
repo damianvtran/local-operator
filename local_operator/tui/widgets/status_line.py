@@ -597,6 +597,12 @@ _DROP_LADDER: tuple[str, ...] = (
     # so a healthy count sheds first and this rung outlives it — which is the
     # right way round for the same reason that demotion exists: a healthy count
     # is a courtesy and an armed fork is a thing the user can still cancel.
+    # A TEMPORARY CHAT: kept almost to the end because it is a standing
+    # statement that this conversation will be DELETED, which nothing else on
+    # screen says once the notice has scrolled away. A STATE like `fork`, not
+    # an alarm, so it sheds just ahead of `fork` and leaves the last places to
+    # the two alarms (the MCP danger count and `approvals`).
+    "temporary",
     "fork",
     # Second-to-last. Its failure branch is an ALARM: the danger-tinted glyph is
     # the only place the band admits the agent is missing tools it was
@@ -622,11 +628,6 @@ _DROP_LADDER: tuple[str, ...] = (
     # scroll — a saved `tool_approval_mode: auto` is adopted at boot with no
     # notice at all (see ``_adopt_saved_approvals``), so this is the only
     # standing indication that no tool will ask before it runs.
-    # A TEMPORARY CHAT: kept almost to the end because it is a standing
-    # statement that this conversation will be DELETED, which nothing else on
-    # screen says once the notice has scrolled away. Just before `approvals`,
-    # whose single-glyph alarm keeps last place by that rung's own argument.
-    "temporary",
     "approvals",
 )
 
