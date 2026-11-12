@@ -352,6 +352,7 @@ export type MessageParams = {
   "relay.session.temporary_deleted_title": undefined;
   "relay.session.temporary_keep": undefined;
   "relay.session.temporary_make": undefined;
+  "relay.session.temporary_make_confirm": undefined;
   "relay.session.temporary_new": undefined;
   "relay.session.temporary_subtitle": { "status": string };
   "relay.session.temporary_toggle": undefined;

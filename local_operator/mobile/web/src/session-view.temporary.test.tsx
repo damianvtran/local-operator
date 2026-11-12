@@ -9,7 +9,7 @@
 //   * the ⋮ row keeps at once, and asks before making a chat with messages
 //     temporary;
 //   * a deleted temporary chat (404 `session_temporary_deleted`) shows the
-//     tombstone, and "New temporary chat" carries the unsent draft over.
+//     tombstone, and "New temporary session" carries the unsent draft over.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
@@ -99,12 +99,18 @@ describe("header toggle", () => {
 		render(<SessionScreen sessionId="s1" />);
 		const button = toggle();
 		expect(button).not.toBeNull();
-		expect(button?.getAttribute("aria-label")).toBe("Temporary chat");
+		expect(button?.getAttribute("aria-label")).toBe("Temporary session");
 		expect(button?.getAttribute("aria-pressed")).toBe("false");
+		expect(button?.className).not.toContain("bg-accent-wash");
 		expect(button?.nextElementSibling?.getAttribute("aria-label")).toBe("session menu");
 		await act(async () => { fireEvent.click(button as HTMLElement); });
 		expect(setSessionTemporary).toHaveBeenCalledWith("s1", true);
 		await waitFor(() => expect(toggle()?.getAttribute("aria-pressed")).toBe("true"));
+		// ON is the relay's pressed pair (wash ground + accent ink), not hue
+		// alone (design D4): the ground is what tells ON from OFF in the 18 of
+		// 31 palettes where accent and muted ink are within 1.2:1.
+		expect(toggle()?.className).toContain("bg-accent-wash");
+		expect(toggle()?.className).toContain("text-accent");
 	});
 
 	it("is gone once the chat has a message", () => {
@@ -148,8 +154,9 @@ describe("⋮ menu row", () => {
 		render(<SessionScreen sessionId="s1" />);
 		fireEvent.click(screen.getByRole("button", { name: "session menu" }));
 		const item = document.querySelector('[data-menu="temporary"]') as HTMLElement;
-		expect(item.textContent).toContain("Keep chat");
-		expect(item.getAttribute("aria-pressed")).toBe("true");
+		expect(item.textContent).toContain("Keep session");
+		// An action row, not a toggle: "Keep session, pressed" contradicted itself (D7).
+		expect(item.hasAttribute("aria-pressed")).toBe(false);
 		await act(async () => { fireEvent.click(item); });
 		expect(setSessionTemporary).toHaveBeenCalledWith("s1", false);
 	});
@@ -161,12 +168,14 @@ describe("⋮ menu row", () => {
 		fireEvent.click(document.querySelector('[data-menu="temporary"]') as HTMLElement);
 		expect(setSessionTemporary).not.toHaveBeenCalled();
 		const confirm = document.querySelector('[data-menu="temporary-confirm"]') as HTMLElement;
-		expect(screen.getByText("Make this chat temporary?")).toBeTruthy();
+		expect(screen.getByText("Make this session temporary?")).toBeTruthy();
 		expect(confirm.textContent).toContain("Files it changed on your computer are kept.");
 		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 		expect(setSessionTemporary).not.toHaveBeenCalled();
 		fireEvent.click(document.querySelector('[data-menu="temporary"]') as HTMLElement);
-		await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Make temporary…" })); });
+		// The commit button has its own label, without the row's ellipsis (D6).
+		expect(screen.queryByRole("button", { name: "Make temporary…" })).toBeNull();
+		await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Make temporary" })); });
 		expect(setSessionTemporary).toHaveBeenCalledWith("s1", true);
 	});
 });
@@ -177,21 +186,21 @@ describe("tombstone", () => {
 		drafts.set("s1", "half-written question");
 		render(<SessionScreen sessionId="s1" />);
 		expect(document.querySelector("[data-temporary-tombstone]")).not.toBeNull();
-		expect(screen.getByText("This temporary chat was deleted")).toBeTruthy();
+		expect(screen.getByText("This temporary session was deleted")).toBeTruthy();
 		expect(screen.queryByText("Quick regex question")).toBeNull();
 		expect(document.querySelector("[data-draft]")?.textContent).toBe("half-written question");
-		await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New temporary chat" })); });
+		await act(async () => { fireEvent.click(screen.getByRole("button", { name: "New temporary session" })); });
 		expect(startSession).toHaveBeenCalledWith({ temporary: true });
 		expect(drafts.get("fresh1")).toBe("half-written question");
 		expect(drafts.get("s1")).toBe("");
 		expect(location.hash).toBe("#/s/fresh1");
 	});
 
-	it("offers only Back to chats without the capability", () => {
+	it("offers only Back to sessions without the capability", () => {
 		tombstone = null;
 		caps = null;
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.queryByRole("button", { name: "New temporary chat" })).toBeNull();
-		expect(screen.getAllByRole("button", { name: "Back to chats" }).length).toBeGreaterThan(0);
+		expect(screen.queryByRole("button", { name: "New temporary session" })).toBeNull();
+		expect(screen.getAllByRole("button", { name: "Back to sessions" }).length).toBeGreaterThan(0);
 	});
 });

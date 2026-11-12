@@ -1708,6 +1708,10 @@ def _retiring_notice_text(error: BaseException) -> str:
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+#: How often a TEMPORARY chat's band segment re-reads its state. The countdown
+#: is shown in whole minutes over its last five, so a 30 s tick keeps it within
+#: half a minute of the pass; a kept chat skips the read entirely.
+TEMPORARY_BAND_TICK_S = 30.0
 
 #: How often the terminal asks whether this machine's connector parked itself.
 #:
@@ -6902,6 +6906,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
         # driver. A tty can EOF before the first interval tick, and requiring a
@@ -12859,6 +12864,7 @@ class OperatorApp(App[None]):
         # The count has no event to hang off (see JOB_POLL_INTERVAL_S).
         self.set_interval(JOB_POLL_INTERVAL_S, self._poll_subagents)
         self.set_interval(1.0, self._poll_completion_attention)
+        self.set_interval(TEMPORARY_BAND_TICK_S, self._tick_temporary_band)
         self.set_interval(TERMINAL_LIFECYCLE_CHECK_S, self._check_terminal_frontend)
         # Prime the reader observation while mount still owns a known-live
         # driver. A tty can EOF before the first interval tick, and requiring a
@@ -14450,9 +14456,12 @@ class OperatorApp(App[None]):
             self._park_unadopted_session(built)
             raise
         except Exception as error:  # TUI-012: construction error path
+            # ``lop --temporary`` armed the mark for THIS boot's session only.
+            self._temporary_pending = None
             self._on_boot_failed(error)
             return
         if navigation_generation != self._sidebar_navigation.generation:
+            self._temporary_pending = None
             if session is not self._session:
                 await session.dispose()
             return
@@ -17626,7 +17635,11 @@ class OperatorApp(App[None]):
             self._status.update(model_label=welcome_mod.MODEL_SETUP, model_name="", streaming=False)
 
     async def _reload_session(
-        self, *, keep_context: bool = False, preserve_outgoing: bool = False
+        self,
+        *,
+        keep_context: bool = False,
+        preserve_outgoing: bool = False,
+        temporary: tuple[str] | None = None,
     ) -> None:
         """Dispose the current session, boot its replacement, and rebuild the
         ledger from what that replacement ACTUALLY holds.
@@ -17653,6 +17666,13 @@ class OperatorApp(App[None]):
         # Explicit reload replaces this workflow source. Sidebar navigation
         # never calls this path and therefore never retires its loops.
         navigation_generation = self._sidebar_navigation.generation
+        # A PENDING TEMPORARY MARK BELONGS TO ONE TRANSITION (review R1-M1).
+        # Whatever was armed before this swap (a ``lop --temporary`` boot that
+        # never bound, say) is superseded by it; this swap's own request is
+        # re-armed only immediately before it adopts the session IT built, so a
+        # failed construction, a sidebar click that supersedes it, or any other
+        # path that returns early can never leave the mark for the next chat.
+        self._temporary_pending = None
         self._interaction.retired = True
         self._retire_attach_behind(self._interaction)
         previous_id = self._conversation_id()
@@ -17951,7 +17971,12 @@ class OperatorApp(App[None]):
                         await session.dispose()
                     return
                 carried_spend = self._reset_ledger_for_swap()
-                self._adopt_session(session)
+                self._temporary_pending = temporary
+                try:
+                    self._adopt_session(session)
+                finally:
+                    # Consumed by the bind inside the adopt; never outlives it.
+                    self._temporary_pending = None
                 # Reload retired the outgoing turn before adopting a fresh
                 # interaction context. Its late unowned fallback must not give
                 # that new context a failed outcome before its first start.
@@ -20351,8 +20376,9 @@ class OperatorApp(App[None]):
             # reserved in the single-word form, like ``remote``; the mark and the
             # optional first prompt land once the new session binds.
             if pieces[0].casefold() == "temporary":
-                self._temporary_pending = (pieces[1] if len(pieces) > 1 else "",)
-                self._start_new_local_session(notice)
+                self._start_new_local_session(
+                    notice, temporary=(pieces[1] if len(pieces) > 1 else "",)
+                )
                 return
         self._start_new_local_session(notice)
 
@@ -20510,7 +20536,9 @@ class OperatorApp(App[None]):
             "warning",
         )
 
-    def _start_new_local_session(self, notice: NoticeFn) -> None:
+    def _start_new_local_session(
+        self, notice: NoticeFn, *, temporary: tuple[str] | None = None
+    ) -> None:
         if self._resume_factory is None:
             self._system_notice("new session unavailable: no session-capable launcher", "warning")
             return
@@ -20560,7 +20588,9 @@ class OperatorApp(App[None]):
         # than to this call site.
         self._reload_config_for_new_session(notice)
         notice("starting a new session…")
-        self._run_session_transition(self._reload_session())
+        # ``temporary`` rides WITH this one transition (review R1-M1): it is
+        # armed for the bind only when this reload adopts the session it built.
+        self._run_session_transition(self._reload_session(temporary=temporary))
 
     def _reload_config_for_new_session(self, notice: NoticeFn) -> None:
         """Adopt on-disk config for the session `/new` is about to build.
@@ -44662,8 +44692,10 @@ class OperatorApp(App[None]):
         # THIS machine's store and sessions, and an OLDER owner still advertises
         # the command ``authoritative_session`` — this pullback is what keeps
         # that stale advertisement from routing the command to another machine.
+        # `/temporary` joins on `/archive`'s argument: the mark it writes is
+        # `config_dir()/sessions/<id>/temporary.json`, this machine's store.
         _LOCAL_WORK_SLASHES = frozenset(
-            {"/archive", "/unarchive", "/delete", "/project", "/tag", "/tags"}
+            {"/archive", "/unarchive", "/delete", "/project", "/tag", "/tags", "/temporary"}
         )
 
         if command == "/model" and arg.strip().casefold() == "saved":
@@ -47411,13 +47443,39 @@ class OperatorApp(App[None]):
     def _apply_pending_temporary(self, session_id: str, prompt: str) -> None:
         """Mark the just-bound session temporary, then send its first prompt."""
         from local_operator.paths import config_dir
+        from local_operator.session.retention import session_activity
         from local_operator.tui import temporary_chat
 
+        # THE BACKSTOP (review R1-M1): a pending mark is for a FRESH chat, and
+        # a fresh chat has no conversation rows until its queued prompt is
+        # sent. Landing on one that does would make an existing conversation
+        # deletable without the confirmation ``/temporary on`` asks for, so it
+        # is never applied there, whatever path armed it.
+        directory = config_dir() / "sessions" / session_id
+        if session_id and session_activity(directory) is not None:
+            logger.warning(
+                "temporary: pending mark not applied to %s (it has messages)", session_id
+            )
+            self._sync_temporary_flag()
+            return
         ok, sentence = temporary_chat.apply(config_dir(), session_id, True)
         self._system_notice(sentence, "note" if ok else "warning")
         self._sync_temporary_flag()
-        if ok and prompt.strip():
-            self._submit_prompt(prompt.strip())
+        if prompt.strip():
+            if ok:
+                self._submit_prompt(prompt.strip())
+            else:
+                # Refused: the typed prompt goes back into the composer rather
+                # than vanishing behind the warning (review R1-n2).
+                self._keep_quick_send_draft(prompt.strip())
+
+    def _tick_temporary_band(self) -> None:
+        """Re-read a temporary chat's band state so its countdown moves.
+
+        Only while the bound chat IS temporary: a kept chat pays nothing.
+        """
+        if self._temporary_flag:
+            self._sync_temporary_flag()
 
     def _sync_temporary_flag(self) -> None:
         """Re-read the bound chat's mark; repaint the band word and the placeholder."""
@@ -47425,17 +47483,20 @@ class OperatorApp(App[None]):
         from local_operator.tui import temporary_chat
 
         session = self._session
-        flag = bool(session) and temporary_chat.is_temporary(
-            config_dir(), getattr(session, "session_id", "")
-        )
+        try:
+            word, alarm = (
+                temporary_chat.band_state(config_dir(), getattr(session, "session_id", ""))
+                if session
+                else ("", False)
+            )
+        except Exception:  # noqa: BLE001 — an unreadable mark reads as kept
+            logger.debug("temporary band state unreadable", exc_info=True)
+            word, alarm = "", False
+        flag = bool(word)
         self._temporary_flag = flag
         try:
-            from local_operator.i18n.keys import tui_status as _ts
-            from local_operator.i18n.text import tr
-
-            word = str(tr("tui.status")(_ts.temporary())) if flag else ""
             if self._status is not None:
-                self._status.update(temporary=word)
+                self._status.update(temporary=word, temporary_alarm=alarm)
         except Exception:  # noqa: BLE001 — before the band mounts
             logger.debug("temporary band segment not painted", exc_info=True)
         try:

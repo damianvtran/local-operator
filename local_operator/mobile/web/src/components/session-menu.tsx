@@ -122,7 +122,9 @@ export function SessionMenu({
 							onClick={() => { temporary.onSet(true); onClose(); }}
 							className="min-h-11 rounded-sm bg-accent-wash px-3 text-body font-medium text-accent active:bg-surface"
 						>
-							{messageRuntime.t("relay.session.temporary_make")}
+							{/* Its own label, without the menu row's ellipsis: this
+							    button commits, it opens nothing further. */}
+							{messageRuntime.t("relay.session.temporary_make_confirm")}
 						</button>
 					</div>
 				</div>
@@ -182,15 +184,15 @@ export function SessionMenu({
 					</span>
 				</button>
 				{temporary ? (
-					/* KEEP OR MAKE TEMPORARY, one row whose verb is the action it takes
-					   (the pin row's idiom). `aria-pressed` carries the state, so the
-					   name need not repeat it. Keeping applies at once; making an
-					   existing chat temporary asks first, in this same sheet. */
+					/* KEEP OR MAKE TEMPORARY, one ACTION row whose label is the verb it
+					   performs. No `aria-pressed`: on a row that flips its own verb,
+					   "Keep session, pressed" contradicts itself (design D7). Keeping
+					   applies at once; making an existing session temporary asks
+					   first, in this same sheet. */
 					<button
 						type="button"
 						data-menu="temporary"
 						disabled={temporary.busy}
-						aria-pressed={temporary.on}
 						onClick={() => {
 							if (temporary.on) { temporary.onSet(false); return; }
 							if (temporary.confirm) { setConfirming(true); return; }

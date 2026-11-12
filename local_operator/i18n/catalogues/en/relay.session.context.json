@@ -108,12 +108,17 @@
   "relay.session.temporary_keep": {
     "role": "⋮ menu row action that turns a temporary chat back into a normal, retained one",
     "tone": "Imperative, sentence case.",
-    "note": "No confirmation follows: keeping only removes the deletion. 'Chat' is the conversation."
+    "note": "No confirmation follows: keeping only removes the deletion. 'Session' is the relay's own noun for a conversation (as in 'Pin session')."
   },
   "relay.session.temporary_make": {
     "role": "⋮ menu row action that makes the current chat temporary",
-    "tone": "Imperative, sentence case. The ellipsis is U+2026 and signals a confirmation follows when the chat has messages.",
+    "tone": "Imperative, sentence case. The ellipsis is U+2026 and signals a confirmation follows when the session has messages.",
     "note": "Sibling of temporary_keep; exactly one of the two shows."
+  },
+  "relay.session.temporary_make_confirm": {
+    "role": "confirm sheet primary button that makes the session temporary",
+    "tone": "Imperative, sentence case, NO ellipsis: this button commits, it does not open anything further.",
+    "note": "The commit half of temporary_make (which keeps its ellipsis because it opens this confirm). 'Temporary' as in the toggle and subtitle."
   },
   "relay.session.temporary_confirm_title": {
     "role": "confirmation sheet title before an existing chat becomes temporary",

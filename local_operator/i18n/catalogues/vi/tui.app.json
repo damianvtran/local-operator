@@ -55,10 +55,10 @@
   "tui.app.temporary_hold_open_ask": "giữ lại khi còn câu hỏi đang mở",
   "tui.app.temporary_hold_armed_wake": "giữ lại khi đã đặt thức dậy",
   "tui.app.temporary_hold_armed_monitor": "giữ lại khi có giám sát đang bật",
-  "tui.app.temporary_hold_unread_mail": "giữ lại khi còn tin nhắn chưa đọc",
+  "tui.app.temporary_hold_unread_mail": "giữ lại: có tin nhắn chưa đọc",
   "tui.app.temporary_hold_operator_hold": "được giữ lại do lệnh giữ",
-  "tui.app.temporary_hold_unseen_result": "giữ lại cho đến khi bạn xem kết quả",
+  "tui.app.temporary_hold_unseen_result": "giữ lại đến khi bạn xem kết quả",
   "tui.app.temporary_hold_unsaved_files": "giữ lại khi còn tệp chưa lưu",
-  "tui.app.temporary_hold_linked": "giữ lại khi được ghim hoặc liên kết",
+  "tui.app.temporary_hold_linked": "giữ lại khi đang ghim/liên kết",
   "tui.app.temporary_hold_cannot_verify": "được giữ lại: không thể kiểm tra"
 }

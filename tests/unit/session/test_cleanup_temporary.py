@@ -463,3 +463,39 @@ def test_start_is_idempotent(tmp_path: Path) -> None:
         assert not cleanup.start_temporary_sweeper(Manager(), tmp_path)
     finally:
         cleanup.stop_temporary_sweeper()
+
+
+def test_a_keep_landing_after_the_tombstone_still_wins_and_withdraws_it(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # C-8 (review R1-m3): the Keep re-read is the LAST read before the
+    # remover, after the roster and tombstone, and the tombstone written for a
+    # chat the user then kept is withdrawn rather than left to be believed.
+    _session(root, A, idle_s=WINDOW_S + 60, mark_age_s=WINDOW_S + 60)
+    real = cleanup._append_temporary_tombstone
+
+    def tombstone_then_keep(config_dir: Path, session_id: str, now: float) -> bool:
+        landed = real(config_dir, session_id, now)
+        assert temp.write_mark(root, session_id, False, by="desktop").ok
+        return landed
+
+    monkeypatch.setattr(cleanup, "_append_temporary_tombstone", tombstone_then_keep)
+    result = _run(root)
+    assert result.expired == []
+    assert (root / "sessions" / A).is_dir()
+    assert all(entry["id"] != A for entry in temp.read_tombstones(root, now=NOW))
+
+
+def test_an_open_ask_outranks_the_wake_it_armed(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # C-12 (QA Q5): the ``ask`` tool arms a hidden deadline wake, and the guard
+    # probes wakes first, so an ask-held chat said "kept while a wake is set".
+    _session(root, A, idle_s=WINDOW_S + 60, mark_age_s=WINDOW_S + 60)
+    monkeypatch.setattr(cleanup, "_has_armed_wake", lambda *_a: True)
+    monkeypatch.setattr(cleanup, "_has_open_asks", lambda _d: True)
+    result = _run(root)
+    assert result.held == {A: "open_ask"}
+    # Control: a wake with no open ask keeps its own word.
+    monkeypatch.setattr(cleanup, "_has_open_asks", lambda _d: False)
+    assert _run(root).held == {A: "armed_wake"}

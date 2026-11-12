@@ -248,3 +248,96 @@ async def test_the_snapshot_carries_the_field(api) -> None:
     assert (await _toggle(client, session_id, False)).status_code == 200
     payload = (await client.get(f"/v1/desktop/sessions/{session_id}")).json()["result"]["payload"]
     assert payload["temporary"] is None
+
+
+def _reap(root: Path, session_id: str, now: float) -> None:
+    """What the temporary pass does to a chat: tombstone first, then remove."""
+    import shutil
+
+    (root / "sessions" / temporary.TOMBSTONES_NAME).write_text(
+        json.dumps([{"id": session_id, "deleted_at": now}])
+    )
+    shutil.rmtree(root / "sessions" / session_id)
+
+
+@pytest.mark.asyncio
+async def test_a_resident_chat_reaped_in_process_answers_the_tombstone_everywhere(api) -> None:
+    # Core #3832 round 1, C-1 (UI QA Q-1): the daemon that HOSTED the chat kept
+    # serving it from its resident bridge after the pass removed the directory
+    # (snapshot/history/events 200), and watch/warm/events could re-spawn a
+    # runtime that recreated ``sessions/<id>/``, masking the tombstone forever.
+    client, root = api
+    _session(root, MINE)
+    opened = await client.get(f"/v1/desktop/sessions/{MINE}")
+    assert opened.status_code == 200, opened.text
+    pool = client._transport.app.state.desktop_sessions  # type: ignore[attr-defined]
+    assert MINE in pool.bridges, "the open made the bridge resident"
+    now = time.time()
+    _reap(root, MINE, now)
+    for method, url, body in (
+        ("get", f"/v1/desktop/sessions/{MINE}", None),
+        ("get", f"/v1/desktop/sessions/{MINE}/history", None),
+        ("get", f"/v1/desktop/sessions/{MINE}/events", None),
+        (
+            "post",
+            f"/v1/desktop/sessions/{MINE}/watch",
+            {"subscription_id": "c" * 32, "visible": True, "can_notify": False},
+        ),
+        ("post", f"/v1/desktop/sessions/{MINE}/warm", {}),
+        ("post", f"/v1/desktop/sessions/{MINE}/temporary", {"temporary": False}),
+    ):
+        response = await getattr(client, method)(
+            url, **({"json": body} if body is not None else {})
+        )
+        assert response.status_code == 404, (url, response.status_code, response.text[:200])
+        detail = response.json()["detail"]
+        assert detail["code"] == "session_temporary_deleted", url
+        assert detail["deleted_at"] == now
+        assert not (root / "sessions" / MINE).exists(), f"{url} recreated the directory"
+    assert MINE not in pool.bridges, "the door evicted the resident bridge"
+
+
+@pytest.mark.asyncio
+async def test_a_resident_bridge_never_re_spawns_a_reaped_chat(api) -> None:
+    # The lease loop and the retire frame reach ``_schedule_warm`` without a
+    # route, so the spawn point refuses a reaped chat on its own (C-1).
+    client, root = api
+    _session(root, MINE)
+    assert (await client.get(f"/v1/desktop/sessions/{MINE}")).status_code == 200
+    pool = client._transport.app.state.desktop_sessions  # type: ignore[attr-defined]
+    bridge = pool.bridges[MINE]
+    spawned: list[str] = []
+
+    async def warm_runtime() -> None:
+        spawned.append(MINE)
+
+    # A held facade, as the lease loop has one: cold, nothing in flight.
+    from types import SimpleNamespace
+
+    bridge.remote = SimpleNamespace(is_cold=True, engage_in_flight=False, warm_runtime=warm_runtime)
+    _reap(root, MINE, time.time())
+    try:
+        bridge._schedule_warm()
+        if bridge.warm_task is not None:
+            await bridge.warm_task
+    finally:
+        bridge.remote = None  # the stand-in has no ``dispose`` for teardown
+    assert spawned == [], "a reaped chat's runtime must never be started"
+    assert not (root / "sessions" / MINE).exists()
+    # Control: the same bridge on a live chat does schedule its warm.
+    _session(root, MINE)
+    bridge.remote = SimpleNamespace(is_cold=True, engage_in_flight=False, warm_runtime=warm_runtime)
+    bridge._schedule_warm()
+    await bridge.warm_task
+    bridge.remote = None
+    assert spawned == [MINE]
+
+
+@pytest.mark.asyncio
+async def test_toggling_an_unknown_id_answers_session_not_found(api) -> None:
+    # Contract §2.3 (core QA Q4): the toggle's refusals are named
+    # temporary-chat codes, so an unknown id is ``session_not_found``.
+    client, _root = api
+    response = await _toggle(client, OTHER, True)
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "session_not_found"

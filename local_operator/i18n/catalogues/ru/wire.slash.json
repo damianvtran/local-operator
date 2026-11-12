@@ -51,5 +51,5 @@
   "wire.slash.unarchive": "Снова показать эту беседу в списках",
   "wire.slash.update": "Установить последнюю версию с PyPI и перезапустить",
   "wire.slash.usage": "Показать квоту использования провайдера",
-  "wire.slash.temporary": "Сделать чат временным или сохранить его (on, off, status)"
+  "wire.slash.temporary": "Сделать временным или сохранить (on, off, status)"
 }

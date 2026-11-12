@@ -64,6 +64,51 @@ def deletes_in(info: dict[str, Any] | None, now: float | None = None) -> str:
     return str(tr("tui.app")(_ta.temporary_deletes_in(minutes=minutes)))
 
 
+#: The band and the sidebar switch to the amber countdown only inside this many
+#: seconds of deletion: the desktop's ``showCountdown`` and the relay's
+#: ``text-warning`` rule, so every surface raises the alarm at the same moment.
+COUNTDOWN_S = 300.0
+
+
+def in_countdown(info: dict[str, Any] | None, now: float | None = None) -> bool:
+    """Whether a row's ``temporary`` object is in its last minutes, with no hold."""
+    if not info or info.get("hold"):
+        return False
+    deletes_at = info.get("deletes_at")
+    if not isinstance(deletes_at, (int, float)):
+        return False
+    clock = time.time() if now is None else now
+    return deletes_at - clock <= COUNTDOWN_S
+
+
+def band_state(root: Path, session_id: str, now: float | None = None) -> tuple[str, bool]:
+    """``(value, alarm)`` for the band's temporary segment; ``("", False)`` when kept.
+
+    At rest the value is the plain word (``tui.status.temporary``), painted
+    neutral; in the countdown it is ``deletes in N min`` and the band paints it
+    amber (design D1). A chat whose mark cannot be read is kept, so it shows
+    nothing.
+    """
+    if not is_temporary(root, session_id):
+        return "", False
+    from local_operator.i18n.keys import tui_status as _ts
+
+    info = temporary.RowProjector(root, now=now).info(session_id)
+    if in_countdown(info, now):
+        return deletes_in(info, now), True
+    return str(tr("tui.status")(_ts.temporary())), False
+
+
+def row_hint(info: dict[str, Any] | None, now: float | None = None) -> tuple[str, bool]:
+    """``(text, alarm)`` for a sidebar row in ``Temporary · N`` (design D2).
+
+    The deletes-in countdown or the hold reason -- never the chat's age, which
+    in a group about deletion reads as time LEFT. ``alarm`` is the same
+    last-minutes rule as the band.
+    """
+    return deletes_in(info, now), in_countdown(info, now)
+
+
 def status_sentence(root: Path, session_id: str, now: float | None = None) -> str:
     """The ``/temporary status`` answer."""
     _t = tr("tui.notices")

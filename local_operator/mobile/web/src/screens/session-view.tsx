@@ -388,7 +388,9 @@ function Header({
 				   starts a backend session on ＋ New, so the choice is offered on the
 				   empty view, where nothing exists yet to delete (no confirmation).
 				   After the first message the subtitle carries the mark and the ⋮
-				   menu carries the toggle. The pressed state is the existing accent. */
+				   menu carries the toggle. The pressed state is the relay's own
+				   pressed pair (`session-group-toggle.tsx`): the accent wash
+				   ground plus accent ink, so ON is not carried by hue alone. */
 				<button
 					type="button"
 					data-temporary-toggle=""
@@ -397,7 +399,10 @@ function Header({
 					aria-label={messageRuntime.t("relay.session.temporary_toggle")}
 					title={messageRuntime.t("relay.session.temporary_toggle")}
 					onClick={() => void setTemporary(!isTemporary)}
-					className={cn(HEADER_CONTROL, isTemporary ? "text-accent" : "text-ink-muted")}
+					className={cn(
+						HEADER_CONTROL,
+						isTemporary ? "bg-accent-wash text-accent" : "text-ink-muted",
+					)}
 				>
 					<ChromeIcon name="temporary" />
 				</button>

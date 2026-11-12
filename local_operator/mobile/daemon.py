@@ -31,6 +31,7 @@ import asyncio
 import collections
 import contextlib
 import copy
+import functools
 import gzip
 import hashlib
 import hmac
@@ -1061,7 +1062,6 @@ class SessionTable:
         it apart from a store with no conversations in it.
         """
         from local_operator.paths import config_dir
-        from local_operator.resume import recent_session_rows
         from local_operator.session.errors import SessionStoreUnavailable
 
         task = self._durable_rows_task
@@ -1091,7 +1091,8 @@ class SessionTable:
                 # (``_list_frame(include_temporary=…)``): this durable half is
                 # ONE cache shared by every listing on the daemon, so it carries
                 # the rows and each frame decides whether its client asked.
-                for row in recent_session_rows(directory, 100, strict=True, include_temporary=True)
+                # The ordinary window stays 100 rows; temporary rows ride on top.
+                for row in _durable_window_rows(directory)
             }
             dates = {}
             for session_id in live_ids - rows.keys():
@@ -2166,6 +2167,39 @@ def _temporary_refusal(code: str, session_id: str, **extra: Any) -> "JSONRespons
     refusal = TemporaryRefusal(code, session_id, **extra)
     body = refusal.envelope()
     return JSONResponse({"error": body.get("text") or code, **body}, status_code=refusal.status)
+
+
+#: The phone home list's durable window: the ORDINARY conversations it shows.
+DURABLE_WINDOW_ROWS = 100
+
+
+def _durable_window_rows(directory: Path) -> list[Any]:
+    """The newest :data:`DURABLE_WINDOW_ROWS` ordinary rows, plus the temporary ones among them.
+
+    Temporary rows ride ON TOP of the window rather than inside it (review
+    R1-m2): counted inside, every temporary chat pushed the oldest ordinary
+    chat off the home list, including for a client that never asked for
+    temporary rows. The scan is newest-first with temporary rows interleaved,
+    so the limit grows by the temporary rows it met until the ordinary count
+    is whole or the store runs out. Temporary chats are few and short-lived,
+    so this is one scan in practice; the loop is bounded regardless.
+    """
+    from local_operator.resume import recent_session_rows
+
+    limit = DURABLE_WINDOW_ROWS
+    rows: list[Any] = []
+    for _attempt in range(4):
+        rows = recent_session_rows(directory, limit, strict=True, include_temporary=True)
+        ordinary = sum(1 for row in rows if not row.temporary)
+        if ordinary >= DURABLE_WINDOW_ROWS or len(rows) < limit:
+            break
+        limit += DURABLE_WINDOW_ROWS - ordinary
+    return rows
+
+
+def _mark_refusal_status(code: str) -> int:
+    """A start's mark refusal: 500 when the write failed, 409 when admission said no."""
+    return 500 if code == "temporary_mark_failed" else 409
 
 
 def _temporary_deleted_response(session_id: str) -> "JSONResponse | None":
@@ -4247,6 +4281,9 @@ class MobileDaemon:
         #: make the watcher believe the change was already announced
         #: (QA round 1, Q-1). ``None`` until the first pass.
         self._tags_notified: tuple[Any, ...] | None = None
+        #: ``session.temporary.change_token`` as last PUBLISHED by
+        #: :meth:`refresh_temporary_if_changed`; ``None`` until the first pass.
+        self._temporary_notified: tuple[Any, ...] | None = None
         self._phone_attaches: dict[str, AttachClient] = {}
         self._phone_generations: dict[str, tuple[int, str]] = {}
         self._phone_attach_tasks: dict[str, asyncio.Task[None]] = {}
@@ -4858,6 +4895,7 @@ class MobileDaemon:
         await self._refresh_pins_if_changed()
         await self._refresh_notifications_if_changed()
         await self.refresh_tags_if_changed()
+        await self.refresh_temporary_if_changed()
         revision = await asyncio.to_thread(AttentionStore().revision)
         if revision != getattr(self, "_attention_revision", None):
             self._attention_revision = revision
@@ -5181,6 +5219,62 @@ class MobileDaemon:
         self.table._summaries_cache = None
         self.table._summaries_at = 0.0
         # On the loop, where ``notify_list_changed``'s ``put_nowait`` is safe.
+        self.table.notify_list_changed()
+
+    async def refresh_temporary_if_changed(self) -> None:
+        """Repaint the list stream when a temporary-chat fact moved elsewhere.
+
+        THE PINS/TAGS HOLE AGAIN (review R1-m1): a mark or Keep from the
+        desktop or TUI deliberately leaves the directory mtime alone, and an
+        expiry by another host's sweeper, or a hold starting or ending, rings
+        nothing here -- so an idle phone kept a newly temporary chat in its
+        ordinary list, and a reaped one in ``Temporary · N``. One token read
+        per scan tick (``session.temporary.change_token``: stats, plus a small
+        state read at most once per pass); on a move the DURABLE rows are
+        dropped as well as the merge, because the temporary flag and its hold
+        are durable-row facts.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.temporary import change_token, deleted_at
+
+        root = config_dir()
+        token = await asyncio.to_thread(change_token, root)
+        previous, self._temporary_notified = self._temporary_notified, token
+        if previous is None or token == previous:
+            return
+        # An EXPIRY also leaves this table holding the chat until the registry
+        # scan sees its runtime stale; drop those entries now, so the frame
+        # this repaint publishes no longer lists a chat the pass removed.
+        held = {entry.record.session_id for entry in self.table.entries.values()}
+        reaped = await asyncio.to_thread(
+            lambda: {sid for sid in held if deleted_at(root, sid) is not None}
+        )
+        for session_id in reaped:
+            self.forget_deleted_temporary(session_id)
+        self.table.invalidate_summaries_cache()
+        self.table.notify_list_changed()
+
+    def forget_deleted_temporary(self, session_id: str) -> None:
+        """Drop what this daemon still holds for a reaped temporary chat.
+
+        Reached from the session routes' tombstone check: a table entry whose
+        runtime the pass preempted is otherwise served until the registry scan
+        sees it stale, and the cached durable rows still list it. The entry is
+        dropped exactly as the scan drops a replaced registration (writer
+        closed, dial cancelled); a record that is somehow still live is simply
+        re-adopted by the next scan, and every route is refused regardless.
+        """
+        for pid, entry in list(self.table.entries.items()):
+            if entry.record.session_id != session_id:
+                continue
+            if entry.writer is not None:
+                entry.writer.close()
+            dial = self._dial_tasks.pop(pid, None)
+            if dial is not None and not dial.done():
+                dial.cancel()
+            self.table.entries.pop(pid, None)
+        self.table.provisional_active.discard(session_id)
+        self.table.invalidate_summaries_cache()
         self.table.notify_list_changed()
 
     async def refresh_tags_if_changed(self) -> None:
@@ -9533,13 +9627,17 @@ def build_app(daemon: MobileDaemon):
         return JSONResponse({"skills": rows})
 
     async def _mark_started_temporary(session_id: str) -> Response | None:
-        """Mark a just-started session temporary; a refusal response, or ``None``.
+        """Mark a session temporary BEFORE its runtime spawns; a refusal, or ``None``.
 
-        The runtime has registered by now, so its directory exists or is about
-        to; it is created here if not (the child materialises into it). A mark
-        that does not read back answers 500 ``temporary_mark_failed`` naming
-        the session: it was started, and the phone must not believe it is
-        temporary when it is not.
+        BEFORE, for two reasons (review R1-m4). The chat is never listed as an
+        ordinary one while its runtime comes up -- the desktop create's own
+        order (mark, then marker, then runtime). And the mark belongs to the
+        FRESH start only: a keyed start's replay never reaches the spawn, so a
+        replay that arrives after the user kept the chat elsewhere cannot turn
+        it temporary again. The directory is created here (the child adopts
+        it, as it adopts the desktop's pre-made one). A mark that does not read
+        back refuses the start with 500 ``temporary_mark_failed``: the phone
+        must not believe a chat is temporary when it is not.
         """
         from local_operator.paths import config_dir
         from local_operator.session.temporary import write_mark
@@ -9556,7 +9654,7 @@ def build_app(daemon: MobileDaemon):
             return None
         return JSONResponse(
             {"error": code, "code": code, "session_id": session_id},
-            status_code=500 if code == "temporary_mark_failed" else 409,
+            status_code=_mark_refusal_status(code),
         )
 
     async def api_start_session(request: Request) -> Response:
@@ -9627,6 +9725,13 @@ def build_app(daemon: MobileDaemon):
                     return chosen
 
                 async def spawn_start(chosen: dict[str, str], sid: str) -> int:
+                    if chosen.get("temporary"):
+                        refused = await _mark_started_temporary(sid)
+                        if refused is not None:
+                            # The receipt layer owns the keyed answer's shape;
+                            # its refusal carries the same code/status/sid body.
+                            code = json.loads(bytes(refused.body))["code"]
+                            raise StartRefusal(code, refused.status_code, session_id=sid)
                     return await daemon.spawn_session(
                         chosen["cwd"],
                         provider=chosen["provider"],
@@ -9648,11 +9753,6 @@ def build_app(daemon: MobileDaemon):
                     {"error": "invalid_start_selection", "code": "invalid_start_selection"},
                     status_code=400,
                 )
-            if intent.get("temporary") and isinstance(answer, dict):
-                # Idempotent, so a replayed receipt re-asserts the same mark.
-                refused = await _mark_started_temporary(str(answer.get("session_id") or ""))
-                if refused is not None:
-                    return refused
             return JSONResponse(answer)
         # Checked before the directory read below so a bad level costs nothing;
         # the same validator the keyed path applies inside ``canonical_request``.
@@ -9689,6 +9789,10 @@ def build_app(daemon: MobileDaemon):
         # The route is a durable conversation identity, never a PID. Mint it
         # before spawn so the child, response and first SSE all agree.
         session_id = uuid.uuid4().hex[:12]
+        if body.get("temporary") is True:
+            refused = await _mark_started_temporary(session_id)
+            if refused is not None:
+                return refused
         try:
             pid = await daemon.spawn_session(
                 cwd,
@@ -9700,10 +9804,6 @@ def build_app(daemon: MobileDaemon):
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile session spawn failed", exc_info=True)
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
-        if body.get("temporary") is True:
-            refused = await _mark_started_temporary(session_id)
-            if refused is not None:
-                return refused
         return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
 
     async def api_resume_session(request: Request) -> Response:
@@ -11558,6 +11658,48 @@ def build_app(daemon: MobileDaemon):
         Route("/mark.png", mark_png),
         Route("/manifest.webmanifest", manifest),
         Route("/", index),
+    ]
+
+    def _tombstone_first(endpoint: Callable[[Request], Awaitable[Response]]):
+        """Answer a reaped temporary chat's 404 before the route uses ANY state.
+
+        Each session route used to consult the tombstone only when it found no
+        live entry and no durable directory, so the daemon that HOSTED a chat
+        (whose table still held it) kept serving it after the temporary pass
+        removed it, and a route that spawns could recreate ``sessions/<id>/``,
+        after which the tombstone is never read again (``deleted_at`` answers
+        only while the directory is absent). One wrapper on every
+        ``/api/sessions/{session_id}`` route makes the order structural, the
+        desktop pool's door twin. The gate runs first so an unauthenticated
+        caller learns nothing about which ids were deleted.
+        """
+
+        @functools.wraps(endpoint)
+        async def wrapped(request: Request) -> Response:
+            denied = gate(request)
+            if denied is not None:
+                return denied
+            session_id = str(request.path_params.get("session_id") or "")
+            gone = await asyncio.to_thread(_temporary_deleted_response, session_id)
+            if gone is not None:
+                daemon.forget_deleted_temporary(session_id)
+                return gone
+            return await endpoint(request)
+
+        return wrapped
+
+    routes = [
+        (
+            Route(
+                route.path,
+                _tombstone_first(route.endpoint),
+                methods=list(route.methods or ()) or None,
+                name=route.name,
+            )
+            if isinstance(route, Route) and route.path.startswith("/api/sessions/{session_id:str}")
+            else route
+        )
+        for route in routes
     ]
     if _DIST_DIR.exists():
         # The mount is resolved at app build time: a rebuilt bundle needs

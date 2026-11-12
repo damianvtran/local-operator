@@ -226,3 +226,161 @@ def test_the_daemon_hosts_the_temporary_sweeper(tmp_path, monkeypatch) -> None:
     with TestClient(build_app(MobileDaemon(port=0, password=PASSWORD))):
         assert started == [(tmp_path, "phone-daemon")]
     assert stopped == [True]
+
+
+def _live_entry(daemon: MobileDaemon, session_id: str, pid: int = 4747) -> None:
+    from local_operator.mobile.daemon import SessionEntry
+    from local_operator.mobile.registry import SessionRecord
+
+    record = SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name=f"session {session_id}",
+        cwd="/synthetic",
+        model_label="fixture",
+        control_port=1,
+        control_key="fixture",
+    )
+    daemon.table.entries[pid] = SessionEntry(record)
+
+
+def _reap(cfg: Path, session_id: str, now: float) -> None:
+    """The temporary pass's own order: tombstone first, then the removal."""
+    import shutil
+
+    (cfg / "sessions" / temporary.TOMBSTONES_NAME).write_text(
+        json.dumps([{"id": session_id, "deleted_at": now}])
+    )
+    shutil.rmtree(cfg / "sessions" / session_id)
+
+
+def test_a_chat_this_daemon_still_holds_answers_the_tombstone_first(relay) -> None:
+    # Core #3832 round 1, C-1: every session route consulted the tombstone
+    # only when it found NO live entry, so the daemon that hosted the chat kept
+    # serving it after the pass removed it.
+    client, cfg, daemon, _app = relay
+    _live_entry(daemon, TEMP)
+    now = time.time()
+    _reap(cfg, TEMP, now)
+    # One request at a time, asserted before the next: on the round-1 code the
+    # SSE route SERVED the reaped chat (a stream that never ends), so it goes
+    # last and the earlier reads fail first.
+    for method, url, body in (
+        ("get", f"/api/sessions/{TEMP}/history", None),
+        ("get", f"/api/sessions/{TEMP}/checkpoints", None),
+        ("post", f"/api/sessions/{TEMP}/seen", {}),
+        ("post", f"/api/sessions/{TEMP}/pin", {"pinned": True}),
+        ("post", f"/api/sessions/{TEMP}/temporary", {"temporary": False}),
+        ("get", f"/api/sessions/{TEMP}/events", None),
+    ):
+        response = getattr(client, method)(url, **({"json": body} if body is not None else {}))
+        assert response.status_code == 404, (url, response.status_code, response.text[:200])
+        assert response.json()["code"] == "session_temporary_deleted"
+        assert response.json()["deleted_at"] == now
+        assert not (cfg / "sessions" / TEMP).exists(), "a route recreated the directory"
+        assert all(e.record.session_id != TEMP for e in daemon.table.entries.values())
+        _live_entry(daemon, TEMP)  # the next route meets a held chat again
+    # Unauthenticated callers learn nothing about which ids were deleted.
+    anonymous = TestClient(_app, follow_redirects=False)
+    assert anonymous.get(f"/api/sessions/{TEMP}/history").status_code == 401
+
+
+def test_an_expiry_elsewhere_repaints_the_list_without_the_chat(relay) -> None:
+    # C-1 + C-10 on the list stream (``api_list_events``): an expiry by any
+    # host's sweeper rings the list, and the chat the table still held is gone
+    # from the frame it publishes.
+    _client, cfg, daemon, app = relay
+    _live_entry(daemon, TEMP)
+
+    async def run() -> tuple[set[str], set[str], int, int]:
+        await daemon.refresh_temporary_if_changed()  # first pass: the baseline
+        before = _ids((await _first_sessions_frame(app, b"include_temporary=1"))["sessions"])
+        revision = daemon.table.list_revision
+        _reap(cfg, TEMP, time.time())
+        await daemon.refresh_temporary_if_changed()
+        after = _ids((await _first_sessions_frame(app, b"include_temporary=1"))["sessions"])
+        return before, after, revision, daemon.table.list_revision
+
+    before, after, revision, rung = asyncio.run(run())
+    assert TEMP in before
+    assert rung > revision, "the expiry rang the list stream"
+    assert TEMP not in after and PLAIN in after
+    assert not (cfg / "sessions" / TEMP).exists()
+
+
+def test_a_mark_or_keep_from_another_surface_rings_the_list(relay) -> None:
+    # C-10: a mark restores its directory mtime, so only the store-level stamp
+    # tells an idle phone that a chat turned temporary or was kept.
+    _client, cfg, daemon, _app = relay
+
+    async def ring_after(change) -> bool:  # noqa: ANN001
+        await daemon.refresh_temporary_if_changed()
+        revision = daemon.table.list_revision
+        change()
+        await daemon.refresh_temporary_if_changed()
+        return daemon.table.list_revision > revision
+
+    assert asyncio.run(ring_after(lambda: temporary.write_mark(cfg, TEMP, False, by="desktop")))
+    assert asyncio.run(ring_after(lambda: temporary.write_mark(cfg, PLAIN, True, by="tui")))
+    assert not asyncio.run(ring_after(lambda: None)), "no change, no repaint"
+
+
+def test_temporary_rows_ride_on_top_of_the_hundred_row_window(tmp_path: Path) -> None:
+    # C-11 (review R1-m2): a temporary chat used to push the oldest ordinary
+    # chat off the phone's 100-row home list.
+    import os
+
+    from local_operator.mobile.daemon import DURABLE_WINDOW_ROWS, _durable_window_rows
+
+    base = time.time() - 10_000
+    ordinary = [f"{n:012x}" for n in range(DURABLE_WINDOW_ROWS + 1)]
+    temps = [f"f{n:011x}" for n in range(3)]
+    for index, session_id in enumerate(ordinary + temps):
+        directory = tmp_path / "sessions" / session_id
+        directory.mkdir(parents=True)
+        transcript = directory / "transcript.jsonl"
+        transcript.write_text('{"type":"message"}\n')
+        stamp = base + index
+        os.utime(transcript, (stamp, stamp))
+    for session_id in temps:  # the newest rows
+        assert temporary.write_mark(tmp_path, session_id, True, by="relay").ok
+    rows = _durable_window_rows(tmp_path)
+    plain = [row.id for row in rows if not row.temporary]
+    assert len(plain) == DURABLE_WINDOW_ROWS
+    assert {row.id for row in rows if row.temporary} == set(temps)
+    assert ordinary[0] not in plain and ordinary[1] in plain
+
+
+def test_a_keyed_start_marks_before_spawning_and_a_replay_never_re_marks(
+    relay, monkeypatch
+) -> None:
+    # C-9 (review R1-m4): the mark is written before the runtime spawns, and
+    # a replay that arrives after a Keep from another surface leaves it kept.
+    client, cfg, daemon, _app = relay
+    seen_marked: list[bool] = []
+
+    async def fake_spawn(cwd, *, resume=None, **_kwargs):  # noqa: ANN001, ANN202
+        seen_marked.append(temporary.is_marked(cfg, resume))
+        return 4243
+
+    async def recover(_sid):  # noqa: ANN001, ANN202
+        return 4243
+
+    monkeypatch.setattr(daemon, "spawn_session", fake_spawn)
+    monkeypatch.setattr(daemon, "recover_started_session", recover)
+    monkeypatch.setattr(
+        "local_operator.mobile.daemon._resolve_start_model",
+        lambda provider, model: ("fixture", "fixture-model"),
+    )
+    body = {"create_request_id": "0" * 31 + "1", "cwd": str(cfg), "temporary": True}
+    first = client.post("/api/sessions/start", json=body)
+    assert first.status_code == 200, first.text
+    session_id = first.json()["session_id"]
+    assert seen_marked == [True], "the runtime was spawned before the mark landed"
+    assert temporary.write_mark(cfg, session_id, False, by="desktop").ok  # kept elsewhere
+    replay = client.post("/api/sessions/start", json=body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["session_id"] == session_id
+    assert not temporary.is_marked(cfg, session_id), "the replay re-marked a kept chat"
+    assert len(seen_marked) == 1

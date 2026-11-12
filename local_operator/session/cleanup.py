@@ -4016,8 +4016,23 @@ class TemporaryPassResult:
     skipped: str = ""
 
 
-def _temporary_hold_for_reason(reason: str) -> str:
-    """Map a ``_guard`` reason to a hold code; anything unknown cannot be verified."""
+def _temporary_hold_for_reason(reason: str, directory: Path | None = None) -> str:
+    """Map a ``_guard`` reason to a hold code; anything unknown cannot be verified.
+
+    AN OPEN ASK OUTRANKS THE WAKE IT ARMED (QA Q5). The ``ask`` tool arms a
+    hidden ``ask_timeout`` wake for its deadline, and ``_guard`` probes wakes
+    (in :func:`_transcript_write_guard`) before it reaches the open-ask probe,
+    so a chat waiting on a question reported "kept while a wake is set" and
+    ``open_ask`` was unreachable for any ask with a deadline. The guard order
+    is left alone -- it is shared with ordinary cleanup and compression, and
+    either reason holds -- and only the WORD the user sees is corrected.
+    """
+    if reason == "has an armed wake" and directory is not None:
+        try:
+            if _has_open_asks(directory):
+                return "open_ask"
+        except Exception:  # noqa: BLE001 — the wake still holds; its word stands
+            logger.debug("temporary pass: open-ask probe failed", exc_info=True)
     return _TEMPORARY_GUARD_HOLDS.get(reason, "cannot_verify")
 
 
@@ -4137,6 +4152,23 @@ def _append_temporary_tombstone(config_dir: Path, session_id: str, now: float) -
     entries.insert(0, {"id": session_id, "deleted_at": now})
     return _write_record(
         Path(config_dir) / SESSIONS_DIRNAME / TOMBSTONES_NAME, entries[:TOMBSTONE_CAP]
+    )
+
+
+def _withdraw_temporary_tombstone(config_dir: Path, session_id: str, now: float) -> bool:
+    """Remove ``session_id``'s tombstone: the chat was kept after it was written."""
+    from local_operator.session.temporary import (
+        TOMBSTONE_CAP,
+        TOMBSTONES_NAME,
+        read_tombstones,
+    )
+
+    entries = read_tombstones(config_dir, now=now)
+    kept = [entry for entry in entries if entry["id"] != session_id]
+    if len(kept) == len(entries):
+        return True
+    return _write_record(
+        Path(config_dir) / SESSIONS_DIRNAME / TOMBSTONES_NAME, kept[:TOMBSTONE_CAP]
     )
 
 
@@ -4304,7 +4336,7 @@ def run_temporary_pass(
             # The rehearsal: with the idle resident gone, what else refuses?
             reason = _guard(directory, config_dir, clock, live_owner_gone=True)
         if reason is not None:
-            hold(_temporary_hold_for_reason(reason))
+            hold(_temporary_hold_for_reason(reason, directory))
             continue
         activity = session_activity(directory)
         extra = _temporary_extra_hold(
@@ -4335,11 +4367,8 @@ def run_temporary_pass(
             reason = _guard(directory, config_dir, clock)
             if reason is not None:
                 registry.remove_exit_request(directory)
-                hold(_temporary_hold_for_reason(reason))
+                hold(_temporary_hold_for_reason(reason, directory))
                 continue
-        # A Keep that landed while we waited on the runtime wins.
-        if temp.read_mark(directory, now=clock) is None:
-            continue
         children: set[str] = set()
         roster = directory / "subagent-roster.v1.json"
         if roster.exists():
@@ -4353,6 +4382,16 @@ def run_temporary_pass(
             logger.warning("temporary pass: tombstone not written for %s; keeping it", session_id)
             result.errors += 1
             state[session_id] = {"held_at": held_at, "hold": None}
+            continue
+        # A KEEP THAT LANDED WHILE WE WORKED WINS, and this is the LAST read
+        # before the remover (review R1-m3): after the runtime wait, the roster
+        # read and the tombstone write, so the only window left is the
+        # remover's own hold check. The tombstone just written for a chat the
+        # user kept is withdrawn, so a later deletion of the KEPT chat is never
+        # reported as "this temporary chat was deleted".
+        if temp.read_mark(directory, now=clock) is None:
+            if not dry_run:
+                _withdraw_temporary_tombstone(config_dir, session_id, clock)
             continue
         removed = remove_session_dir(
             directory,

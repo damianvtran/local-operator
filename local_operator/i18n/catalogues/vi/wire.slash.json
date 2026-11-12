@@ -51,5 +51,5 @@
   "wire.slash.unarchive": "Hiện lại cuộc trò chuyện này trong danh sách",
   "wire.slash.update": "Cài bản mới nhất từ PyPI và khởi chạy lại",
   "wire.slash.usage": "Xem hạn mức sử dụng của nhà cung cấp",
-  "wire.slash.temporary": "Đặt cuộc trò chuyện này là tạm thời, hoặc giữ lại (on, off, status)"
+  "wire.slash.temporary": "Chuyển thành tạm thời hoặc giữ lại (on, off, status)"
 }

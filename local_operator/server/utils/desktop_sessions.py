@@ -6274,7 +6274,30 @@ class DesktopSessionBridge:
         # viewer cold and the next keystroke should be free to try again.
         if remote.engage_in_flight or (self.warm_task is not None and not self.warm_task.done()):
             return
+        # A DELETED TEMPORARY CHAT IS NEVER RE-SPAWNED. A bridge resident from
+        # before the temporary pass removed the directory still carries a live
+        # watch lease, and its lease loop (or a retire frame) would start a
+        # runtime that recreates ``sessions/<id>/`` -- which masks the tombstone
+        # for good, since ``deleted_at`` answers only while the directory is
+        # absent. Silent here because two of the three callers have nobody to
+        # answer; the routes are refused at the pool's door instead.
+        if self.deleted_temporary_at() is not None:
+            return
         self.warm_task = asyncio.create_task(remote.warm_runtime())
+
+    def deleted_temporary_at(self) -> float | None:
+        """When this session was reaped as a temporary chat, or ``None``.
+
+        One stat on the common path (the directory exists); the tombstone file
+        is read only when it is gone. A draft has no directory by design and a
+        peer's conversation lives on another device, so neither is ever
+        answered from this machine's tombstones.
+        """
+        if self.draft is not None or self.remote_row is not None:
+            return None
+        from local_operator.session.temporary import deleted_at
+
+        return deleted_at(self.root, self.session_id)
 
     def _on_runtime_retired(self) -> None:
         """The runtime retired itself; engage its successor now.
@@ -8117,10 +8140,15 @@ class DesktopSessions:
         from local_operator.session import temporary as temp
 
         def apply() -> dict[str, Any]:
+            # ``session_not_found`` (contract §2.3), not the ladder's generic
+            # ``requested_not_found``: this route's refusals are all named
+            # temporary-chat codes, and the client keys its copy off them.
             if not SESSION_ID.fullmatch(session_id):
-                raise KeyError("Unknown session")
+                # Not echoed: a malformed id is caller input, not an id we know.
+                raise TemporaryRefusal(temp.CODE_NOT_FOUND, "")
             if not (self.root / "sessions" / session_id).is_dir():
-                raise KeyError("Unknown session")
+                gone = temporary_deleted_refusal(self.root, session_id)
+                raise gone or TemporaryRefusal(temp.CODE_NOT_FOUND, session_id)
             result = temp.write_mark(self.root, session_id, on, by=by)
             if not result.ok:
                 raise TemporaryRefusal(result.code, session_id)
@@ -10120,6 +10148,7 @@ class DesktopSessions:
         """
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
+        await self._refuse_deleted_temporary(session_id)
         bridge: DesktopSessionBridge | None = None
         flight: asyncio.Task[_LocatedSession] | None = None
         # ``taken`` rather than an unconditional release in the ``finally``: a
@@ -10485,6 +10514,30 @@ class DesktopSessions:
             return False
         await bridge.close()
         return True
+
+    async def _refuse_deleted_temporary(self, session_id: str) -> None:
+        """Answer a reaped temporary chat's tombstone BEFORE any residency is used.
+
+        The temporary pass removes a directory from whichever process hosts the
+        sweeper (this one, the phone daemon or a TUI), so nothing tells THIS
+        pool's resident bridge that it went -- the explicit delete's
+        :meth:`forget` has no counterpart there. Without this check a resident
+        bridge kept answering snapshot/history/events 200 for a removed chat,
+        and ``watch``/``warm``/``events`` re-spawned a runtime that recreated
+        the directory, after which the tombstone could never be read again.
+        So the door asks first and :meth:`forget`\\ s the bridge, the same
+        close-and-drop an explicit delete performs. A draft id is skipped: it
+        has no directory by design and was never a reaped session.
+        """
+        if session_id in self.drafts or (self.root / "sessions" / session_id).exists():
+            return
+        from local_operator.session.temporary import CODE_DELETED, deleted_at
+
+        stamp = await asyncio.to_thread(deleted_at, self.root, session_id)
+        if stamp is None:
+            return
+        await self.forget(session_id)
+        raise TemporaryRefusal(CODE_DELETED, session_id, deleted_at=stamp)
 
     async def close(self) -> None:
         await asyncio.gather(*(bridge.close() for bridge in self.bridges.values()))

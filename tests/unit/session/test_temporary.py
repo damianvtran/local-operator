@@ -291,3 +291,50 @@ def test_row_info_is_none_for_a_kept_chat(tmp_path: Path) -> None:
 
 def test_state_file_name_is_store_level() -> None:
     assert STATE_NAME.startswith(".") and TOMBSTONES_NAME.startswith(".")
+
+
+def test_the_change_token_moves_on_mark_keep_expiry_and_hold_only(tmp_path: Path) -> None:
+    # C-10: the store-level facts a repainting listing needs; a mark restores
+    # its directory mtime, so it is the stamp that moves.
+    from local_operator.session.temporary import change_token
+
+    sid = "c" * 12
+    (tmp_path / "sessions" / sid).mkdir(parents=True)
+    first = change_token(tmp_path)
+    assert change_token(tmp_path) == first, "reading never moves it"
+    assert write_mark(tmp_path, sid, True, by="cli").ok
+    marked = change_token(tmp_path)
+    assert marked != first
+    assert write_mark(tmp_path, sid, False, by="desktop").ok
+    kept = change_token(tmp_path)
+    assert kept != marked
+    state = tmp_path / "sessions" / STATE_NAME
+    state.write_text(
+        json.dumps({"v": 1, "evaluated_at": 1.0, "sessions": {sid: {"held_at": 1.0, "hold": None}}})
+    )
+    held_none = change_token(tmp_path)
+    state.write_text(
+        json.dumps({"v": 1, "evaluated_at": 2.0, "sessions": {sid: {"held_at": 2.0, "hold": None}}})
+    )
+    os.utime(state, ns=(time.time_ns() + 10**9, time.time_ns() + 10**9))
+    assert change_token(tmp_path) == held_none, "a pass that changed no hold is silent"
+    state.write_text(
+        json.dumps(
+            {"v": 1, "evaluated_at": 3.0, "sessions": {sid: {"held_at": 3.0, "hold": "running"}}}
+        )
+    )
+    os.utime(state, ns=(time.time_ns() + 2 * 10**9, time.time_ns() + 2 * 10**9))
+    assert change_token(tmp_path) != held_none
+    before_expiry = change_token(tmp_path)
+    (tmp_path / "sessions" / TOMBSTONES_NAME).write_text(
+        json.dumps([{"id": sid, "deleted_at": 1.0}])
+    )
+    assert change_token(tmp_path) != before_expiry
+
+
+def test_the_dead_duplicate_refusal_is_gone() -> None:
+    # C-14 (review R1-n1): one ``TemporarySessionError``, in ``projects``.
+    from local_operator.session import temporary as module
+
+    assert not hasattr(module, "TemporarySessionError")
+    assert not hasattr(module, "require_not_temporary")

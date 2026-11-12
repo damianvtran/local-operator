@@ -110,6 +110,10 @@ def temporary_make() -> Msg:
     return Msg("relay.session.temporary_make", {})
 
 
+def temporary_make_confirm() -> Msg:
+    return Msg("relay.session.temporary_make_confirm", {})
+
+
 def temporary_new() -> Msg:
     return Msg("relay.session.temporary_new", {})
 

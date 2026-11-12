@@ -862,6 +862,6 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 منٹ",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 گھنٹے",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 گھنٹے",
-  "wire.settings.session_cleanup_temporary_idle_minutes.label": "عارضی چیٹس حذف کریں بعد از",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "اتنی دیر بعد عارضی چیٹس حذف کریں",
   "wire.settings.session_cleanup_temporary_idle_minutes.help": "عارضی چیٹ کتنی دیر غیر فعال رہ سکتی ہے اس سے پہلے کہ حذف ہو جائے۔ اسکرین پر رہنے کا وقت، چلتا ہوا کام یا کھلا سوال غیر فعالی میں شمار نہیں ہوتا۔"
 }

@@ -33,7 +33,7 @@
   "tui.notices.model_switch_refused": "{model} was not applied: {reason}",
   "tui.notices.temporary_on": "temporary chat: left out of history and deleted after {minutes} idle minutes — /temporary off keeps it",
   "tui.notices.temporary_off": "kept: this chat is no longer temporary and stays in your history",
-  "tui.notices.temporary_status_on": "temporary chat — deleted {deletes_in} unless you keep it (/temporary off)",
+  "tui.notices.temporary_status_on": "temporary chat — {deletes_in} (/temporary off keeps it)",
   "tui.notices.temporary_status_off": "this chat is kept in your history (not temporary)",
   "tui.notices.temporary_confirm": "make this chat temporary? Its messages, files in its scratchpad and its session memory are deleted after it sits idle; anything you saved elsewhere is kept. Type /temporary on again within 30 seconds to confirm.",
   "tui.notices.temporary_refused_pinned": "this chat is pinned, so it cannot be made temporary — unpin it first",

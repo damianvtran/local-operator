@@ -862,6 +862,6 @@
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 minutes",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 heures",
   "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 heures",
-  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Supprimer les discussions temporaires après",
-  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Durée d’inactivité d’une discussion temporaire avant sa suppression. Le temps à l’écran, une tâche en cours ou une question ouverte ne comptent pas comme inactivité."
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Supprimer les conversations temporaires après",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Durée d’inactivité d’une conversation temporaire avant sa suppression. Le temps à l’écran, une tâche en cours ou une question ouverte ne comptent pas comme inactivité."
 }

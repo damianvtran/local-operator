@@ -105,11 +105,26 @@ ICON_EFFORT = "▴"
 #: is ``›``, and ``high › » fast`` read as two separators in a row (design
 #: D1).
 ICON_FAST = "↯"
-#: A TEMPORARY chat (``session/temporary.py``): a dashed square, the terminal's
-#: twin of the desktop's dashed bubble. U+2B1A, OUTSIDE Geometric Shapes, so the
-#: tofu rule above applies: a real-terminal check is a QA acceptance row, and
-#: the word beside it carries the meaning if the glyph does not render.
-ICON_TEMPORARY = "⬚"
+#: A TEMPORARY chat (``session/temporary.py``): an empty outline, the terminal's
+#: twin of the desktop's dashed bubble -- a frame with nothing kept in it.
+#: ``▯`` U+25AF WHITE VERTICAL RECTANGLE, chosen INSIDE Geometric Shapes because
+#: of the tofu rule on ``ICON_JOBS`` below: nothing on this host can check a
+#: glyph in a real terminal, so the block is the only guarantee. It is East
+#: Asian width N (never two cells in a CJK terminal), has no emoji
+#: presentation, measures ``cell_len == 1`` and is used nowhere else in the band,
+#: the sidebar or ``tui/glyphs.py``. The word beside it still carries the
+#: meaning. REJECTED, each for a recorded reason:
+#:
+#: * ``⬚`` U+2B1A (the design study's dashed square): outside U+25xx, and no
+#:   font installed here covers it (``fc-list ':charset=2b1a'`` is empty);
+#: * ``□`` U+25A1: ``tui/glyphs.py``'s ``sessions`` tool icon, and width A;
+#: * ``▢`` U+25A2 and ``▭`` U+25AD: ``ICON_LAST_RATE`` and its documented
+#:   gauge-like neighbour; ``◌`` U+25CC reads as the in-flight spinner;
+#: * ``◻``/``◽`` U+25FB-U+25FE: emoji presentation in some terminals;
+#: * ``○``/``◯``: width A, and ``○`` is a sidebar row mark;
+#: * ``▱`` U+25B1: a skewed bar that reads as a progress gauge, and ``◦`` a
+#:   list bullet too small to be found in the band.
+ICON_TEMPORARY = "▯"
 #: Saver's compression mark: one cell, distinct from the speed lightning.
 #:
 #: NOT ``≡`` (design round 2, D3): that is ``PLAIN_TOOL_ICONS["read"]``, the
@@ -1312,6 +1327,8 @@ class StatusLine:
         self._fast: str = ""
         #: The temporary-chat word, or "" for an ordinary chat. Pushed by the app.
         self._temporary: str = ""
+        #: True only in the last minutes before deletion (see the segment).
+        self._temporary_alarm = False
         # The localized word, or "" when this session is not occupying Saver.
         # Off paints NOTHING (design round 1, D1): the reserved-five-cells
         # version this replaced painted a dim glyph with an empty value in every
@@ -1707,6 +1724,7 @@ class StatusLine:
         fast: str | None = None,
         saver: str | None = None,
         temporary: str | None = None,
+        temporary_alarm: bool | None = None,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1753,6 +1771,8 @@ class StatusLine:
             self._saver = saver
         if temporary is not None:
             self._temporary = temporary
+        if temporary_alarm is not None:
+            self._temporary_alarm = temporary_alarm
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -2548,12 +2568,19 @@ class StatusLine:
         # Value-gated like the dials above. NOT suppressed under a subagent
         # overlay: whether the conversation is kept is a fact about the page,
         # not about the request being made.
+        #
+        # NEUTRAL WHILE LIVE, AMBER ONLY IN THE LAST MINUTES (design D1): a
+        # standing warning colour wears the alarm out before it matters, so the
+        # word sits in the band's muted role and switches to `warning` -- with
+        # the app's own countdown wording as the value -- only while
+        # ``_temporary_alarm`` says the chat deletes within five minutes.
         if self._temporary and "temporary" not in dropped:
+            role = "warning" if self._temporary_alarm else "muted"
             parts.append(
                 (
                     ICON_TEMPORARY,
                     self._temporary,
-                    Style(color=theme_mod.semantic_color("warning")),
+                    Style(color=theme_mod.semantic_color(role)),
                     None,
                 )
             )

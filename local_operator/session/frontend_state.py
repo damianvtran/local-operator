@@ -1338,6 +1338,13 @@ _FRONTEND_LOCAL_SLASHES = {
     # write. v2 is single-machine; serving the owner's project view over the
     # control protocol is a follow-up.
     "project",
+    # `/temporary on|off|status` writes and reads THIS machine's
+    # `config_dir()/sessions/<id>/temporary.json`, the per-session sidecar the
+    # sidebar, the band and this machine's sweeper read -- the `/archive`
+    # argument, one file over. Routed to the runtime it fell through to the
+    # owner's generic "reads this machine's configuration" refusal (core QA
+    # round 1, Q1), so the command did nothing on every attached viewer.
+    "temporary",
     # The tag store is THIS machine's: `config_dir()/tags` holds the registry and
     # the per-session assignment files the sidebar's bucket map reads, exactly
     # the argument `/archive` makes about `archived-sessions.json`. Routed to the

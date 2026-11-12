@@ -38,6 +38,6 @@
     "role": "status band segment word",
     "tone": "single word",
     "maxCells": 12,
-    "note": "Shown after a dashed-square glyph (⬚) in the status band while the chat is temporary (not kept, deleted when idle). Keep it short."
+    "note": "Shown after an empty-outline glyph (▯) in the status band while the chat is temporary (not kept, deleted when idle). Keep it short."
   }
 }

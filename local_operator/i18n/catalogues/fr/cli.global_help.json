@@ -16,5 +16,5 @@
   "cli.global_help.propagated_hosting": "Plateforme d’hébergement pour cette exécution (p. ex. anthropic, openai, openrouter)",
   "cli.global_help.propagated_model": "Modèle à utiliser pour cette exécution",
   "cli.global_help.propagated_run_in": "Répertoire de travail dans lequel exécuter l’opérateur",
-  "cli.global_help.temporary": "Lancer une discussion temporaire : elle est exclue de l’historique et supprimée après une période d’inactivité (30 minutes par défaut)."
+  "cli.global_help.temporary": "Lancer une conversation temporaire : elle est exclue de l’historique et supprimée après une période d’inactivité (30 minutes par défaut)."
 }

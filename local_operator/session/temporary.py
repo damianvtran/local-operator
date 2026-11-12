@@ -73,6 +73,13 @@ TOMBSTONE_CAP = 1000
 #: listings to say "deletes at" / "kept while …". Reads never create it.
 STATE_NAME = ".temporary-state.json"
 
+#: ``sessions/.temporary-changed``: an EMPTY stamp whose mtime moves on every
+#: mark or Keep that lands. A mark deliberately restores its directory's mtime
+#: (it is bookkeeping, not activity), so without a store-level stamp a listing
+#: that repaints on change -- the phone daemon's list stream -- cannot see a
+#: chat turn temporary or kept from another surface. See :func:`change_token`.
+CHANGES_NAME = ".temporary-changed"
+
 #: The window presets, in minutes. A configured value outside the set is
 #: clamped UP to the next preset (kept longer — the fail-closed direction).
 IDLE_PRESETS: tuple[int, ...] = (15, 30, 120, 1440)
@@ -124,24 +131,6 @@ class MarkResult:
 
     ok: bool
     code: str = ""
-
-
-class TemporarySessionError(ValueError):
-    """A temporary chat cannot be linked to a project until the user keeps it.
-
-    A ``ValueError`` so every existing caller that already turns a registry
-    ``ValueError`` into a refusal keeps working; the routes that know the
-    ``code`` answer 409 with it.
-    """
-
-    code = CODE_TEMPORARY
-
-    def __init__(self, session_id: str) -> None:
-        self.session_id = session_id
-        super().__init__(
-            f"Session {session_id} is a temporary chat and can't be linked to a "
-            "project until the user keeps it."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +307,20 @@ def write_mark(
     landed = read_mark(directory, now=clock) is not None
     if landed != bool(on):
         return MarkResult(False, CODE_MARK_FAILED)
+    _touch_changes(Path(config_dir))
     return MarkResult(True)
+
+
+def _touch_changes(config_dir: Path) -> None:
+    """Move the store-level change stamp; best effort (a listing heals on its TTL)."""
+    stamp = config_dir / "sessions" / CHANGES_NAME
+    try:
+        stamp.touch()
+        # ``touch`` on an existing file can land in the same mtime tick as the
+        # previous one on a coarse filesystem; an explicit ns stamp cannot.
+        os.utime(stamp, ns=(time.time_ns(), time.time_ns()))
+    except OSError:
+        logger.debug("temporary: could not touch the change stamp", exc_info=True)
 
 
 def _write_mark_file(directory: Path, payload: dict[str, Any]) -> bool:
@@ -352,15 +354,6 @@ def pin_refusal(config_dir: Path, session_id: str) -> str:
     delete; the user picks one by keeping the chat first.
     """
     return CODE_TEMPORARY if is_marked(config_dir, session_id) else ""
-
-
-def require_not_temporary(config_dir: Path, session_ids: Any) -> None:
-    """Raise :class:`TemporarySessionError` for the first temporary id in ``session_ids``."""
-    if isinstance(session_ids, str):
-        session_ids = [session_ids]
-    for session_id in session_ids or ():
-        if is_marked(config_dir, session_id):
-            raise TemporarySessionError(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +425,55 @@ def read_state(config_dir: Path) -> dict[str, Any]:
         "evaluated_at": _finite(payload.get("evaluated_at")),
         "sessions": sessions if isinstance(sessions, dict) else {},
     }
+
+
+#: ``change_token``'s memo of the state file's hold digest, keyed by
+#: ``(path, mtime_ns)``: the pass rewrites the file every minute (its
+#: ``evaluated_at`` and each held chat's ``held_at`` move), so the digest is
+#: recomputed only when the file did, and only the HOLD CODES feed it.
+_HOLDS_MEMO: dict[str, tuple[int, tuple[tuple[str, str], ...]]] = {}
+
+
+def _mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def change_token(config_dir: Path) -> tuple[Any, ...]:
+    """A value that moves when any temporary-chat LISTING fact moved.
+
+    Three facts change what a listing shows and none of them touches a session
+    directory's mtime: a mark or Keep (:data:`CHANGES_NAME`), an expiry (the
+    tombstone file is written before every removal) and a hold starting or
+    ending (the state file's hold codes). Reading it is two or three stats and,
+    at most once per pass, one small JSON read. Never creates a file.
+    """
+    sessions = Path(config_dir) / "sessions"
+    state_path = sessions / STATE_NAME
+    state_mtime = _mtime_ns(state_path)
+    holds: tuple[tuple[str, str], ...] = ()
+    if state_mtime is not None:
+        key = str(state_path)
+        memo = _HOLDS_MEMO.get(key)
+        if memo is not None and memo[0] == state_mtime:
+            holds = memo[1]
+        else:
+            entries = read_state(config_dir)["sessions"]
+            holds = tuple(
+                sorted(
+                    (str(sid), str(value.get("hold") or ""))
+                    for sid, value in entries.items()
+                    if isinstance(value, dict)
+                )
+            )
+            _HOLDS_MEMO[key] = (state_mtime, holds)
+    return (
+        _mtime_ns(sessions / CHANGES_NAME),
+        _mtime_ns(sessions / TOMBSTONES_NAME),
+        holds,
+    )
 
 
 def clamp_idle_minutes(value: Any) -> int:
