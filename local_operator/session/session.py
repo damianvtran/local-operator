@@ -23012,7 +23012,9 @@ class Session:
                 "commands": command_count(),
                 "wall_s": time.monotonic() - started,
                 "model": getattr(job, "model_label", None),
-                "tools": tuple(sorted(surface.declaration(getattr(self, "_declared_tools", None)) or ())),
+                "tools": tuple(
+                    sorted(surface.declaration(getattr(self, "_declared_tools", None)) or ())
+                ),
                 "transcript_dir": (
                     str(directory)
                     if (comms := getattr(self, "subagent_comms", None)) is not None

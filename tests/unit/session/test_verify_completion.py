@@ -273,6 +273,7 @@ async def test_request_cap_cancels_the_child(tmp_path, config_dir):
     assert verdict.status == "INCONCLUSIVE"
     made = len(stream.by_job[verdict.job_id])
     assert limits.max_requests <= made <= limits.max_requests + 1, made
+    assert verdict.job_id is not None
     job = parent.jobs.get(verdict.job_id)
     assert job is not None and job.status != "running"
     await parent.dispose()
@@ -317,6 +318,7 @@ async def test_verifier_result_is_not_delivered_to_the_parent(tmp_path, config_d
     parent = make_parent(tmp_path, stream)
 
     verdict = await parent.verify_completion(request="r", claim="c")
+    assert verdict.job_id is not None
     job = parent.jobs.get(verdict.job_id)
     assert job is not None and job.consumed is True
     # Give any (wrongly) scheduled delivery a chance to run.
@@ -335,9 +337,7 @@ async def test_verifier_result_is_not_delivered_to_the_parent(tmp_path, config_d
 
 
 @pytest.mark.asyncio
-async def test_verifier_prompt_is_exactly_role_plus_request_claim_observation(
-    tmp_path, config_dir
-):
+async def test_verifier_prompt_is_exactly_role_plus_request_claim_observation(tmp_path, config_dir):
     stream = TreeStream(lambda request: text_turn("VERDICT: PASS"))
     parent = make_parent(tmp_path, stream)
     await parent.verify_completion(
@@ -402,6 +402,11 @@ def test_parse_verdict_is_strict() -> None:
 
 
 def test_limits_refuse_nonsense() -> None:
-    for bad in ({"max_requests": 0}, {"max_commands": True}, {"wall_s": float("inf")}):
+    bad_values: list[dict[str, Any]] = [
+        {"max_requests": 0},
+        {"max_commands": True},
+        {"wall_s": float("inf")},
+    ]
+    for bad in bad_values:
         with pytest.raises(ValueError):
             VerifierLimits(**bad)

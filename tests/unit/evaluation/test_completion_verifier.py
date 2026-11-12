@@ -1,0 +1,488 @@
+"""The session arm's completion verifier: bridge finish branch, inspect tool, records.
+
+What is pinned, against the design (verifier-design.md, "Coder brief"):
+
+* PASS accepts; FAIL/INCONCLUSIVE becomes the finish challenge carrying the
+  findings and is accounted as the self-check challenge; the last round
+  always accepts; a budget that cannot hold the exchange records a skip and
+  takes today's path; premature/failed claims are untouched.
+* ``inspect_command`` is refused outside the verification window and does
+  not deadlock while the finish branch holds the bridge lock.
+* rows of the verifier enter the request summary with their job id.
+* ``rounds=0`` adds nothing to any record.
+* end to end through the REAL ``Session.verify_completion``: the FAIL
+  findings reach the worker, the worker fixes, the second finish is accepted.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from local_operator.evaluation.completion_verifier import (
+    SANDBOX_PROBE,
+    SANDBOX_TOKEN,
+    CompletionVerifierConfig,
+    VerifierInspector,
+    obvious_write,
+)
+from local_operator.evaluation.runner.episode import EpisodeConfig
+from local_operator.evaluation.session_arm import (
+    SessionArmOutcome,
+    _flush_request_observation,
+    _outcome_json,
+    _verifier_summary,
+)
+from local_operator.harness.verifier import VerifierVerdict
+from tests.unit.evaluation.test_session_arm import _bridge, _command_result
+
+DONE = {"actions": [{"kind": "finish", "status": "done", "reason": "B2 now holds 42"}]}
+WAIT = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+
+
+def _verdict(status: str, findings: str = "", ended_by: str = "verdict") -> VerifierVerdict:
+    return VerifierVerdict(
+        status=status, findings=findings, ended_by=ended_by, job_id="vjob"  # type: ignore[arg-type]
+    )
+
+
+def _armed(tmp_path: Path, verdicts: list[VerifierVerdict], *, rounds: int = 1, **kwargs: Any):
+    actions: list[tuple[str, dict[str, Any]]] = []
+    events: list[tuple[str, dict[str, Any]]] = []
+    seen: list[tuple[Any, Any, int]] = []
+    bridge = _bridge(
+        tmp_path, record=lambda kind, payload: actions.append((kind, payload)), **kwargs
+    )
+
+    async def verifier(claim: Any, pending: Any, round_: int) -> VerifierVerdict:
+        seen.append((claim, pending, round_))
+        return verdicts[min(len(seen) - 1, len(verdicts) - 1)]
+
+    bridge.verifier = verifier
+    bridge.verifier_rounds = rounds
+    bridge.verifier_wall_s = 180.0
+    bridge.record_event = lambda kind, payload: events.append((kind, payload))
+    return bridge, actions, events, seen
+
+
+# -- 5. the bridge's finish branch --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pass_accepts_the_first_done_claim(tmp_path: Path) -> None:
+    bridge, actions, events, seen = _armed(tmp_path, [_verdict("PASS", "all met")])
+    reply = await bridge.call(DONE)
+    assert reply["details"]["terminal"] == "finish"
+    assert bridge.end_requested == "finish" and len(seen) == 1
+    # No self-check challenge on top of an independent PASS.
+    assert [k for k, _ in actions if k == "completion_challenged"] == []
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["verified"] == "PASS" and finish["completion_challenged"] is False
+    assert [k for k, _ in events] == ["verifier_verdict"]
+    assert events[0][1]["round"] == 1 and events[0][1]["status"] == "PASS"
+    assert bridge.steps == 1
+
+
+@pytest.mark.asyncio
+async def test_fail_becomes_the_challenge_with_findings(tmp_path: Path) -> None:
+    bridge, actions, _events, _seen = _armed(
+        tmp_path, [_verdict("FAIL", "B2 is empty (read: openpyxl B2=None)")]
+    )
+    reply = await bridge.call(DONE)
+    assert reply["details"]["terminal"] == "completion-challenged"
+    text = reply["content"][0].text
+    assert text.startswith("An independent check of your deliverable reported (FAIL):")
+    assert "B2 is empty (read: openpyxl B2=None)" in text
+    # The shared challenge follows, unchanged.
+    assert "That declaration is a CLAIM" in text and "B2 now holds 42" in text
+    assert bridge.end_requested is None and bridge.completion_challenges_fired == 1
+    # Accounted exactly as the self-check challenge: one epoch, same kind.
+    assert [p for k, p in actions if k == "output_epoch"] == [
+        {"epoch_kind": "finish-challenged", "steps": 1}
+    ]
+    [row] = [p for k, p in actions if k == "completion_challenged"]
+    assert row["trigger"] == "verifier" and row["verdict"] == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_inconclusive_also_challenges(tmp_path: Path) -> None:
+    bridge, *_ = _armed(tmp_path, [_verdict("INCONCLUSIVE", "could not open the file")])
+    reply = await bridge.call(DONE)
+    assert reply["details"]["terminal"] == "completion-challenged"
+    assert "(INCONCLUSIVE)" in reply["content"][0].text
+
+
+@pytest.mark.asyncio
+async def test_the_last_round_always_accepts(tmp_path: Path) -> None:
+    bridge, _actions, _events, seen = _armed(tmp_path, [_verdict("FAIL", "no")], rounds=1)
+    assert (await bridge.call(DONE))["details"]["terminal"] == "completion-challenged"
+    second = await bridge.call(DONE)
+    assert second["details"]["terminal"] == "finish" and len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_two_rounds_verify_twice_then_accept(tmp_path: Path) -> None:
+    bridge, _a, _e, seen = _armed(tmp_path, [_verdict("FAIL", "no")], rounds=2, max_steps=10)
+    assert (await bridge.call(DONE))["details"]["terminal"] == "completion-challenged"
+    assert (await bridge.call(DONE))["details"]["terminal"] == "completion-challenged"
+    assert (await bridge.call(DONE))["details"]["terminal"] == "finish"
+    assert [round_ for _c, _p, round_ in seen] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_skipped_when_the_step_budget_cannot_hold_the_exchange(tmp_path: Path) -> None:
+    bridge, _a, events, seen = _armed(tmp_path, [_verdict("FAIL", "no")], max_steps=1)
+    await bridge.call(DONE)
+    assert seen == []
+    assert events == [
+        ("verifier_skipped", {"round": 1, "reason": "step-budget", "steps": 0, "max_steps": 1})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skipped_when_the_wall_cannot_hold_the_verifier(tmp_path: Path) -> None:
+    bridge, actions, events, seen = _armed(tmp_path, [_verdict("PASS")])
+    bridge.wall_remaining = lambda: 60.0  # < verifier_wall_s 180
+    reply = await bridge.call(DONE)
+    assert seen == [] and events[0][1]["reason"] == "wall"
+    # Today's path: the self-check challenge fires as it always did.
+    assert reply["details"]["terminal"] == "completion-challenged"
+    assert "An independent check" not in reply["content"][0].text
+
+
+@pytest.mark.asyncio
+async def test_refused_verdict_is_a_skip_on_todays_path(tmp_path: Path) -> None:
+    bridge, _a, events, _seen = _armed(
+        tmp_path, [_verdict("INCONCLUSIVE", "memory admission refused", ended_by="refused")]
+    )
+    reply = await bridge.call(DONE)
+    assert events == [
+        (
+            "verifier_skipped",
+            {"round": 1, "reason": "refused", "detail": "memory admission refused"},
+        )
+    ]
+    assert "An independent check" not in reply["content"][0].text
+
+
+@pytest.mark.asyncio
+async def test_premature_and_failed_claims_are_unchanged(tmp_path: Path) -> None:
+    bridge, _a, _e, seen = _armed(tmp_path, [_verdict("FAIL", "no")])
+    failed = {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot"}]}
+    reply = await bridge.call(failed)
+    # The premature-terminal rule still fires (no action executed yet) ...
+    assert reply["details"]["terminal"] == "completion-challenged"
+    assert "before any action has been executed" in reply["content"][0].text
+    # ... and the verifier never ran for a non-``done`` claim.
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_raising_verifier_is_a_skip(tmp_path: Path) -> None:
+    bridge, _a, events, _seen = _armed(tmp_path, [])
+
+    async def broken(*_args: Any) -> Any:
+        raise RuntimeError("boom")
+
+    bridge.verifier = broken
+    reply = await bridge.call(DONE)
+    assert events[0][0] == "verifier_skipped" and events[0][1]["reason"] == "error"
+    assert reply["details"]["terminal"] == "completion-challenged"  # today's path
+
+
+# -- 6. inspect_command: window gate and no deadlock ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inspect_is_refused_outside_the_window_and_reaches_nothing(tmp_path: Path) -> None:
+    ran: list[str] = []
+
+    async def run_command(command: str, timeout_s: float) -> Any:
+        ran.append(command)
+        return _command_result()
+
+    bridge = _bridge(tmp_path)
+    inspector = VerifierInspector(run_command=run_command, window=lambda: bridge.verification_round)
+    text, is_error = await inspector.inspect({"command": "cat /etc/hostname"})
+    assert is_error and "only available while a completion check is running" in text
+    assert ran == []
+
+
+@pytest.mark.asyncio
+async def test_inspect_inside_the_finish_branch_does_not_deadlock(tmp_path: Path) -> None:
+    ran: list[str] = []
+    rows: list[tuple[str, dict[str, Any]]] = []
+
+    async def run_command(command: str, timeout_s: float) -> Any:
+        ran.append(command)
+        if command == SANDBOX_PROBE:
+            return _command_result(stdout=SANDBOX_TOKEN + "\n", stdout_bytes=18)
+        return _command_result(stdout="42\n", stdout_bytes=3)
+
+    bridge = _bridge(tmp_path)
+    bridge.run_command = run_command
+    inspector = VerifierInspector(
+        run_command=run_command,
+        window=lambda: bridge.verification_round,
+        record_event=lambda kind, payload: rows.append((kind, payload)),
+    )
+    outputs: list[tuple[str, bool]] = []
+
+    async def verifier(claim: Any, pending: Any, round_: int) -> VerifierVerdict:
+        # The bridge lock is HELD here (``call`` is mid-finish).
+        assert bridge._lock.locked()
+        outputs.append(await inspector.inspect({"command": "cat B2.txt"}))
+        return _verdict("PASS")
+
+    bridge.verifier, bridge.verifier_rounds = verifier, 1
+    reply = await asyncio.wait_for(bridge.call(DONE), timeout=5)
+    assert reply["details"]["terminal"] == "finish"
+    assert outputs[0][1] is False and "42" in outputs[0][0]
+    # Sandboxed: the command was wrapped, the probe recorded.
+    assert ran[0] == SANDBOX_PROBE and ran[1].startswith("bwrap --ro-bind / / ")
+    kinds = [(k, p.get("probe", False), p.get("readonly_enforcement")) for k, p in rows]
+    assert kinds == [
+        ("verifier_command", True, "sandboxed"),
+        ("verifier_command", False, "sandboxed"),
+    ]
+    # After the window closed, the same tool is refused again.
+    assert (await inspector.inspect({"command": "ls"}))[1] is True
+
+
+@pytest.mark.asyncio
+async def test_audit_mode_refuses_obvious_writes_and_sweeps_changes() -> None:
+    ran: list[str] = []
+
+    async def run_command(command: str, timeout_s: float) -> Any:
+        ran.append(command)
+        if command == SANDBOX_PROBE:
+            return _command_result(exit_code=3, stdout="", stdout_bytes=0)
+        if command == "date +%s":
+            return _command_result(stdout="1700000000\n", stdout_bytes=11)
+        if command.startswith("find "):
+            return _command_result(stdout="/home/user/.config/x\n", stdout_bytes=21)
+        return _command_result()
+
+    rows: list[dict[str, Any]] = []
+    inspector = VerifierInspector(
+        run_command=run_command, window=lambda: 1, record_event=lambda _k, p: rows.append(p)
+    )
+    text, refused = await inspector.inspect({"command": "echo x > /home/user/file"})
+    assert refused and "looks like it writes" in text
+    assert inspector.mode == "audit"
+    text, refused = await inspector.inspect({"command": "cat /home/user/file"})
+    assert not refused and "cat /home/user/file" in ran
+    last = rows[-1]
+    assert last["readonly_enforcement"] == "audit"
+    assert last["changed_files"] == ["/home/user/.config/x"] and last["mutation_detected"] is True
+    assert "-newermt @1700000000" in next(c for c in ran if c.startswith("find "))
+
+
+def test_obvious_write_lexicon() -> None:
+    for command in (
+        "rm -f a",
+        "sed -i s/a/b/ f",
+        "cp a b",
+        "python3 -c \"open('f','w')\"",
+        "echo hi >> f",
+        "soffice --headless --convert-to pdf a.docx",
+    ):
+        assert obvious_write(command), command
+    for command in (
+        "cat a 2>/dev/null",
+        "python3 -c \"import openpyxl; print(openpyxl.load_workbook('a.xlsx')['S']['B2'].value)\"",
+        "ls -la ~/Desktop",
+        "grep -c x f 2>&1",
+        "pdftotext a.pdf -",
+    ):
+        assert not obvious_write(command), command
+
+
+# -- 9. verifier rows in the cost summary -------------------------------------
+
+
+def _row(request_id: str, *, actor_role: str | None, job_id: str | None) -> dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "actor_role": actor_role,
+        "job_id": job_id,
+        "purpose": "turn",
+        "usage_coverage": "reported_final",
+        "usage": {"input": 10, "output": 5, "usd_cost": 0.01, "provider": "p", "model_id": "m"},
+    }
+
+
+def test_verifier_rows_enter_the_request_summary() -> None:
+    from local_operator.harness.types import Usage
+
+    rows = [
+        _row("r1", actor_role=None, job_id=None),
+        _row("r2", actor_role="verifier", job_id="vjob"),
+        _row("r3", actor_role="verifier", job_id="vjob"),
+    ]
+    written: list[tuple[str, dict[str, Any]]] = []
+    record = SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
+    handle = SimpleNamespace(
+        request_rows=rows, request_usages=[Usage.model_validate(r["usage"]) for r in rows]
+    )
+    _flush_request_observation(record, handle)  # type: ignore[arg-type]
+    [(kind, payload)] = written
+    assert kind == "requests" and payload["count"] == 3  # whole tree, verifier included
+    share = payload["verifier"]
+    assert share["count"] == 2 and share["job_ids"] == ["vjob"]
+    assert share["recorded_usd"] == pytest.approx(0.02)
+
+
+# -- 10. rounds=0 adds nothing -------------------------------------------------
+
+
+def test_rounds_zero_adds_no_key_anywhere(tmp_path: Path) -> None:
+    assert EpisodeConfig(
+        evidence_root=tmp_path, artifact_root=tmp_path, rescue_root=tmp_path
+    ).completion_verifier == CompletionVerifierConfig(rounds=0)
+    assert CompletionVerifierConfig().enabled is False
+    # The bridge's default carries no verifier.
+    assert _bridge(tmp_path).verifier is None
+    # No ``verifier`` share when no verifier row exists.
+    written: list[tuple[str, dict[str, Any]]] = []
+    handle = SimpleNamespace(
+        request_rows=[_row("r1", actor_role=None, job_id=None)], request_usages=[]
+    )
+    sink = SimpleNamespace(write=lambda k, p: written.append((k, p)))
+    _flush_request_observation(sink, handle)  # type: ignore[arg-type]
+    assert "verifier" not in written[0][1]
+    # And the outcome has no key at all.
+    outcome = SessionArmOutcome(status="completed", episode_id="e", record_root=None)
+    assert "completion_verifier" not in _outcome_json(outcome)
+    assert _verifier_summary(None) is None
+
+
+def test_config_refuses_out_of_range() -> None:
+    bad_values: list[dict[str, Any]] = [
+        {"rounds": 3},
+        {"rounds": True},
+        {"wall_s": 241.0},
+        {"max_requests": 0},
+    ]
+    for bad in bad_values:
+        with pytest.raises(ValueError):
+            CompletionVerifierConfig(**bad)
+    assert CompletionVerifierConfig(rounds=1).stamp() == {
+        "rounds": 1,
+        "max_requests": 12,
+        "max_commands": 10,
+        "wall_s": 180.0,
+    }
+
+
+# -- end to end: FAIL findings reach the worker, it fixes, the next finish passes --
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_fail_fix_pass_through_the_real_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bridge, the arm's wiring (``_arm_completion_verifier``), the real
+    ``Session.verify_completion`` and a real verifier child session; only the
+    model wire and the guest are scripted. The worker's three calls are the
+    "model": a wrong ``done``, the fix, the same ``done`` again."""
+
+    from local_operator.evaluation.session_arm import (
+        _arm_completion_verifier,
+        _copy_verifier_transcripts,
+    )
+    from local_operator.harness.types import ChatRequest, TurnEndEvent
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from tests.unit.session.test_launch_subagent import MODEL
+    from tests.unit.session.test_verify_completion import (
+        TreeStream,
+        is_verifier,
+        text_turn,
+        tool_turn,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.chdir(tmp_path)
+    guest = {"B2": "None"}
+
+    async def run_command(command: str, timeout_s: float) -> Any:
+        if command == SANDBOX_PROBE:
+            return _command_result(stdout=SANDBOX_TOKEN + "\n", stdout_bytes=18)
+        value = guest["B2"] + "\n"
+        return _command_result(stdout=value, stdout_bytes=len(value))
+
+    def reply(request: ChatRequest) -> list[Any]:
+        assert is_verifier(request), "only the verifier talks to the model here"
+        results = [m for m in request.messages if m.role in ("tool", "toolResult")]
+        if not results:
+            return tool_turn("inspect_command", {"command": "read B2"})
+        seen = "".join(getattr(block, "text", "") for block in results[-1].content)
+        if "42" in seen:
+            return text_turn("B2 holds 42: MET\nVERDICT: PASS")
+        return text_turn("B2 is empty (read None): UNMET\nVERDICT: FAIL")
+
+    parent = Session(
+        model=MODEL,
+        stream_fn=TreeStream(reply),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+
+    executed: list[Any] = []
+    bridge = _bridge(tmp_path, max_steps=10, instruction="Put 42 in cell B2.")
+    original_execute = bridge.execute
+
+    async def execute(batch: Any) -> Any:
+        executed.append(batch)
+        guest["B2"] = "42"  # the worker's fix lands on the guest
+        return await original_execute(batch)
+
+    bridge.execute = execute
+    bridge.run_command = run_command
+    written: list[tuple[str, dict[str, Any]]] = []
+    record = SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
+    state = _arm_completion_verifier(
+        bridge=bridge,
+        handle=SimpleNamespace(session=parent),  # type: ignore[arg-type]
+        record=record,  # type: ignore[arg-type]
+        config=CompletionVerifierConfig(rounds=2),
+        wall_remaining=None,
+    )
+    try:
+        first = await asyncio.wait_for(bridge.call(DONE), timeout=20)
+        assert first["details"]["terminal"] == "completion-challenged"
+        assert "B2 is empty (read None): UNMET" in first["content"][0].text
+        assert executed == []  # a challenged finish moves nothing
+        # Each worker call is its own turn, as the real loop delivers them.
+        bridge.fold(TurnEndEvent())
+        fix = await bridge.call(WAIT)
+        assert fix["is_error"] is False and len(executed) == 1
+        bridge.fold(TurnEndEvent())
+        second = await asyncio.wait_for(bridge.call(DONE), timeout=20)
+        assert second["details"].get("terminal") == "finish", second
+        assert bridge.end_requested == "finish"
+    finally:
+        await parent.dispose()
+
+    kinds = [kind for kind, _ in written]
+    assert kinds.count("verifier_started") == 2 and kinds.count("verifier_verdict") == 2
+    verdicts = [p["status"] for k, p in written if k == "verifier_verdict"]
+    assert verdicts == ["FAIL", "PASS"]
+    started = [p for k, p in written if k == "verifier_started"]
+    assert all(p["readonly_enforcement"] == "sandboxed" for p in started)
+    assert "inspect_command" in started[0]["tools"]
+    assert not {"write", "edit", "task", "web_search", "web_fetch"} & set(started[0]["tools"])
+    commands = [p for k, p in written if k == "verifier_command" and not p.get("probe")]
+    assert [p["job_id"] for p in commands] == [p["job_id"] for p in started]
+    assert [v["status"] for v in state["verdicts"]] == ["FAIL", "PASS"]
+    # The bundle gets each verifier's transcript.
+    _copy_verifier_transcripts(tmp_path / "bundle", state, record)  # type: ignore[arg-type]
+    assert sorted(state["bundle_transcripts"]) == sorted(p["job_id"] for p in started)
+    for relative in state["bundle_transcripts"].values():
+        assert (tmp_path / "bundle" / relative).stat().st_size > 0

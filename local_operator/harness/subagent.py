@@ -4969,7 +4969,8 @@ async def _construct_child_session(
         # The harness bound narrows (never widens) whatever the parent declared,
         # and is this child's FIRST declaration, so ``set_tool_inventory``'s
         # one-way rule then holds it for the child's life (``ChildSurface``).
-        declared = surface.declaration(declared)
+        bounded = surface.declaration(declared)
+        declared = tuple(sorted(bounded)) if bounded is not None else None
     if declared is not None and hasattr(child, "set_tool_inventory"):
         child.set_tool_inventory(
             declared,

@@ -69,6 +69,7 @@ from local_operator.evaluation.adapters.supervisor import (
     run_rescue,
     verify_artifact,
 )
+from local_operator.evaluation.completion_verifier import CompletionVerifierConfig
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     AgentStopPayload,
@@ -434,6 +435,13 @@ class EpisodeConfig:
     completion_gate: bool = True
     completion_challenges: int = 1
     premature_terminal_gate: bool = True
+    #: The session arm's completion verifier (``evaluation/completion_verifier
+    #: .py``). Default ``rounds=0``: no verifier, and every record the arm
+    #: writes is byte-identical to an arm that predates the field. The reply
+    #: channel (this module's runner) does not read it.
+    completion_verifier: CompletionVerifierConfig = field(
+        default_factory=lambda: CompletionVerifierConfig()
+    )
 
     def __post_init__(self) -> None:
         rate = self.execution_overhead_seconds_per_action

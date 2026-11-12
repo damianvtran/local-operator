@@ -250,7 +250,9 @@ def counted_host_tools(
     def _wrap(tool: "AgentTool") -> "AgentTool":
         inner = tool.execute
 
-        async def execute(tool_call_id, args, signal=None, on_update=None, context=None):  # type: ignore[no-untyped-def]
+        async def execute(  # type: ignore[no-untyped-def]
+            tool_call_id, args, signal=None, on_update=None, context: Any = None
+        ):
             nonlocal count
             if count >= limit:
                 on_exhausted()
