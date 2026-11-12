@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import threading
 import time
 from pathlib import Path
@@ -111,6 +112,144 @@ def test_r1_1_the_cache_never_builds_a_path_from_a_malformed_name(tmp_path: Path
         remote_cache.locations(tmp_path, SID, "../home/notes")
     with pytest.raises(ValueError):
         remote_cache.locations(tmp_path, "../../x", "a" * 32)
+
+
+# -- Directory-removal guard confinement ------------------------------------------
+
+
+@pytest.mark.parametrize("linked_part", ["cache", "remote-files"])
+def test_eviction_never_follows_a_cache_directory_symlink(
+    tmp_path: Path, linked_part: str
+) -> None:
+    root = tmp_path / "config"
+    authoritative = _blob(root / "attachments", b"ONLY AUTHORITATIVE COPY")
+    directory = remote_cache.cache_root(root)
+    if linked_part == "cache":
+        (root / "attachments" / "remote-files").mkdir()
+        authoritative.path.rename(root / "attachments" / "remote-files" / authoritative.path.name)
+        protected = root / "attachments" / "remote-files" / authoritative.path.name
+        (root / "cache").symlink_to(root / "attachments", target_is_directory=True)
+    else:
+        directory.parent.mkdir()
+        directory.symlink_to(root / "attachments", target_is_directory=True)
+        protected = authoritative.path
+    assert remote_cache.evict(root, budget=0) == 0
+    assert protected.read_bytes() == b"ONLY AUTHORITATIVE COPY"
+
+
+def test_eviction_removes_only_digest_blobs_and_their_cache_sidecars(tmp_path: Path) -> None:
+    directory = remote_cache.cache_root(tmp_path)
+    cached = _blob(directory, b"EXPENDABLE")
+    authoritative = _blob(tmp_path / "attachments", b"AUTHORITATIVE")
+    session_file = tmp_path / "sessions" / SID / "transcript.jsonl"
+    session_file.parent.mkdir(parents=True)
+    session_file.write_bytes(b"TRANSCRIPT")
+    for suffix in (".json", ".peaks.json"):
+        cached.path.with_name(cached.path.stem + suffix).write_bytes(b"SIDECAR")
+    unrelated = directory / "user-data.bin"
+    unrelated.write_bytes(b"USER DATA")
+    assert remote_cache.evict(tmp_path, budget=0) == len(b"EXPENDABLE")
+    assert not cached.path.exists()
+    assert not cached.path.with_suffix(".json").exists()
+    assert not cached.path.with_suffix(".peaks.json").exists()
+    assert unrelated.read_bytes() == b"USER DATA"
+    assert authoritative.path.read_bytes() == b"AUTHORITATIVE"
+    assert session_file.read_bytes() == b"TRANSCRIPT"
+
+
+def test_eviction_pins_its_directory_across_a_cache_path_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = remote_cache.cache_root(tmp_path)
+    cached = _blob(directory, b"EXPENDABLE")
+    authoritative = _blob(tmp_path / "attachments", b"AUTHORITATIVE")
+    # Matching names make following the replacement symlink destructive, not just
+    # a missing-file no-op. The real os.scandir must receive the already-held fd.
+    protected = authoritative.path.with_name(cached.path.name)
+    protected.write_bytes(b"PROTECTED")
+    displaced = directory.with_name("displaced-cache")
+    real_scandir = os.scandir
+    swapped: list[bool] = []
+
+    def swap(path: Any) -> Any:
+        assert isinstance(path, int), "eviction scanned a re-resolvable pathname"
+        directory.rename(displaced)
+        directory.symlink_to(authoritative.path.parent, target_is_directory=True)
+        swapped.append(True)
+        return real_scandir(path)
+
+    monkeypatch.setattr(remote_cache.os, "scandir", swap)
+    assert remote_cache.evict(tmp_path, budget=0) == len(b"EXPENDABLE")
+    assert swapped == [True]
+    assert not (displaced / cached.path.name).exists()
+    assert protected.read_bytes() == b"PROTECTED"
+    assert authoritative.path.read_bytes() == b"AUTHORITATIVE"
+
+
+def test_eviction_refuses_a_symlink_swap_between_check_and_directory_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import sync
+
+    directory = remote_cache.cache_root(tmp_path)
+    cached = _blob(directory, b"EXPENDABLE")
+    protected = _blob(tmp_path / "attachments", b"AUTHORITATIVE")
+    real_open = sync.open_directory
+    swapped: list[bool] = []
+
+    def swap(*args: Any, **kwargs: Any) -> int:
+        # write_scope already checked the original path; open_directory must not
+        # trust that check after the path changes into an authoritative-store link.
+        directory.rename(directory.with_name("displaced-cache"))
+        directory.symlink_to(protected.path.parent, target_is_directory=True)
+        swapped.append(True)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(sync, "open_directory", swap)
+    assert remote_cache.evict(tmp_path, budget=0) == 0
+    assert swapped == [True]
+    assert protected.path.read_bytes() == b"AUTHORITATIVE"
+    assert (directory.with_name("displaced-cache") / cached.path.name).read_bytes() == b"EXPENDABLE"
+
+
+def test_eviction_ignores_digest_named_symlinks_and_directories(tmp_path: Path) -> None:
+    directory = remote_cache.cache_root(tmp_path)
+    directory.mkdir(parents=True)
+    protected = _blob(tmp_path / "attachments", b"AUTHORITATIVE")
+    link = directory / ("a" * 32 + ".bin")
+    link.symlink_to(protected.path)
+    folder = directory / ("b" * 32 + ".bin")
+    folder.mkdir()
+    (folder / "user-data").write_bytes(b"USER DATA")
+    assert remote_cache.evict(tmp_path, budget=0) == 0
+    assert link.is_symlink()
+    assert protected.path.read_bytes() == b"AUTHORITATIVE"
+    assert (folder / "user-data").read_bytes() == b"USER DATA"
+
+
+@pytest.mark.parametrize("collision", ["file", "symlink", "directory"])
+def test_download_cleanup_never_unlinks_an_existing_temp_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, collision: str
+) -> None:
+    blob = _blob(tmp_path / "cache", b"PAYLOAD")
+    folder = tmp_path / "downloads"
+    folder.mkdir()
+    temp = folder / ".lop-download-fixed.part"
+    protected = tmp_path / "user-data"
+    protected.write_bytes(b"USER DATA")
+    if collision == "symlink":
+        temp.symlink_to(protected)
+    elif collision == "directory":
+        temp.mkdir()
+    else:
+        temp.write_bytes(b"EXISTING TEMP")
+    monkeypatch.setattr(rsf.secrets, "token_hex", lambda _size: "fixed")
+    with pytest.raises(FileExistsError):
+        rsf.land(blob, name="pic.png", folder=folder, device="owner box")
+    assert temp.exists()
+    assert protected.read_bytes() == b"USER DATA"
+    if collision == "file":
+        assert temp.read_bytes() == b"EXISTING TEMP"
 
 
 # -- R1-2 -------------------------------------------------------------------------

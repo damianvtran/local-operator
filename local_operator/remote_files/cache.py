@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -162,21 +163,33 @@ def touch(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def _locked(directory: Path) -> Iterator[None]:
-    """One eviction pass at a time, across processes (``flock``) and threads."""
-    directory.mkdir(parents=True, exist_ok=True)
-    with _GUARD:
-        try:
-            import fcntl
-        except ImportError:  # pragma: no cover - Windows: the thread guard alone
-            yield
-            return
-        with open(directory / ".lock", "a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+def _locked(root: Path) -> Iterator[int | None]:
+    """Pin the cache directory no-follow before locking or removing any entry."""
+    from local_operator.network import sync
+
+    try:
+        scope = sync.write_scope(root, cache_root(root))
+        directory = sync.open_directory(scope, Path("."), ".lock", create=False)
+    except (OSError, sync.SyncRefused):
+        yield None
+        return
+    try:
+        with _GUARD:
             try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                import fcntl
+            except ImportError:  # pragma: no cover - Windows: the thread guard alone
+                yield directory
+                return
+            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(".lock", flags, 0o600, dir_fd=directory)
+            with os.fdopen(fd, "a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield directory
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        os.close(directory)
 
 
 def total_bytes(root: Path) -> int:
@@ -198,21 +211,22 @@ def evict(root: Path, *, budget: int | None = None, keep: frozenset[str] = froze
     parts live under ``network/staging/files`` and a route serves from an fd it
     already opened, which an unlink cannot take away (POSIX keeps the inode alive).
     """
-    directory = cache_root(root)
-    if not directory.is_dir():
-        return 0
     limit = configured_budget(root) if budget is None else budget
     freed = 0
-    with _locked(directory):
+    with _locked(root) as directory:
+        if directory is None:
+            return 0
         blobs: list[tuple[int, int, str]] = []
         total = 0
         with contextlib.suppress(OSError):
             for entry in os.scandir(directory):
-                if not entry.name.endswith(".bin"):
+                if not entry.name.endswith(".bin") or not is_digest(entry.name[:-4]):
                     continue
                 with contextlib.suppress(OSError):
-                    info = entry.stat()
-                    blobs.append((info.st_mtime_ns, info.st_size, entry.name[: -len(".bin")]))
+                    info = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode):
+                        continue
+                    blobs.append((info.st_mtime_ns, info.st_size, entry.name[:-4]))
                     total += info.st_size
         for _mtime, size, digest in sorted(blobs):
             if total <= limit:
@@ -221,7 +235,9 @@ def evict(root: Path, *, budget: int | None = None, keep: frozenset[str] = froze
                 continue
             for suffix in (".bin", *_SIDECARS):
                 with contextlib.suppress(FileNotFoundError):
-                    (directory / f"{digest}{suffix}").unlink()
+                    # The held no-follow directory fd keeps a renamed cache path
+                    # from redirecting removal into sessions or the attachment store.
+                    os.unlink(f"{digest}{suffix}", dir_fd=directory)
             total -= size
             freed += size
     if freed:
