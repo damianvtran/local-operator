@@ -27565,6 +27565,24 @@ class OperatorApp(App[None]):
         session_dir = config_dir() / "sessions" / session_id
         return session_id if _has_transcript(session_dir) else ""
 
+    def diff_archive_directory(self) -> Path | None:
+        """The parent conversation's directory, for a card's whole-diff read.
+
+        Asked by a :class:`ToolCard` in the main transcript (a subagent page
+        answers first for its own cards). The same layout ``_session_directory``
+        composes, from the config root rather than the session object; the id
+        is shape-checked so it can only name a directory under ``sessions/``.
+        The archive read then proves the call is a row of THAT transcript.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.tui.session_catalog import session_directory_name
+
+        session = self._session
+        session_id = str(getattr(session, "session_id", "") or "") if session else ""
+        if not session_directory_name(session_id):
+            return None
+        return config_dir() / "sessions" / session_id
+
     def resume_hint(self) -> str:
         """``lop --resume <id>`` for this session, or "" when there is none.
 

@@ -1468,6 +1468,11 @@ def entry_block(
             return WorkingBlock(activity, activity, fold_width=fold_width)
         return NoticeBlock(entry.text, entry.notice_kind, fold_width=fold_width)
     card = ToolCard("", entry.tool_name, entry.tool_args, entry.intent)
+    # The row's key IS the child's ``tool_call_id`` for a real call (an id-less
+    # event gets a ``t:`` anchor no transcript row carries, which the archive
+    # read simply refuses). Bound for the full-diff read only; the card's own
+    # id stays empty, as it always has on this page.
+    card.diff_call_id = entry.key
     card.set_fold_hint(fold_width)
     if entry.outcome == "error":
         card.restore(
@@ -2088,6 +2093,19 @@ class SubagentView(Vertical):
     def job_id(self) -> str:
         """The task job this page is showing."""
         return self._job_id
+
+    def diff_archive_directory(self) -> str | None:
+        """The CHILD's session directory, where its write/edit rows are persisted.
+
+        Asked by a :class:`ToolCard` opening its whole archived diff: on this
+        page the call belongs to the child's transcript, never the parent's, so
+        the archive is proved against the child's own session (its directory
+        name, the id its loop stamped on the artifact). ``None`` while the
+        child has no durable session yet; the card then keeps its inline rows.
+        """
+        directory = self._history_directory
+        # ``__unresolved__`` is the pre-``show`` sentinel, not a directory.
+        return directory if directory and directory != "__unresolved__" else None
 
     def compose(self):  # type: ignore[override]
         yield self._title

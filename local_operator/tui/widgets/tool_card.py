@@ -84,6 +84,7 @@ Widths measured through ``rich.cells.cell_len`` only (one width model).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -92,6 +93,7 @@ import textwrap
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from rich.cells import cell_len
@@ -110,6 +112,8 @@ from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.i18n.keys import tui_profile_actions as _pa
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr, tr_record
+from local_operator.tools import diff_archive
+from local_operator.tools.diff_archive import DIFF_FULL_KEY
 from local_operator.tui import bindings
 from local_operator.tui import imagegen as imagegen_mod
 from local_operator.tui.glyphs import display_name, tool_icon
@@ -1846,6 +1850,25 @@ class ToolCard(ExpandableActionBlock):
         #: colourised at render time. ``None`` (not []) when the tool reported
         #: no diff — a read or bash card expands to its raw output instead.
         self._diff: list[str] | None = None
+        #: The SECOND expand level of a write/edit card: the whole diff instead of
+        #: the :data:`EXPAND_MAX_LINES` preview. Reported from a subagent page,
+        #: where a reviewer could not see the change it was approving: the
+        #: preview painted 40 rows and the inline record only ever holds 200, so
+        #: everything past it lived solely in the redacted archive
+        #: (``tools/diff_archive``) that no terminal reader opened.
+        #: ``_diff_omitted`` is the inline record's own ``diff_truncated_rows``;
+        #: ``_diff_full`` its content-free archive descriptor; ``_full_diff_rows``
+        #: the archive's rows once read (``None`` until then, or when the read
+        #: refused -- the level then shows the whole inline record instead).
+        self._diff_omitted = 0
+        self._diff_full: Mapping[str, Any] | None = None
+        self._full_diff_rows: list[str] | None = None
+        self._full_diff_shown = False
+        self._full_diff_loading = False
+        #: The id the archive is proved against. The parent's cards carry their
+        #: ``tool_call_id``; a subagent page builds its cards with an empty id
+        #: (its rows are keyed by the fold) and binds the child's call id here.
+        self.diff_call_id = tool_call_id
         #: True when this card holds a web_fetch (or a ``read <url>`` sugar)
         #: result, so the body painter and the rest-visibility rule can select
         #: the fetch presentation. Set in :meth:`_absorb_result`.
@@ -3273,6 +3296,12 @@ class ToolCard(ExpandableActionBlock):
             self._diff = [str(line) for line in diff]
         else:
             self._diff = None
+        omitted = details.get("diff_truncated_rows") if isinstance(details, Mapping) else None
+        self._diff_omitted = omitted if isinstance(omitted, int) and omitted > 0 else 0
+        full = details.get(DIFF_FULL_KEY) if isinstance(details, Mapping) else None
+        self._diff_full = full if isinstance(full, Mapping) else None
+        self._full_diff_rows = None
+        self._full_diff_shown = False
 
     def _clean_output(self, result_text: str) -> list[str]:
         """Normalise the result into displayable rows (empty = nothing to show).
@@ -3333,6 +3362,106 @@ class ToolCard(ExpandableActionBlock):
             or self._state == "running"
             or (self._state == "queued" and self._is_imagegen())
         )
+
+    def _full_diff_offered(self) -> bool:
+        """Whether the open card is a diff PREVIEW with rows still behind it.
+
+        True on a settled write/edit card expanded at its first level whose
+        preview hides rows -- past :data:`EXPAND_MAX_LINES`, or past the inline
+        record's cap (``diff_truncated_rows``). The next activation then opens
+        the whole diff instead of collapsing, so the reader reaches it with the
+        gesture they already used (Enter/Space/click), not a new binding.
+        """
+        if not self._expanded or self._full_diff_shown or self._state != "success":
+            return False
+        diff = self._diff or []
+        if not diff:
+            return False
+        headers = (
+            2 if len(diff) >= 2 and diff[0].rstrip() == "---" and diff[1].rstrip() == "+++" else 0
+        )
+        return len(diff) - headers > EXPAND_MAX_LINES or self._diff_omitted > 0
+
+    def toggle_expanded(self) -> bool:
+        """collapsed -> preview -> whole diff -> collapsed, for a long write/edit.
+
+        Every other card keeps the base's two-state toggle unchanged.
+        """
+        if self._full_diff_loading:
+            return self._expanded  # one read in flight; a repeat press waits on it
+        if self._full_diff_offered():
+            self._open_full_diff()
+            return self._expanded
+        if self._expanded:
+            # Collapsing returns the card to its first level; the rows already
+            # read stay cached, so reopening the whole diff costs no second read.
+            self._full_diff_shown = False
+        return super().toggle_expanded()
+
+    def _archived(self) -> bool:
+        full = self._diff_full
+        return bool(
+            self._diff_omitted
+            and full is not None
+            and full.get("state") == "archived"
+            and self.diff_call_id
+        )
+
+    def _open_full_diff(self) -> None:
+        """Show every row: the archive's when it holds more than the inline record."""
+        if self._full_diff_rows is None and self._archived():
+            directory = self._diff_archive_directory()
+            if directory is not None:
+                self._full_diff_loading = True
+                self.run_worker(
+                    self._load_full_diff(directory), group="tool-card-full-diff", exclusive=True
+                )
+                return
+        self._show_full_diff()
+
+    async def _load_full_diff(self, directory: Path) -> None:
+        """Read the archive off the event loop (up to 4 MiB of rows), then paint.
+
+        ``load_all_rows`` is the desktop routes' own membership proof: the call
+        must be a persisted write/edit row of THIS session's transcript and the
+        artifact must name this session and call. The session id is the
+        directory's own name, the binding the child route uses. A refusal of
+        any kind answers ``None`` and the level paints the inline record with
+        its honest "N more" count -- never anything this card was not given.
+        """
+        try:
+            rows = await asyncio.to_thread(
+                diff_archive.load_all_rows, directory, directory.name, self.diff_call_id
+            )
+        except Exception:  # noqa: BLE001 - a broken read must not take the page down
+            rows = None
+        finally:
+            self._full_diff_loading = False
+        self._full_diff_rows = rows
+        if self._expanded:
+            self._show_full_diff()
+
+    def _show_full_diff(self) -> None:
+        self._full_diff_shown = True
+        self._refresh_row()
+        parent = self.parent
+        if isinstance(parent, TranscriptView):
+            parent.refresh_gap_after(self)
+            parent.call_after_refresh(lambda: parent.reveal_block(self))
+
+    def _diff_archive_directory(self) -> Path | None:
+        """The session directory whose transcript this card's row lives in.
+
+        Asked of the nearest host that knows it -- a subagent page answers with
+        the CHILD's directory, the app with the parent conversation's -- so a
+        card never names a session itself. A card under neither answers ``None``.
+        """
+        for node in self.ancestors:
+            resolve = getattr(node, "diff_archive_directory", None)
+            if callable(resolve):
+                found = resolve()
+                return Path(found) if isinstance(found, (str, Path)) and found else None
+        return None
 
     def _after_toggle(self) -> None:
         """An expand/collapse supersedes any earlier inert-row answer."""
@@ -4800,10 +4929,16 @@ class ToolCard(ExpandableActionBlock):
         # itself begins `--` (a SQL/Lua comment, say) renders as `--- …` inside
         # the body, and a pattern filter would silently delete the very record
         # this expansion now solely carries (review round 1, F1/D1).
-        diff = list(self._diff or [])
+        # The second level paints EVERY row: the archive's when it was read,
+        # else the whole inline record. The rows are the producer's redacted
+        # ones either way; nothing here re-derives or unmasks a line.
+        source = self._diff or []
+        if self._full_diff_shown and self._full_diff_rows is not None:
+            source = self._full_diff_rows
+        diff = list(source)
         if len(diff) >= 2 and diff[0].rstrip() == "---" and diff[1].rstrip() == "+++":
             diff = diff[2:]
-        shown = diff[:EXPAND_MAX_LINES]
+        shown = diff if self._full_diff_shown else diff[:EXPAND_MAX_LINES]
         for raw in shown:
             line = raw.rstrip()
             prefix = line[:1] if line else ""
@@ -4817,7 +4952,12 @@ class ToolCard(ExpandableActionBlock):
                 ink = dim
             row.append("\n" + indent, style=dim)
             row.append(truncate_cells(line, line_width), style=ink)
+        # The inline record's own omissions count too: the marker used to say
+        # "158 more" over a 500-row change because it counted only the 200
+        # rows it held. Zero once the archive's complete rows are painted.
         hidden = len(diff) - len(shown)
+        if self._full_diff_rows is None or not self._full_diff_shown:
+            hidden += self._diff_omitted
         if hidden > 0:
             marker = f"… {hidden} more diff line{'s' if hidden != 1 else ''}"
             row.append("\n" + indent, style=dim)
@@ -5043,7 +5183,13 @@ class ToolCard(ExpandableActionBlock):
                 or self._hovered
                 or self._focused
             ):
-                offer = COLLAPSE_HINT if self._expanded else EXPAND_HINT
+                # An open preview with rows still behind it offers the next
+                # level rather than the collapse the next press will not do.
+                offer = (
+                    COLLAPSE_HINT
+                    if self._expanded and not self._full_diff_offered()
+                    else EXPAND_HINT
+                )
                 if remaining - (cell_len(offer) + 1) >= _SUMMARY_FLOOR:
                     slot = offer
         elif self._notice:

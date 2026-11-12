@@ -597,3 +597,51 @@ def load_page(
         "next_offset": next_offset if next_start is not None else None,
         "clipped_rows": [],
     }
+
+
+def load_all_rows(
+    session_dir: Path,
+    session_id: str,
+    call_id: str,
+    *,
+    config_root: Path | None = None,
+) -> list[str] | None:
+    """Every archived row of ``call_id``, re-joined, or ``None`` when not archived.
+
+    The terminal reader's door (``tui/widgets/tool_card``): it walks
+    :func:`load_page`'s own server-issued cursor, so the membership proof, the
+    artifact/session binding and the fragment contract are the one the desktop
+    routes use -- this adds no second reader of the store. A continuation
+    fragment (``offset`` > 0) re-joins onto the row it splits by dropping its
+    repeated marker. Bounded by :data:`ARCHIVE_MAX_ROWS` (the artifact cannot
+    hold more), so the walk ends. Any refusal -- unknown call, another
+    session's digest, eviction, an ambiguous id, a non-archived state -- is
+    ``None``: the caller keeps the redacted inline preview it already has.
+    """
+    rows: list[str] = []
+    start: int | None = 0
+    offset = 0
+    try:
+        while start is not None:
+            page = load_page(
+                session_dir,
+                session_id,
+                call_id,
+                start=start,
+                offset=offset,
+                config_root=config_root,
+            )
+            if page["state"] != STATE_ARCHIVED:
+                return None
+            for index, fragment in enumerate(page["rows"]):
+                if index == 0 and offset and rows:
+                    rows[-1] += fragment[1:]
+                else:
+                    rows.append(fragment)
+            next_start, next_offset = page["next_start"], page["next_offset"]
+            if next_start is not None and (next_start, next_offset or 0) <= (start, offset):
+                return None  # a cursor that does not advance is not one we follow
+            start, offset = next_start, next_offset or 0
+    except (DiffArchiveNotFound, DiffPageRangeError):
+        return None
+    return rows
