@@ -33,6 +33,29 @@ from local_operator.tunnels.errors import LoginRequired, RecordNotFound
 STORE_BUSY_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0)
 
 
+async def _open_store_on_thread() -> AuthStore:
+    """`AuthStore()` on a worker thread, closed if nobody is left to receive it.
+
+    Cancelling the awaiting task (connector shutdown, a `wait_for` around
+    `/connect`) cannot stop the worker thread: the constructor finishes anyway
+    and its open sqlite connection would be dropped on the floor until GC
+    (round 1, R1-2). Shielding the thread's future keeps it observable after the
+    cancellation, so the store it eventually returns is closed here instead.
+    """
+    opening = asyncio.ensure_future(asyncio.to_thread(AuthStore))
+    try:
+        return await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        opening.add_done_callback(_close_orphaned_store)
+        raise
+
+
+def _close_orphaned_store(opening: asyncio.Future[AuthStore]) -> None:
+    if opening.cancelled() or opening.exception() is not None:
+        return
+    opening.result().close()
+
+
 async def _open_store() -> AuthStore:
     """`AuthStore()`, retried briefly while another process holds its bootstrap guard.
 
@@ -44,11 +67,11 @@ async def _open_store() -> AuthStore:
     """
     for delay in STORE_BUSY_RETRY_DELAYS:
         try:
-            return await asyncio.to_thread(AuthStore)
+            return await _open_store_on_thread()
         except AuthStoreBusyError:
             await asyncio.sleep(delay)
     try:
-        return await asyncio.to_thread(AuthStore)
+        return await _open_store_on_thread()
     except AuthStoreBusyError as failure:
         # A ValueError, chained, like every other failure `request` reports: the
         # poller and `service.main` catch ValueError, and a bare AuthStoreError

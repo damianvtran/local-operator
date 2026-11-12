@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
+import httpcore
 import httpx
 import jwt
 import pytest
@@ -4405,3 +4406,87 @@ async def test_tunnel_status_names_a_local_cause_instead_of_an_unreachable_contr
     assert f"Connector: not serving — {label}" in receipt
     assert TERMINAL_DETAIL[code] in receipt
     assert "unreachable" not in receipt
+
+
+def _chained(*links: BaseException) -> BaseException:
+    """`links[0]` raised from `links[1]` raised from ..., like the real raise sites."""
+    for outer, inner in zip(links, links[1:]):
+        outer.__cause__ = inner
+    return links[0]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        # The shape httpx 0.28 / httpcore 1.0 actually produce (round 1, R1-1).
+        lambda: _chained(httpx.ConnectTimeout(""), httpcore.ConnectTimeout(""), TimeoutError()),
+        lambda: _chained(
+            ValueError("wrapped"),
+            httpx.ConnectTimeout(""),
+            httpcore.ConnectTimeout(""),
+            TimeoutError(),
+        ),
+        lambda: _chained(httpx.ConnectError(""), httpcore.ConnectError(""), OSError(61, "x")),
+    ],
+    ids=["connect-timeout", "wrapped-connect-timeout", "connect-error"],
+)
+def test_a_chained_connect_failure_reads_as_unreachable_not_timed_out(failure):
+    from local_operator.tunnels import service
+
+    built = failure()
+    assert service.authorization_failure_reason(built) == UNREACHABLE
+    assert service.classify_failure(built).reason == UNREACHABLE
+
+
+@pytest.mark.asyncio
+async def test_a_real_connect_timeout_reads_as_unreachable(monkeypatch):
+    """The real path: httpx's own connect timeout, chain and all, from a dial that
+    cannot complete inside its connect budget (the socket layer is made to stall)."""
+    import anyio
+
+    from local_operator.tunnels import service
+
+    async def never_connects(*_args, **_kwargs):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(anyio, "connect_tcp", never_connects)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=0.05)) as client:
+        with pytest.raises(httpx.ConnectTimeout) as caught:
+            await client.get("http://127.0.0.1:9/")
+    chain = {type(link) for link in service._failure_chain(caught.value)}
+    assert TimeoutError in chain, "the builtin TimeoutError that misled the first draft"
+    assert service.authorization_failure_reason(caught.value) == UNREACHABLE
+
+
+@pytest.mark.asyncio
+async def test_a_store_opened_for_a_cancelled_caller_is_closed(monkeypatch):
+    """R1-2: cancelling the caller cannot stop the worker thread, so the store it
+    finishes opening must be closed rather than left for GC."""
+    import threading
+
+    from local_operator.tunnels import api
+
+    release = threading.Event()
+    started = threading.Event()
+    closed: list[bool] = []
+
+    class SlowStore:
+        def __init__(self):
+            started.set()
+            release.wait(5)
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(api, "AuthStore", SlowStore)
+    task = asyncio.create_task(api._open_store())
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    for _ in range(200):
+        if closed:
+            break
+        await asyncio.sleep(0.01)
+    assert closed == [True]

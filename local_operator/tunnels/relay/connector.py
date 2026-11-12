@@ -250,10 +250,13 @@ def describe_failure(failure: BaseException) -> str:
     transport error) in one shared ValueError sentence.
 
     WHAT IS LEFT OUT, deliberately: the messages of the chained links. Only the
-    outermost message is shown — for `/connect` that is one of the tunnel
-    client's fixed literals, which never echo a provider body, token or URL —
-    while an inner link could be a third-party exception whose text carries a
-    request URL or a server-supplied string. Types alone identify the cause.
+    outermost message is shown. For `/connect` that is either one of the tunnel
+    client's fixed literals (which never echo a provider body, token or URL) or
+    an httpx/OS transport message that `RadientTunnels.request` lets escape
+    unwrapped (e.g. `[Errno 61] Connection refused`) — the same text this line
+    logged before it named types. An inner link could be a third-party exception
+    whose text carries a request URL or a server-supplied string, so the chain
+    is named by type alone.
     """
     message = str(failure).strip()
     text = type(failure).__name__ + (f": {message}" if message else " (no message)")

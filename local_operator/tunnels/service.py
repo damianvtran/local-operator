@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
+import httpcore
 import httpx
 
 from local_operator.mobile.auth import load_password
@@ -390,9 +391,22 @@ def _local_cause(failure: BaseException) -> str | None:
     chain = list(_failure_chain(failure))
     if any(isinstance(link, AuthStoreBusyError) for link in chain):
         return CREDENTIAL_STORE_BUSY
-    # Not `httpx.ConnectTimeout`: no connection was ever made, which IS the
-    # unreachable claim. Read/write timeouts mean the request went out and no
-    # answer came back in time; a pool timeout is the local client's own queue.
+    # A failed or timed-out CONNECT made no connection at all, which IS the
+    # unreachable claim — and it must be ruled out before the TimeoutError walk
+    # below, because httpcore raises its `ConnectTimeout` from the socket's
+    # builtin `TimeoutError`, so every real connect timeout carries one in its
+    # chain (round 1, R1-1: `httpx.ConnectTimeout <- httpcore.ConnectTimeout <-
+    # TimeoutError` read as "timed out"). Read/write timeouts mean the request
+    # went out and no answer came back in time; a pool timeout is the local
+    # client's own queue.
+    connect_failures = (
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpcore.ConnectTimeout,
+        httpcore.ConnectError,
+    )
+    if any(isinstance(link, connect_failures) for link in chain):
+        return None
     if any(
         isinstance(link, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, TimeoutError))
         for link in chain
