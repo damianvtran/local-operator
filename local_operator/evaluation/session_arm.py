@@ -718,6 +718,63 @@ class SessionArmError(RuntimeError):
 # The MCP declaration: one server, in the episode's own scratch root
 # ---------------------------------------------------------------------------
 
+#: The harness's ``run_command`` RPC deadline past the command's own
+#: ``timeout_s`` (``_make_run_command``). It must outlast the adapter's
+#: wall-clock bound on the guest reply (the OSWorld adapter's ``timeout_s + 10``)
+#: plus its lost-reply liveness probe (~4 s worst case), or the RPC deadline
+#: fires first and tears the channel down -- losing the episode the probe exists
+#: to keep. Named, not inline, because the action server's MCP request timeout
+#: is derived from it (:func:`action_server_mcp_timeout_s`).
+COMMAND_RPC_MARGIN_S = 20.0
+
+#: Slack between the ``run_command`` RPC deadline and the MCP client's request
+#: timeout for the episode action server. It covers what can still happen
+#: AFTER that deadline before the bridge's reply reaches the client: the RPC
+#: layer's 1 s cancel grace (``rpc.RpcClient.call``) and, on that poisoning
+#: path, the worker teardown (``_terminate_process_group``: up to
+#: ``TERM_GRACE_SECONDS`` for SIGTERM plus the same again after SIGKILL, then a
+#: 1 s drainer join -- 11 s at today's 5 s grace). The bridge -> stdio child ->
+#: MCP client hops are local and millisecond-scale. 30 s is ~2.5x that 12 s
+#: worst case; ``test_action_server_mcp_timeout_nests_*`` pins the inequality.
+ACTION_SERVER_REPLY_SLACK_S = 30.0
+
+
+def action_server_mcp_timeout_s() -> float:
+    """The MCP client request timeout the episode action server is declared with.
+
+    WHY THIS EXISTS. The MCP client bounds every request at
+    ``DEFAULT_MCP_TIMEOUT_MS`` (300 s) unless the server declares its own
+    ``timeout``, and ``run_command`` advertises a 300 s maximum
+    (``action_server.COMMAND_MAX_TIMEOUT_S``) whose downstream deadlines then
+    ADD margins (guest wrapper +5, adapter bound +10, harness RPC +20). So a
+    command near its advertised maximum was guaranteed to be cut by the MCP
+    client first: sealed episode ``t29a-t030-20261111-192648`` called
+    ``timeout_s: 300``, the client gave up at 305.06 s, the cancellation
+    poisoned the adapter session, and the episode was lost unscored.
+
+    The deadlines must NEST: each outer bound exceeds the inner one plus every
+    margin between them. Derived from the constants -- and read at call time,
+    not frozen at import -- so raising the command maximum (or the RPC margin)
+    moves this bound with it; the invariant test fails if anyone breaks that.
+
+    The GUI ``apply_actions`` tool shares this server and therefore this
+    timeout, which is >= the 300 s it had before, so nothing there tightens. A
+    GUI batch may legally declare up to 64 x 60 s of waits
+    (``deadlines.DECLARED_WORK_HEADROOM_S``), which no fixed MCP bound short of
+    an hour covers; that is tolerable because a GUI call cut by the client is
+    NOT forwarded as a cancellation (``action_server.forward_call`` half-closes
+    only for ``run_command``): the bridge finishes the batch, the reply is
+    lost, and the next call re-binds -- a lost reply, never a poisoned session.
+    """
+
+    from local_operator.evaluation import action_server
+
+    return (
+        float(action_server.COMMAND_MAX_TIMEOUT_S)
+        + COMMAND_RPC_MARGIN_S
+        + ACTION_SERVER_REPLY_SLACK_S
+    )
+
 
 @dataclass(frozen=True)
 class ActionServerDeclaration:
@@ -786,6 +843,12 @@ def declare_action_server(
         # reserves it for the episode's own turn -- children do not inherit it
         # and the harness refuses an execution carrying a child's job id.
         "ownTurnOnly": True,
+        # Per-server MCP request timeout (milliseconds), so the client's bound
+        # nests OUTSIDE every downstream command deadline instead of cutting a
+        # legitimate 300 s command at the 300 s client default. Scoped to this
+        # one server: ordinary sessions keep ``DEFAULT_MCP_TIMEOUT_MS``. See
+        # ``action_server_mcp_timeout_s`` for the derivation.
+        "timeout": int(action_server_mcp_timeout_s() * 1000),
     }
     if command:
         args.append("--command")
@@ -884,6 +947,22 @@ def assert_declaration_resolved(
             f"the action server {server_name!r} was not discovered from {resolved_cwd}; "
             "the declaration and the session's cwd disagree"
         )
+    # ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks a per-server ``timeout``
+    # (``resolve_mcp_timeout_s``), so an inherited env override could silently
+    # undo the nesting the declaration sets and bring back the measured loss
+    # (a 300 s command cut by the MCP client, the session poisoned). Refuse
+    # that at episode start, where it costs nothing, rather than mid-run.
+    if server_name == SERVER_NAME:
+        from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+        resolved_timeout = resolve_mcp_timeout_s(configs[server_name])
+        required_timeout = action_server_mcp_timeout_s()
+        if resolved_timeout is not None and resolved_timeout < required_timeout:
+            raise SessionArmError(
+                f"the action server's MCP request timeout resolves to {resolved_timeout:g} s, "
+                f"below the {required_timeout:g} s its longest command needs; "
+                "unset LOCAL_OPERATOR_MCP_TIMEOUT_MS (or raise it) for episode runs"
+            )
     return sources
 
 
@@ -1920,19 +1999,30 @@ class ActionBridge:
         except OSError:
             pass
 
-    async def call_command(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    async def call_command(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        caller_gone: asyncio.Event | None = None,
+    ) -> dict[str, Any]:
         """Run a negotiated text operation without consuming a screen token.
 
         Transport failures remain errors, not synthetic exit statuses. Recording
         metadata excludes output: sealed artifacts still identify exactly what ran.
+
+        ``caller_gone`` is set by :meth:`_handle` when the MCP caller cancelled
+        after dispatch: the command is then left to settle (see there) and its
+        row is sealed as the unknown outcome the caller was left with.
         """
         # Screen actions, terminal admission and commands share ONE mutation
         # lane. Keep the ended-state check inside it so queued calls cannot run
         # after a finish accepted while they were waiting.
         async with self._lock:
-            return await self._call_command_locked(arguments)
+            return await self._call_command_locked(arguments, caller_gone)
 
-    async def _call_command_locked(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    async def _call_command_locked(
+        self, arguments: Mapping[str, Any], caller_gone: asyncio.Event | None = None
+    ) -> dict[str, Any]:
         from local_operator.evaluation.action_server import (
             COMMAND_DEFAULT_TIMEOUT_S,
             COMMAND_MAX_TIMEOUT_S,
@@ -1969,7 +2059,7 @@ class ActionBridge:
         if self.record is not None:
             self.record("command_started", dict(row))
 
-        def record_cancellation() -> None:
+        def record_cancellation(settled: dict[str, Any] | None = None) -> None:
             row.update(
                 cancelled=True,
                 outcome="cancelled_after_dispatch",
@@ -1980,8 +2070,18 @@ class ActionBridge:
                 stderr_truncated=None,
                 error="CancelledError: command outcome unknown",
             )
+            # The harness-side settlement of a command whose caller left, kept
+            # BESIDE the model-facing fields rather than in them: the model was
+            # never shown this result, so the row's outcome stays the unknown
+            # it was left with (a late success must never read as green), while
+            # the record still says what the target actually answered.
+            if settled is not None:
+                row["settled_after_cancel"] = settled
             if self.record is not None:
                 self.record("command", row)
+
+        def caller_left() -> bool:
+            return caller_gone is not None and caller_gone.is_set()
 
         try:
             result = await self.run_command(command, float(timeout))
@@ -1999,6 +2099,9 @@ class ActionBridge:
             if task is not None and task.cancelling():
                 record_cancellation()
                 raise asyncio.CancelledError from error
+            if caller_left():
+                record_cancellation({"error": f"{type(error).__name__}: {error}"})
+                return refusal("The caller cancelled this command.")
             row.update(
                 exit_code=None,
                 timed_out=None,
@@ -2012,6 +2115,9 @@ class ActionBridge:
                 f"The target could not run the command ({type(error).__name__}: {error})."
             )
         details = result.model_dump(mode="json", exclude={"stdout", "stderr"})
+        if caller_left():
+            record_cancellation(details)
+            return refusal("The caller cancelled this command.")
         row.update(details)
         if self.record is not None:
             self.record("command", row)
@@ -2039,23 +2145,52 @@ class ActionBridge:
             line = await reader.readline()
             request = decode_call(line)
             if request["tool"] == "run_command":
-                operation = asyncio.create_task(self.call_command(request.get("arguments") or {}))
+                caller_gone = asyncio.Event()
+                operation = asyncio.create_task(
+                    self.call_command(request.get("arguments") or {}, caller_gone=caller_gone)
+                )
                 disconnect = asyncio.create_task(reader.read(1))
                 try:
                     done, _ = await asyncio.wait(
                         (operation, disconnect), return_when=asyncio.FIRST_COMPLETED
                     )
                     if disconnect in done:
-                        # The command client half-closes on cancellation. ACK
-                        # only after forwarding cancellation, so a caller that
-                        # releases a delayed HTTP reply cannot race this signal.
-                        operation.cancel()
-                        writer.write(encode_response([], is_error=True))
-                        await writer.drain()
+                        # The command client half-closes on cancellation (an
+                        # MCP request timeout, an interrupted turn). The command
+                        # is DETACHED, not cancelled: cancelling it could not
+                        # recall what the guest already runs, and cancelling
+                        # the in-flight adapter RPC poisons its channel
+                        # (``RpcClient.call``) and kills the worker -- the
+                        # measured loss, where one cut ``timeout_s: 300``
+                        # command failed every later call and ``score``.
+                        #
+                        # WHY HERE, and with no probe of its own. This is the
+                        # one layer that turns "the caller went away" into a
+                        # cancellation; below it the RPC cannot be cancelled
+                        # without poisoning, so no probe there could save the
+                        # session. Letting the bounded RPC settle (its own
+                        # deadline, ``timeout_s + COMMAND_RPC_MARGIN_S``) makes
+                        # the outcome KNOWN to the harness, and the existing
+                        # liveness rule already runs inside it: a lost guest
+                        # reply takes the adapter's one ``/platform`` probe --
+                        # live guest, an unknown-outcome answer carrying
+                        # ``UNKNOWN_OUTCOME_CAUTION`` and the session lives;
+                        # dead guest, the error escapes and ``_mutating_call``
+                        # poisons as before. Holding the mutation lane until it
+                        # settles keeps later calls (and ``finish``) ordered
+                        # behind it. This matches ``apply_actions``, whose
+                        # cut caller was never forwarded as a cancellation.
+                        # Only a cancellation of THIS handler (bridge teardown)
+                        # still cancels the operation, via ``finally``.
+                        caller_gone.set()
                         try:
-                            await operation
-                        except asyncio.CancelledError:
+                            writer.write(encode_response([], is_error=True))
+                            await writer.drain()
+                        except OSError:
+                            # The caller's bounded ACK wait already gave up;
+                            # the command must still settle, not be cancelled.
                             pass
+                        await operation
                         return
                     reply = await operation
                 finally:
@@ -4726,8 +4861,10 @@ def _make_run_command(
             # answer and the poisoning error; at ``+ 15`` that answer would
             # land within ~1 s of this deadline, and a deadline that fires first
             # tears the RPC channel down -- losing the episode the probe exists
-            # to keep. ``+ 20`` leaves ~6 s of scheduling margin.
-            timeout=timeout_s + 20,
+            # to keep. ``+ 20`` leaves ~6 s of scheduling margin. Named
+            # (``COMMAND_RPC_MARGIN_S``) because the action server's MCP request
+            # timeout is derived from it and must stay outside it.
+            timeout=timeout_s + COMMAND_RPC_MARGIN_S,
         )
 
     return run

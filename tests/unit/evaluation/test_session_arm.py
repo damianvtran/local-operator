@@ -507,6 +507,107 @@ class TestResolution:
             assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
 
 
+class TestActionServerDeadlineNesting:
+    """The MCP client's request bound must nest OUTSIDE every command deadline.
+
+    Sealed episode ``t29a-t030-20261111-192648``: a ``timeout_s: 300`` command
+    (the advertised maximum) was cut by the MCP client at 305.06 s -- the 300 s
+    client default -- before the harness's own ``timeout_s + 20`` RPC deadline,
+    and the cancellation poisoned the session. These tests fail if the
+    declaration stops carrying a timeout, or if anyone raises the command
+    maximum (or the RPC margin) without the MCP bound following.
+    """
+
+    @staticmethod
+    def _declared_timeout_ms(tmp_path: Path) -> float:
+        config = tmp_path / "config"
+        config.mkdir(exist_ok=True)
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface(), command=True
+        )
+        document = json.loads((config / "mcp.json").read_text(encoding="utf-8"))
+        return float(document["mcpServers"]["episode-actions"]["timeout"])
+
+    @staticmethod
+    def _floor_s(command_max_s: float) -> float:
+        from local_operator.evaluation.adapters.supervisor import TERM_GRACE_SECONDS
+        from local_operator.evaluation.session_arm import COMMAND_RPC_MARGIN_S
+
+        # RPC deadline, then its 1 s cancel grace, the poison's SIGTERM and
+        # post-SIGKILL waits and a 1 s drainer join -- everything that can still
+        # happen before the bridge replies (``ACTION_SERVER_REPLY_SLACK_S``).
+        return command_max_s + COMMAND_RPC_MARGIN_S + 1.0 + 2 * TERM_GRACE_SECONDS + 1.0
+
+    def test_action_server_mcp_timeout_nests_outside_the_longest_command(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation import action_server
+        from local_operator.mcp.manager import DEFAULT_MCP_TIMEOUT_MS
+
+        declared_s = self._declared_timeout_ms(tmp_path) / 1000.0
+        assert declared_s > self._floor_s(action_server.COMMAND_MAX_TIMEOUT_S)
+        # The measured defect: the client default sat AT the command maximum.
+        assert declared_s > DEFAULT_MCP_TIMEOUT_MS / 1000.0
+        # The ordinary-session default is untouched by this per-server bound.
+        assert DEFAULT_MCP_TIMEOUT_MS == 300_000.0
+
+    def test_action_server_mcp_timeout_nests_when_the_command_max_is_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.evaluation import action_server
+
+        monkeypatch.setattr(action_server, "COMMAND_MAX_TIMEOUT_S", 900)
+        assert self._declared_timeout_ms(tmp_path) / 1000.0 > self._floor_s(900)
+
+    def test_the_resolved_client_bound_is_the_declared_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.evaluation import action_server
+        from local_operator.mcp.config import load_all_mcp_configs
+        from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+        home = tmp_path / "home"
+        config = home / ".local-operator"
+        work = home / "work"
+        config.mkdir(parents=True)
+        work.mkdir()
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface()
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+        configs, _ = load_all_mcp_configs(work)
+        resolved = resolve_mcp_timeout_s(configs["episode-actions"])
+        assert resolved is not None
+        assert resolved > self._floor_s(action_server.COMMAND_MAX_TIMEOUT_S)
+        assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+
+    @pytest.mark.parametrize(("env_ms", "refused"), [("300000", True), ("0", False)])
+    def test_an_env_override_below_the_nesting_bound_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_ms: str, refused: bool
+    ) -> None:
+        # ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks the per-server timeout, so
+        # an inherited 300 s override would silently restore the measured loss;
+        # ``0`` disables the client bound entirely and nests trivially.
+        home = tmp_path / "home"
+        config = home / ".local-operator"
+        work = home / "work"
+        config.mkdir(parents=True)
+        work.mkdir()
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface()
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", env_ms)
+        if refused:
+            with pytest.raises(SessionArmError, match="MCP request timeout resolves to 300 s"):
+                assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+        else:
+            assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+
+
 class TestBridgeDiscipline:
     @pytest.mark.asyncio
     async def test_one_batch_per_observation_until_the_turn_ends(self, tmp_path: Path) -> None:
@@ -6317,9 +6418,18 @@ async def test_pending_command_serializes_finish(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("late_error", [False, True])
-async def test_mcp_cancellation_seals_unknown_even_after_late_success(
+async def test_mcp_cancellation_detaches_and_seals_unknown_even_after_late_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: bool, late_error: bool
 ) -> None:
+    """A caller cancelled after dispatch DETACHES the command; it never cancels it.
+
+    Cancelling the in-flight command used to cancel the adapter RPC, which
+    poisons its channel and kills the worker (sealed episode
+    ``t29a-t030-20261111-192648``: every later call and ``score`` failed). The
+    command now settles under its own deadline. The row still seals the
+    UNKNOWN outcome the caller was left with -- a late success must never read
+    as green -- and records what the target actually answered beside it.
+    """
     from mcp import types
 
     from local_operator.evaluation.action_server import (
@@ -6367,20 +6477,27 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
             await writer.wait_closed()
 
     async def run(command: str, timeout: float) -> Any:
-        remote = asyncio.create_task(http_request())
-        while True:
-            try:
-                return await asyncio.shield(remote)
-            except asyncio.CancelledError:
-                if remote.cancelled():
-                    raise
-                # Publish only once the bridge operation has observed cancellation.
-                # Native socket teardown can cancel it again while it collects the
-                # late reply; keep shielding on EVERY await so that teardown cannot
-                # cancel the independent HTTP task before the handshake releases it.
-                cancelled.set()
+        try:
+            return await http_request()
+        except asyncio.CancelledError:
+            # The defect this test guards: the caller's cancellation reaching
+            # the dispatched command (and with it the adapter RPC).
+            cancelled.set()
+            raise
 
     bridge.run_command = run
+    # Observe the bridge's detach signal, so the late reply is released only
+    # once the caller's cancellation has reached the bridge (the MCP cancel is
+    # an asynchronous notification across the stdio transport).
+    detached: list[asyncio.Event] = []
+    original_call_command = bridge.call_command
+
+    async def spy_call_command(arguments: Any, **kwargs: Any) -> Any:
+        if kwargs.get("caller_gone") is not None:
+            detached.append(kwargs["caller_gone"])
+        return await original_call_command(arguments, **kwargs)
+
+    monkeypatch.setattr(bridge, "call_command", spy_call_command)
     await bridge.start()
     server = build_mcp_server(str(bridge.endpoint), ActionSurface(), timeout=5, command=True)
     entry = server.get_request_handler("tools/call")
@@ -6419,19 +6536,28 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
 
     task = asyncio.create_task(invoke())
     try:
-        await admitted.wait()
+        await asyncio.wait_for(admitted.wait(), 10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         # MCP cancellation is a notification across a subprocess transport,
-        # not a synchronous remote ACK. Hold the actual HTTP reply until
-        # cancellation reaches the operation, then deliver its late success.
-        await asyncio.wait_for(cancelled.wait(), 2)
+        # not a synchronous remote ACK. Hold the actual HTTP reply until the
+        # bridge has seen the caller leave, then deliver its late answer.
+        for _ in range(200):
+            if detached and detached[0].is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert detached and detached[0].is_set(), "caller cancellation never reached the bridge"
         release.set()
         await asyncio.wait_for(completed.wait(), 2)
         await asyncio.wait_for(recorded.wait(), 2)
-        assert cancelled.is_set(), "caller cancellation never reached the bridge operation"
+        assert not cancelled.is_set(), "caller cancellation reached the dispatched command"
         row = [p for k, p in rows if k == "command"][0]
+        settled = (
+            {"error": "ValueError: late reply could not be decoded"}
+            if late_error
+            else _command_result().model_dump(mode="json", exclude={"stdout", "stderr"})
+        )
         assert row == {
             "call_id": row["call_id"],
             "command": "late success",
@@ -6444,7 +6570,9 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
             "stdout_truncated": None,
             "stderr_truncated": None,
             "error": "CancelledError: command outcome unknown",
+            "settled_after_cancel": settled,
         }
+        assert len([k for k, _ in rows if k == "command"]) == 1
     finally:
         release.set()
         if manager is not None:
@@ -6452,3 +6580,63 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
         await bridge.stop()
         target.close()
         await target.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_a_command_at_the_advertised_maximum_is_not_cut_by_the_mcp_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measured loss, scaled down and driven through the real MCP client.
+
+    Sealed episode ``t29a-t030-20261111-192648``: ``timeout_s: 300`` (the
+    advertised maximum) met the client's 300 s default request timeout and was
+    cut at 305.06 s. Here the client default is scaled to 0.5 s and the command
+    takes 1 s (its own deadline plus downstream margins, scaled): without the
+    per-server bound the declaration now carries, the client cuts it exactly as
+    the sealed run did; with it, the command's real answer reaches the caller.
+    """
+
+    from local_operator.mcp import manager as manager_mod
+
+    monkeypatch.setattr(manager_mod, "DEFAULT_MCP_TIMEOUT_MS", 500.0)
+    monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+    bridge = _bridge(tmp_path)
+
+    async def run(command: str, timeout: float) -> Any:
+        await asyncio.sleep(1.0)
+        return _command_result(stdout="trained\n", stdout_bytes=8)
+
+    bridge.run_command = run
+    await bridge.start()
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    decl = declare_action_server(
+        config_dir=config,
+        endpoint=bridge.endpoint,
+        surface=ActionSurface(),
+        python_executable=sys.executable,
+        cwd=Path(__file__).resolve().parents[3],
+        command=True,
+    )
+    manager = McpManager(str(tmp_path))
+    try:
+        await manager.discover_and_connect()
+        await manager.wait_settled(20)
+        tool = next(t for t in manager.get_tools() if t.name == decl.command_tool_name)
+        result = await asyncio.wait_for(
+            tool.execute(
+                "max-timeout",
+                {"command": "python train.py", "timeout_s": 300},
+                None,
+                None,
+                ToolContext(),
+            ),
+            30,
+        )
+        text = "".join(getattr(block, "text", "") for block in result.content)
+        assert "timed out" not in text, text
+        assert "exit_code: 0" in text and "trained" in text, text
+    finally:
+        await manager.disconnect_all()
+        await bridge.stop()
