@@ -6816,17 +6816,37 @@ class PeerAttachmentUnavailable(Exception):
 
     code = "attachment_on_peer"
 
-    def __init__(self, session_id: str, row: SessionRow) -> None:
+    def __init__(self, session_id: str, row: SessionRow, *, owner_code: str = "") -> None:
         from local_operator.resume import UNNAMED_DEVICE
 
-        device = row.owner_label or UNNAMED_DEVICE
-        super().__init__(
-            f"{session_id}'s images are kept on {device}, which holds that "
-            "conversation; this desktop can only read attachments out of its "
-            "own store today, so this one cannot be shown here yet."
-        )
+        self.device = row.owner_label or UNNAMED_DEVICE
+        #: The owner's refusal, folded to the sentence's closed ``reason`` set: the
+        #: owner's own code says WHY (not referenced, revoked, gone…), which is what
+        #: the reader can act on (#3872 Q1-1). The envelope's ``code`` is unchanged.
+        self.reason = peer_refusal_reason(owner_code)
+        super().__init__(f"{self.code}:{owner_code or 'none'}")
         self.session_id = session_id
         self.row = row
+
+
+#: Owner refusal codes (``network/files.py``, the authorizer) by the clause of
+#: ``attachment_owner_refused`` that tells the reader what happened.
+_PEER_REFUSAL_REASONS: dict[str, str] = {
+    "not_referenced": "not_referenced",
+    "missing": "missing",
+    "not_found": "missing",
+    "session_not_found": "missing",
+    "not_authorised": "not_allowed",
+    "not_a_member": "not_allowed",
+    "phase_forbidden": "not_allowed",
+    "integrity_failed": "integrity",
+    "corrupt_source": "integrity",
+    "stale_file": "integrity",
+}
+
+
+def peer_refusal_reason(owner_code: str) -> str:
+    return _PEER_REFUSAL_REASONS.get(owner_code, "other")
 
 
 class PeerAttachmentRetryable(Exception):
@@ -6860,6 +6880,9 @@ class PeerAttachmentOutdated(Exception):
         from local_operator.resume import UNNAMED_DEVICE
 
         self.device = row.owner_label or UNNAMED_DEVICE
+        #: The device ID for the command the sentence names: a label can be
+        #: ``unnamed device`` or contain spaces, and neither runs (#3872 I1-3).
+        self.peer = str(row.owner_device or "") or self.device
         super().__init__(self.code)
         self.session_id = session_id
         self.row = row
@@ -6940,7 +6963,7 @@ async def _fetch_peer(
                 session_id, row, pending=error.kind == "pending"
             ) from None
         logger.info("peer refused %s of %s: %s", key, member_id, error.code)
-        raise PeerAttachmentUnavailable(session_id, row) from None
+        raise PeerAttachmentUnavailable(session_id, row, owner_code=error.code) from None
 
 
 def _open_blob(blob: Any) -> PeerAttachmentFile:

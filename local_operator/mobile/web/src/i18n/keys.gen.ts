@@ -564,8 +564,9 @@ export type MessageParams = {
   "wire.errors.desktop.aside_still_running": undefined;
   "wire.errors.desktop.aside_unavailable": undefined;
   "wire.errors.desktop.attachment_fetch_pending": { "device": string };
+  "wire.errors.desktop.attachment_owner_refused": { "reason": string; "device": string };
   "wire.errors.desktop.attachment_owner_unreachable": { "device": string };
-  "wire.errors.desktop.attachment_peer_outdated": { "device": string };
+  "wire.errors.desktop.attachment_peer_outdated": { "device": string; "peer": string };
   "wire.errors.desktop.claim_authorization_required": undefined;
   "wire.errors.desktop.claim_body_not_object": undefined;
   "wire.errors.desktop.claim_key_unpublished": undefined;

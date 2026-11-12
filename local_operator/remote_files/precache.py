@@ -111,14 +111,28 @@ class Precacher:
             self._enqueue(row)
 
     def opened_session(self, session_id: str, row: dict[str, Any] | None = None) -> None:
-        """A remote session was opened here: remember it and prepare it now."""
+        """A remote session was opened here: remember it and prepare it now.
+
+        Called on EVERY Files-panel request (each page, ``building`` poll, open and
+        download), so the pass goes through the catalogue poll's gate: at most once
+        per :data:`RESCAN_S`, and after that only when the session moved or was not
+        in the opened LRU before (#3872 R1-2).
+        """
+        newly_opened = session_id not in self.opened
         self.opened[session_id] = None
         self.opened.move_to_end(session_id)
         while len(self.opened) > OPENED_LRU:
             self.opened.popitem(last=False)
         row = row or self.rows.get(session_id)
-        if row is not None and remote_cache.configured_budget(self.root) > 0:
-            self._enqueue(row)
+        if row is None or remote_cache.configured_budget(self.root) <= 0:
+            return
+        last = self.passes.get(session_id)
+        if last is not None:
+            recent = time.monotonic() - last[0] < RESCAN_S
+            unchanged = last[1] == float(row.get("mtime") or 0.0)
+            if recent or (unchanged and not newly_opened):
+                return
+        self._enqueue(row)
 
     def _enqueue(self, row: dict[str, Any]) -> None:
         self.queue[str(row["id"])] = row
@@ -209,26 +223,31 @@ class Precacher:
         budget = remote_cache.configured_budget(self.root)
         landed = 0
         for member, source, key, size in await self.candidates(row):
-            if "file_id" in source:
-                try:
-                    detail, _ = await ask(
-                        self.root, session_id, phase="row", file_id=source["file_id"]
-                    )
-                except (MeshRefusal, KeyError):
-                    continue
-                pull = detail.get("source")
-                if not isinstance(pull, dict) or not pull.get("path"):
-                    continue
-                member = str(pull.get("session_id") or member)
-                source = {"path": str(pull["path"])}
-                key = f"path:{pull['path']}:{size}"
-            elif await asyncio.to_thread(remote_cache.lookup, self.root, (member, session_id), key):
+            if "file_id" not in source and await asyncio.to_thread(
+                remote_cache.lookup, self.root, (member, session_id), key
+            ):
                 continue
             total = await asyncio.to_thread(remote_cache.total_bytes, self.root)
             if total + size > budget:
                 break
             try:
+                # The per-path ``row`` ask is precache traffic too: behind the budget
+                # check and inside the precache slot, so it never competes with an
+                # on-screen request for the link or the owner's op thread (R1-2).
                 async with self._semaphore(owner):
+                    if "file_id" in source:
+                        try:
+                            detail, _ = await ask(
+                                self.root, session_id, phase="row", file_id=source["file_id"]
+                            )
+                        except (MeshRefusal, KeyError):
+                            continue
+                        pull = detail.get("source")
+                        if not isinstance(pull, dict) or not pull.get("path"):
+                            continue
+                        member = str(pull.get("session_id") or member)
+                        source = {"path": str(pull["path"])}
+                        key = f"path:{pull['path']}:{size}"
                     blob = await remote_fetch.fetch(
                         self.root,
                         owner=owner,

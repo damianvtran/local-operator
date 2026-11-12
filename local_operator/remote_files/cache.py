@@ -15,6 +15,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,20 @@ CACHE_PARTS: tuple[str, ...] = ("cache", "remote-files")
 
 _SIDECARS = (".json", ".peaks.json")
 _GUARD = threading.Lock()
+
+#: The AttachmentStore's content address (``sha256[:32]``, lower-case hex).
+DIGEST = re.compile(r"[0-9a-f]{32}")
+#: ``desktop_sessions.SESSION_ID``'s shape, restated (as ``session_files.family``
+#: does) so this module stays off the desktop module's import path.
+SESSION_ID = re.compile(r"[a-f0-9]{12}")
+
+
+def is_digest(value: object) -> bool:
+    return isinstance(value, str) and DIGEST.fullmatch(value) is not None
+
+
+def is_session_id(value: object) -> bool:
+    return isinstance(value, str) and SESSION_ID.fullmatch(value) is not None
 
 
 def cache_root(root: Path) -> Path:
@@ -88,10 +103,19 @@ def _mime_beside(path: Path) -> str:
 
 
 def locations(root: Path, session_id: str, digest: str) -> list[tuple[str, Path]]:
-    """The lookup order of §1, as ``(source, path)``: store, replica, cache."""
+    """The lookup order of §1, as ``(source, path)``: store, replica, cache.
+
+    Both names become path components, and a digest can arrive from ANOTHER device
+    (an owner's listing or row reply), so the shapes are checked here as well as at
+    the callers: no caller can build a path out of ``../..`` (#3872 R1-1).
+    """
     from local_operator.network import sync
     from local_operator.session.attachments import ATTACHMENTS_DIRNAME
 
+    if not is_digest(digest):
+        raise ValueError("not a content digest")
+    if not is_session_id(session_id):
+        raise ValueError("not a session id")
     root = Path(root)
     return [
         ("store", root / ATTACHMENTS_DIRNAME / f"{digest}.bin"),
@@ -106,9 +130,16 @@ def lookup(root: Path, session_ids: tuple[str, ...], digest: str) -> CachedBlob 
     ``session_ids`` names every replica that may hold it (a child's bytes may sit in
     its own replica or its parent's). A cache hit is touched, because LRU is by
     ``.bin`` mtime: atime is unreliable under ``relatime``/``noatime``.
+
+    A malformed digest names nothing on this disk, so it is a miss; malformed
+    session ids are skipped (their replica cannot exist).
     """
+    if not is_digest(digest):
+        return None
     seen: set[Path] = set()
     for session_id in session_ids:
+        if not is_session_id(session_id):
+            continue
         for source, path in locations(root, session_id, digest):
             if path in seen:
                 continue

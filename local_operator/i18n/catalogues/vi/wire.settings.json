@@ -162,7 +162,7 @@
   "wire.settings.desktop_launch_command.label": "lệnh khởi chạy",
   "wire.settings.desktop_launch_command.placeholder": "local-operator-ui --open-session '{'session'}'",
   "wire.settings.desktop_remote_files_cache_bytes.help": "Dung lượng đĩa cho bản sao tệp từ các cuộc trò chuyện nằm trên thiết bị khác, để mở nhanh tại đây. Bản sao cũ nhất bị xóa trước. 0 nghĩa là không giữ lại gì sau khi hiển thị.",
-  "wire.settings.desktop_remote_files_cache_bytes.label": "bộ nhớ đệm tệp từ xa (byte)",
+  "wire.settings.desktop_remote_files_cache_bytes.label": "cache tệp từ xa (byte)",
   "wire.settings.detail_length.help": "Đã lỗi thời. Được thay thế bởi bộ máy nén.",
   "wire.settings.detail_length.label": "Độ dài chi tiết",
   "wire.settings.display_comfortable_rows.choice.false.description": "gọn hơn, xem được nhiều lịch sử hơn",

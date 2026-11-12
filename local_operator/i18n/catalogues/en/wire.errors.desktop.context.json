@@ -31,27 +31,33 @@
   },
   "wire.errors.desktop.attachment_owner_unreachable": {
     "role": "API refusal text shown where a remote conversation's file would render (image tile, audio player, document preview)",
-    "tone": "plain, calm, tells the user what happens next",
+    "tone": "plain, calm, tells the user what to do",
     "width": "one or two sentences; shown inline in a tile or in a toast",
-    "note": "504, retryable: the device that holds a remote conversation (or this device's relay) is not answering, so a picture, recording or document from it cannot be fetched. The desktop retries on its own and then offers a retry. {device} is the other device's name; keep both mentions."
+    "note": "504, retryable: the device that holds a remote conversation (or this device's relay) is not answering, so a picture, recording or document from it cannot be fetched. The desktop retries on its own and then offers a retry, so the sentence asks the user to try again rather than promising an automatic load. {device} is the other device's name; one mention."
   },
   "wire.errors.desktop.attachment_fetch_pending": {
     "role": "API refusal text shown where a remote conversation's file would render (image tile, audio player, document preview)",
     "tone": "plain, calm, tells the user what happens next",
     "width": "one or two sentences; shown inline in a tile or in a toast",
-    "note": "504 with Retry-After, retryable: a large file from another device is still transferring when the request's wait ends; the transfer continues. {device} is the other device's name."
+    "note": "504 with Retry-After, retryable: a large file from another device is still transferring when the request's wait ends; the transfer continues and the next request joins it, so the sentence asks the user to try again. {device} is the other device's name."
   },
   "wire.errors.desktop.attachment_peer_outdated": {
     "role": "API refusal text shown where a remote conversation's file would render (image tile, audio player, document preview)",
     "tone": "plain, calm, tells the user what happens next",
     "width": "one or two sentences; shown inline in a tile or in a toast",
-    "note": "409, permanent until the other device updates. 'lop network update' is a command and stays untranslated; {device} is the other device's name, used twice."
+    "note": "409, permanent until the other device updates. The backticked `lop network update {peer}` is a command: keep it untranslated, in backticks, with {peer} (the device ID) inside. {device} is the other device's display name."
+  },
+  "wire.errors.desktop.attachment_owner_refused": {
+    "role": "API refusal text shown where a remote conversation's file would render (image tile, audio player, document preview)",
+    "tone": "plain, calm, says why",
+    "width": "one or two sentences; shown inline in a tile or in a toast",
+    "note": "409, permanent: the device that holds the conversation refused to send this file. {reason} is a machine code selecting the clause and is never shown: not_referenced (the conversation no longer refers to the file), missing (gone from that device), not_allowed (this device's access to the conversation was revoked), integrity (the bytes did not match), other. {device} is the other device's name."
   },
   "wire.errors.desktop.session_files_remote_unreadable": {
     "role": "API refusal text for a file listed in a conversation held on another device (Files panel, download)",
     "tone": "plain, calm, says why and what to do",
     "width": "one or two sentences; inline in a row tooltip or a toast",
-    "note": "409, permanent: a file listed in a conversation held on another device cannot be read from here. {device} is the other device's name; {reason} is a machine code selecting the clause and is never shown. 'scratchpad' is the conversation's own shared folder (glossary term). Keep the 256 MiB figure."
+    "note": "409, permanent: a file listed in a conversation held on another device cannot be read from here. {device} is the other device's name; {reason} is a machine code selecting the clause and is never shown. 'scratchpad' is the conversation's own shared folder (glossary term). Keep the 256 MiB figure. The 'sensitive' clause covers hidden files (a name starting with a dot) as well as credential-shaped names."
   },
   "wire.errors.desktop.session_files_sensitive_name": {
     "role": "API refusal text for a file listed in a conversation held on another device (Files panel, download)",
@@ -73,8 +79,8 @@
   },
   "wire.errors.desktop.session_files_owner_unreachable": {
     "role": "API refusal text shown in the Files panel of a conversation held on another device",
-    "tone": "plain, calm, tells the user what happens next",
+    "tone": "plain, calm, tells the user what to do",
     "width": "one or two sentences; shown in the panel body",
-    "note": "504, retryable: the Files panel of a conversation held on another device cannot be listed because that device (or this device's relay) is not answering. {device} is the other device's name; keep both mentions."
+    "note": "504, retryable: the Files panel of a conversation held on another device cannot be listed because that device (or this device's relay) is not answering. The panel offers a retry. {device} is the other device's name; one mention."
   }
 }

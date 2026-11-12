@@ -74,12 +74,16 @@ def attachment_fetch_pending(*, device: str) -> Msg:
     return Msg("wire.errors.desktop.attachment_fetch_pending", {"device": device})
 
 
+def attachment_owner_refused(*, reason: str, device: str) -> Msg:
+    return Msg("wire.errors.desktop.attachment_owner_refused", {"reason": reason, "device": device})
+
+
 def attachment_owner_unreachable(*, device: str) -> Msg:
     return Msg("wire.errors.desktop.attachment_owner_unreachable", {"device": device})
 
 
-def attachment_peer_outdated(*, device: str) -> Msg:
-    return Msg("wire.errors.desktop.attachment_peer_outdated", {"device": device})
+def attachment_peer_outdated(*, device: str, peer: str) -> Msg:
+    return Msg("wire.errors.desktop.attachment_peer_outdated", {"device": device, "peer": peer})
 
 
 def claim_authorization_required() -> Msg:

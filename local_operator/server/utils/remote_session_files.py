@@ -20,7 +20,7 @@ import hashlib
 import os
 import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from fastapi import HTTPException
 
@@ -123,7 +123,7 @@ async def listing(
             PeerAttachmentUnavailable,
         )
 
-        raise PeerAttachmentUnavailable(session_id, row) from None
+        raise PeerAttachmentUnavailable(session_id, row, owner_code=refusal.code) from None
     device = device_of(row)
     _stamp(list(detail.get("rows") or detail.get("items") or []), device)
     detail["unsupported_reason"] = None
@@ -161,7 +161,7 @@ async def _resolve(config_dir: Path, session_id: str, file_id: str) -> tuple[Any
             PeerAttachmentUnavailable,
         )
 
-        raise PeerAttachmentUnavailable(session_id, row) from None
+        raise PeerAttachmentUnavailable(session_id, row, owner_code=refusal.code) from None
     file_row = detail.get("row") or {}
     source = detail.get("source")
     reason = file_row.get("remote_unreadable")
@@ -172,11 +172,24 @@ async def _resolve(config_dir: Path, session_id: str, file_id: str) -> tuple[Any
                 reason=str(reason or "outside_session_files"), device=device_of(row)["name"]
             ).envelope(code="session_files_remote_unreadable"),
         )
+    from local_operator.remote_files import cache as remote_cache
+
+    # The owner's reply names a digest and a member id that become path components
+    # on THIS disk (store, replica, cache): a malformed one is the owner's fault and
+    # permanent, never a path to open and never an uncaught ``SyncRefused`` (R1-1).
     member_id = str(source.get("session_id") or session_id)
-    if source.get("attachment"):
-        blob = await peer_blob(
-            config_dir, session_id, row, str(source["attachment"]), member_id=member_id
+    attachment = source.get("attachment")
+    if not remote_cache.is_session_id(member_id) or (
+        attachment and not remote_cache.is_digest(attachment)
+    ):
+        raise HTTPException(
+            409,
+            _wd.session_files_remote_unreadable(
+                reason="other", device=device_of(row)["name"]
+            ).envelope(code="session_files_remote_unreadable"),
         )
+    if attachment:
+        blob = await peer_blob(config_dir, session_id, row, str(attachment), member_id=member_id)
     else:
         path = str(source.get("path") or "")
         key = f"path:{path}:{file_row.get('size_bytes')}:{file_row.get('modified_at')}"
@@ -201,19 +214,40 @@ def _open(blob: Any) -> Any:
     return handle
 
 
+async def _opened(resolve: Any, session_id: str) -> tuple[Any, Any, Any, Any]:
+    """``(handle, blob, file_row, row)``: ``resolve()``, then its blob OPENED.
+
+    An eviction can win the race between the lookup and the open; the bytes can
+    be re-fetched by construction, so one re-resolve, then 504 retryable — the
+    transcript route's ``_peer_file`` rule, never a 500 or a permanent 409 (R1-3).
+    Once open, an unlink cannot take the bytes (POSIX keeps the inode).
+    """
+    for attempt in (1, 2):
+        blob, file_row, row = await resolve()
+        try:
+            handle = await asyncio.to_thread(_open, blob)
+        except FileNotFoundError:
+            if attempt == 2:
+                from local_operator.server.utils.desktop_sessions import (
+                    PeerAttachmentRetryable,
+                )
+
+                raise PeerAttachmentRetryable(session_id, row, pending=False) from None
+            continue
+        return handle, blob, file_row, row
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 async def content(config_dir: Path, session_id: str, file_id: str, range_header: str | None):
     """The bytes of one remote row, streamed from an fd opened before answering."""
-    from local_operator.server.routes.desktop_sessions import (
-        ATTACHMENT_SERVABLE_MIME_TYPES,
-    )
     from local_operator.server.utils import byte_range
 
-    blob, _file_row, _row = await _resolve(config_dir, session_id, file_id)
-    handle = await asyncio.to_thread(_open, blob)
-    mime = blob.mime if blob.mime in ATTACHMENT_SERVABLE_MIME_TYPES | _PASSIVE_TEXT else None
+    handle, blob, _file_row, _row = await _opened(
+        lambda: _resolve(config_dir, session_id, file_id), session_id
+    )
     return byte_range.handle_response(
         handle,
-        media_type=mime or "application/octet-stream",
+        media_type=_servable(blob.mime),
         headers={
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox",
@@ -221,6 +255,18 @@ async def content(config_dir: Path, session_id: str, file_id: str, range_header:
         },
         range_header=range_header,
     )
+
+
+def _servable(mime: str | None) -> str:
+    """The type a remote byte route may answer with: passive types as themselves,
+    anything else (HTML, SVG…, or a type another device made up) as opaque bytes."""
+    from local_operator.server.routes.desktop_sessions import (
+        ATTACHMENT_SERVABLE_MIME_TYPES,
+    )
+
+    if mime and mime in ATTACHMENT_SERVABLE_MIME_TYPES | _PASSIVE_TEXT:
+        return mime
+    return "application/octet-stream"
 
 
 def downloads_dir(config_dir: Path) -> Path:
@@ -253,8 +299,13 @@ def _candidates(name: str) -> list[str]:
     return [name, *(f"{stem} ({n}){ext}" for n in range(1, MAX_NUMBERED_COPIES + 1))]
 
 
-def land(blob: Any, *, name: str, folder: Path, device: str) -> dict[str, Any]:
+def land(
+    blob: Any, *, name: str, folder: Path, device: str, source: BinaryIO | None = None
+) -> dict[str, Any]:
     """Copy ``blob`` into ``folder`` verified and without overwriting. Blocking.
+
+    ``source`` is ``blob`` already opened (the route opens it first, so a concurrent
+    eviction cannot take it); without one the blob is opened here. Closed either way.
 
     I3-2: an ``O_EXCL`` temp in the target folder, a streamed 1 MiB-block copy from an
     fd opened once, ``fsync``, the full sha256 checked against the blob's content
@@ -263,8 +314,13 @@ def land(blob: Any, *, name: str, folder: Path, device: str) -> dict[str, Any]:
     (``created: false``); a different one moves the landing to ``name (n).ext``.
     """
     expected = Path(blob.path).stem
-    with open(blob.path, "rb") as source:
-        temp = folder / f".{name}.{secrets.token_hex(6)}.part"
+    if source is None:
+        source = open(blob.path, "rb")  # noqa: SIM115 — closed by the ``with`` below
+    with source:
+        # A short FIXED-length temp name: the final name may already be at the
+        # 255-byte limit (80 CJK characters are 240 bytes), so the temp must not grow
+        # with it (R1-4).
+        temp = folder / f".lop-download-{secrets.token_hex(8)}.part"
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         digest = hashlib.sha256()
         size = 0
@@ -322,9 +378,20 @@ def _receipt(path: Path, size: int, hexdigest: str, *, created: bool) -> dict[st
 
 async def download(config_dir: Path, session_id: str, file_id: str) -> dict[str, Any]:
     """Fetch one remote row and land it on THIS device; the receipt names where."""
+    handle, blob, file_row, row = await _opened(
+        lambda: _resolve(config_dir, session_id, file_id), session_id
+    )
+    try:
+        return await _download_opened(config_dir, handle, blob, file_row, row)
+    finally:
+        handle.close()
+
+
+async def _download_opened(
+    config_dir: Path, handle: BinaryIO, blob: Any, file_row: dict[str, Any], row: Any
+) -> dict[str, Any]:
     from local_operator.session_files import service
 
-    blob, file_row, row = await _resolve(config_dir, session_id, file_id)
     device = device_of(row)
     raw_name = str(file_row.get("name") or "")
     name = service.sanitise_name(raw_name, Path(blob.path).stem, blob.mime)
@@ -340,7 +407,7 @@ async def download(config_dir: Path, session_id: str, file_id: str) -> dict[str,
     try:
         folder = await asyncio.to_thread(downloads_dir, config_dir)
         receipt = await asyncio.to_thread(
-            land, blob, name=name, folder=folder, device=device["name"]
+            land, blob, name=name, folder=folder, device=device["name"], source=handle
         )
     except DownloadRefused as refusal:
         raise HTTPException(refusal.status, refusal.envelope) from None
@@ -378,22 +445,33 @@ async def library_content(
         )
     session_id = str(occurrence["session_id"])
     member_id = str(occurrence.get("child_id") or "") or session_id
-    if asset.digest:
-        row = await asyncio.to_thread(_row_for, config_dir, session_id)
-        blob = await peer_blob(config_dir, session_id, row, asset.digest, member_id=member_id)
+    digest = asset.digest
+    if digest:
+
+        async def resolve() -> tuple[Any, Any, Any]:
+            row = await asyncio.to_thread(_row_for, config_dir, session_id)
+            blob = await peer_blob(config_dir, session_id, row, digest, member_id=member_id)
+            return blob, None, row
+
     else:
-        blob, _file_row, _row = await _resolve(
-            config_dir, session_id, str(occurrence.get("remote_file_id") or "")
-        )
-    handle = await asyncio.to_thread(_open, blob)
+
+        async def resolve() -> tuple[Any, Any, Any]:
+            return await _resolve(
+                config_dir, session_id, str(occurrence.get("remote_file_id") or "")
+            )
+
+    handle, _blob, _file_row, _row = await _opened(resolve, session_id)
     name = asset.derived_name or asset.id
     disposition = "attachment" if download else "inline"
+    # The type came from ANOTHER device's listing: the same allowlist and sandbox
+    # as the session-files content route (R1-5), not served inline as declared.
     return byte_range.handle_response(
         handle,
-        media_type=asset.content_type or "application/octet-stream",
+        media_type=_servable(asset.content_type),
         headers={
             "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(name, safe='')}",
             "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
             "Cache-Control": "private, max-age=60",
         },
         range_header=range_header,

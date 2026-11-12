@@ -2247,15 +2247,23 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         ) from None
     except PeerAttachmentOutdated as error:
         raise HTTPException(
-            409, _wd.attachment_peer_outdated(device=error.device).envelope(code=error.code)
+            409,
+            _wd.attachment_peer_outdated(device=error.device, peer=error.peer).envelope(
+                code=error.code
+            ),
         ) from None
     except PeerAttachmentUnavailable as error:
         # The bytes are on the device that holds the conversation, and this
         # device's content-addressed store is what the route reads. 409 rather
         # than 404 for the same reason as above: the image exists, and the reader
-        # is told where it is instead of being told it does not.
+        # is told where it is instead of being told it does not. The sentence
+        # carries the OWNER's reason (#3872 Q1-1); the code stays, so the
+        # renderer's handling does not change.
         raise HTTPException(
-            409, _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+            409,
+            _wd.attachment_owner_refused(reason=error.reason, device=error.device).envelope(
+                code=error.code
+            ),
         ) from None
     except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's

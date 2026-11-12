@@ -62,6 +62,11 @@ class FetchKey:
 
 
 _TASKS: dict[tuple[int, FetchKey], asyncio.Task[cache.CachedBlob]] = {}
+#: Digests landed by a pull whose waiters have not looked them up yet. Every
+#: eviction pass keeps them, so one landing cannot evict another between its
+#: pull and its ``lookup`` (#3872 R1-3); past the lookup, the caller opens an fd
+#: and an unlink can no longer take the bytes.
+_LANDED: dict[int, str] = {}
 _SEMAPHORES: dict[tuple[int, str], asyncio.Semaphore] = {}
 #: Counters a test reads to prove single-flight (one pull per key, however many waiters).
 STATS: dict[str, int] = {"pulls": 0}
@@ -110,10 +115,19 @@ async def _run(
     async with owner_semaphore(fetch.owner):
         receipt = await asyncio.to_thread(_pull, root, fetch.owner, fetch.member_id, source)
     digest = str(receipt.get("attachment") or "")
-    # The digest just landed is kept: I4-1 bounds the cache at budget + this one
-    # file, and a budget of 0 then evicts it on the NEXT pass, after it was served.
-    await asyncio.to_thread(cache.evict, root, keep=frozenset({digest}))
-    blob = await asyncio.to_thread(cache.lookup, root, session_ids, digest)
+    # The digest just landed is kept, and so is every other landing still on its
+    # way to its lookup: I4-1 bounds the cache at budget + the files in flight, and
+    # a budget of 0 then evicts them on a LATER pass, after they were served.
+    marker = id(asyncio.current_task())
+    _LANDED[marker] = digest
+    try:
+        keep = frozenset(_LANDED.values()) | {
+            task_key.key for (_loop, task_key) in _TASKS if cache.is_digest(task_key.key)
+        }
+        await asyncio.to_thread(cache.evict, root, keep=keep)
+        blob = await asyncio.to_thread(cache.lookup, root, session_ids, digest)
+    finally:
+        _LANDED.pop(marker, None)
     if blob is None:
         # Landed and verified, then gone before this stat: another process's
         # eviction pass with a smaller budget. Retryable — the next ask re-pulls.

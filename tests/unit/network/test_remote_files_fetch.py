@@ -269,7 +269,10 @@ async def test_h_an_owner_without_file_transfer_is_409_outdated(
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["code"] == "attachment_peer_outdated"
-    assert "lop network update device-a" in detail["text"], detail
+    # I1-3: the command names the device ID, in backticks, so it runs as shown.
+    command = f"`lop network update {server_a.identity.device_id}`"
+    assert command in detail["text"], detail
+    assert detail["text"].startswith("device-a "), detail
 
 
 @pytest.mark.asyncio
