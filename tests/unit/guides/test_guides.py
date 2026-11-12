@@ -46,6 +46,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
 
     assert [guide.name for guide in guides] == [
         "agents",
+        "app-files",
         "browser",
         "classification",
         "code-requests",
@@ -181,6 +182,11 @@ def test_guide_listing_never_contains_guide_body() -> None:
         # negative control, because a guide that matches everything routes nothing.
         ("never let me force-push main", "guardrails"),
         ("warn me before deleting data", "guardrails"),
+        # The app-files row: the vocabulary this router can see is the
+        # description's own ("file format", "project", "image-editor"). The
+        # system prompt also points at the guide by name, so routing is the
+        # second route in, not the only one.
+        ("write an application's project file format directly", "app-files"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -1288,3 +1294,27 @@ def test_radient_vault_guide_is_gated_concise_and_keeps_local_first(monkeypatch,
     assert "session credential" in prose and "never shown to you" in prose
     assert "cannot create or upload" in prose
     assert len(body.splitlines()) <= 40
+
+
+def test_app_files_guide_states_the_native_shape_rules() -> None:
+    """A hand-written application file must be what the app's own operation
+    makes. Measured on a 20-task DeepSeek V4.1 Flash sample (2026-11-12): a
+    project file named a generic backend filter where the app has its own
+    (scored as no crop), layers loaded with file names were renamed against a
+    "don't rename" instruction, and source media was transcoded instead of
+    referenced. Each rule below is the general form of one of those misses."""
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://app-files")
+    assert body is not None
+    prose = " ".join(body.replace("**", "").split())
+
+    assert "Drive the app" in prose and "scripting, batch or CLI mode" in prose
+    assert "Use the app's identifiers and defaults." in prose
+    assert "make a tiny sample with the app's own action" in prose
+    assert "One app operation, one object." in prose
+    assert "A placeholder stays a placeholder" in prose
+    assert "Reference the original sources" in prose
+    assert "The user's negative constraints bind what you create." in prose
+    assert "Edit the named file in place" in prose
+    assert "Round-trip it through the app" in prose
+    assert "Check mechanical properties with a command" in prose

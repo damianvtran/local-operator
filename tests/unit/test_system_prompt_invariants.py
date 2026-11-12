@@ -174,3 +174,30 @@ def test_guides_skills_and_mcp_are_read_through_their_schemes(queued: str) -> No
 def test_every_guide_the_moved_prose_now_lives_in_is_pointed_at(queued: str, guide: str) -> None:
     """A trim that moves detail into a guide must leave the pointer behind."""
     assert f"guide://{guide}" in queued
+
+
+def test_a_file_the_user_asked_to_change_is_edited_in_place(queued: str) -> None:
+    """The overwrite caution is for files the user did NOT ask to change. Read
+    without this sentence it pushed a model asked to "fill in the blank PDFs"
+    into writing ``*-filled.pdf`` siblings and leaving the named files blank
+    (DeepSeek V4.1 Flash sample, 2026-11-12) — the deliverable was missing."""
+    assert "Treat unknown files as the user's work" in queued
+    assert "A file the user asks you to edit, fill or fix is the deliverable" in queued
+    assert "change it in place (backup elsewhere if needed)" in queued
+    assert "new files only when asked or the original isn't theirs" in queued
+
+
+def test_verifying_the_end_state_demands_complete_computed_evidence(queued: str) -> None:
+    """Measured misses the end-state rule now names (same sample): "every box
+    is inside its card" proved by one example, required names judged by eye,
+    "match B" judged on looks while links/metadata differed, and an item left
+    untested on a false "can't resize" after one route."""
+    assert "check paths, names and counts by command, not by eye" in queued
+    assert '"Every X" needs per-element output, not a sample' in queued
+    assert '"match B" a property diff against B (links, metadata, types)' in queued
+    assert '"can\'t test" two tried routes, else unmet' in queued
+    assert "Claim success only when observable" in queued
+
+
+def test_hand_written_app_files_point_at_their_guide(queued: str) -> None:
+    assert "Hand-writing an app's file format? Read `guide://app-files` first." in queued
