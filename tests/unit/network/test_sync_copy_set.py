@@ -537,6 +537,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
         "beside the session directories, never an entry of a session",
     ),
+    "local_operator/server/loop_watchdog.py": (
+        1,
+        "``DUMP_SIGNAL_NAME`` ('SIGUSR2'): the ``signal`` attribute name serve's "
+        "watchdog registers faulthandler on, not a pathname or a session entry",
+    ),
     "local_operator/server/utils/local_tokens.py": (
         1,
         "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
