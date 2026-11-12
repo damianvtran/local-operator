@@ -3,7 +3,8 @@
 WHY THIS TOOL EXISTS
 --------------------
 Repositories mandate where review and audit receipts live (``i18n/receipts/``,
-``i18n/audits/evidence/``, ``docs/evidence/``), and review-type roles are
+``i18n/audits/evidence/``, ``docs/evidence/`` — each repository uses its own
+subset; see ``EVIDENCE_DIRS``), and review-type roles are
 expected to leave one there. The packaged ``reviewer`` row has no
 ``write``/``edit``; its ``bash`` could physically write the file, but a shell
 redirect into a repository is exactly what a careful reader (rightly wary of a
@@ -65,11 +66,17 @@ from local_operator.tools.builtin import _error, _text, _validation_error
 
 TOOL_NAME = "evidence"
 
-#: Repo-mandated receipt locations, relative to the checkout root. Verified on
-#: origin/main 2026-11-11: local-operator-ui has all three; local-operator has
-#: ``i18n/audits/evidence`` and ``docs/evidence`` but no ``i18n/receipts``. The
-#: tool refuses a directory the bound checkout lacks rather than creating it, so
-#: listing one here never invents a location a repository did not choose.
+#: Repo-mandated receipt locations, relative to the checkout root. This is a
+#: CROSS-REPOSITORY allowlist, not a statement that every checkout has all three.
+#: Verified on origin/main 2026-11-11: local-operator-ui has all three;
+#: local-operator tracks only ``i18n/audits/evidence`` — its ``docs/evidence``
+#: was retired by the repository cleanup (PR #3683; ``/docs/evidence/`` is now
+#: in its ``.gitignore``, and AGENTS.md "Testing evidence must not be committed"
+#: sends proof captures to the PR instead). ``docs/evidence`` stays listed for
+#: local-operator-ui. The tool refuses a directory the bound checkout lacks
+#: rather than creating it, so listing one here never invents a location a
+#: repository did not choose; a clean local-operator worktree has no
+#: ``docs/evidence`` and therefore refuses that prefix.
 EVIDENCE_DIRS: tuple[str, ...] = ("i18n/receipts", "i18n/audits/evidence", "docs/evidence")
 
 #: Content cap in UTF-8 bytes. Measured 2026-11-11 over the tracked files in
@@ -303,7 +310,8 @@ def build_evidence_tool(root: str) -> AgentTool:
         label="Write evidence",
         description=(
             "Create a NEW receipt file you authored in the briefed worktree's "
-            "i18n/receipts, i18n/audits/evidence or docs/evidence. Never overwrites."
+            "i18n/receipts, i18n/audits/evidence or docs/evidence (only the ones "
+            "that repository already has). Never overwrites."
         ),
         parameters=EvidenceParams.model_json_schema(),
         approval_tier="write",

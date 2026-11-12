@@ -1137,9 +1137,21 @@ def test_m2_a_failing_store_says_so_once_and_stops_the_re_derivation(
     monkeypatch.setattr(repair_inbox, "BACKOFF_BASE_S", 60.0)
     caplog.set_level(logging.DEBUG, logger="local_operator.network.credentials.repair_inbox")
 
+    def repair_warnings() -> list[logging.LogRecord]:
+        # The real relay rig can independently refuse unauthorised member rows.
+        # This contract counts ALL repair-inbox warnings (not only the expected
+        # message), so duplicate/new repair warnings still fail without coupling
+        # the backoff assertion to unrelated transport diagnostics.
+        return [
+            r
+            for r in caplog.records
+            if r.name == repair_inbox.__name__ and r.levelno >= logging.WARNING
+        ]
+
     assert repair_inbox.tick(rig.a) == "failed"
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    warnings = repair_warnings()
     assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "publication failed" in warnings[0].getMessage()
     assert "the store is unreadable" in warnings[0].getMessage()
 
     # Backed off: five more member calls derive nothing and say nothing new.
@@ -1148,7 +1160,7 @@ def test_m2_a_failing_store_says_so_once_and_stops_the_re_derivation(
         assert repair_inbox.tick(rig.a) == "backoff"
     after = dict(repair_inbox.COUNTERS)
     assert after["derivations"] == before["derivations"]
-    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == warnings
+    assert repair_warnings() == warnings
 
     # The store comes back: the next pass after the backoff publishes and resets.
     # (Not ``monkeypatch.undo()``: pytest shares ONE instance per test with the

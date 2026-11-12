@@ -734,6 +734,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # withdraw its own record; the legacy fixed `delivery.json` is read but no
     # longer written.
     (
+        "local_operator/server/loop_watchdog.py::prune_stall_logs",
+        "<path>.unlink",
+        "Removes only ``serve-stall-<pid>.log`` FILES directly inside <config>/logs "
+        "(iterdir + fullmatch); never recurses, never reaches sessions/, and unlink "
+        "rejects directories (the OSError is swallowed).",
+    ),
+    (
         "local_operator/server/utils/desktop_presence.py::DesktopDeliveryPublisher._write",
         "os.replace",
         "Atomic replacement of THIS process's own <instance_id>.json record FILE "
@@ -4136,6 +4143,48 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "child, meta is its hex digest + '.json', neither session-derived",
         2,
     ),
+    # -- mesh file pull (network/files.py; docs/design/mesh-file-transfer.md S1) --
+    # ``AttachmentStore.adopt_file`` moves a VERIFIED staged file into the
+    # content-addressed store. Destination: ``self._content_path(digest)``, i.e.
+    # ``<config>/attachments/<hex digest>.bin``, a sibling of ``sessions/``, never under
+    # it, named by the digest of the bytes it just hashed. Source: its one caller
+    # (``files.pull_file``) passes the relay's own ``<root>/network/staging/files/
+    # <sha256>.part``, outside ``sessions/`` by construction. Both calls run only
+    # AFTER the source was streamed through ``open("rb")`` and hashed to the
+    # announced sha256, so a directory never reaches them (it fails the open), and
+    # ``unlink`` takes a file entry only.
+    (
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
+        "os.replace",
+        "Renames the verified staging part (<root>/network/staging/files/) to "
+        "<config>/attachments/<digest>.bin; never session-derived",
+    ),
+    (
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
+        "<path>.unlink",
+        "Drops the verified staging part when the store already holds that digest; a "
+        "FILE under <root>/network/staging/files/, never session-derived",
+    ),
+    # ``lop network files pull --out``: ``_land_out``'s source is the
+    # NamedTemporaryFile it just created beside ``out``; ``out`` is the target
+    # ``_out_target`` returned, which REFUSES anything whose resolved path (realpath of
+    # the parent plus the name, and the leaf's own resolution) is inside this device's
+    # config dir -- so neither ``sessions/`` nor anything else of Local Operator's own
+    # data is reachable (#3794 gate remediation; measured before it: ``--force`` over a
+    # transcript replaced it). A directory target is refused too, and a rename of a
+    # file onto a directory raises EISDIR.
+    (
+        "local_operator/network/cli.py::_land_out",
+        "os.replace",
+        "--force rename of our own sibling temp onto the user's --out FILE; _out_target "
+        "refuses any resolved target inside the config dir, so sessions/ is unreachable",
+    ),
+    (
+        "local_operator/network/cli.py::_land_out",
+        "<path>.unlink",
+        "Removes only the NamedTemporaryFile this function created beside --out, which "
+        "_out_target keeps outside the config dir",
+    ),
     # -- the delegated content layer's rescue-bundle housekeeping ------------
     # Both calls touch the SAME two artefacts, both spelled from the plan's
     # ``bundle_path`` (``<pad>/reap-rescue-<tree>.bundle``, strictly inside a
@@ -4599,6 +4648,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # tmp -> approvals.json, a FILE inside the conversation's own directory
         # (the atomic-write shape every other sidecar writer here uses).
         "local_operator/session/approval_policy.py::write_override",
+        # verified staging part (<root>/network/staging/files/) -> attachments/<d>.bin
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
     }
 )
 
