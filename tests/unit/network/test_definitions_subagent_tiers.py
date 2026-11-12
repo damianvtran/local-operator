@@ -420,6 +420,32 @@ def test_a_broken_config_is_reported_unreadable_and_never_moved_aside(tmp_path: 
     untouched()
 
 
+def test_a_peer_readiness_probe_never_moves_a_broken_config_aside(tmp_path: Path) -> None:
+    """QA round 2, Q-2: the WHOLE ``net_readiness`` answer leaves the bytes alone.
+
+    The M1 guard covered the tier reader, but ``collect_peer_facts`` runs
+    ``default_model_fact`` first, which built ``ConfigManager(root)`` after only
+    an existence check: the probe renamed config.yml aside, and the tiers fact
+    read in the same answer then saw defaults instead of ``unreadable``.
+    """
+    from local_operator.network import readiness
+
+    node = _root(tmp_path, "node")
+    home = _root(tmp_path, "home")
+    config = node / "config.yml"
+    broken = b"subagents:\n  models: {hi: openai/gpt-6\n\tmax_running: [\n"
+    config.write_bytes(broken)
+
+    facts = readiness.collect_peer_facts(node, home=home)
+
+    assert config.read_bytes() == broken
+    assert sorted(p.name for p in node.iterdir() if ".bad" in p.name) == []
+    assert facts["subagent_tiers"] is not None
+    assert facts["subagent_tiers"]["status"] == "unreadable", facts["subagent_tiers"]
+    assert facts["default_model"]["resolved"] is False
+    assert "could not be read" in facts["default_model"]["reason"], facts["default_model"]
+
+
 def test_a_tiers_mirror_from_another_origin_is_kept(tmp_path: Path) -> None:
     """Review round 1, m2: a copy of device C's tiers is not replaced by A's."""
     other = "d_" + "c" * 32

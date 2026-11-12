@@ -936,9 +936,11 @@ def _subagent_tiers_on_disk(root: Path) -> tuple[dict[str, Any] | None, bool]:
     # ``config.yml.bad.<stamp>`` and loads defaults. This read is reachable from a
     # PEER (definitions state, readiness, apply), so without the guard a peer's
     # read-only probe would move this node's config aside and the next apply would
-    # install over defaults. A peer request must never construct a manager that
-    # can rename or rewrite config, so a file the strict parser refuses is
-    # reported as ``unreadable`` and left byte-for-byte as it is.
+    # install over defaults. This guard protects only THIS read: on a readiness
+    # probe ``readiness.default_model_fact`` runs first and constructs its own
+    # manager, so it carries the same guard (QA round 2, Q-2) — any new
+    # ``ConfigManager(root)`` on a peer-reachable path needs one too. Here a file
+    # the strict parser refuses is reported as ``unreadable`` and left as it is.
     try:
         settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)
     except settings_io.ConfigUnreadableError:

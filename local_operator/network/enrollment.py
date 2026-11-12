@@ -290,6 +290,36 @@ def encode(record: Mapping[str, Any]) -> dict[str, Any]:
     return {"format": FORMAT, "version": VERSION, "record": checked(record)}
 
 
+#: The readiness rows verify REQUIRES as positive evidence (plus reachability,
+#: which is a check, not a capability). Every other readiness row is accepted
+#: and, when failed, reported as a warning — never evidence.
+EVIDENCE_CAPABILITIES: frozenset[str] = frozenset({"build", "operator_authority"})
+
+
+def enrollment_capabilities() -> frozenset[str]:
+    """Every capability a readiness row can carry, derived from readiness itself.
+
+    WHY DERIVED: verify refuses a ``readiness`` row whose capability it does not
+    know (an unknown producer is not evidence), and ``ready`` reports EVERY
+    peer's rows, not only the enrolling device's. The set used to be written out
+    by hand here and in :func:`public_report`, so each new readiness row
+    (``model_switch``, ``custom_instructions`` from #3829, ``subagent_tiers``;
+    ``skills`` was patched into the hand list by #3839) made enrollment against
+    any mesh where a peer reported it fail with "The network enrollment
+    authority is invalid". Deriving from readiness' ``CAPABILITY_*`` constants
+    makes a new row admissible the moment it exists; a capability no constant
+    names is still refused. Lazy import, as in :func:`public_report`: readiness
+    is large and enrollment is imported by lighter callers.
+    """
+    from local_operator.network import readiness
+
+    return frozenset(
+        value
+        for key, value in vars(readiness).items()
+        if key.startswith("CAPABILITY_") and isinstance(value, str)
+    )
+
+
 def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict[str, str]]:
     """Closed known-producer evidence, NOT filtering an empty set of failures.
 
@@ -307,28 +337,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
     )
     rows = _array(report.get("checks"))
     require(isinstance(rows, list) and bool(rows))
-    allowed = {
-        "build",
-        "operator_authority",
-        "git_identity",
-        "repository",
-        "model_credential",
-        "mcp_servers",
-        "mcp_credential",
-        "tooling",
-        "resilience",
-        # Local recovery authority rides the same ready report; it is evidence
-        # about the viewer's grant, never positive peer equipment evidence.
-        "peer_restart",
-        # Non-gating equipment like resilience (readiness.NON_GATING_EQUIPMENT):
-        # a peer row the verify step must accept and report as a warning.
-        "serve_daemon",
-        "selected_model_credential",
-        # Non-gating equipment (readiness.CAPABILITY_SKILLS, PR #3839): the
-        # mesh skill sync appends one per peer to every ready report, so verify
-        # must know it or every enrollment from that build ends ``failed``.
-        "skills",
-    }
+    allowed = enrollment_capabilities()
     required: set[str] = set()
     warnings: list[dict[str, str]] = []
     for row in rows:
@@ -361,7 +370,7 @@ def ready_evidence(report: Any, *, device_id: str, network_id: str) -> list[dict
             required.add("reachability")
         if check == "readiness":
             capability = row["capability"]
-            if capability in {"build", "operator_authority"}:
+            if capability in EVIDENCE_CAPABILITIES:
                 require(
                     row["ok"] is True
                     and isinstance(row.get("code", ""), str)
@@ -402,6 +411,9 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in vars(readiness).items()
         if key.startswith("CODE_") and isinstance(value, str)
     } | {""}
+    # Exactly what ``ready_evidence`` can put in its warnings: every readiness
+    # row except the two that are evidence (they must be ok, so never warn).
+    warning_capabilities = enrollment_capabilities() - EVIDENCE_CAPABILITIES
     require(
         data.get("enrollment_verified") is True
         and type(data.get("ready_ok")) is bool
@@ -413,22 +425,7 @@ def public_report(data: Mapping[str, Any]) -> dict[str, Any]:
     for row in rows:
         require(
             isinstance(row, dict)
-            and row.get("capability")
-            in {
-                "git_identity",
-                "repository",
-                "model_credential",
-                "mcp_servers",
-                "mcp_credential",
-                "tooling",
-                "resilience",
-                "peer_restart",
-                "serve_daemon",
-                "selected_model_credential",
-                # Mirrors ready_evidence's allowlist: a not-yet-synced skills
-                # row is a warning the terminal receipt must carry, not refuse.
-                "skills",
-            }
+            and row.get("capability") in warning_capabilities
             and row.get("code", "") in codes
         )
         public.append({"capability": row["capability"], "code": row.get("code", "")})
