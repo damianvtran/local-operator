@@ -203,12 +203,13 @@ def test_proxy_flag_comes_from_the_task() -> None:
 # not the x11grab recorder the revision before that named). The adapter now
 # reclaims that space itself at episode start (``guest_disk``).
 #
-# This knob is INERT as the adapter stands: the guest's root filesystem measured
-# 30,993,747,968 bytes in both a 40 GiB and a 120 GiB volume, because
-# ``DesktopEnv(...)`` is constructed without ``volume_size=`` so upstream's
-# ``expand_guest_volume`` never runs. It is still validated and still stamped
-# into the sealed manifest (see ``DISCLOSED_INFRA_METADATA_KEYS``), which is what
-# these tests cover; it is not what fixes the disk.
+# This knob is LIVE since PR #3867: the requested size grows the guest's root
+# filesystem, a task's own ``volume_size`` wins, and the override only sizes
+# tasks that declare none (upstream's precedence). Before #3867 it was inert --
+# the filesystem measured 30,993,747,968 bytes in both a 40 GiB and a 120 GiB
+# volume. It is validated and stamped into the sealed manifest (see
+# ``DISCLOSED_INFRA_METADATA_KEYS``); these tests cover that resolution and the
+# precedence, not the grow itself (``test_guest_disk``).
 
 
 def _with_volume_size(value: str) -> tuple[ScopedInfraValue, ...]:

@@ -457,8 +457,16 @@ on the AMI's ~29 GiB filesystem with ~2.2 GB free, ungrown.
 **Disclosure — the 2026-11 campaign.** Its earlier arms set
 `AWS_ROOT_VOLUME_SIZE=120` globally. That was **inert**: the filesystem never
 grew — every `t33v-*` `guest-preparation.json` reads `filesystem_bytes`
-30,993,747,968 inside `disk_bytes` 128,849,018,880 — so those arms ran with
-upstream's disk. From this change on the override is **live**: setting it
+30,993,747,968 inside `disk_bytes` 128,849,018,880. For the 90 tasks that
+declare no `volume_size` that matched upstream's ungrown ~29 GiB filesystem.
+It did **not** match for tasks that declare one: upstream sizes and grows
+those, but the earlier arms left them ungrown too. Three such tasks ran in
+arms main29, main30, main32 and main33 — task_030 (declares 50 GiB),
+task_047 (60 GiB) and task_048 (64 GiB) — on the ~29 GiB filesystem
+(`t33v-t048` reads the same 30,993,747,968 bytes against its 64 GiB pin).
+Those episodes ran with **less** disk than upstream provides; that is a
+short-disk deviation that can only have cost them, never helped them, and their
+scores should be read with it. From this change on the override is **live**: setting it
 grants the non-declaring tasks extra disk upstream's documented run does not
 give, and a run that sets it must disclose that as a deviation. The campaign
 launchers stop setting it from the next arm on. Each episode's
