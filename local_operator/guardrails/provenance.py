@@ -522,6 +522,117 @@ def owned_record(
     return best
 
 
+#: Most recent ledger rows ``ForeignCreations`` reads in one classify call.
+#: Past it the oldest rows are simply not consulted — the target then keeps
+#: today's ranking, which is the state before this rule existed, never a
+#: lower one.
+_FOREIGN_ROWS = 20_000
+
+
+class ForeignCreations:
+    """Another session's ledger rows, read ONCE per classify call.
+
+    WHY (operator incident, osworld): ``rm -rf ~/worktrees/osworld/osworld-21/runs``
+    deleted another session's sealed benchmark evidence. A deep non-git
+    directory under HOME is an "ordinary path" (LOW), so nothing asked. The
+    creation ledger already knew a different session made that tree; this
+    surfaces that fact so ``classify._rank`` sends the delete to the judge
+    (HIGH) with the owning session named.
+
+    Constraints:
+
+    * A row counts only while its directory is the same inode generation
+      (dev, ino and ``creation_stamp``, as ``owned_record`` checks): a path
+      deleted and re-made by someone else is no longer that session's work.
+    * A path any owner of which is this session, or a session in its subagent
+      tree (``same_task_tree``), is not foreign: the ledger copies a child's
+      creation to its ancestors, and a manager may remove its child's work and
+      vice versa. Tree lookups run only for owners of rows that actually
+      relate to a target, memoised, because each one reads the lineage files.
+    * Unreadable ledger (locked, corrupt, missing): ``match`` returns ``None``
+      and the caller adds nothing. Failing "HIGH" there would turn every
+      delete on the machine into a judge call while one writer holds the DB.
+    * Symlink rows are skipped: they vouch for a link entry, never a tree.
+    """
+
+    def __init__(
+        self, session_id: str, *, state_root: str | os.PathLike[str] | None = None
+    ) -> None:
+        self.session_id = session_id
+        self.state_root = state_root
+        self._rows: dict[str, tuple[set[str], CreationRecord]] | None = None
+        self._loaded = False
+        self._tree: dict[str, bool] = {}
+
+    def _load(self) -> dict[str, tuple[set[str], CreationRecord]] | None:
+        if self._loaded:
+            return self._rows
+        self._loaded = True
+        try:
+            conn = _connect(ledger_path(self.state_root), create=False)
+            if conn is None:
+                self._rows = {}
+                return self._rows
+            try:
+                rows = conn.execute(
+                    "SELECT owner, path, dev, ino, created_at, creator, kind, command, stamp"
+                    " FROM created ORDER BY created_at DESC LIMIT ?",
+                    (_FOREIGN_ROWS,),
+                ).fetchall()
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error):
+            logger.debug("guardrail ledger unreadable", exc_info=True)
+            return None
+        by_path: dict[str, tuple[set[str], CreationRecord]] = {}
+        for owner, *fields in rows:
+            rec = CreationRecord(*fields)
+            if rec.kind == "symlink":
+                continue
+            owners, _ = by_path.setdefault(rec.path, (set(), rec))
+            owners.add(owner)
+        self._rows = by_path
+        return self._rows
+
+    def _related(self, owner: str) -> bool:
+        if owner == self.session_id:
+            return True
+        if owner not in self._tree:
+            self._tree[owner] = bool(
+                same_task_tree(self.session_id, owner, state_root=self.state_root)
+            )
+        return self._tree[owner]
+
+    def match(self, paths: Iterable[str]) -> tuple[str, CreationRecord] | None:
+        """``(owner, row)`` of a foreign directory at, under or above any of ``paths``.
+
+        ``None`` when nothing foreign relates — or when the ledger is unreadable.
+        """
+        rows = self._load()
+        if not rows:
+            return None
+        reals = {os.path.realpath(p).rstrip("/") or "/" for p in paths if p}
+        for rec_path, (owners, rec) in rows.items():
+            prefix = rec_path.rstrip("/") + "/"
+            if not any(
+                r == rec_path or r.startswith(prefix) or rec_path.startswith(r.rstrip("/") + "/")
+                for r in reals
+            ):
+                continue
+            if any(self._related(o) for o in owners):
+                continue
+            try:
+                st = os.stat(rec_path)
+            except OSError:
+                continue
+            if (st.st_dev, st.st_ino) != (rec.dev, rec.ino):
+                continue
+            if rec.stamp is None or creation_stamp(st) != rec.stamp:
+                continue
+            return sorted(owners)[0], rec
+        return None
+
+
 def link_path(path: str) -> str:
     """The canonical path of the link ENTRY at ``path``: its parent resolved, its
     own last component kept, so the link itself is never followed."""

@@ -35,7 +35,10 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   `$HOME`, `/`, an ancestor of those, and a glob reaching such a name
   (`rm -rf ~/.local-op*`). Refused outright.
 - **HIGH** — another session's directory, any other path in the state root, a direct
-  child of `$HOME`, a repo root, `git clean` of untracked work, every linked
+  child of `$HOME`, a repo root, `git clean` of untracked work, a directory another
+  session created (its creation-ledger row at, under or above the target, still the
+  same inode, from a session outside your subagent tree — the reason names that
+  session), every linked
   worktree a delete reaches that this session's ledger does not record — by its
   path, a glob match (`rm -rf <repo>/.worktrees/*`, or a loop over one) or an
   ancestor (`rm -rf <repo>/.worktrees`), however it is spelled (matched by
@@ -58,7 +61,8 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
 
 - **Creation ledger.** After every bash call the loop records the directories it
   created: `mkdir [-p]` (the topmost new component), `mktemp -d TEMPLATE`,
-  `git worktree add <path>`, `git clone <url> [<dir>]`. Rows live in
+  `git worktree add <path>`, `git clone <url> [<dir>]` — inside a `for` loop, one
+  candidate per loop value (a `$(…)` or unknown loop list records nothing). Rows live in
   `<config_dir>/guardrails/created.sqlite`, keyed by session id + realpath +
   inode, written under the creator and every ancestor session, so a parent may
   delete what its subagents made. Overwriting or deleting the ledger is CRITICAL.

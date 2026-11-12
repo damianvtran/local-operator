@@ -38,7 +38,7 @@ import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_operator.guardrails.resolve import (
     Creation,
@@ -47,6 +47,10 @@ from local_operator.guardrails.resolve import (
     physical_path,
     resolve_command,
 )
+
+if TYPE_CHECKING:
+    # Runtime import is deferred: ``provenance`` imports this module.
+    from local_operator.guardrails.provenance import ForeignCreations
 
 _STATE_DIRNAME = ".local-operator"
 _CONFIG_FILE = "config.yml"
@@ -1116,7 +1120,11 @@ def _glob_reaches_git_dir(pattern: str) -> str | None:
 
 
 def _rank(
-    target: Target, prot: _Protected, session_id: str = "", globstar: bool = False
+    target: Target,
+    prot: _Protected,
+    session_id: str = "",
+    globstar: bool = False,
+    foreign: ForeignCreations | None = None,
 ) -> RankedTarget:
     if target.landings:
         # An unpinned ``..``: rank the landing its missing and re-linked parts
@@ -1131,10 +1139,11 @@ def _rank(
                 prot,
                 session_id,
                 globstar,
+                foreign,
             )
             for p in target.landings
         ]
-        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id, globstar))
+        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id, globstar, foreign))
         return max(readings, key=lambda r: r.risk)
     path = target.path
     notes: list[str] = list(target.empty)
@@ -1347,6 +1356,14 @@ def _rank(
         return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+    foreign_reason = _foreign_reason(target, path, foreign)
+    if foreign_reason is not None:
+        # Every LOW below is "nothing here is known to matter"; another
+        # session's ledger row says otherwise (``ForeignCreations``). Placed
+        # after the selecting-find LOW, which removes a regenerable subset
+        # (``-name '*.pyc'``) wherever it runs, and never above any CRITICAL
+        # or HIGH return, so this rule only ever raises a rank.
+        return RankedTarget(target, Risk.HIGH, "; ".join([foreign_reason, *notes]))
     if worktree_note:
         # Never discard the worktree state the branch above recorded.
         return RankedTarget(target, Risk.LOW, f"ordinary path; {worktree_note}")
@@ -1580,6 +1597,45 @@ def _reached_worktrees(
     return RankedTarget(target, Risk.HIGH, f"{head}: " + " | ".join(parts))
 
 
+#: Glob matches ``_foreign_reason`` compares one by one; past it the glob's
+#: literal directory stands in for them (an over-approximation: HIGH, judged).
+_FOREIGN_GLOB_MATCHES = 256
+
+
+def _foreign_reason(target: Target, path: str, foreign: ForeignCreations | None) -> str | None:
+    """Name the other session whose created directory ``target`` destroys, if any.
+
+    At, under or above: deleting the recorded directory, something inside it,
+    or a directory that holds it all destroy that session's work. ``None``
+    when nothing foreign relates or the ledger is unreadable.
+    """
+    if foreign is None:
+        return None
+    candidates = [path]
+    if target.pattern is not None:
+        import glob as _glob
+
+        try:
+            matches = _glob.glob(target.pattern)
+        except (OSError, ValueError):
+            matches = []
+        if 0 < len(matches) <= _FOREIGN_GLOB_MATCHES:
+            candidates = matches
+    hit = foreign.match(candidates)
+    if hit is None:
+        return None
+    owner, rec = hit
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.created_at))
+    real = {os.path.realpath(c) for c in candidates}
+    if rec.path in real:
+        where = ""
+    elif any(_under(r, rec.path) for r in real):
+        where = f"inside {rec.path}, "
+    else:
+        where = f"holds {rec.path}, "
+    return f"{where}created by another session ({owner}, {rec.kind}, {when})"
+
+
 def _owned_by_session(
     target: Target, path: str, prot: _Protected, session_id: str
 ) -> tuple[str, list[str]] | None:
@@ -1729,7 +1785,12 @@ def classify_targets(
     if not targets and not opaque_reasons and not evidence_hits:
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
-    ranked = [_rank(t, prot, session_id, globstar) for t in targets]
+    from local_operator.guardrails.provenance import ForeignCreations
+
+    # One lazy ledger read shared by every target of this call (read only if
+    # some target reaches the LOW fallbacks in ``_rank``).
+    foreign = ForeignCreations(session_id)
+    ranked = [_rank(t, prot, session_id, globstar, foreign) for t in targets]
     # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
     # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
     # row for it would invent a target (review M1 on PR #3816).
