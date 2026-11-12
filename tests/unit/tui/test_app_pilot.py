@@ -4666,12 +4666,21 @@ async def test_logout_offers_one_row_per_credential_not_per_provider() -> None:
         await pilot.pause()
         app.query_one(Editor).focus()
         await pilot.pause()
+        # The rows are not set by the keystroke: `_sync_picker` clears them and
+        # posts ArgumentQueryOpened, which BUBBLES Editor -> ... -> App before
+        # `on_argument_query_opened` fills them. Each bubble hop is queued after
+        # `pilot.pause()`'s per-node markers, so one pause joins none of it and
+        # only its CPU-idle heuristic stood in for the chain; on a loaded shard
+        # that returned first and the list read `[]` (#3790 gate, run
+        # 43192612153, test (3.12, 4)). Settle on "the app has pushed rows" —
+        # the clear is synchronous, so stale rows from the previous command
+        # cannot satisfy it — and keep the exact assertions afterwards.
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await settle(pilot, lambda: bool(_provider_rows(app)), what="/logout rows pushed")
         assert _provider_rows(app) == [("openai", "remove oauth")]
 
         _set_editor_line(app.query_one(Editor), "/login ")
-        await pilot.pause()
+        await settle(pilot, lambda: bool(_provider_rows(app)), what="/login rows pushed")
         assert [name for name, _ in _provider_rows(app)] == ["openai", "openai-device"]
 
 
