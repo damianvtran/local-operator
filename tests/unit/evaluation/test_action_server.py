@@ -381,6 +381,18 @@ class TestCommandToolGate:
         for word in ("osworld", "kimi", "benchmark", "episode", "task"):
             assert word not in text
 
+    def test_the_command_tool_says_a_cut_call_may_still_be_running(self) -> None:
+        # PR #3836 m1: a cut call shows the model only the MCP client's generic
+        # timeout, so the description is where it learns the command may
+        # still run, that later calls wait behind it, and what "Not run" means.
+        from local_operator.evaluation.action_server import COMMAND_TOOL_DESCRIPTION
+
+        text = COMMAND_TOOL_DESCRIPTION.lower()
+        assert "may still be running" in text
+        assert "later calls wait" in text
+        assert "re-issuing it blindly could run it twice" in text
+        assert '"not run" was never sent' in text
+
     @pytest.mark.asyncio
     async def test_a_command_call_is_forwarded_under_its_own_tool_name(
         self, tmp_path: Path

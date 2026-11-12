@@ -3807,6 +3807,84 @@ def _source_session_cwd(server: "RelayServer", session_id: str) -> str:
     return ""
 
 
+def _handoff_in_progress_refusal(server: "RelayServer", session_id: str) -> dict[str, Any] | None:
+    """The ``in_progress`` refusal for a session THIS device's journal holds mid-handoff.
+
+    ONE answer for every route, because the state is this device's own durable fact:
+    the destination's ``prepare`` asks it here (:func:`_source_prepare`), and the
+    OWNER's own offload asks it before it dials (:func:`_offload`). The offload used
+    to learn it only through the destination — invite, then the destination's
+    ``status``/``prepare`` back to this device, then its ``refused`` report — four
+    asks over one link, so a link that died on the way (a ``replaced`` eviction, a
+    peer closing under load) turned this device's own, legible ``phase: prepared``
+    into "that device is unreachable (no answer on its link)", blaming the peer for
+    a state the asker was holding (CI main 43143140065, 2026-11-12). ``None`` means
+    no handoff is in flight here after a reconcile, so the move may proceed.
+    """
+    from local_operator.session.placement import handoff_in_flight
+
+    try:
+        existing = handoff_in_flight(server.root, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
+        existing = None
+    if existing and str(existing.get("phase") or "") in ("prepared", "handing-off"):
+        # Reconcile a stale entry before refusing, then re-read: a journal entry
+        # left by a crash is exactly what `--wait`'s retry must be able to clear.
+        reconcile(server.root, server=server, only=session_id)
+        try:
+            existing = handoff_in_flight(server.root, session_id)
+        except Exception:  # noqa: BLE001
+            existing = None
+        if existing:
+            # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
+            # this device is holding may be a handoff that is genuinely under way, or
+            # one whose destination died — and until it is settled, every route to
+            # this conversation answers the same sentence. Measured on the two-device
+            # rig 2026-09-26 (probe 9): the destination's relay was killed mid-copy,
+            # A answered ``deadline_exceeded`` with "Nothing was deleted: this device
+            # still holds the conversation", and SEVEN retries over ten minutes then
+            # read "a handoff ... is already in progress on this device" with no way
+            # to tell what was wrong or what to do; the same move landed the moment
+            # A's relay restarted. The phase and the age are the two facts that make
+            # the state legible (``prepared`` = no bytes were committed anywhere;
+            # ``handing-off`` = monotone, the destination owns the outcome), so they
+            # are NAMED here rather than left for the user to infer from a JSON
+            # journal. The recovery the design's §6.5 table would apply to a stale
+            # entry written by a DEAD relay is deliberately not applied here — this
+            # entry's writer is alive — and that gap is recorded, not guessed at.
+            phase = str(existing.get("phase") or "")
+            age = _handoff_age(existing)
+            # THE DEVICE, NOT "this device": on the destination's route the reader
+            # is the DESTINATION, so "this device" named the wrong machine and its
+            # remedy (restart the destination's relay) cleared nothing. Naming the
+            # holder reads correctly on the owner's own offload route too. The
+            # journal is device-local, so the holder for an entry here is always
+            # this relay's own device.
+            holder = str(server._own_label())  # noqa: SLF001
+            # THE ESCAPE IS NAMED, because it is not derivable from the state. An
+            # entry written by this device's LIVE relay is skipped by every reconcile
+            # (the instance rule that stops a merely slow peer losing an in-flight
+            # handoff), so no amount of retrying clears it and no other verb does
+            # either: what clears it is making the writer instance stale, after which
+            # the next attempt reconciles it at ``prepared`` and rolls it back
+            # (measured 2026-09-26: seven retries over ten minutes read this sentence;
+            # the same move landed the moment the source's relay restarted). Review
+            # round 1's ruling is a user-facing abandon verb, and this clause is its
+            # prerequisite: a person can act on the state they can read.
+            return {
+                "result": "refused",
+                "code": "in_progress",
+                "message": (
+                    "a handoff of that conversation is already in progress on "
+                    f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
+                    f"changed. If the move does not finish on its own, restart the "
+                    f"relay on {holder} (`lop network restart`), then try the move again."
+                ),
+                "session_id": session_id,
+            }
+    return None
+
+
 def _source_prepare(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3827,7 +3905,6 @@ def _source_prepare(
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import (
         HANDOFF_PHASE_PREPARED,
-        handoff_in_flight,
         write_handoff_entry,
     )
 
@@ -3874,63 +3951,9 @@ def _source_prepare(
         if (session_roles and drop_session_roles and not keep)
         else ""
     )
-    try:
-        existing = handoff_in_flight(server.root, session_id)
-    except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
-        existing = None
-    if existing and str(existing.get("phase") or "") in ("prepared", "handing-off"):
-        # Reconcile a stale entry before refusing, then re-read: a journal entry
-        # left by a crash is exactly what `--wait`'s retry must be able to clear.
-        reconcile(server.root, server=server, only=session_id)
-        try:
-            existing = handoff_in_flight(server.root, session_id)
-        except Exception:  # noqa: BLE001
-            existing = None
-        if existing:
-            # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
-            # this device is holding may be a handoff that is genuinely under way, or
-            # one whose destination died — and until it is settled, every route to
-            # this conversation answers the same sentence. Measured on the two-device
-            # rig 2026-09-26 (probe 9): the destination's relay was killed mid-copy,
-            # A answered ``deadline_exceeded`` with "Nothing was deleted: this device
-            # still holds the conversation", and SEVEN retries over ten minutes then
-            # read "a handoff ... is already in progress on this device" with no way
-            # to tell what was wrong or what to do; the same move landed the moment
-            # A's relay restarted. The phase and the age are the two facts that make
-            # the state legible (``prepared`` = no bytes were committed anywhere;
-            # ``handing-off`` = monotone, the destination owns the outcome), so they
-            # are NAMED here rather than left for the user to infer from a JSON
-            # journal. The recovery the design's §6.5 table would apply to a stale
-            # entry written by a DEAD relay is deliberately not applied here — this
-            # entry's writer is alive — and that gap is recorded, not guessed at.
-            phase = str(existing.get("phase") or "")
-            age = _handoff_age(existing)
-            # THE DEVICE, NOT "this device": the reader is the DESTINATION, so
-            # "this device" named the wrong machine and its remedy (restart the
-            # destination's relay) cleared nothing. The journal is device-local,
-            # so the holder for an entry here is always this relay's own device.
-            holder = str(server._own_label())  # noqa: SLF001
-            # THE ESCAPE IS NAMED, because it is not derivable from the state. An
-            # entry written by this device's LIVE relay is skipped by every reconcile
-            # (the instance rule that stops a merely slow peer losing an in-flight
-            # handoff), so no amount of retrying clears it and no other verb does
-            # either: what clears it is making the writer instance stale, after which
-            # the next attempt reconciles it at ``prepared`` and rolls it back
-            # (measured 2026-09-26: seven retries over ten minutes read this sentence;
-            # the same move landed the moment the source's relay restarted). Review
-            # round 1's ruling is a user-facing abandon verb, and this clause is its
-            # prerequisite: a person can act on the state they can read.
-            return {
-                "result": "refused",
-                "code": "in_progress",
-                "message": (
-                    "a handoff of that conversation is already in progress on "
-                    f"{holder} (phase: {phase or 'unknown'}, {age}), so nothing was "
-                    f"changed. If the move does not finish on its own, restart the "
-                    f"relay on {holder} (`lop network restart`), then try the move again."
-                ),
-                "session_id": session_id,
-            }
+    refused = _handoff_in_progress_refusal(server, session_id)
+    if refused is not None:
+        return refused
     # A QUEUED MOVE IS A PENDING HANDOFF TOO (§5.4), so it is checked before
     # anything else can start a second copy. The SAME request is idempotently
     # accepted (a re-delivery, a ``--wait`` re-probe); a DIFFERENT one is refused
@@ -6133,6 +6156,25 @@ def _offload(
             "already_local",
             f"{session_id} is already on this device, so nothing was moved",
         )
+    # A HANDOFF THIS DEVICE IS ALREADY HOLDING IS ANSWERED HERE, BEFORE ANY DIAL.
+    # It is this device's own durable journal, so its legibility must not depend on
+    # the link: through the destination it came back only after four asks over one
+    # link, and a link lost on the way read "that device is unreachable" for a
+    # session parked at ``phase: prepared`` HERE (see _handoff_in_progress_refusal).
+    # Same reconcile, same code, same sentence as the round trip; ``--wait`` never
+    # re-probes ``in_progress`` (only ``busy``), so answering it early loses nothing.
+    # The session-roles gate answers FIRST on the round trip (_source_prepare), so a
+    # session it would refuse is left to that path rather than reordered here.
+    try:
+        roles_block = bool(_session_role_definitions(server.root, session_id)) and not (
+            drop_session_roles
+        )
+    except _SessionRolesUnreadable:
+        roles_block = True
+    if not roles_block:
+        held = _handoff_in_progress_refusal(server, session_id)
+        if held is not None:
+            return _move_refusal(session_id, "in_progress", str(held["message"]))
     try:
         link = _link_for_move(server, target_device, target_name)
     except Moved as refusal:

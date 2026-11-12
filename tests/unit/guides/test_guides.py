@@ -692,8 +692,10 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     assert messaging is not None
     flat = " ".join(messaging.split())
     assert "a device on your **mesh** (a name or id)" in flat
-    assert "drives a turn there and the owner's reply comes back in the result" in flat
-    assert "The mailbox is loopback-only; `send(peer=…)` is the mesh path." in flat
+    # PR #3827 A1: a mesh send is a mailbox delivery, not a turn.
+    assert "the message lands in its mailbox there exactly as a local send does" in flat
+    assert "answers with `send peer=`" in flat
+    assert "`send(peer=…)` is the mesh path to the same mailbox." in flat
 
 
 def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:

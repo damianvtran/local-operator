@@ -982,6 +982,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "must NOT travel with a session: the receipt describes THIS device's pushes to "
         "its peers, and skills are synced to the config root by their own channel",
     ),
+    "local_operator/network/create_keys.py": (
+        1,
+        "``INDEX_FILENAME`` (``create-keys.json``): the OWNER device's per-device "
+        "create-idempotency index under ``<config>/network`` -- it binds a requesting "
+        "device's create_key to the session THIS device created, so it describes this "
+        "device's mesh state, never an entry of a session directory, and must not "
+        "travel with a session",
+    ),
     "local_operator/network/relay.py": (
         1,
         "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
@@ -1068,11 +1076,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        2,
+        4,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory",
+        "reply-channel/action-tool precedent), never a file in a session directory; "
+        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER``: per-device files "
+        "under the config root's ``network/`` directory (this device's repository "
+        "narrowing; the marker that a designation, including a cleared one, was "
+        "delivered) — device state that must stay on the device, never a file in a "
+        "session directory, so it never travels with a session",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,
@@ -1377,6 +1390,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(``mesh-repair:<network>:<credential key>:<generation>``, see "
         "``repair_inbox.item_key``): a primary key inside SQLite, never a path on disk "
         "and never a session directory entry, so there is nothing for the copy to carry",
+    ),
+    "local_operator/notifications/remote_attention.py": (
+        3,
+        "``remote-done`` and ``remote-notice`` (``DONE_PREFIX``/``NOTICE_PREFIX``) prefix "
+        "a forwarded completion's/notice's row KEY in ``notifications.db``: primary "
+        "keys inside SQLite, never paths on disk. "
+        "``ORIGINS_FILE`` ('remote-attention-origins.json') lives ONLY at the config "
+        "root (``_origins_path(root)``, root = the relay's config dir): a per-device "
+        "record of which mesh viewers collect this node's forwarded items. It is never "
+        "an entry of a session directory and must not travel with one -- a moved "
+        "session would carry another device's viewer list to a node those viewers "
+        "never collected from",
     ),
     "local_operator/notifications/remote_park.py": (
         1,

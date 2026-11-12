@@ -16184,7 +16184,7 @@ class SendParams(BaseModel):
         default="",
         description=(
             "Message a session on ANOTHER device over the mesh (a peer name or id); "
-            "drives a turn there and returns the owner's reply."
+            "delivered to its mailbox there, like a local send."
         ),
     )
 
@@ -16463,17 +16463,50 @@ def _role_words(context: "ToolContext | None") -> "dict[str, tuple[str, ...]]":
     return role_word_set(registry)
 
 
-#: The fields that mean one thing on THIS machine's loopback/registrant
-#: substrate and nothing on the mesh — refused, never dropped, beside `peer`
-#: (design §3B).
-_MESH_LOCAL_ONLY_MODES = ("wake", "now", "patience", "model")
+#: The fields that mean one thing on THIS machine and nothing on the mesh —
+#: refused, never dropped, beside `peer` (design §3B). ``wake`` and ``now`` left
+#: this list when a mesh send became a mailbox delivery (PR #3827 A1): the owner
+#: honours both exactly as a local send's target does. ``patience`` arms a wait
+#: on this machine's reply ledger, which a mesh reply does not write; ``model``
+#: is its own act.
+_MESH_LOCAL_ONLY_MODES = ("patience", "model")
 
 
-def _mesh_send_argv(peer: str, address: str, text: str) -> list[str]:
+def _mesh_send_argv(
+    peer: str,
+    address: str,
+    text: str,
+    *,
+    mailbox: bool = False,
+    wake: bool = True,
+    now: bool = False,
+) -> list[str]:
     """The one spelling of a mesh send (design §3A): ``--json`` BEFORE the act —
     a trailing one would be delivered to the peer as payload — and the text
-    ALWAYS after ``--``, where it is DATA the CLI takes as-is to end of line."""
-    return ["network", "sessions", "--json", "--peer", peer, "--send", address, "--", text]
+    ALWAYS after ``--``, where it is DATA the CLI takes as-is to end of line.
+
+    ``mailbox`` is the ``send peer=`` spelling (a ``peer_message``, local-send
+    parity); without it ``--send`` drives a turn, which ``sessions resume peer=
+    prompt=`` still wants."""
+    flags: list[str] = []
+    if mailbox:
+        flags.append("--mailbox")
+        if now:
+            flags.append("--now")
+        elif not wake:
+            flags.append("--no-wake")
+    return [
+        "network",
+        "sessions",
+        "--json",
+        "--peer",
+        peer,
+        "--send",
+        address,
+        *flags,
+        "--",
+        text,
+    ]
 
 
 async def _execute_send_peer(
@@ -16481,13 +16514,16 @@ async def _execute_send_peer(
 ) -> ToolResult:
     """``send(peer=…)``: drive a turn in a session on ANOTHER device.
 
-    NOT THE LOOPBACK MAILBOX (design §8.1/§8.2, locked): the local path spools to
-    a registrant on this machine; this one runs the SAME pilot act the CLI drives
-    (``lop network sessions --peer P --send <id-or-name> -- <text>``), where the
-    owner admits the turn through its own prompt admission
-    (``viewer.prompt_and_wait``) and answers with a receipt carrying its reply —
-    no new wire op, no second writer, and the CLI keeps every bound and refusal.
-    This function builds the argv, relays refusals, and renders the outcome.
+    THE OWNER'S MAILBOX, OVER THE MESH (PR #3827 A1): this runs the pilot act
+    ``lop network sessions --peer P --send <id-or-name> --mailbox -- <text>``,
+    which delivers a ``peer_message`` frame — the op a local ``send`` delivers —
+    so a busy owner reads it at its next tool-call boundary instead of parking a
+    ``prompt`` behind its running turn, ``wake``/``now`` mean what they mean
+    locally, and the answer comes at mailbox admission. The owner stamps the
+    sending device from the authenticated link, so the receiver can reply with
+    ``send peer=``. An owner too old for that falls back to the turn path, whose
+    timeout is reported as NOT delivered. This function builds the argv, relays
+    refusals, and renders the outcome.
     """
     peer = params.peer.strip()
     given = params.model_fields_set
@@ -16498,9 +16534,9 @@ async def _execute_send_peer(
             tool_call_id,
             "send",
             f"{spelled} {'is a local-only mode' if len(refused) == 1 else 'are local-only modes'}"
-            " — the loopback mailbox and the model switch act on THIS machine. With "
-            "`peer` the send drives a turn on that device and returns the owner's "
-            "reply: drop `wake`/`now`/`patience`/`model` for a peer send.",
+            " — a patience wait and the model switch act on THIS machine. With "
+            "`peer` the message goes to that session's mailbox on its device: drop "
+            "`patience`/`model` for a peer send.",
         )
 
     if params.message is None or not params.message.strip():
@@ -16536,7 +16572,9 @@ async def _execute_send_peer(
         )
 
     timeout = _mesh_pilot_timeout_s()
-    argv = _mesh_send_argv(peer, address, params.message)
+    argv = _mesh_send_argv(
+        peer, address, params.message, mailbox=True, wake=bool(params.wake), now=bool(params.now)
+    )
     try:
         code, payload, stderr = await _mesh_cli_json(argv, timeout, context)
     except (asyncio.TimeoutError, TimeoutError):
@@ -16574,12 +16612,32 @@ async def _execute_send_peer(
     for key in ("code", "error", "peer_named"):
         if payload.get(key):
             details[key] = payload[key]
-    if payload.get("ok") is False:
-        # ``running``/``queued``/``failed``/``lost`` are the owner's honest
-        # NON-completions — the same states the CLI exits non-zero for, so a
-        # delivery is never read as a completion.
+    if _mesh_send_failed(payload):
+        # ``queued``/``failed``/``lost`` are the owner's honest NON-completions:
+        # not delivered yet (parked behind its running turn), no turn ran, it
+        # failed, or nobody knows. See ``_mesh_send_failed``.
         return _error(tool_call_id, "send", text, details=details)
     return _text(tool_call_id, "send", text, details=details)
+
+
+def _mesh_send_failed(payload: Mapping[str, Any]) -> bool:
+    """Is a pilot ``send`` receipt a failure the TOOL result must flag?
+
+    Only on the TURN path (``sessions resume peer= prompt=``, or an owner too old
+    for the mailbox). ``running`` there is reported ONLY when the owner's user row
+    for our message id is in the window (``network.cli._pilot_send``): admitted,
+    and still working when the CLI stopped waiting. That is a delivered message,
+    so success with ``details.outcome == "running"``. A wait that ended BEFORE
+    admission is ``queued`` (``code == "queued_behind_turn"``): the prompt is
+    parked in that runtime's memory behind its running turn and lost if it stops
+    first — NOT delivered, so an error (PR #3827 A1: an earlier revision called
+    every timeout ``running``, which would have told agents a parked message had
+    landed). The CLI keeps its non-zero exit for ``running``: a shell script
+    waiting for a reply still must not read admission as completion.
+    """
+    if payload.get("ok") is not False:
+        return False
+    return str(payload.get("outcome") or "") != "running"
 
 
 # A pathological attention turn must not retain every unique payload forever.
@@ -20745,7 +20803,13 @@ async def _sessions_spawn_mesh(
     if minted:
         head += f" (session {identifier_text(context, minted)})"
     lines = [head]
-    if str(params.prompt or ""):
+    if payload.get("create_unconfirmed") or payload.get("replayed"):
+        # The create's own reply was lost (confirmed by key) or this was a retry
+        # the owner matched to the session it already made: the first prompt's
+        # admission was not observed by THIS call, so "not admitted" would be a
+        # claim nobody saw. The owner/relay sentence says what is known.
+        lines.append(str(payload.get("detail") or ""))
+    elif str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
         lines.append("the prompt was admitted there" if admitted else "the prompt was not admitted")
     notice = str(payload.get("unattended_notice") or "")
@@ -20808,7 +20872,9 @@ async def _sessions_resume_mesh(
             from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
 
             details[BRIDGE_TAINT_DETAILS_KEY] = True
-        if payload.get("ok") is False:
+        # The same pilot-send receipt as ``send peer=``, so the same rule: an
+        # admitted turn still running there is a delivery, not a failure.
+        if _mesh_send_failed(payload):
             return _error(tool_call_id, "sessions", text, details=details)
         return _text(tool_call_id, "sessions", text, details=details)
 

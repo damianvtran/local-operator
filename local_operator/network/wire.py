@@ -191,8 +191,19 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "member-list-push-v1",
     # The single-file pull (``files.py``'s ``net_file_get``); see MESH_FILE_V1.
     "mesh-file-v1",
+    # Origin-only completion/notice fields on catalogue rows; see
+    # REMOTE_ATTENTION_V1 below.
+    "remote-attention-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
+#: Catalogue rows carry ``attention``/``notices`` (and ``attention_unknown`` when
+#: the owner's completion read failed) for the session's ORIGIN
+#: (``notifications/remote_attention``). An owner stamps them only on a link
+#: whose viewer advertised this, so an older viewer — which would parse the keys
+#: as nothing, or forbid them on a strict model — receives the exact row shape it
+#: always did. Named here so the tuple above, the owner's condition and the tests
+#: read ONE spelling of the string.
+REMOTE_ATTENTION_V1 = "remote-attention-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
 #: purposes). The runtime-record half of the same promise lives in
 #: ``session/runtime/types.PEER_JOURNAL_SOURCE_CAPABILITY`` — one string, two
