@@ -4926,6 +4926,15 @@ def _start_store_maintenance(
     separate runtime processes sharing this config root.
     """
     global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
+    # The temporary-chat sweeper is its own thread (idempotent per process),
+    # NOT part of this one-shot worker: temporary chats expire on a 60 s
+    # cadence whatever the delegated sweep's switch or period says.
+    try:
+        from local_operator.session.cleanup import start_temporary_sweeper
+
+        start_temporary_sweeper(config_manager, config_dir, actor="session-runtime")
+    except Exception:  # noqa: BLE001 — housekeeping never fails session start
+        logger.debug("temporary sweeper could not start", exc_info=True)
     if _STORE_MAINTENANCE_THREAD is not None:
         return
     try:

@@ -11381,9 +11381,25 @@ def build_app(daemon: MobileDaemon):
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        # The temporary-chat sweeper (``session.cleanup``), hosted by the phone
+        # daemon too so a chat started from the phone still expires when no
+        # session process is left. Idempotent per process; never fails startup.
+        sweeper = False
+        try:
+            from local_operator.config import ConfigManager
+            from local_operator.session.cleanup import start_temporary_sweeper
+
+            root = config_dir()
+            sweeper = start_temporary_sweeper(ConfigManager(root), root, actor="phone-daemon")
+        except Exception:  # noqa: BLE001 — housekeeping never fails the daemon
+            logger.debug("temporary sweeper could not start", exc_info=True)
         try:
             yield
         finally:
+            if sweeper:
+                from local_operator.session.cleanup import stop_temporary_sweeper
+
+                stop_temporary_sweeper()
             await daemon.close_phone_views()
 
     return Starlette(routes=routes, lifespan=lifespan)

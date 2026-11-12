@@ -1517,6 +1517,12 @@ export type MessageParams = {
   "wire.settings.session_cleanup_remove_empty.choice.true.description": undefined;
   "wire.settings.session_cleanup_remove_empty.help": undefined;
   "wire.settings.session_cleanup_remove_empty.label": undefined;
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": undefined;
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": undefined;
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": undefined;
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": undefined;
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": undefined;
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": undefined;
   "wire.settings.session_compression.description": undefined;
   "wire.settings.session_compression.title": undefined;
   "wire.settings.session_compression_after_days.help": undefined;

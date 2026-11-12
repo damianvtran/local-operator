@@ -576,6 +576,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning("hub update runner could not start", exc_info=True)
         app.state.hub_sync = None
 
+    # THE TEMPORARY-CHAT SWEEPER. Hosted here too (not only by session
+    # processes) so a temporary chat still expires when the desktop is open and
+    # every runtime has gone: the delegated sweep runs only inside a session.
+    # One daemon thread; the first pass waits a full cadence.
+    temporary_sweeper_started = False
+    try:
+        from local_operator.session.cleanup import start_temporary_sweeper
+
+        temporary_sweeper_started = start_temporary_sweeper(
+            app.state.config_manager, config_dir, actor="desktop-server"
+        )
+    except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
+        logger.warning("temporary-chat sweeper could not start", exc_info=True)
+
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
     # never waits on a memberships read. Never raises; ineligible = no-op.
@@ -629,6 +643,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cancel_prewarm()
         except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
             logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
+        if temporary_sweeper_started:
+            try:
+                from local_operator.session.cleanup import stop_temporary_sweeper
+
+                stop_temporary_sweeper()
+            except Exception:  # noqa: BLE001 — teardown never raises
+                logger.debug("temporary sweeper stop failed", exc_info=True)
         if hub_sync_task is not None:
             if app.state.hub_sync is not None:
                 app.state.hub_sync.stop()
