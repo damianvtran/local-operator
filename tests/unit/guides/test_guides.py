@@ -46,6 +46,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
 
     assert [guide.name for guide in guides] == [
         "agents",
+        "app-files",
         "browser",
         "classification",
         "code-requests",
@@ -181,6 +182,16 @@ def test_guide_listing_never_contains_guide_body() -> None:
         # negative control, because a guide that matches everything routes nothing.
         ("never let me force-push main", "guardrails"),
         ("warn me before deleting data", "guardrails"),
+        # The app-files rows are phrased unlike the description (a row that
+        # repeats it proves only string overlap) and use the shapes this router
+        # can see: an app's own object vocabulary ("clips", "layers", "office
+        # XML"). The system prompt also points at the guide by name, so routing
+        # is the second route in, not the only one.
+        # `test_ordinary_file_and_project_turns_do_not_route_to_app_files` is
+        # their negative control.
+        ("add three clips to my video editor timeline", "app-files"),
+        ("build an image-editor document with two layers", "app-files"),
+        ("hand-write the slide deck's office XML", "app-files"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -213,6 +224,37 @@ async def test_an_unrelated_task_does_not_route_to_guardrails(tmp_path: Path) ->
     selected = await index.select("summarise this spreadsheet into a table")
 
     assert "guardrails" not in {g.name for g in selected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "update the project status to active",
+        "create a new project for the website redesign",
+        "show my projects and their milestones",
+        "write a json file with these settings",
+    ],
+)
+async def test_ordinary_file_and_project_turns_do_not_route_to_app_files(
+    tmp_path: Path, query: str
+) -> None:
+    """The negative control for the app-files routing rows.
+
+    Lop *project* turns (status, milestones) are among the most frequent in
+    team sessions, and writing a plain data file is routine. An earlier
+    description naming "project" and "file format" routed all four of these
+    (PR #3857 review round 1), spending a listing line and inviting a needless
+    guide read on ordinary turns. The guide is for an application's native
+    format only, so none of these may surface it.
+    """
+    guides = discover_guides()
+    index = SkillIndex(cast(Any, guides), LocalEmbedder(), cache_dir=tmp_path / "cache")
+    await index.build()
+
+    selected = await index.select(query)
+
+    assert "app-files" not in {g.name for g in selected}
 
 
 def test_guardrails_guide_rule_example_is_loadable(tmp_path: Path) -> None:
@@ -1288,3 +1330,39 @@ def test_radient_vault_guide_is_gated_concise_and_keeps_local_first(monkeypatch,
     assert "session credential" in prose and "never shown to you" in prose
     assert "cannot create or upload" in prose
     assert len(body.splitlines()) <= 40
+
+
+def test_app_files_guide_states_the_native_shape_rules() -> None:
+    """A hand-written application file must be what the app's own operation
+    makes. Measured on a 20-task DeepSeek V4.1 Flash sample (2026-11-12): a
+    project file named a generic backend filter where the app has its own
+    (scored as no crop), layers loaded with file names were renamed against a
+    "don't rename" instruction, and source media was transcoded instead of
+    referenced. Each rule below is the general form of one of those misses."""
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://app-files")
+    assert body is not None
+    prose = " ".join(body.replace("**", "").split())
+
+    assert "Drive the app" in prose and "scripting, batch or CLI mode" in prose
+    assert "Use the app's identifiers and defaults." in prose
+    assert "make a tiny sample with the app's own action" in prose
+    assert "One app operation, one object." in prose
+    assert "A placeholder stays a placeholder" in prose
+    assert "Reference the original sources" in prose
+    assert "The user's negative constraints bind what you create." in prose
+    assert "Edit the named file in place" in prose
+    assert "Round-trip it through the app" in prose
+    assert "Check mechanical properties with a command" in prose
+    # The system prompt states these at their minimum to stay inside the
+    # start-context budget; the guide carries the elaboration the prompt
+    # dropped (irreversible-edit examples, every-element and "match B" checks,
+    # the two-safe-routes rule and its "unmet" consequence).
+    assert "back it up elsewhere first" in prose
+    assert "write a new file only when asked for a copy" in prose
+    assert "needs a check over all of them that counts the failures" in prose
+    assert "property diff against B (links, metadata, types)" in prose
+    assert "try two safe routes (never the irreversible action itself)" in prose
+    assert "still untested means unmet" in prose
+    # The guide is general harness guidance, not benchmark advice.
+    assert "grader" not in prose
