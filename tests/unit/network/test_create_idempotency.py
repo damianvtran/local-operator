@@ -6,7 +6,8 @@ answered "stopped answering before it replied" while the node HAD created
 session running the same first prompt. See ``network/create_keys.py``.
 
 THE RIG is two in-process relays: an OWNER whose real ``_op_session_create`` /
-``_op_session_create_lookup`` run against its own disk, and a REQUESTER whose real
+``_op_session_create_lookup`` and ``net_definitions`` handler
+(``definitions.make_handler``) run against its own disk, and a REQUESTER whose real
 ``_ctl_peer_create`` → ``_local_peer_call`` path talks to the owner through a
 fake link. The link can DROP a reply after the owner has acted, which is the
 production failure exactly (the frame arrived, the answer did not). The warm-up
@@ -55,6 +56,14 @@ class _Wire:
     ``drop_create_replies`` replies to that many ``net_session_create`` frames
     with ``None`` AFTER the owner ran them — the lost-reply case. ``lookup`` set
     to ``"unknown_op"`` plays an owner older than this build.
+
+    ``net_definitions`` frames — the probe ``push_to_peer`` opens a create with —
+    are recorded in ``definition_frames`` and the complete ``all_frames`` stream,
+    and answered by the owner's real handler in an ``ack``. The reply carries the
+    ``phase`` key the wire's does. What phase
+    those frames may carry is asserted in the TEST BODY, never here:
+    ``push_to_peer`` swallows anything this ``request`` raises
+    (``definitions.py:1777-1778``), so an assert in this class cannot fail a test.
     """
 
     def __init__(self, owner: relay.RelayServer, *, drop_create_replies: int = 0) -> None:
@@ -62,17 +71,23 @@ class _Wire:
         self.drop = drop_create_replies
         self.lookup = "ok"
         self.sent: list[dict[str, Any]] = []
+        self.all_frames: list[dict[str, Any]] = []
+        self.definition_frames: list[dict[str, Any]] = []
+        self.definition_replies: list[dict[str, Any]] = []
+        self._definitions = definitions.make_handler(owner)
 
     def request(self, frame: dict[str, Any], timeout: float | None = None) -> dict[str, Any] | None:
-        self.sent.append(dict(frame))
+        self.all_frames.append(dict(frame))
         op = frame["op"]
+        if op == "net_definitions":
+            self.definition_frames.append(dict(frame))
+            reply = {"op": "ack", "detail": self._definitions(_owner_link(), frame)}
+            self.definition_replies.append(reply)
+            return reply
+        self.sent.append(dict(frame))
         if op == "net_session_create_lookup" and self.lookup == "unknown_op":
             return {"op": "error", "code": "unknown_op", "message": "not an operation"}
-        # A create MUST reconcile definitions first, even with no named profile.
-        # Exercise that real preflight rather than letting the fake raise KeyError
-        # and the production caller report state_failed before the create proceeds.
         handler = {
-            "net_definitions": definitions.make_handler(self.owner),
             "net_session_create": self.owner._op_session_create,  # noqa: SLF001
             "net_session_create_lookup": self.owner._op_session_create_lookup,  # noqa: SLF001
         }[op]
@@ -83,7 +98,7 @@ class _Wire:
         if op == "net_session_create" and self.drop > 0:
             self.drop -= 1
             return None
-        return {"op": "ack" if op == "net_definitions" else "reply", "detail": detail}
+        return {"op": "reply", "detail": detail}
 
 
 @pytest.fixture
@@ -102,6 +117,10 @@ def _sessions(owner: relay.RelayServer) -> list[str]:
     return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
 
 
+def _phases(wire: _Wire) -> list[Any]:
+    return [frame.get("phase") for frame in wire.definition_frames]
+
+
 def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     pair: tuple[Any, Any, _Wire],
 ) -> None:
@@ -109,6 +128,11 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     owner, requester, wire = pair
     wire.drop = 1
     first = requester._ctl_peer_create({"peer": "node-2"})  # noqa: SLF001
+    # The definitions probe is a state READ; the write phase is ``apply``. Asserted
+    # here, off the swallowing path: see the ``_Wire`` docstring.
+    assert _phases(wire) == ["state"], wire.definition_frames
+    assert [reply["op"] for reply in wire.definition_replies] == ["ack"]
+    assert wire.definition_replies[0]["detail"]["phase"] == "state"
     # Settled by the lookup, not reported as unreachable.
     assert first["create_unconfirmed"] is True, first
     minted = first["session_id"]
@@ -117,16 +141,23 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     key = first["create_key"]
     # The mandatory preflight predates this cell (24b6de4c86). The original
     # assertion in 6ccc448f63 omitted it; 18318597a only edits later cells/copy.
-    assert [f["op"] for f in wire.sent] == [
+    assert [f["op"] for f in wire.all_frames] == [
         "net_definitions",
         "net_session_create",
         "net_session_create_lookup",
     ]
-    assert wire.sent[0]["phase"] == "state"
-    create_frames = [f for f in wire.sent if f["op"].startswith("net_session_create")]
+    assert wire.all_frames[0]["phase"] == "state"
+    create_frames = [f for f in wire.all_frames if f["op"].startswith("net_session_create")]
     assert [f["create_key"] for f in create_frames] == [key, key]
+    assert [f["op"] for f in wire.sent] == [
+        "net_session_create",
+        "net_session_create_lookup",
+    ]
+    assert wire.sent[0]["create_key"] == key and wire.sent[1]["create_key"] == key
 
     retry = requester._ctl_peer_create({"peer": "node-2", "create_key": key})  # noqa: SLF001
+    assert _phases(wire) == ["state", "state"], wire.definition_frames
+    assert [reply["op"] for reply in wire.definition_replies] == ["ack", "ack"]
     assert retry["session_id"] == minted, retry
     assert retry["replayed"] is True, retry
     assert _sessions(owner) == [minted], "a retry with the same key made a second session"
