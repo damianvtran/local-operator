@@ -206,6 +206,10 @@ def bind_failed_reason(message: object) -> str:
     repaint a terminal or forge a second line, and it is clipped. Absent or
     empty — an older owner, or a frame without the key — keeps the exact
     historical sentence so nothing that already reads it changes.
+
+    This pass is NOT complete on its own: an owner on 0.101.x or older sends its
+    raw ``str(exc)``, which a new viewer now displays, and the viewer can mask
+    credential shapes but not that owner's retrieved-secret ledger values.
     """
     if not isinstance(message, str) or not message.strip():
         return BIND_FAILED_REASON

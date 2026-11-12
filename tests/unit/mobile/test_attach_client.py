@@ -1927,3 +1927,114 @@ async def test_owner_records_bind_failures_bounded(config: Path, tmp_path: Path)
         assert journal.read_bind_failures(conv) == rows
     finally:
         r.close()
+
+
+class _UnprintableError(RuntimeError):
+    """An exception whose ``str()`` itself raises (bad args, a broken override).
+
+    Third-party and unpickled exceptions do this. ``str(exc)`` on the failure
+    path must not be what stops the owner dropping the connection.
+    """
+
+    def __str__(self) -> str:
+        raise ValueError("broken __str__")
+
+
+@pytest.mark.asyncio
+async def test_unprintable_bind_failure_still_refuses_and_drops(config: Path) -> None:
+    """Review M1 / QA Q1: a raising ``__str__`` must not skip the drop.
+
+    Drives the REAL failure branch of ``_serve_frontend_sync`` (announce, then
+    drop). Before the fix ``str(exc)`` ran outside the announce's guard, the
+    announce raised, ``_drop_client`` never ran, and the viewer sat on a dead,
+    still-registered connection until its sync timeout.
+    """
+
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        conn = next(c for c in r._clients.values() if c.kind == "attach")
+
+        def subscribe_frontend(*_args: Any, **_kwargs: Any) -> Any:
+            raise _UnprintableError("unprintable")
+
+        await _on_runtime_loop(r, r._serve_frontend_sync(conn, {}, subscribe_frontend))
+        await _await_disconnect(disconnected)
+        assert disconnected, "viewer was never refused"
+        reason = disconnected[0]
+        assert reason.startswith("owner could not prepare this view"), reason
+        # The fallback names the exception type rather than its (unprintable) text.
+        assert "_UnprintableError" in reason, reason
+        assert conn not in r._clients.values(), "owner kept the dead connection registered"
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_masks_ledger_secret_before_wire_and_record(
+    config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m2: the OWNER masks a ledger-only secret, not just the viewer.
+
+    The value has no credential shape, so the viewer's ``scrub_shapes`` cannot
+    mask it; only the owner's retrieved-secret ledger pass can. Asserted on the
+    frame the owner hands to ``_send_to`` and on the record it writes.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.secrets import runtime as secrets_runtime
+    from local_operator.session.runtime import journal
+
+    ledger = secrets_runtime._RedactionLedger()
+    monkeypatch.setattr(secrets_runtime, "_LEDGER", ledger)
+    # Shape-less on purpose: no credential prefix or entropy pattern, so only
+    # the ledger pass can mask it. Built from parts so no literal sits here.
+    secret = "-".join(["ledger", "only", "mango", "tangerine", "41"])
+    ledger.register(secret)
+
+    conv = tmp_path / "conv" / "sess-a"
+    conv.mkdir(parents=True)
+    handle = FakeHandle("sess-a")
+    handle._session = SimpleNamespace(  # type: ignore[attr-defined]
+        session_id="sess-a", _transcript=SimpleNamespace(directory=conv)
+    )
+    r = RuntimeServer(handle, kind="tui")
+    sent: list[dict[str, Any]] = []
+    real_send = r._send_to
+
+    async def capture(conn: Any, frame: dict[str, Any]) -> Any:
+        if frame.get("op") == "bind_failed":
+            sent.append(frame)
+        return await real_send(conn, frame)
+
+    monkeypatch.setattr(r, "_send_to", capture)
+    r.start()
+    try:
+        record = await _wait_record()
+        disconnected: list[str] = []
+        client = AttachClient(lambda p: None, disconnected.append)
+        await client.connect(record, "sess-a")
+        try:
+            raise RuntimeError(f"store refused key {secret}\x1b[2J\nsecond line")
+        except RuntimeError as exc:
+            failure = exc
+        await _bind_fail_then_drop(r, [failure])
+        await _await_disconnect(disconnected)
+
+        assert len(sent) == 1, sent
+        assert secret not in sent[0]["message"], sent[0]
+        assert "[redacted]" in sent[0]["message"], sent[0]
+        raw = (conv / journal.BIND_FAILURES_NAME).read_text()
+        assert secret not in raw
+        (row,) = journal.read_bind_failures(conv)
+        assert "[redacted]" in row["message"] and "[redacted]" in row["traceback"]
+        # QA Q2: the record's message is one sanitised line, like the reason.
+        assert "\n" not in row["message"] and "\x1b" not in row["message"], row
+        assert disconnected and secret not in disconnected[0], disconnected
+    finally:
+        r.close()
