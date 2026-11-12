@@ -154,6 +154,30 @@ def test_another_sessions_dir_child_or_ancestor_ranks_high(home: Path, rel: str)
     assert f"created by another session ({OTHER}, mkdir" in verdict.targets[0].reason
 
 
+def test_landing_recursion_keeps_foreign_ledger_and_critical_ranks(home: Path) -> None:
+    """Convergence: a relink landing must share the call's foreign-ledger view."""
+    from local_operator.guardrails.classify import _protected, _rank
+    from local_operator.guardrails.resolve import Target
+
+    foreign_dir = _osworld(home)
+    ordinary = home / "worktrees" / "plain" / "runs"
+    ordinary.mkdir(parents=True)
+    prot = _protected(_env(home), None, SID)
+    foreign = prov.ForeignCreations(SID)
+    # Isolate the recursion's contract: both spellings are ordinary paths
+    # without ledger evidence, so dropping `foreign` silently returns LOW.
+    target = Target(
+        path=str(ordinary), op="delete", program="rm", landings=(str(foreign_dir),)
+    )
+    ranked = _rank(target, prot, SID, foreign)
+    assert ranked.risk is Risk.HIGH
+    assert f"created by another session ({OTHER}" in ranked.reason
+    assert _rank(target, prot, SID).risk is Risk.LOW
+
+    target.landings = (str(home / ".local-operator" / "config.yml"),)
+    assert _rank(target, prot, SID, foreign).risk is Risk.CRITICAL
+
+
 def test_unrecorded_deep_dir_and_own_dir_stay_low(home: Path) -> None:
     (home / "worktrees" / "plain" / "runs").mkdir(parents=True)
     assert _verdict(home, "rm -rf ~/worktrees/plain/runs").risk is Risk.LOW
