@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 
@@ -394,3 +395,110 @@ def test_i1_3_the_update_command_names_the_device_id() -> None:
     outdated = desktop_utils.PeerAttachmentOutdated(SID, row)
     assert outdated.peer == OWNER
     assert outdated.device == "unnamed device"
+
+
+# -- QA round 2: Q2-1 / Q2-2 / Q2-3 (the Library route's CACHED remote branch) ------
+
+ASSET = "la_" + "0f" * 8
+
+
+@pytest_asyncio.fixture
+async def cached_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The Library content route over a peer's digest asset whose bytes are cached.
+
+    The index and catalogue reads are stubbed (what is under test is the route's
+    branch for bytes already in ``cache/remote-files``); the cache, the lookup,
+    ``_opened`` and the response are real.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.library import service as library_service
+    from local_operator.server.routes import desktop_library
+
+    payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+    blob = _blob(remote_cache.cache_root(tmp_path), payload, mime="image/svg+xml")
+    digest = blob.path.stem
+    asset = SimpleNamespace(
+        id=ASSET, digest=digest, derived_name="evil.svg", content_type="image/svg+xml", path=None
+    )
+    monkeypatch.setattr(library_service, "_catalog_asset", lambda _config, _id: asset)
+    monkeypatch.setattr(
+        library_service, "_remote_occurrence", lambda _config, _id: {"session_id": SID}
+    )
+    monkeypatch.setattr(rsf, "_row_for", lambda _config, _sid: _row())
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "t")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    app.include_router(desktop_library.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer t"},
+    ) as client:
+        yield client, blob, payload
+
+
+@pytest.mark.asyncio
+async def test_q2_1_a_cached_remote_svg_is_opaque_and_sandboxed(cached_library) -> None:
+    client, _blob_, payload = cached_library
+    for _open_number in (1, 2):  # QA saw the first open safe and every later one not
+        response = await client.get(f"/v1/desktop/library/assets/{ASSET}/content")
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == "application/octet-stream"
+        assert response.headers["content-security-policy"] == "sandbox"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.content == payload
+
+
+@pytest.mark.asyncio
+async def test_q2_2_an_eviction_before_the_body_re_resolves_never_truncates(
+    cached_library, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.server.routes import desktop_library
+
+    client, blob, payload = cached_library
+    evictions: list[str] = []
+    fetched: list[str] = []
+
+    def evict_once(path: Path) -> None:
+        if not evictions:
+            path.unlink()
+            evictions.append(path.name)
+
+    # Evict at whichever point sits between this device's lookup and the first
+    # body byte: the lazy stream (the old cached branch) or the open (``_opened``).
+    real_stream, real_open = desktop_library._stream, rsf._open
+
+    def stream(path: Path, *args: Any) -> Any:
+        evict_once(path)
+        return real_stream(path, *args)
+
+    def open_(found: Any) -> Any:
+        evict_once(found.path)
+        return real_open(found)
+
+    async def fetch_peer(root: Path, _sid: str, _row: Any, _member: str, source, key, _r):
+        fetched.append(key)
+        blob.path.write_bytes(payload)
+        return remote_cache.CachedBlob(
+            path=blob.path, size=len(payload), mime="image/svg+xml", source="cache"
+        )
+
+    monkeypatch.setattr(desktop_library, "_stream", stream)
+    monkeypatch.setattr(rsf, "_open", open_)
+    monkeypatch.setattr(desktop_utils, "_fetch_peer", fetch_peer)
+    response = await client.get(f"/v1/desktop/library/assets/{ASSET}/content")
+    assert evictions, "the probe never evicted"
+    assert response.status_code == 200, response.text
+    assert response.content == payload, "200 headers, then a truncated body"
+    assert fetched == [blob.path.stem], "the eviction did not re-resolve through the owner"
+
+
+@pytest.mark.asyncio
+async def test_q2_3_a_second_eviction_says_still_on_its_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _resolve_twice(monkeypatch, _evicted(tmp_path), _evicted(tmp_path))
+    with pytest.raises(desktop_utils.PeerAttachmentRetryable) as raised:
+        await rsf.content(tmp_path, SID, "f1", None)
+    assert raised.value.pending is True
+    assert raised.value.code == "attachment_fetch_pending"

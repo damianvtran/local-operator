@@ -232,7 +232,10 @@ async def _opened(resolve: Any, session_id: str) -> tuple[Any, Any, Any, Any]:
                     PeerAttachmentRetryable,
                 )
 
-                raise PeerAttachmentRetryable(session_id, row, pending=False) from None
+                # Both lookups found the bytes; only this device's cache churned,
+                # so "still on its way" (+ Retry-After), not "owner not answering"
+                # (QA r2 Q2-3).
+                raise PeerAttachmentRetryable(session_id, row, pending=True) from None
             continue
         return handle, blob, file_row, row
     raise AssertionError("unreachable")  # pragma: no cover

@@ -781,6 +781,10 @@ class ContentRef:
     name: str
     digest: bool = False
     modified_at: float = 0.0
+    #: The bytes are this device's copy of ANOTHER device's file (the remote-files
+    #: cache), so ``content_type`` is the owner's declaration, not ours. The
+    #: content route must serve it the way it serves an uncached remote open.
+    remote: bool = False
 
 
 def _catalog_asset(config: Path, asset_id: str) -> library_index.Asset:
@@ -817,7 +821,16 @@ def resolve_content(config_dir: str | Path, asset_id: str) -> ContentRef:
 
             cached = cache_root(config) / f"{asset.digest}.bin"
             if cached.is_file():
-                path = cached
+                # Thumbnails and waveforms read the cached bytes without dialing;
+                # the content ROUTE sees ``remote`` and takes the remote path.
+                return ContentRef(
+                    path=cached,
+                    content_type=asset.content_type,
+                    name=name,
+                    digest=True,
+                    modified_at=cached.stat().st_mtime,
+                    remote=True,
+                )
             elif _remote_occurrence(config, asset_id) is not None:
                 # Not here; a peer session holds it. The ROUTE fetches (async, §1),
                 # never this resolver, so a thumbnail or list read can never dial.

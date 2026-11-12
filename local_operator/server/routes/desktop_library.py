@@ -381,19 +381,7 @@ async def library_content(
         raise _asset_not_found() from None
     except service.ContentUnavailable as error:
         if error.code == "content_remote":
-            # Remote files parity §5: ONLY this explicit open (lightbox, player,
-            # download) of a peer-held asset fetches, through §1's fetch-on-miss,
-            # with §1's statuses (504 retryable, 409 permanent).
-            from local_operator.server.routes.desktop_sessions import errors
-            from local_operator.server.utils import remote_session_files
-
-            async with errors(request):
-                return await remote_session_files.library_content(
-                    config,
-                    asset_id,
-                    range_header=request.headers.get("range"),
-                    download=download,
-                )
+            return await _remote_content(request, config, asset_id, download)
         message = (
             _wd.library_content_denied()
             if error.code == "content_denied"
@@ -403,6 +391,11 @@ async def library_content(
             404 if error.code != "content_denied" else 403,
             message.envelope(code=f"library_{error.code}"),
         ) from None
+    if content.remote:
+        # Cached bytes of a peer's file: the same allowlist + sandbox and the same
+        # open-before-answering as an uncached open (QA r2 Q2-1/Q2-2). The lookup
+        # finds the cache first, so this never dials while the bytes are here.
+        return await _remote_content(request, config, asset_id, download)
     try:
         size = content.path.stat().st_size  # type: ignore[union-attr]
     except OSError:
@@ -444,6 +437,22 @@ async def library_content(
         media_type=content.content_type,
         headers=headers,
     )
+
+
+async def _remote_content(request: Request, config: Path, asset_id: str, download: bool):
+    """Remote files parity §5: ONLY an explicit open (lightbox, player, download)
+    of a peer-held asset fetches, through §1's fetch-on-miss, with §1's statuses
+    (504 retryable, 409 permanent)."""
+    from local_operator.server.routes.desktop_sessions import errors
+    from local_operator.server.utils import remote_session_files
+
+    async with errors(request):
+        return await remote_session_files.library_content(
+            config,
+            asset_id,
+            range_header=request.headers.get("range"),
+            download=download,
+        )
 
 
 @router.get("/v1/desktop/library/assets/{asset_id}/thumbnail")
