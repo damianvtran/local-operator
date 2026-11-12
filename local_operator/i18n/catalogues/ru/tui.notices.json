@@ -30,5 +30,15 @@
   "tui.notices.effort_default_changed": "значение усилия рассуждений по умолчанию изменено для новых сессий ({effort}); /model saved применит его здесь",
   "tui.notices.effort_default_changed_headline": "Умолчание усилия изменено",
   "tui.notices.model_switch_queued": "переключение на {model} в очереди — вступит в силу на следующем шаге",
-  "tui.notices.model_switch_refused": "{model} не применён: {reason}"
+  "tui.notices.model_switch_refused": "{model} не применён: {reason}",
+  "tui.notices.temporary_on": "временный чат: не попадает в историю и удаляется после {minutes} мин простоя — /temporary off сохранит его",
+  "tui.notices.temporary_off": "сохранён: этот чат больше не временный и остаётся в истории",
+  "tui.notices.temporary_status_on": "временный чат — {deletes_in}, если не сохранить его (/temporary off)",
+  "tui.notices.temporary_status_off": "этот чат хранится в истории (не временный)",
+  "tui.notices.temporary_confirm": "сделать этот чат временным? После простоя его сообщения, файлы черновика и память сессии будут удалены; всё, что вы сохранили в другом месте, останется. Введите /temporary on ещё раз в течение 30 секунд для подтверждения.",
+  "tui.notices.temporary_refused_pinned": "этот чат закреплён, поэтому его нельзя сделать временным — сначала открепите его",
+  "tui.notices.temporary_refused_project": "этот чат привязан к проекту, поэтому его нельзя сделать временным — сначала отвяжите его",
+  "tui.notices.temporary_deleted": "временный чат {session_id} удалён после простоя. Начать новый: lop --temporary",
+  "tui.notices.temporary_new_hint": "/new temporary [сообщение] начинает временный чат: он не попадает в историю и удаляется после простоя",
+  "tui.notices.temporary_refused": "этот чат нельзя сделать временным: {reason}"
 }

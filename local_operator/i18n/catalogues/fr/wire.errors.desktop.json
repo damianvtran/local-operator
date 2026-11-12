@@ -87,5 +87,12 @@
   "wire.errors.desktop.sort_unknown": "sort doit être l’un de {sorts}.",
   "wire.errors.desktop.start_after_end": "Le début doit précéder la fin",
   "wire.errors.desktop.unknown_command": "Commande inconnue",
-  "wire.errors.desktop.unknown_provider": "Fournisseur inconnu"
+  "wire.errors.desktop.unknown_provider": "Fournisseur inconnu",
+  "wire.errors.desktop.session_in_project": "la conversation {session_id} est liée à un projet ; dissociez-la d’abord",
+  "wire.errors.desktop.session_pinned": "la conversation {session_id} est épinglée ; désépinglez-la d’abord",
+  "wire.errors.desktop.session_temporary": "la conversation {session_id} est une discussion temporaire ; conservez-la d’abord",
+  "wire.errors.desktop.session_temporary_deleted": "cette discussion temporaire a été supprimée après une période d’inactivité",
+  "wire.errors.desktop.temporary_mark_failed": "impossible d’enregistrer la conversation {session_id} comme temporaire ; rien n’a été modifié",
+  "wire.errors.desktop.temporary_not_user": "la conversation {session_id} n’a pas été lancée par vous ; elle ne peut pas devenir temporaire",
+  "wire.errors.desktop.temporary_peer_unsupported": "une discussion temporaire ne peut pas encore être lancée sur un autre appareil"
 }

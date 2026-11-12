@@ -1,3 +1,4 @@
 {
-  "tui.composer.placeholder_default": "Écrivez à Local Operator…"
+  "tui.composer.placeholder_default": "Écrivez à Local Operator…",
+  "tui.composer.temporary_placeholder": "Message (discussion temporaire — non conservée)…"
 }

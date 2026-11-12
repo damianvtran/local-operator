@@ -9,5 +9,8 @@
   "cli.exec_runtime.model_returned": "[dim]retour à {selector}[/dim]",
   "cli.exec_runtime.compacting": "[dim]compactage du contexte…[/dim]",
   "cli.exec_runtime.error": "Erreur : {sentence}",
-  "cli.exec_runtime.aborted": "[red]interrompu[/red]"
+  "cli.exec_runtime.aborted": "[red]interrompu[/red]",
+  "cli.exec_runtime.temporary_agent_shell_refused": "une discussion temporaire se lance par vous-même ; elle ne peut pas être lancée depuis le shell d’un agent",
+  "cli.exec_runtime.temporary_conflicts_resume": "--temporary lance une nouvelle discussion ; impossible de le combiner avec --resume",
+  "cli.exec_runtime.temporary_conflicts_workstream": "--temporary ne peut pas être combiné avec --workstream : un workstream est conservé"
 }

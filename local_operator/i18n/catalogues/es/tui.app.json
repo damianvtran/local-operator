@@ -47,5 +47,18 @@
   "tui.app.providers.no_live_list": "sin lista en vivo: {names}",
   "tui.app.compaction.idle_receipt": "contexto compactado en reposo · {detail}",
   "tui.app.compaction.idle_receipt_bare": "contexto compactado en reposo",
-  "tui.app.compaction.idle_skipped": "compactación en reposo omitida · nada cambió"
+  "tui.app.compaction.idle_skipped": "compactación en reposo omitida · nada cambió",
+  "tui.app.section_temporary": "{count, plural, one {Temporal · #} many {Temporales · #} other {Temporales · #}}",
+  "tui.app.temporary_deletes_in": "{minutes, plural, one {se elimina en # min} many {se elimina en # min} other {se elimina en # min}}",
+  "tui.app.temporary_hold_running": "se conserva mientras se ejecuta",
+  "tui.app.temporary_hold_on_screen": "se conserva mientras está en pantalla",
+  "tui.app.temporary_hold_open_ask": "se conserva mientras haya una pregunta abierta",
+  "tui.app.temporary_hold_armed_wake": "se conserva mientras haya un despertar programado",
+  "tui.app.temporary_hold_armed_monitor": "se conserva mientras haya una monitorización activa",
+  "tui.app.temporary_hold_unread_mail": "se conserva mientras haya un mensaje sin leer",
+  "tui.app.temporary_hold_operator_hold": "se conserva por una retención",
+  "tui.app.temporary_hold_unseen_result": "se conserva hasta que veas el resultado",
+  "tui.app.temporary_hold_unsaved_files": "se conserva mientras haya archivos sin guardar",
+  "tui.app.temporary_hold_linked": "se conserva mientras esté fijado o vinculado",
+  "tui.app.temporary_hold_cannot_verify": "se conserva: no se pudo comprobar"
 }

@@ -47,5 +47,18 @@
   "tui.app.providers.no_live_list": "कोई लाइव सूची नहीं: {names}",
   "tui.app.compaction.idle_receipt": "निष्क्रिय सत्र में संदर्भ संपीडित किया गया · {detail}",
   "tui.app.compaction.idle_receipt_bare": "निष्क्रिय सत्र में संदर्भ संपीडित किया गया",
-  "tui.app.compaction.idle_skipped": "निष्क्रिय-सत्र संपीडन छोड़ा गया · कुछ नहीं बदला"
+  "tui.app.compaction.idle_skipped": "निष्क्रिय-सत्र संपीडन छोड़ा गया · कुछ नहीं बदला",
+  "tui.app.section_temporary": "{count, plural, one {अस्थायी · #} other {अस्थायी · #}}",
+  "tui.app.temporary_deletes_in": "{minutes, plural, one {# मिनट में हटेगी} other {# मिनट में हटेगी}}",
+  "tui.app.temporary_hold_running": "चलने तक रखी गई",
+  "tui.app.temporary_hold_on_screen": "स्क्रीन पर रहने तक रखी गई",
+  "tui.app.temporary_hold_open_ask": "खुले सवाल तक रखी गई",
+  "tui.app.temporary_hold_armed_wake": "जागृति तय रहने तक रखी गई",
+  "tui.app.temporary_hold_armed_monitor": "निगरानी सक्रिय रहने तक रखी गई",
+  "tui.app.temporary_hold_unread_mail": "अपठित संदेश रहने तक रखी गई",
+  "tui.app.temporary_hold_operator_hold": "रोक के कारण रखी गई",
+  "tui.app.temporary_hold_unseen_result": "नतीजा देखने तक रखी गई",
+  "tui.app.temporary_hold_unsaved_files": "बिना सहेजी फ़ाइलें रहने तक रखी गई",
+  "tui.app.temporary_hold_linked": "पिन या जुड़ी रहने तक रखी गई",
+  "tui.app.temporary_hold_cannot_verify": "रखी गई: जाँच नहीं हो सकी"
 }

@@ -17927,7 +17927,11 @@ def main() -> int:
 
                 tombstone = deleted_sentence(config_dir(), str(args.resume))
                 if tombstone:
-                    print(f"\033[31m{tombstone}\033[0m", file=sys.stderr)
+                    print(
+                        # i18n: ignore ANSI colour around an already-keyed sentence
+                        f"\033[31m{tombstone}\033[0m",
+                        file=sys.stderr,
+                    )
                     return 1
                 # A CONVERSATION ANOTHER DEVICE HOLDS IS NOT A TYPO. The resolver
                 # above only answers for a directory on THIS disk, so a peer's id

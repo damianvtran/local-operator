@@ -47,5 +47,18 @@
   "tui.app.providers.no_live_list": "không có danh sách trực tiếp: {names}",
   "tui.app.compaction.idle_receipt": "đã nén ngữ cảnh khi rảnh · {detail}",
   "tui.app.compaction.idle_receipt_bare": "đã nén ngữ cảnh khi rảnh",
-  "tui.app.compaction.idle_skipped": "đã bỏ qua nén khi rảnh · không có gì thay đổi"
+  "tui.app.compaction.idle_skipped": "đã bỏ qua nén khi rảnh · không có gì thay đổi",
+  "tui.app.section_temporary": "{count, plural, other {Tạm thời · #}}",
+  "tui.app.temporary_deletes_in": "{minutes, plural, other {xóa sau # phút}}",
+  "tui.app.temporary_hold_running": "giữ lại khi đang chạy",
+  "tui.app.temporary_hold_on_screen": "giữ lại khi đang hiển thị",
+  "tui.app.temporary_hold_open_ask": "giữ lại khi còn câu hỏi đang mở",
+  "tui.app.temporary_hold_armed_wake": "giữ lại khi đã đặt thức dậy",
+  "tui.app.temporary_hold_armed_monitor": "giữ lại khi có giám sát đang bật",
+  "tui.app.temporary_hold_unread_mail": "giữ lại khi còn tin nhắn chưa đọc",
+  "tui.app.temporary_hold_operator_hold": "được giữ lại do lệnh giữ",
+  "tui.app.temporary_hold_unseen_result": "giữ lại cho đến khi bạn xem kết quả",
+  "tui.app.temporary_hold_unsaved_files": "giữ lại khi còn tệp chưa lưu",
+  "tui.app.temporary_hold_linked": "giữ lại khi được ghim hoặc liên kết",
+  "tui.app.temporary_hold_cannot_verify": "được giữ lại: không thể kiểm tra"
 }

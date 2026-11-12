@@ -30,5 +30,15 @@
   "tui.notices.effort_default_changed": "نئے سیشنز کے لیے استدلال کی شدت کا ڈیفالٹ بدل گیا ({effort})؛ /model saved اسے یہاں اپنا لیتا ہے",
   "tui.notices.effort_default_changed_headline": "استدلال کی شدت کا ڈیفالٹ بدل گیا",
   "tui.notices.model_switch_queued": "{model} پر تبدیلی قطار میں — اگلے مرحلے میں لاگو ہوگی",
-  "tui.notices.model_switch_refused": "{model} لاگو نہیں ہوا: {reason}"
+  "tui.notices.model_switch_refused": "{model} لاگو نہیں ہوا: {reason}",
+  "tui.notices.temporary_on": "عارضی چیٹ: ہسٹری سے باہر اور {minutes} منٹ غیر فعال رہنے کے بعد حذف — /temporary off اسے محفوظ رکھتا ہے",
+  "tui.notices.temporary_off": "محفوظ: یہ چیٹ اب عارضی نہیں اور آپ کی ہسٹری میں رہے گی",
+  "tui.notices.temporary_status_on": "عارضی چیٹ — {deletes_in}، جب تک آپ اسے محفوظ نہ رکھیں (/temporary off)",
+  "tui.notices.temporary_status_off": "یہ چیٹ آپ کی ہسٹری میں محفوظ ہے (عارضی نہیں)",
+  "tui.notices.temporary_confirm": "اس چیٹ کو عارضی بنائیں؟ غیر فعال رہنے کے بعد اس کے پیغامات، اسکریچ پیڈ کی فائلیں اور سیشن میموری حذف ہو جائیں گی؛ جو آپ نے کہیں اور محفوظ کیا ہے وہ رہے گا۔ تصدیق کے لیے 30 سیکنڈ کے اندر دوبارہ /temporary on لکھیں۔",
+  "tui.notices.temporary_refused_pinned": "یہ چیٹ پن ہے، اس لیے اسے عارضی نہیں بنایا جا سکتا — پہلے اسے ان پن کریں",
+  "tui.notices.temporary_refused_project": "یہ چیٹ ایک پروجیکٹ سے منسلک ہے، اس لیے اسے عارضی نہیں بنایا جا سکتا — پہلے اسے الگ کریں",
+  "tui.notices.temporary_deleted": "عارضی چیٹ {session_id} غیر فعال رہنے کے بعد حذف کر دی گئی۔ نئی شروع کریں: lop --temporary",
+  "tui.notices.temporary_new_hint": "/new temporary [پیغام] ایک عارضی چیٹ شروع کرتا ہے جو ہسٹری سے باہر رہتی ہے اور غیر فعال ہونے پر حذف ہو جاتی ہے",
+  "tui.notices.temporary_refused": "اس چیٹ کو عارضی نہیں بنایا جا سکتا: {reason}"
 }

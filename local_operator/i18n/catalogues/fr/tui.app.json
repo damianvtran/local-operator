@@ -47,5 +47,18 @@
   "tui.app.providers.no_live_list": "aucune liste à jour : {names}",
   "tui.app.compaction.idle_receipt": "contexte compacté en veille · {detail}",
   "tui.app.compaction.idle_receipt_bare": "contexte compacté en veille",
-  "tui.app.compaction.idle_skipped": "compactage en veille ignoré · rien n’a changé"
+  "tui.app.compaction.idle_skipped": "compactage en veille ignoré · rien n’a changé",
+  "tui.app.section_temporary": "{count, plural, one {Temporaire · #} many {Temporaires · #} other {Temporaires · #}}",
+  "tui.app.temporary_deletes_in": "{minutes, plural, one {supprimée dans # min} many {supprimée dans # min} other {supprimée dans # min}}",
+  "tui.app.temporary_hold_running": "conservée pendant l’exécution",
+  "tui.app.temporary_hold_on_screen": "conservée tant qu’elle est affichée",
+  "tui.app.temporary_hold_open_ask": "conservée tant qu’une question est ouverte",
+  "tui.app.temporary_hold_armed_wake": "conservée tant qu’un réveil est programmé",
+  "tui.app.temporary_hold_armed_monitor": "conservée tant qu’une surveillance est active",
+  "tui.app.temporary_hold_unread_mail": "conservée tant qu’un message est non lu",
+  "tui.app.temporary_hold_operator_hold": "conservée par un maintien",
+  "tui.app.temporary_hold_unseen_result": "conservée jusqu’à ce que vous voyiez le résultat",
+  "tui.app.temporary_hold_unsaved_files": "conservée tant que des fichiers ne sont pas enregistrés",
+  "tui.app.temporary_hold_linked": "conservée tant qu’elle est épinglée ou liée",
+  "tui.app.temporary_hold_cannot_verify": "conservée : vérification impossible"
 }
