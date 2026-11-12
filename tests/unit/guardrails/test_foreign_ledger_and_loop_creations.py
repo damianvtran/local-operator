@@ -477,24 +477,58 @@ def test_read_only_pre_index_ledger_still_serves_lookups(home: Path) -> None:
         conn.close()
 
 
-def test_writer_holding_reserved_does_not_stall_or_hide_foreign_rows(home: Path) -> None:
-    """m5: readers never take a write lock, so RESERVED (BEGIN IMMEDIATE) costs nothing."""
-    import time
+def test_writer_holding_reserved_does_not_stall_or_hide_foreign_rows(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m5: readers never take a write lock, so RESERVED (BEGIN IMMEDIATE) costs nothing.
 
+    WHY THIS ASSERTS THE MECHANISM AND NOT A WALL-CLOCK BOUND: ``elapsed < 1.0``
+    was a bet on machine load (AGENTS.md "Timing, flakes, and how to assert
+    that something is fast"). The fact that cannot flake: the lookup never
+    waits on the lock at all. The spy hands every read connection a ZERO busy
+    timeout, so any contention would surface as SQLITE_BUSY at once, the
+    lookup would degrade to "no foreign info" and the rank would drop to
+    main's. The foreign row still ranking HIGH under a held RESERVED lock
+    proves the reader never needed the busy handler. The EXCLUSIVE control
+    below shows the same zero-wait spy does hide the row when a lock really
+    blocks readers, so the assertion discriminates.
+    """
     (home / "w").mkdir()
     _run(home, "mkdir ~/w/theirs", sid=OTHER)
     db = _pre_index_ledger(home)
-    writer = sqlite3.connect(db, isolation_level=None)
-    try:
-        writer.execute("BEGIN IMMEDIATE")
-        start = time.monotonic()
-        verdict = _verdict(home, "rm -rf ~/w/theirs")
-        elapsed = time.monotonic() - start
-    finally:
-        writer.execute("ROLLBACK")
-        writer.close()
+
+    real_connect = sqlite3.connect
+    read_opens: list[float] = []
+
+    def zero_wait(*args, **kwargs):  # read connections get no busy wait at all
+        if kwargs.get("timeout") == prov._DB_READ_TIMEOUT_S:
+            read_opens.append(kwargs["timeout"])
+            kwargs["timeout"] = 0
+        return real_connect(*args, **kwargs)
+
+    def verdict_under(lock: str):
+        writer = real_connect(db, isolation_level=None)
+        try:
+            writer.execute(lock)
+            # Scoped: ``monkeypatch.undo()`` would also revert the fixture's
+            # HOME/config isolation.
+            with monkeypatch.context() as m:
+                m.setattr(prov.sqlite3, "connect", zero_wait)
+                return _verdict(home, "rm -rf ~/w/theirs")
+        finally:
+            writer.execute("ROLLBACK")
+            writer.close()
+
+    verdict = verdict_under("BEGIN IMMEDIATE")
+    assert read_opens, "the lookup did not open a read connection"
     assert verdict.risk is Risk.HIGH, verdict.targets[0].reason
-    assert elapsed < 1.0, elapsed
+    assert f"created by another session ({OTHER}" in verdict.targets[0].reason
+
+    # Control: with zero busy wait, a lock that does block readers hides the row.
+    read_opens.clear()
+    control = verdict_under("BEGIN EXCLUSIVE")
+    assert read_opens
+    assert control.risk is not Risk.HIGH, control.targets[0].reason
 
 
 def test_exclusive_lock_bounds_foreign_lookup_and_keeps_main_rank(
