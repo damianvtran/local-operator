@@ -923,14 +923,32 @@ def classify_download(path: Path, *, declared_mime: str = "", policy: Policy = D
 _PRIVATE_KEY_ARMOUR = (b"PRIVATE KEY", b"PRIVATE-KEY", b"PuTTY-User-Key-File")
 
 
+#: The first line of a public key in the formats a web console accepts:
+#: OpenSSH (`ssh-ed25519 AAAA…`, `ecdsa-sha2-nistp256 …`, the FIDO `sk-…`
+#: types), RFC 4716 / PEM public armour, and an ASCII-armoured PGP public key.
+_PUBLIC_KEY_FIRST_LINE_RE = re.compile(
+    rb"^(?:ssh-(?:ed25519|rsa|dss)\s|ecdsa-sha2-|sk-|---- BEGIN SSH2 PUBLIC KEY ----"
+    rb"|-----BEGIN (?:RSA )?PUBLIC KEY-----|-----BEGIN PGP PUBLIC KEY BLOCK-----)"
+)
+
+
 def _is_public_key_file(path: Path) -> bool:
-    """Does this file read as public-key material only (no private armour)?"""
+    """Does this file positively read as a public key (and carry no private armour)?
+
+    A POSITIVE shape, not mere absence of private armour (agent review round 1,
+    R8): `prod.env.pub` holding `API_KEY=…`, or a service-account JSON named
+    `*.pub`, has no private-key armour either, and the `.pub` exception runs
+    before every name and directory deny-list.
+    """
     try:
         with path.open("rb") as handle:
             head = handle.read(_SNIFF_HEAD_BYTES)
     except OSError:
         return False
-    return not any(marker in head for marker in _PRIVATE_KEY_ARMOUR)
+    if any(marker in head for marker in _PRIVATE_KEY_ARMOUR):
+        return False
+    first_line = head.lstrip().split(b"\n", 1)[0]
+    return bool(_PUBLIC_KEY_FIRST_LINE_RE.match(first_line))
 
 
 def _credential_refusal(path: Path) -> str:
@@ -941,7 +959,8 @@ def _credential_refusal(path: Path) -> str:
     being copied out.
 
     One exception, checked first: a PUBLIC key (`*.pub`, wherever it lives,
-    `~/.ssh` included) whose bytes carry no private-key armour. Uploading
+    `~/.ssh` included) whose first line has a public-key shape and whose bytes
+    carry no private-key armour. Uploading
     `id_ed25519.pub` to a web console is what SSH-key rotation IS, and refusing
     it blocked that routine task; a public key is meant to be shared. The
     content check keeps a private key renamed `.pub` refused. An unreadable

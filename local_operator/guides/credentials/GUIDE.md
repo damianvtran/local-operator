@@ -52,17 +52,27 @@ What happens to such a call depends on whether the harness can mask it:
   seam on macOS or Linux). The value shows as `[redacted]` in the stream, in
   `jobs` peeks and in the result, and one `[secret sink] ran: …` line under
   `exit code:` steers you to the better form. Treat it as a nudge, not a
-  channel: the mask matches only the exact value.
+  channel: the mask matches only the exact value, its quoted/escaped
+  spellings (`declare -p`, `set -x`, `repr`, JSON) and each line of a
+  multi-line value. Whole-line filters (`head -n`, `tail -n`, `sort`, `uniq`)
+  run the same way.
 - **Refused (nothing runs).** Anything that defeats the mask: a re-spelled
-  value (`| base64`, `| rev`, `| xxd`, `| tr`, `| cut`, `head -c`,
-  `${v:0:8}`, `token[::-1]`, `.upper()`), a value handed to an inline
-  interpreter (`python3 -c …`, `sh -c 'echo …'`), text the scanner cannot
-  classify around a `lop secret get`, and **every** print when the redaction
-  chain is not live. The error names the rule, the span and the rewrite;
+  value (`| base64`, `| rev`, `| xxd`, `| tr`, `| cut`, `head -c`, `cat -A`,
+  `echo -e`, `printf '%q'`, an unquoted `$v`, a custom `IFS`, `${v:0:8}`,
+  `token[::-1]`, `.upper()`, `.strip("…")`, `.encode("utf-16")`), a question
+  about the value (`grep`, `[[ $v == ghp_* ]]`, `case`, `.startswith()`,
+  `in`), an in-place edit whose program prints (`sed -i '…w /dev/stdout'`), a
+  value handed to an inline interpreter (`python3 -c …`, `sh -c 'echo …'`), a
+  read-back in the same call that replaced the value (`lop secret update K
+  && lop secret get K`: split it into two calls), `export -p`/`declare -p`/
+  `set -x` of a multi-line value, `HOME=`/`LOCAL_OPERATOR_CONFIG_DIR=` in
+  front of `lop`, text the scanner cannot classify around a
+  `lop secret get`, and **every** print when the redaction chain is not live. The error names the rule, the span and the rewrite;
   re-spell the call rather than route around it.
 - **Not a print at all (no message).** `sed -i`/`perl -i`/`gawk -i inplace`
   rewriting a file with `$(lop secret get NAME)`, `| wc -c`, piping into a
-  consumer, and `secrets["A"] == secrets["B"]` (a rotation check) all pass.
+  consumer, `[ -n "$v" ]`, `[ "$a" = "$b" ]` and `secrets["A"] ==
+  secrets["B"]` (rotation checks) all pass.
 
 Other routine secret work — `lop secret update|rotate`, `gh secret set`,
 `aws secretsmanager put-secret-value`, reading or editing a `.env` (its values

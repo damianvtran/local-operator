@@ -2236,7 +2236,7 @@ _WARN_COMMANDS = (
     'echo "$(lop secret get {name})"',
     "lop secret get {name}",
     "lop secret get {name} | cat",
-    'set -x; v=$(lop secret get {name}); '
+    "set -x; v=$(lop secret get {name}); "
     'curl -s -o /dev/null -H "A: $v" http://127.0.0.1:9/ || true',
     "v=$(lop secret get {name}); typeset -p v",
     "lop secret get {name} >/dev/null 1>&2",
@@ -2484,6 +2484,366 @@ async def test_eval_prints_masked_with_a_steer_where_the_mask_is_live(
             context,
         )
         assert reversed_cell.is_error and "python.print-of-source" in _result_text(reversed_cell)
+    finally:
+        kernel = eval_tool._KERNELS.pop(eval_tool._session_key(context), None)
+        if kernel is not None:
+            await eval_tool._close_kernel(kernel)
+
+
+# ---------------------------------------------------------------------------
+# Agent review / QA round 1: every route to output no registered mask matches
+# ---------------------------------------------------------------------------
+#
+# Each row is the reviewer's (R*) or QA's (Q*) exact repro on 44833db, where it
+# ran with a steer and printed the value (or a fact about it) unmasked. The
+# invariant they share is written above ``BLOCKING_LABELS`` in
+# ``harness/secret_sinks.py``.
+
+_ROUND1_BLOCKING_SHELL = (
+    # R1: an in-place editor whose program prints.
+    "sed -i '' -e \"s/^K=.*/K=$(lop secret get K)/\" -e 's/./& /gw /dev/stdout' f.env",
+    'sed -i "s/^K=.*/K=$(lop secret get K)/p" f.env',
+    "sed -i -e \"s/^K=.*/K=$(lop secret get K)/\" -e 'r /dev/stdin' f.env",
+    'gawk -i inplace -v v="$(lop secret get K)" \'{print substr(v,1,4) > "/dev/stderr"}\' f',
+    'perl -i -pe "s/old/$(lop secret get K)/; print STDERR reverse \\$_" f',
+    # R3: word splitting, colour, oracles.
+    "v=$(lop secret get K); IFS=-; echo $v",
+    "v=$(lop secret get K); echo $v",
+    "echo $(lop secret get K)",
+    'v=$(lop secret get K); IFS=_ read -ra p <<< "$v"; echo "${p[@]}"',
+    "lop secret get K | grep --color=always scan",
+    "v=$(lop secret get K); [[ $v == synthetic* ]] && echo PREFIX-YES",
+    'v=$(lop secret get K); echo "$v" | grep -q ^a && echo yes',
+    'v=$(lop secret get K); echo "$v" | grep -c ^a',
+    "v=$(lop secret get K); case $v in a*) echo y;; esac",
+    'v=$(lop secret get K); test "$v" \\> m && echo later',
+    'v=$(lop secret get K); [ "$v" = abc ] && echo same',
+    'v=$(lop secret get K); echo "$v" | column -t -s _',
+    'v=$(lop secret get K); echo "$v" | paste -d " " - -',
+    'v=$(lop secret get K); echo "$v" | diff --color=always - /dev/null',
+    'v=$(lop secret get K); echo -e "$v"',
+    'v=$(lop secret get K); printf "$v"',
+    "lop secret get K | cat -A",
+    # R4: a field filter on a (multi-line) value.
+    "lop secret get MULTI_LINE | grep DB_PASS",
+    # R7: byte mode inside a short-option cluster.
+    'v=$(lop secret get K); echo "$v" | head -qc8',
+    # Q1: re-quoting printf.
+    "export K=$(lop secret get K); printf '%q\\n' \"$K\"",
+    'printf "%b" "$(lop secret get K)"',
+    # R5/Q2: replace and read back in one call.
+    "printf 'fresh-generated-value-7Kq2Zx' | lop secret update K "
+    '&& echo "now: $(lop secret get K)"',
+    "lop secret update K < new && lop secret get K",
+)
+
+
+@pytest.mark.parametrize("command", _ROUND1_BLOCKING_SHELL)
+def test_round1_shell_respellings_and_oracles_are_blocking(command: str) -> None:
+    result = scan_command(command)
+    assert result.blocking and not result.advisory, (command, result)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Routine work that must keep running (or keep warning): rotation,
+        # whole-value checks, the sanctioned consumer, verbatim prints.
+        "sed -i '' \"s/^API_KEY=.*/API_KEY=$(lop secret get K)/\" .env",
+        "gawk -i inplace -v v=\"$(lop secret get K)\" '{sub(/old/, v); print}' f",
+        'perl -pi -e "s/old/$(lop secret get K)/" f.env',
+        'printf %s "$(lop secret get K)" | lop secret update K',
+        "lop secret update K < new && lop secret describe K",
+        "lop secret update K < new && lop secret get K | wc -c",
+        'v=$(lop secret get K); [ -n "$v" ] && echo present',
+        'a=$(lop secret get A); b=$(lop secret get B); [ "$a" = "$b" ] && echo same',
+        'export K=$(lop secret get K); curl -s -H "Authorization: Bearer $K" https://x',
+        'v=$(lop secret get K); echo "$v"',
+        "v=$(lop secret get K); printf 'token: %s\\n' \"$v\"",
+        "export K=$(lop secret get K); env | sort",
+        "lop secret get MULTI_LINE | head -n 2",
+        "lop secret file K -- cat",
+    ],
+)
+def test_round1_routine_secret_work_is_not_blocking(command: str) -> None:
+    result = scan_command(command)
+    assert not result.blocking, (command, result)
+
+
+def test_round1_store_write_then_print_names_the_split() -> None:
+    result = scan_command("lop secret update K < new && lop secret get K")
+    assert "shell.print-after-store-write" in result.labels
+    assert "two calls" in refusal_text(result, text="x", tool_name="bash")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("HOME=/x lop secret get K", True),
+        ("env HOME=/x lop secret get K", True),
+        ("export LOCAL_OPERATOR_CONFIG_DIR=/x; lop secret get K", True),
+        ("unset HOME; lop secret get K", True),
+        ("env -u HOME lop secret get K", True),
+        # Exact tokens: neither a longer name nor path text counts (R9/O3).
+        ("MYHOME=/x lop secret get K", False),
+        ("cd ~/config-dir && lop secret get K", False),
+    ],
+)
+def test_round1_alternate_store_is_read_from_tokens(command: str, expected: bool) -> None:
+    assert scan_command(command).alternate_store is expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("export K=$(lop secret get K); export -p", True),
+        ("export K=$(lop secret get K); declare -p K", True),
+        ("set -x; K=$(lop secret get K); true", True),
+        ('export K=$(lop secret get K); env | grep -c "="', False),
+        ('v=$(lop secret get K); echo "$v"', False),
+    ],
+)
+def test_round1_requoting_printers_are_flagged(command: str, expected: bool) -> None:
+    assert scan_command(command).requoted is expected
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        'print(secrets["K"].startswith("synthetic-sink"))',
+        'print("9f2c41" in secrets["K"])',
+        'print(secrets["K"].lstrip("syn"))',
+        'print(secrets["K"].encode("utf-16"))',
+        'print(set(secrets["K"]))',
+        'print(sorted(secrets["K"]))',
+        'print(max(secrets["K"]))',
+        'print("{:.4}".format(secrets["K"]))',
+        'print(bytes(secrets["K"], "utf-16"))',
+        'print(str(secrets["K"].encode(), "utf-16"))',
+        'x = secrets["K"]\nprint(x < "m")',
+        "print(f\"{secrets['K']!a}\")",
+    ],
+)
+def test_round1_python_oracles_and_respellings_are_blocking(cell: str) -> None:
+    result = scan_python(cell)
+    assert result.blocking and not result.advisory, (cell, result)
+
+
+@pytest.mark.parametrize(
+    ("cell", "advisory"),
+    [
+        ('print(secrets["K"] == secrets["K"], secrets["K"] != secrets["J"])', False),
+        ('print(len(secrets["K"]))', False),
+        ('print(secrets["K"])', True),
+        ('print(repr(str(secrets["K"])))', True),
+        ('print(json.dumps(secrets["K"]))', True),
+        ('print("token: {}".format(secrets["K"]))', True),
+    ],
+)
+def test_round1_python_whole_value_forms_still_run(cell: str, advisory: bool) -> None:
+    result = scan_python(cell)
+    assert not result.blocking, (cell, result)
+    assert result.advisory is advisory
+
+
+_QUOTE_NAME = "SINK_SCAN_QUOTE_PW"
+#: Holds every character a shell or `repr` escapes (QA round 1's QA_QUOTE).
+_QUOTE_VALUE = "qa\"synth$etic'quote\\pw`x-7Rk2Lm9"
+_MULTI_NAME = "SINK_SCAN_MULTI_LINE"
+_MULTI_PASS = "Zq7vNw3mK9xR2pT8"
+_MULTI_VALUE = f"line-one-public\nDB_PASS={_MULTI_PASS}\nline-three-public"
+_SA_NAME = "SINK_SCAN_SA_JSON"
+_SA_KEY_ID = "4f1c2a9e7b3d5c8e0a6f2b4d9c1e3a5b7d9f0c2e"
+_SA_VALUE = (
+    "{\n"
+    '  "type": "service_account",\n'
+    f'  "private_key_id": "{_SA_KEY_ID}",\n'
+    '  "client_email": "synthetic-sa@example-proj.iam.gserviceaccount.com"\n'
+    "}"
+)
+
+
+def _store(config_root: Path, name: str, value: str) -> None:
+    proc = subprocess.run(
+        [str(_worktree_lop()), "secret", "set", name],
+        input=value.encode(),
+        capture_output=True,
+        cwd=str(config_root),
+    )
+    assert proc.returncode == 0, proc.stderr.decode()[-2000:]
+
+
+@pytest.fixture
+def round1_secrets(config_root: Path, stored_secret: str) -> None:
+    _store(config_root, _QUOTE_NAME, _QUOTE_VALUE)
+    _store(config_root, _MULTI_NAME, _MULTI_VALUE)
+    _store(config_root, _SA_NAME, _SA_VALUE)
+
+
+def _escaped_spellings(value: str) -> list[str]:
+    """What QA's sweep looked for: the value and the escapings that leaked."""
+    return [
+        value,
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`"),
+        value.replace("'", "'\\''"),
+        repr(value)[1:-1],
+    ]
+
+
+async def _bash(tmp_path: Path, command: str, context: ToolContext | None = None) -> object:
+    return await builtin.execute_bash(
+        "bash-round1", {"command": command}, AbortSignal(), None, context or _context(tmp_path)
+    )
+
+
+@pytest.mark.asyncio
+async def test_round1_r1_sed_write_to_stdout_is_refused_before_it_runs(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    env_file = tmp_path / "f.env"
+    env_file.write_text("K=old\n")
+    command = (
+        f"sed -i '' -e \"s/^K=.*/K=$(lop secret get {stored_secret})/\" "
+        f"-e 's/./& /gw /dev/stdout' {env_file}"
+    )
+    result = await _bash(tmp_path, command)
+    assert result.is_error, _result_text(result)
+    assert env_file.read_text() == "K=old\n", "the child ran"
+    _assert_no_value(_result_text(result))
+
+
+@pytest.mark.asyncio
+async def test_round1_r5_update_then_read_back_is_refused_and_nothing_changes(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    fresh = "fresh-generated-value-7Kq2Zx"
+    command = (
+        f"printf '{fresh}' | lop secret update {stored_secret} "
+        f'&& echo "now: $(lop secret get {stored_secret})"'
+    )
+    result = await _bash(tmp_path, command)
+    text = _result_text(result)
+    assert result.is_error and "shell.print-after-store-write" in text, text
+    assert "two calls" in text
+    stored = subprocess.run(
+        [str(_worktree_lop()), "secret", "get", stored_secret],
+        capture_output=True,
+        cwd=str(config_root),
+    )
+    assert stored.stdout.decode() == _SYNTHETIC, "the update ran"
+
+
+@pytest.mark.asyncio
+async def test_round1_r4_a_line_filter_of_a_multi_line_secret_prints_only_masks(
+    tmp_path: Path, config_root: Path, round1_secrets: None, shimmed_path: None
+) -> None:
+    result = await _bash(tmp_path, f"lop secret get {_MULTI_NAME} | head -n 2")
+    text = _result_text(result)
+    assert not result.is_error, text
+    assert _MULTI_PASS not in text and "line-one-public" not in text, text
+    refused = await _bash(tmp_path, f"lop secret get {_MULTI_NAME} | grep DB_PASS")
+    assert refused.is_error and _MULTI_PASS not in _result_text(refused)
+
+
+@pytest.mark.asyncio
+async def test_round1_r4_a_short_line_makes_a_line_filter_unprovable(
+    tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    _store(config_root, "SINK_SCAN_SHORT_LINES", "long-first-line-xyz\nPW=ab12\n")
+    result = await _bash(tmp_path, "lop secret get SINK_SCAN_SHORT_LINES | tail -n 1")
+    text = _result_text(result)
+    assert result.is_error and "too short to mask" in text, text
+    assert "ab12" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "template",
+    [
+        "export K=$(lop secret get {name}); export -p",
+        "export K=$(lop secret get {name}); declare -p K",
+        "set -x; K=$(lop secret get {name}); true",
+        'K=$(lop secret get {name}); echo "$K"',
+    ],
+)
+async def test_round1_q1_requoted_prints_of_a_quote_heavy_value_are_masked(
+    template: str, tmp_path: Path, config_root: Path, round1_secrets: None, shimmed_path: None
+) -> None:
+    result = await _bash(tmp_path, template.format(name=_QUOTE_NAME))
+    text = _result_text(result)
+    assert not result.is_error, text
+    assert "[secret sink] ran:" in text and "[redacted]" in text, text
+    for spelling in _escaped_spellings(_QUOTE_VALUE):
+        assert spelling not in text, (spelling, text)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "template",
+    [
+        "export K=$(lop secret get {name}); export -p",
+        "export K=$(lop secret get {name}); declare -p K",
+        "set -x; K=$(lop secret get {name}); true",
+    ],
+)
+async def test_round1_q1_requoted_print_of_a_multi_line_value_is_refused(
+    template: str, tmp_path: Path, config_root: Path, round1_secrets: None, shimmed_path: None
+) -> None:
+    marker = tmp_path / "ran-requote"
+    result = await _bash(tmp_path, f"touch {marker}; " + template.format(name=_SA_NAME))
+    text = _result_text(result)
+    assert result.is_error and not marker.exists(), text
+    assert "$'" in text and _SA_KEY_ID not in text
+
+
+@pytest.mark.asyncio
+async def test_round1_q1_env_dump_of_a_json_secret_masks_its_fields(
+    tmp_path: Path, config_root: Path, round1_secrets: None, shimmed_path: None
+) -> None:
+    """`env` prints the value raw; its lines and `private_key_id` are all masked."""
+    result = await _bash(tmp_path, f"export K=$(lop secret get {_SA_NAME}); env | sort")
+    text = _result_text(result)
+    assert not result.is_error, text
+    assert _SA_KEY_ID not in text and "synthetic-sa@" not in text, text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prefix", ["HOME=/nonexistent ", "env LOCAL_OPERATOR_CONFIG_DIR=/nonexistent "]
+)
+async def test_round1_r9_another_store_is_refused(
+    prefix: str, tmp_path: Path, config_root: Path, stored_secret: str, shimmed_path: None
+) -> None:
+    result = await _bash(tmp_path, f"{prefix}lop secret get {stored_secret}")
+    text = _result_text(result)
+    assert result.is_error and "another store" in text, text
+
+
+@pytest.mark.asyncio
+async def test_round1_e14_eval_repr_of_a_quote_heavy_value_is_masked(
+    tmp_path: Path, config_root: Path, round1_secrets: None
+) -> None:
+    context = _context(tmp_path)
+    try:
+        result = await execute_eval(
+            "eval-repr",
+            {"code": f'print(repr(str(secrets["{_QUOTE_NAME}"])))'},
+            AbortSignal(),
+            None,
+            context,
+        )
+        text = _result_text(result)
+        assert not result.is_error, text
+        for spelling in _escaped_spellings(_QUOTE_VALUE):
+            assert spelling not in text, (spelling, text)
+        oracle = await execute_eval(
+            "eval-oracle",
+            {"code": f'print(secrets["{_QUOTE_NAME}"].startswith("qa"))'},
+            AbortSignal(),
+            None,
+            context,
+        )
+        assert oracle.is_error and "True" not in _result_text(oracle)
     finally:
         kernel = eval_tool._KERNELS.pop(eval_tool._session_key(context), None)
         if kernel is not None:

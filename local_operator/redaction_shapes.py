@@ -8838,6 +8838,7 @@ def credential_forms(value: str) -> tuple[str, ...]:
         json.dumps(value, ensure_ascii=False)[1:-1],
     ]
     forms += [separator.join(value) for separator in _SEPARATOR_RUN_SEPARATORS]
+    forms += _requoted_forms(value)
     # De-duplicated first: an alphanumeric value's URL-safe spelling IS its
     # standard one and its percent-encoded spelling IS itself, so without the
     # dedupe a plain value pays several whole-text searches for spellings it has
@@ -8845,6 +8846,35 @@ def credential_forms(value: str) -> tuple[str, ...]:
     # is deterministic for ties.
     unique = dict.fromkeys(form for form in forms if form)
     return tuple(sorted(unique, key=len, reverse=True))
+
+
+def _requoted_forms(value: str) -> list[str]:
+    """The spellings shells and Python print a value in when they RE-QUOTE it.
+
+    Why: the bash and eval tools let a verbatim print of a stored value run
+    masked (``harness/secret_sinks.py``), and `export -p`, `declare -p`,
+    `set -x` xtrace and `repr()` print the value escaped whenever it holds a
+    quote, `$`, a backslash or a backtick — most generated passwords and
+    every JSON secret. The exact value no longer matched, so the whole value
+    reached the result (QA round 1, Q1). Measured on this host for a
+    printable-ASCII value: bash 3.2 and 5 `declare -p`/`export -p` (and
+    `sh`'s `export -p`) use the double-quote escaping below, bash/zsh xtrace
+    and zsh `export -p` the `'\\''` splice, dash the `'"'"'` splice, and
+    `repr` its own. Only the INNER text is listed: the delimiters are not the
+    value. A value with a newline, a tab or non-ASCII bytes gets ANSI-C
+    `$'…'` quoting that differs between shell versions; that case is not
+    enumerated here, and the bash tool refuses a re-quoting printer of such a
+    value instead (``tools/builtin.py`` ``_preregister_printed_secrets``).
+    """
+    double_quoted = (
+        value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    )
+    return [
+        double_quoted,
+        value.replace("'", "'\\''"),
+        value.replace("'", "'\"'\"'"),
+        repr(value)[1:-1],
+    ]
 
 
 def longest_redaction_form(values: Iterable[Optional[str]]) -> int:

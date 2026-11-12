@@ -461,6 +461,67 @@ RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
+        label="shell.oracle-of-source",
+        verdict="printing",
+        lang="shell",
+        question="Does a test answer a question about a secret's text?",
+        why=(
+            '`[[ $v == ghp_* ]] && echo yes`, `case $v in a*)`, `[ "$v" \\< m ]` '
+            "and `test` print nothing of the value, so the output mask has "
+            "nothing to match, yet each answer is a bit of the value: a prefix, "
+            "a character class, an ordering. Asked in a loop, they spell it out "
+            "(agent review round 1, R3). Whole-value equality against ANOTHER "
+            "stored value and the emptiness checks `-n`/`-z` reveal nothing a "
+            "length sink does not, so they stay allowed."
+        ),
+        rewrite=(
+            'Compare two stored values whole (`[ "$a" = "$b" ]`), check '
+            'presence with `[ -n "$v" ]`, or compare digests '
+            "(`lop secret get A | shasum`); never test a value against a pattern "
+            "or a literal."
+        ),
+        examples=(
+            "v=$(lop secret get K); [[ $v == synthetic* ]] && echo PREFIX-YES",
+            'v=$(lop secret get K); [ "$v" = "abc" ] && echo same',
+            'v=$(lop secret get K); test "$v" \\> m && echo later',
+            "v=$(lop secret get K); case $v in a*) echo y;; esac",
+        ),
+        counterexamples=(
+            'v=$(lop secret get K); [ -n "$v" ] && echo present',
+            'a=$(lop secret get A); b=$(lop secret get B); [ "$a" = "$b" ] && echo same',
+            'a=$(lop secret get A); b=$(lop secret get B); [[ "$a" != "$b" ]] && echo differ',
+            "[[ $HOME == /Users/* ]] && echo mac",
+        ),
+    ),
+    Rule(
+        label="shell.print-after-store-write",
+        verdict="printing",
+        lang="shell",
+        question="Does one command both replace a stored secret and print it?",
+        why=(
+            "The bash tool masks a printed value by reading it from the store "
+            "BEFORE the command runs. `openssl rand -hex 32 | lop secret update K "
+            "&& lop secret get K` prints the NEW value, which nothing read or "
+            "registered yet, so it reached the result raw (agent review round 1, "
+            "R5/Q2). Split into two calls and the second one reads, and masks, "
+            "the value that is actually stored."
+        ),
+        rewrite=(
+            "Split it into two calls: run `lop secret update NAME` (or set/rotate) "
+            "first, then read it back in a second call, or verify without "
+            "printing: `lop secret describe NAME`, `lop secret get NAME | wc -c`."
+        ),
+        examples=(
+            "lop secret update K < new && lop secret get K",
+            "printf 'fresh' | lop secret update K && echo \"now: $(lop secret get K)\"",
+        ),
+        counterexamples=(
+            'printf %s "$(lop secret get K)" | lop secret update K',
+            "lop secret update K < new && lop secret describe K",
+            "lop secret update K < new && lop secret get K | wc -c",
+        ),
+    ),
+    Rule(
         label="shell.argv-visible-source",
         verdict="printing",
         lang="shell",
@@ -954,8 +1015,22 @@ RULE_LABELS: frozenset[str] = frozenset(rule.label for rule in RULES)
 #: refused class; it is decided per flow by :attr:`ScanResult.transformed`
 #: rather than per label, because the same rule (``shell.print-of-source``)
 #: covers both ``echo "$v"`` and ``echo "${v:0:8}"``.
+#:
+#: **The invariant the warn path rests on** (agent review round 1, the root
+#: cause of R1–R5 and Q1): a print may run masked ONLY when every byte of
+#: model-visible output derived from a secret falls inside a string the
+#: session has registered as a mask — the whole value, one of its closed
+#: escaped spellings (:func:`local_operator.redaction_shapes.credential_forms`),
+#: or, for a multi-line value, one of its registered line/field fragments
+#: (``tools/builtin.py`` ``_preregister_printed_secrets``). Anything that
+#: cannot be SHOWN to satisfy that is refused: a filter that selects part of
+#: the value, an oracle that answers a question about it (`[[ $v == a* ]]`,
+#: `startswith`, `grep -q`), an editor program that prints, a word-split
+#: expansion, and a read-back of a value the same command just replaced.
 BLOCKING_LABELS: frozenset[str] = frozenset(
     {
+        "shell.oracle-of-source",
+        "shell.print-after-store-write",
         "shell.interpreter-inline-source",
         "shell.unresolved-source-region",
         "python.source-into-shell-string",
@@ -1001,6 +1076,31 @@ class ScanResult:
     #: the whole text rather than per finding: a transform anywhere on a value
     #: path plus a print anywhere is refused, which errs toward refusal.
     transformed: bool = False
+    #: A printer that RE-QUOTES what it prints ran beside a value: `export -p`,
+    #: `declare -p`/`typeset -p`, bare `set`, `set -x` xtrace. For a value of
+    #: printable ASCII their spelling is one of the closed escaped forms
+    #: :func:`local_operator.redaction_shapes.credential_forms` registers
+    #: (`\"`/`\$` double-quote escaping, `'\''` and `'"'"'` single-quote
+    #: splicing); for a value with a newline, a tab or non-ASCII bytes they
+    #: switch to ANSI-C `$'…'` quoting whose escapes differ between bash 3.2,
+    #: bash 5 and zsh (measured on this host). The scan cannot see the value, so
+    #: it only RECORDS this; the bash tool reads the value and refuses the
+    #: call when the form is not provably covered (agent review round 1, Q1).
+    requoted: bool = False
+    #: The text points `lop` at ANOTHER store than the one this process can
+    #: read (`HOME=…`, `LOCAL_OPERATOR_CONFIG_DIR=…`, or unsetting either, on
+    #: any stage). The bash tool pre-registers the value it reads from THIS
+    #: store, so a child reading another store would print a value nothing
+    #: registered (agent review round 1, R9). Judged from the lexer's words —
+    #: an assignment token — never from a substring of the text.
+    alternate_store: bool = False
+    #: A line-SELECTING verbatim emitter (`head -n`, `tail -n`, `sort`, `uniq`,
+    #: `tac`, `nl`, `diff`, `comm`) appears anywhere in the text. Coarse, like
+    #: ``saw_transformer``: the walk does not carry a dump's output into the
+    #: next stage (`env | sort`). Such a stage prints whole LINES of a
+    #: multi-line value, which only its registered line fragments mask, so the
+    #: bash tool refuses when a line is too short to register (R4).
+    line_selected: bool = False
 
     @property
     def refused(self) -> bool:
@@ -1083,6 +1183,11 @@ class _Piece:
     kind: str
     span: tuple[int, int]
     heredoc: bool = False
+    #: Inside double quotes. An UNQUOTED expansion is word-split on ``IFS``
+    #: and globbed, so `echo $v` can print the value re-spelled (runs of
+    #: whitespace collapsed, a multi-line value joined onto one line) — bytes
+    #: the exact-value mask does not match (agent review round 1, R3).
+    quoted: bool = False
 
 
 @dataclass(frozen=True)
@@ -1281,10 +1386,10 @@ def _read_word(text: str, start: int) -> tuple[_Word, int]:
     i = start
     n = len(text)
 
-    def flush() -> None:
+    def flush(*, quoted: bool = False) -> None:
         nonlocal buf
         if buf:
-            pieces.append(_Piece("".join(buf), "expand", (buf_start, i)))
+            pieces.append(_Piece("".join(buf), "expand", (buf_start, i), quoted=quoted))
             buf = []
 
     while i < n:
@@ -1316,7 +1421,7 @@ def _read_word(text: str, start: int) -> tuple[_Word, int]:
             buf_start = i
             continue
         if ch == '"':
-            flush()
+            flush(quoted=True)
             quote_open = i
             pieces_before = len(pieces)
             i += 1
@@ -1325,7 +1430,7 @@ def _read_word(text: str, start: int) -> tuple[_Word, int]:
                 if i >= n:
                     raise _LexFault("unterminated double quote", start)
                 if text[i] == '"':
-                    flush()
+                    flush(quoted=True)
                     # `""` is a real (empty) word to bash, exactly as `''` is
                     # (whose branch above already yields an empty literal
                     # piece). Leaving it pieceless made `lop secret list &&
@@ -1341,18 +1446,18 @@ def _read_word(text: str, start: int) -> tuple[_Word, int]:
                     i += 2
                     continue
                 if text.startswith("$(", i):
-                    flush()
+                    flush(quoted=True)
                     inner, end = _read_substitution(text, i)
-                    pieces.append(_Piece(inner, "subst", (i, end)))
+                    pieces.append(_Piece(inner, "subst", (i, end), quoted=True))
                     i = end
                     buf_start = i
                     continue
                 if text[i] == "`":
                     # The other command substitution, and just as live inside
                     # double quotes as `$(` is.
-                    flush()
+                    flush(quoted=True)
                     inner, end = _read_backtick(text, i)
-                    pieces.append(_Piece(inner, "subst", (i, end)))
+                    pieces.append(_Piece(inner, "subst", (i, end), quoted=True))
                     i = end
                     buf_start = i
                     continue
@@ -1614,18 +1719,43 @@ _TRANSFORMING_EMITTERS = frozenset(
         "csplit",
         "fmt",
         "pr",
+        # Moved here in agent review round 1 (R3/R4): each can print bytes
+        # that are not a whole registered string. `grep` is an ORACLE even
+        # without `-q` (whether the masked line appears answers "does the
+        # value match this pattern?"), and `--color` splits a match with ANSI
+        # codes; `paste`/`column`/`join` re-assemble fields across lines;
+        # `expand`/`unexpand` rewrite tabs inside a value; `bat`/`less -R`
+        # decorate; `logger` and zsh's `print` take re-spelling flags.
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "paste",
+        "column",
+        "join",
+        "expand",
+        "unexpand",
+        "less",
+        "more",
+        "bat",
+        "logger",
+        "print",
     }
 )
 
-#: Emitters that write their operands or input through unchanged (whole lines,
-#: whole files), so the mask sees the exact value. A few re-spell only under a
-#: flag (`head -c 8`, `grep -o`, `printf '%.8s'`): :func:`_stage_transforms`
-#: reads those flags per stage rather than moving the whole command over.
+#: The emitters that print their input's bytes unchanged (`echo`, `printf
+#: '%s'`, `cat`, `tee`) or WHOLE LINES of it (`head -n`, `tail -n`, `sort`,
+#: `uniq`, `tac`, `nl`, `diff`, `comm`). A whole-value print is masked by the
+#: value itself; a whole-line print of a multi-line value is masked by the
+#: line fragments ``tools/builtin.py`` registers beside it, and the bash tool
+#: refuses a line-selecting print of a value with a line too short to
+#: register (:attr:`ScanResult.line_selected`). A flag that re-spells
+#: (`head -c 8`, `cat -A`, `echo -e`, `printf '%.8s'`, `--color=always`) makes
+#: the stage transforming: :func:`_stage_transforms`.
 _VERBATIM_EMITTERS = frozenset(
     {
         "echo",
         "printf",
-        "print",
         "cat",
         "tee",
         "head",
@@ -1634,27 +1764,23 @@ _VERBATIM_EMITTERS = frozenset(
         "tac",
         "sort",
         "uniq",
-        "paste",
-        "column",
-        "grep",
-        "egrep",
-        "fgrep",
-        "rg",
         "diff",
         "comm",
-        "join",
-        "expand",
-        "unexpand",
-        "less",
-        "more",
-        "bat",
-        "logger",
     }
 )
 
-#: A printf conversion with a precision (`%.8s`) or a non-string conversion
-#: (`%x`, `%d`): either prints something other than the operand's exact bytes.
-_PRINTF_RESPELLING_RE = re.compile(r"%[-+ #0']*\d*(?:\.\d*|\.\*)|%[-+ #0']*\d*[^sbq%\d\s.-]")
+#: The verbatim emitters that print a SUBSET or a reordering of their input's
+#: lines rather than all of it in order (see :attr:`ScanResult.line_selected`).
+_LINE_SELECTING_EMITTERS = _VERBATIM_EMITTERS - {"echo", "printf", "cat", "tee"}
+
+#: A printf conversion other than a plain `%s` (an optional `-` and width pad
+#: the operand but keep its bytes contiguous). `%.8s` truncates, `%x`/`%d`
+#: re-spell, `%b` interprets the operand's backslash escapes and `%q`
+#: re-quotes it (agent review round 1, Q1) — none print the operand's bytes.
+_PRINTF_RESPELLING_RE = re.compile(r"(?:^|[^%])(?:%%)*%(?!%|-?\d*s)")
+
+#: `cat` switches that change no byte of the output (`-u` is unbuffered).
+_CAT_PLAIN_FLAGS = frozenset({"-u", "--"})
 
 #: Editors whose `-i`/`--in-place` form writes back to the named files and
 #: prints nothing: `sed -i "s/^K=.*/K=$(lop secret get K)/" .env` is a rotation,
@@ -1663,22 +1789,147 @@ _IN_PLACE_EDITORS = frozenset({"sed", "gsed", "awk", "gawk", "perl"})
 
 
 def _stage_transforms(command: str, args: Sequence[str]) -> bool:
-    """Does this emitter stage print something other than the value's bytes?"""
+    """Does this emitter stage print something other than whole registered strings?"""
     if command in _TRANSFORMING_EMITTERS:
         return True
+    flags = [arg for arg in args if arg.startswith("-") and arg not in ("-", "--")]
+    # `--color=always` (or a bare `--color`, which some tools read as always)
+    # splices ANSI codes into the line, splitting the value (R3).
+    if any(
+        arg.startswith(("--color", "--colour")) and arg.split("=", 1)[-1] not in ("never", "auto")
+        for arg in flags
+    ):
+        return True
     if command in ("head", "tail"):
-        return any(
-            arg == "-c" or arg.startswith(("-c", "--bytes")) for arg in args if arg.startswith("-")
-        )
-    if command in ("grep", "egrep", "fgrep", "rg"):
-        return any(
-            arg == "--only-matching"
-            or (arg.startswith("-") and not arg.startswith("--") and "o" in arg[1:])
-            for arg in args
-        )
+        # Byte mode in any spelling, a short-option CLUSTER included: GNU
+        # `head -qc8` is `-q -c 8` (R7).
+        return any(arg.startswith("--bytes") or re.match(r"^-[^-]*c", arg) for arg in flags)
+    if command == "cat":
+        # `-A`/`-v`/`-e`/`-t` re-spell control bytes, `-n`/`-b` interleave
+        # numbers, `-s` drops blank lines: only `-u` prints the bytes as read.
+        return any(arg not in _CAT_PLAIN_FLAGS for arg in flags)
+    if command == "echo":
+        # `-e` interprets backslash escapes in the value (`\n`, `\c`), so a
+        # value with a backslash prints re-spelled; `-n`/`-E` do not.
+        return any(re.match(r"^-[nE]*e", arg) for arg in flags)
     if command == "printf":
         operands = [arg for arg in args if arg != "--"]
+        if operands and operands[0] == "-v":
+            return False
         return bool(operands) and bool(_PRINTF_RESPELLING_RE.search(operands[0]))
+    return False
+
+
+#: sed scripts the in-place exemption accepts: `;`-separated `s`, `y` and `d`
+#: commands behind an optional line/regex address, with `s` flags that only
+#: choose WHICH match is replaced. Everything else (`p`, `w`, `W`, `e`, `l`,
+#: `r`, `R`, the `s///p|w|e` flags) can write to stdout, `/dev/stdout` or a
+#: shell, i.e. into this result (R1).
+_SED_ADDRESS = r"(?:\d+|\$|/(?:[^/\\]|\\.)*/[IM]*)"
+_SED_SAFE_COMMAND_RE = re.compile(
+    rf"\s*(?:{_SED_ADDRESS}(?:\s*,\s*{_SED_ADDRESS})?)?\s*!?\s*"
+    r"(?:"
+    r"s(?P<d>[^\\\n\s])(?:(?!(?P=d))[^\\]|\\.)*(?P=d)(?:(?!(?P=d))[^\\]|\\.)*(?P=d)[gIiMm0-9]*"
+    r"|y(?P<y>[^\\\n\s])(?:(?!(?P=y))[^\\]|\\.)*(?P=y)(?:(?!(?P=y))[^\\]|\\.)*(?P=y)"
+    r"|d"
+    r")\s*"
+)
+
+#: awk/perl program text that can write somewhere other than the edited file:
+#: a redirect or pipe, a device path, a shell-out, or (perl) any explicit
+#: printer or handle — `-p` already prints `$_` back into the file.
+_AWK_OUTPUT_RE = re.compile(r"[>|]|/dev/|\bsystem\b|\bgetline\b|\bfflush\b|\bclose\b")
+_PERL_OUTPUT_RE = re.compile(
+    r"\b(?:print|printf|say|warn|die|system|exec|syswrite|open|qx|readpipe)\b"
+    r"|STD(?:OUT|ERR)|/dev/|`"
+)
+
+
+def _sed_script_is_safe(script: str) -> bool:
+    """Does this sed script consist only of `s`/`y`/`d` commands that print nothing?"""
+    position = 0
+    text = script.strip()
+    if not text:
+        return False
+    while position < len(text):
+        match = _SED_SAFE_COMMAND_RE.match(text, position)
+        if match is None or match.end() == position:
+            return False
+        position = match.end()
+        if position < len(text):
+            if text[position] not in ";\n":
+                return False
+            position += 1
+    return True
+
+
+def _in_place_program_is_silent(command: str, args: Sequence[str]) -> bool:
+    """Is this in-place editor's program provably unable to print?
+
+    The write-back exemption is safe only when the program cannot print: a sed
+    `w /dev/stdout`, a gawk `print … > "/dev/stderr"` or a perl `print STDERR`
+    sends the value (re-spelled, if the program likes) into this result with
+    no mask that matches it (agent review round 1, R1). So the program text is
+    read and only a provably silent one keeps the exemption; a script in a
+    file (`-f`), or one this cannot parse, is not provable and falls back to
+    the ordinary scan.
+    """
+    if command in ("sed", "gsed"):
+        scripts: list[str] = []
+        operands: list[str] = []
+        skip_suffix = False
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if skip_suffix:
+                skip_suffix = False
+                # BSD `sed -i '' …`: the empty word is the backup suffix.
+                if arg == "":
+                    index += 1
+                    continue
+            if arg in ("-e", "--expression") and index + 1 < len(args):
+                scripts.append(args[index + 1])
+                index += 2
+                continue
+            if arg.startswith("--expression="):
+                scripts.append(arg.split("=", 1)[1])
+            elif arg in ("-f", "--file") or arg.startswith(("--file=", "-f")):
+                return False
+            elif arg.startswith("-") and len(arg) > 1:
+                if _IN_PLACE_FLAG_RE[command].match(arg) and arg.endswith("i"):
+                    skip_suffix = True
+            else:
+                operands.append(arg)
+            index += 1
+        if not scripts:
+            if not operands:
+                return False
+            scripts = [operands[0]]
+        return all(_sed_script_is_safe(script) for script in scripts)
+    if command in ("awk", "gawk"):
+        program: list[str] = []
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in ("-f", "--file") or arg.startswith("--file="):
+                return False
+            if arg in ("-i", "--include", "-v", "--assign", "-F", "--field-separator"):
+                index += 2
+                continue
+            if not arg.startswith("-"):
+                program.append(arg)
+                break
+            index += 1
+        return bool(program) and not _AWK_OUTPUT_RE.search(program[0])
+    if command == "perl":
+        programs = [
+            nxt
+            for arg, nxt in zip(args, args[1:], strict=False)
+            if re.match(r"^-[A-Za-z]*[eE]$", arg)
+        ]
+        if not programs:
+            return False
+        return not any(_PERL_OUTPUT_RE.search(program) for program in programs)
     return False
 
 
@@ -1741,6 +1992,15 @@ _INLINE_PYTHON = frozenset({"python", "python3"})
 #: `describe`, `set`, `audit` and `--help` produce no value and are not sources
 #: (required non-finding (iii)).
 _SOURCE_VERBS = frozenset({"get", "file", "run"})
+
+#: `lop secret` verbs that change what the store holds for a name (`rotate`
+#: re-seals every record; listed so a rotate-then-print is split the same way).
+_STORE_WRITE_VERBS = frozenset({"set", "update", "rm", "delete", "rotate", "migrate-env"})
+
+#: Variables that choose WHICH store `lop` opens (`paths.config_dir`: the
+#: override, else `~/.local-operator` under `HOME`), see
+#: :attr:`ScanResult.alternate_store`.
+_STORE_SELECTING_VARS = frozenset({"HOME", "LOCAL_OPERATOR_CONFIG_DIR"})
 
 #: Prefixes that BIND an assignment rather than commanding with it. Binding is
 #: not exporting (R2-4): only `export`, `declare -x`/`typeset -x`/`local -x` and
@@ -2266,6 +2526,14 @@ class _ShellAnalyzer:
         #: as re-spelled whenever one is present at all — coarse, and on the
         #: refusing side, which is where the old behaviour sat.
         self.saw_transformer = False
+        #: See :attr:`ScanResult.requoted`, :attr:`ScanResult.alternate_store`
+        #: and :attr:`ScanResult.line_selected`.
+        self.requoted = False
+        self.alternate_store = False
+        self.line_selected = False
+        #: The first `lop secret set|update|rm|delete|rotate|migrate-env` stage:
+        #: a print in the same text reads a value nothing pre-registered (R5).
+        self._store_write: tuple[tuple[int, int], str] | None = None
 
     # -- findings -----------------------------------------------------------
 
@@ -3050,6 +3318,116 @@ class _ShellAnalyzer:
             return index
         return None
 
+    def _note_text_guards(self, stage: list[_Word | _Op | _Body]) -> None:
+        """Whole-text facts read off one stage's words, before any unwrapping.
+
+        Read from the RAW stage so `env HOME=/x lop …` still shows its
+        assignment after the wrapper is stripped. Exact tokens, never a
+        substring: `MYHOME=x` and a path containing `config-dir` are not hits.
+        """
+        words = [item for item in stage if isinstance(item, _Word)]
+        texts = [self._word_text(word).strip() for word in words]
+        for word, text in zip(words, texts, strict=False):
+            match = _ASSIGNMENT_RE.match(text)
+            assigned = match.group(1) if match and word.pieces[0].kind != "subst" else ""
+            if assigned in _STORE_SELECTING_VARS:
+                self.alternate_store = True
+            if assigned == "IFS" or text == "xpg_echo":
+                # R3: a custom IFS re-splits every later unquoted expansion and
+                # `read -a`; bash's `xpg_echo` makes `echo` interpret the
+                # value's backslashes. Either re-spells a printed value.
+                self.transformed = True
+        unsets = {"unset", "-u", "--unset"}
+        if any(text in unsets for text in texts) and any(
+            text in _STORE_SELECTING_VARS or text.split("=", 1)[-1] in _STORE_SELECTING_VARS
+            for text in texts
+        ):
+            self.alternate_store = True
+        if any(text.startswith("--unset=") and text[8:] in _STORE_SELECTING_VARS for text in texts):
+            self.alternate_store = True
+
+    def _whole_value_ref(self, word: _Word, *, depth: int) -> bool:
+        """Is this word EXACTLY one value: `$v`, `"${v}"` or `"$(lop secret get K)"`?"""
+        live = [piece for piece in word.pieces if piece.text or piece.kind == "subst"]
+        if len(live) != 1:
+            return False
+        piece = live[0]
+        if piece.kind == "subst":
+            return bool(self._value_flow(word, depth=depth).value)
+        match = _BARE_REF_RE.match(piece.text) if piece.kind == "expand" else None
+        return bool(match) and match.group(1) in self.value_vars
+
+    def _oracle_of_source(
+        self, head: str, words: list[_Word], *, depth: int
+    ) -> tuple[tuple[int, int], str] | None:
+        """``(span, name)`` when a `[[`/`[`/`test`/`case` asks about a value's text.
+
+        Allowed: `-n`/`-z` on a value (presence only) and `=`/`==`/`!=` between
+        two WHOLE values. Everything else that involves a value — a pattern, a
+        literal, an ordering, `=~` — answers a question about its bytes (R3).
+        """
+        operands = words[1:]
+        if head == "[[" and operands and self._word_text(operands[-1]).strip() == "]]":
+            operands = operands[:-1]
+        if head == "[" and operands and self._word_text(operands[-1]).strip() == "]":
+            operands = operands[:-1]
+        if head == "case":
+            operands = operands[:1]
+        flows = [self._value_flow(word, depth=depth) for word in operands]
+        tainted = [(word, flow) for word, flow in zip(operands, flows, strict=False) if flow.value]
+        if not tainted:
+            return None
+        texts = [self._word_text(word).strip() for word in operands]
+        if texts and texts[0] == "!":
+            operands, texts = operands[1:], texts[1:]
+        if head != "case":
+            if len(operands) == 2 and texts[0] in ("-n", "-z"):
+                return None
+            if (
+                len(operands) == 3
+                and texts[1] in ("=", "==", "!=")
+                and self._whole_value_ref(operands[0], depth=depth)
+                and self._whole_value_ref(operands[2], depth=depth)
+            ):
+                return None
+        word, flow = tainted[0]
+        return (flow.span if flow.span != (0, 0) else word.span), flow.name
+
+    def _operands_respell(self, command: str, words: Sequence[_Word]) -> bool:
+        """Does an emitter's argv re-spell a value before printing it (R3)?
+
+        An UNQUOTED expansion of a value (`echo $v`, `echo $(lop secret get K)`)
+        is word-split and globbed: a multi-line value prints on one line, runs
+        of spaces collapse. And `printf "$v"` makes the value the FORMAT, whose
+        `%` and `\\` sequences printf interprets.
+        """
+        operands = list(words)
+        if command == "printf":
+            while operands and self._word_text(operands[0]).strip() in ("--",):
+                operands = operands[1:]
+            if operands:
+                fmt = operands[0]
+                if any(
+                    piece.kind == "subst" or (piece.kind == "expand" and "$" in piece.text)
+                    for piece in fmt.pieces
+                ):
+                    return True
+        for word in operands:
+            for piece in word.pieces:
+                if piece.quoted or piece.heredoc:
+                    continue
+                if piece.kind == "subst" and _RAW_SOURCE_RE.search(piece.text):
+                    return True
+                if piece.kind == "subst" and any(
+                    match.group(1) in self.value_vars for match in _VAR_REF_RE.finditer(piece.text)
+                ):
+                    return True
+                if piece.kind == "expand" and any(
+                    match.group(1) in self.value_vars for match in _VAR_REF_RE.finditer(piece.text)
+                ):
+                    return True
+        return False
+
     def _source_verb(self, stage: list[_Word | _Op | _Body]) -> tuple[str, str] | None:
         """``(verb, name)`` when this stage IS ``lop secret get|file|run``.
 
@@ -3094,6 +3472,14 @@ class _ShellAnalyzer:
         if len(args) < 2 or args[0] != "secret":
             return None
         verb = args[1]
+        if verb in _STORE_WRITE_VERBS:
+            # Not a source, but recorded: a print later in this text would
+            # read the value this stage replaces (R5).
+            name = next((arg for arg in args[2:] if not arg.startswith("-")), "?")
+            if self._store_write is None:
+                span = next((item.span for item in stage if isinstance(item, _Word)), (0, 0))
+                self._store_write = (span, name)
+            return None
         if verb not in _SOURCE_VERBS:
             return None
         if verb == "run":
@@ -3527,6 +3913,7 @@ class _ShellAnalyzer:
         # Wrappers first: `timeout 30 lop secret get X | rev` IS `lop secret get
         # X | rev`, so every rule below sees the real command instead of each
         # rule carrying its own list of wrappers (R3-2).
+        self._note_text_guards(stage)
         stage = self._unwrap(stage)
         # Reserved words are structure, not operands: dropping them here is what
         # lets `for …; do v=$(…); done` and `if …; then lop secret get X; fi`
@@ -3575,6 +3962,28 @@ class _ShellAnalyzer:
         # Before the assignment branch, because `PS4='+ '` IS an assignment and
         # would otherwise return early without ever being examined.
         self._note_conditions(command, stage, all_words)
+
+        # -- a test that asks a question about a value (R3) -------------------
+        # `[[` and `case` are reserved words (dropped from `words`), so the
+        # head is read from the stage itself. Nothing here prints the value,
+        # so the mask has nothing to match: the answer IS the leak.
+        head_word = next(
+            (item for item in stage if isinstance(item, _Word) and not self._is_assignment(item)),
+            None,
+        )
+        head = self._word_text(head_word).strip() if head_word is not None else ""
+        if head_word is not None and head in ("[[", "[", "test", "case"):
+            stage_words = [item for item in stage if isinstance(item, _Word)]
+            stage_words = stage_words[stage_words.index(head_word) :]
+            oracle = self._oracle_of_source(head, stage_words, depth=depth)
+            if oracle is not None:
+                self._add(
+                    "shell.oracle-of-source",
+                    oracle[0],
+                    oracle[1],
+                    reason="the test's answer is a fact about the value's text",
+                )
+            return _Flow()
 
         # -- a substitution standing alone in command position ---------------
         # `$(lop secret get NAME)` with nothing consuming it: its output becomes
@@ -3778,6 +4187,10 @@ class _ShellAnalyzer:
             ]
             dumped = self._dumped_name(command, dumper_flags, dumper, prefix, depth=depth)
             if dumped:
+                if command not in ("env", "printenv"):
+                    # `export -p`, `declare -p`, bare `set`: the value is printed
+                    # shell-QUOTED (see :attr:`ScanResult.requoted`, Q1).
+                    self.requoted = True
                 # The caret goes under the DUMPER: nothing in its argv carries
                 # the value, so the flow's span is empty by construction (R2-3).
                 self._add(
@@ -3858,7 +4271,21 @@ class _ShellAnalyzer:
         stage_args = [self._word_text(word).strip() for word in words[1:]]
         if command in _EMITTERS and _stage_transforms(command, stage_args):
             self.saw_transformer = True
-        if _edits_in_place(command, stage_args) and (flow_in.value or flow_in.path):
+        if command in _LINE_SELECTING_EMITTERS:
+            self.line_selected = True
+        in_place = _edits_in_place(command, stage_args) and (flow_in.value or flow_in.path)
+        if in_place and not _in_place_program_is_silent(command, stage_args):
+            # R1: the program can write to stdout/stderr (`w /dev/stdout`,
+            # `print STDERR`), so this is a print, not a write-back. sed and
+            # awk fall through to the emitter branch, which refuses them as
+            # transforming; perl is not an emitter there, so it is refused
+            # here, re-spelled by construction (its program decides).
+            in_place = False
+            if command == "perl":
+                self.transformed = True
+                self._add("shell.print-of-source", span, name)
+                return _Flow()
+        if in_place:
             for word in words[1:]:
                 text = self._word_text(word).strip()
                 if (
@@ -3872,6 +4299,8 @@ class _ShellAnalyzer:
         # -- the stage prints -------------------------------------------------
         if command in _EMITTERS:
             emits = flow_in.value or flow_in.path or path_hit
+            if emits and self._operands_respell(command, words[1:]):
+                self.transformed = True
             if emits and _stage_transforms(command, stage_args):
                 # Recorded whether or not THIS stage reaches the result: a
                 # re-spelling captured into a variable and printed later
@@ -4110,6 +4539,7 @@ class _ShellAnalyzer:
         """
         if self._xtrace is not None and self.sources:
             span, _ = self._xtrace
+            self.requoted = True
             self._add(
                 "shell.xtrace-of-source",
                 span,
@@ -4136,6 +4566,19 @@ class _ShellAnalyzer:
                 span,
                 name,
                 reason="this command's argv holds the value and the command reads a process table",
+            )
+        if self._store_write is not None and any(
+            rule(finding.rule).verdict == "printing" for finding in self.findings
+        ):
+            span, name = self._store_write
+            self._add(
+                "shell.print-after-store-write",
+                span,
+                name,
+                reason=(
+                    "this command replaces a stored secret and prints one; the mask was "
+                    "read before the command ran, so it would not match the new value"
+                ),
             )
 
 
@@ -4798,6 +5241,9 @@ def scan_command(command: str) -> ScanResult:
         findings=tuple(analyzer.findings),
         sources=tuple(dict.fromkeys(analyzer.sources)),
         transformed=analyzer.transformed or analyzer.saw_transformer,
+        requoted=analyzer.requoted,
+        alternate_store=analyzer.alternate_store,
+        line_selected=analyzer.line_selected,
     )
 
 
@@ -4838,39 +5284,51 @@ def scan_python(source: str) -> ScanResult:
     )
 
 
-#: Methods on the value that keep its bytes (`token.strip()`, `.encode()`) or
-#: return a bool/int about it rather than a re-spelling (`startswith`, `find`).
-#: Every OTHER method called on a value is a re-spelling (`.upper()`, `.hex()`,
-#: `.replace(…)`, `.removeprefix(…)`, `.split()`).
-_PY_VERBATIM_METHODS = frozenset(
+#: Methods on a value that print its whole bytes. EMPTY since agent review
+#: round 1 (R2): `startswith`/`find`/`count`/`in` answer questions about the
+#: text (an oracle the mask cannot see), `strip(chars)` drops part of it, and
+#: `encode`/`decode` with a codec re-spell it (`utf-16` interleaves NULs).
+#: Every method called on a value is therefore a re-spelling for a cell that
+#: also prints; `==`/`!=` against a whole value and `len()` stay allowed
+#: (they are not method calls on the value's text).
+_PY_VERBATIM_METHODS: frozenset[str] = frozenset()
+#: Calls whose result spells the value as one of the registered forms: `str`
+#: (the bytes), `repr` (Python string escaping), `json.dumps` (JSON escaping)
+#: and `shlex.quote` (`'\''` splicing), each with the value as its ONLY
+#: argument — `str(v, "utf-16")`-style extra arguments are a re-spelling.
+_PY_VERBATIM_CALLS = frozenset({"str", "repr", "json.dumps", "shlex.quote"})
+#: Builtins that iterate, reorder, encode or summarise a value's characters
+#: (`set(v)` prints its character set, `max(v)` one character, `ascii(v)` an
+#: escaping no registered form covers): re-spellings, whatever is printed.
+_PY_RESPELLING_BUILTINS = frozenset(
     {
-        "strip",
-        "lstrip",
-        "rstrip",
-        "encode",
-        "decode",
-        "startswith",
-        "endswith",
-        "find",
-        "rfind",
-        "index",
-        "rindex",
-        "count",
-        "isalnum",
-        "isalpha",
-        "isascii",
-        "isdigit",
-        "islower",
-        "isprintable",
-        "isspace",
-        "isupper",
+        "set",
+        "frozenset",
+        "sorted",
+        "list",
+        "tuple",
+        "iter",
+        "next",
+        "reversed",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "dict",
+        "bytes",
+        "bytearray",
+        "memoryview",
+        "ascii",
+        "min",
+        "max",
+        "sum",
+        "any",
+        "all",
+        "ord",
     }
 )
-#: Calls that keep a value's bytes in their result (a repr adds quotes,
-#: `json.dumps`/`shlex.quote` add quoting) among the carrier functions and
-#: modules; every other carrier applied to a value (`reversed`, `list`,
-#: `base64.b64encode`, `binascii.hexlify`, `urllib.parse.quote`) re-spells it.
-_PY_VERBATIM_CALLS = frozenset({"str", "repr", "bytes", "format", "json.dumps", "shlex.quote"})
+#: A `str.format` field with a conversion or a spec (`{:.4}`, `{!a}`).
+_PY_FORMAT_SPEC_RE = re.compile(r"\{[^{}]*[:!][^{}]*\}")
 
 
 def _py_respells_a_value(tree: ast.Module, analyzer: _PyAnalyzer) -> bool:
@@ -4897,9 +5355,33 @@ def _py_respells_a_value(tree: ast.Module, analyzer: _PyAnalyzer) -> bool:
         if isinstance(node, ast.Subscript):
             if analyzer._source_name(node) is None and touches(node.value):
                 return True
+        elif isinstance(node, ast.Compare):
+            # R2: only whole-value `==`/`!=` stay; `in`, `<` and friends are
+            # oracles that answer a question about the text.
+            operands = [node.left, *node.comparators]
+            if any(not isinstance(op, (ast.Eq, ast.NotEq)) for op in node.ops) and any(
+                touches(operand) for operand in operands
+            ):
+                return True
         elif isinstance(node, ast.Call):
             func = node.func
             arguments = list(node.args) + [keyword.value for keyword in node.keywords]
+            if not any(touches(argument) for argument in arguments) and not (
+                isinstance(func, ast.Attribute) and touches(func.value)
+            ):
+                continue
+            if isinstance(func, ast.Name) and func.id in _PY_RESPELLING_BUILTINS:
+                return True
+            if isinstance(func, ast.Name) and func.id == "format" and len(arguments) > 1:
+                return True
+            if isinstance(func, ast.Attribute) and func.attr in ("format", "format_map"):
+                receiver = func.value
+                if not (
+                    isinstance(receiver, ast.Constant)
+                    and isinstance(receiver.value, str)
+                    and not _PY_FORMAT_SPEC_RE.search(receiver.value)
+                ):
+                    return True
             if isinstance(func, ast.Attribute) and func.attr == "join" and node.args:
                 # `sep.join(token)` iterates the CHARACTERS; `sep.join([token])`
                 # splices the whole value, which is verbatim.
@@ -4919,11 +5401,16 @@ def _py_respells_a_value(tree: ast.Module, analyzer: _PyAnalyzer) -> bool:
             if carrier and dotted not in _PY_VERBATIM_CALLS:
                 if any(touches(argument) for argument in arguments):
                     return True
+            if dotted in _PY_VERBATIM_CALLS and len(arguments) > 1:
+                return True
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
             if touches(node.iter):
                 return True
         elif isinstance(node, ast.FormattedValue):
-            if node.format_spec is not None and touches(node.value):
+            # `!a` is `ascii()`, an escaping no registered form covers.
+            if (node.format_spec is not None or node.conversion == ord("a")) and touches(
+                node.value
+            ):
                 return True
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
             if (
@@ -4969,8 +5456,13 @@ def _span_context(text: str, span: tuple[int, int], *, line_based: bool = False)
     return line, caret
 
 
-def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
+def refusal_text(result: ScanResult, *, text: str, tool_name: str = "", note: str = "") -> str:
     """The tool-level error the model reads: rule, span, why, rewrite.
+
+    ``note`` is one extra ``why`` line from the caller, for a refusal decided
+    with knowledge the scan does not have (the bash tool's read of the value:
+    a re-quoting printer of a multi-line value, another store, a line too
+    short to mask).
 
     It quotes the COMMAND, never a value. That is safe by construction — the
     offending span of a refused call is a spelling like ``lop secret get NAME``
@@ -5005,7 +5497,13 @@ def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
         shell_surface = tool_name != "eval"
     lines = [f"[secret sink] {head}"]
     if result.findings:
-        finding = result.findings[0]
+        # The finding that DECIDED the refusal leads: where the mask is live a
+        # verbatim print runs, so a blocking label (an oracle, a read-back
+        # after a store write) is the one whose rewrite the reader needs.
+        finding = next(
+            (item for item in result.findings if item.rule in BLOCKING_LABELS),
+            result.findings[0],
+        )
         spec = rule(finding.rule)
         if spec.lang == "python":
             lines.append(
@@ -5030,7 +5528,10 @@ def refusal_text(result: ScanResult, *, text: str, tool_name: str = "") -> str:
         # is two findings of one rule (the `print` and the `repr`), and the old
         # `len(findings)` guard printed an empty "also refused by:" (NIT-1).
         if len(result.labels) > 1:
-            lines.append(f"  also refused by: {', '.join(result.labels[1:])}")
+            others = [label for label in result.labels if label != finding.rule]
+            lines.append(f"  also refused by: {', '.join(others)}")
+    if note:
+        lines.append(f"  also:   {note}")
     if result.verdict == "unresolved" and not result.findings:
         # `scan_command`'s `except RecursionError` branch returns an unresolved
         # result with NO findings (it is marked unreachable because `_MAX_DEPTH`
@@ -5077,14 +5578,19 @@ def steer_text(result: ScanResult) -> str:
     subject = ", ".join(dict.fromkeys(names)) or "a stored secret"
     python = bool(result.findings) and rule(result.findings[0].rule).lang == "python"
     better = (
-        "use the value inside the call that needs it, or compare/len() it"
+        "use the value inside the call that needs it, or compare it whole (`==`) or len() it"
         if python
         else "interpolate it into the consumer "
         '(`curl -H "Authorization: Bearer $(lop secret get NAME)" …`), '
         "or identify it with `lop secret describe NAME`"
     )
+    # R6: the line states what the mask COVERS rather than asserting the
+    # result is clean: the call ran only because every spelling it can print
+    # is one the session registered, and that is the claim worth teaching.
     return (
-        f"[secret sink] ran: {subject} reached printed output and was masked as [redacted]; "
-        f"{better}. A re-spelled print (rev, base64, a substring, an inline interpreter) "
-        "is refused, because the mask only matches the exact value."
+        f"[secret sink] ran: {subject} reached printed output; the value, its "
+        "quoted/escaped spellings and each line of a multi-line value are masked "
+        f"as [redacted]; {better}. A re-spelled print (rev, base64, a substring, "
+        "grep, a pattern test, an inline interpreter) is refused, because the mask "
+        "only matches those registered spellings."
     )

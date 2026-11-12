@@ -1487,3 +1487,27 @@ def test_check_upload_still_refuses_private_key_material(name: str, tmp_path: Pa
     resolved, reason = bf.check_upload(str(path), cwd=str(tmp_path))
     assert resolved is None, name
     assert "credential deny-list" in reason
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("prod.env.pub", "API_KEY=synthetic-not-a-public-key\n"),
+        ("service-account.pub", '{"type": "service_account", "private_key_id": "abc"}\n'),
+        ("notes.pub", "just some text\n"),
+    ],
+)
+def test_check_upload_needs_a_public_key_shape_for_the_pub_exception(
+    name: str, body: str, tmp_path: Path
+) -> None:
+    """Agent review round 1, R8: absence of private armour is not a public key.
+
+    A `.pub` name whose first line is not an OpenSSH/PEM/PGP public key falls
+    through to the ordinary checks; under `secrets/` the directory rule refuses it.
+    """
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    path = secrets_dir / name
+    path.write_text(body)
+    resolved, reason = bf.check_upload(str(path), cwd=str(tmp_path))
+    assert resolved is None, (name, reason)
