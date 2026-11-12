@@ -337,3 +337,150 @@ def test_ledger_has_a_path_index_and_reads_only_related_rows(home: Path) -> None
     finally:
         conn.close()
     assert "SCAN created" not in plan and "USING INDEX" in plan, plan
+
+
+# -- Review round 2 (PR #3835): M3, m5, m6 -------------------------------------------
+
+
+def test_foreign_query_memory_is_bounded_for_a_very_deep_path(home: Path) -> None:
+    """M3: the ancestor list must not hold every prefix of a 20k-component path.
+
+    Before the bound each prefix of ``real`` was kept as a bind parameter:
+    Σ len(prefix) = O(L²), ~100 MB of strings at 10k components and an OOM
+    kill at 20k. Only ancestors no longer than ``PATH_MAX`` can be stored rows.
+    """
+    import tracemalloc
+
+    deep = str(home) + "/w/f" + "/b" * 10_000
+    tracemalloc.start()
+    try:
+        sql, params = prov._foreign_query([deep])
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 5 * 1024 * 1024, peak
+    assert all(len(p) <= prov._PATH_MAX for p in params)
+    assert str(home) + "/w/f" in params and str(home) in params  # shallow ones kept
+    assert len(params) <= prov._MAX_ANCESTORS + 2
+
+
+def test_foreign_query_caps_ancestor_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """M3: even under a huge PATH_MAX only the shallowest ancestors are bound."""
+    monkeypatch.setattr(prov, "_PATH_MAX", 10**9)
+    _sql, params = prov._foreign_query(["/a" * 5_000])
+    assert len(params) == prov._MAX_ANCESTORS
+    assert params[:3] == ["/", "/a", "/a/a"]  # shallowest first; the deep range is dropped
+
+
+def test_very_deep_target_classifies_bounded_and_keeps_other_targets_high(home: Path) -> None:
+    """M3 end to end: the reviewer's repro, under a modest memory bound."""
+    import tracemalloc
+
+    (home / "w").mkdir()
+    _run(home, "mkdir ~/w/f", sid=OTHER)
+    tracemalloc.start()
+    try:
+        verdict = _verdict(home, "rm -rf ~/w/f" + "/b" * 20_000 + " ~/w/f")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 100 * 1024 * 1024, peak
+    assert verdict.risk is Risk.HIGH
+    assert any(f"created by another session ({OTHER}" in t.reason for t in verdict.targets)
+
+
+def _pre_index_ledger(home: Path) -> Path:
+    """A ledger as the pre-index code left it: same rows, no ``created_path``."""
+    db = prov.ledger_path(home / ".local-operator")
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("DROP INDEX created_path")
+        conn.commit()
+    finally:
+        conn.close()
+    return db
+
+
+def test_read_only_pre_index_ledger_still_serves_lookups(home: Path) -> None:
+    """m5: a read-only ledger without the index must not break either rule."""
+    (home / "w").mkdir()
+    _run(home, "mkdir ~/w/theirs", sid=OTHER)
+    # This session's own worktree: LOW only through its ledger row — the
+    # own-provenance path the reviewer saw flip to HIGH on this ledger.
+    repo = home / "w" / "repo"
+    repo.mkdir()
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    _run(home, "git worktree add -q -b x .worktrees/x main", sid=SID, cwd=repo)
+    db = _pre_index_ledger(home)
+    os.chmod(db, 0o444)
+    os.chmod(db.parent, 0o555)  # no journal can be created next to it either
+    try:
+        foreign = _verdict(home, "rm -rf ~/w/theirs")
+        own = _verdict(home, "rm -rf ~/w/repo/.worktrees/x")
+    finally:
+        os.chmod(db.parent, 0o755)
+        os.chmod(db, 0o644)
+    assert foreign.risk is Risk.HIGH, foreign.targets[0].reason
+    assert f"created by another session ({OTHER}" in foreign.targets[0].reason
+    assert own.risk is Risk.LOW and "created by this session" in own.targets[0].reason
+    conn = sqlite3.connect(db)
+    try:  # the read path wrote nothing: still no index
+        assert "created_path" not in {r[1] for r in conn.execute("PRAGMA index_list(created)")}
+    finally:
+        conn.close()
+
+
+def test_writer_holding_reserved_does_not_stall_or_hide_foreign_rows(home: Path) -> None:
+    """m5: readers never take a write lock, so RESERVED (BEGIN IMMEDIATE) costs nothing."""
+    import time
+
+    (home / "w").mkdir()
+    _run(home, "mkdir ~/w/theirs", sid=OTHER)
+    db = _pre_index_ledger(home)
+    writer = sqlite3.connect(db, isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        start = time.monotonic()
+        verdict = _verdict(home, "rm -rf ~/w/theirs")
+        elapsed = time.monotonic() - start
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+    assert verdict.risk is Risk.HIGH, verdict.targets[0].reason
+    assert elapsed < 1.0, elapsed
+
+
+def test_exclusive_lock_bounds_foreign_lookup_and_keeps_main_rank(home: Path) -> None:
+    """m5: an EXCLUSIVE writer makes the foreign lookup give up fast, rank as main."""
+    import time
+
+    (home / "w").mkdir()
+    _run(home, "mkdir ~/w/theirs", sid=OTHER)
+    db = prov.ledger_path(home / ".local-operator")
+    foreign = prov.ForeignCreations(SID, state_root=home / ".local-operator")
+    writer = sqlite3.connect(db, isolation_level=None)
+    try:
+        writer.execute("BEGIN EXCLUSIVE")
+        start = time.monotonic()
+        hit = foreign.match([str(home / "w" / "theirs")])
+        elapsed = time.monotonic() - start
+    finally:
+        foreign.close()
+        writer.execute("ROLLBACK")
+        writer.close()
+    assert hit is None
+    assert elapsed < prov._DB_TIMEOUT_S / 2, elapsed
+
+
+@pytest.mark.parametrize("rel", ["w/f/\udcff", "w/plain/\udcff"])
+def test_lone_surrogate_target_does_not_raise(home: Path, rel: str) -> None:
+    """m6: a surrogateescape'd name (``rm -rf build/*`` on Linux) cannot be bound in SQLite."""
+    (home / "w" / "plain").mkdir(parents=True)
+    _run(home, "mkdir ~/w/f", sid=OTHER)
+    verdict = _verdict(home, f"rm -rf ~/{rel}")
+    if rel.startswith("w/f/"):  # its encodable ancestor still matches the foreign row
+        assert verdict.risk is Risk.HIGH, verdict.targets[0].reason
+    else:
+        assert verdict.risk is Risk.LOW and verdict.targets[0].reason == "ordinary path"

@@ -75,6 +75,14 @@ LEDGER_FILENAME = "created.sqlite"
 #: a held lock past this is a stuck writer, and the guard degrades to "no
 #: provenance" (the old ranking) rather than stalling a turn.
 _DB_TIMEOUT_S = 2.0
+#: Busy wait for the foreign-ledger lookup (``ForeignCreations``), which runs
+#: on every LOW delete classify. Readers only wait on an EXCLUSIVE writer
+#: (rollback journal: RESERVED/PENDING never block a reader's shared lock
+#: until commit); a commit of these tiny rows takes milliseconds, so a lock
+#: still held after this is not worth stalling the turn for — the lookup
+#: gives up and the rank stays what it was before the rule existed (m5,
+#: review round 2 of PR #3835: the 2 s wait measured 3.86 s per classify).
+_DB_READ_TIMEOUT_S = 0.25
 #: Bound on every git probe. Measured on this machine's worktrees (n=12,
 #: ``git status --porcelain --untracked-files=all`` on local-operator linked
 #: worktrees, 2026-11-07): median 0.015 s, max 0.86 s. 10 s is far above that and still
@@ -393,19 +401,25 @@ _SCHEMA = (
 
 #: ``ForeignCreations`` looks rows up by path (``_foreign_query``); the
 #: primary key leads with ``owner`` and cannot serve that. ``IF NOT EXISTS``
-#: adds it to ledgers written before it existed, on their next open.
+#: adds it to ledgers written before it existed, on their next WRITE open
+#: only (m5): creating it is a write, and a read-only ledger (or one a writer
+#: holds) must keep serving lookups — unindexed until the next recording
+#: call, which SQLite answers with a table scan, never an error.
 _PATH_INDEX = "CREATE INDEX IF NOT EXISTS created_path ON created (path)"
 
 
-def _connect(path: Path, *, create: bool) -> sqlite3.Connection | None:
+def _connect(
+    path: Path, *, create: bool, timeout: float = _DB_TIMEOUT_S
+) -> sqlite3.Connection | None:
     if not create and not path.exists():
         return None
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=_DB_TIMEOUT_S)
+    conn = sqlite3.connect(str(path), timeout=timeout)
     try:
         conn.execute(_SCHEMA)
-        conn.execute(_PATH_INDEX)
+        if create:
+            conn.execute(_PATH_INDEX)
         # A ledger written before the stamp column existed: add it (old rows
         # keep NULL and so never match — fail closed).
         columns = {row[1] for row in conn.execute("PRAGMA table_info(created)")}
@@ -529,6 +543,28 @@ def owned_record(
     return best
 
 
+def _path_max() -> int:
+    try:
+        value = os.pathconf("/", "PC_PATH_MAX")
+    except (OSError, ValueError):
+        return 1024
+    return value if value > 0 else 1024
+
+
+#: Longest path a ledger row can hold (``_foreign_query``'s M3 bound).
+_PATH_MAX = _path_max()
+#: Most ancestors bound per target; see ``_foreign_query``.
+_MAX_ANCESTORS = 512
+
+
+def _bindable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _foreign_query(paths: Iterable[str]) -> tuple[str, list[str]]:
     """SQL selecting only the ledger rows that can relate to ``paths``.
 
@@ -540,19 +576,39 @@ def _foreign_query(paths: Iterable[str]) -> tuple[str, list[str]]:
     ``'/'`` in the BINARY collation SQLite compares ``path`` with). Both shapes
     are served by the ``created_path`` index, so the read stays millisecond-
     scale however large the never-pruned ledger grows.
+
+    BOUNDS (M3, review round 2). Keeping every prefix of ``real`` costs
+    Σ len(prefix) = O(L²): a single 20k-component token in a command OOMs the
+    classifier. No stored row can be longer than ``PATH_MAX`` (rows are
+    realpaths of directories that existed), so only ancestors within it are
+    bound, and the prefixes are sliced from separator offsets rather than
+    built by repeated ``dirname``. Under a huge ``PATH_MAX`` the shallowest
+    ``_MAX_ANCESTORS`` still cap the list; deeper ancestors (and a target too
+    long to be a row) add no foreign info — the rank stays what it was
+    without this rule. Paths SQLite cannot bind (a lone surrogate from a
+    surrogateescape'd name, m6) are dropped the same way; their encodable
+    ancestors still match.
     """
     ancestors: dict[str, None] = {}
     ranges: list[str] = []
     for real in paths:
-        node = real
-        while True:
-            ancestors[node] = None
-            parent = os.path.dirname(node)
-            if parent == node:
+        ends = [1] if real.startswith("/") else []  # "/" itself
+        ends += [i for i, ch in enumerate(real) if ch == "/" and 0 < i <= _PATH_MAX]
+        if len(real) <= _PATH_MAX:
+            ends.append(len(real))
+        kept = 0
+        for end in dict.fromkeys(ends):
+            if kept >= _MAX_ANCESTORS:
                 break
-            node = parent
+            if _bindable(node := real[:end]):
+                ancestors[node] = None
+                kept += 1
         prefix = real.rstrip("/") + "/"
-        ranges += [prefix, prefix[:-1] + "0"]
+        # Rows under the target: only when the target itself was bound (not
+        # past PATH_MAX or the cap, and encodable), so beyond the bound means
+        # no foreign info for the whole subtree, consistently.
+        if real in ancestors:
+            ranges += [prefix, prefix[:-1] + "0"]
     clauses = []
     if ancestors:
         clauses.append(f"path IN ({','.join('?' * len(ancestors))})")
@@ -639,7 +695,9 @@ class ForeignCreations:
         if not self._tried:
             self._tried = True
             try:
-                self._conn = _connect(ledger_path(self.state_root), create=False)
+                self._conn = _connect(
+                    ledger_path(self.state_root), create=False, timeout=_DB_READ_TIMEOUT_S
+                )
             except (OSError, sqlite3.Error):
                 logger.debug("guardrail ledger unreadable", exc_info=True)
         return self._conn
@@ -672,10 +730,14 @@ class ForeignCreations:
         conn = self._connection()
         if not reals or conn is None:
             return None
-        sql, params = _foreign_query(reals)
         try:
+            sql, params = _foreign_query(reals)
             rows = conn.execute(sql, params).fetchall()
-        except sqlite3.Error:
+        # ValueError covers UnicodeEncodeError: a lone surrogate SQLite cannot
+        # bind (m6). ``_foreign_query`` already drops such parameters; this
+        # keeps any other unbindable input at "no foreign info" (the rank
+        # main gives), never a guardrail-error hard block.
+        except (sqlite3.Error, ValueError):
             logger.debug("guardrail ledger unreadable", exc_info=True)
             return None
         # path -> (owners, row) over rows of the LIVE generation only.
