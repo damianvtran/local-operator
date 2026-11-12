@@ -168,6 +168,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
+    # The mesh skill sync (``skillsync.py``); see SKILLS_SYNC_V1 below.
+    "skills-sync-v1",
     "memory-sync-v1",
     "memory-item-512",
     "pair-offer-v1",
@@ -207,6 +209,11 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+#: The user-skill sync's capability (``skillsync.py``). Advertised by every build
+#: that serves ``net_skills``; the sender checks it BEFORE its first request, so a
+#: peer that predates skill sync is reported ``peer_too_old`` with its remedy and
+#: never asked an op it would have to refuse.
+SKILLS_SYNC_V1 = "skills-sync-v1"
 MEMORY_SYNC_V1 = "memory-sync-v1"
 #: The 512-content-token memory item cap (``memory.ITEM_TOKENS``). Advertised by
 #: every build whose ``validate_fact`` accepts it. A peer WITHOUT it still refuses a

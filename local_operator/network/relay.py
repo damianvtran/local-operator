@@ -502,6 +502,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_definitions",
         "net_readiness",
         "net_mcp_defs",
+        "net_skills",
         "net_memory",
         # The single-peer update (meshupdate.py; S1 of mesh-rolling-updates.md
         # §8.2). Slow by registration below: the handler may run a real install
@@ -536,6 +537,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "definitions_sync",
         "peer_readiness",
         "mcp_defs_sync",
+        "skills_sync",
         # The single-peer update's local half — a viewer asking ITS OWN relay to
         # ask a peer (the ``peer_*`` boundary rule; the peer-scope half is
         # ``net_update``).
@@ -558,6 +560,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # registers a tick step there), so it is installed after that module but
     # starts no thread of its own.
     "local_operator.network.mcpdefs",
+    # User skills ride the same definitions cadence (a tick step), no thread.
+    "local_operator.network.skillsync",
     "local_operator.network.memory",
     # S1 of the mesh rolling updates: the ``update`` capability's op halves. It
     # starts no thread of its own (the S3 rollout driver is a different slice).
@@ -14140,6 +14144,24 @@ class RelayServer:
                 "pinned": {name: digest for name, digest in sorted(pinned_names.items())},
                 "unpinned": unpinned,
             }
+        # SKILLS TRAVEL BEFORE THE CREATE, so a brief that names ``skill://x`` resolves
+        # on the session's FIRST turn rather than after the next cadence tick (up to
+        # a minute later). Unconditional — unlike definitions, nothing in the frame
+        # names which skills a session will read — and BOUNDED
+        # (``skillsync.CREATE_PUSH_BUDGET_S``): a large first sync continues in the
+        # background and the receipt says so, so it can never stall the create.
+        # Best-effort: a peer that is unreachable or predates skill sync answers the
+        # create exactly as before, with the reason on the receipt.
+        skills_receipt: dict[str, Any] = {}
+        try:
+            from local_operator.network import skillsync
+
+            skills_receipt = skillsync.push_for_create(self, self._resolve_peer(peer))
+        except MeshRefusal:
+            skills_receipt = {}  # an unknown peer is refused by the create itself below
+        except Exception as exc:  # noqa: BLE001 — a skills push must never fail a create
+            logger.debug("peer create: skills push failed", exc_info=True)
+            skills_receipt = {"ok": False, "code": "failed", "message": str(exc)}
         fields: dict[str, Any] = {
             "cwd": str(frame.get("cwd") or ""),
             "model": frame.get("model"),
@@ -14185,9 +14207,12 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        extra: dict[str, Any] = {}
         if reconciliation:
-            return {**detail, "definitions": reconciliation}
-        return detail
+            extra["definitions"] = reconciliation
+        if skills_receipt:
+            extra["skills"] = skills_receipt
+        return {**detail, **extra} if extra else detail
 
     def _ctl_peer_engage(self, frame: dict[str, Any]) -> dict[str, Any]:
         return self._local_peer_call(

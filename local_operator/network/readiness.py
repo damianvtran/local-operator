@@ -94,6 +94,12 @@ CAPABILITY_SERVE_DAEMON = "serve_daemon"
 #: operator met that refusal on lop-remote-node-2 with ``ready`` reporting the
 #: peer fine: the report names the owner's decision before anyone hits it.
 CAPABILITY_MODEL_SWITCH = "model_switch"
+#: (k) user skills: does the peer hold this device's own skills at the revision
+#: this device has (``skillsync.py``)? Added 2026-11-11 with the mesh skill sync:
+#: a brief naming ``skill://x`` resolves on the head and, before that sync, on no
+#: peer. Informational (non-gating): the cadence repairs it within a minute, and
+#: the create path pushes first.
+CAPABILITY_SKILLS = "skills"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -140,6 +146,9 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # Turns on the borrowed model still run; only switching is refused, and
         # widening the share is the owner's access decision, never a gate here.
         CAPABILITY_MODEL_SWITCH,
+        # A missing skill is a sync in flight or a skill that cannot travel; the
+        # row names which, and nothing about onboarding depends on it.
+        CAPABILITY_SKILLS,
     }
 )
 
@@ -1683,7 +1692,101 @@ def collect_peer_facts(
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
         # viewer reading a peer built before it renders ``unknown`` — never ok.
         "serve_daemons": serve_daemons_fact(root),
+        # ADDITIVE ON THE WIRE (2026-11-11): names, tree hashes and mirror origin of
+        # this device's user skills — never content. Absent from older peers.
+        "skills": skills_fact(root),
     }
+
+
+def skills_fact(root: Path) -> dict[str, Any] | None:
+    """This device's user skills as the skill sync sees them; ``None`` if unreadable."""
+    try:
+        from local_operator.network import skillsync
+
+        return {"skills": skillsync.skill_state(root)["skills"]}
+    except Exception:  # noqa: BLE001 — a fact is not a gate; the row reads None as unknown
+        return None
+
+
+def skills_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    peer_label: str,
+    local: Sequence[Any],
+    own_device_id: str,
+) -> dict[str, Any]:
+    """(k) Does the peer hold this device's own skills, current? Informational.
+
+    ``local`` is this device's ``skillsync.authored_skills`` (the only skills it
+    sends); ``facts["skills"]`` is the peer's own ``skill_state``. Every skill
+    that will not travel is NAMED with its reason, so an oversize skill is never
+    a silent absence on the far side.
+    """
+    fact = facts.get("skills")
+    held_in = fact.get("skills") if isinstance(fact, Mapping) else None
+    if not isinstance(held_in, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_SKILLS,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry its skills (it may predate skill sync)",
+            source=SOURCE_UNKNOWN,
+        )
+    current: list[str] = []
+    kept: list[str] = []
+    missing: list[str] = []
+    untravelled: list[str] = []
+    for skill in local:
+        name = str(getattr(skill, "name", "") or "")
+        if getattr(skill, "status", "") != "ready":
+            untravelled.append(f"{name} ({getattr(skill, 'reason', '') or 'cannot travel'})")
+            continue
+        held = held_in.get(name)
+        held = held if isinstance(held, Mapping) else None
+        if held is not None and str(held.get("tree_hash") or "") == getattr(skill, "tree_hash", ""):
+            current.append(name)
+        elif held is not None and (
+            not held.get("origin") or held.get("origin") != own_device_id or held.get("edited")
+        ):
+            kept.append(name)
+        else:
+            missing.append(name)
+    sendable = len(current) + len(kept) + len(missing)
+    parts = [f"{peer_label} holds {len(current)} of this device's {sendable} sendable skills"]
+    if kept:
+        parts.append(f"kept as its own: {_name_list(kept)}")
+    if missing:
+        parts.append(f"not synced yet: {_name_list(missing)}")
+    if untravelled:
+        parts.append(f"will not travel: {'; '.join(untravelled)}")
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SKILLS,
+        ok=not missing,
+        code="" if not missing else "skills_not_synced",
+        detail="; ".join(parts),
+        remedies=(
+            [
+                "the mesh syncs skills about once a minute; to do it now, run "
+                f"`lop network skills push --peer {peer_label}`"
+            ]
+            if missing
+            else []
+        ),
+        source=SOURCE_PEER,
+        observed={
+            "current": current,
+            "kept": kept,
+            "missing": missing,
+            "untravelled": [
+                str(getattr(s, "name", "")) for s in local if getattr(s, "status", "") != "ready"
+            ],
+        },
+    )
 
 
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
@@ -5601,6 +5704,21 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
+    try:
+        from local_operator.network import skillsync
+
+        own_skills: list[Any] = list(skillsync.authored_skills(server.root))
+    except Exception:  # noqa: BLE001 — this device's own skills unreadable: compare none
+        own_skills = []
+    rows.append(
+        skills_row(
+            member,
+            facts,
+            peer_label=peer_label,
+            local=own_skills,
+            own_device_id=str(getattr(getattr(server, "identity", None), "device_id", "") or ""),
+        )
+    )
     rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
     switch_row = model_switch_row(
         member,
