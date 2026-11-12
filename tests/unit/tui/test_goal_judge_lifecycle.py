@@ -39,6 +39,7 @@ from local_operator.tui.events import TurnEnded, UserMessageStart
 from local_operator.tui.widgets.transcript import NoticeBlock
 
 from .test_app_pilot import GoalSession, _factory
+from .waiting import settle
 
 GOAL = "land the OAuth refresh fix"
 CONTINUE = "VERDICT: CONTINUE\nmore to do"
@@ -145,9 +146,24 @@ async def test_a_loop_taking_over_a_held_tui_answer_yields_to_waiting(monkeypatc
     monkeypatch.setattr(session, "complete_aside", held)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot, 2)
+        # Boot must be FINISHED before the turn end is posted, not merely paced.
+        # `_maybe_judge_goal_turn` drops a TurnEnded outright while the session
+        # is not yet adopted (`_session is None`) or while boot's goal re-arm
+        # worker still holds `judge_in_flight` — so on a loaded shard where two
+        # `pilot.pause()` calls returned before boot's tail ran, `started` was
+        # never set and the old 2 s `wait_for` fired (CI job 131111268234).
+        # Waiting on the two facts the hook reads is the join; the bare pauses
+        # were a CPU-idle bet.
+        await settle(
+            pilot,
+            lambda: app._session is session and not app._interaction.goal.judge_in_flight,
+            what="boot adopted the session and its goal re-arm released the judge",
+            workers=("session",),
+        )
         app.post_message(TurnEnded(aborted=False, error=None))
-        await asyncio.wait_for(started.wait(), 2)
+        # settle's own deadline is the hang guard; the judge worker is held on
+        # `release` by design, so it is deliberately not a named join.
+        await settle(pilot, started.is_set, what="the turn-end judge reached complete_aside")
         app._loop_running = True
         try:
             release.set()
