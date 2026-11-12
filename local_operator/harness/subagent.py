@@ -4061,6 +4061,11 @@ async def _construct_child_session(
     language_line = preferred_language_line()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
+    # A child of a Team-Bridge-latched parent is latched for life: the task
+    # prompt the parent writes can carry the hostile text. Read through the
+    # fail-closed property; a parent without one is a host that does not track
+    # taint. A parent that latches LATER is handled by the link below.
+    inherited_bridge_taint = bool(getattr(parent_session, "bridge_latched", False))
     # Whether this child runs on a role allowlist. Decided HERE, before the
     # ToolContext closes over the resolver, because the MCP surface is built
     # from it: a restricted child gets the read half (inherit + discover) and
@@ -4162,6 +4167,7 @@ async def _construct_child_session(
         job_label=label,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # The parent's variable store. DEFENSIVE PARITY, not a bug fix: no
         # current ``TOOL_BUILDERS`` entry reads ``context.variables`` at
         # construction time (the variables readers are all execute-time, and
@@ -4498,6 +4504,7 @@ async def _construct_child_session(
         # so the executor wraps every command the ``read``-tier schema admitted.
         shell_write_root=shell_write_root,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # Which job the child's approvals belong to, so a host can scope a
         # denial to the work that provoked it. Reaches the executor through
         # ``Session._build_tool_context``; the construction-time context above
@@ -4557,6 +4564,21 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # Link the two latches for the child's life (review R1, S-67): a parent
+    # that latches after this spawn can still write into the child (``hub``
+    # send/steer are read-tier), and whatever a latched child reports reaches
+    # the parent. Unlinked at dispose so a settled child is not kept alive by
+    # the parent's callback list. See ``bridge_egress.link_latches``.
+    _parent_latch = getattr(parent_session, "bridge_taint_latch", None)
+    _child_latch = getattr(child, "bridge_taint_latch", None)
+    if _parent_latch is not None and _child_latch is not None:
+        from local_operator.harness.bridge_egress import link_latches
+
+        _unlink_latches = link_latches(_parent_latch, _child_latch)
+        # Both stacks: the rollback stack for a launch that fails after this
+        # line, the child's own dispose hooks for its normal lifetime.
+        cleanup.callback(_unlink_latches)
+        child.add_dispose_hook(_unlink_latches)
     # The LIVE half of the same link: an event this child records for an opened or
     # acted-on code request is propagated to the parent's transcript as it happens, so
     # the operator's conversation shows the PR its subagent opened without waiting for
