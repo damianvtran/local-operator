@@ -40,9 +40,9 @@ the same shape, because the unsafe direction of a failed read is an install
 over a running turn. On the immutable GENERATION layout there is no busy gate:
 the install writes a new tree and flips a pointer, a busy runtime keeps the
 tree it loaded and is retired once idle (``buildwatch``), and the receipt
-names the sessions it left on the old build (the reason's "stay on … until they settle"
-clause and its ``left_busy`` twin). See the comment above the gate in
-``_execute_validated`` for why the stricter rule was dropped there.
+names the sessions it left on the old build (the reason's "stay on … until
+they settle" clause and its ``left_busy`` twin). See the comment above the
+gate in ``_execute_validated`` for why the stricter rule was dropped there.
 
 OPEN QUESTION (verify at implementation), carried from the design rather than
 invented here: the reply map's origin-side ``no_grant`` skip (RU §3, first row)
