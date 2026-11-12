@@ -1711,12 +1711,15 @@ class AwsProvider:
                 clock=time.monotonic,
                 # Upstream's own gate: ``DesktopEnv(volume_size=N)`` grows the
                 # guest filesystem into the volume, ``volume_size=None`` does
-                # not. ``plan.volume_gb`` is exactly that parameter (a task's
-                # ``volume_size`` or the ``AWS_ROOT_VOLUME_SIZE`` override),
-                # and the adapter never hands it to ``DesktopEnv`` -- so
-                # without this the volume was enlarged and the filesystem was
-                # not. See ``guest_disk``'s module docstring.
-                grow_root=plan.volume_gb is not None,
+                # not. ``plan.volume_gb`` is exactly that parameter, resolved
+                # with upstream's precedence (a task's own ``volume_size``,
+                # else the ``AWS_ROOT_VOLUME_SIZE`` default), and the adapter
+                # never hands it to ``DesktopEnv`` -- so without this the
+                # volume was enlarged and the filesystem was not. The source
+                # is recorded so an override-granted grow is visible in the
+                # bundle. See ``guest_disk``'s module docstring.
+                requested_volume_gb=plan.volume_gb,
+                volume_source=plan.volume_source,
                 # The hold's retries run on the adapter's recovery cadence and
                 # the provider's injected sleep (virtual in tests).
                 sleep=self._sleep,

@@ -104,19 +104,24 @@ UPSTREAM DOES. An earlier revision refused to grow the partition at all, and
 the record it left shows what that cost: all 84 ``guest-preparation.json``
 records of the 2026-11 campaign read ``disk_bytes`` 128,849,018,880 (the 120
 GiB ``AWS_ROOT_VOLUME_SIZE`` volume) around ``filesystem_bytes`` 30,993,747,968,
-so every episode started with ~2.2 GB free next to ~90 GiB that was paid for
-and unreachable, and a task that ``pip install``s a wheel the size of
-``onnxruntime`` had nowhere to put it. Upstream's contract is explicit:
-``DesktopEnv(volume_size=N)`` both sizes the EBS volume AND runs
-``expand_guest_volume`` (vendored ``desktop_env/providers/volume.py``:
-``growpart`` + ``resize2fs``/``xfs_growfs``, installing ``cloud-guest-utils``
-first when ``growpart`` is missing), while ``volume_size=None`` leaves the
-AMI's 29.5G filesystem inside upstream's 40 GiB default volume untouched. The
-adapter's ``AWS_ROOT_VOLUME_SIZE`` (or a task's own ``volume_size``) IS that
-upstream parameter, so ``grow_root`` mirrors upstream's gate exactly: grow when
-a size was requested, never otherwise. That gives the agent what upstream gives
-an agent run with the same ``--volume_size``, no more -- and a run that used the
-knob is already disclosed in its manifest (``aws_root_volume_size_override``).
+so the 120 GiB was INERT: paid for and unreachable. Upstream's contract, as of
+the pinned release (OSWorld-V2.1 @ 3d778a3,
+``desktop_env/providers/volume.py``), is explicit: ``DesktopEnv(volume_size=N)``
+both sizes the EBS volume AND runs ``expand_guest_volume`` (``growpart`` +
+``resize2fs``/``xfs_growfs``/``btrfs``, installing ``cloud-guest-utils`` first
+when ``growpart`` is missing), while ``volume_size=None`` leaves the AMI's
+29.5G filesystem inside upstream's 40 GiB default volume untouched.
+
+WHICH SIZE IS "REQUESTED" follows upstream's precedence exactly: a task's own
+``volume_size`` first, and the run-level default (upstream's ``--volume_size``,
+our ``AWS_ROOT_VOLUME_SIZE``) only for a task that declares none
+(``provisioning._resolve_root_volume``). THE FAITHFUL CONFIGURATION SETS NO
+OVERRIDE: upstream's documented run passes no ``--volume_size``, so 18 of
+v2.1's 108 tasks are grown to their declared size and the other 90 are not.
+An override grants the non-declaring tasks disk upstream's documented run
+does not; the report records ``volume_size_source`` (``task`` | ``override`` |
+null) per episode and the manifest stamps ``aws_root_volume_size_override``,
+so such a run is identifiable and must be disclosed as a deviation.
 
 The objections the earlier revision recorded are answered rather than ignored:
 ``growpart`` IS absent from the AMI, which is why the step installs it the way
@@ -125,12 +130,21 @@ every record above), so ``apt-get`` can run; the "cannot install onto a full
 disk" observation was made at 0 bytes free, late in a dying episode. ``sfdisk``
 is still never called directly: ``growpart`` is the standard, upstream-chosen
 tool, and it refuses (``NOCHANGE``) rather than rewriting a partition that cannot
-grow. The step is ADVISORY, never blocking: upstream itself tolerates a failed
-``growpart``/``resize2fs`` (both ``|| true`` in its script), and a guest whose
-snapd hold landed runs a full episode at 2.2 GB free, so refusing an episode
-over a failed grow would trade a recorded fidelity gap for a lost episode. The
-filesystem size AFTER the step is recorded (``filesystem_bytes_after``), so the
-gap, when there is one, is visible in every bundle.
+grow.
+
+ADVISORY HERE, STRICT UPSTREAM -- AND WHY THAT IS NOT AN ADVANTAGE. v2.1's
+script runs under ``set -euo pipefail`` (an ``apt-get`` or ``growpart`` failure
+fails ``DesktopEnv`` construction), and ``verify_linux_guest_volume`` RAISES
+when the mounted filesystem is under 95 % of the requested size. This step
+never refuses the episode over a failed or short grow: the only difference that
+makes is an agent running with LESS disk than upstream would have given it,
+never more, and a guest whose snapd hold landed runs a full episode at 2.2 GB
+free. Refusing would trade a recorded gap for a lost paid episode. The gap is
+recorded instead, against v2.1's own test: ``grow_target_met`` is the 95 %
+check (``filesystem_bytes_after`` -- or ``filesystem_bytes`` when no grow was
+needed -- against the requested GiB), so a short-grown episode is identifiable
+from its bundle. The grow is SKIPPED when the reclamation already failed
+(``blocking_steps`` non-empty): the provider refuses that episode anyway.
 """
 
 from __future__ import annotations
@@ -211,7 +225,17 @@ DEFAULT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 0.5, 1.0)
 # budget is not shared with ours: worst case here is 270 s + 180 s of
 # preparation inside the runner's 900 s ``reset_start``, and the common case
 # (hold lands first time, grow in well under a minute) is unchanged from before.
+# UNMEASURED: 180 s is an estimate, not a fitted bound -- no grown guest on this
+# AMI had been timed when it was set. The grow step records its own
+# ``duration_s`` in ``guest-preparation.json``, so the first live grown episodes
+# supply the distribution to re-fit it against ("measure before you cap").
 GROW_TIMEOUT_S = 180.0
+
+# v2.1's ``verify_linux_guest_volume`` threshold: the mounted filesystem must be
+# at least this fraction of the requested GiB ("Allow filesystem metadata and
+# the small boot partitions in provider images"). Upstream raises below it; this
+# module records ``grow_target_met`` instead (see the module docstring).
+GROW_TARGET_FRACTION = 0.95
 
 # A filesystem within this much of its block device is already grown. The
 # AMI's own partition table, alignment and an ESP/BIOS-boot partition account
@@ -308,15 +332,22 @@ class StepOutcome:
     # a hold that landed on its third send reads differently from one that
     # landed at once, and a reader never mistakes a retried step for a clean one.
     attempts: int = 1
+    # Wall seconds the step took, set only on steps whose ceiling is still an
+    # estimate (the grow step; see ``GROW_TIMEOUT_S``) and omitted from the JSON
+    # otherwise, so every existing record keeps its shape.
+    duration_s: float | None = None
 
     def to_json(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "name": self.name,
             "status": self.status,
             "returncode": self.returncode,
             "detail": self.detail,
             "attempts": self.attempts,
         }
+        if self.duration_s is not None:
+            payload["duration_s"] = round(self.duration_s, 3)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -349,6 +380,15 @@ class GuestDiskReport:
     # ``GROWN_WITHIN_BYTES``) or shows the fidelity gap it left.
     root_grow_requested: bool = False
     filesystem_bytes_after: int | None = None
+    # The size that was requested and WHERE it came from (``task`` -- the task
+    # file's own ``volume_size``, upstream-faithful -- or ``override``, the
+    # ``AWS_ROOT_VOLUME_SIZE`` default filling a task that declares none, a
+    # disclosed deviation), and v2.1's 95 % check against it: True/False once a
+    # filesystem size is known, None when nothing was requested or nothing
+    # could be measured.
+    requested_volume_gb: int | None = None
+    volume_size_source: str | None = None
+    grow_target_met: bool | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -360,7 +400,10 @@ class GuestDiskReport:
             # override -- the measured 29.5G-in-100GiB case.
             "disk_bytes": self.disk_bytes,
             "root_grow_requested": self.root_grow_requested,
+            "requested_volume_gb": self.requested_volume_gb,
+            "volume_size_source": self.volume_size_source,
             "filesystem_bytes_after": self.filesystem_bytes_after,
+            "grow_target_met": self.grow_target_met,
             "threshold_bytes": self.threshold_bytes,
             "reclamation_attempted": self.reclamation_attempted,
             # Derived, not stored: the steps are the record, and this is the
@@ -400,19 +443,32 @@ class GuestDiskReport:
         not a reason to throw away an episode that would have run.
         """
 
-        if not self.reclamation_attempted:
-            return ()
-        by_name = {step.name: step for step in self.steps}
-        blockers: list[StepOutcome] = []
-        for step in self.steps:
-            if step.name not in _RECLAMATION_STEP_NAMES or step.status == "ok":
+        return _blocking_steps(self.steps, reclamation_attempted=self.reclamation_attempted)
+
+
+def _blocking_steps(
+    steps: Sequence[StepOutcome], *, reclamation_attempted: bool
+) -> tuple[StepOutcome, ...]:
+    """``GuestDiskReport.blocking_steps`` over a step list still being built.
+
+    A function rather than only the method because ``prepare_guest_disk``
+    needs the same answer BEFORE the report exists, to skip a grow on an
+    episode the provider is about to refuse; one rule, two callers.
+    """
+
+    if not reclamation_attempted:
+        return ()
+    by_name = {step.name: step for step in steps}
+    blockers: list[StepOutcome] = []
+    for step in steps:
+        if step.name not in _RECLAMATION_STEP_NAMES or step.status == "ok":
+            continue
+        covering = _COVERING_STEPS.get(step.name)
+        if covering is not None and by_name.get(covering, None) is not None:
+            if by_name[covering].status == "ok":
                 continue
-            covering = _COVERING_STEPS.get(step.name)
-            if covering is not None and by_name.get(covering, None) is not None:
-                if by_name[covering].status == "ok":
-                    continue
-            blockers.append(step)
-        return tuple(blockers)
+        blockers.append(step)
+    return tuple(blockers)
 
 
 def _bash(script: str) -> list[str]:
@@ -463,7 +519,12 @@ class _Session:
         self._deadline = self._clock() + seconds
 
     def step(
-        self, name: str, script: str, *, timeout_s: float = COMMAND_TIMEOUT_S
+        self,
+        name: str,
+        script: str,
+        *,
+        timeout_s: float = COMMAND_TIMEOUT_S,
+        timed: bool = False,
     ) -> CommandResult | None:
         """Run one step, record it, and return its result or None on failure.
 
@@ -473,7 +534,12 @@ class _Session:
         ``providers/aws.py`` refuses an episode whose reclamation did not land.
         """
 
+        # The clock is read only for a timed step: an untimed one must consume
+        # exactly the clock reads it always did, or every budget test shifts.
+        started = self._clock() if timed else 0.0
         outcome, result = self._attempt(name, script, timeout_s)
+        if timed:
+            outcome = dataclasses.replace(outcome, duration_s=self._clock() - started)
         self.steps.append(outcome)
         return result
 
@@ -580,7 +646,8 @@ def prepare_guest_disk(
     *,
     client_password: str,
     clock: Clock,
-    grow_root: bool = False,
+    requested_volume_gb: int | None = None,
+    volume_source: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
     retry_delays: Sequence[float] = DEFAULT_RETRY_DELAYS_S,
 ) -> GuestDiskReport:
@@ -591,10 +658,12 @@ def prepare_guest_disk(
     module docstring for why an unreachable guest must not cost an episode that
     would otherwise have worked.
 
-    ``grow_root`` is upstream's own gate -- "was a volume size requested" --
-    and the caller passes exactly that; see the module docstring for why
-    growing on any other condition would hand the agent a disk upstream would
-    not. ``sleep`` and ``retry_delays`` pace the hold's retries (injected so the
+    ``requested_volume_gb`` is upstream's own gate -- "was a volume size
+    requested" -- and the caller passes exactly the resolved size (a task's own
+    ``volume_size`` first, then the override; ``volume_source`` says which).
+    None means no grow; see the module docstring for why growing on any other
+    condition would hand the agent a disk upstream would not. ``sleep`` and
+    ``retry_delays`` pace the hold's retries (injected so the
     provider uses its own recovery cadence and tests use no wall time).
     """
 
@@ -619,7 +688,20 @@ def prepare_guest_disk(
     # would also race snapd's downloads for the very space apt needs.
     filesystem_after: int | None = None
     grew = False
-    if grow_root:
+    grow_root = requested_volume_gb is not None
+    if grow_root and _blocking_steps(session.steps, reclamation_attempted=reclamation_attempted):
+        # The provider refuses this episode on ``blocking_steps`` the moment
+        # this returns, so a grow (apt + growpart + resize, up to
+        # ``GROW_TIMEOUT_S``) would only delay a refusal. Recorded, not silent.
+        session.steps.append(
+            StepOutcome(
+                name=GROW_STEP_NAME,
+                status="skipped",
+                detail="reclamation blocked; episode will be refused",
+                attempts=0,
+            )
+        )
+    elif grow_root:
         grew = _grow_root_filesystem(session, client_password, filesystem_bytes, disk_bytes)
         if grew:
             filesystem_after, _ = _measure_geometry(session, "measure-geometry-after")
@@ -639,7 +721,27 @@ def prepare_guest_disk(
         steps=tuple(session.steps),
         root_grow_requested=grow_root,
         filesystem_bytes_after=filesystem_after,
+        requested_volume_gb=requested_volume_gb,
+        volume_size_source=volume_source if grow_root else None,
+        grow_target_met=_grow_target_met(
+            requested_volume_gb, filesystem_after if grew else filesystem_bytes
+        ),
     )
+
+
+def _grow_target_met(requested_volume_gb: int | None, filesystem_bytes: int | None) -> bool | None:
+    """v2.1's ``verify_linux_guest_volume`` test, recorded instead of raised.
+
+    ``filesystem_bytes`` is the size AFTER the grow when one ran, else the
+    size measured at the start (a filesystem that already spanned the volume
+    needed no grow and is judged as it stood). Same measure as upstream:
+    ``df --output=size`` is statvfs ``f_blocks * f_frsize``, the number upstream's
+    probe compares.
+    """
+
+    if requested_volume_gb is None or filesystem_bytes is None:
+        return None
+    return filesystem_bytes >= int(requested_volume_gb * 1024**3 * GROW_TARGET_FRACTION)
 
 
 def _measure_geometry(session: _Session, name: str) -> tuple[int | None, int | None]:
@@ -698,10 +800,15 @@ def _grow_root_filesystem(
         )
         return False
     session.extend(GROW_TIMEOUT_S + COMMAND_TIMEOUT_S)
+    # ``authenticated_escalation_script``, not the shared ladder: the grow must
+    # run ONCE (v2.1 "Do not replay partition writes") and a grow failure must
+    # never be re-tried under the next password and then reported as that
+    # password's auth failure. See that function.
     session.step(
         GROW_STEP_NAME,
-        escalation_script(_GROW_ROOT_FRAGMENT, client_password),
+        authenticated_escalation_script(_GROW_ROOT_FRAGMENT, client_password),
         timeout_s=GROW_TIMEOUT_S,
+        timed=True,
     )
     return True
 
@@ -803,9 +910,15 @@ GROW_STEP_NAME = "grow-root-filesystem"
 # * No ``[ -b ]`` test: ``lsblk`` returning a parent disk is the same evidence
 #   (it fails for anything that is not a partition of a block device) and keeps
 #   the fragment exercisable against stubs.
+# * The fstype and its resize tool are validated FIRST, before apt or
+#   ``growpart`` touch anything -- v2.1's order: an unsupported filesystem must
+#   not leave a partition table rewritten for a resize that can never follow.
 _GROW_ROOT_FRAGMENT = (
     "src=$(findmnt -no SOURCE /) || { echo grow=unsupported root=unknown; exit 3; }; "
     "fstype=$(findmnt -no FSTYPE /); "
+    'case "$fstype" in ext2|ext3|ext4) tool=resize2fs;; xfs) tool=xfs_growfs;; '
+    'btrfs) tool=btrfs;; *) echo "grow=unsupported-fs fs=$fstype"; exit 6;; esac; '
+    'command -v "$tool" >/dev/null 2>&1 || { echo "grow=no-resize-tool tool=$tool"; exit 6; }; '
     'dev=$(readlink -f -- "$src" 2>/dev/null || printf %s "$src"); '
     "name=${dev##*/}; "
     'disk=$(lsblk -ndo PKNAME "$dev" 2>/dev/null | head -n 1); '
@@ -824,11 +937,11 @@ _GROW_ROOT_FRAGMENT = (
     "*) if [ $gprc -ne 0 ]; then echo grow=growpart-failed rc=$gprc; exit 5; fi; "
     "state=grown;; esac; "
     "udevadm settle >/dev/null 2>&1 || true; "
+    # The fstype was validated above, so this ``case`` has no fall-through arm.
     'case "$fstype" in '
     'ext2|ext3|ext4) resize2fs "$dev" >/dev/null 2>&1;; '
     "xfs) xfs_growfs / >/dev/null 2>&1;; "
-    "btrfs) btrfs filesystem resize max / >/dev/null 2>&1;; "
-    '*) echo "grow=unsupported-fs fs=$fstype"; exit 6;; esac; '
+    "btrfs) btrfs filesystem resize max / >/dev/null 2>&1;; esac; "
     "rs=$?; "
     'echo "grow=$state fs=$fstype resize_rc=$rs growpart_installed=$installed"; '
     "exit $rs"
@@ -1030,6 +1143,81 @@ def escalation_script(fragment: str, client_password: str) -> str:
     # later write -- would silently invert that ordering and let a shadow object
     # be read as the result, which is the "no restart" blindness this parser
     # exists to prevent. Keep this print last.
+    lines.append("printf 'escalation=%s\\n' \"$tiers\"")
+    lines.append("printf '%s\\n' \"$out\"")
+    lines.append("exit $rc")
+    return "; ".join(lines)
+
+
+def authenticated_escalation_script(fragment: str, client_password: str) -> str:
+    """Authenticate first, then run the fragment ONCE under the rung that worked.
+
+    WHY NOT ``escalation_script``. That ladder moves to the next rung on ANY
+    non-zero exit, so a fragment that fails for its own reasons is re-run under
+    every remaining candidate, and the record keeps only the last rung's
+    output. For the idempotent reclamation fragments that is tolerable and is
+    left as it is (pre-existing behaviour; every campaign record reads
+    ``escalation=agentless>supplied``, so it has never fired there). For the
+    grow it is wrong twice over, both reproduced in review: a failed
+    ``growpart`` was REPLAYED (twice on a NOPASSWD guest), which v2.1 forbids
+    ("Do not replay partition writes", ``attempts=1``), and when the supplied
+    value is one of upstream's defaults the grow's own ``grow=<reason>`` was
+    overwritten by the next default's ``sudo: 1 incorrect password attempt``,
+    so the record blamed a credential for a disk failure.
+
+    This is v2.1's own ``sudo_cmd`` discipline ("Authenticate separately: a
+    command failure is not a password failure"): ``sudo -n -v``, then each
+    candidate through ``sudo -S -p '' -v``, same candidates and order as the
+    ladder; the first that VALIDATES is the one the fragment runs under, once.
+    The run re-feeds that candidate with ``-k`` rather than trusting the
+    timestamp ``-v`` left: without a tty sudo keys the ticket on the parent
+    PID, which a command substitution may or may not change (the hazard
+    upstream's own comment warns about), and ``-k`` also guarantees the
+    password line is consumed by sudo, never left on the fragment's stdin.
+
+    THE RECORDED OUTPUT keeps the ladder's shape: ``escalation=<chain>`` (the
+    rungs tried, ending on the one that authenticated), then the fragment's own
+    output. When no rung authenticates the fragment never runs and the output
+    says so -- an auth failure that cannot be mistaken for a grow failure, or
+    the reverse. Each candidate appears once in the script, assigned to a shell
+    variable and fed to ``sudo -S`` on stdin only.
+    """
+
+    quoted_fragment = _shell_quote(fragment)
+    #: Tier labels are fixed vocabulary, never a value: they land in the report.
+    candidates: list[tuple[str, str]] = []
+    if client_password:
+        candidates.append(("supplied", client_password))
+    candidates.extend(("upstream-default", value) for value in _fallback_passwords(client_password))
+
+    lines = [
+        "rc=1",
+        "out=''",
+        "pw=''",
+        "auth=''",
+        "tiers='agentless'",
+        "if sudo -n -v >/dev/null 2>&1; then auth=agentless; fi",
+    ]
+    for index, (tier, password) in enumerate(candidates):
+        var = f"cand{index}"
+        lines.append(
+            f'if [ -z "$auth" ]; then tiers="$tiers>{tier}"; {var}={_shell_quote(password)}; '
+            f"if printf '%s\\n' \"${var}\" | sudo -S -p '' -v >/dev/null 2>&1; "
+            f'then auth={tier}; pw="${var}"; fi; fi'
+        )
+    # One invocation of the fragment, under whichever rung validated. With no
+    # password (agentless) nothing at all is piped; with one, ``-k`` makes sudo
+    # read it afresh (see the docstring).
+    lines.append(
+        'if [ -z "$auth" ]; then '
+        "out='sudo: no candidate authenticated; fragment not run'; rc=1; "
+        'elif [ -z "$pw" ]; then '
+        f"out=$(sudo -n bash -c {quoted_fragment} 2>&1); rc=$?; "
+        "else "
+        f"out=$(printf '%s\\n' \"$pw\" | sudo -S -k -p '' bash -c {quoted_fragment} 2>&1); rc=$?; "
+        "fi"
+    )
+    # Payload last, for the same reason as in ``escalation_script``.
     lines.append("printf 'escalation=%s\\n' \"$tiers\"")
     lines.append("printf '%s\\n' \"$out\"")
     lines.append("exit $rc")

@@ -3177,6 +3177,9 @@ async def test_the_root_filesystem_is_grown_exactly_when_a_volume_size_was_reque
     # The grow's own ceiling reached the guest, not the 60 s reclamation one.
     assert grow_posts[0]["timeout"] == guest_deadline_for(guest_disk.GROW_TIMEOUT_S)
     assert report["root_grow_requested"] is True
+    # The plan's size AND its source reach the record: PLAIN declares no
+    # volume_size, so 120 is the override filling it -- the disclosed deviation.
+    assert (report["requested_volume_gb"], report["volume_size_source"]) == (120, "override")
     assert names.index("clear-snapd-download-scratch") < names.index("grow-root-filesystem")
     assert "measure-geometry-after" in names
     assert report["blocking_steps"] == []

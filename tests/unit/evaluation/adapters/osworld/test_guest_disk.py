@@ -265,7 +265,9 @@ def test_every_privileged_step_is_one_privileged_shell_reached_by_the_ladder() -
         assert "*" not in _unquoted(script)
 
 
-def _install_fake_sudo(bin_dir: Path, *, password: str, marker: Path) -> None:
+def _install_fake_sudo(
+    bin_dir: Path, *, password: str, marker: Path, nopasswd: bool = False
+) -> None:
     """A ``sudo`` that regains access the way root would, in both modes.
 
     ``-n`` -- the escalation ladder's first rung -- is always refused, which is
@@ -277,15 +279,28 @@ def _install_fake_sudo(bin_dir: Path, *, password: str, marker: Path) -> None:
     exactly as sudo's.
     """
 
+    # The options both ladders use: ``-n`` (refused unless ``nopasswd``, as on
+    # a guest with no NOPASSWD rule and no cached credential), ``-S`` (read
+    # the password from stdin), ``-v`` (validate only, run nothing), ``-k``
+    # (ignore cached credentials -- this stub caches none) and ``-p ''``.
     script = f"""#!/bin/bash
-if [ "$1" = "-n" ]; then
+nonint=0; validate=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n) nonint=1; shift;; -S|-k) shift;; -v) validate=1; shift;;
+    -p) shift 2;; --) shift; break;; *) break;;
+  esac
+done
+if [ $nonint = 1 ] && [ {"1" if nopasswd else "0"} = 0 ]; then
   echo 'sudo: a password is required' >&2; exit 1
 fi
-[ "$1" = "-S" ] && shift
-IFS= read -r pw
-if [ "$pw" != {guest_disk._shell_quote(password)} ]; then
-  echo 'sudo: 1 incorrect password attempt' >&2; exit 1
+if [ $nonint = 0 ]; then
+  IFS= read -r pw
+  if [ "$pw" != {guest_disk._shell_quote(password)} ]; then
+    echo 'sudo: 1 incorrect password attempt' >&2; exit 1
+  fi
 fi
+[ $validate = 1 ] && exit 0
 chmod -R u+rwx {guest_disk._shell_quote(str(marker))}
 "$@"
 rc=$?
@@ -1266,7 +1281,7 @@ def test_a_requested_volume_size_grows_the_filesystem_after_the_reclamation() ->
 
     guest = _growable_guest()
 
-    report = _prepare_with(guest, grow_root=True)
+    report = _prepare_with(guest, requested_volume_gb=120)
 
     names = [step.name for step in report.steps]
     assert names.index(guest_disk.GROW_STEP_NAME) > names.index("clear-snapd-download-scratch")
@@ -1288,7 +1303,7 @@ def test_the_grow_step_runs_on_its_own_ceiling_outside_the_reclamation_budget() 
     guest = _growable_guest()
     clock = _SleepingClock(step=TOTAL_BUDGET_S / 6)
 
-    report = _prepare_with(guest, clock, grow_root=True)
+    report = _prepare_with(guest, clock, requested_volume_gb=120)
 
     assert _status(report, guest_disk.GROW_STEP_NAME) == "ok"
     grow_index = next(i for i, command in enumerate(guest.commands) if "growpart" in command)
@@ -1303,7 +1318,7 @@ def test_a_filesystem_that_already_spans_the_volume_is_not_grown_again() -> None
         script={"--output=size": CommandResult(0, f"{_VOLUME_120 - 10**8}\n{_VOLUME_120}\n", "")},
     )
 
-    report = _prepare_with(guest, grow_root=True)
+    report = _prepare_with(guest, requested_volume_gb=120)
 
     assert not guest.ran("growpart")
     grow = _step(report, guest_disk.GROW_STEP_NAME)
@@ -1316,7 +1331,7 @@ def test_a_roomy_guest_is_still_grown_when_a_volume_size_was_requested() -> None
 
     guest = _growable_guest(free_bytes=ROOMY_FREE)
 
-    report = _prepare_with(guest, grow_root=True)
+    report = _prepare_with(guest, requested_volume_gb=120)
 
     assert report.reclamation_attempted is False
     assert not guest.ran("snap refresh")
@@ -1340,7 +1355,7 @@ def test_a_failed_grow_is_recorded_but_never_refuses_the_episode(reply: Any) -> 
 
     guest = _growable_guest(script={"growpart": reply})
 
-    report = _prepare_with(guest, grow_root=True)
+    report = _prepare_with(guest, requested_volume_gb=120)
 
     assert _status(report, guest_disk.GROW_STEP_NAME) in {"failed", "unreachable"}
     assert report.blocking_steps() == ()
@@ -1451,3 +1466,262 @@ def test_the_grow_fragment_reports_which_link_broke(tmp_path: Path) -> None:
 
     assert completed.returncode == 4
     assert "grow=no-growpart install=failed" in completed.stdout
+
+
+def test_the_grow_fragment_validates_the_filesystem_before_touching_the_partition(
+    tmp_path: Path,
+) -> None:
+    """N1: an unsupported fs exits 6 with neither apt nor ``growpart`` run.
+
+    v2.1 validates the resize handler first; RED on the previous fragment,
+    which ran ``growpart`` and only then found no resize arm for the fstype.
+    """
+
+    bin_dir = _fake_root_guest(tmp_path, has_growpart=True)
+    (bin_dir / "findmnt").write_text(
+        '#!/bin/bash\ncase "$*" in *SOURCE*) echo /dev/nvme0n1p1;; *FSTYPE*) echo vfat;; esac\n'
+    )
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 6
+    assert "grow=unsupported-fs fs=vfat" in completed.stdout
+    log = tmp_path / "calls.log"
+    calls = log.read_text() if log.exists() else ""
+    assert "growpart" not in calls
+    assert "apt-get" not in calls
+
+
+def test_the_grow_fragment_refuses_when_the_resize_tool_is_missing(tmp_path: Path) -> None:
+    """v2.1's ``tool_available "$RESIZE_TOOL"`` check, also before the partition."""
+
+    bin_dir = _fake_root_guest(tmp_path, has_growpart=True)
+    (bin_dir / "resize2fs").unlink()
+
+    completed = _run_grow(bin_dir)
+
+    assert completed.returncode == 6
+    assert "grow=no-resize-tool tool=resize2fs" in completed.stdout
+    log = tmp_path / "calls.log"
+    assert "growpart" not in (log.read_text() if log.exists() else "")
+
+
+# ----------------------------------------------------------------------
+# The grow's escalation: authenticate first, run the fragment once
+# ----------------------------------------------------------------------
+
+
+def _counting_fragment(counter: Path, *, rc: int, says: str) -> str:
+    """A fragment that records each run, then exits like a failed grow."""
+
+    return f"echo run >> {guest_disk._shell_quote(str(counter))}; echo {says}; exit {rc}"
+
+
+def _fake_sudo_guest(tmp_path: Path, *, password: str, nopasswd: bool = False) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    guard = tmp_path / "guard"
+    guard.mkdir()
+    _install_fake_sudo(bin_dir, password=password, marker=guard, nopasswd=nopasswd)
+    return bin_dir
+
+
+def test_a_failed_grow_is_not_replayed_or_reported_as_an_auth_failure(tmp_path: Path) -> None:
+    """F3/Q2, reproduced: the supplied value is an upstream default.
+
+    That opens the ladder's third rung, and the shared ladder re-ran a failed
+    grow under it -- whose ``sudo: 1 incorrect password attempt`` then replaced
+    the grow's own reason in the record. Authenticating first runs the fragment
+    once, under the rung that validated, and keeps ITS output.
+    """
+
+    first, second = guest_disk._UPSTREAM_DEFAULT_PASSWORDS
+    bin_dir = _fake_sudo_guest(tmp_path, password=second)
+    counter = tmp_path / "runs"
+    fragment = _counting_fragment(counter, rc=4, says="grow=no-growpart install=failed")
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(fragment, second), bin_dir
+    )
+
+    assert completed.returncode == 4
+    assert counter.read_text().splitlines() == ["run"]
+    assert "grow=no-growpart install=failed" in completed.stdout
+    assert "incorrect password" not in completed.stdout
+    assert completed.stdout.splitlines()[0] == "escalation=agentless>supplied"
+    assert second not in completed.stdout and first not in completed.stdout
+
+    # RED control: the shared ladder, same guest and fragment, masks the reason.
+    counter.unlink()
+    shared = _run_in_fake_guest(guest_disk.escalation_script(fragment, second), bin_dir)
+    assert "grow=no-growpart" not in shared.stdout
+    assert "incorrect password" in shared.stdout
+
+
+def test_a_failed_grow_runs_once_on_a_nopasswd_guest(tmp_path: Path) -> None:
+    """F3(b): the shared ladder ran a failed ``growpart`` twice here."""
+
+    bin_dir = _fake_sudo_guest(tmp_path, password="unused", nopasswd=True)
+    counter = tmp_path / "runs"
+    fragment = _counting_fragment(counter, rc=5, says="grow=growpart-failed rc=2")
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(fragment, "password"), bin_dir
+    )
+
+    assert completed.returncode == 5
+    assert counter.read_text().splitlines() == ["run"]
+    assert completed.stdout.splitlines()[0] == "escalation=agentless"
+    assert "grow=growpart-failed rc=2" in completed.stdout
+
+
+def test_the_grow_escalation_falls_through_to_a_default_that_validates(tmp_path: Path) -> None:
+    """The ladder's reach is unchanged: the measured stale-default case still opens."""
+
+    first, second = guest_disk._UPSTREAM_DEFAULT_PASSWORDS
+    bin_dir = _fake_sudo_guest(tmp_path, password=first)
+    counter = tmp_path / "runs"
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(
+            _counting_fragment(counter, rc=0, says="grow=grown"), second
+        ),
+        bin_dir,
+    )
+
+    assert completed.returncode == 0
+    assert counter.read_text().splitlines() == ["run"]
+    assert completed.stdout.splitlines()[0] == "escalation=agentless>supplied>upstream-default"
+
+
+def test_the_grow_never_runs_when_no_candidate_authenticates(tmp_path: Path) -> None:
+    """An auth failure reads as one, and nothing privileged was attempted."""
+
+    bin_dir = _fake_sudo_guest(tmp_path, password="none-of-them")
+    counter = tmp_path / "runs"
+
+    completed = _run_in_fake_guest(
+        guest_disk.authenticated_escalation_script(
+            _counting_fragment(counter, rc=0, says="grow=grown"), "password"
+        ),
+        bin_dir,
+    )
+
+    assert completed.returncode == 1
+    assert not counter.exists()
+    assert "no candidate authenticated; fragment not run" in completed.stdout
+    assert "escalation=agentless>supplied>upstream-default" in completed.stdout
+
+
+def test_each_grow_candidate_appears_once_and_only_on_stdin() -> None:
+    first, second = guest_disk._UPSTREAM_DEFAULT_PASSWORDS
+    script = guest_disk.authenticated_escalation_script("echo INNER", second)
+
+    assert script.count(f"'{second}'") == 1
+    assert script.count(f"'{first}'") == 1
+    # Validation only ever pipes into ``sudo -S ... -v``; the one run re-feeds
+    # the validated value with ``-k`` so sudo, not the fragment, consumes it.
+    assert script.count("| sudo -S -p '' -v") == 2
+    assert script.count("| sudo -S -k -p '' bash -c") == 1
+    assert "| sudo -n" not in script
+
+
+def test_the_grow_step_uses_the_auth_first_escalation() -> None:
+    guest = _growable_guest()
+
+    _prepare_with(guest, requested_volume_gb=120)
+
+    grow_command = next(command for command in guest.commands if "growpart" in command)
+    assert "sudo -n -v" in grow_command
+    assert "fragment not run" in grow_command
+    # The reclamation steps keep the shared ladder (pre-existing behaviour).
+    hold = next(command for command in guest.commands if "--hold=forever" in command)
+    assert "sudo -n -v" not in hold
+
+
+# ----------------------------------------------------------------------
+# What the record says about the grow: source, target, duration, skip
+# ----------------------------------------------------------------------
+
+
+def test_the_record_carries_the_requested_size_its_source_and_the_v21_target() -> None:
+    """F1(c)/F2: which size, from where, and did the fs reach 95 % of it."""
+
+    guest = _growable_guest()
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="override")
+
+    payload = json.loads(report.to_json_bytes())
+    assert payload["requested_volume_gb"] == 120
+    assert payload["volume_size_source"] == "override"
+    # 128,249,018,880 B >= 0.95 x 120 GiB (122,406,567,936 B).
+    assert payload["grow_target_met"] is True
+
+
+def test_a_short_grow_is_identifiable_by_grow_target_met() -> None:
+    """v2.1 raises under 95 %; this records False and still runs the episode."""
+
+    guest = _growable_guest(grown=_FS_BYTES + 10 * 1024**3)
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="task")
+
+    payload = json.loads(report.to_json_bytes())
+    assert payload["grow_target_met"] is False
+    assert payload["volume_size_source"] == "task"
+    assert report.blocking_steps() == ()
+
+
+def test_grow_target_met_is_none_when_nothing_was_requested() -> None:
+    payload = json.loads(_prepare_with(_growable_guest()).to_json_bytes())
+
+    assert payload["requested_volume_gb"] is None
+    assert payload["volume_size_source"] is None
+    assert payload["grow_target_met"] is None
+
+
+def test_an_already_spanning_filesystem_is_judged_as_it_stood() -> None:
+    """No grow needed: the 95 % test reads the starting filesystem size."""
+
+    guest = _Guest(
+        free_bytes=TIGHT_FREE,
+        script={"--output=size": CommandResult(0, f"{_VOLUME_120 - 10**8}\n{_VOLUME_120}\n", "")},
+    )
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="task")
+
+    assert report.grow_target_met is True
+
+
+def test_the_grow_step_records_its_duration_and_no_other_step_does() -> None:
+    """F4: the 180 s cap is unmeasured; the record is what will measure it."""
+
+    guest = _growable_guest()
+
+    payload = json.loads(
+        _prepare_with(guest, _SleepingClock(step=1.0), requested_volume_gb=120).to_json_bytes()
+    )
+
+    steps = {step["name"]: step for step in payload["steps"]}
+    assert steps[guest_disk.GROW_STEP_NAME]["duration_s"] > 0
+    assert all(
+        "duration_s" not in step for name, step in steps.items() if name != "grow-root-filesystem"
+    )
+
+
+def test_the_grow_is_skipped_when_the_episode_will_be_refused() -> None:
+    """F5/Q3: a blocked reclamation is refused; growing first only delays it."""
+
+    guest = _growable_guest(
+        script={
+            "snap refresh --hold": ConnectionError("refused"),
+            "refresh.hold=": ConnectionError("refused"),
+        }
+    )
+
+    report = _prepare_with(guest, requested_volume_gb=120, volume_source="task")
+
+    assert report.blocking_steps() != ()
+    assert not guest.ran("growpart")
+    grow = _step(report, guest_disk.GROW_STEP_NAME)
+    assert (grow.status, grow.attempts) == ("skipped", 0)
+    assert "reclamation blocked" in grow.detail
