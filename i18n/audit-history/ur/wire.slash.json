@@ -2,33 +2,32 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "wire.slash",
-  "history_sha256": "640f81d9c091656eec98262b90bbc1e21310a272b6ca89aa49bfaffea2fc8264",
+  "history_sha256": "f00190e469925208ccc21ea721b44d81b939d42bf0ed4255f527beb803702e2d",
   "entries": [
     {
       "locale": "ur",
       "namespace": "wire.slash",
       "source_sha256": "4190e3ccb3e995361840fb424c770fdad3b0243f8b8c2416710740a7b3e2d98f",
-      "target_sha256": "27e48ac212fba852404c54b62ea484c4e3f1700adde47080b093686fff326a6f",
       "translator": {
-        "agent": "coder (lopdev, core-temporary-backend, session cf2843d74957)",
+        "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
         "model": "anthropic/claude-opus-5-5",
-        "fallback": "none observed",
-        "date": "2026-11-12"
+        "fallback": "none reported in the relayed source",
+        "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
       },
       "auditor": {
-        "agent": "i18n-auditor (lopdev reviewer role, session 506f24a144fa; independent of PR authors and translators)",
-        "session": "506f24a144fa",
+        "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+        "session": "5c6cf4252f37",
         "model": "anthropic/claude-opus-5-5",
         "fallback": "none observed in this session",
         "date": "2026-11-12",
         "result": "passed",
         "findings": 0,
         "unresolved_blocker_major": 0,
-        "minor": 0,
+        "minor": 1,
         "nit": 0
       },
       "status": "passed",
-      "note": "Temporary chats (PR #3832 @ b06ad8dc5): 1 added key(s) read against glossary + ur guide; placeholders/plurals/width checked; 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 506f24a144fa, anthropic/claude-opus-5-5, no fallback. Re-validated at eaff8c7a9 by 2d1500d56d0e: en and target bytes identical; new glossary rows checked, no conflict."
+      "note": "Round 3 (in-PR apply) 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): read all 1 changed/added key(s) against i18n/glossary.md and i18n/style-guides/ur.md; mechanical: placeholders, CLDR plural arms, NFC/bidi/ellipsis/fr U+202F, maxCells via rich cell_len; 52 unchanged key(s) byte-identical to the passed, fresh base row at origin/main 27bfbdb21. Target ur/wire.slash.json sha256 27e48ac212fba852404c54b62ea484c4e3f1700adde47080b093686fff326a6f. Dispositions: I3-3 MINOR (deferred in PR thread): keep rendered with محفوظ (temporary_off 'محفوظ:', '/temporary off اسے محفوظ رکھتا ہے', status_off, placeholder, wire.slash, session_temporary) while relay buttons and tui.app holds use رکھیں/رکھی گئی; glossary keep row is رکھیں, never save; align."
     }
   ]
 }

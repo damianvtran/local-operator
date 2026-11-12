@@ -2,22 +2,21 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.slash",
-  "history_sha256": "b6de972b14180c9f7e6e1699b0536a768ab44f50050d1a0b862e10cc7fe23edf",
+  "history_sha256": "c0339ce25267420076feecefb2a3d517d87c18a83404f26fe3302886ff1756f3",
   "entries": [
     {
       "locale": "vi",
       "namespace": "wire.slash",
       "source_sha256": "4190e3ccb3e995361840fb424c770fdad3b0243f8b8c2416710740a7b3e2d98f",
-      "target_sha256": "0a9f72b15cd749c3d8bf9b6fe303e70a14eb662d7815767ddf09af0406d0f387",
       "translator": {
-        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-backend, session cf2843d74957); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
         "model": "anthropic/claude-opus-5-5",
-        "fallback": "none observed",
-        "date": "2026-11-12"
+        "fallback": "none reported in the relayed source",
+        "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
       },
       "auditor": {
-        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
-        "session": "2d1500d56d0e",
+        "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+        "session": "5c6cf4252f37",
         "model": "anthropic/claude-opus-5-5",
         "fallback": "none observed in this session",
         "date": "2026-11-12",
@@ -28,7 +27,7 @@
         "nit": 0
       },
       "status": "passed",
-      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the vi guide and sidecars; placeholders, plurals, U+202F and maxCells checked. 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
+      "note": "Round 3 (in-PR apply) 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): read all 1 changed/added key(s) against i18n/glossary.md and i18n/style-guides/vi.md; mechanical: placeholders, CLDR plural arms, NFC/bidi/ellipsis/fr U+202F, maxCells via rich cell_len; 52 unchanged key(s) byte-identical to the passed, fresh base row at origin/main 27bfbdb21. Target vi/wire.slash.json sha256 0a9f72b15cd749c3d8bf9b6fe303e70a14eb662d7815767ddf09af0406d0f387. Dispositions: no findings."
     }
   ]
 }
