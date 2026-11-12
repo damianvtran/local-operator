@@ -10,12 +10,24 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def back_to_chats() -> Msg:
+    return Msg("relay.session.back_to_chats", {})
+
+
 def directory_path_placeholder() -> Msg:
     return Msg("relay.session.directory.path_placeholder", {})
 
 
 def directory_sheet_title() -> Msg:
     return Msg("relay.session.directory.sheet_title", {})
+
+
+def keep_and_link() -> Msg:
+    return Msg("relay.session.keep_and_link", {})
+
+
+def keep_and_pin() -> Msg:
+    return Msg("relay.session.keep_and_pin", {})
 
 
 def list_empty_hint() -> Msg:
@@ -72,6 +84,42 @@ def past_loading() -> Msg:
 
 def past_search_placeholder() -> Msg:
     return Msg("relay.session.past.search_placeholder", {})
+
+
+def temporary_confirm_body() -> Msg:
+    return Msg("relay.session.temporary_confirm_body", {})
+
+
+def temporary_confirm_title() -> Msg:
+    return Msg("relay.session.temporary_confirm_title", {})
+
+
+def temporary_deleted_detail() -> Msg:
+    return Msg("relay.session.temporary_deleted_detail", {})
+
+
+def temporary_deleted_title() -> Msg:
+    return Msg("relay.session.temporary_deleted_title", {})
+
+
+def temporary_keep() -> Msg:
+    return Msg("relay.session.temporary_keep", {})
+
+
+def temporary_make() -> Msg:
+    return Msg("relay.session.temporary_make", {})
+
+
+def temporary_new() -> Msg:
+    return Msg("relay.session.temporary_new", {})
+
+
+def temporary_subtitle(*, status: str) -> Msg:
+    return Msg("relay.session.temporary_subtitle", {"status": status})
+
+
+def temporary_toggle() -> Msg:
+    return Msg("relay.session.temporary_toggle", {})
 
 
 def view_back() -> Msg:

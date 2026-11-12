@@ -83,5 +83,18 @@
   "relay.chrome.composer.model_label": "Модель: {label}",
   "relay.chrome.composer.spend_label": "Расходы и контекст: {label}",
   "relay.chrome.spend.title": "Расходы и контекст",
-  "relay.chrome.model.effort": "Усилие рассуждений"
+  "relay.chrome.model.effort": "Усилие рассуждений",
+  "relay.chrome.section_temporary": "Временные · {count, number}",
+  "relay.chrome.temporary_deletes_in": "{minutes, plural, one {Удаление через # мин} few {Удаление через # мин} many {Удаление через # мин} other {Удаление через # мин}}",
+  "relay.chrome.temporary_hold_running": "Сохраняется, пока идёт работа",
+  "relay.chrome.temporary_hold_on_screen": "Сохраняется, пока открыт",
+  "relay.chrome.temporary_hold_open_ask": "Сохраняется: есть открытый вопрос",
+  "relay.chrome.temporary_hold_armed_wake": "Сохраняется до запланированного пробуждения",
+  "relay.chrome.temporary_hold_armed_monitor": "Сохраняется: работает монитор",
+  "relay.chrome.temporary_hold_unread_mail": "Сохраняется: есть непрочитанные сообщения",
+  "relay.chrome.temporary_hold_operator_hold": "Сохраняется: поставлен на удержание",
+  "relay.chrome.temporary_hold_unseen_result": "Сохраняется, пока вы не увидите результат",
+  "relay.chrome.temporary_hold_unsaved_files": "Сохраняется: есть несохранённые файлы",
+  "relay.chrome.temporary_hold_linked": "Сохраняется: на него есть ссылка",
+  "relay.chrome.temporary_hold_cannot_verify": "Сохраняется: состояние пока не проверить"
 }

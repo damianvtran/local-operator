@@ -17,5 +17,17 @@
   "relay.session.model.filter_placeholder": "filtrer les modèles",
   "relay.session.model.loading": "chargement…",
   "relay.session.model.queued": "changement en attente — prendra effet à la prochaine étape",
-  "relay.session.model.refused": "{model} n’a pas été appliqué : {reason}"
+  "relay.session.model.refused": "{model} n’a pas été appliqué : {reason}",
+  "relay.session.temporary_toggle": "Discussion temporaire",
+  "relay.session.temporary_subtitle": "Temporaire · {status}",
+  "relay.session.temporary_keep": "Conserver la discussion",
+  "relay.session.temporary_make": "Rendre temporaire…",
+  "relay.session.temporary_confirm_title": "Rendre cette discussion temporaire ?",
+  "relay.session.temporary_confirm_body": "Elle quitte dès maintenant votre liste de discussions et sera supprimée après une période d’inactivité. Les fichiers qu’elle a modifiés sur votre ordinateur sont conservés.",
+  "relay.session.temporary_deleted_title": "Cette discussion temporaire a été supprimée",
+  "relay.session.temporary_deleted_detail": "Elle a été supprimée après une période d’inactivité et ne peut pas être rouverte. Les fichiers qu’elle a modifiés sur votre ordinateur sont toujours là.",
+  "relay.session.temporary_new": "Nouvelle discussion temporaire",
+  "relay.session.back_to_chats": "Retour aux discussions",
+  "relay.session.keep_and_pin": "Conserver et épingler",
+  "relay.session.keep_and_link": "Conserver et associer"
 }

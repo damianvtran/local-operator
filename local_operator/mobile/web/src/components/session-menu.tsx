@@ -25,6 +25,7 @@
 import { useEffect, useState, type RefObject } from "react";
 import { applyWideView, getWideView, isStandalone } from "../lib/viewport";
 import { Sheet } from "./ui/sheet";
+import { ChromeIcon } from "./ui/chrome-icon";
 import { messageRuntime } from "../store";
 
 /** One full-width menu row: the 44px touch floor the header controls use. */
@@ -44,6 +45,7 @@ export function SessionMenu({
 	onResume,
 	resuming = false,
 	returnFocusRef,
+	temporary,
 }: {
 	open: boolean;
 	onClose: () => void;
@@ -75,6 +77,11 @@ export function SessionMenu({
 	resuming?: boolean;
 	/** The ⋮ button, so closing returns focus to the control that opened it. */
 	returnFocusRef?: RefObject<HTMLElement | null>;
+	/** The temporary-chat row. ABSENT without `features.temporary_chats`, so an
+	    older relay shows no row whose request it would refuse. `confirm` is
+	    whether making it temporary asks first (a chat with messages has
+	    something to lose); keeping never asks. */
+	temporary?: { on: boolean; confirm: boolean; busy: boolean; onSet: (on: boolean) => void };
 }) {
 	/* Seeded from the persisted preference on mount and re-read on open: the
 	   preference can be changed from the conversation list while this screen is
@@ -95,6 +102,33 @@ export function SessionMenu({
 	if (latch.open !== open) setLatch({ open, spend: showSpend, queued: showQueued });
 	const spendRow = open && latch.open ? latch.spend : showSpend;
 	const queuedRow = open && latch.open ? latch.queued : showQueued;
+	/* THE CONFIRMATION REPLACES THE ROWS IN THIS SHEET rather than opening a
+	   second dialog over it (the Approvals rule above: two stacked sheets leave
+	   the column inert twice over). It resets whenever the sheet closes. */
+	const [confirming, setConfirming] = useState(false);
+	if (!open && confirming) setConfirming(false);
+	if (confirming && temporary) {
+		return (
+			<Sheet open={open} onClose={onClose} title={messageRuntime.t("relay.session.temporary_confirm_title")} returnFocusRef={returnFocusRef}>
+				<div data-menu="temporary-confirm" className="flex flex-col gap-3 p-3">
+					<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.session.temporary_confirm_body")}</p>
+					<div className="flex flex-wrap justify-end gap-2">
+						<button type="button" onClick={() => setConfirming(false)} className="min-h-11 rounded-sm px-3 text-body text-ink-muted active:bg-surface">
+							{messageRuntime.t("relay.notifications.confirm.cancel")}
+						</button>
+						<button
+							type="button"
+							disabled={temporary.busy}
+							onClick={() => { temporary.onSet(true); onClose(); }}
+							className="min-h-11 rounded-sm bg-accent-wash px-3 text-body font-medium text-accent active:bg-surface"
+						>
+							{messageRuntime.t("relay.session.temporary_make")}
+						</button>
+					</div>
+				</div>
+			</Sheet>
+		);
+	}
 	return (
 		<Sheet open={open} onClose={onClose} title="Session" returnFocusRef={returnFocusRef}>
 			<div className="flex flex-col gap-1 p-2">
@@ -147,6 +181,31 @@ export function SessionMenu({
 						{pinned ? "pinned" : "not pinned"}
 					</span>
 				</button>
+				{temporary ? (
+					/* KEEP OR MAKE TEMPORARY, one row whose verb is the action it takes
+					   (the pin row's idiom). `aria-pressed` carries the state, so the
+					   name need not repeat it. Keeping applies at once; making an
+					   existing chat temporary asks first, in this same sheet. */
+					<button
+						type="button"
+						data-menu="temporary"
+						disabled={temporary.busy}
+						aria-pressed={temporary.on}
+						onClick={() => {
+							if (temporary.on) { temporary.onSet(false); return; }
+							if (temporary.confirm) { setConfirming(true); return; }
+							temporary.onSet(true);
+						}}
+						className={MENU_ROW}
+					>
+						<span className="shrink-0 text-ink-dim"><ChromeIcon name="temporary" size={16} /></span>
+						<span className="min-w-0 flex-1 truncate">
+							{temporary.on
+								? messageRuntime.t("relay.session.temporary_keep")
+								: messageRuntime.t("relay.session.temporary_make")}
+						</span>
+					</button>
+				) : null}
 				{/* Absent in an installed app, where wide view is never applied
 				    (`isStandalone`): a row there would be a dead toggle. */}
 				{!isStandalone() && (

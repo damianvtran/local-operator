@@ -83,5 +83,18 @@
   "relay.chrome.composer.model_label": "模型：{label}",
   "relay.chrome.composer.spend_label": "费用与上下文：{label}",
   "relay.chrome.spend.title": "费用与上下文",
-  "relay.chrome.model.effort": "推理强度"
+  "relay.chrome.model.effort": "推理强度",
+  "relay.chrome.section_temporary": "临时 · {count, number}",
+  "relay.chrome.temporary_deletes_in": "{minutes, plural, other {# 分钟后删除}}",
+  "relay.chrome.temporary_hold_running": "运行中，暂不删除",
+  "relay.chrome.temporary_hold_on_screen": "正在打开，暂不删除",
+  "relay.chrome.temporary_hold_open_ask": "有待回答的问题，暂不删除",
+  "relay.chrome.temporary_hold_armed_wake": "已设定定时唤醒，暂不删除",
+  "relay.chrome.temporary_hold_armed_monitor": "监视器运行中，暂不删除",
+  "relay.chrome.temporary_hold_unread_mail": "有未读消息，暂不删除",
+  "relay.chrome.temporary_hold_operator_hold": "已被保留，暂不删除",
+  "relay.chrome.temporary_hold_unseen_result": "结果尚未查看，暂不删除",
+  "relay.chrome.temporary_hold_unsaved_files": "有未保存的文件，暂不删除",
+  "relay.chrome.temporary_hold_linked": "有内容关联到它，暂不删除",
+  "relay.chrome.temporary_hold_cannot_verify": "暂时无法确认状态，暂不删除"
 }
