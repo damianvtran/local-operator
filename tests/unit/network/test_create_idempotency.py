@@ -146,8 +146,47 @@ def test_an_old_owner_that_cannot_be_asked_says_may_have_been_created(
     assert refused.value.code == "create_unconfirmed", refused.value
     sentence = refused.value.sentence
     assert "may have been created" in sentence, sentence
-    assert "sessions list peer=node-2" in sentence, sentence
+    # Both real spellings (R1-n1 / QA Q2): the tool's and the CLI's.
+    assert "`sessions op=list peer=node-2`" in sentence, sentence
+    assert "`lop network sessions --peer node-2`" in sentence, sentence
     assert "unreachable" not in sentence
+
+
+def test_a_pending_lookup_names_the_full_retry_command(
+    pair: tuple[Any, Any, _Wire], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-n1: the retry sentence is a command an agent can run as written."""
+    owner, requester, wire = pair
+    wire.drop = 1
+    monkeypatch.setattr(
+        owner._create_keys, "lookup", lambda _device, _key: ("pending", "")  # noqa: SLF001
+    )
+    with pytest.raises(types.MeshRefusal) as refused:
+        requester._ctl_peer_create({"peer": "node-2", "create_key": "a" * 32})  # noqa: SLF001
+    sentence = refused.value.sentence
+    assert f"`lop network sessions --peer node-2 --create --create-key {'a' * 32}`" in sentence
+
+
+def test_images_without_a_prompt_are_refused_before_the_key_is_reserved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-m4: the refusal depends on the frame alone, so it reserves (and binds)
+    nothing — a keyed retry must not be answered ``replayed`` for a refused create."""
+    monkeypatch.setattr(relay.RelayServer, "_warm_after_create", lambda self, *a, **k: None)
+    owner = _server(tmp_path / "owner")
+    key = "9" * 32
+    frame = {
+        "op": "net_session_create",
+        "req": 1,
+        "cwd": "",
+        "create_key": key,
+        "images": [{"data_b64": "AA==", "mime_type": "image/png"}],
+    }
+    with pytest.raises(types.MeshRefusal) as refused:
+        owner._op_session_create(_owner_link(), frame)  # noqa: SLF001
+    assert refused.value.code == "protocol_error"
+    assert owner._create_keys.lookup(REQUESTER_DEVICE, key) == ("unknown", "")  # noqa: SLF001
+    assert _sessions(owner) == [], "nothing was minted for a refused frame"
 
 
 def test_an_unreachable_link_is_still_unreachable(

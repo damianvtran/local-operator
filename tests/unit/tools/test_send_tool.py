@@ -1338,11 +1338,12 @@ def _fake_mesh(
 
 
 @pytest.mark.asyncio
-async def test_peer_send_drives_a_turn_and_returns_the_reply(
+async def test_peer_send_against_an_old_owner_renders_the_turn_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§3B/§8.1: one call drives a turn on that device; the owner's reply is in
-    the result — the receipt-carried acceptance the manager locked."""
+    """An owner too old for the mesh mailbox runs the send as a turn (the CLI's
+    ``fallback: "prompt"``); the owner's reply is in the result and the receipt
+    says it went as a turn."""
     calls: list[tuple[list[str], float]] = []
     _fake_mesh(
         monkeypatch,
@@ -1353,6 +1354,7 @@ async def test_peer_send_drives_a_turn_and_returns_the_reply(
             "ok": True,
             "outcome": "finished",
             "reply": "done over there",
+            "fallback": "prompt",
         },
         calls=calls,
     )
@@ -1364,10 +1366,68 @@ async def test_peer_send_drives_a_turn_and_returns_the_reply(
     details = result.details or {}
     assert details["mode"] == "mesh" and details["reply"] == "done over there"
     assert details["outcome"] == "finished"
-    # §3A's spelling, at the boundary: --json BEFORE the act, text after `--`.
+    assert "sent as a turn" in result.text
+    # §3A's spelling, at the boundary: --json BEFORE the act, text after `--`,
+    # and ``--mailbox`` (PR #3827 A1) — the tool always asks for the mailbox.
     assert calls == [
-        (["network", "sessions", "--json", "--peer", PEER, "--send", "alpha", "--", "hello"], 600.0)
+        (
+            [
+                "network",
+                "sessions",
+                "--json",
+                "--peer",
+                PEER,
+                "--send",
+                "alpha",
+                "--mailbox",
+                "--",
+                "hello",
+            ],
+            600.0,
+        )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("given", "flags", "phrase"),
+    [
+        ({}, ["--mailbox"], "or wakes for it if idle"),
+        ({"wake": False}, ["--mailbox", "--no-wake"], "quietly"),
+        ({"now": True}, ["--mailbox", "--now"], "as a steer"),
+    ],
+)
+async def test_a_peer_send_is_a_mailbox_delivery_with_wake_and_now(
+    monkeypatch: pytest.MonkeyPatch, given: dict[str, Any], flags: list[str], phrase: str
+) -> None:
+    """PR #3827 A1: ``send peer=`` is local-send parity — a mailbox delivery whose
+    ``wake``/``now`` reach the CLI as ``--no-wake``/``--now``, and whose success is
+    the owner's mailbox admission, worded for the mode actually used."""
+    calls: list[tuple[list[str], float]] = []
+    mode = "steer" if given.get("now") else "mailbox"
+    _fake_mesh(
+        monkeypatch,
+        {
+            "session_id": "s1",
+            "peer": PEER,
+            "verb": "send",
+            "ok": True,
+            "outcome": "delivered",
+            "delivery_path": "mailbox",
+            "mode": mode,
+            "wake": given.get("wake", True),
+            "message_id": "peer-" + "a" * 32,
+        },
+        calls=calls,
+    )
+    result = await execute_send(
+        "t", {"peer": PEER, "target": "alpha", "message": "hi", **given}, None, None, _context()
+    )
+    assert not result.is_error, result.text
+    assert phrase in result.text, result.text
+    assert (result.details or {})["outcome"] == "delivered"
+    argv = calls[0][0]
+    assert argv[argv.index("alpha") + 1 : argv.index("--")] == flags
 
 
 @pytest.mark.asyncio
@@ -1401,6 +1461,7 @@ async def test_peer_send_addresses_by_exact_session_id_too(
         PEER,
         "--send",
         "s9",
+        "--mailbox",
         "--",
         "hello",
     ]
@@ -1410,15 +1471,15 @@ async def test_peer_send_addresses_by_exact_session_id_too(
 async def test_peer_send_refuses_the_local_only_modes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§3B: `wake`/`now`/`patience`/`model` act on THIS machine's loopback
-    substrate; beside `peer` they are refused — never dropped."""
-    for given in ({"wake": True}, {"now": True}, {"patience": "5m"}, {"model": "x/y"}):
+    """§3B: `patience`/`model` act on THIS machine; beside `peer` they are
+    refused — never dropped. (`wake`/`now` left the list with PR #3827 A1.)"""
+    for given in ({"patience": "5m"}, {"model": "x/y"}):
         _fake_mesh(monkeypatch, {})  # must never be reached
         args: dict[str, Any] = {"peer": PEER, "target": "alpha", "message": "hi", **given}
         result = await execute_send("t", args, None, None, _context())
         assert result.is_error, given
         assert "local-only" in result.text, given
-        assert "drop `wake`/`now`/`patience`/`model`" in result.text, given
+        assert "drop `patience`/`model`" in result.text, given
 
 
 @pytest.mark.asyncio
@@ -1446,12 +1507,11 @@ async def test_peer_send_refuses_a_pid_a_double_address_and_a_missing_one() -> N
 async def test_an_admitted_peer_send_still_running_is_a_delivery_not_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`running` means the owner ADMITTED the turn and was still on it when the CLI
-    stopped waiting (the CLI exits 1 so a script never reads it as a reply). For
-    the tool it is a delivery — what a local `send` returns on admission — so the
-    result is NOT an error (2026-11-11: a busy lop-remote-node-2 session came back
-    is_error=true and invited a duplicate send). It still carries the outcome and
-    the resume hint."""
+    """`running` (turn path only: an old owner) is reported only once the owner's
+    user row for our id exists — ADMITTED and still running when the CLI stopped
+    waiting (the CLI exits 1 so a script never reads it as a reply). For the tool
+    it is a delivery, so NOT an error. It still carries the outcome and the
+    resume hint."""
     _fake_mesh(
         monkeypatch,
         {
@@ -1494,6 +1554,57 @@ async def test_a_peer_send_that_did_not_run_or_failed_stays_an_error(
     )
     assert result.is_error
     assert (result.details or {})["outcome"] == outcome
+
+
+@pytest.mark.asyncio
+async def test_a_turn_parked_behind_a_busy_owner_is_an_error_not_a_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #3827 A1: a turn-path wait that ended BEFORE the owner admitted it is
+    parked in that runtime's prompt queue — not delivered, lost if it stops — so
+    the tool says so and flags an error (the earlier revision called it success)."""
+    _fake_mesh(
+        monkeypatch,
+        {
+            "session_id": "s1",
+            "peer": PEER,
+            "verb": "send",
+            "ok": False,
+            "outcome": "queued",
+            "code": "queued_behind_turn",
+            "fallback": "prompt",
+        },
+        rc=1,
+    )
+    result = await execute_send(
+        "t", {"peer": PEER, "target": "alpha", "message": "go"}, None, None, _context()
+    )
+    assert result.is_error
+    assert "NOT delivered yet" in result.text and "queued behind its running turn" in result.text
+    assert (result.details or {})["code"] == "queued_behind_turn"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_owner_that_cannot_confirm_stays_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mailbox path's own non-delivery: an owner too busy to confirm admission
+    is a ``session_unreachable`` refusal, relayed as an error — never a delivery."""
+    _fake_mesh(
+        monkeypatch,
+        {
+            "ok": False,
+            "code": "session_unreachable",
+            "message": "s1 on cloud-node-1 was too busy to confirm the message within 60s; "
+            "it is not confirmed delivered — check before you retry",
+        },
+        rc=1,
+    )
+    result = await execute_send(
+        "t", {"peer": PEER, "target": "alpha", "message": "go"}, None, None, _context()
+    )
+    assert result.is_error
+    assert "too busy to confirm" in result.text
 
 
 @pytest.mark.asyncio

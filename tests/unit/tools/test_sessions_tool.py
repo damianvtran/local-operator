@@ -3611,3 +3611,42 @@ async def test_a_remote_resume_still_running_is_delivered_and_a_lost_create_name
     assert not spawned.is_error, spawned.text
     assert "s_new" in spawned.text and "reply to the create was lost" in spawned.text
     assert "the prompt was not admitted" not in spawned.text
+
+
+@pytest.mark.asyncio
+async def test_a_remote_resume_parked_behind_a_busy_owner_is_an_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3827 A1: ``resume peer= prompt=`` keeps the prompt path, and a wait that
+    ended before the owner admitted it is ``queued_behind_turn`` — not delivered,
+    so an error with the honest sentence. Its argv carries no ``--mailbox``."""
+    seen: list[list[str]] = []
+
+    async def fake(
+        argv: list[str], timeout: float, context: object | None = None
+    ) -> tuple[int, dict[str, Any], str]:
+        seen.append(argv)
+        return (
+            1,
+            {
+                "session_id": "s1",
+                "peer": PEER,
+                "verb": "send",
+                "ok": False,
+                "outcome": "queued",
+                "code": "queued_behind_turn",
+            },
+            "",
+        )
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    resumed = await execute_sessions(
+        "t",
+        {"op": "resume", "peer": PEER, "session": "s1", "prompt": "go"},
+        None,
+        None,
+        _context(root),
+    )
+    assert resumed.is_error
+    assert "NOT delivered yet" in resumed.text
+    assert "--mailbox" not in seen[0]

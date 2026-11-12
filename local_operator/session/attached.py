@@ -10898,6 +10898,54 @@ class AttachedSession:
             elif not completed.cancelled():
                 completed.exception()
 
+    def owner_takes_mesh_peer_message(self) -> bool:
+        """Whether the bound owner takes a relayed ``peer_message`` (mesh ``send``).
+
+        False with no client, on an in-process takeover, or for an owner that did
+        not advertise ``MESH_PEER_MESSAGE_CAPABILITY`` — the caller then falls back
+        to the prompt path (PR #3827 A1). Read after ``bind_runtime``.
+        """
+        client = self._client
+        if self._takeover_target is not None or client is None or not client.connected:
+            return False
+        return bool(getattr(client, "mesh_peer_message_supported", False))
+
+    async def send_peer_message(
+        self,
+        text: str,
+        *,
+        mode: str,
+        wake: bool,
+        sender: dict[str, Any],
+        message_id: str,
+    ) -> dict[str, Any]:
+        """Deliver ``text`` to the owner's mailbox; the owner's reply frame.
+
+        The mesh twin of ``lop send``: see ``AttachClient.peer_message``. No
+        ``prompt``, so nothing is parked in the owner's prompt queue behind a
+        running turn — that parking is what made a busy mesh send unreportable.
+        """
+        await self._await_owner_ready()
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError("owner connection lost")
+        return await client.peer_message(
+            text, mode=mode, wake=wake, sender=sender, message_id=message_id
+        )
+
+    def holds_message(self, message_id: str) -> bool:
+        """Whether the synced window holds a row with ``message_id``.
+
+        How a pilot that stopped waiting tells "the owner admitted my prompt and
+        is running it" from "still parked in its prompt queue": the owner adopts
+        the caller's id as the user row's id, so the row exists only once admitted.
+        """
+        try:
+            rows = self.display_history_window()
+        except Exception:  # noqa: BLE001 — a deferred window holds nothing yet
+            return False
+        return any(getattr(row, "id", None) == message_id for row in rows)
+
     async def prompt(
         self,
         text: str,

@@ -2070,6 +2070,18 @@ def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
     assert result.is_error
     assert _text(result).endswith("boom")
 
+    # PR #3827 A1: a wait that ended BEFORE admission is parked behind the
+    # owner's running turn — NOT delivered — and stays an error.
+    parked = dict(receipt, outcome="queued", code="queued_behind_turn")
+
+    async def fake_parked(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        return 1, json.dumps(parked), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_parked)
+    result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
+    assert result.is_error
+    assert "NOT delivered yet" in _text(result)
+
     done = dict(receipt, ok=True, outcome="finished", reply="on it")
 
     async def fake_done(argv: list[str], timeout: float) -> tuple[int, str, str]:

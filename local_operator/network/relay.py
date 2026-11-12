@@ -9681,6 +9681,14 @@ class RelayServer:
         # every refusal above (so a refused create reserves nothing) and BEFORE the
         # mint (so a replay mints nothing). Namespaced by the sending device: a key
         # is never a way to read another member's sessions.
+        if frame.get("images") and not str(frame.get("prompt") or ""):
+            # Images with no text are not a turn. Refused rather than silently
+            # dropped, because a create that discarded them would look like it had
+            # started something. HERE, above the reservation and the mint (review
+            # round 1, R1-m4): it depends on the frame alone, and raised after the
+            # bind it left the key pointing at a session the requester was told
+            # was refused — a keyed retry then answered ``replayed`` for it.
+            raise MeshRefusal("protocol_error", "a create frame carried images but no prompt text")
         create_key = normalize_create_key(frame.get("create_key"))
         if create_key:
             reserved, existing = self._create_keys.reserve(link.device_id, create_key)
@@ -9884,13 +9892,7 @@ class RelayServer:
             ),
         }
         if not prompt:
-            if frame.get("images"):
-                # Images with no text are not a turn. Refused rather than silently
-                # dropped, because a create that discarded them would look like it had
-                # started something.
-                raise MeshRefusal(
-                    "protocol_error", "a create frame carried images but no prompt text"
-                )
+            # (Images without a prompt were refused above the reservation.)
             # ANSWER THE CREATE, THEN WARM IT (QA round 1, Q4b). A warm-up is a spawned
             # runtime plus its discovery record, measured at 15.9-22.1 s on LOOPBACK on
             # a loaded host, while the desktop's own window for this call is 20 s: the
@@ -14098,10 +14100,15 @@ class RelayServer:
         a second one.
         """
         label = self._peer_label(peer)
-        check = f"check `sessions list peer={peer}` before creating again"
+        # BOTH REAL SPELLINGS (review round 1, R1-n1 / QA Q2): this sentence
+        # reaches an agent through the ``sessions`` tool and a person through the
+        # CLI, and the earlier ``sessions list peer=`` was neither one's syntax.
+        listing = f"`sessions op=list peer={peer}` (CLI: `lop network sessions --peer {peer}`)"
+        check = f"check {listing} before creating again"
         retry = (
-            f"a retry that sends create key {create_key} (`--create-key {create_key}`) "
-            "returns that session instead of making a second one"
+            f"a retry that sends create key {create_key} — "
+            f"`lop network sessions --peer {peer} --create --create-key {create_key}` with "
+            "the same options — returns that session instead of making a second one"
         )
         try:
             found = self._local_peer_call(
@@ -14137,7 +14144,7 @@ class RelayServer:
                 "detail": (
                     f"{label} created {session_id}, but its reply to the create was lost, so "
                     "whether the first prompt was admitted is unknown — "
-                    f"`sessions list peer={peer}` shows how far it got"
+                    f"{listing} shows how far it got"
                 ),
                 "record": found.get("record"),
             }

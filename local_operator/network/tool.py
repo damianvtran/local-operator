@@ -942,9 +942,21 @@ def _pilot_receipt_lines(verb: str, payload: dict[str, Any]) -> list[str]:
     peer = str(payload.get("peer") or "")
     lines: list[str] = []
     if verb == "send":
+        from local_operator.network.cli import (
+            mailbox_receipt_lines,
+            prompt_fallback_line,
+            queued_behind_turn_lines,
+        )
+
         outcome = str(payload.get("outcome") or "")
         error = str(payload.get("error") or "")
-        if outcome == "finished":
+        if outcome in ("delivered", "duplicate"):
+            # A MAILBOX delivery (``--send --mailbox``, the ``send peer=`` path).
+            lines.extend(mailbox_receipt_lines(payload))
+        elif outcome == "queued" and payload.get("code") == "queued_behind_turn":
+            # NOT delivered: parked behind the owner's running turn (PR #3827 A1).
+            lines.extend(queued_behind_turn_lines(session_id, peer))
+        elif outcome == "finished":
             lines.append(f"{session_id} on {peer}: the turn finished.")
             reply = str(payload.get("reply") or "")
             if reply:
@@ -952,8 +964,8 @@ def _pilot_receipt_lines(verb: str, payload: dict[str, Any]) -> list[str]:
         elif outcome == "running":
             lines.append(f"{session_id} on {peer} took the turn and is still running it.")
             lines.append(
-                "It was admitted there, so the work is happening — this call stopped waiting; "
-                f"open it to watch it: `lop --resume {session_id}`"
+                "Its message row is there, so the work is happening — this call stopped "
+                f"waiting; open it to watch it: `lop --resume {session_id}`"
             )
         elif outcome == "queued":
             lines.append(f"{peer} is retiring that session's runtime, so no turn ran here.")
@@ -972,6 +984,8 @@ def _pilot_receipt_lines(verb: str, payload: dict[str, Any]) -> list[str]:
             )
         else:
             lines.append(json.dumps(payload, sort_keys=True))
+        if payload.get("fallback") == "prompt":
+            lines.append(prompt_fallback_line(peer))
     elif verb == "steer":
         because = str(payload.get("receipt") or "").strip() or "accepted"
         lines.append(f"{session_id} on {peer}: {because}")
@@ -1570,11 +1584,13 @@ async def execute_network(
             body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
             text, spill = spill_truncate(body, _TOOL, context)
             if scrubbed.get("verb") == "send" and scrubbed.get("outcome") == "running":
-                # ADMITTED IS DELIVERED (2026-11-11): the owner took the turn and is
-                # still running it; the CLI's exit 1 only means "no reply yet" to a
-                # script. A tool result flagged as an error here told the agent its
-                # message failed while the work was happening — the same rule
-                # ``tools.builtin._mesh_send_failed`` applies to ``send peer=``.
+                # ADMITTED IS DELIVERED: ``running`` is reported only once the
+                # owner's user row for OUR message id is in the window
+                # (``_pilot_send``), so the turn really is running there; the CLI's
+                # exit 1 only means "no reply yet" to a script. A wait that ended
+                # before admission is ``queued``/``queued_behind_turn`` — parked
+                # behind the running turn, NOT delivered — and stays an error
+                # (PR #3827 A1). Same rule as ``tools.builtin._mesh_send_failed``.
                 return _text(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
             return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read

@@ -10991,6 +10991,30 @@ class Session:
                 f"{Session._neutralize_bridge_tag(text)}\n"
                 "</team-bridge-message>"
             )
+        elif sender.get("mesh_device_id"):
+            # A MESH PEER WROTE THIS (``send peer=``, PR #3827 A1). Its pid names
+            # a process on another machine, so the envelope names what a REPLY
+            # needs instead: the sending session and the device, the latter
+            # stamped by this owner from the authenticated link
+            # (``server._stamp_peer_sender``) — never taken from the frame.
+            device = str(sender.get("mesh_device_name") or sender.get("mesh_device_id"))
+            from_session = str(sender.get("session_id") or "")
+            wrapped = (
+                f"<peer-session-message "
+                f"from_session={from_session!r} "
+                f"device={device!r} "
+                f"conversation={conversation!r} "
+                f"model={model_label!r}>\n"
+                f"{text}\n"
+                "</peer-session-message>\n"
+                # The exact reply call, because the local reply habit (target= /
+                # pid=) cannot reach another device.
+                + (
+                    f"(Reply with send peer={device!r} session={from_session!r}.)"
+                    if from_session
+                    else f"(It came from device {device!r}; reply with send peer={device!r}.)"
+                )
+            )
         else:
             wrapped = (
                 f"<peer-session-message "

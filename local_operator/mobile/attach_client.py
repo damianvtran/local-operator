@@ -81,6 +81,7 @@ from local_operator.session.runtime.types import (
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     drain_phrase_for_frame,
 )
@@ -1141,6 +1142,9 @@ class AttachClient:
         self._activity_supported = False
         self._exclusive_move_supported = False
         self._ask_attachments_supported = False
+        #: Whether the owner takes a relayed ``peer_message`` and stamps the
+        #: sending device (``MESH_PEER_MESSAGE_CAPABILITY``). False until a dial.
+        self._mesh_peer_message_supported = False
         self._connected = False
 
     @property
@@ -1281,6 +1285,9 @@ class AttachClient:
         # its neighbours. Unlike ``_input_mode_supported`` this gates a REFUSAL, not
         # a strip: see ``ask_respond``.
         self._ask_attachments_supported = ASK_ATTACHMENTS_CAPABILITY in record.capabilities
+        # Read on a local dial too, for symmetry with the remote one
+        # (``RemoteSessionClient.connect``); only the mesh pilot consults it.
+        self._mesh_peer_message_supported = MESH_PEER_MESSAGE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
                 "127.0.0.1", record.control_port, limit=_READ_LIMIT_BYTES
@@ -2835,6 +2842,41 @@ class AttachClient:
         if reason:
             fields["reason"] = reason
         return await self._request("ask_dismiss", **fields)
+
+    @property
+    def mesh_peer_message_supported(self) -> bool:
+        """Did this owner advertise ``MESH_PEER_MESSAGE_CAPABILITY`` on this dial?"""
+        return bool(getattr(self, "_mesh_peer_message_supported", False))
+
+    async def peer_message(
+        self,
+        text: str,
+        *,
+        mode: str,
+        wake: bool,
+        sender: dict[str, Any],
+        message_id: str,
+    ) -> dict[str, Any]:
+        """Deliver ``text`` to the owner's MAILBOX, as a local ``lop send`` does.
+
+        The mesh ``send`` (PR #3827 A1): unlike ``prompt``, a busy owner does not
+        park this behind its running turn — it is a ``peer_message`` row read at
+        the next tool-call boundary, with the sender's wake/steer choice, and the
+        ack arrives at mailbox admission. Returns the whole reply frame so the
+        caller can read the owner's ``delivery`` block; raises the owner's
+        refusal like every other op. The SENDING DEVICE is not ours to claim: the
+        owner stamps it from the link (``server._stamp_peer_sender``).
+        """
+        reply = await self._request_frame(
+            "peer_message",
+            text=text,
+            mode=mode,
+            wake=wake,
+            sender=sender,
+            message_id=message_id,
+        )
+        self._raise_for_reply_error(reply)
+        return reply
 
     async def recall_steer(self, command_id: str) -> str:
         """Unsend the queued steer submitted under ``command_id`` (v4)."""
