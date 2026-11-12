@@ -1,6 +1,12 @@
 {
+  "wire.sessions.approval_park_local": "tạm cất {address} nếu phiên đang rảnh: dừng runtime để giải phóng bộ nhớ, giữ các lần đánh thức và trình theo dõi vẫn hoạt động; bị từ chối khi phiên đang làm việc",
+  "wire.sessions.approval_park_self": "tạm cất phiên này sau lượt này: dừng runtime để giải phóng bộ nhớ, giữ các lần đánh thức và trình theo dõi vẫn hoạt động",
   "wire.sessions.approval_stop_local": "dừng {address} nếu phiên đang rảnh: giải phóng lease của phiên và không bao giờ gửi tín hiệu; bị từ chối khi phiên đang làm việc",
   "wire.sessions.approval_stop_peer": "dừng {address} trên {peer}: bản dựng này luôn từ chối, sẽ không gửi gì",
+  "wire.sessions.park_done": "đã tạm cất \"{name}\" — {wakes, plural, other {# lần đánh thức}} và {monitors, plural, other {# trình theo dõi}} vẫn hoạt động; trình giám sát sẽ mở lại phiên khi một trong số đó kích hoạt",
+  "wire.sessions.park_self_refused_busy": "Phiên này không thể tự tạm cất khi vẫn còn tác tử con, tác vụ nền hoặc câu hỏi chưa được trả lời, nên chưa có gì được lên lịch. Hãy tạm cất khi công việc đó xong.",
+  "wire.sessions.park_self_scheduled": "Phiên này sẽ được tạm cất ngay khi lượt này kết thúc: runtime thoát để giải phóng bộ nhớ, còn {wakes, plural, other {# lần đánh thức}} và {monitors, plural, other {# trình theo dõi}} vẫn hoạt động. Phiên sẽ mở lại khi một trong số đó kích hoạt hoặc có tin nhắn đến.",
+  "wire.sessions.stop_dormant_hint": "Dừng phiên sẽ khiến các lần đánh thức và trình theo dõi của nó TẠM NGỪNG cho đến khi phiên được mở lại. Để giải phóng bộ nhớ mà vẫn giữ chúng hoạt động, hãy dùng op='park'.",
   "wire.sessions.stop_pending": "“{name}” đã chấp nhận lệnh dừng, nhưng chưa thoát sau {seconds} s. Không có tín hiệu nào được gửi — hãy xem danh sách phiên trước khi thử lại.",
   "wire.sessions.stop_refused_busy": "“{name}” đang làm việc (một lượt, một phê duyệt, một tác nhân con hoặc một tác vụ), nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại khi phiên rảnh.",
   "wire.sessions.stop_refused_old_owner": "“{name}” đang chạy bản dựng cũ hơn, bản dựng đó không thể cam kết chỉ dừng khi phiên rảnh, nên không có gì bị dừng và không có tín hiệu nào được gửi. Thử lại sẽ không thay đổi điều đó — hãy đề nghị người vận hành dừng nó.",

@@ -31712,7 +31712,12 @@ class Session:
         precisely what the supervisor engages to achieve, so this is where
         "the wake machinery got this far" becomes observable."""
         self._write_wake_index_entry(
-            list(self._wake.schedules), clear=("stopped_at",), stamp="last_attempt_at"
+            # ``parked_at`` too: a park is over the moment a runtime exists
+            # again, and a stale stamp would mislabel a live session as parked
+            # (and make the parked-monitor sweep probe a session that is up).
+            list(self._wake.schedules),
+            clear=("stopped_at", "parked_at"),
+            stamp="last_attempt_at",
         )
 
     def _write_wake_index_entry(
@@ -31814,7 +31819,10 @@ class Session:
         EVERY open, which is the self-healing property for the derived file a
         cold reader (cleanup guard, picker, ``lop monitor status``) sees.
         """
-        self._write_monitor_index_entry(list(self._monitors.monitors), clear=("stopped_at",))
+        # ``parked_at`` is cleared for the same reason as on the wake entry.
+        self._write_monitor_index_entry(
+            list(self._monitors.monitors), clear=("stopped_at", "parked_at")
+        )
         self._prune_monitor_store()
 
     def _prune_monitor_store(self) -> None:

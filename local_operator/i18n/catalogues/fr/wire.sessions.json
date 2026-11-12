@@ -1,6 +1,12 @@
 {
+  "wire.sessions.approval_park_local": "mettre {address} en veille si la session est inactive : son runtime s’arrête pour libérer de la mémoire, ses réveils et ses moniteurs restent armés ; refusé tant qu’elle travaille",
+  "wire.sessions.approval_park_self": "mettre cette session en veille après ce tour : son runtime s’arrête pour libérer de la mémoire, ses réveils et ses moniteurs restent armés",
   "wire.sessions.approval_stop_local": "arrêter {address} si elle est inactive : libère le bail de la session et n’envoie jamais de signal ; refusé pendant qu’elle travaille",
   "wire.sessions.approval_stop_peer": "arrêter {address} sur {peer} : toujours refusé sur ce build, rien ne sera envoyé",
+  "wire.sessions.park_done": "« {name} » mis en veille — {wakes, plural, one {# réveil} many {# de réveils} other {# réveils}} et {monitors, plural, one {# moniteur} many {# de moniteurs} other {# moniteurs}} restent armés ; le superviseur la rouvre dès que l’un d’eux se déclenche",
+  "wire.sessions.park_self_refused_busy": "Cette session ne peut pas se mettre en veille tant qu’un sous-agent, une tâche en arrière-plan ou une question ouverte est en cours, donc rien n’a été planifié. Mettez-la en veille une fois ce travail terminé.",
+  "wire.sessions.park_self_scheduled": "Cette session se met en veille dès la fin de ce tour : son runtime s’arrête pour libérer de la mémoire, et ses {wakes, plural, one {# réveil} many {# de réveils} other {# réveils}} et {monitors, plural, one {# moniteur} many {# de moniteurs} other {# moniteurs}} restent armés. Elle se rouvre dès que l’un d’eux se déclenche ou qu’un message arrive.",
+  "wire.sessions.stop_dormant_hint": "L’arrêt rend ses réveils et ses moniteurs INACTIFS jusqu’à la réouverture de la session. Pour libérer de la mémoire en les gardant armés, utilisez plutôt op='park'.",
   "wire.sessions.stop_pending": "L’arrêt a été accepté par « {name} », mais la session n’était pas encore sortie après {seconds} s. Aucun signal n’a été envoyé — lisez la liste des sessions avant de réessayer.",
   "wire.sessions.stop_refused_busy": "« {name} » travaille en ce moment (un tour, une approbation, un sous-agent ou une tâche), donc rien n’a été arrêté et aucun signal n’a été envoyé. Réessayez une fois la session inactive.",
   "wire.sessions.stop_refused_old_owner": "« {name} » tourne sur un build plus ancien qui ne peut pas promettre un arrêt réservé aux sessions inactives, donc rien n’a été arrêté et aucun signal n’a été envoyé. Réessayer n’y changera rien — demandez à l’opérateur de l’arrêter.",

@@ -1,6 +1,6 @@
 ---
 name: sessions
-description: "Use the `sessions` tool to list, inspect, spawn, resume, stop or peek at other local lop sessions; `lop sessions` and `lop exec --workstream` remain the CLI fallback."
+description: "Use the `sessions` tool to list, inspect, spawn, resume, stop, park or peek at other local lop sessions; `lop sessions` and `lop exec --workstream` remain the CLI fallback."
 ---
 
 # The `sessions` tool — other local sessions, tool-first
@@ -24,7 +24,8 @@ the message protocol.
 | `info` | one session: state, directory, transcript path, origin, opener, sidebar visibility | read |
 | `spawn` | open a parallel session — a listed workstream by default | write |
 | `resume` | reopen a stored or stopped session headlessly | write |
-| `stop` | end a running session gracefully (no force in this version) | exec |
+| `stop` | end a running session gracefully (no force in this version); its wakes and monitors go DORMANT until it is reopened | exec |
+| `park` | end an idle session's runtime to free memory while its wakes and monitors stay ARMED; no address parks THIS session once the current turn ends | exec |
 | `peek` | a bounded transcript read — a window, a search, or a digest | read |
 | `help` | the full per-op reference — accepted inputs with types and defaults, one example and the refusals per op | read |
 
@@ -73,6 +74,35 @@ that cannot promise an idle-only stop is REFUSED, and the refusal names which.
 Restart is two auditable calls (`stop` + `resume`). There is no force option and
 no way to stop a session that is mid-run from this tool — the escalation stays
 the operator's, in the CLI.
+
+## Stop vs park
+
+Both end an idle runtime through the same idle-only ladder (never a signal,
+never a cut turn). They differ in what happens to the session's schedules:
+
+| | `stop` | `park` |
+| --- | --- | --- |
+| runtime process | ends | ends |
+| wakes | DORMANT (`stopped_at`) — will not fire until someone reopens it | ARMED (`parked_at`) — the wake supervisor fires them and reopens the session |
+| monitors | DORMANT | ARMED — the supervisor runs read-only checks (`bash` allow-listed commands, `read`, `grep`) itself and reopens the session only when one changes; other tools (MCP, web) reopen it on every due tick |
+| use it when | the session's work is over | you only want the memory back |
+
+The stop receipt says how many wakes and monitors it made dormant and names
+`park` as the alternative. Free memory with `park`; reserve `stop` for ending
+work. Reopening the session (any engage) clears either stamp.
+
+**Self-park.** `sessions(op='park')` with no address parks the calling session
+once the current turn ends: a detached helper waits for the owner's idle latch
+and then parks it, so the turn is never cut. It is refused (nothing scheduled)
+while this session has a running subagent, a background job or an open ask.
+Use it when you have nothing left to do until a wake or monitor fires.
+
+**Under pressure, the fleet guard parks first.** When the machine memory pass
+reaches its act line, or swap on the data volume outgrows the free space (or
+free space drops under 2 GiB), the wake supervisor parks idle, detached
+sessions — oldest-idle first, never a busy one, one a viewer is attached to,
+the chief of staff (Aida) or an engine duty session — before it would end a
+build. Each park logs one `pressure park:` line in the supervisor log.
 
 ## Resume — the canonical flow
 

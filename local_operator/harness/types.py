@@ -946,7 +946,7 @@ class OneTurnSecretScopeError(ValueError):
 _AGENT_FORWARDING_TOOLS = frozenset({"task", "hub", "send", "sessions", "network"})
 _FORWARDING_READ_OPS: dict[str, frozenset[str]] = {
     "hub": frozenset({"list", "peek", "pause", "cancel"}),
-    "sessions": frozenset({"list", "info", "stop", "peek", "help"}),
+    "sessions": frozenset({"list", "info", "stop", "park", "peek", "help"}),
     "network": frozenset(
         {
             "status",
