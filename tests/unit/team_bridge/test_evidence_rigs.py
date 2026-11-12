@@ -23,8 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 RIGS = (
-    ROOT / "docs/evidence/team-bridge-h1/capture-rig.py",
-    ROOT / "docs/evidence/team-bridge-h1/proactive-rig.py",
+    ROOT / "scripts/repro/team-bridge-h1/capture-rig.py",
+    ROOT / "scripts/repro/team-bridge-h1/proactive-rig.py",
 )
 
 #: The first harness import — where the prologue must already have stripped.
