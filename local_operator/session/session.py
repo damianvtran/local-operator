@@ -27207,16 +27207,9 @@ class Session:
         enabled = policy(self._config_dir)
         if not enabled["enabled"] or not enabled["capture"] or not self._session_id:
             return
-        from local_operator.memory_capture import import_capture_disabled
+        from local_operator.memory_capture import auto_capture_skipped
 
-        if import_capture_disabled(getattr(self._transcript, "directory", None)):
-            return
-        # A TEMPORARY CHAT is deleted when idle: auto-capture would carry its
-        # content into durable memory past the deletion the user asked for.
-        from local_operator.session.temporary import is_marked_path
-
-        transcript_dir = getattr(self._transcript, "directory", None)
-        if transcript_dir is not None and is_marked_path(transcript_dir):
+        if auto_capture_skipped(getattr(self._transcript, "directory", None)):
             return
         # The task returns data only. It is not a session background job and
         # cannot wake/continue a turn; stale speculative plans simply lose it.

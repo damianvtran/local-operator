@@ -323,7 +323,12 @@ def _strip_dangling_separator(title: str) -> str:
 #: ``subagent`` keeps rank 4 rather than closing the gap the retired peer axis
 #: (rank 3) left: the rank is this widget's own sort key, and renumbering it
 #: would churn every test and comment for a hole nothing reads.
-_SECTION_NAMES = {0: "pinned", 1: "active", 2: "previous", 4: "subagent"}
+#:
+#: ``temporary`` (rank -1) heads the list: a TEMPORARY chat
+#: (``session/temporary.py``) is listed only here, in its own group, because
+#: it is left out of the ordinary sections by design and the group is where
+#: the user finds the chats that will be deleted when idle.
+_SECTION_NAMES = {-1: "temporary", 0: "pinned", 1: "active", 2: "previous", 4: "subagent"}
 
 
 class SessionSidebar(Widget, can_focus=True):
@@ -1066,6 +1071,8 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if entry.subagent:
             return 4
+        if getattr(entry.row, "temporary", False):
+            return -1
         return 1 if entry.active else 2
 
     def _section_key(self, entry: CatalogEntry) -> tuple[int, str]:
@@ -2711,6 +2718,25 @@ class SessionSidebar(Widget, can_focus=True):
                 # above it. No title cells are spent on the rows themselves.
                 result.append(
                     truncate_cells(f"  {label}", width).ljust(width),
+                    style=theme_mod.semantic_color("muted"),
+                )
+                continue
+            if kind == "header:temporary":
+                # Keyed and counted (``Temporary · N``), unlike the four legacy
+                # headings below, because it is new copy and the count is what
+                # tells the user how many chats are on a deletion clock.
+                from local_operator.i18n.keys import tui_app as _ta
+                from local_operator.i18n.text import tr
+
+                count = sum(
+                    1
+                    for _kind, row in rows
+                    if row is not None and self._section_of(row) == -1
+                )
+                result.append(
+                    truncate_cells(
+                        str(tr("tui.app")(_ta.section_temporary(count=count))), width
+                    ).ljust(width),
                     style=theme_mod.semantic_color("muted"),
                 )
                 continue

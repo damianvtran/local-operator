@@ -11906,6 +11906,9 @@ class OperatorApp(App[None]):
             entries = load_catalog(
                 root,
                 include_subagents=self._session_sidebar.show_subagents,
+                # Temporary chats live in the sidebar's own `Temporary · N`
+                # group (``_unpinned_rank`` files them at rank -1).
+                include_temporary=True,
                 pinned_hidden_ids=tuple(read_pins(root)),
             )
             # `/tags on` is persisted, so a shortcut pressed while the drawer
@@ -12243,6 +12246,9 @@ class OperatorApp(App[None]):
             entries = load_catalog(
                 root,
                 include_subagents=self._session_sidebar.show_subagents,
+                # Temporary chats live in the sidebar's own `Temporary · N`
+                # group (``_unpinned_rank`` files them at rank -1).
+                include_temporary=True,
                 pinned_hidden_ids=tuple(pins),
             )
             # THE PEER TIER (``mesh-ui.md`` §1.3, review round 4 MINOR 3): the
