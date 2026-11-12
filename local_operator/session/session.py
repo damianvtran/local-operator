@@ -22968,9 +22968,9 @@ class Session:
             CANCEL_JOIN_S,
             REQUEST_BUDGET_REFUSAL,
             VERIFIER_ROLE,
+            VerdictStatus,
             VerifierLimits,
             VerifierVerdict,
-            VerdictStatus,
             build_verifier_prompt,
             counted_host_tools,
             find_verdict,
@@ -22979,8 +22979,10 @@ class Session:
             verifier_ceiling,
             verifier_profile,
         )
-
-        from local_operator.harness.verifier_evidence import VerifierEvidence, assess_completion
+        from local_operator.harness.verifier_evidence import (
+            VerifierEvidence,
+            assess_completion,
+        )
 
         # Receipts belong to this invocation: reusing an SDK evidence envelope
         # must not make a prior check's inspections available to a fresh child.

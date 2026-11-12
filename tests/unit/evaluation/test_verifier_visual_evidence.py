@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.evaluation.completion_verifier import CompletionVerifierConfig, SANDBOX_TOKEN
+from local_operator.evaluation.completion_verifier import (
+    SANDBOX_TOKEN,
+    CompletionVerifierConfig,
+)
 from local_operator.evaluation.protocol import FinishAction
 from local_operator.evaluation.session_arm import _arm_completion_verifier
 from local_operator.harness.verifier import VerifierVerdict

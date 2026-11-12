@@ -60,13 +60,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
-from local_operator.harness.verifier_evidence import VerifierEvidence
-
 from local_operator.harness.verifier import (
     CANCEL_JOIN_S,
     DEFAULT_LOCAL_TOOL_ALLOWANCE,
     VerifierLimits,
 )
+from local_operator.harness.verifier_evidence import VerifierEvidence
 
 #: Per-command bound for the verifier's guest reads. A read that needs more
 #: than this is not a read; the worker's own commands keep their 300 s.

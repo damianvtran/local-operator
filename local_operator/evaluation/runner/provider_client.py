@@ -44,8 +44,8 @@ from local_operator.evaluation.action_surface import (
     ActionAdmissionError,
     ActionSurface,
 )
-from local_operator.evaluation.evidence.projection import frame_images
 from local_operator.evaluation.evidence.models import RouteIdentity
+from local_operator.evaluation.evidence.projection import frame_images
 from local_operator.evaluation.protocol import (
     MAX_BATCH_SIZE,
     ActionBatch,

@@ -12,21 +12,18 @@ import pytest
 from PIL import Image
 
 from local_operator.harness.types import ChatRequest, ImageContent, Message, TextContent
-from tests.unit.session.test_launch_subagent import MODEL
 from local_operator.harness.verifier_evidence import (
     VerifierEvidence,
     VerifierEvidenceItem,
     assess_completion,
 )
 from local_operator.providers.clients import OpenAICompatClient
+from tests.unit.session.test_launch_subagent import MODEL
 from tests.unit.session.test_verify_completion import (
     TreeStream,
-    config_dir as _config_dir,
-    make_parent,
-    text_turn,
-    tool_turn,
 )
-
+from tests.unit.session.test_verify_completion import config_dir as _config_dir
+from tests.unit.session.test_verify_completion import make_parent, text_turn, tool_turn
 
 config_dir = _config_dir
 
@@ -316,6 +313,7 @@ async def test_capped_typed_unmet_assessment_keeps_repair_challenge(
     tmp_path, config_dir, monkeypatch
 ):
     import asyncio
+
     from local_operator.harness import subagent
     from local_operator.harness.verifier import VerifierLimits, build_verdict_challenge
 

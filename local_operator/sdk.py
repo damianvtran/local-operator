@@ -92,7 +92,10 @@ if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from contextlib import AbstractAsyncContextManager
 
     from local_operator.harness.types import AgentEvent, EventHandler
-    from local_operator.harness.verifier_evidence import VerifierEvidence, VerifierEvidenceItem
+    from local_operator.harness.verifier_evidence import (
+        VerifierEvidence,
+        VerifierEvidenceItem,
+    )
     from local_operator.i18n.messages import Msg
     from local_operator.output_contract import MarkdownSchema, decode_output
     from local_operator.session.protocol import (
