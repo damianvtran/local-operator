@@ -1099,7 +1099,10 @@ def _rank(
         # so ``_kernel_reason`` judges it, not the check-time lookup.
         readings = [
             _rank(
-                dataclasses.replace(target, path=p, raw_path=p, landings=()), prot, session_id, globstar
+                dataclasses.replace(target, path=p, raw_path=p, landings=()),
+                prot,
+                session_id,
+                globstar,
             )
             for p in target.landings
         ]
