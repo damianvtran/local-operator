@@ -31256,16 +31256,25 @@ class OperatorApp(App[None]):
     def _watch_bridge_latch(self, session: Any, source: SessionInteraction) -> None:
         """Announce once, in this pane, that a pre-latch session auto stopped covering calls.
 
-        Only a session this app hosts has a local latch; a viewer's owner
-        announces through its own notice stream.
+        A session this app hosts has the real latch; a viewer facade has a
+        MIRROR of the owner's (``mirror=True``), which only redraws parked
+        cards -- the owner announces through its own notice stream.
+
+        Installed once PER LATCH, not once per source: a source's session is
+        replaced on takeover (viewer facade -> hosted ``Session``), and the new
+        session's real latch must get its own watcher.
         """
         latch = getattr(session, "bridge_taint_latch", None)
-        if latch is None or getattr(source, "_bridge_watch_installed", False):
+        if latch is None or getattr(source, "_bridge_watch_latch", None) is latch:
             return
-        source._bridge_watch_installed = True  # type: ignore[attr-defined]
+        source._bridge_watch_latch = latch  # type: ignore[attr-defined]
 
         def announce() -> None:
-            suspended = self._draft_grant_suspended(source)
+            # A viewer's MIRROR latch (``AttachedSession.bridge_taint_latch``)
+            # fires only to redraw parked cards: the owner already announced
+            # the suspension on its own notice stream, so a second notice here
+            # would say it twice.
+            suspended = not getattr(latch, "mirror", False) and self._draft_grant_suspended(source)
             from local_operator.harness.bridge_egress import grant_suspended_notice
 
             def paint() -> None:
@@ -31303,6 +31312,18 @@ class OperatorApp(App[None]):
                 enter(bridge_card_notice(source.session))
             except Exception:  # noqa: BLE001 - the setters still refuse; logged
                 logger.warning("could not re-render a parked card as latched", exc_info=True)
+                continue
+            # Followers (an attached pane, the desktop, the phone) were sent
+            # this card while it was clean; re-publish it latched on the same
+            # request id so they redraw it as Allow/Deny too (security r7 lead
+            # on #3796). Only a card this app projected carries that id.
+            handle = self._mobile_handle
+            relatch = getattr(handle, "note_approval_relatched", None)
+            if callable(relatch):
+                try:
+                    relatch(card)
+                except Exception:  # noqa: BLE001 - the owner still refuses; logged
+                    logger.warning("could not re-publish a parked card as latched", exc_info=True)
 
     def _card_setting_refused_while_latched(
         self, source: SessionInteraction

@@ -323,8 +323,15 @@ class BridgeTaintLatch:
         *,
         inherited: bool = False,
         entries: Callable[[], Iterable[tuple[str, Mapping[str, Any]]]] | None = None,
+        mirror: bool = False,
     ) -> None:
         self.inherited = bool(inherited)
+        #: A VIEWER's copy of the owner's latch (``AttachedSession``), marked
+        #: from the owner's per-card ``bridge_latched`` flag. It drives the
+        #: viewer's card redraw only: the owner announces the latch-time notice
+        #: through its own notice stream, so a host must not announce it again
+        #: for a mirror, and the owner's runtime stays the enforcer.
+        self.mirror = bool(mirror)
         self._latched = self.inherited
         #: Wording only (see :data:`SOURCE_AGENT_MESSAGE`). A child inheriting a
         #: latched parent's taint got it through another session.
@@ -1153,6 +1160,23 @@ def _kind_copy(name: str, source: Any) -> str:
     if source_kind_of(source) == SOURCE_OTHER_SESSION:
         return _copy(f"{name}_other_session")
     return _copy(name)
+
+
+def card_notice_kind(detail: Any) -> SourceKind:
+    """The latch kind an owner's card detail was stamped with (viewer side).
+
+    The wire carries the kind only as the kind-selected ``bridge_card_notice``
+    line the owner prefixes to a latched card's detail (S-46), so a viewer
+    reads it back from there rather than gaining a wire field. Wording only:
+    anything unrecognised is ``agent_message``, the pre-kind wording.
+    """
+    try:
+        head = str(detail or "").split("\n", 1)[0]
+        if head and head == _copy("card_notice_other_session"):
+            return SOURCE_OTHER_SESSION
+    except Exception:  # noqa: BLE001 - wording only: fall back to the old copy
+        logger.warning("bridge card notice kind unreadable", exc_info=True)
+    return SOURCE_AGENT_MESSAGE
 
 
 def bridge_card_notice(source: Any = None) -> str:

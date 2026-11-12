@@ -109,7 +109,11 @@ full request when its ordinary summary is clipped or does not show every
 argument verbatim. No mode change answers a parked card, and a viewer's
 background approval leaves it parked. Desktop and phone receive the
 `bridge_latched`/`taint_raised` flags and the notice as the first line of the
-description, whether the runtime or the TUI owns the gate.
+description, whether the runtime or the TUI owns the gate. A card parked
+while the session was clean is re-published with those fields, on the same
+request id, the moment the session latches, so every viewer redraws it as the
+Allow/Deny card. An attached terminal keeps a mirror of the owner's latch,
+marked from that flag, which drives the redraw only; the owner still enforces.
 
 The latch records which kind of source set it, and that kind picks only the
 wording of the card notice, the paused-auto notice and the refused-auto
@@ -133,13 +137,16 @@ survives resume.
 
 ## bridge_ack
 
-A routed `approvals auto` for a latched session needs the `bridge_ack` marker
-(sent by a desktop build that knows the latch; the TUI marks typed commands).
-Without it the command is refused with a receipt that says to type
-`/approvals auto` in the terminal, so an older desktop's "Set auto" escape
-cannot re-loosen a latched session. Today that includes the phone composer's
-typed `/approvals auto`: the phone has no `bridge_ack` path yet, so a latched
-session can be loosened only from the terminal (fail closed).
+A routed `approvals auto` or `approvals default auto` for a latched session
+needs the `bridge_ack` marker (sent by a desktop build that knows the latch;
+the TUI marks typed commands). Without it the command is refused with a
+receipt that says to type `/approvals auto` in the terminal, so an older
+desktop's "Set auto" escape cannot re-loosen a latched session. The `default`
+form is covered because global auto covers a latched session's cards (the
+accepted auto/yolo risk), so a stale card's `G` would otherwise loosen the gate
+in one press. Today that includes the phone composer's typed `/approvals
+auto`: the phone has no `bridge_ack` path yet, so a latched session can be
+loosened only from the terminal (fail closed).
 
 ## Fail-closed
 

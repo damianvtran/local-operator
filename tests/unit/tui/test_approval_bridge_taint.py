@@ -354,3 +354,55 @@ async def test_u1_u4_latched_card_names_its_source_and_flashes_withdrawn_keys(
         assert app._approve_all is False
         await pilot.press("n")
         assert await pending is False
+
+
+class _ViewerSession(GatedSession):
+    """A gated fake carrying a VIEWER's mirror latch (``AttachedSession``).
+
+    The mirror is marked from the owner's re-published card, never by this
+    process; the app must redraw the parked card from it but leave the
+    latch-time notice to the owner's own notice stream.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        from local_operator.harness.bridge_egress import BridgeTaintLatch
+
+        self.bridge_taint_latch = BridgeTaintLatch(mirror=True)
+
+    @property
+    def bridge_latched(self) -> bool:
+        return self.bridge_taint_latch.latched
+
+
+@pytest.mark.asyncio
+async def test_r7_lead_a_viewer_card_parked_before_the_latch_is_redrawn_from_the_mirror(
+    config_dir: Path,
+) -> None:
+    """Security r7 lead on #3796: a viewer's card raised while the session was
+    clean was never redrawn (the facade had no latch, so no watcher), and its
+    ``G`` routed ``approvals default auto``. The owner's re-publish marks the
+    viewer's mirror latch; the app's existing watcher then turns the parked
+    card into the Allow/Deny card, and ``G`` writes nothing."""
+    session = _ViewerSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._set_approve_all(False)
+        gate = _gate(session)
+
+        parked = asyncio.ensure_future(gate("bash", "ls"))
+        await _wait_prompt(pilot, app)
+        assert _labels(app) == ["Allow", "Deny", "Allow all"]
+        records_before = _approvals_records(config_dir)
+
+        session.bridge_taint_latch.mark()
+        await pilot.pause()
+        assert _labels(app) == ["Allow", "Deny"], "the viewer's parked card kept Allow all"
+
+        await pilot.press("G")
+        await pilot.pause()
+        assert _approvals_records(config_dir) == records_before
+        assert not parked.done(), "G answered the parked card"
+        await pilot.press("y")
+        assert await parked is True
