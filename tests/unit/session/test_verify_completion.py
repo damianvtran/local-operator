@@ -410,3 +410,159 @@ def test_limits_refuse_nonsense() -> None:
     for bad in bad_values:
         with pytest.raises(ValueError):
             VerifierLimits(**bad)
+
+
+# -- review round 1 regressions (PR #3837) -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_task_verifier_role_keeps_its_shell_and_the_harness_verifier_is_confined(
+    tmp_path, monkeypatch
+):
+    """R2 / Q1: confinement rides the harness LAUNCH, never the ``verifier``
+    name. An operator registry row called ``verifier`` (this machine has one:
+    it needs ``gh``/``curl``) launched by ``task`` keeps an ordinary shell and
+    its network floor; the harness-built verifier, same name, is confined."""
+    from local_operator.harness import subagent as subagent_mod
+    from local_operator.harness.subagent import is_readonly_shell_role
+    from local_operator.harness.verifier import VERIFIER_TOOL_ALLOWLIST
+    from tests.unit.session.test_launch_subagent import (
+        OneShotStream,
+        _bash_of,
+        _sandbox,
+        make_session,
+    )
+
+    _sandbox(monkeypatch, available=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.chdir(tmp_path)
+    # The attached-profile path (``lop exec --profile verifier``) reads the
+    # same one predicate.
+    assert not is_readonly_shell_role("verifier")
+    parent = make_session(tmp_path, OneShotStream())
+
+    ordinary = await subagent_mod._build_child_session(
+        label="verifier",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-operator-verifier",
+        agent="verifier",
+        profile=AgentProfile(name="verifier", tools=("read", "bash", "web_fetch")),
+    )
+    bash = _bash_of(ordinary)
+    assert bash is not None and bash.approval_tier == "exec"
+    assert "SANDBOXED" not in bash.description
+    assert ordinary._shell_write_root is None and not ordinary._readonly_shell
+    assert "web_fetch" in {tool.name for tool in ordinary._tools}
+
+    harness = await subagent_mod._build_child_session(
+        label="Verify completion",
+        prompt="p",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-harness-verifier",
+        agent=VERIFIER_ROLE,
+        profile=verifier_profile(),
+        surface=ChildSurface(ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST), readonly_shell=True),
+    )
+    confined = _bash_of(harness)
+    assert confined is not None and confined.approval_tier == "read"
+    assert "SANDBOXED" in confined.description
+    assert harness._shell_write_root and harness._readonly_shell
+    assert not {"web_search", "web_fetch"} & {tool.name for tool in harness._tools}
+    await harness.dispose()
+    await ordinary.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_caller_cancels_the_verifier_job(tmp_path, config_dir):
+    """R3: a cancelled caller must not leave the child running uncapped."""
+
+    stream = TreeStream(lambda request: [30.0, *text_turn("VERDICT: PASS")])
+    parent = make_parent(tmp_path, stream)
+    started = asyncio.Event()
+    info: dict[str, Any] = {}
+
+    def on_started(payload: dict[str, Any]) -> None:
+        info.update(payload)
+        started.set()
+
+    caller = asyncio.create_task(
+        parent.verify_completion(
+            request="r",
+            claim="c",
+            limits=VerifierLimits(max_requests=100, wall_s=60),
+            on_started=on_started,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=5)
+    await wait_for(lambda: bool(stream.by_job.get(info["job_id"])))
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    job = parent.jobs.get(info["job_id"])
+    assert job is not None and job.status == "cancelled", getattr(job, "status", None)
+    # The request observer is gone too: nothing of this call stays subscribed.
+    assert stream.observers == []
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_on_the_capped_request_is_kept(tmp_path, config_dir):
+    """Q2: the answer given ON request ``max_requests`` wins over the cap."""
+
+    limits = VerifierLimits(max_requests=3, max_commands=10, wall_s=30)
+
+    def reply(request: ChatRequest) -> list[Any]:
+        done = sum(1 for m in request.messages if m.role in ("tool", "toolResult"))
+        if done < limits.max_requests - 1:
+            return tool_turn("glob", {"pattern": "*.nothing"})
+        return text_turn("all met\nVERDICT: PASS")
+
+    stream = TreeStream(reply)
+    parent = make_parent(tmp_path, stream)
+    verdict = await parent.verify_completion(request="r", claim="c", limits=limits)
+
+    assert len(stream.by_job[verdict.job_id]) == limits.max_requests
+    assert (verdict.status, verdict.ended_by) == ("PASS", "verdict"), verdict
+    await parent.dispose()
+
+
+def test_parse_verdict_accepts_common_decorations() -> None:
+    """M3: decorations a model adds to its last line are not a failure."""
+
+    for line in (
+        "`VERDICT: PASS`",
+        "## VERDICT: PASS",
+        "> VERDICT: PASS",
+        "Final VERDICT: PASS",
+        "**Final verdict:** PASS",
+        "- **VERDICT**: `PASS`",
+        "verdict: pass",
+    ):
+        assert parse_verdict(f"B2 holds 42\n{line}") == ("PASS", "B2 holds 42"), line
+    # Still strict where it matters: prose is not a verdict.
+    assert parse_verdict("the verdict is clearly a pass")[0] == "INCONCLUSIVE"
+    assert parse_verdict("VERDICT: PASSABLE")[0] == "INCONCLUSIVE"
+
+
+@pytest.mark.asyncio
+async def test_recorded_tools_are_what_the_child_was_given(tmp_path, config_dir, monkeypatch):
+    """M5: on a host that cannot sandbox, the confined verifier gets NO
+    ``bash``, and neither ``verifier_started`` nor the verdict may list one."""
+    from tests.unit.session.test_launch_subagent import _sandbox
+
+    _sandbox(monkeypatch, available=False)
+    stream = TreeStream(lambda request: text_turn("VERDICT: PASS"))
+    parent = make_parent(tmp_path, stream)
+    started: list[dict[str, Any]] = []
+
+    verdict = await parent.verify_completion(request="r", claim="c", on_started=started.append)
+
+    given = {tool.name for tool in stream.by_job[verdict.job_id][0].tools}
+    assert "bash" not in given
+    assert "bash" not in verdict.tools and "bash" not in started[0]["tools"]
+    assert set(verdict.tools) == given, (verdict.tools, given)
+    await parent.dispose()

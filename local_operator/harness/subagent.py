@@ -1009,11 +1009,13 @@ def _with_network_floor(
 #: and :data:`READ_ONLY_TOOLS` is left without ``bash``, so no other role
 #: inherits a shell through that list. ``reviewer``/``architect``/
 #: ``qa-tester`` are NOT here: they need network and write test caches.
-#: ``verifier`` (``harness/verifier.py``) is here for the scout's reason: an
-#: independent completion check must be able to RUN a reader (``python -c`` on
-#: an ``.xlsx``, ``pdftotext``) without being able to change the artifact it
-#: is judging.
-READ_ONLY_SHELL_ROLES = frozenset({"scout", "verifier"})
+#: The harness completion verifier is deliberately NOT here: a name in this
+#: set confines EVERY session of that name, including an operator's own
+#: registry role of the same name and any ``task(agent=...)`` naming it (PR
+#: #3837 review R2 / QA Q1: this machine already has a ``verifier`` role that
+#: needs ``gh``/``curl``). It is confined by its launch instead
+#: (:attr:`ChildSurface.readonly_shell`), which only harness code can set.
+READ_ONLY_SHELL_ROLES = frozenset({"scout"})
 
 
 @dataclass(frozen=True)
@@ -1037,10 +1039,17 @@ class ChildSurface:
     the declaration by name: the embedder that declared the parent's surface
     is the one handing them over, and they never enter the parent's own
     inventory, so the model that launched nothing cannot reach them.
+
+    ``readonly_shell`` confines THIS child's ``bash`` exactly as a
+    :data:`READ_ONLY_SHELL_ROLES` child's (writes only to its own scratchpad,
+    no network, no shell at all without a sandbox). It rides the launch, not
+    the role name, so it binds only the child the harness built -- a registry
+    row or a ``task`` launch that happens to share the name is untouched.
     """
 
     ceiling: frozenset[str] | None = None
     host_tools: tuple["AgentTool", ...] = ()
+    readonly_shell: bool = False
 
     @property
     def host_tool_names(self) -> frozenset[str]:
@@ -1099,6 +1108,7 @@ async def _readonly_shell_root(
     profile: "AgentProfile | None",
     parent_session: "Session",
     session_dir: "Path",
+    surface: "ChildSurface | None" = None,
 ) -> "tuple[bool, str | None]":
     """Whether this child is write-confined, and its shell root if it may HAVE one.
 
@@ -1126,6 +1136,9 @@ async def _readonly_shell_root(
 
     confined = (
         is_readonly_shell_role(agent, profile.name if profile is not None else None)
+        # A harness launch's own confinement (``ChildSurface``), keyed on the
+        # launch so no same-named registry role inherits it.
+        or bool(surface is not None and surface.readonly_shell)
         or bool(getattr(parent_session, "_shell_write_root", None))
         or bool(getattr(parent_session, "_readonly_shell", False))
     )
@@ -4367,7 +4380,11 @@ async def _construct_child_session(
     # ``read`` approval tier, and the child ``Session`` below must carry the
     # SAME root so the executor wraps what the schema promised.
     readonly_shell, shell_write_root = await _readonly_shell_root(
-        agent=agent, profile=profile, parent_session=parent_session, session_dir=session_dir
+        agent=agent,
+        profile=profile,
+        parent_session=parent_session,
+        session_dir=session_dir,
+        surface=surface,
     )
     tool_context = ToolContext(
         team_id=target.team_lineage[-1] if target and target.team_lineage else "",

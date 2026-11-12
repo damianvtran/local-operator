@@ -1335,10 +1335,12 @@ class ActionBridge:
     #: session), so the bridge never holds a session reference itself.
     verifier: Callable[[FinishAction, Observation, int], Awaitable[Any]] | None = None
     verifier_rounds: int = 0
-    #: The verifier's own wall cap: the claim is only verified when the
-    #: episode's remaining wall (``wall_remaining``) can hold it, because a
-    #: check that outlives the episode would cost the finish it is checking.
-    verifier_wall_s: float = 0.0
+    #: The verifier's worst-case envelope (``completion_verifier
+    #: .verifier_envelope_s``: probe + wall cap + cancel join, review M2): the
+    #: claim is only verified when the episode's remaining wall
+    #: (``wall_remaining``) can hold ALL of it, because a check that outlives
+    #: the episode would cost the finish it is checking.
+    verifier_envelope_s: float = 0.0
     wall_remaining: Callable[[], float | None] | None = None
     #: Unprefixed record writer for the ``verifier_*`` rows (the ``record``
     #: seam above prefixes ``action_``); ``None`` records nothing.
@@ -1555,8 +1557,8 @@ class ActionBridge:
         The fit test is the premature gate's (``_challenge_epoch_pair_fits``:
         a FAIL must be able to pay for its challenge AND the worker's next
         finish) plus the episode wall, which must hold the verifier's whole
-        wall cap -- no extra margin is invented here; what remains after the
-        check is the worker's.
+        envelope (probe + wall cap + cancel join) -- no extra margin is
+        invented here; what remains after the check is the worker's.
 
         Runs with ``_lock`` HELD (from ``call``): that is what parks the worker
         and keeps the guest quiescent, and why the verifier's guest reads go
@@ -1573,7 +1575,7 @@ class ActionBridge:
             reason = "step-budget"
         elif self.wall_remaining is not None:
             remaining = self.wall_remaining()
-            if remaining is not None and remaining <= self.verifier_wall_s:
+            if remaining is not None and remaining <= self.verifier_envelope_s:
                 reason = "wall"
         if reason is not None:
             self._record_verifier(
@@ -5229,7 +5231,10 @@ def _arm_completion_verifier(
     recorded once as ``verifier_skipped`` rather than left implicit.
     """
 
-    from local_operator.evaluation.completion_verifier import VerifierInspector
+    from local_operator.evaluation.completion_verifier import (
+        VerifierInspector,
+        verifier_envelope_s,
+    )
 
     state: dict[str, Any] = {
         "config": config.stamp(),
@@ -5298,7 +5303,7 @@ def _arm_completion_verifier(
 
     bridge.verifier = verify
     bridge.verifier_rounds = config.rounds
-    bridge.verifier_wall_s = float(config.wall_s)
+    bridge.verifier_envelope_s = verifier_envelope_s(config.wall_s)
     bridge.wall_remaining = wall_remaining
     bridge.record_event = record_event
     return state

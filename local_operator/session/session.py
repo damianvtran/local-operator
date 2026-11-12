@@ -22878,7 +22878,10 @@ class Session:
 
         * the role is code-defined (``verifier_profile``), never the registry's;
         * a :class:`ChildSurface` ceiling of the verifier allowlist, so the
-          child gets no ``web_*`` floor, no ``hub``/``task``, no inherited MCP;
+          child gets no ``web_*`` floor, no ``hub``/``task``, no inherited MCP,
+          and ``readonly_shell``: its ``bash`` is write-confined by THIS launch,
+          not by the ``verifier`` name (an operator role of that name keeps
+          its own shell);
         * ``host_tools`` -- whatever lets it SEE the deliverable -- exist in
           that child only, wrapped to count against ``max_commands``;
         * ``announce=False``: the result is returned here, never injected into
@@ -22896,6 +22899,8 @@ class Session:
         from local_operator import memory_guard
         from local_operator.harness.subagent import ChildSurface, run_subagent
         from local_operator.harness.verifier import (
+            CANCEL_JOIN_S,
+            REQUEST_CAP_SETTLE_GRACE_S,
             VERIFIER_ROLE,
             VERIFIER_TOOL_ALLOWLIST,
             VerifierLimits,
@@ -22924,9 +22929,19 @@ class Session:
         admission = memory_guard.admission_check("a completion verifier")
         if not admission.admitted:
             return refused(admission.reason or "memory admission refused")
+        # What the child is actually GIVEN, for ``verifier_started``/``tools``
+        # (review M5): the declaration lists ``bash``, but a confined child on
+        # a host that cannot sandbox gets no shell at all, by the same probe
+        # ``_readonly_shell_root`` asks (cached after the first spawn). Asked
+        # BEFORE the request subscription, so nothing awaits between that and
+        # the ``finally`` that removes it.
+        from local_operator.tools.confinement import shell_sandbox_unavailable_reason_async
+
+        no_shell_sandbox = await shell_sandbox_unavailable_reason_async() is not None
 
         state: dict[str, Any] = {"job_id": None, "requests": 0, "ended_by": None}
         stop = asyncio.Event()
+        overshoot = asyncio.Event()
 
         def end(reason: str) -> None:
             if state["ended_by"] is None:
@@ -22939,6 +22954,10 @@ class Session:
             if state["job_id"] is None or observation.job_id != state["job_id"]:
                 return
             state["requests"] += 1
+            if state["requests"] > limits.max_requests:
+                # A request PAST the cap finished inside the settle grace
+                # below: the cap's request was not the answer, so stop now.
+                overshoot.set()
             if state["requests"] >= limits.max_requests:
                 end("requests")
 
@@ -22954,7 +22973,18 @@ class Session:
             on_call=lambda _count: None,
             on_exhausted=lambda: end("commands"),
         )
-        surface = ChildSurface(ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST), host_tools=wrapped)
+        # ``readonly_shell`` confines this launch's ``bash`` by the launch
+        # itself, never by the ``verifier`` name (an operator's registry role
+        # of that name must keep its own shell: review R2 / QA Q1).
+        surface = ChildSurface(
+            ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST), host_tools=wrapped, readonly_shell=True
+        )
+        job_id: str | None = None
+        settled: asyncio.Event | None = None
+        granted = surface.declaration(getattr(self, "_declared_tools", None)) or frozenset()
+        if no_shell_sandbox:
+            granted = granted - {"bash"}
+        granted_tools = tuple(sorted(granted))
         prompt = build_verifier_prompt(request=request, claim=claim, observation=observation)
         try:
             try:
@@ -22980,29 +23010,39 @@ class Session:
                     {
                         "job_id": job_id,
                         "model": getattr(job, "model_label", None),
-                        "tools": sorted(
-                            surface.declaration(getattr(self, "_declared_tools", None)) or ()
-                        ),
+                        "tools": list(granted_tools),
                         "limits": limits.as_record(),
                     }
                 )
             settled = self.jobs.settled_event(job_id)
-            settle_wait = asyncio.ensure_future(settled.wait())
-            stop_wait = asyncio.ensure_future(stop.wait())
-            try:
-                await asyncio.wait(
-                    {settle_wait, stop_wait},
-                    timeout=float(limits.wall_s),
-                    return_when=asyncio.FIRST_COMPLETED,
+            deadline = started + float(limits.wall_s)
+
+            async def first_of(events: "tuple[asyncio.Event, ...]", timeout: float) -> None:
+                waiters = [asyncio.ensure_future(event.wait()) for event in events]
+                try:
+                    await asyncio.wait(
+                        waiters, timeout=max(0.0, timeout), return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for waiter in waiters:
+                        waiter.cancel()
+
+            await first_of((settled, stop), deadline - time.monotonic())
+            if not settled.is_set() and state["ended_by"] == "requests":
+                # The cap fires on the request-final row of request N, which
+                # may BE the answer: the job settles moments later. Give it a
+                # short grace -- inside the wall, and cut short by request N+1
+                # finishing -- so a verdict on the cap's own request is kept
+                # (QA Q2: one on request 12 of 12 was cancelled and discarded).
+                await first_of(
+                    (settled, overshoot),
+                    min(REQUEST_CAP_SETTLE_GRACE_S, deadline - time.monotonic()),
                 )
-            finally:
-                for waiter in (settle_wait, stop_wait):
-                    waiter.cancel()
             if not settled.is_set():
                 end("wall")
                 await self.jobs.cancel(job_id)
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(settled.wait(), timeout=10.0)
+                    await asyncio.wait_for(settled.wait(), timeout=CANCEL_JOIN_S)
             job = self.jobs.get(job_id)
             status_text = getattr(job, "status", None)
             usage = getattr(job, "usage", None)
@@ -23012,9 +23052,7 @@ class Session:
                 "commands": command_count(),
                 "wall_s": time.monotonic() - started,
                 "model": getattr(job, "model_label", None),
-                "tools": tuple(
-                    sorted(surface.declaration(getattr(self, "_declared_tools", None)) or ())
-                ),
+                "tools": granted_tools,
                 "transcript_dir": (
                     str(directory)
                     if (comms := getattr(self, "subagent_comms", None)) is not None
@@ -23039,6 +23077,17 @@ class Session:
             return VerifierVerdict(
                 status="INCONCLUSIVE", findings=detail, ended_by=ended_by, **common
             )
+        except BaseException:
+            # The caller was cancelled (an Esc, a teardown) or a callback
+            # raised: the observer enforcing the request cap is about to be
+            # unsubscribed and the wall cap WAS the wait above, so a child left
+            # running here would run uncapped and, being consumed, never
+            # surface (review R3). Shielded so the cancel itself completes even
+            # though this task is being cancelled.
+            if job_id is not None and not (settled is not None and settled.is_set()):
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self.jobs.cancel(job_id))
+            raise
         finally:
             unsubscribe()
 

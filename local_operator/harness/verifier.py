@@ -29,8 +29,14 @@ Constraints:
 * No ``write``/``edit``/``task``/``web_*``: the allowlist plus the
   :class:`~local_operator.harness.subagent.ChildSurface` ceiling, which also
   removes the ``web_*`` floor every role-limited child otherwise gets.
-* ``bash`` is the write-confined, no-network shell of
-  :data:`~local_operator.harness.subagent.READ_ONLY_SHELL_ROLES`.
+* ``bash`` is the write-confined, no-network shell a scout gets, switched on
+  by the launch (``ChildSurface.readonly_shell``), NOT by the ``verifier``
+  name: an operator registry role called ``verifier`` keeps its own shell.
+  In a world-confined session (the OSWorld arm sets ``world_root``) the
+  inherited full ``ToolConfinement`` takes precedence over the write
+  confinement (``tools/builtin.py``), so that shell can write inside the
+  world root -- the controller-side world, never the guest; the same rule
+  applies to scouts there and predates this module (review M1).
 * Bounded: :class:`VerifierLimits` cancels the child at the first of its
   request, host-command and wall caps.
 * The verdict is PARSED from a fixed last line; anything else is
@@ -50,7 +56,7 @@ if TYPE_CHECKING:
 
 VERIFIER_ROLE = "verifier"
 
-#: Read-only reach. ``bash`` is confined by role (``READ_ONLY_SHELL_ROLES``).
+#: Read-only reach. ``bash`` is confined by the launch (``ChildSurface.readonly_shell``).
 VERIFIER_TOOL_ALLOWLIST: tuple[str, ...] = ("read", "glob", "grep", "bash")
 
 VerdictStatus = Literal["PASS", "FAIL", "INCONCLUSIVE"]
@@ -90,7 +96,28 @@ MAX_OBSERVATION_CHARS = 12_000
 #: Findings travel back into the parent's challenge text; bound them too.
 MAX_FINDINGS_CHARS = 4_000
 
-_VERDICT_LINE = re.compile(r"^\s*\**\s*VERDICT\s*:\s*\**\s*(PASS|FAIL|INCONCLUSIVE)\b", re.I)
+#: The verdict line, tolerant of the decorations models add to a last line:
+#: markdown emphasis/heading/quote/bullet/backtick prefixes and an optional
+#: "final" (``> **Final VERDICT:** `PASS` ``). Anything else stays
+#: ``INCONCLUSIVE``; tolerance here only ever saves a PASS from becoming a
+#: wasted challenge turn (review M3), it never invents one.
+_VERDICT_LINE = re.compile(
+    r"^\s*(?:[#>*_`~\-]+\s*)*(?:final\s+)?VERDICT\s*[*_`]*\s*:\s*[*_`\s]*"
+    r"(PASS|FAIL|INCONCLUSIVE)\b",
+    re.I,
+)
+
+#: How long ``Session.verify_completion`` lets a job settle after its request
+#: cap fired, before cancelling it. The cap fires on request N's final row,
+#: which may be the answer itself; settling is the in-process tail of the
+#: child's turn (no further model call), so the grace only needs to cover
+#: that. It is always clipped to the wall deadline, so it never extends the
+#: verifier's total time, and request N+1 finishing ends it at once.
+REQUEST_CAP_SETTLE_GRACE_S = 5.0
+#: How long a cancelled verifier job is awaited to settle. Part of the
+#: verifier's worst-case envelope (``wall_s + CANCEL_JOIN_S``), which an
+#: embedder with a deadline must budget for.
+CANCEL_JOIN_S = 10.0
 
 
 def verifier_profile() -> "AgentProfile":

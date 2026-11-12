@@ -19,16 +19,31 @@ verifier's own reads.
 READ-ONLY ON THE GUEST IS TWO HONEST MODES, recorded per verification as
 ``readonly_enforcement`` and never conflated:
 
-* ``sandboxed`` -- a probe at the first inspection proved ``bwrap`` can run a
-  command under a read-only bind of ``/`` with no network, and that a write
-  inside it FAILS. Every command is then wrapped the same way.
-* ``audit`` -- no working sandbox. Obvious writes are refused lexically, and
-  every command is followed by a sweep for files under ``$HOME`` and ``/tmp``
-  modified since the window opened, recorded as ``changed_files`` /
-  ``mutation_detected``. This DETECTS mutation; it does not prevent it, and
-  nothing here calls it read-only. Desktop applications write in the
-  background too (autosave, recent-files), so a hit is a fact about the
-  window, not proof the verifier wrote.
+* ``sandboxed`` -- a probe at the first inspection proved ``bwrap`` runs a
+  command with exactly :data:`SANDBOX_GUARANTEES`: a read-only bind of ``/``,
+  no network (which also hides abstract sockets), private PID and IPC
+  namespaces (it cannot signal the desktop's processes), a new session (no
+  terminal injection), and the path-based X11/ICE/D-Bus/user-runtime socket
+  directories hidden under empty tmpfs with ``DISPLAY``/``DBUS_*``/
+  ``XAUTHORITY``/``XDG_RUNTIME_DIR`` unset (it cannot type into apps or
+  change settings over the session bus). The probe checks the write, the PID
+  isolation and the hidden sockets; a probe that fails ANY of them is
+  ``audit``. Every command is then wrapped the same way. Review round 1 (R1)
+  found the first version bound only the filesystem while recording
+  "no mutation" -- ``pkill``, ``gsettings set`` and ``xdotool`` would have
+  reached the desktop. Nothing is SWEPT in this mode, so a command's
+  ``mutation_detected`` is ``None`` (not measured), never ``False``.
+* ``audit`` -- no working sandbox. Every command is followed by a sweep for
+  files under ``$HOME`` and ``/tmp`` created or modified since the window
+  opened, recorded as ``changed_files`` / ``mutation_detected``. It cannot
+  see deletions or non-file state (a killed process, a changed setting).
+  This DETECTS some mutation; it does not prevent it, and nothing here calls
+  it read-only. Desktop applications write in the background too (autosave,
+  recent-files), so a hit is a fact about the window, not proof the verifier
+  wrote.
+
+In BOTH modes obvious writes are refused lexically first (:func:`obvious_write`):
+in ``sandboxed`` mode that is belt and braces, in ``audit`` the only gate.
 
 ``/tmp`` is deliberately NOT replaced by a tmpfs in the sandbox (the design
 note's ``--tmpfs /tmp``): task deliverables live there often enough that
@@ -43,18 +58,44 @@ import shlex
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
-from local_operator.harness.verifier import VerifierLimits
-
-#: The MCP client's default per-call deadline (``mcp/manager.py``
-#: ``DEFAULT_MCP_TIMEOUT_MS`` = 300 s) bounds the worker's finish call, and
-#: the verifier runs INSIDE that call. 240 s leaves the 10 s cancel join in
-#: ``verify_completion`` and the challenge's own delivery inside it.
-MAX_VERIFIER_WALL_S = 240.0
+from local_operator.harness.verifier import CANCEL_JOIN_S, VerifierLimits
 
 #: Per-command bound for the verifier's guest reads. A read that needs more
 #: than this is not a read; the worker's own commands keep their 300 s.
 INSPECT_MAX_TIMEOUT_S = 30
 INSPECT_DEFAULT_TIMEOUT_S = 15
+
+#: The MCP client's default per-call deadline (``mcp/manager.py``
+#: ``DEFAULT_MCP_TIMEOUT_MS`` = 300 s) bounds the worker's finish call, and
+#: EVERYTHING the verifier costs runs inside that call: the once-per-episode
+#: sandbox probe (:data:`PROBE_ENVELOPE_S`), the wall cap, and the cancel join
+#: (``CANCEL_JOIN_S``; the request-cap settle grace is clipped to the wall).
+#: Review M2: the first version budgeted only wall + join (240 + 10) and the
+#: probe pushed the worst case to 295 s. The 50 s delivery margin is the one
+#: that version left for the challenge's own delivery.
+MCP_FINISH_DEADLINE_S = 300.0
+#: The probe's own timeout plus the adapter's per-command slack
+#: (``session_arm._make_run_command``: ``timeout=timeout_s + 15``).
+PROBE_ENVELOPE_S = float(INSPECT_MAX_TIMEOUT_S + 15)
+FINISH_DELIVERY_MARGIN_S = 50.0
+MAX_VERIFIER_WALL_S = (
+    MCP_FINISH_DEADLINE_S - PROBE_ENVELOPE_S - CANCEL_JOIN_S - FINISH_DELIVERY_MARGIN_S
+)
+
+
+def verifier_envelope_s(wall_s: float) -> float:
+    """The worst case one verification adds to a finish call, in seconds.
+
+    What an embedder's fit check must compare against (``ActionBridge
+    ._maybe_verify``), not the bare wall: the probe and the cancel join run
+    outside the verifier's own wall cap. Conservative after the first round
+    (the probe runs once per episode): over-skipping a check is recorded,
+    overrunning the finish deadline loses the episode's finish.
+    """
+
+    return PROBE_ENVELOPE_S + float(wall_s) + CANCEL_JOIN_S
+
+
 #: How much of one command's output reaches the verifier's context.
 INSPECT_OUTPUT_CHARS = 12_000
 
@@ -110,40 +151,126 @@ class CompletionVerifierConfig:
         return {"rounds": self.rounds, **self.limits().as_record()}
 
 
-#: The probe proves ENFORCEMENT, not presence: it attempts a write inside the
-#: sandbox and only a refused write prints the token.
-SANDBOX_TOKEN = "LOP_RO_SANDBOX_OK"
-_BWRAP = "bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --die-with-parent --"
-SANDBOX_PROBE = (
-    "command -v bwrap >/dev/null 2>&1 || exit 3; "
-    f"{_BWRAP} /bin/sh -c "
-    + shlex.quote(
-        'p="$HOME/.lop-ro-probe-$$"; if : > "$p" 2>/dev/null; then rm -f "$p"; echo WRITABLE; '
-        f"else echo {SANDBOX_TOKEN}; fi"
-    )
+#: What ``sandboxed`` mode guarantees, recorded on the probe row so a record
+#: says exactly what the label means (review R1).
+SANDBOX_GUARANTEES: tuple[str, ...] = (
+    "read-only-filesystem",
+    "no-network",
+    "private-pid-namespace",
+    "private-ipc-namespace",
+    "new-session",
+    "x11-dbus-runtime-sockets-hidden",
+)
+#: Path-based desktop sockets live here: X11/ICE (``/tmp/.X11-unix/X0``), the
+#: user's runtime dir (session bus, systemd --user, pulse, wayland) and the
+#: system bus. Hidden only where they exist -- ``--tmpfs`` on a missing
+#: directory would need to create it on the read-only root and fail -- and
+#: ONLY these: ``/tmp`` itself stays visible because deliverables live there.
+_SOCKET_DIRS = ("/tmp/.X11-unix", "/tmp/.ICE-unix", "/run/user", "/run/dbus")
+_DESKTOP_ENV = (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_SYSTEM_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+)
+#: A shell prefix; the inner ``/bin/sh -c <command>`` follows it. ``env -u``
+#: rather than ``bwrap --unsetenv`` so an older bwrap is not a probe failure.
+_BWRAP = (
+    "set --; for d in "
+    + " ".join(_SOCKET_DIRS)
+    + '; do [ -d "$d" ] && set -- "$@" --tmpfs "$d"; done; '
+    'bwrap --ro-bind / / --dev /dev --proc /proc "$@" '
+    "--unshare-net --unshare-pid --unshare-ipc --new-session --die-with-parent -- "
+    "env " + " ".join(f"-u {name}" for name in _DESKTOP_ENV)
 )
 
-#: Lexical write-deny for ``audit`` mode. It catches the obvious, not the
-#: determined: the changed-file sweep is the backstop, and the mode's name
-#: says so.
+
+def sandboxed(command: str) -> str:
+    """``command`` as it runs on the guest in ``sandboxed`` mode."""
+
+    return f"{_BWRAP} /bin/sh -c {shlex.quote(command)}"
+
+
+#: The probe proves ENFORCEMENT, not presence: inside the very wrapper every
+#: command uses, a write must FAIL, the probe's own outer shell must be
+#: unsignalable (PID namespace) and no desktop socket may be visible. Only
+#: then is the token printed.
+SANDBOX_TOKEN = "LOP_RO_SANDBOX_OK"
+_PROBE_SCRIPT = (
+    'p="$HOME/.lop-ro-probe-$$"; '
+    'if : > "$p" 2>/dev/null; then rm -f "$p"; echo WRITABLE; exit 0; fi; '
+    'if kill -0 "$1" 2>/dev/null; then echo PID-SHARED; exit 0; fi; '
+    "for s in /tmp/.X11-unix/* /run/user/*/bus /run/dbus/*; do "
+    'if [ -S "$s" ]; then echo SOCKET-VISIBLE; exit 0; fi; done; '
+    f"echo {SANDBOX_TOKEN}"
+)
+SANDBOX_PROBE = (
+    "command -v bwrap >/dev/null 2>&1 || exit 3; outer=$$; "
+    f'{_BWRAP} /bin/sh -c {shlex.quote(_PROBE_SCRIPT)} probe "$outer"'
+)
+
+#: Lexical write-deny, applied in BOTH modes. It catches the obvious, not the
+#: determined: the sandbox (or, in ``audit``, the changed-file sweep) is the
+#: backstop. Tuned against plain reads that the first version refused, each
+#: of which burned one of the verifier's ten commands (review M4):
+#: ``open('a.xlsx','rb')`` (only an ``open()`` MODE argument counts now),
+#: ``awk '$3 > 5'`` (redirection is matched outside quotes only) and
+#: ``dpkg -l`` (package managers only on their mutating subcommands).
 _WRITE_PATTERNS = re.compile(
     r"""
-    (?<![0-9&])>(?!&|\s*/dev/(?:null|stderr|stdout)\b)   # redirection into a file
-    | \b(?:rm|rmdir|mv|cp|tee|dd|truncate|touch|mkdir|ln|chmod|chown|chgrp|install
+    \b(?:rm|rmdir|mv|cp|tee|dd|truncate|touch|mkdir|ln|chmod|chown|chgrp|install
           |shred|unlink|rsync|patch|kill|pkill|killall|reboot|shutdown|xdotool)\b
     | \bsed\s+(?:-\w*\s+)*-i | \bperl\s+(?:-\w*\s+)*-i
-    | \b(?:apt|apt-get|dpkg|pip|pip3|npm|snap)\b
+    | \b(?:apt|apt-get|aptitude)\s+(?:-\S+\s+)*(?:install|remove|purge|upgrade
+          |dist-upgrade|full-upgrade|autoremove|update|reinstall)\b
+    | \bdpkg\s+(?:-\S+\s+)*(?:-i|--install|-r|--remove|-P|--purge|--configure
+          |--unpack|--set-selections)\b
+    | \b(?:pip|pip3)\s+(?:-\S+\s+)*(?:install|uninstall)\b
+    | \bnpm\s+(?:install|i|uninstall|ci|update|link)\b
+    | \bsnap\s+(?:install|remove|refresh|revert)\b
     | \b(?:soffice|libreoffice)\b.*--convert-to
     | \bgit\s+(?:commit|checkout|reset|apply|stash|push|rm|mv|clean)\b
-    | \bgsettings\s+set\b | \bdconf\s+(?:write|reset|load)\b
-    | \.save\s*\( | \bopen\s*\([^)]*['"][wax+]
+    | \bgsettings\s+(?:set|reset)\b | \bdconf\s+(?:write|reset|load)\b
+    | \.save\s*\( | \.(?:write_text|write_bytes|unlink|rmdir|touch|mkdir|rename)\s*\(
+    | \bos\.(?:remove|unlink|rename|replace|rmdir|removedirs|makedirs|mkdir|kill|system)\b
+    | \bshutil\.(?:rmtree|move|copy\w*)\b
+    | \bopen\s*\(\s*[^,()]+,\s*(?:mode\s*=\s*)?[rbt]?['"][rbtU]*[wax+]
+    | \bmode\s*=\s*['"][rbtU]*[wax+]
     """,
     re.X,
 )
+#: A redirection into a file: not ``2>&1``/``>&2`` and not ``/dev/null``-ish.
+_REDIRECT = re.compile(r"(?<![0-9&])>(?!&|\s*/dev/(?:null|stderr|stdout)\b)")
+_QUOTED = re.compile(r"'[^']*'" + r'|"(?:\\.|[^"\\])*"')
+#: ``sh -c '...'`` (and bash/dash/zsh): its quoted argument is itself a shell
+#: line, so a redirection INSIDE it is still a redirection.
+_SHELL_C = re.compile(r"\b(?:ba|da|z)?sh\s+(?:-\w+\s+)*-\w*c\w*\s*$")
+
+
+def _redirects(command: str, depth: int = 0) -> bool:
+    """Whether ``command`` redirects into a file, ignoring quoted text.
+
+    A ``>`` inside quotes is data (``awk '$3 > 5'``, ``python3 -c "a > b"``),
+    except in the quoted argument of ``sh -c``, which is checked as a shell
+    line of its own (bounded recursion).
+    """
+
+    if _REDIRECT.search(_QUOTED.sub("''", command)):
+        return True
+    if depth >= 3:
+        return False
+    for match in _QUOTED.finditer(command):
+        if _SHELL_C.search(command[: match.start()]):
+            inner = match.group(0)[1:-1]
+            if _redirects(inner, depth + 1):
+                return True
+    return False
 
 
 def obvious_write(command: str) -> bool:
-    return _WRITE_PATTERNS.search(command) is not None
+    return _WRITE_PATTERNS.search(command) is not None or _redirects(command)
 
 
 RunCommand = Callable[[str, float], Awaitable[Any]]
@@ -179,9 +306,11 @@ class VerifierInspector:
 
         if self.mode is None:
             row: dict[str, Any] = {"probe": True, "command": SANDBOX_PROBE}
+            probe_output: str | None = None
             try:
                 result = await self._run(SANDBOX_PROBE, float(INSPECT_MAX_TIMEOUT_S))
-                ok = result.exit_code == 0 and SANDBOX_TOKEN in (result.stdout or "")
+                probe_output = (result.stdout or "").strip()
+                ok = result.exit_code == 0 and SANDBOX_TOKEN in probe_output
                 row["exit_code"] = result.exit_code
             except Exception as error:  # noqa: BLE001 -- an unreachable probe is no sandbox
                 ok = False
@@ -190,6 +319,12 @@ class VerifierInspector:
             # The probe ran on the guest too, so it is on the record like any
             # verifier command, with the mode it decided.
             row["readonly_enforcement"] = self.mode
+            if ok:
+                row["guarantees"] = list(SANDBOX_GUARANTEES)
+            elif probe_output is not None:
+                # WHICH check failed (WRITABLE / PID-SHARED / SOCKET-VISIBLE),
+                # so an ``audit`` episode says why it was not sandboxed.
+                row["probe_output"] = probe_output[:200]
             self._emit(row)
         return self.mode
 
@@ -237,15 +372,17 @@ class VerifierInspector:
             "command": command,
             "readonly_enforcement": mode,
         }
+        # Both modes (review R1): in ``sandboxed`` the wrapper is the real
+        # gate and this only saves a command; in ``audit`` it is the only one.
+        if obvious_write(command):
+            row.update(refused="write-pattern", exit_code=None, mutation_detected=None)
+            self._emit(row)
+            return (
+                "Refused: that command looks like it writes or changes state. "
+                "Only read the deliverable.",
+                True,
+            )
         if mode == "audit":
-            if obvious_write(command):
-                row.update(refused="write-pattern", exit_code=None, mutation_detected=None)
-                self._emit(row)
-                return (
-                    "Refused: that command looks like it writes or changes state. "
-                    "Only read the deliverable.",
-                    True,
-                )
             if round_ not in self._window_start:
                 try:
                     stamp = await self._run("date +%s", 10.0)
@@ -254,7 +391,7 @@ class VerifierInspector:
                     self._window_start[round_] = "0"
             wire = command
         else:
-            wire = f"{_BWRAP} /bin/sh -c {shlex.quote(command)}"
+            wire = sandboxed(command)
         if len(wire) > MAX_COMMAND_LENGTH:
             return "Refused: the command is too long.", True
         try:
@@ -269,7 +406,9 @@ class VerifierInspector:
             row["changed_files"] = changed
             row["mutation_detected"] = None if changed is None else bool(changed)
         else:
-            row["mutation_detected"] = False
+            # Nothing was checked after the command: the sandbox's guarantees
+            # are on the probe row, and "not measured" is not "no mutation".
+            row["mutation_detected"] = None
         self._emit(row)
         text = (
             f"exit_code: {result.exit_code if result.exit_code is not None else 'none'}\n"

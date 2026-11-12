@@ -24,11 +24,13 @@ from typing import Any
 import pytest
 
 from local_operator.evaluation.completion_verifier import (
+    MAX_VERIFIER_WALL_S,
     SANDBOX_PROBE,
     SANDBOX_TOKEN,
     CompletionVerifierConfig,
     VerifierInspector,
     obvious_write,
+    sandboxed,
 )
 from local_operator.evaluation.runner.episode import EpisodeConfig
 from local_operator.evaluation.session_arm import (
@@ -64,7 +66,7 @@ def _armed(tmp_path: Path, verdicts: list[VerifierVerdict], *, rounds: int = 1, 
 
     bridge.verifier = verifier
     bridge.verifier_rounds = rounds
-    bridge.verifier_wall_s = 180.0
+    bridge.verifier_envelope_s = 235.0  # verifier_envelope_s(180): 45 + 180 + 10
     bridge.record_event = lambda kind, payload: events.append((kind, payload))
     return bridge, actions, events, seen
 
@@ -146,7 +148,7 @@ async def test_skipped_when_the_step_budget_cannot_hold_the_exchange(tmp_path: P
 @pytest.mark.asyncio
 async def test_skipped_when_the_wall_cannot_hold_the_verifier(tmp_path: Path) -> None:
     bridge, actions, events, seen = _armed(tmp_path, [_verdict("PASS")])
-    bridge.wall_remaining = lambda: 60.0  # < verifier_wall_s 180
+    bridge.wall_remaining = lambda: 60.0  # < verifier_envelope_s 235
     reply = await bridge.call(DONE)
     assert seen == [] and events[0][1]["reason"] == "wall"
     # Today's path: the self-check challenge fires as it always did.
@@ -243,7 +245,7 @@ async def test_inspect_inside_the_finish_branch_does_not_deadlock(tmp_path: Path
     assert reply["details"]["terminal"] == "finish"
     assert outputs[0][1] is False and "42" in outputs[0][0]
     # Sandboxed: the command was wrapped, the probe recorded.
-    assert ran[0] == SANDBOX_PROBE and ran[1].startswith("bwrap --ro-bind / / ")
+    assert ran[0] == SANDBOX_PROBE and ran[1] == sandboxed("cat B2.txt")
     kinds = [(k, p.get("probe", False), p.get("readonly_enforcement")) for k, p in rows]
     assert kinds == [
         ("verifier_command", True, "sandboxed"),
@@ -365,7 +367,7 @@ def test_config_refuses_out_of_range() -> None:
     bad_values: list[dict[str, Any]] = [
         {"rounds": 3},
         {"rounds": True},
-        {"wall_s": 241.0},
+        {"wall_s": MAX_VERIFIER_WALL_S + 1},
         {"max_requests": 0},
     ]
     for bad in bad_values:
@@ -486,3 +488,166 @@ async def test_end_to_end_fail_fix_pass_through_the_real_session(
     assert sorted(state["bundle_transcripts"]) == sorted(p["job_id"] for p in started)
     for relative in state["bundle_transcripts"].values():
         assert (tmp_path / "bundle" / relative).stat().st_size > 0
+
+
+# -- review round 1 regressions (PR #3837) -------------------------------------
+
+
+def _fake_bwrap(tmp_path: Path, *, isolate: bool) -> Path:
+    """A ``bwrap`` stand-in on PATH: logs its argv, then runs the command after
+    ``--`` WITHOUT any isolation -- the negative control a real probe must
+    catch. ``isolate=False`` is the only mode; the name keeps intent visible."""
+
+    assert not isolate
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "bwrap"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{tmp_path}/argv"\n'
+        'while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done\n'
+        "shift\n"
+        'exec "$@"\n'
+    )
+    fake.chmod(0o755)
+    return bin_dir
+
+
+def test_probe_refuses_a_sandbox_that_does_not_enforce(tmp_path: Path) -> None:
+    """R1: the probe runs the REAL wrapper text through ``/bin/sh``. A bwrap
+    that isolates nothing must never yield the token, and the wrapper must ask
+    for every isolation ``SANDBOX_GUARANTEES`` names."""
+    import os
+    import subprocess
+
+    from local_operator.evaluation.completion_verifier import (
+        _DESKTOP_ENV,
+        _SOCKET_DIRS,
+        SANDBOX_GUARANTEES,
+    )
+
+    bin_dir = _fake_bwrap(tmp_path, isolate=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(home), "DISPLAY": ":0"}
+    out = subprocess.run(
+        ["/bin/sh", "-c", SANDBOX_PROBE], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert out.returncode == 0, out.stderr
+    assert SANDBOX_TOKEN not in out.stdout and "WRITABLE" in out.stdout, out.stdout
+    argv = (tmp_path / "argv").read_text().splitlines()
+    for flag in (
+        "--ro-bind",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--new-session",
+        "--die-with-parent",
+    ):
+        assert flag in argv, flag
+    # Socket dirs are hidden exactly where they exist on this host.
+    hidden = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--tmpfs"]
+    assert hidden == [d for d in _SOCKET_DIRS if os.path.isdir(d)]
+    after = argv[argv.index("--") + 1 :]
+    for name in _DESKTOP_ENV:
+        assert after[after.index(name) - 1] == "-u", name
+    assert "private-pid-namespace" in SANDBOX_GUARANTEES
+
+    # The wrapper really strips the desktop env from the command it runs.
+    wire = sandboxed('echo "display=${DISPLAY:-unset}"')
+    shown = subprocess.run(["/bin/sh", "-c", wire], env=env, capture_output=True, text=True)
+    assert shown.stdout.strip() == "display=unset", shown
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_mode_records_unknown_mutation_and_still_refuses_writes() -> None:
+    """R1: no sweep in ``sandboxed`` mode means ``mutation_detected`` is
+    ``None`` (not measured), and the write lexicon applies in both modes."""
+
+    ran: list[str] = []
+
+    async def run_command(command: str, timeout_s: float) -> Any:
+        ran.append(command)
+        if command == SANDBOX_PROBE:
+            return _command_result(stdout=SANDBOX_TOKEN + "\n", stdout_bytes=18)
+        return _command_result(stdout="ok\n", stdout_bytes=3)
+
+    rows: list[dict[str, Any]] = []
+    inspector = VerifierInspector(
+        run_command=run_command, window=lambda: 1, record_event=lambda _k, p: rows.append(p)
+    )
+    for command in ("pkill soffice", "gsettings set org.gnome.x y z", "xdotool key ctrl+s"):
+        text, refused = await inspector.inspect({"command": command})
+        assert refused and "looks like it writes" in text, command
+    assert ran == [SANDBOX_PROBE]
+    text, refused = await inspector.inspect({"command": "cat a.txt"})
+    assert not refused and ran[-1] == sandboxed("cat a.txt")
+    assert rows[0]["guarantees"] and rows[0]["readonly_enforcement"] == "sandboxed"
+    assert rows[-1]["mutation_detected"] is None
+    assert all(row.get("mutation_detected") is not False for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_records_which_check_failed() -> None:
+    async def run_command(command: str, timeout_s: float) -> Any:
+        return _command_result(stdout="PID-SHARED\n", stdout_bytes=11)
+
+    rows: list[dict[str, Any]] = []
+    inspector = VerifierInspector(
+        run_command=run_command, window=lambda: 1, record_event=lambda _k, p: rows.append(p)
+    )
+    assert await inspector.ensure_mode() == "audit"
+    assert rows[0]["probe_output"] == "PID-SHARED" and "guarantees" not in rows[0]
+
+
+def test_obvious_write_lets_plain_reads_through() -> None:
+    """M4: reads the first lexicon refused, each costing one of ten commands."""
+
+    for command in (
+        "python3 -c \"open('a.xlsx','rb')\"",
+        "python3 -c \"print(open('/home/user/a.csv').read())\"",
+        "awk '$3 > 5' f.csv",
+        'python3 -c "print(1 > 0)"',
+        "dpkg -l | grep libreoffice",
+        "dpkg -s gimp",
+        "pip list",
+        "apt list --installed",
+        "python3 -c \"s='a'.replace('a','b'); print(s)\"",
+    ):
+        assert not obvious_write(command), command
+    for command in (
+        "python3 -c \"open('f','w')\"",
+        "python3 -c \"open('f', mode='a')\"",
+        "python3 -c \"open('f','r+')\"",
+        "python3 -c \"import os; os.remove('/home/user/a.xlsx')\"",
+        "python3 -c \"import pathlib; pathlib.Path('a').write_text('x')\"",
+        "python3 -c \"import shutil; shutil.rmtree('d')\"",
+        "sh -c 'echo x > /home/user/f'",
+        'bash -lc "cat a > b"',
+        "echo x>f",
+        "dpkg -i a.deb",
+        "apt-get -y install gimp",
+        "pip install x",
+        "gsettings reset org.gnome.x y",
+    ):
+        assert obvious_write(command), command
+
+
+@pytest.mark.asyncio
+async def test_skipped_when_the_wall_holds_the_cap_but_not_the_envelope(tmp_path: Path) -> None:
+    """M2: 200 s left holds the 180 s wall cap, not probe + wall + join."""
+    from local_operator.evaluation.completion_verifier import (
+        FINISH_DELIVERY_MARGIN_S,
+        MCP_FINISH_DEADLINE_S,
+        verifier_envelope_s,
+    )
+
+    assert verifier_envelope_s(180.0) == 235.0
+    # The largest allowed wall still leaves the delivery margin in 300 s.
+    assert verifier_envelope_s(MAX_VERIFIER_WALL_S) + FINISH_DELIVERY_MARGIN_S <= (
+        MCP_FINISH_DEADLINE_S
+    )
+    bridge, _actions, events, seen = _armed(tmp_path, [_verdict("PASS")])
+    bridge.wall_remaining = lambda: 200.0
+    await bridge.call(DONE)
+    assert seen == [] and events[0][1]["reason"] == "wall"
