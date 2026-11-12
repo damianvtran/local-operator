@@ -123,7 +123,20 @@ def _record_for(config_dir: Path, session_id: str) -> Any:
     return None
 
 
-async def _wait_for_record(config_dir: Path, session_id: str, timeout: float = 30.0) -> Any:
+#: Backstop for a runtime child to publish its registry record. The wait returns
+#: the moment the record exists, so this only bounds a child that never boots.
+#: 30 s was not enough on a saturated box: the armed cell's non-editable child
+#: (a cold interpreter importing the whole package) took longer than that to
+#: reach its first record in 4 of 12 local runs under 12 busy loops on a
+#: 14-core host (load average ~60), old head and new alike, failing with
+#: ``no record for refresharmed1 within 30.0s`` -- a boot-speed wager, not a
+#: product signal. An idle box needs ~2 s.
+RECORD_BACKSTOP_S = 120.0
+
+
+async def _wait_for_record(
+    config_dir: Path, session_id: str, timeout: float = RECORD_BACKSTOP_S
+) -> Any:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -143,6 +156,78 @@ def _alive(child: subprocess.Popen[bytes]) -> bool:
     already retired. ``poll()`` reaps and answers.
     """
     return child.poll() is None
+
+
+#: How long the armed-probe cell's turn parks in the mock's ``[bash:N]`` tool.
+#: It is the mock's CAP (``_mock_bash_sleep`` bounds N at 60) on purpose: the
+#: turn is not meant to END on this clock. The cell releases it itself, with
+#: :func:`_release_parked_sleep`, once it has OBSERVED the latch; the number only
+#: has to outlast the latch (5-10 s on an idle box: a 5 s probe tick, a settle,
+#: one more tick) with room for a starved runner, and a bigger one would just
+#: be a longer hang if the release never came.
+ARMED_HOLD_S = 60
+
+
+def _descendant_commands(root_pid: int) -> list[tuple[int, str, bool]]:
+    """``(pid, argv, is_leaf)`` for every live descendant of ``root_pid``.
+
+    ``ps`` rather than psutil: it is not a dependency here, and the one fact
+    wanted -- "is the parked ``sleep`` a live descendant of THIS runtime" -- is
+    an ancestry question on a table that is short on a test box. ``-A -o`` with
+    empty headers parses the same on macOS and the Linux runner.
+    """
+    table = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,args="], capture_output=True, text=True, timeout=30
+    ).stdout
+    children: dict[int, list[int]] = {}
+    commands: dict[int, str] = {}
+    for line in table.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 2 or not (fields[0].isdigit() and fields[1].isdigit()):
+            continue
+        pid, parent = int(fields[0]), int(fields[1])
+        commands[pid] = fields[2] if len(fields) > 2 else ""
+        children.setdefault(parent, []).append(pid)
+    found: list[tuple[int, str, bool]] = []
+    queue = list(children.get(root_pid, []))
+    while queue:
+        pid = queue.pop()
+        found.append((pid, commands.get(pid, ""), pid not in children))
+        queue.extend(children.get(pid, []))
+    return found
+
+
+def _parked_sleep_pids(root_pid: int, seconds: int) -> list[int]:
+    """The ``sleep <seconds>`` leaf processes under the runtime: the bash tool, RUNNING.
+
+    A leaf, because ``bash -c "sleep N"`` may or may not exec its last command
+    and a wrapper's argv repeats the command line; the leaf is the one that is
+    actually sleeping, and the one safe to signal.
+    """
+    wanted = f"sleep {seconds}"
+    return [
+        pid
+        for pid, args, leaf in _descendant_commands(root_pid)
+        if leaf and args.strip().split("/")[-1].endswith(wanted)
+    ]
+
+
+def _release_parked_sleep(root_pid: int, seconds: int) -> int:
+    """End the parked tool call now (SIGTERM to its exact pid); how many were signalled.
+
+    The turn then completes the way any bash call that exited non-zero does --
+    the mock answers the tool row with text -- so the cell's later "the turn's
+    reply is durable" and "no error attention row" assertions still read a turn
+    that finished rather than one that was aborted.
+    """
+    signalled = 0
+    for pid in _parked_sleep_pids(root_pid, seconds):
+        try:
+            os.kill(pid, 15)
+            signalled += 1
+        except ProcessLookupError:
+            pass
+    return signalled
 
 
 async def _never_take_over() -> Any:
@@ -1487,7 +1572,7 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
         else:
             raise AssertionError("the warm-up turn never completed")
 
-        await viewer.prompt("please [bash:12]")
+        await viewer.prompt(f"please [bash:{ARMED_HOLD_S}]")
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             state = getattr(viewer, "frontend_state", None)
@@ -1496,6 +1581,32 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             await asyncio.sleep(0.05)
         else:
             raise AssertionError("the runtime never started the turn")
+
+        # WAIT UNTIL THE BASH TOOL IS RUNNING, THEN DELETE -- ``streaming`` is
+        # not that moment. It flips when the turn is ADMITTED; the tool call
+        # that this cell parks the turn in is dispatched later (a provider
+        # request, then the guardrail check, then the spawn), and each of those
+        # touches modules on disk. Delete in that gap and the dispatch fails in
+        # microseconds -- "aborted", or "BLOCKED by guardrail ... the safety check
+        # failed" -- the turn completes with no tool ever having run, and the
+        # latch assertion below reports "completion rows: complete, complete".
+        # That was CI's failure (runs 43082470360, 43135142485): the gap is
+        # ~ms on an idle box and stretches with runner load, while the old
+        # cell's rmtree was timed against ``streaming`` alone. A live
+        # ``sleep`` under THIS runtime is the observable that the dispatch is
+        # behind us, so the deletion now lands on a turn that is genuinely
+        # parked in its tool, which is the situation the cell claims to test.
+        # (``AttachedSession`` publishes no per-tool state to wait on instead.)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            if _parked_sleep_pids(pid, ARMED_HOLD_S):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError(
+                "the turn never reached its bash tool: "
+                + _completion_attention_report(config, session_id, stderr_path)
+            )
 
         shutil.rmtree(tree)  # what `uv tool install --force` does first
 
@@ -1517,6 +1628,17 @@ async def test_the_armed_probe_drains_and_exits_when_the_loaded_tree_vanishes(
             viewer.frontend_state, "streaming", False
         ), "the latch must land while the turn is STILL running — " + _completion_attention_report(
             config, session_id, stderr_path
+        )
+
+        # THE TURN IS HELD OPEN UNTIL HERE, NOT FOR A FIXED TIME. The tool parks
+        # for ARMED_HOLD_S (the mock's cap), far past the latch, so "the latch
+        # landed while the turn was still running" cannot be lost to a slow
+        # probe tick; the cell ends the park itself now that the latch is
+        # observed and the assertion above has passed. Without it a loaded
+        # runner could finish a fixed 12 s turn before a 5 s probe fired twice.
+        assert _release_parked_sleep(pid, ARMED_HOLD_S), (
+            "the parked bash tool vanished before the cell could release it: "
+            + _completion_attention_report(config, session_id, stderr_path)
         )
 
         # (b) It EXITS — the Q-1 pin. On the wedged head this loop timed out with
