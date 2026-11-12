@@ -2848,3 +2848,102 @@ async def test_round1_e14_eval_repr_of_a_quote_heavy_value_is_masked(
         kernel = eval_tool._KERNELS.pop(eval_tool._session_key(context), None)
         if kernel is not None:
             await eval_tool._close_kernel(kernel)
+
+
+# Frozen round-2 ledger: these are mask-defeating predicates/transformations,
+# not new quoting forms. Exercise the actual tool gate before a child can run.
+_ROUND2_SHELL = (
+    'v=$(lop secret get K); if [[ $v == synthetic* ]]; then echo PREFIX-YES; fi',
+    'v=$(lop secret get K); { [[ $v == synthetic* ]] && echo PREFIX-YES; }',
+    'v=$(lop secret get K); [[ -n $v && $v == synthetic* ]] && echo PREFIX-YES',
+    'v=$(lop secret get K); ! [[ $v == synthetic* ]] || echo PREFIX-YES',
+    'v=$(lop secret get K); [[ -n $v && $v == synthetic* && -n $v ]] && echo PREFIX-YES',
+    'v=$(lop secret get K); if test "$v" = synthetic*; then echo PREFIX-YES; fi',
+    'v=$(lop secret get K); while [[ $v == synthetic* ]]; do echo PREFIX-YES; break; done',
+    'lop secret get K | tac -s -',
+    'lop secret get K | tac --separator=-',
+    'lop secret get K | tac --separator -',
+    'lop secret get K | tac -bs-',
+    'lop secret get K | diff -W 24 -y - /dev/null',
+    'lop secret get K | diff -yW24 - /dev/null',
+    'lop secret get K | diff --width=24 --side-by-side - /dev/null',
+    'lop secret get K | diff --width 24 - /dev/null',
+    'lop secret get K | diff --side-by-side - /dev/null',
+    'v=$(lop secret get K); echo "${v@E}"',
+    'v=$(lop secret get K); echo "${v@U}"',
+    'v=$(lop secret get K); echo "${v@L}"',
+)
+
+_ROUND2_PYTHON = (
+    'import operator; print(operator.contains(secrets["K"], "9f2c41"))',
+    'import re; print(bool(re.match("synth", secrets["K"])))',
+    'def inspect_text(v): return v.startswith("synth")\nprint(inspect_text(secrets["K"]))',
+    'import operator\na = operator.contains(secrets["K"], "9f2c41")\nprint(a)',
+    'print(repr(repr(str(secrets["K"]))))',
+    'import json; print(json.dumps(repr(str(secrets["K"]))))',
+    'import shlex; print(shlex.quote(repr(str(secrets["K"]))))',
+    'a = repr(str(secrets["K"]))\nb = a\nprint(repr(b))',
+    'import json\na = json.dumps(secrets["K"])\nprint(repr(a))',
+    'q = repr\nprint(q(repr(secrets["K"])))',
+    'from json import dumps as q\nprint(q(repr(secrets["K"])))',
+    'v = repr(secrets["K"])\nprint(f"{v!r}")',
+)
+
+
+@pytest.mark.parametrize("command", _ROUND2_SHELL)
+def test_round2_shell_frozen_ledger_blocks(command: str) -> None:
+    assert scan_command(command).blocking, command
+
+
+@pytest.mark.parametrize("cell", _ROUND2_PYTHON)
+def test_round2_python_frozen_ledger_blocks(cell: str) -> None:
+    assert scan_python(cell).blocking, cell
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", _ROUND2_SHELL)
+async def test_round2_shell_real_path_refuses_before_execution(
+    command: str, tmp_path: Path, config_root: Path, round1_secrets: None, shimmed_path: None
+) -> None:
+    marker = tmp_path / "round2-must-not-run"
+    # @E needs actual backslashes; quote-heavy and multiline rows cover the
+    # distinct mask domains the other frozen findings defeated.
+    _store(config_root, "ROUND2_ESCAPES", r"pre\x41\tpost-zz9q8w7e6r")
+    for name in ("ROUND2_ESCAPES", _QUOTE_NAME, _MULTI_NAME):
+        exact = command.replace("secret get K", f"secret get {name}")
+        updates = []
+        result = await builtin.execute_bash(
+            "round2-frozen",
+            {"command": f"touch {marker}; {exact}"},
+            AbortSignal(),
+            updates.append,
+            _context(tmp_path),
+        )
+        assert not updates, "refused command produced a stream frame"
+        assert result.is_error, "unsafe command was not refused"
+        assert not marker.exists(), "refused command executed a side effect"
+        text = _result_text(result)
+        for value in (_QUOTE_VALUE, _MULTI_VALUE, _MULTI_PASS, "post-zz9q8w7e6r"):
+            assert value not in text, "synthetic secret fragment reached final output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cell", _ROUND2_PYTHON)
+async def test_round2_python_real_path_refuses_before_execution(
+    cell: str, tmp_path: Path, config_root: Path, round1_secrets: None
+) -> None:
+    context = _context(tmp_path)
+    marker = tmp_path / "round2-eval-must-not-run"
+    exact = cell.replace('secrets["K"]', f'secrets["{_QUOTE_NAME}"]')
+    code = f"from pathlib import Path\nPath({str(marker)!r}).touch()\n{exact}"
+    updates = []
+    result = await execute_eval(
+        "round2-frozen", {"code": code}, AbortSignal(), updates.append, context
+    )
+    assert not updates, "refused cell produced a stream frame"
+    assert result.is_error, "unsafe cell was not refused"
+    assert not marker.exists(), "refused cell executed a side effect"
+    assert eval_tool._session_key(context) not in eval_tool._KERNELS, "refusal started a kernel"
+    text = _result_text(result)
+    for spelling in _escaped_spellings(_QUOTE_VALUE):
+        assert spelling not in text, "synthetic secret spelling reached final output"

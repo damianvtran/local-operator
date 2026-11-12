@@ -1804,6 +1804,24 @@ def _stage_transforms(command: str, args: Sequence[str]) -> bool:
         # Byte mode in any spelling, a short-option CLUSTER included: GNU
         # `head -qc8` is `-q -c 8` (R7).
         return any(arg.startswith("--bytes") or re.match(r"^-[^-]*c", arg) for arg in flags)
+    if command == "tac":
+        # A custom record separator reorders fragments, not registered lines.
+        for index, arg in enumerate(args):
+            if arg in ("-s", "--separator"):
+                if index + 1 >= len(args) or args[index + 1] != "\n":
+                    return True
+            elif arg.startswith("--separator="):
+                if arg.split("=", 1)[1] != "\n":
+                    return True
+            elif re.match(r"^-[^-]*s", arg):
+                return True
+    if command == "diff":
+        # Side-by-side output truncates lines to the selected display width.
+        return any(
+            arg.startswith(("--side-by-side", "--width"))
+            or re.match(r"^-[^-]*[yW]", arg)
+            for arg in flags
+        )
     if command == "cat":
         # `-A`/`-v`/`-e`/`-t` re-spell control bytes, `-n`/`-b` interleave
         # numbers, `-s` drops blank lines: only `-u` prints the bytes as read.
@@ -2446,7 +2464,7 @@ def _is_respelling_expansion(text: str, match: re.Match[str]) -> bool:
     rest = text[match.end() : match.end() + 2]
     if not rest:
         return False
-    if rest[0] in "#%/^,":
+    if rest[0] in "#%/^,@":
         return True
     return rest[0] == ":" and rest[1:2] not in ("-", "=", "?", "+")
 
@@ -3870,7 +3888,19 @@ class _ShellAnalyzer:
         piped: list[bool] = []
         current: list[_Word | _Op | _Body] = []
         reads_stdin = False
+        in_test = False
         for item in items:
+            # &&/|| within [[ ... ]] join predicate clauses, not commands.
+            # Keep them together so only a SIMPLE approved test can be exempt.
+            if isinstance(item, _Word):
+                text = _ShellAnalyzer._word_text(item).strip()
+                if text == "[[":
+                    in_test = True
+                elif text == "]]":
+                    in_test = False
+            if in_test and isinstance(item, _Op):
+                current.append(item)
+                continue
             if isinstance(item, _Body):
                 # A here-doc BODY arrives after the newline that ended the stage
                 # whose delimiter introduced it, so it belongs to that stage —
@@ -3968,7 +3998,16 @@ class _ShellAnalyzer:
         # head is read from the stage itself. Nothing here prints the value,
         # so the mask has nothing to match: the answer IS the leak.
         head_word = next(
-            (item for item in stage if isinstance(item, _Word) and not self._is_assignment(item)),
+            (
+                item
+                for item in stage
+                if isinstance(item, _Word)
+                and not self._is_assignment(item)
+                and (
+                    self._word_text(item).strip() not in _SHELL_KEYWORDS
+                    or self._word_text(item).strip() in ("[[", "case")
+                )
+            ),
             None,
         )
         head = self._word_text(head_word).strip() if head_word is not None else ""
@@ -5276,6 +5315,15 @@ def scan_python(source: str) -> ScanResult:
         )
     analyzer = _PyAnalyzer()
     analyzer.run(tree)
+    # Unknown helpers may return an oracle bit (or stash it in a new variable).
+    # Refuse the call itself, rather than betting on a list of encoder modules.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and not _py_known_value_call(node, analyzer):
+            for argument in [*node.args, *(kw.value for kw in node.keywords)]:
+                found, name = analyzer._is_tainted(argument)
+                if found:
+                    analyzer._add("python.print-of-source", node, name)
+                    break
     return ScanResult(
         verdict=_verdict_of(analyzer.findings, analyzer.sources),
         findings=tuple(analyzer.findings),
@@ -5331,6 +5379,38 @@ _PY_RESPELLING_BUILTINS = frozenset(
 _PY_FORMAT_SPEC_RE = re.compile(r"\{[^{}]*[:!][^{}]*\}")
 
 
+def _py_known_value_call(node: ast.Call, analyzer: _PyAnalyzer) -> bool:
+    """Known maskable/metadata calls and existing non-printing consumers only.
+
+    Consumer responses deliberately do not inherit the credential's taint.
+    Unknown text helpers do not get that exemption merely for using a new module.
+    """
+    dotted = analyzer._dotted(node.func)
+    if analyzer._write_path(node) is not None or dotted in {"os.write", "client.get_secret_value"}:
+        return True
+    if dotted in _PY_VERBATIM_CALLS | _PY_PRINT_CALLS | {"len", "hash", "id"}:
+        return True
+    if isinstance(node.func, ast.Attribute):
+        if node.func.attr in ("format", "format_map", "join"):
+            return True  # Their precise shape is checked below, as before.
+        module, _, method = dotted.rpartition(".")
+        if module in ("requests", "httpx") and method in {
+            "get",
+            "post",
+            "put",
+            "patch",
+            "delete",
+            "head",
+            "options",
+            "request",
+            "Request",
+        }:
+            return True
+        if module in ("subprocess", "os") and method in _PY_SHELL_CALLS:
+            return True
+    return False
+
+
 def _py_respells_a_value(tree: ast.Module, analyzer: _PyAnalyzer) -> bool:
     """Does this cell re-spell a stored value anywhere (the mask-defeating case)?
 
@@ -5351,6 +5431,39 @@ def _py_respells_a_value(tree: ast.Module, analyzer: _PyAnalyzer) -> bool:
                 return True
         return False
 
+    # One registered quoting layer is maskable; composing layers is not closed
+    # under those spellings. Follow assignments too, without generating escapes.
+    requoted: set[str] = set()
+
+    def has_quote(node: ast.AST) -> bool:
+        return any(
+            (isinstance(child, ast.Name) and child.id in requoted)
+            or (
+                isinstance(child, ast.Call)
+                and analyzer._dotted(child.func) in {"repr", "json.dumps", "shlex.quote"}
+                and touches(child)
+            )
+            or (
+                isinstance(child, ast.FormattedValue)
+                and child.conversion == ord("r")
+                and touches(child.value)
+            )
+            for child in ast.walk(node)
+        )
+
+    assignments = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
+    while True:
+        before = len(requoted)
+        for assignment in assignments:
+            if assignment.value is not None and has_quote(assignment.value):
+                requoted.update(
+                    target.id
+                    for target in analyzer._assign_targets(assignment)
+                    if isinstance(target, ast.Name)
+                )
+        if len(requoted) == before:
+            break
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript):
             if analyzer._source_name(node) is None and touches(node.value):
@@ -5370,6 +5483,12 @@ def _py_respells_a_value(tree: ast.Module, analyzer: _PyAnalyzer) -> bool:
                 isinstance(func, ast.Attribute) and touches(func.value)
             ):
                 continue
+            if not _py_known_value_call(node, analyzer):
+                return True
+            if analyzer._dotted(func) in {"repr", "json.dumps", "shlex.quote"} and any(
+                has_quote(argument) for argument in arguments
+            ):
+                return True
             if isinstance(func, ast.Name) and func.id in _PY_RESPELLING_BUILTINS:
                 return True
             if isinstance(func, ast.Name) and func.id == "format" and len(arguments) > 1:
@@ -5411,6 +5530,8 @@ def _py_respells_a_value(tree: ast.Module, analyzer: _PyAnalyzer) -> bool:
             if (node.format_spec is not None or node.conversion == ord("a")) and touches(
                 node.value
             ):
+                return True
+            if node.conversion == ord("r") and has_quote(node.value):
                 return True
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
             if (
