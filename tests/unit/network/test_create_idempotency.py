@@ -6,7 +6,8 @@ answered "stopped answering before it replied" while the node HAD created
 session running the same first prompt. See ``network/create_keys.py``.
 
 THE RIG is two in-process relays: an OWNER whose real ``_op_session_create`` /
-``_op_session_create_lookup`` run against its own disk, and a REQUESTER whose real
+``_op_session_create_lookup`` and ``net_definitions`` handler
+(``definitions.make_handler``) run against its own disk, and a REQUESTER whose real
 ``_ctl_peer_create`` → ``_local_peer_call`` path talks to the owner through a
 fake link. The link can DROP a reply after the owner has acted, which is the
 production failure exactly (the frame arrived, the answer did not). The warm-up
@@ -21,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import relay, types
+from local_operator.network import definitions, relay, types
 from local_operator.network.create_keys import CreateKeyIndex
 
 REQUESTER_DEVICE = "d_" + "b" * 32
@@ -55,6 +56,13 @@ class _Wire:
     ``drop_create_replies`` replies to that many ``net_session_create`` frames
     with ``None`` AFTER the owner ran them — the lost-reply case. ``lookup`` set
     to ``"unknown_op"`` plays an owner older than this build.
+
+    ``net_definitions`` frames — the probe ``push_to_peer`` opens a create with —
+    are recorded in ``definition_frames`` and answered by the owner's real
+    handler, so the reply carries the ``phase`` key the wire's does. What phase
+    those frames may carry is asserted in the TEST BODY, never here:
+    ``push_to_peer`` swallows anything this ``request`` raises
+    (``definitions.py:1777-1778``), so an assert in this class cannot fail a test.
     """
 
     def __init__(self, owner: relay.RelayServer, *, drop_create_replies: int = 0) -> None:
@@ -62,10 +70,15 @@ class _Wire:
         self.drop = drop_create_replies
         self.lookup = "ok"
         self.sent: list[dict[str, Any]] = []
+        self.definition_frames: list[dict[str, Any]] = []
+        self._definitions = definitions.make_handler(owner)
 
     def request(self, frame: dict[str, Any], timeout: float | None = None) -> dict[str, Any] | None:
-        self.sent.append(dict(frame))
         op = frame["op"]
+        if op == "net_definitions":
+            self.definition_frames.append(dict(frame))
+            return {"op": "reply", "detail": self._definitions(_owner_link(), frame)}
+        self.sent.append(dict(frame))
         if op == "net_session_create_lookup" and self.lookup == "unknown_op":
             return {"op": "error", "code": "unknown_op", "message": "not an operation"}
         handler = {
@@ -98,6 +111,10 @@ def _sessions(owner: relay.RelayServer) -> list[str]:
     return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
 
 
+def _phases(wire: _Wire) -> list[Any]:
+    return [frame.get("phase") for frame in wire.definition_frames]
+
+
 def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     pair: tuple[Any, Any, _Wire],
 ) -> None:
@@ -105,6 +122,9 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     owner, requester, wire = pair
     wire.drop = 1
     first = requester._ctl_peer_create({"peer": "node-2"})  # noqa: SLF001
+    # The definitions probe is a state READ; the write phase is ``apply``. Asserted
+    # here, off the swallowing path: see the ``_Wire`` docstring.
+    assert _phases(wire) == ["state"], wire.definition_frames
     # Settled by the lookup, not reported as unreachable.
     assert first["create_unconfirmed"] is True, first
     minted = first["session_id"]
@@ -118,6 +138,7 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     assert wire.sent[0]["create_key"] == key and wire.sent[1]["create_key"] == key
 
     retry = requester._ctl_peer_create({"peer": "node-2", "create_key": key})  # noqa: SLF001
+    assert _phases(wire) == ["state", "state"], wire.definition_frames
     assert retry["session_id"] == minted, retry
     assert retry["replayed"] is True, retry
     assert _sessions(owner) == [minted], "a retry with the same key made a second session"
