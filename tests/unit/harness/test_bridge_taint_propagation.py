@@ -38,9 +38,13 @@ from local_operator.harness import bridge_egress as be
 from local_operator.harness.loop import AgentLoop, LoopContext, _PlannedCall
 from local_operator.harness.types import (
     AgentTool,
+    ChatRequest,
     CustomMessage,
     LoopConfig,
     Message,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
     TextContent,
     ToolCall,
     ToolContext,
@@ -970,3 +974,296 @@ def test_s63_static_read_tier_inventory_is_pinned() -> None:
         "they can reach a third party while latched, then record the reason here"
     )
     assert not set(STATIC_READ_TIER) - found, "a pinned tool is gone; drop it from the list"
+
+
+# -- S-38 (operator report): the job RESULT is not a source, and the real -------
+#    ``task`` wiring is what carries a child's PULL to its parent.
+#
+# The report was "my own ``task`` child's ``job_result`` latched the session".
+# The result is not the cause: a ``job_result`` row carries no latch stamp, so
+# nothing in that path is a source. The cause is the CHILD -- a child that read
+# a latched session's journal latches, and ``link_latches`` propagates that to
+# the parent (R1/S-67, which must stay). These tests pin both sides through the
+# whole path a real session takes -- the ``task`` tool, the child runner and
+# its real loop, the real commit observer, and the durable row -- because the
+# latch-only unit tests above cannot see a wiring change at any of those seams.
+
+
+#: Prompt markers that let ONE scripted provider serve the parent and both
+#: children of a batch (``run_subagent`` hands the child the parent's stream).
+READ_MARKER = "pull the other session's ledger"
+HOLD_MARKER = "hold this child until the reader has pulled"
+
+
+class _TaskProvider:
+    """The parent's and its children's turns, dispatched on the prompt.
+
+    The ``read`` child answers with a REAL ``read`` call and then a report. The
+    sibling parks on ``hold`` until the test releases it, so it is still ALIVE
+    (and therefore still linked) when the parent latches. Every other turn --
+    the parent's job-result turn included -- is plain text.
+    """
+
+    def __init__(self, read_path: str) -> None:
+        self.read_path = read_path
+        self.hold = asyncio.Event()
+        self.calls: list[list[str]] = []
+
+    def __call__(self, request: ChatRequest, signal: Any = None) -> Any:
+        roles = [m.role for m in request.messages if isinstance(m, Message)]
+        body = "\n".join(
+            m.text for m in request.messages if isinstance(m, Message) and m.role == "user"
+        )
+        self.calls.append(roles)
+        return self._turn(READ_MARKER in body, "tool" in roles, HOLD_MARKER in body)
+
+    async def _turn(self, reader: bool, has_result: bool, holder: bool) -> Any:
+        if reader and not has_result:
+            yield StreamToolCallDelta(
+                index=0,
+                id="c-read",
+                name="read",
+                argument_delta=json.dumps({"path": self.read_path}),
+            )
+            yield StreamEndEvent(stop_reason="toolUse")
+            return
+        if holder:
+            await self.hold.wait()
+        yield StreamTextDelta(delta="report: nothing to escalate")
+        yield StreamEndEvent(stop_reason="stop")
+
+
+async def _real_session(tmp_path: Path, provider: Any) -> Session:
+    """A session on the real constructor: real latch, real commit subscription."""
+    transcript = await asyncio.to_thread(Transcript, tmp_path / "parent")
+    return Session(
+        model=MODEL,
+        stream_fn=provider,
+        tools=[],
+        transcript=transcript,
+        system_blocks_provider=lambda: ["stable", "env"],
+        cwd=str(tmp_path),
+    )
+
+
+def _custom_rows(session: Session, custom_type: str) -> list[dict[str, Any]]:
+    """Payloads carrying ``custom_type``, whatever ROW type holds them.
+
+    A ``job_result`` is a ``CustomMessage`` journaled as a ``message`` row, and
+    the latch row is a ``custom`` row: filtering on the entry type would miss
+    one of the two, so the durable marker decides.
+    """
+    return [
+        entry.payload or {}
+        for entry in session._transcript.entries()
+        if (entry.payload or {}).get("custom_type") == custom_type
+    ]
+
+
+def _latch_rows(session: Session) -> list[dict[str, Any]]:
+    return _custom_rows(session, be.BRIDGE_TAINT_LATCH_TYPE)
+
+
+def _tool_rows(session: Session, tool_name: str) -> list[dict[str, Any]]:
+    return [
+        entry.payload or {}
+        for entry in session._transcript.entries()
+        if (entry.payload or {}).get("role") == "tool"
+        and (entry.payload or {}).get("tool_name") == tool_name
+    ]
+
+
+def _tool_text(payload: dict[str, Any]) -> str:
+    return "\n".join(
+        str(block.get("text", ""))
+        for block in payload.get("content") or []
+        if isinstance(block, dict)
+    )
+
+
+async def _wait_for(predicate: Any, timeout: float = 20.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() > deadline:
+            raise AssertionError("timed out waiting for the real subagent path")
+        await asyncio.sleep(0.01)
+
+
+async def _settle(parent: Session, job_ids: list[str]) -> None:
+    """Wait for the jobs, the delivery turn and any latch-row write they caused."""
+    for job_id in job_ids:
+        await asyncio.wait_for(parent.jobs.settled_event(job_id).wait(), timeout=60)
+    # ``_deliver_job_results`` journals each result and spawns the turn that
+    # answers it fire-and-forget, so the rows land after the jobs settle. Wait
+    # for the rows, then for the session's background group to drain, before
+    # judging what the commits wrote.
+    await _wait_for(lambda: len(_custom_rows(parent, "job_result")) >= len(job_ids), timeout=30)
+    await _wait_for(lambda: not parent._background_tasks, timeout=30)
+    task = parent._bridge_latch_row_task
+    if task is not None:
+        await task
+
+
+async def _launch(parent: Session, args: dict[str, Any]) -> dict[str, str]:
+    """Run the real ``task`` tool; return ``label -> job_id``."""
+    from local_operator.tools.builtin import execute_task
+
+    result = await execute_task("t1", args, None, None, parent._build_tool_context())
+    assert not result.is_error, result.text
+    jobs = (result.details or {}).get("jobs") or []
+    assert jobs, result.text
+    return {entry["label"]: entry["job_id"] for entry in jobs}
+
+
+async def _children(parent: Session, job_ids: list[str]) -> dict[str, Any]:
+    """The live child sessions, captured while the jobs still own them."""
+    children: dict[str, Any] = {}
+    for job_id in job_ids:
+        await _wait_for(
+            lambda j=job_id: parent.subagent_comms is not None
+            and parent.subagent_comms._records.get(j) is not None
+            and parent.subagent_comms._records[j].child is not None
+        )
+        child = parent.subagent_comms._records[job_id].child
+        assert child is not None
+        children[job_id] = child
+    return children
+
+
+@pytest.mark.asyncio
+async def test_s38_control_a_a_clean_childs_job_result_never_latches_the_parent(
+    store: Path, tmp_path: Path
+) -> None:
+    """The report, negated through the real path.
+
+    A clean child finishes, its ``job_result`` reaches the parent, and neither
+    the result nor the commit that carries it is a source: no latch row, and
+    the parent stays unlatched -- including after the NEXT commit, which is
+    when the commit observer would write one if the result were a source.
+    """
+    provider = _TaskProvider(read_path=str(tmp_path / "unread"))
+    parent = await _real_session(tmp_path, provider)
+    try:
+        job_id = (await _launch(parent, {"label": "clean", "prompt": "summarise the notes"}))[
+            "clean"
+        ]
+        child = (await _children(parent, [job_id]))[job_id]
+        await _settle(parent, [job_id])
+
+        # The child really was clean: no pull of its own, no source, no row.
+        assert child.bridge_latched is False
+        assert _latch_rows(child) == []
+        assert _tool_rows(child, "read") == []
+
+        # The row really landed, and it really is not a source -- the object the
+        # delivery builds and the durable payload the observer judges, both.
+        result_row = parent._job_result_message(
+            job_id, "report: nothing to escalate", parent.jobs.get(job_id)
+        )
+        assert result_row.custom_type == "job_result"
+        assert not be.message_is_taint_source(result_row)
+        delivered = _custom_rows(parent, "job_result")
+        assert delivered, "the clean child's result must reach the parent"
+        for payload in delivered:
+            assert not be.entry_is_taint_source("message", payload)
+
+        assert parent.bridge_latched is False
+        assert _latch_rows(parent) == []
+
+        # "Including after the next commit": every transcript commit runs the
+        # observer, so this is the commit that would persist a bad latch.
+        await parent._transcript.append_message(Message.user("carry on"))
+        if parent._bridge_latch_row_task is not None:
+            await parent._bridge_latch_row_task
+        assert _latch_rows(parent) == []
+        assert parent.bridge_latched is False
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_s38_control_b_a_childs_pull_latches_both_children_and_the_parent(
+    store: Path, tmp_path: Path
+) -> None:
+    """Propagation, through the real ``task`` batch (R1/S-67, must stay).
+
+    The reader child pulls a synthetic session whose journal holds a real
+    ``team_bridge_message`` row; the live link latches the parent with
+    ``other_session`` and the still-running sibling too, and the parent's next
+    commit persists that kind -- the row a resume reads back.
+    """
+    _journal(store, "aaaa11112222", latched=True)
+    read_path = str(store / "sessions" / "aaaa11112222" / "transcript.jsonl")
+    provider = _TaskProvider(read_path=read_path)
+    parent = await _real_session(tmp_path, provider)
+    try:
+        jobs = await _launch(
+            parent,
+            {
+                "tasks": [
+                    {"label": "reader", "prompt": f"{READ_MARKER}", "agent": "task"},
+                    {"label": "clean", "prompt": f"{HOLD_MARKER}, then summarise", "agent": "task"},
+                ]
+            },
+        )
+        children = await _children(parent, list(jobs.values()))
+        reader, sibling = children[jobs["reader"]], children[jobs["clean"]]
+
+        # The pull runs inside the child's real loop. ``link_latches`` fires
+        # synchronously inside ``latch.mark``, so the parent holds it already.
+        await _wait_for(lambda: _tool_rows(reader, "read"), timeout=30)
+        pulled = _tool_rows(reader, "read")[0]
+        assert not pulled.get("is_error"), pulled
+        assert "team_bridge_message" in _tool_text(pulled), "the child read the OTHER journal"
+        assert reader.bridge_latched is True
+        assert reader.bridge_taint_latch.kind == be.SOURCE_OTHER_SESSION
+        assert parent.bridge_latched is True, "a child's pull must latch its parent"
+        assert parent.bridge_taint_latch.kind == be.SOURCE_OTHER_SESSION
+        assert sibling.bridge_latched is True, "the live sibling is marked through the parent"
+
+        provider.hold.set()
+        await _settle(parent, list(jobs.values()))
+
+        # The durable rows: the child's own, and the parent's on its next commit.
+        assert [be.latch_row_kind(row) for row in _latch_rows(reader)] == [be.SOURCE_OTHER_SESSION]
+        await parent._transcript.append_message(Message.user("carry on"))
+        if parent._bridge_latch_row_task is not None:
+            await parent._bridge_latch_row_task
+        assert [be.latch_row_kind(row) for row in _latch_rows(parent)] == [be.SOURCE_OTHER_SESSION]
+        reopened = await asyncio.to_thread(Transcript, tmp_path / "parent")
+        assert _session_over(reopened).bridge_latched is True
+
+        # The security consequence: this parent's next egress is gated.
+        assert be.context_is_latched(parent._build_tool_context()) is True
+    finally:
+        provider.hold.set()
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_s38_control_c_a_genuine_inbound_card_latches_with_agent_message(
+    store: Path, tmp_path: Path
+) -> None:
+    """The source that IS supposed to latch, through the real receive path.
+
+    ``receive_peer_message`` is what ``team_bridge/connector/wake.py`` calls to
+    land a card, so this is the inbound half of the same commit observer.
+    """
+    parent = await _real_session(tmp_path, _TaskProvider(read_path=str(tmp_path / "unread")))
+    try:
+        await parent.receive_peer_message(
+            "hello from a teammate",
+            mode="mailbox",
+            sender={"account_id": "acct-test", "source": be.TEAM_BRIDGE_MESSAGE_TYPE},
+            custom_type=be.TEAM_BRIDGE_MESSAGE_TYPE,
+        )
+        assert parent.bridge_latched is True
+        assert parent.bridge_taint_latch.kind == be.SOURCE_AGENT_MESSAGE
+        task = parent._bridge_latch_row_task
+        assert task is not None
+        await task
+        assert [be.latch_row_kind(row) for row in _latch_rows(parent)] == [be.SOURCE_AGENT_MESSAGE]
+        assert be.context_is_latched(parent._build_tool_context()) is True
+    finally:
+        await parent.dispose()
