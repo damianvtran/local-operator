@@ -256,6 +256,9 @@ class MetadataStore:
                 # locked" while another connection is writing.
                 connection.execute("PRAGMA busy_timeout=5000")
                 connection.execute("PRAGMA foreign_keys=OFF")
+                # Same file as the derived index, same reason: temp structures
+                # in RAM, not ``etilqs_*`` disk files (see ``LibraryStore``).
+                connection.execute("PRAGMA temp_store=MEMORY")
             except sqlite3.DatabaseError as error:
                 # A corrupt file may fail here (``file is not a database``).
                 raise MetadataUnavailable(str(error)) from error

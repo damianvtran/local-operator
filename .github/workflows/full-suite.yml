@@ -1,4 +1,10 @@
 name: Main Full Suite
+# PR number is the stable owning lane; actor identifies who armed it. Label
+# events cannot distinguish a first arm from a re-arm, so name both honestly.
+run-name: >-
+  Full suite · owner=${{ github.actor }}/lane-${{ github.event.pull_request.number || github.ref_name }}
+  · ${{ github.event_name == 'pull_request' && format('arm/re-arm:{0}', github.event.label.name) || github.event_name }}
+  · head=${{ github.event.pull_request.head.sha || github.sha }} · attempt=${{ github.run_attempt }}
 
 # THE FULL UNIT SUITE, AND THE PULL-REQUEST MERGE GATE.
 #
@@ -47,8 +53,8 @@ name: Main Full Suite
 # run rather than a bigger selection: matrix-version bugs (3.13 only), cross-test
 # state leaks that only show under sharded `-n auto` worksteal ordering, and any
 # test the diff-to-test mapping did not reach. On `main` it does NOT block a
-# PR: a red run files (or updates) one `ci-main-red` issue via the `report`
-# job, and a later green run closes it. On a PR it DOES block, through the
+# PR: a red run opens no issue (red main is checked on a cadence by the
+# operator's sweep, not filed here). On a PR it DOES block, through the
 # `merge-gate` aggregate below.
 
 on:
@@ -104,6 +110,38 @@ jobs:
   # merge gate (a skip is a verdict, not a silent pass — the gate refuses a
   # failed or cancelled job). It exists here so the moved jobs keep their
   # `needs: [changes]` + flag wiring byte-for-byte.
+  # THE MERGE BASE: every job below that checks out code tests the PR head
+  # merged into the main tip resolved ONCE here, never the cached merge ref.
+  #
+  # Why: on a `labeled` event `actions/checkout` checks out
+  # `refs/pull/<n>/merge`, and GitHub recomputes that ref only on a push to
+  # the PR, not when main moves, so a re-armed gate tested a stale main.
+  # 2026-11-10: #3723 gate 42881345745 checked out `15f31d1 = Merge 5cfa1bc4
+  # into 065ab3c8a9f` (36 behind main); #3720 gate 42881290246 a merge into
+  # `ce220b9216c` (38 behind); #3732 gate 42881232605 `ff0c557 = Merge
+  # 44e32ff6 into 1799972999c` (22 behind) re-failed a membership_change_push
+  # node main had already fixed (#3685, ad16110f), and the PR API kept the
+  # stale `merge_commit_sha` for over a minute — only a push refreshed it.
+  #
+  # How: `resolve` below reads the base branch tip with `git ls-remote` and
+  # exports it as `gate_base`; `test` re-exports it for `coverage-report`
+  # (whose only `needs` must stay `test`). Each job's `apply` step, right after
+  # its checkout, rebuilds the merge of `pull_request.head.sha` into exactly
+  # that SHA and fails with both SHAs named on a conflict or a failed
+  # `HEAD^1 == base` / `HEAD^2 == head` check. One SHA for the run is the
+  # point: shards must not drift onto different mains as main moves mid-run.
+  # Off `pull_request` both steps change nothing (push/schedule/dispatch test
+  # their checkout as before) and only log.
+  #
+  # Verify from a gate log: every checking-out job prints exactly one
+  #   full-suite tested-base=<base> head=<head> tree=<tree> merge=<sha> job=<id> event=<e>
+  # line. `tested-base` must be the main tip when `changes` ran (an ancestor
+  # of today's origin/main), `head` the PR head, and `tree` IDENTICAL in every
+  # job of the run (merge SHAs carry a timestamp; the tree does not).
+  #
+  # These two steps and the `gate_base` output are the ONLY difference from
+  # ci.yml's `changes` (a PR push recomputes the merge ref, so ci.yml needs
+  # neither); test_full_suite_changes_job_matches_ci strips exactly them.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -120,12 +158,25 @@ jobs:
       cli: ${{ steps.classify.outputs.cli }}
       server: ${{ steps.classify.outputs.server }}
       i18n: ${{ steps.classify.outputs.i18n }}
+      gate_base: ${{ steps.gate_base.outputs.gate_base }}
     steps:
       - uses: actions/checkout@v7
         with:
           # HEAD^1 must be present. Two commits is the whole requirement, as in
           # version-bump-guard.
           fetch-depth: 2
+
+      # Before the classifier, so `HEAD^1` below is the fresh base and the
+      # diff it classifies is the one the suite will test.
+      - name: Resolve the main tip this run tests against
+        id: gate_base
+        run: python3 scripts/gate_merge_base.py resolve
+
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ steps.gate_base.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -245,6 +296,11 @@ jobs:
     # p75 weights; their LPT test-time sums are NOT wall-time margin evidence.
     # See docs/ci-test-durations.md for provenance and post-change limits.
     timeout-minutes: 38
+    # Pass-through only, for `coverage-report` (whose `needs` must stay
+    # `test`). Every leg carries the same value from `changes`, so the
+    # last-leg-wins rule for matrix outputs cannot pick a different base.
+    outputs:
+      gate_base: ${{ needs.changes.outputs.gate_base }}
     strategy:
       fail-fast: false
       matrix:
@@ -291,6 +347,15 @@ jobs:
         tests/unit/network/test_membership_convergence.py::test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pass
     steps:
       - uses: actions/checkout@v7
+
+      # Stays step 2, never folded into the checkout: gen_test_durations.py binds
+      # timing sources to a bare first-step `actions/checkout@v7`.
+      # See "THE MERGE BASE" at the `changes` job and scripts/gate_merge_base.py.
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ needs.changes.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
@@ -615,6 +680,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Same base as the shards whose coverage this combines, via `test`'s output.
+      # See "THE MERGE BASE" at the `changes` job and scripts/gate_merge_base.py.
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ needs.test.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
@@ -829,9 +902,21 @@ jobs:
     # the 1200s budget at 21. A ceiling is not a reservation -- it is only
     # paid by a leg that is genuinely stuck -- and the e2e tree grows, so the
     # extra minute is cheaper here than a cancellation.
-    timeout-minutes: 22
+    # 22 -> 23 on 2026-11-10 (settings intents, PR #3705): the tree grew to a
+    # heaviest leg of 1264.919s with tests/e2e/test_settings_intents_e2e.py
+    # weighed at its measured 22.714s, so the guard's minimum is
+    # ceil((1264.919 + 60)/60) = 23 minutes, leaving +55.081s. Still below
+    # the unit shard's projection, so the freeze guard keeps landing first.
+    timeout-minutes: 23
     steps:
       - uses: actions/checkout@v7
+      # Both platforms test the same fresh merge as the unit shards.
+      # See "THE MERGE BASE" at the `changes` job and scripts/gate_merge_base.py.
+      - name: Rebuild the PR merge on the run's main tip
+        env:
+          GATE_BASE: ${{ needs.changes.outputs.gate_base }}
+          GATE_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/gate_merge_base.py apply
       - name: Set Up Python 3.12
         uses: actions/setup-python@v7
         with:
@@ -944,80 +1029,17 @@ jobs:
         if: always()
         run: python -m tests.e2e.watchdog
 
-  # Files the red as ONE tracking issue instead of blocking every PR.
-  #
-  # Red: comment on the open `ci-main-red` issue if there is one (so a run of
-  # red commits accumulates on one thread, not one issue per merge), else open
-  # it. Green: close any open one, naming the green SHA. `cancelled` counts as
-  # neither — the superseding run will report — so a merge burst cannot close
-  # or open an issue on a run that never finished.
-  #
-  # `issues: write` is granted on THIS job only; the test jobs keep the
-  # workflow's read-only token, and they run repository code.
-  #
-  # Off `main` (a branch dispatch for an infra PR) the issue is never touched:
-  # `ci-main-red` tracks main's health, and a feature branch's red or green
-  # says nothing about it. The job still fails on red so the run reads red.
-  report:
-    needs: [changes, test, coverage-report, tui-e2e]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      issues: write
-    steps:
-      - name: File or close the ci-main-red issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          NEEDS: ${{ toJSON(needs) }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          failed="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure") | .key')"
-          cancelled="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "cancelled") | .key')"
-          short="${SHA:0:12}"
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "branch run on $GITHUB_REF; ci-main-red is left alone"
-            if [ -n "$failed" ]; then echo "failed: $(echo "$failed" | tr '\n' ' ')"; exit 1; fi
-            exit 0
-          fi
-          # Idempotent: create fails harmlessly when the label already exists.
-          gh label create ci-main-red --color B60205 \
-            --description "The main full-suite run is red" 2>/dev/null || true
-          open="$(gh issue list --label ci-main-red --state open --json number --jq '.[0].number // empty')"
-          if [ -n "$failed" ]; then
-            # shellcheck disable=SC2016 # the backticks are literal markdown
-            body="$(printf 'Full suite red at %s.\n\nFailing jobs:\n%s\n\nRun: %s\n' \
-              "$SHA" "$(echo "$failed" | sed 's/^/- `/; s/$/`/')" "$RUN_URL")"
-            # A red run can ALSO carry cancelled jobs (a shard at its cap);
-            # name them too, so the issue alone says which shards produced
-            # no verdict rather than leaving that to the run page.
-            if [ -n "$cancelled" ]; then
-              # shellcheck disable=SC2016 # the backticks are literal markdown
-              body="$body$(printf '\n\nCancelled jobs:\n%s\n' \
-                "$(echo "$cancelled" | sed 's/^/- `/; s/$/`/')")"
-            fi
-            if [ -n "$open" ]; then
-              gh issue comment "$open" --body "$body"
-            else
-              gh issue create --title "main full suite red at $short" \
-                --label ci-main-red --body "$body"
-            fi
-            exit 1
-          elif [ -n "$cancelled" ]; then
-            echo "::notice::jobs cancelled ($cancelled); leaving ci-main-red as it is"
-          elif [ -n "$open" ]; then
-            gh issue close "$open" --comment "Full suite green at $SHA: $RUN_URL"
-          fi
+  # No `report` job: a red run on `main` used to file/update a
+  # tracking issue here. Operator decision: red main must not open GitHub issues; it is
+  # checked on a cadence (the 4-hourly sweep) instead. `merge-gate` below is the
+  # only aggregate and is unchanged — it never needed the filer.
 
   # THE SECOND REQUIRED CHECK: nothing merges until the whole suite is green.
   #
   # Shape copied from ci.yml's `ci-gate` on purpose — one stable check name, an
-  # `always()` aggregate over every job in its own workflow, fail-closed on
-  # `failure`/`cancelled` and passing on `skipped` (a hygiene test compares the
-  # two scripts). Splitting the two checks is what keeps review cheap: `CI Gate`
+  # `always()` aggregate over every job in its own workflow, fail-closed by an
+  # allowlist: only `success` and `skipped` pass (a hygiene test runs both
+  # scripts against the same NEEDS payloads). Splitting the two checks is what keeps review cheap: `CI Gate`
   # is the slim PR path, this is the one-time full run at the gate.
   #
   # NO EVENT GUARD, AND NO LABEL CONDITION — THOSE ARE THE ONLY SAFE SHAPES.
@@ -1066,14 +1088,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail on any failed or cancelled needed job
+      # FAIL CLOSED: an ALLOWLIST of passing results, never a denylist of bad
+      # ones. A need passes only when its result is exactly `success` or
+      # `skipped` (skipped stays a pass: path-filtered jobs legitimately skip on
+      # a docs-only head). Anything else -- failure, cancelled, an empty/null
+      # result, or a value GitHub invents later -- fails the gate and names the
+      # job and its result. The old denylist (`failure`/`cancelled` only) let
+      # GitHub's 2026-11-11 Actions incident (20:48-21:29Z) report this check
+      # SUCCESS over jobs that never ran: their result was `abandoned`
+      # (PR #3804: `CI Gate` job 130798073631, `Merge gate (full suite)` job
+      # 130788458667). tests/unit/test_ci_hygiene.py runs this exact step
+      # script against such a NEEDS payload.
+      - name: Fail unless every needed job succeeded or was skipped
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')"
+          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')"
           if [ -n "$bad" ]; then
-            echo "::error title=Merge gate (full suite)::failed or cancelled: $(echo "$bad" | tr '\n' ' ')"
+            echo "::error title=Merge gate (full suite)::needed jobs not success or skipped: $(echo "$bad" | tr '\n' ' ')"
             exit 1
           fi

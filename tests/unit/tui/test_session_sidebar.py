@@ -483,6 +483,15 @@ async def test_switch_session_attaches_from_the_composer_and_wraps(position):
         await pilot.pause()
         assert app._sidebar_timer is not None
         app._sidebar_timer.pause()
+        # Opening the list started a REAL catalog read off-loop; under a slow
+        # thread it lands after the fixture below and replaces it with the
+        # isolated config's empty catalog, so the shortcut has nothing to
+        # switch to (CI job 129767804111: "attached []"). Pausing the timer
+        # stops only FUTURE polls; bumping the generation is the app's own
+        # contract for retiring the in-flight one (`_refresh_sidebar` drops a
+        # result whose generation is stale), same as `prepare()` in
+        # test_sidebar_repaint.py.
+        app._sidebar_refresh_generation += 1
         sidebar = app._session_sidebar
         sidebar.set_entries(_hover_entries())
         editor = app.query_one(Editor)

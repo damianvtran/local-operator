@@ -182,6 +182,142 @@ def test_a_secret_question_still_refuses_a_recommendation_after_the_hoist_landed
     assert "no options to recommend" in str(excinfo.value)
 
 
+# --- ask: a multi-select may recommend several rows ---------------------------
+
+
+def _multi(labels: list[str], recommended: int | list[int] | None, **extra: object) -> AskQuestion:
+    return AskQuestion(
+        id="scopes",
+        question="Which scopes?",
+        options=[AskOption(label=label) for label in labels],
+        multi=True,
+        recommended=recommended,
+        **extra,  # type: ignore[arg-type]
+    )
+
+
+def test_a_multi_select_set_is_hoisted_in_the_order_the_model_listed_it():
+    question = _multi(["a", "b", "c", "d"], [2, 0])
+    # The listed rows lead in LISTED order (the model's ranking), then the rest
+    # in authored order.
+    assert [option.label for option in question.options] == ["c", "a", "b", "d"]
+    assert question.recommended == 0
+    assert question.recommended_all == [0, 1]
+    assert question.recommended_rows == (0, 1)
+
+
+def test_a_bare_int_on_a_multi_select_is_a_set_of_one_with_no_derived_field():
+    question = _multi(["a", "b", "c"], 2)
+    assert [option.label for option in question.options] == ["c", "a", "b"]
+    assert question.recommended == 0
+    assert question.recommended_all is None
+    assert question.recommended_rows == (0,)
+
+
+def test_a_one_element_list_on_a_single_select_collapses_to_an_int():
+    question = AskQuestion(
+        id="rollout",
+        question="Which rollout?",
+        options=[AskOption(label=label) for label in "abc"],
+        recommended=[2],
+    )
+    assert question.recommended == 0
+    assert question.recommended_all is None
+    assert [option.label for option in question.options] == ["c", "a", "b"]
+
+
+def test_no_recommendation_means_no_rows():
+    question = _multi(["a", "b"], None)
+    assert question.recommended is None
+    assert question.recommended_all is None
+    assert question.recommended_rows == ()
+
+
+def test_recommending_every_option_is_allowed():
+    question = _multi(["a", "b", "c"], [1, 2, 0])
+    assert [option.label for option in question.options] == ["b", "c", "a"]
+    assert question.recommended_all == [0, 1, 2]
+
+
+@pytest.mark.parametrize(
+    "kwargs, fragment",
+    [
+        ({"multi": False, "recommended": [0, 1]}, "several recommendations need multi=true"),
+        ({"multi": True, "recommended": []}, "empty list"),
+        ({"multi": True, "recommended": [1, 1]}, "twice"),
+        ({"multi": True, "recommended": [0, 5]}, "recommended must index options (0..2)"),
+        ({"multi": True, "recommended": [-1, 0]}, "recommended must index options (0..2)"),
+        ({"multi": True, "recommended": None, "recommended_all": [0, 1]}, "derived"),
+        ({"multi": True, "recommended": 1, "recommended_all": [0, 1]}, "derived"),
+        ({"multi": True, "recommended": 0, "recommended_all": [1, 0]}, "derived"),
+        ({"multi": True, "recommended": 0, "recommended_all": [0]}, "derived"),
+        ({"multi": False, "recommended": 0, "recommended_all": [0, 1]}, "need multi=true"),
+    ],
+)
+def test_a_malformed_recommendation_set_is_refused(kwargs: dict[str, object], fragment: str):
+    with pytest.raises(ValidationError) as excinfo:
+        AskQuestion(
+            id="scopes",
+            question="Which scopes?",
+            options=[AskOption(label=label) for label in "abc"],
+            **kwargs,  # type: ignore[arg-type]
+        )
+    assert fragment in str(excinfo.value)
+
+
+def test_a_secret_question_refuses_a_set_and_a_derived_set():
+    for extra in ({"recommended": [0, 1]}, {"recommended_all": [0, 1]}):
+        with pytest.raises(ValidationError) as excinfo:
+            AskQuestion(
+                id="GITHUB_TOKEN",
+                question="Paste it.",
+                secret=True,
+                **extra,  # type: ignore[arg-type]
+            )
+        assert "no options to recommend" in str(excinfo.value)
+
+
+def test_a_dumped_set_validates_back_to_itself():
+    """Stored rows are dumped and re-validated by the queue, the renderers and
+    the TUI; the model forbids extras, so the derived field has to round-trip."""
+    question = _multi(["a", "b", "c", "d"], [3, 1])
+    dumped = question.model_dump()
+    assert dumped["recommended"] == 0 and dumped["recommended_all"] == [0, 1]
+    again = AskQuestion.model_validate(dumped)
+    assert again == question
+    assert AskQuestion.model_validate_json(question.model_dump_json()) == question
+    assert [option.label for option in again.options] == ["d", "b", "a", "c"]
+
+
+def test_a_stored_row_without_the_derived_field_still_validates():
+    """Rows written before the set existed carry `recommended` and nothing else."""
+    legacy = {
+        "id": "scopes",
+        "question": "Which scopes?",
+        "options": [{"label": "a"}, {"label": "b"}],
+        "multi": True,
+        "recommended": 0,
+    }
+    question = AskQuestion.model_validate(legacy)
+    assert question.recommended == 0
+    assert question.recommended_all is None
+    assert question.recommended_rows == (0,)
+
+
+def test_recommended_is_never_a_list_after_validation():
+    for recommended in (None, 0, 2, [2], [2, 0], [1, 2, 0]):
+        question = _multi(["a", "b", "c"], recommended)
+        assert question.recommended is None or isinstance(question.recommended, int)
+
+
+def test_the_published_schema_takes_a_list_and_hides_the_derived_field():
+    schema = AskQuestion.model_json_schema()
+    assert "recommended_all" not in schema["properties"]
+    arms = {arm.get("type") for arm in schema["properties"]["recommended"]["anyOf"]}
+    assert arms == {"integer", "array", "null"}
+    assert "preselected" not in schema["properties"]["recommended"]["description"]
+
+
 # ---------------------------------------------------------------------------
 # The generation bound a request carries (Step 1 of the runtime convergence)
 # ---------------------------------------------------------------------------

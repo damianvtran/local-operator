@@ -2102,3 +2102,38 @@ def test_rearm_never_cancels_a_reconcile_mid_hand_off(tmp_path: Path, monkeypatc
     _run(scenario())
     delivered = [m.id for batch in session.batches for m in batch]
     assert delivered == [timeout_row], delivered
+
+
+def test_question_shape_carries_the_recommendation_set_only_when_there_is_one():
+    from local_operator.asks.queue import _question_shape
+    from local_operator.harness.types import AskOption, AskQuestion, AskRowQuestion
+
+    def build(recommended: int | list[int] | None):
+        # What the tool hands the queue: the TOOL's question, not a stored row.
+        return AskQuestion(
+            id="scopes",
+            question="Which scopes?",
+            options=[AskOption(label=label) for label in "abc"],
+            multi=True,
+            recommended=recommended,
+        )
+
+    one = _question_shape(build(1))
+    assert one["recommended"] == 0
+    # Absent, never None: existing logs and folds stay byte-identical.
+    assert "recommended_all" not in one
+    assert "recommended_all" not in _question_shape(build(None))
+
+    many = _question_shape(build([2, 0]))
+    assert many["recommended"] == 0
+    assert many["recommended_all"] == [0, 1]
+    assert [o["label"] for o in many["options"]] == ["c", "a", "b"]
+    # The stored row is re-validated by the renderers and the TUI.
+    again = AskRowQuestion.model_validate(many)
+    assert again.recommended_rows == (0, 1)
+    # Re-shaping the re-validated row only adds the row option's empty `id`.
+    reshaped = _question_shape(again)
+    assert {k: v for k, v in reshaped.items() if k != "options"} == {
+        k: v for k, v in many.items() if k != "options"
+    }
+    assert [o["label"] for o in reshaped["options"]] == ["c", "a", "b"]

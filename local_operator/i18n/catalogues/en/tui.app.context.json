@@ -228,5 +228,20 @@
     "role": "status",
     "tone": "dim",
     "note": "Providers with nothing stored to list; names are identifiers."
+  },
+  "tui.app.compaction.idle_receipt": {
+    "role": "TUI transcript notice",
+    "tone": "terse, operator-facing status",
+    "note": "Receipt for a compaction the session ran on its own while idle, just before its prompt cache expired. {detail} is the already-rendered English size/strategy/advisor clause (e.g. '262.0k → 88.0k tokens (66% smaller), via summary · advisor: work finished'); keep it at the end after the middle dot."
+  },
+  "tui.app.compaction.idle_receipt_bare": {
+    "role": "TUI transcript notice",
+    "tone": "terse, operator-facing status",
+    "note": "Same receipt as idle_receipt when no before/after figures are available."
+  },
+  "tui.app.compaction.idle_skipped": {
+    "role": "TUI transcript notice",
+    "tone": "quiet info, not an error",
+    "note": "An idle compaction the user never asked for did not complete; the conversation is untouched. Must not read as an alarm."
   }
 }

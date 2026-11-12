@@ -258,6 +258,15 @@ def _bridge_settings() -> Any:
     return TeamBridgeSettings.from_values(watcher.values)
 
 
+def _screening_model() -> str:
+    """Read the receiver's next-turn preference through its production reader."""
+    from local_operator.paths import config_dir
+    from local_operator.team_bridge.settings import read_screening_model
+
+    choice = read_screening_model(config_dir())
+    return "/".join(choice) if choice is not None else ""
+
+
 def _screening_budget() -> Any:
     """The LIVE spending ceilings the receiver resolves, read the way it does.
 
@@ -517,6 +526,15 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "compaction.auto_continue": (False, lambda s, w: compaction_of(s).auto_continue),
     "compaction.mid_turn_enabled": (False, lambda s, w: compaction_of(s).mid_turn_enabled),
     "compaction.resume_replay": ("card", lambda s, w: compaction_of(s).resume_replay),
+    "compaction.idle_enabled": (False, lambda s, w: compaction_of(s).idle_enabled),
+    "compaction.idle_threshold_tokens": (
+        150_000,
+        lambda s, w: compaction_of(s).idle_threshold_tokens,
+    ),
+    "compaction.idle_min_growth_tokens": (
+        45_000,
+        lambda s, w: compaction_of(s).idle_min_growth_tokens,
+    ),
     # The two BYTE knobs. LIVE for the same reason as their neighbours — the
     # session re-coerces CompactionSettings on every config change — and it
     # matters more here: an operator raising the budget is usually reacting to
@@ -895,6 +913,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "team_bridge.session": (
         "synthetic-live-probe-session",
         lambda s, w: _bridge_settings().session,
+    ),
+    # Observe the receiver's production reader, not just the written document:
+    # the next screening turn must see a choice saved by another process.
+    "team_bridge.screening.model": (
+        "radient/probe-screening-model",
+        lambda s, w: _screening_model(),
     ),
     # The screening spend ceilings. LIVE for the same reason the two rows above
     # are: the receiver re-reads the subtree on every ``Store`` construction. The

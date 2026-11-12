@@ -268,7 +268,9 @@ _B64_RUN = re.compile(r"(?<![\w+/=-])[A-Za-z0-9+/_-]{40,}={0,2}(?![\w+/=-])")
 #      base64/alnum run: a 40-char mixed-case token after "id" is not a commit;
 #   3. structurally a LOCATOR, not a value: a DNS label followed by a real hostname tail
 #      (``<32hex>-lop.radienthq.com``) or a harness attachment blob in a LOCAL path
-#      (``~/.local-operator/attachments/<hex>.bin``) -> stored;
+#      (``~/.local-operator/attachments/<hex>.<ext>``, ext in
+#      ``_ATTACHMENT_EXTENSIONS``) or a public GitHub locator whose URL prefix ends
+#      exactly where the run starts (``_PUBLIC_URL_PREFIX``) -> stored;
 #   4. otherwise (bare and unnamed) -> refused: that is how a leaked key would be kept.
 # Vendor-prefixed keys, JWTs, PEM blocks, bearer headers and ``name=value`` assignments
 # never reach this rule's leniency: the shared ``redaction_shapes`` table refuses them
@@ -321,10 +323,46 @@ _FILE_SUFFIXES = frozenset(
     "html css png jpg jpeg gif webp svg pdf bin dat db sqlite pem key crt env cfg conf ini".split()
 )
 # A harness attachment blob, judged as part of a LOCAL path token (no ``scheme://``):
-# the store mints exactly ``<hex digest>.bin`` (session/attachments.py).
+# the store mints ``<hex digest>.bin`` (session/attachments.py), and agents also cite
+# rendered copies by their media/document extension (issue #3573).
 _LOCAL_ATTACHMENT_PREFIX = re.compile(
     r"(?:^|[\s(\"'`=])(?:~|\.{1,2}|[A-Za-z]:)?[^\s:]*[/\\]attachments[/\\]\Z"
 )
+# Extensions a harness attachment name may carry (issue #3573). A small NAMED allowlist,
+# not "any suffix": ``<hex>.env`` / ``<hex>.png.env`` must stay refused, so the extension
+# has to be the FINAL suffix (the lookahead refuses ``.png.env`` and ``.pngx``). Shared by
+# the opaque-run rule and the config-dir path exemption (``_ATTACHMENT_BLOB``) so the
+# two can never disagree about which attachment names are locators.
+_ATTACHMENT_EXTENSIONS = ("bin", "png", "jpg", "jpeg", "gif", "webp", "heic", "pdf", "json", "txt")
+_ATTACHMENT_SUFFIX = re.compile(
+    r"\.(?:" + "|".join(_ATTACHMENT_EXTENSIONS) + r")(?![A-Za-z0-9]|\.[A-Za-z0-9])"
+)
+# Public GitHub locators whose path segment IS a hex id (issue #3573): a commit
+# (``/commit/<sha>``, ``/commits/<sha>``, ``/pull/<N>/commits/<sha>``), a ``#diff-<sha256>``
+# file anchor inside a github.com URL, and a gist id (``gist.github.com/[<user>/]<id>``).
+# WHY host-anchored, not path-anchored: webhook and signed-URL secrets live under
+# arbitrary-host paths (``https://hooks.example.com/attachments/<hex>``,
+# ``…/runs/<hex>``), so a segment name alone never proves a locator (agent review
+# round 1, B1; QA Q1/Q4). WHY ``\Z``: the prefix must END where the classified run
+# STARTS, so only the run that is the locator id is exempt, never an unrelated value
+# later in the sentence (M1/Q2). The lookbehind demands a token boundary (start,
+# whitespace, bracket or quote; not ``=``, so a ``?u=`` query value on another host is
+# never read as the host) before the optional scheme, which refuses ``evilgithub.com``
+# and ``evil.example/github.com``;
+# the literal ``/`` right after the host refuses ``github.com.evil.example``.
+# Deliberately NOT covered: ``/runs/<hex>`` on any host — GitHub Actions run ids are
+# decimal (never refused) and no public hex-run host is known, so matching ``/runs/``
+# would only reopen the webhook class. ``#diff-`` may not cross whitespace.
+_PUBLIC_URL_PREFIX = re.compile(
+    r"(?<![^\s(\"'`<\[])(?:https?://)?"
+    r"(?:"
+    r"(?:www\.)?github\.com/[^/\s?#]+/[^/\s?#]+/"
+    r"(?:commits?/|pull/\d+/commits/|[^\s#]*#diff-)"
+    r"|gist\.github\.com/(?:[^/\s?#]+/)?"
+    r")\Z",
+    re.I,
+)
+
 # Back-compat alias: the digest vocabulary is now part of the public-id context.
 _DIGEST_CONTEXT = _PUBLIC_ID_CONTEXT
 _SYMBOLS = set("!@$%^&*")
@@ -749,15 +787,19 @@ def _opaque_verdict(
             # Secret-name priority above and vendor/JWT/PEM/bearer checks in the
             # shared shape table still win, even inside this public syntax.
             return None
-        if (
-            text.startswith(".bin", end)
-            and not re.match(r"[A-Za-z0-9]", text[end + 4 : end + 5])
-            and _LOCAL_ATTACHMENT_PREFIX.search(text[max(0, start - 512) : start])
+        if _ATTACHMENT_SUFFIX.match(text, end) and _LOCAL_ATTACHMENT_PREFIX.search(
+            text[max(0, start - 512) : start]
         ):
             # A content-addressed attachment blob in a LOCAL path: the harness mints
             # that name and shows it to the agent. A URL (``https://…/attachments/…``)
             # or any other segment stays refused: webhook and signed-URL secrets live
             # there (agent review round 1, m1).
+            return None
+        # A public GitHub locator whose prefix ends exactly at this run (issue #3573).
+        # ``pos``/``endpos`` (not a slice) keep the lookbehind reading the real text,
+        # so a prefix cut by the 512-char window refuses rather than matching mid-token.
+        # A secret name in the clause already won above.
+        if _PUBLIC_URL_PREFIX.search(text, max(0, start - 512), start):
             return None
     tail = _HOST_TAIL.match(text, end)
     # Only a run that CAN be a DNS label gets the hostname reading: hex, or lowercase
@@ -1115,10 +1157,11 @@ def _guard_string(value: str, field: str | None, *, opaque: bool) -> None:
 
 
 #: A content-addressed attachment blob name: the store writes ``<hex digest>.bin``
-#: (session/attachments.py, 32 hex today; up to 64 accepted for a full sha256).
+#: (session/attachments.py, 32 hex today; up to 64 accepted for a full sha256); a
+#: rendered copy carries one of ``_ATTACHMENT_EXTENSIONS`` as its FINAL suffix (#3573).
 # Matched as a PREFIX of the last component: in a JSON spelling of the fact (the
 # ``guard(_dump(fact))`` pass) the path token runs on into an escaped ``\n``.
-_ATTACHMENT_BLOB = re.compile(r"[0-9a-f]{32,64}\.bin(?![A-Za-z0-9]|\.[A-Za-z0-9])")
+_ATTACHMENT_BLOB = re.compile(r"[0-9a-f]{32,64}" + _ATTACHMENT_SUFFIX.pattern)
 
 
 def _is_attachment_reference(word: str, rule: str) -> bool:

@@ -1883,7 +1883,18 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # i.e. inside the band rather than below it, so the ceiling is re-derived the
 # documented way — this tree's own measurement plus the 55 band (35,232 + 55) —
 # and the next branch inherits 35,287.
-BUDGET_BILLED_TOKENS = 35_287
+# MUSIC ADMISSION (2026-11-09): complete availability adds generate_music,
+# modify_music and music_status, not a newly hidden/deferred capability.
+# Controlled same-code comparison excluding ONLY those three from measurement:
+# top 97,945 -> 101,798 chars (~35,232 -> ~36,618 estimated billed tokens);
+# child 86,907 -> 90,760 chars (~31,262 -> ~32,647). The identical +3,853
+# chars is 3,806 schema/description chars +47 inventory chars. Per-tool wire
+# costs: generate 1,730, modify 1,717, status 359. Minimal description compaction
+# saved203 chars; all typed controls/strict runtime validation remain intact.
+# These are estimates at2.78 chars/token, NOT a provider invoice. Admit the
+# requested async music capability with600 tokens of slack (half the unchanged
+# tighten band), rather than weakening availability or hiding its context cost.
+BUDGET_BILLED_TOKENS = 37_218
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2100,7 +2111,9 @@ BUDGET_BILLED_TOKENS = 35_287
 # not for the child pair, which is what CI caught. Re-derived the documented way,
 # this tree's own measurement plus the 55 band (31,262 + 55), so the next branch
 # inherits 31,317 and the tighten band below (1,200) is not in play.
-BUDGET_CHILD_BILLED_TOKENS = 31_317
+# Same measured music admission as the top arm:32,647 +600 slack. Keep the
+# child's narrower inventory and the shared tighten/negative controls unchanged.
+BUDGET_CHILD_BILLED_TOKENS = 33_247
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

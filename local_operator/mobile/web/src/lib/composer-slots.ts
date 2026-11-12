@@ -16,7 +16,87 @@
 import type { Capabilities } from "../types";
 
 /** What slot B holds. First match wins in `primaryRole`. */
-export type PrimaryRole = "connecting" | "stopping" | "stop" | "steer" | "send";
+export type PrimaryRole =
+	| "send-recording-busy"
+	| "send-recording"
+	| "connecting"
+	| "stopping"
+	| "stop"
+	| "steer"
+	| "send";
+
+/** The mic's phase, as the composer's dictation state names it. */
+export type DictationPhase = "idle" | "recording" | "transcribing";
+
+/**
+ * "Send recording": the press that stops the take, transcribes it and submits
+ * the words as a message, in one tap. Mirrors the desktop composer's machine
+ * (`SendRecordingPhase` in local-operator-ui `composer-slots.ts`); the phone's
+ * differs in ONE place, `transcript`, because the phone appends the transcript
+ * to the draft at the moment it LANDS (not at the press), so the "did the box
+ * change under the wait" check is made there, against the draft and the
+ * attachments the press saw.
+ *
+ *   idle -> awaiting-transcript            the press (recorder stopping, transcribing)
+ *   awaiting-transcript -> ready-to-submit a usable transcript landed and the box
+ *                                          is what the press saw
+ *   awaiting-transcript -> idle            failure, empty transcript, discarded
+ *                                          take, a cancel, or the box was edited
+ *                                          meanwhile (the words stay in the box,
+ *                                          nothing is sent)
+ *   ready-to-submit -> submitting          the render holding the transcript is
+ *                                          what was expected; the send has fired
+ *   ready-to-submit -> idle                it is not: nothing is sent
+ *   submitting -> idle                     the send settled (accepted or refused)
+ */
+export type SendRecordingPhase = "idle" | "awaiting-transcript" | "ready-to-submit" | "submitting";
+
+export type SendRecordingEvent =
+	| { type: "press" }
+	/** The transcription settled. `usable`: a non-empty transcript landed AND the box is what the press saw. */
+	| { type: "transcript"; usable: boolean }
+	/** The take was thrown away (cancelled, too short, no audio, an error, an unmount). */
+	| { type: "discarded" }
+	/** The render after the transcript landed. `entered`: the send was started. */
+	| { type: "checked"; entered: boolean }
+	/** The send path has run. `sending` is its in-flight flag as of the next render. */
+	| { type: "settled"; sending: boolean };
+
+export function sendRecordingNext(
+	phase: SendRecordingPhase,
+	event: SendRecordingEvent,
+): SendRecordingPhase {
+	switch (event.type) {
+		case "press":
+			return phase === "idle" ? "awaiting-transcript" : phase;
+		case "transcript":
+			if (phase !== "awaiting-transcript") return phase;
+			return event.usable ? "ready-to-submit" : "idle";
+		case "discarded":
+			return "idle";
+		case "checked":
+			if (phase !== "ready-to-submit") return phase;
+			return event.entered ? "submitting" : "idle";
+		case "settled":
+			return phase === "submitting" && !event.sending ? "idle" : phase;
+		default:
+			return phase;
+	}
+}
+
+/**
+ * Whether the box is still what the "Send recording" press saw: the same draft
+ * text and the SAME attachments (by identity, the list is replaced on every
+ * change). Anything else means the user typed or attached during the wait; those
+ * words were never part of the press, so nothing is sent and the transcript is
+ * appended as an ordinary dictation for them to review.
+ */
+export function dictatedDraftIntact(
+	atPress: { text: string; images: readonly unknown[] },
+	now: { text: string; images: readonly unknown[] },
+): boolean {
+	return atPress.text === now.text && atPress.images === now.images;
+}
 
 export function primaryRole(input: {
 	/** A turn is running (`projection.streaming`). */
@@ -27,7 +107,22 @@ export function primaryRole(input: {
 	sending: boolean;
 	/** The box holds text or an attachment. */
 	hasPayload: boolean;
+	/** The mic's phase. While recording, slot B is "Send recording". */
+	dictation: DictationPhase;
+	/** "Send recording" has been pressed and has not settled. */
+	sendRecording: SendRecordingPhase;
 }): PrimaryRole {
+	/* A "Send recording" in flight holds slot B as a static, inert disc that still
+	   says what the press was. Without it the disc would flip to Stop (empty box,
+	   working) or back to an ordinary Send under a finger that is still on it, and
+	   a second tap would cancel the transcription the first one asked for. */
+	if (input.sendRecording !== "idle") return "send-recording-busy";
+	/* RECORDING: the disc at the Send spot sends the take. On the phone it used to
+	   stay a plain Send/Steer/Stop, which threw the take away ("Voice input
+	   discarded.") or stopped the agent: the desktop's recording row puts "Send
+	   recording" here and never an interrupt. Stop stays reachable on the working
+	   line. */
+	if (input.dictation === "recording") return "send-recording";
 	/* The send just cleared the box, so `alive && !hasPayload` is true for the
 	   instant before the request settles. Without this lock the disc flips from
 	   Steer to Stop under the finger that is still double-tapping it. */

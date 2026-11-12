@@ -70,6 +70,14 @@ def model_info_incomplete_headline() -> Msg:
     return Msg("tui.notices.model_info_incomplete_headline", {})
 
 
+def model_switch_queued(*, model: str) -> Msg:
+    return Msg("tui.notices.model_switch_queued", {"model": model})
+
+
+def model_switch_refused(*, model: str, reason: str) -> Msg:
+    return Msg("tui.notices.model_switch_refused", {"model": model, "reason": reason})
+
+
 def output_limit_before_call() -> Msg:
     return Msg("tui.notices.output_limit_before_call", {})
 

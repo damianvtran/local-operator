@@ -406,6 +406,18 @@ CREATE TABLE IF NOT EXISTS screening_answer_holds (
         owner_key, body_sha256, template_sha256, model, admission_revision, envelope_digest
     )
 );
+-- How many passes in a row EVERY screening hop answered unusably for one
+-- message (``Store.note_unusable_screening_pass``). Keyed by message id and
+-- separate from ``screening_holds`` because the conversation loop deletes the
+-- screener's bare hold row every tick (QA round 2, Q4); terminal outcomes clear
+-- it. Not in ``_V3_TABLES``: a store without it is simply one with no counts.
+CREATE TABLE IF NOT EXISTS screening_unusable_passes (
+    owner_key TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    passes INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (owner_key, message_id)
+);
 CREATE TABLE IF NOT EXISTS screening_policy (
     owner_key TEXT PRIMARY KEY,
     version TEXT NOT NULL,
@@ -598,6 +610,23 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_unusable_pass_table(conn: sqlite3.Connection) -> None:
+    """Create the unusable-pass counter on a store that predates it (QA round 2, Q4).
+
+    The same rule as :func:`_ensure_answer_hold_table`: a stamped current-version
+    store never re-runs schema DDL, so the paths that touch the table create it
+    (``IF NOT EXISTS``, inside the caller's write transaction). Purely additive and
+    authority-free: a lost row costs at most a few more retry passes before a
+    person is asked, never a verdict, budget or receipt.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_unusable_passes ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, passes INTEGER NOT NULL, "
+        "updated_at REAL NOT NULL, PRIMARY KEY (owner_key, message_id))"
+    )
 
 
 def _ensure_budget_episode_table(conn: sqlite3.Connection) -> None:
@@ -1032,6 +1061,30 @@ def _owner_from_row(row: sqlite3.Row) -> OwnerSnapshot:
     ).validated()
 
 
+def _verified_sender(sender_account_id: Any, sender_kind: Any) -> str:
+    """The verified sender id for physical attribution, or ``""`` (unattributed).
+
+    The SAME classification the logical rows use (``_reserve_bucket``): the
+    hub-stated sender ACCOUNT is the bucket key, with or without a stated
+    class (an account whose class the lane does not state is still that
+    sender — round 1 S-1/S-2 of the budget work). A class outside the closed
+    ``human``/``agent`` set, or no account, is unattributed.
+    """
+
+    if (
+        isinstance(sender_account_id, str)
+        and sender_account_id
+        and sender_kind
+        in (
+            "",
+            "human",
+            "agent",
+        )
+    ):
+        return sender_account_id
+    return ""
+
+
 def _owner_key(owner: OwnerSnapshot) -> str:
     """The namespace key: hub origin + account + tenant + endpoint.
 
@@ -1137,14 +1190,57 @@ def _owner_release_sha256() -> str:
     return OWNER_RELEASE_SHA256
 
 
+#: OWNER-PRINCIPAL provenance (operator report 2026-11-09). The receiver's own
+#: owner, posting as a HUMAN under the SAME account this endpoint is enrolled
+#: for, is the principal the screener protects — not a stranger to screen. The
+#: hub fans a member's own post out to their own agent (it skips a recipient
+#: only when account AND endpoint match, and a human sender has no endpoint),
+#: so before this the owner's own channel post was screened by their own CoS,
+#: and a cached ``model_hold`` on it never cleared (``bcmsg_15f004fa``, held
+#: 17:48:07 on the owner's own receiver). Such a message is admitted with no
+#: model call and no budget charge, under a receipt whose template is the
+#: sha256 of a fixed domain string: no published screening template can equal
+#: it, and every cache lookup filters on the policy template, so the receipt
+#: can never be replayed as a verdict for another sender's identical body.
+OWNER_PRINCIPAL_MODEL = "owner_principal"
+OWNER_PRINCIPAL_PROMPT_VERSION = "owner-principal-v1"
+OWNER_PRINCIPAL_SHA256 = hashlib.sha256(
+    b"local-operator team-bridge owner-principal v1"
+).hexdigest()
+
+
+def is_owner_principal(owner: OwnerSnapshot, sender_account: str, sender_kind: str) -> bool:
+    """Is this HUB-STORED sender the receiver's own owner, posting as a person?
+
+    Both values must come from the server's stored participant identity
+    (``validate_envelope``'s participant block, filled from the classification
+    read's ``sender_account_id``/``sender_kind``) — never a display name, which
+    any member can copy. ``kind == "human"`` is required: an AGENT under the same
+    account (another endpoint of the owner's, or a pre-#327 server that states
+    no class) is still screened, because an agent can relay a stranger's words.
+    """
+
+    return bool(
+        sender_account
+        and isinstance(owner.account_id, str)
+        and sender_account == owner.account_id
+        and sender_kind == "human"
+    )
+
+
 def receipt_authority(
     owner: OwnerSnapshot,
     policy: Mapping[str, Any],
     receipt: Mapping[str, Any],
     *,
     release: Mapping[str, Any] | None = None,
+    principal: tuple[str, str] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
+
+    ``principal`` is the validated envelope's ``(sender_account, sender_kind)``;
+    only an :data:`OWNER_PRINCIPAL_SHA256` receipt reads it (see
+    :func:`is_owner_principal`).
 
     WHY THIS IS ONE FUNCTION, called from two sides of the store: the WRITE-side
     consumption point (:meth:`Store.consume_screening_receipt`, which must refuse
@@ -1187,7 +1283,23 @@ def receipt_authority(
     never rendered to a caller: the machine-readable half stays the closed code.
     """
 
-    if receipt.get("template_sha256") == _owner_release_sha256():
+    if receipt.get("template_sha256") == OWNER_PRINCIPAL_SHA256:
+        # The ONLY authority for an owner-principal receipt is that the message's
+        # hub-stored sender IS this owner, as a person — re-derived by the caller
+        # from the validated envelope (``principal``), never read from the row.
+        # A caller that cannot supply it (the write-side cache consumers, which
+        # filter on the policy template and so never select this row) gets
+        # DAMAGE, the fail-closed answer, exactly like an unverified release.
+        if not (
+            isinstance(principal, tuple)
+            and len(principal) == 2
+            and is_owner_principal(owner, str(principal[0]), str(principal[1]))
+            and receipt.get("verdict") == "allow"
+        ):
+            return None, RECEIPT_CORRUPT, "owner-principal receipt for a non-owner sender"
+        if policy.get("revision") != receipt.get("admission_revision"):
+            return None, RECEIPT_STALE, ""
+    elif receipt.get("template_sha256") == _owner_release_sha256():
         word = "deliver" if receipt.get("verdict") == "allow" else "discard"
         if not (
             isinstance(release, Mapping)
@@ -1417,6 +1529,8 @@ _DELIVERY_HOLD_CODES = frozenset(
         "schema_unsupported",
         "schema_unversioned",
         "ref_migration_conflict",
+        # record_feed_batch's quarantine of a ref this build cannot read
+        "malformed_feed_ref",
         "stale_generation",
         "not_enrolled",
         "busy",
@@ -1513,16 +1627,15 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         "busy",
         "budget_exhausted",
         "screening_unavailable",
-        # The provider ANSWERED but the reply cannot admit (#3200, #3195): the
-        # screening model's own safety refusal, or a reply cut off at the
-        # output ceiling. Neither is the sender's fault and neither is
-        # terminal — the message is re-screened on the next drain exactly like
-        # a provider error — so the sender is told screening is temporarily
-        # unavailable, never that their message was judged and held for review.
-        # Named EXPLICITLY rather than left to the fallback: the conservative
-        # class would claim a human is reviewing it, which is not what happens.
-        "model_refused",
-        "reply_truncated",
+        # Every hop answered BLANK even after the re-draw and failover: like
+        # ``parse_failed`` it is NOT cached and is re-screened on the backoff
+        # (operator report 2026-11-09), so it is genuinely transient.
+        "empty_reply",
+        # ``model_refused``/``reply_truncated`` are deliberately NOT here any
+        # more (operator report 2026-11-09): both are cached ANSWERS that are
+        # never re-screened, so telling the sender "temporarily unavailable"
+        # promised a retry that never came. They are owner-review holds now
+        # (``hold_release.REVIEW_HOLD_CODES``) and publish ``awaiting_review``.
         # PR #3400: a batch that could not conclude the message; it is
         # re-screened alone at once, so screening is only briefly pending.
         "batch_unresolved",
@@ -1626,6 +1739,48 @@ def read_screening_status(config_dir: Path) -> dict[str, Any] | None:
         return store.screening_status_readonly(owner)
     except Exception:  # noqa: BLE001 — a status read never fails its caller
         return None
+
+
+#: ``screening_holds.hold_code`` for a feed ref :func:`_contentless_delivery_key`
+#: refused. See :func:`_quarantine_feed_ref`.
+FEED_REF_QUARANTINE_CODE = "malformed_feed_ref"
+
+#: Key prefix of a quarantine row. Never a ``bcmsg_``/``bmsg_`` id and never the
+#: conversation-ref prefix, so no retry, release or publish path mistakes the row
+#: for a message it could act on.
+FEED_REF_QUARANTINE_PREFIX = "quarantine:feed_ref:"
+
+
+def _quarantine_feed_ref(conn: sqlite3.Connection, owner_key: str, raw: str) -> None:
+    """Park ONE unreadable feed ref as a visible, content-free hold.
+
+    WHY. A feed batch is written atomically; a ref the parser refuses used to
+    abort the batch, so the cursor never advanced and the receiver stalled on
+    one row. The owner must still SEE that something arrived and was set aside
+    (``lop team-bridge receiver status`` counts holds by code), so the ref
+    becomes a ``screening_holds`` row rather than being dropped silently.
+
+    CONSTRAINTS. The key is a SHA-256 digest of the raw ref, never the ref: a
+    refused value is by definition one this build cannot vouch for, and an old
+    layout could carry display names. The digest is stable, so a re-fetched
+    page re-hits the same row (``INSERT OR IGNORE`` keeps the first
+    ``created_at``) instead of growing the table.
+    The row is excluded from :meth:`Store.due_screening_holds`: there is no
+    message to re-drive, so it waits for the owner, not the backoff.
+    """
+
+    digest = hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+    conn.execute(
+        "INSERT OR IGNORE INTO screening_holds "
+        "(owner_key, message_id, hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+        (
+            owner_key,
+            f"{FEED_REF_QUARANTINE_PREFIX}{digest}",
+            FEED_REF_QUARANTINE_CODE,
+            None,
+            time.time(),
+        ),
+    )
 
 
 def _contentless_delivery_key(value: str) -> str:
@@ -3053,7 +3208,10 @@ class Store:
         """
 
         from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+        from local_operator.team_bridge.hold_release import REVIEW_HOLD_CODES
         from local_operator.team_bridge.types import is_conversation_message_id
+
+        review_codes = sorted(REVIEW_HOLD_CODES)
 
         empty: dict[str, Any] = {"count": 0}
         cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
@@ -3071,13 +3229,27 @@ class Store:
             # so it leaves this count ONLY once that notice was actually
             # recorded (``notified_at``). A refused notice keeps it here, so no
             # held message can be invisible to both alerts.
+            #
+            # A REVIEW hold (``hold_release.REVIEW_HOLD_CODES``) with a decision
+            # row leaves it too (operator report 2026-11-10: "the sidebar badge
+            # is sufficient", at most one daily rollup). Its decision row IS the
+            # Deliver/Discard item the Agent messages badge and holds list show,
+            # so the owner already sees it; counting it here made this keyed
+            # rollup re-revision (re-banner) on every count change during a
+            # model_hold flood. Keyed on the DECISION, not the hold code alone:
+            # with ``review_held: false`` no decision is written, the hold has no
+            # badge exit, and it stays counted here so it is never invisible to
+            # every alert. Work-scope holds and screening-unavailable codes
+            # (provider errors, parse failures) are unaffected.
             try:
                 noticed = {
                     str(r["message_id"])
                     for r in conn.execute(
                         "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
-                        "AND notified_at IS NOT NULL",
-                        (_owner_key(owner),),
+                        "AND (notified_at IS NOT NULL OR hold_code IN ({}))".format(
+                            ",".join("?" * len(review_codes))
+                        ),
+                        (_owner_key(owner), *review_codes),
                     ).fetchall()
                 }
             except sqlite3.OperationalError:
@@ -3386,6 +3558,103 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_policy)")}
         if "approved_serving" not in columns:
             conn.execute("ALTER TABLE screening_policy ADD COLUMN approved_serving TEXT")
+
+    @staticmethod
+    def _ensure_policy_privacy_column(conn: sqlite3.Connection) -> None:
+        """Add ``privacy_generation`` (A8) to a ``screening_policy`` that predates it.
+
+        Additive, ``NOT NULL DEFAULT 0`` (= privacy pass off), no schema stamp:
+        the same rule as :meth:`_ensure_policy_serving_column`. A legacy row
+        therefore reads as an OFF publication, which is exactly what it was.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_policy)")}
+        if "privacy_generation" not in columns:
+            conn.execute(
+                "ALTER TABLE screening_policy "
+                "ADD COLUMN privacy_generation INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def note_unusable_screening_pass(self, owner: OwnerSnapshot, message_id: str) -> int:
+        """Count one more pass on which EVERY hop answered unusably; return the total.
+
+        WHY (code review round 1, R4). ``empty_reply``/``parse_failed`` are not
+        answers, so they are not cached and the backoff re-screens them — but a
+        body that reliably blanks every hop used to be re-drawn (2 draws x hops a
+        pass) for as long as the retry ladder ran, with the sender told
+        "temporarily unavailable" throughout. The pipeline turns the hold into a
+        person's review once this count reaches its bound, which needs a count
+        that survives a connector restart (the loop's ``_RETRY_ATTEMPTS`` is
+        in-memory).
+
+        WHY ITS OWN TABLE (QA round 2, Q4). The count first lived on the
+        message's ``screening_holds`` row, but on the conversation lane that row
+        is the screener's bare ``bcmsg_`` duplicate, which the loop deletes every
+        tick once due (:meth:`retire_due_bare_conversation_holds`) before the
+        lane's feed-ref row re-screens it — so every pass counted 1 and the bound
+        was never reached. ``screening_unusable_passes`` is keyed by the message
+        id alone and the retire never touches it; the receipt commits and
+        :meth:`delete_hold` clear it (:meth:`_clear_unusable_passes`), so a
+        delivered, admitted or discarded message leaves no count behind.
+
+        Counts only while the caller's hold row exists (the pipeline writes it
+        just before calling): ``0`` when the hold write itself was refused, which
+        never converts anything. Additive (:func:`_ensure_unusable_pass_table`), not
+        in ``_V3_TABLES``, so its absence is never damage.
+        """
+
+        keys = [message_id]
+        try:
+            canonical = _contentless_delivery_key(message_id)
+        except Exception:  # noqa: BLE001 — a malformed ref keeps the raw key only
+            canonical = message_id
+        if canonical != message_id:
+            keys.append(canonical)
+        owner_key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            _ensure_unusable_pass_table(conn)
+            total = 0
+            for key in keys:
+                held = conn.execute(
+                    "SELECT 1 FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, key),
+                ).fetchone()
+                if held is None:
+                    continue
+                conn.execute(
+                    "INSERT INTO screening_unusable_passes "
+                    "(owner_key, message_id, passes, updated_at) VALUES (?, ?, 1, ?) "
+                    "ON CONFLICT (owner_key, message_id) DO UPDATE SET "
+                    "passes = passes + 1, updated_at = excluded.updated_at",
+                    (owner_key, key, time.time()),
+                )
+                row = conn.execute(
+                    "SELECT passes FROM screening_unusable_passes "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (owner_key, key),
+                ).fetchone()
+                if row is not None:
+                    total = max(total, int(row[0] or 0))
+            return total
+
+    @staticmethod
+    def _clear_unusable_passes(conn: sqlite3.Connection, owner_key: str, message_id: str) -> None:
+        """Drop a message's unusable-pass count once it reaches a terminal outcome.
+
+        Called beside every terminal ``DELETE FROM screening_holds`` (receipt
+        commits, owner releases, :meth:`delete_hold`) but deliberately NOT by
+        :meth:`retire_due_bare_conversation_holds`: that retire is a per-tick
+        de-duplication, not an outcome, and clearing there is exactly the Q4 bug.
+        """
+
+        _ensure_unusable_pass_table(conn)
+        conn.execute(
+            "DELETE FROM screening_unusable_passes WHERE owner_key = ? AND message_id = ?",
+            (owner_key, message_id),
+        )
 
     @staticmethod
     def _ensure_hold_failure_class_column(conn: sqlite3.Connection) -> None:
@@ -4312,9 +4581,21 @@ class Store:
             ).fetchone()
             pending = int(current["pending_resync"]) if current is not None else 0
             for ref in event_refs:
+                try:
+                    canonical = _contentless_delivery_key(str(ref))
+                except StoreRefused:
+                    # ONE ref this build cannot read must never wedge the feed.
+                    # The batch is atomic, so raising here used to roll back
+                    # every good ref AND the cursor; the next poll re-fetched
+                    # the same page and failed the same way, forever (operator
+                    # report 2026-11-10: every inbound message stuck at
+                    # ``not_admitted`` behind one 8-part ref). Quarantine the
+                    # bad ref as a visible hold instead and let the rest commit.
+                    _quarantine_feed_ref(conn, _owner_key(owner), str(ref))
+                    continue
                 conn.execute(
                     "INSERT OR IGNORE INTO feed_refs (owner_key, ref, seq) VALUES (?,?,?)",
-                    (_owner_key(owner), _contentless_delivery_key(str(ref)), int(cursor)),
+                    (_owner_key(owner), canonical, int(cursor)),
                 )
             if resync_required or pending:
                 # A fresh cursor may be LOWER than the stored one (the server
@@ -5296,8 +5577,16 @@ class Store:
         expected_epoch: int | None = None,
         create_only: bool = False,
         approved_serving: "Sequence[tuple[str, str]] | None" = None,
+        privacy_generation: int = 0,
     ) -> int:
         """Publish the current accepted policy; return its durable epoch.
+
+        ``privacy_generation`` (A8, memo S-2) is the operator's privacy-pass
+        control generation this publication was minted under while ENABLED,
+        ``0`` while off. It is checked against the durable control row INSIDE
+        this transaction, so a stale publisher holding an enabled
+        ``_CyclePolicy`` after a disable (or an off one after an enable)
+        refuses ``policy_stale`` instead of republishing old authority.
 
         ``approved_serving`` is the full screening chain's ``(provider,
         model)`` set (see :func:`policy_serving_models`); stored sorted as
@@ -5326,10 +5615,12 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             self._ensure_policy_serving_column(conn)
+            self._ensure_policy_privacy_column(conn)
+            self._require_privacy_generation(conn, int(privacy_generation))
             key = _owner_key(owner)
             row = conn.execute(
                 "SELECT version, template_sha256, default_model, revision, epoch, "
-                "approved_serving FROM screening_policy WHERE owner_key = ?",
+                "approved_serving, privacy_generation FROM screening_policy WHERE owner_key = ?",
                 (key,),
             ).fetchone()
             if row is not None and create_only:
@@ -5358,8 +5649,17 @@ class Store:
                 conn.execute(
                     "INSERT INTO screening_policy "
                     "(owner_key, version, template_sha256, default_model, revision, epoch, "
-                    "accepted_at, approved_serving) VALUES (?,?,?,?,?,1,?,?)",
-                    (key, version, template_sha256, default_model, revision, time.time(), serving),
+                    "accepted_at, approved_serving, privacy_generation) VALUES (?,?,?,?,?,1,?,?,?)",
+                    (
+                        key,
+                        version,
+                        template_sha256,
+                        default_model,
+                        revision,
+                        time.time(),
+                        serving,
+                        int(privacy_generation),
+                    ),
                 )
                 return 1
             if expected_epoch is not None and int(row["epoch"]) != expected_epoch:
@@ -5373,13 +5673,14 @@ class Store:
                 and row["default_model"] == default_model
                 and row["revision"] == revision
                 and row["approved_serving"] == serving
+                and int(row["privacy_generation"] or 0) == int(privacy_generation)
             )
             if unchanged:
                 return int(row["epoch"])
             conn.execute(
                 "UPDATE screening_policy SET version = ?, template_sha256 = ?, "
                 "default_model = ?, revision = ?, epoch = ?, accepted_at = ?, "
-                "approved_serving = ? WHERE owner_key = ?",
+                "approved_serving = ?, privacy_generation = ? WHERE owner_key = ?",
                 (
                     version,
                     template_sha256,
@@ -5388,6 +5689,7 @@ class Store:
                     int(row["epoch"]) + 1,
                     time.time(),
                     serving,
+                    int(privacy_generation),
                     key,
                 ),
             )
@@ -5549,6 +5851,7 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (key, str(message_id)),
             )
+            self._clear_unusable_passes(conn, key, str(message_id))
             return dict(
                 decoded,
                 rendered_template_sha256=source["rendered_template_sha256"],
@@ -6252,6 +6555,542 @@ class Store:
                 "reservation without a registered input proof cannot bind a job",
             )
 
+    # -- A8 privacy pass (privacy_pass.py; design memo §3, S-1, S-2) ---------
+    #
+    # WHY THESE LIVE HERE. The privacy pass is a production admission rule, so
+    # its proof must be checked where every other admission binding is: inside
+    # the native write transactions that reserve a physical send, publish a
+    # policy and commit an allow receipt. Everything below is ADDITIVE (the
+    # ``_ensure_*`` rule: created on the paths that touch it, no schema stamp
+    # moves) and CONTENTLESS: references, digests, closed codes and counts —
+    # never a body, prompt, reply, model reason or exception prose.
+
+    @staticmethod
+    def _ensure_privacy_tables(conn: sqlite3.Connection) -> None:
+        """Create the control row table and the decision table if absent.
+
+        ``privacy_control`` is ONE row per config root (this Store), outside
+        every enrollment/endpoint namespace, so an old endpoint cannot restore
+        an earlier enable. Only :meth:`advance_privacy_control` writes it.
+        ``privacy_decisions`` is the durable composite decision: one row per
+        (owner, message, envelope, policy revision, control generation, rule),
+        with the first stage's provenance and the privacy stage's lifecycle.
+        """
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS privacy_control ("
+            "id INTEGER PRIMARY KEY CHECK (id = 1), enabled INTEGER NOT NULL, "
+            "generation INTEGER NOT NULL, digest TEXT NOT NULL, updated_at REAL NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS privacy_decisions ("
+            "decision_id TEXT PRIMARY KEY, owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+            "envelope_digest TEXT NOT NULL, body_sha256 TEXT NOT NULL, "
+            "admission_revision TEXT NOT NULL, policy_epoch INTEGER NOT NULL, "
+            "control_generation INTEGER NOT NULL, rule_version TEXT NOT NULL, "
+            "template_sha256 TEXT NOT NULL, trigger TEXT NOT NULL, channel TEXT NOT NULL, "
+            "first_preferred INTEGER NOT NULL, first_provider TEXT NOT NULL, "
+            "first_model TEXT NOT NULL, first_disposition TEXT NOT NULL, "
+            "first_attempt_id TEXT NOT NULL, stage_state TEXT NOT NULL, "
+            "lease_holder TEXT, lease_until REAL, deadline_at REAL, reservation_id TEXT, "
+            "route TEXT, privacy_result TEXT, privacy_model TEXT, final TEXT NOT NULL, "
+            "hold_code TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+            "completed_at REAL, "
+            "UNIQUE (owner_key, message_id, envelope_digest, admission_revision, "
+            "control_generation, rule_version))"
+        )
+
+    def _privacy_control(self, conn: sqlite3.Connection) -> dict[str, Any] | None:
+        self._ensure_privacy_tables(conn)
+        row = conn.execute(
+            "SELECT enabled, generation, digest FROM privacy_control WHERE id = 1"
+        ).fetchone()
+        return None if row is None else {k: row[k] for k in ("enabled", "generation", "digest")}
+
+    def _require_privacy_generation(self, conn: sqlite3.Connection, minted: int) -> None:
+        """Refuse unless ``minted`` (0 = off) agrees with the durable control row.
+
+        * row absent (never initialized) or disabled: only an OFF mint passes;
+        * row enabled at generation G: only a mint at exactly G passes.
+        A damaged row refuses. This is the native half of S-2: the fresh config
+        read happens in the caller, under the config lock; this transaction
+        makes the decision atomic with the write it guards.
+        """
+
+        try:
+            control = self._privacy_control(conn)
+            enabled = 0 if control is None else int(control["enabled"])
+            generation = 0 if control is None else int(control["generation"])
+        except (sqlite3.Error, TypeError, ValueError) as error:
+            raise StoreRefused("control_unavailable", "privacy control row unreadable") from error
+        live = generation if enabled == 1 else 0
+        if enabled not in (0, 1) or int(minted) != live:
+            raise StoreRefused("policy_stale", "privacy control generation moved")
+
+    def _check_physical_sender(
+        self, conn: sqlite3.Connection, scope: str, sender: str, now: float
+    ) -> None:
+        """S-1: refuse ONE more physical send past the verified sender's share.
+
+        The ceiling is the EXISTING ``screening_budget.sender`` (no new pool,
+        no additive allowance), counted over PHYSICAL ``http`` rows in the same
+        rolling 3600 s window (``at > now - 3600``) as every other ceiling.
+        Bucket = (hub+recipient account scope, verified sender) — independent
+        of message id, body, endpoint, template, policy revision and flag
+        round trips, so a fresh id or a variant body spends the same share.
+        CONSERVATIVE by design (memo S-1 item 4): rows with NO attribution
+        (pre-upgrade history, unknown provenance) count against every named
+        sender, and an unattributed caller (``sender == ""``) counts ALL the
+        account's physical sends. Enforced only while A8 is enabled.
+        """
+
+        spent = conn.execute(
+            "SELECT COUNT(*) FROM screening_attempts "
+            "WHERE account_scope = ? AND kind = 'http' AND at > ? AND "
+            "(? = '' OR sender_account_id = ? OR sender_account_id IS NULL)",
+            (scope, now - 3600.0, sender, sender),
+        ).fetchone()[0]
+        if int(spent) >= self.screening_budget.sender:
+            raise StoreRefused("sender_exhausted", "physical sender sends/hour exhausted")
+
+    def _require_privacy_proof(
+        self,
+        conn: sqlite3.Connection,
+        owner: OwnerSnapshot,
+        *,
+        message_id: str,
+        envelope_digest: str | None,
+        admission_revision: str | None,
+        decision_id: str | None,
+    ) -> None:
+        """The NATIVE allow fence: an allow under A8 needs a matching proof.
+
+        Required when the control row is enabled OR the published policy was
+        minted enabled. The proof row must bind the same owner, message,
+        envelope, revision and the CURRENT control generation, and be settled
+        ``bypass`` (trusted preferred first hop) or ``admit`` with a completed
+        privacy stage whose result was ``deliver``. A missing row is never
+        success.
+        """
+
+        self._ensure_policy_privacy_column(conn)
+        control = self._privacy_control(conn)
+        enabled = control is not None and int(control["enabled"]) == 1
+        policy = conn.execute(
+            "SELECT privacy_generation FROM screening_policy WHERE owner_key = ?",
+            (_owner_key(owner),),
+        ).fetchone()
+        minted = int(policy["privacy_generation"] or 0) if policy is not None else 0
+        if not enabled and minted == 0:
+            # A8 off and the policy minted off: the legacy allow, unchanged.
+            return
+        if not enabled or control is None or minted != int(control["generation"]):
+            raise StoreRefused("policy_stale", "privacy control moved before commit")
+        if not decision_id:
+            raise StoreRefused("privacy_proof_missing", "allow without privacy evidence")
+        row = conn.execute(
+            "SELECT * FROM privacy_decisions WHERE decision_id = ?", (decision_id,)
+        ).fetchone()
+        if (
+            row is None
+            or row["owner_key"] != _owner_key(owner)
+            or row["message_id"] != message_id
+            or row["envelope_digest"] != envelope_digest
+            or row["admission_revision"] != admission_revision
+            or int(row["control_generation"]) != int(control["generation"])
+        ):
+            raise StoreRefused("privacy_proof_missing", "privacy evidence does not bind this allow")
+        if row["final"] == "bypass" and int(row["first_preferred"]) == 1:
+            return
+        if (
+            row["final"] == "admit"
+            and row["stage_state"] == "completed"
+            and row["privacy_result"] == "deliver"
+            and row["first_disposition"] == "deliver"
+        ):
+            return
+        raise StoreRefused("privacy_proof_missing", "privacy evidence is not a deliver")
+
+    def privacy_control_row(self) -> dict[str, Any] | None:
+        """The durable control row (``None`` = never initialized); raises when unreadable."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            return self._privacy_control(conn)
+
+    def advance_privacy_control(self, *, enabled: bool) -> int:
+        """Write the control row and ADVANCE its generation; return the new generation.
+
+        Called only by ``privacy_pass.write_privacy_pass_enabled`` while it holds
+        ``config_write_lock`` (lock order: config lock, then this transaction).
+        Every call advances, so false->true->false->true never revisits a
+        generation (no ABA).
+        """
+
+        from local_operator.team_bridge.privacy_pass import (
+            PRIVACY_RULE_VERSION,
+            PRIVACY_TEMPLATE_SHA256,
+        )
+
+        digest = hashlib.sha256(
+            f"{PRIVACY_RULE_VERSION}|{PRIVACY_TEMPLATE_SHA256}|{int(enabled)}".encode("utf-8")
+        ).hexdigest()
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            current = self._privacy_control(conn)
+            generation = 1 if current is None else int(current["generation"]) + 1
+            conn.execute(
+                "INSERT INTO privacy_control (id, enabled, generation, digest, updated_at) "
+                "VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, "
+                "generation = excluded.generation, digest = excluded.digest, "
+                "updated_at = excluded.updated_at",
+                (int(bool(enabled)), generation, digest, time.time()),
+            )
+            return generation
+
+    def find_privacy_decision(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        message_id: str,
+        envelope_digest: str,
+        admission_revision: str,
+        control_generation: int,
+        rule_version: str,
+    ) -> dict[str, Any] | None:
+        """The existing decision for this exact binding, or ``None``."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._ensure_privacy_tables(conn)
+            row = conn.execute(
+                "SELECT * FROM privacy_decisions WHERE owner_key = ? AND message_id = ? AND "
+                "envelope_digest = ? AND admission_revision = ? AND control_generation = ? "
+                "AND rule_version = ?",
+                (
+                    _owner_key(owner),
+                    message_id,
+                    envelope_digest,
+                    admission_revision,
+                    int(control_generation),
+                    rule_version,
+                ),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def open_privacy_decision(self, owner: OwnerSnapshot, **fields: Any) -> dict[str, Any]:
+        """Get-or-create the decision for its binding; return the row.
+
+        Idempotent per binding (the UNIQUE key), so a replay of the same
+        message under the same policy and control generation RESUMES its
+        decision instead of minting a second one. The first stage's parsed
+        outcome and provenance are persisted HERE, before any privacy await.
+
+        RE-STAMP (round 1 M-1). A row that never entered privacy work -- its
+        trigger is ``first_not_deliver`` or ``preferred_bypass`` and its stage
+        is still ``pending`` -- records only the LATEST first-stage attempt,
+        whose commit may not have landed (``finish_screening`` refused, the
+        process died). The legacy retry re-draws that first stage anyway, so
+        such a row is re-stamped with the CURRENT attempt's trigger and
+        ``first_*`` fields and re-opened. Freezing it instead left a
+        non-preferred retry looping on ``privacy_pending`` (paying the first
+        stage every time) and a preferred retry unable to prove its bypass.
+        A ``nonpreferred_deliver`` row is NEVER re-stamped: once a message's
+        recorded first verdict required the privacy stage, that requirement,
+        its claim and any settled privacy hold stand for the binding, so a
+        re-drawn first stage cannot shop its way out (S-1); the caller
+        routes such a retry through the stored row (``decide_admission``).
+        """
+
+        from local_operator.team_bridge.privacy_pass import (
+            PRIVACY_TEMPLATE_SHA256,
+            new_decision_id,
+        )
+
+        now = time.time()
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_privacy_tables(conn)
+            key = _owner_key(owner)
+            binding = (
+                key,
+                fields["message_id"],
+                fields["envelope_digest"],
+                fields["admission_revision"],
+                int(fields["control_generation"]),
+                fields["rule_version"],
+            )
+            row = conn.execute(
+                "SELECT * FROM privacy_decisions WHERE owner_key = ? AND message_id = ? AND "
+                "envelope_digest = ? AND admission_revision = ? AND control_generation = ? "
+                "AND rule_version = ?",
+                binding,
+            ).fetchone()
+            if row is not None:
+                if (
+                    row["trigger"] in ("first_not_deliver", "preferred_bypass")
+                    and row["stage_state"] == "pending"
+                    and row["final"] in ("open", "bypass", "first_stage")
+                    and row["hold_code"] is None
+                    and row["reservation_id"] is None
+                ):
+                    # No privacy claim, send or hold was ever recorded on this
+                    # row (the conjunction above), so re-stamping loses no
+                    # evidence and spends nothing.
+                    conn.execute(
+                        "UPDATE privacy_decisions SET policy_epoch = ?, trigger = ?, "
+                        "channel = ?, first_preferred = ?, first_provider = ?, "
+                        "first_model = ?, first_disposition = ?, first_attempt_id = ?, "
+                        "final = 'open', updated_at = ? WHERE decision_id = ?",
+                        (
+                            int(fields["policy_epoch"]),
+                            fields["trigger"],
+                            fields["channel"],
+                            int(bool(fields["first_preferred"])),
+                            fields["first_provider"],
+                            fields["first_model"],
+                            fields["first_disposition"],
+                            fields["first_attempt_id"],
+                            now,
+                            row["decision_id"],
+                        ),
+                    )
+                    row = conn.execute(
+                        "SELECT * FROM privacy_decisions WHERE decision_id = ?",
+                        (row["decision_id"],),
+                    ).fetchone()
+                return dict(row)
+            decision_id = new_decision_id()
+            conn.execute(
+                "INSERT INTO privacy_decisions (decision_id, owner_key, message_id, "
+                "envelope_digest, body_sha256, admission_revision, policy_epoch, "
+                "control_generation, rule_version, template_sha256, trigger, channel, "
+                "first_preferred, first_provider, first_model, first_disposition, "
+                "first_attempt_id, stage_state, final, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','open',?,?)",
+                (
+                    decision_id,
+                    key,
+                    fields["message_id"],
+                    fields["envelope_digest"],
+                    fields["body_sha256"],
+                    fields["admission_revision"],
+                    int(fields["policy_epoch"]),
+                    int(fields["control_generation"]),
+                    fields["rule_version"],
+                    PRIVACY_TEMPLATE_SHA256,
+                    fields["trigger"],
+                    fields["channel"],
+                    int(bool(fields["first_preferred"])),
+                    fields["first_provider"],
+                    fields["first_model"],
+                    fields["first_disposition"],
+                    fields["first_attempt_id"],
+                    now,
+                    now,
+                ),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM privacy_decisions WHERE decision_id = ?", (decision_id,)
+                ).fetchone()
+            )
+
+    def settle_privacy_decision(
+        self,
+        owner: OwnerSnapshot,
+        decision_id: str,
+        *,
+        final: str,
+        hold_code: str | None,
+        privacy_result: str | None = None,
+    ) -> None:
+        """Record the decision's final disposition (closed vocabulary only).
+
+        A settled ``hold`` is never re-opened to ``admit`` by this method:
+        only an explicit operator re-evaluation mints a new decision.
+        """
+
+        if final not in ("admit", "bypass", "first_stage", "hold"):
+            raise StoreRefused("invalid_outcome", "unknown privacy final")
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._ensure_privacy_tables(conn)
+            row = conn.execute(
+                "SELECT final, owner_key FROM privacy_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or row["owner_key"] != _owner_key(owner):
+                raise StoreRefused("unknown_attempt", "no such privacy decision")
+            if row["final"] == "hold" and final != "hold":
+                raise StoreRefused("write_once_conflict", "a privacy hold is final")
+            conn.execute(
+                "UPDATE privacy_decisions SET final = ?, hold_code = ?, "
+                "privacy_result = COALESCE(?, privacy_result), "
+                "stage_state = CASE WHEN stage_state = 'pending' AND ? IS NOT NULL "
+                "THEN 'not_run' ELSE stage_state END, updated_at = ? WHERE decision_id = ?",
+                (final, hold_code, privacy_result, privacy_result, time.time(), decision_id),
+            )
+
+    def claim_privacy_send(
+        self,
+        owner: OwnerSnapshot,
+        decision_id: str,
+        *,
+        turn: str,
+        control_generation: int,
+        expected_epoch: int,
+        admission_revision: str,
+        sender_account_id: str,
+        sender_kind: str,
+        template_sha256: str,
+        route: str,
+        deadline_at: float,
+    ) -> str:
+        """Atomically claim the privacy stage's ONE physical send; return its row id.
+
+        ONE write transaction (the caller holds the config lock around it):
+        live owner generation; the published policy still at the captured
+        epoch/revision and minted at this control generation, which must be
+        the durable row's (S-2 prewire); the account turn still ours; the
+        stage still ``pending`` (a ``claimed`` stage is never re-claimed — the
+        one-send token); the account physical ceiling AND the verified
+        sender's physical share (S-1) both have room. Then the attributed
+        ``http`` row is inserted and the stage marked ``claimed``. No budget
+        means no send; a refusal inserts nothing.
+        """
+
+        now = time.time()
+        reservation = str(uuid.uuid4())
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_privacy_tables(conn)
+                self._ensure_policy_privacy_column(conn)
+                self._ensure_attempt_allocation_columns(conn)
+                self._require_privacy_generation(conn, int(control_generation))
+                key = _owner_key(owner)
+                policy = conn.execute(
+                    "SELECT revision, epoch, privacy_generation FROM screening_policy "
+                    "WHERE owner_key = ?",
+                    (key,),
+                ).fetchone()
+                if (
+                    policy is None
+                    or policy["revision"] != admission_revision
+                    or int(policy["epoch"]) != int(expected_epoch)
+                    or int(policy["privacy_generation"] or 0) != int(control_generation)
+                ):
+                    raise StoreRefused("policy_stale", "published policy moved before privacy send")
+                schedule = conn.execute(
+                    "SELECT lease_holder, lease_expires FROM screening_schedule "
+                    "WHERE owner_key = ?",
+                    (self._account_scope(owner),),
+                ).fetchone()
+                if (
+                    schedule is None
+                    or schedule["lease_holder"] != turn
+                    or float(schedule["lease_expires"] or 0.0) <= now
+                ):
+                    raise StoreRefused("retry_later", "account turn not held for privacy send")
+                row = conn.execute(
+                    "SELECT owner_key, stage_state, final, message_id, control_generation "
+                    "FROM privacy_decisions WHERE decision_id = ?",
+                    (decision_id,),
+                ).fetchone()
+                if row is None or row["owner_key"] != key:
+                    raise StoreRefused("unknown_attempt", "no such privacy decision")
+                if row["stage_state"] != "pending" or row["final"] != "open":
+                    raise StoreRefused("stage_taken", "privacy stage already claimed")
+                if int(row["control_generation"]) != int(control_generation):
+                    raise StoreRefused("policy_stale", "decision minted under another generation")
+                scope = self._account_scope(owner)
+                spent = conn.execute(
+                    "SELECT COUNT(*) FROM screening_attempts "
+                    "WHERE account_scope = ? AND kind = 'http' AND at > ?",
+                    (scope, now - 3600.0),
+                ).fetchone()[0]
+                if int(spent) >= self.screening_budget.account:
+                    raise StoreRefused("budget_exhausted", "http attempts/hour/account exhausted")
+                sender = _verified_sender(sender_account_id, sender_kind)
+                self._check_physical_sender(conn, scope, sender, now)
+                conn.execute(
+                    "INSERT INTO screening_attempts (attempt_id, kind, account_scope, owner_key, "
+                    "message_id, fingerprint, at, sender_account_id, sender_kind) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        reservation,
+                        "http",
+                        scope,
+                        key,
+                        row["message_id"],
+                        f"privacy:{decision_id}:{template_sha256}",
+                        now,
+                        sender or None,
+                        (sender_kind or None) if sender else None,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE privacy_decisions SET stage_state = 'claimed', lease_holder = ?, "
+                    "lease_until = ?, deadline_at = ?, reservation_id = ?, route = ?, "
+                    "updated_at = ? WHERE decision_id = ?",
+                    (turn, deadline_at, deadline_at, reservation, route, now, decision_id),
+                )
+                return reservation
+        except StoreRefused as refusal:
+            self._note_budget_refusal(owner, refusal.code)
+            raise
+
+    def complete_privacy_stage(
+        self,
+        owner: OwnerSnapshot,
+        decision_id: str,
+        *,
+        privacy_result: str,
+        privacy_model: str,
+        hold_code: str | None,
+    ) -> None:
+        """``claimed`` -> ``completed`` exactly once (a late completion is fenced).
+
+        Settles ``final`` in the same write: ``admit`` only for a valid
+        identity-verified ``deliver``, ``hold`` with its closed code otherwise.
+        """
+
+        now = time.time()
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._ensure_privacy_tables(conn)
+            row = conn.execute(
+                "SELECT owner_key, stage_state, final FROM privacy_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            if row is None or row["owner_key"] != _owner_key(owner):
+                raise StoreRefused("unknown_attempt", "no such privacy decision")
+            if row["stage_state"] != "claimed" or row["final"] != "open":
+                raise StoreRefused("stage_taken", "privacy stage is not this claim's")
+            admit = hold_code is None and privacy_result == "deliver"
+            conn.execute(
+                "UPDATE privacy_decisions SET stage_state = 'completed', privacy_result = ?, "
+                "privacy_model = ?, final = ?, hold_code = ?, completed_at = ?, updated_at = ? "
+                "WHERE decision_id = ?",
+                (
+                    privacy_result,
+                    privacy_model,
+                    "admit" if admit else "hold",
+                    None if admit else (hold_code or "privacy_invalid"),
+                    now,
+                    now,
+                    decision_id,
+                ),
+            )
+
     def reserve_screening_dispatch(
         self, owner: OwnerSnapshot, *, message_id: str, job: Any, turn: str
     ) -> str:
@@ -6275,13 +7114,21 @@ class Store:
             self._require_live(conn, owner)
             if self._live_generation(conn, owner) != job.owner_generation:
                 raise StoreRefused("owner_changed", "job owner generation is stale")
+            self._ensure_policy_privacy_column(conn)
             policy = conn.execute(
-                "SELECT version, template_sha256, default_model, revision, epoch "
-                "FROM screening_policy WHERE owner_key = ?",
+                "SELECT version, template_sha256, default_model, revision, epoch, "
+                "privacy_generation FROM screening_policy WHERE owner_key = ?",
                 (_owner_key(owner),),
             ).fetchone()
             if policy is None:
                 raise StoreRefused("policy_stale", "no published policy for this job")
+            # A8 / S-2 at the WIRE: the published policy's privacy generation
+            # must agree with the operator's durable control row inside THIS
+            # transaction. A stale enabled process cannot send after a disable,
+            # and an off publication cannot send once A8 is enabled (it must
+            # republish first). Both disagreements refuse before any I/O.
+            privacy_generation = int(policy["privacy_generation"] or 0)
+            self._require_privacy_generation(conn, privacy_generation)
             if not job.provider or not job.approved:
                 # The reservation must check what the job CLAIMS (R6/Q3): a
                 # job with no canonical provider/approvals is not authority.
@@ -6334,11 +7181,30 @@ class Store:
             ).fetchone()[0]
             if int(spent) >= self.screening_budget.account:
                 raise StoreRefused("budget_exhausted", "http attempts/hour/account exhausted")
+            self._ensure_attempt_allocation_columns(conn)
+            # The VERIFIED allocation identity from the job, which the logical
+            # row's retained proof was just compared against above — never a
+            # message hint. Attribution is written on every physical row (also
+            # while A8 is off) so an enable later counts real history.
+            sender = _verified_sender(job.sender_account_id, job.sender_kind)
+            if privacy_generation > 0:
+                self._check_physical_sender(conn, scope, sender, now)
             conn.execute(
                 "INSERT INTO screening_attempts "
-                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (attempt_id, "http", scope, _owner_key(owner), message_id, job.digest, now),
+                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at, "
+                "sender_account_id, sender_kind) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    attempt_id,
+                    "http",
+                    scope,
+                    _owner_key(owner),
+                    message_id,
+                    job.digest,
+                    now,
+                    sender or None,
+                    (job.sender_kind or None) if sender else None,
+                ),
             )
             return attempt_id
 
@@ -6509,6 +7375,26 @@ class Store:
                 ).fetchone()
                 if row is None:
                     return None
+                if row["engine_version"] != engine_version:
+                    # Another engine's answer can never be replayed by this build
+                    # (QA round 1 Q3): drop THIS exact row on the read that finds
+                    # it, so an engine bump leaves no inert rows behind. Narrow on
+                    # purpose -- one keyed row, inside this write transaction --
+                    # and the only cost to a downgraded build is one re-screen.
+                    conn.execute(
+                        "DELETE FROM screening_answer_holds WHERE owner_key = ? "
+                        "AND body_sha256 = ? AND template_sha256 = ? AND model = ? "
+                        "AND admission_revision = ? AND envelope_digest = ?",
+                        (
+                            key,
+                            body_sha256,
+                            template_sha256,
+                            model,
+                            admission_revision,
+                            envelope_digest,
+                        ),
+                    )
+                    return None
                 if (
                     policy["template_sha256"] != template_sha256
                     or policy["default_model"] != model
@@ -6658,8 +7544,15 @@ class Store:
         turn: str | None = None,
         failure_class: str | None = None,
         rendered_template_sha256: str | None = None,
+        privacy_decision_id: str | None = None,
     ) -> None:
         """Commit ONE logical outcome, fenced on every binding that matters.
+
+        ``privacy_decision_id`` (A8) is the conjunction PROOF an allow must
+        present while the privacy pass is enabled or the published policy was
+        minted enabled: :meth:`_require_privacy_proof` verifies it in this same
+        transaction. A missing or non-matching proof refuses — defence against
+        a forgotten future finalizer, not a second reducer.
 
         ``rendered_template_sha256`` rides a RECEIPT only: the hash of the
         prompt the model actually read (the batch template, or v3 for an
@@ -6719,6 +7612,15 @@ class Store:
                 # this transaction: nothing commits (A2/A3 bridge — the live
                 # check runs INSIDE the native write, not only outside it).
                 raise StoreRefused("policy_stale", "live policy changed at commit")
+            if receipt is not None and receipt.verdict == "allow":
+                self._require_privacy_proof(
+                    conn,
+                    owner,
+                    message_id=message_id,
+                    envelope_digest=envelope_digest,
+                    admission_revision=admission_revision,
+                    decision_id=privacy_decision_id,
+                )
             key = _owner_key(owner)
             attempt = conn.execute(
                 "SELECT kind, message_id, fingerprint, committed_message_id "
@@ -6931,6 +7833,7 @@ class Store:
                     "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                     (key, message_id),
                 )
+                self._clear_unusable_passes(conn, key, message_id)
             else:
                 # WRITE-ONCE per attempt (reviewer R7): once this attempt has
                 # committed a receipt, a later hold for the same attempt is
@@ -7300,6 +8203,10 @@ class Store:
                     f"SELECT message_id, hold_code, retry_at, created_at, {no_batch} AS no_batch "
                     "FROM screening_holds "
                     "WHERE owner_key = ? AND (retry_at IS NULL OR retry_at <= ?) "
+                    # A quarantined feed ref has no message the retry could
+                    # re-drive (its key is a digest, by design): it waits for
+                    # the owner, never for the backoff.
+                    f"AND hold_code != '{FEED_REF_QUARANTINE_CODE}' "
                     # HIGHEST TIER, THEN OLDEST, among the due rows (agent-server
                     # #294 S-1; #3400 m3): a refill makes a whole backlog due at
                     # once, and the bounded pass must serve a person's DM before
@@ -7339,6 +8246,9 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (_owner_key(owner), _contentless_delivery_key(message_id)),
             )
+            # Both spellings: the count is keyed by the id the screener saw.
+            for counted in {message_id, _contentless_delivery_key(message_id)}:
+                self._clear_unusable_passes(conn, _owner_key(owner), counted)
             return bool(deleted.rowcount)
 
     def make_holds_due(self, owner: OwnerSnapshot, hold_code: str, *, now: float) -> int:
@@ -7701,9 +8611,17 @@ class Store:
             key = _owner_key(owner)
             deleted = 0
             for ref in refs:
+                try:
+                    stored = _contentless_delivery_key(str(ref))
+                except StoreRefused:
+                    # A row an older writer stored before its shape stopped
+                    # parsing: delete it by its exact stored spelling. Raising
+                    # would roll back the whole drained batch and replay it
+                    # forever (the same wedge ``record_feed_batch`` guards).
+                    stored = str(ref)
                 cur = conn.execute(
                     "DELETE FROM feed_refs WHERE owner_key = ? AND ref = ?",
-                    (key, _contentless_delivery_key(str(ref))),
+                    (key, stored),
                 )
                 deleted += int(cur.rowcount or 0)
             return deleted
@@ -7876,8 +8794,13 @@ class Store:
         screener_verdict: str = "",
         screener_hop: int = -1,
         screener_preferred: bool = False,
+        hold_code: str = "",
     ) -> dict[str, Any]:
         """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
+
+        ``hold_code`` defaults to the work-scope class; a review code
+        (``hold_release.REVIEW_HOLD_CODES``) is always eligible — see there for
+        why it needs neither a preferred screener nor the sender budget.
 
         Eligibility is computed HERE, in the same write transaction as the
         per-sender budget count, so two passes cannot both spend the last unit.
@@ -7897,8 +8820,13 @@ class Store:
             ).fetchone()
             if existing is not None:
                 return dict(existing)
+            code = hold_code or hr.WORK_SCOPE_HOLD
+            if code not in hr.RELEASABLE_HOLD_CODES:
+                raise StoreRefused("invalid_decision", "hold code is not releasable")
             reason: str | None = None
-            if not screener_preferred:
+            if code in hr.REVIEW_HOLD_CODES:
+                pass
+            elif not screener_preferred:
                 # Amendment 2: only trusted PREFERRED-stage provenance is releasable;
                 # a later preferred Opus qualifies, an ordinary cascade Opus does not.
                 reason = hr.INELIGIBLE_SCREENER
@@ -7924,7 +8852,7 @@ class Store:
                     conversation_id,
                     body_sha256,
                     envelope_digest,
-                    hr.WORK_SCOPE_HOLD,
+                    code,
                     screener_provider,
                     screener_model,
                     template_sha256,
@@ -8017,10 +8945,17 @@ class Store:
         return int(rows[0]["n"]) if rows else 0
 
     def unnotified_work_scope_holds(self, owner: OwnerSnapshot) -> int:
+        from local_operator.team_bridge.hold_release import WORK_SCOPE_HOLD
+
         rows = self._work_scope_rows(
             "SELECT COUNT(*) AS n FROM work_scope_decisions WHERE owner_key = ? "
-            "AND eligible = 1 AND notified_at IS NULL AND cleared_at IS NULL",
-            (_owner_key(owner),),
+            "AND eligible = 1 AND notified_at IS NULL AND cleared_at IS NULL "
+            # Only work-scope holds can be waiting for a per-message notice: a
+            # review hold is badge-only and never notified (operator report
+            # 2026-11-10), so counting it would inflate the overflow's "N more"
+            # forever.
+            "AND hold_code = ?",
+            (_owner_key(owner), WORK_SCOPE_HOLD),
         )
         return int(rows[0]["n"]) if rows else 0
 
@@ -8209,3 +9144,4 @@ class Store:
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (key, message_id),
             )
+            self._clear_unusable_passes(conn, key, message_id)

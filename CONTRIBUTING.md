@@ -39,6 +39,16 @@ Thank you for your interest in contributing to Local Operator! We welcome all co
     └── unit                     # Unit test implementations
 ```
 
+## Documentation, evaluations and test data
+
+Use the [documentation map](docs/README.md), [evaluation catalog](evals/README.md)
+and [benchmark catalog](benchmarks/README.md) to find the maintained entrypoints
+and distinguish reusable inputs from historical reports. Shared test fixtures
+live under `tests/fixtures/`; self-contained evaluation kits keep their own
+corpora and provenance together. Put new one-off PR bodies, logs, screenshots
+and validation captures in session scratch storage and attach them to the PR,
+not the source tree.
+
 ## Dependency Graph
 
 Refer to the [dependency graph](docs/dependencies.md) for a visual representation of the project structure.

@@ -4714,3 +4714,30 @@ def test_a_picture_set_and_removal_each_publish_one_avatar_frame(tmp_path):
         {"agent_id": agent.id, "sha256": None},
     ], frames
     assert all("session_id" not in frame for frame in frames)
+
+
+def test_a_settings_intent_change_is_published_on_the_machine_wide_feed(tmp_path):
+    """The applier's slot changes reach every window without a session bridge.
+
+    The frame names the session and the kind, carries the slot (or ``null`` once
+    pruned) and is LIVE-ONLY: a subscriber that connects afterwards gets nothing
+    replayed, because ``GET /v1/desktop/settings-intents`` is its baseline.
+    """
+    sid = "7" * 12
+    _session(tmp_path, sid)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _queued(subscription)  # the open frame
+
+    slot = {"kind": "model", "value": "a/b", "state": "applying", "generation": 3}
+    feed.publish_settings_intent(sid, "model", slot)
+    feed.publish_settings_intent(sid, "model", None)
+    frames = [frame for frame in _queued(subscription) if frame["type"] == "settings_intent"]
+    assert [frame["session_id"] for frame in frames] == [sid, sid]
+    assert frames[0]["payload"] == {"kind": "model", "intent": slot}
+    assert frames[1]["payload"]["intent"] is None
+
+    late = feed.subscribe()
+    assert not [frame for frame in _queued(late) if frame["type"] == "settings_intent"]
+    asyncio.run(feed.close())

@@ -78,6 +78,7 @@
   "wire.errors.desktop.session_is_remote_open": "{session_id}位于{label}，此桌面端尚不能打开其他设备上的会话。使用`lop sessions move {session_id} --to local`将其移回本机，或在终端中使用`/network sessions --peer {label} --engage {session_id}`操控。",
   "wire.errors.desktop.session_is_remote_write": "{noun}（属于{session_id}）位于{label}，此桌面端尚不能向该设备写入；本机未作任何更改。",
   "wire.errors.desktop.session_not_found": "没有id为{session_id}的会话",
+  "wire.errors.desktop.settings_intent_generation_moved": "已有更新的更改替换了这一项，因此没有可取消的内容。",
   "wire.errors.desktop.skill_alias_occupied": "已有本地技能使用此名称。请用 --dry-run 对 Hub 技能执行 pull，检查接管时的 merge 方案，或选择其他名称。",
   "wire.errors.desktop.skill_local_changes_unpublished": "此技能有从未发布的本地更改，移除后这些更改将丢失。请先发布这些更改，或仍然移除以放弃它们。",
   "wire.errors.desktop.skill_not_editable": "此技能在这里是只读的。请将它复制到你的技能中再进行更改。",

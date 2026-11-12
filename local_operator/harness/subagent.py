@@ -1892,6 +1892,24 @@ def missing_worktree_notice(agent: str, prompt: str) -> str | None:
     return MISSING_WORKTREE_NOTICE
 
 
+def reader_evidence_root(agent: str, profile_name: str | None, prompt: str) -> str | None:
+    """The verified worktree a reader child's ``evidence`` tool binds to, or None.
+
+    Only :data:`READER_ROLES` (by launch name, or by resolved profile name for a
+    ``team:`` launch), and only when the brief's ``Worktree:`` field names a
+    real checkout (``tools/evidence_tool.verified_worktree_root``). Coder,
+    manager, plain and top-level sessions never reach this, so they never get
+    the tool: it sanctions one receipt path for roles that review, it is not a
+    general write grant. Blocking (two ``git`` calls); call it off the loop.
+    """
+    from local_operator.tools.evidence_tool import first_verified_root
+
+    roles = {agent.strip().lower(), (profile_name or "").strip().lower()}
+    if not roles & READER_ROLES:
+        return None
+    return first_verified_root(match.group(1) for match in _WORKTREE_FIELD.finditer(prompt or ""))
+
+
 def _effective_prompt(
     prompt: str,
     agent: str,
@@ -2085,6 +2103,62 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
     )
 
 
+def _snapshot_profile_lineage(parent_session: Any) -> tuple[bool, bool]:
+    """``(seam_inherited, untrusted)`` of the parent right now (host-only).
+
+    A parent that cannot say (an unknown host or test double) hands its child
+    no seam and a tainted lineage: unknown provenance fails closed.
+    """
+    lineage = getattr(parent_session, "profile_lineage", None)
+    if not callable(lineage):
+        return False, True
+    try:
+        snapshot = lineage()
+    except Exception:  # noqa: BLE001 — unknown provenance fails closed
+        return False, True
+    # Validate the shape at runtime instead of trusting the annotation: an
+    # unknown host may return anything, and anything else fails closed.
+    if not isinstance(snapshot, tuple) or len(snapshot) != 2:
+        return False, True
+    seam, untrusted = snapshot
+    return bool(seam), bool(untrusted)
+
+
+def _propagate_child_profile_taint(parent_session: Any, child: Any) -> None:
+    """Taint the parent's profile episode when its child ended tainted.
+
+    HOST metadata only (the child's own lineage), never a field of the child's
+    result text, so a model cannot claim a child was clean. A child whose
+    lineage cannot be read is treated as tainted; a parent without the hook
+    (a reduced host) has no autonomous profile writes to protect.
+    """
+    note = getattr(parent_session, "note_child_profile_taint", None)
+    if not callable(note):
+        return
+    if _snapshot_profile_lineage(child)[1]:
+        try:
+            note()
+        except Exception:  # noqa: BLE001 — must never fail the child's job
+            logger.warning("could not record the child's profile taint", exc_info=True)
+
+
+def _redact_child_result(parent_session: "Session", text: str) -> str:
+    """``text`` through the session store's redactor (known values, then shapes).
+
+    The child shares the parent's store, so a value either side registered is
+    caught here too. Fail closed: a filter that cannot vouch for the text must
+    not persist it.
+    """
+    redact = getattr(getattr(parent_session, "_variables", None), "redact", None)
+    if not text or not callable(redact):
+        return text
+    try:
+        return str(redact(text))
+    except Exception:  # noqa: BLE001 — see the docstring: withholding IS the guard
+        logger.warning("subagent result redaction failed", exc_info=True)
+        return "[subagent result withheld: the credential filter could not read it]"
+
+
 def _make_runner(
     *,
     label: str,
@@ -2107,6 +2181,10 @@ def _make_runner(
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
     comms = getattr(parent_session, "subagent_comms", None)
+    # PROFILE TAINT IS SNAPSHOT AT DISPATCH, here, not when a queued child
+    # finally gets a slot: by then the parent's run may have ended and reset
+    # its flags, and a peer-tainted request would reach the child clean.
+    profile_lineage = _snapshot_profile_lineage(parent_session)
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -2151,6 +2229,7 @@ def _make_runner(
                 profile=profile,
                 restricted=restricted,
                 target=target,
+                profile_lineage=profile_lineage,
             )
             try:
                 interval = float(os.environ.get("LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S", "30"))
@@ -2378,12 +2457,19 @@ def _make_runner(
                 bridge.cancel()
                 with contextlib.suppress(BaseException):
                     await bridge
+                # Upward, on every settle (completed, failed, cancelled): what
+                # the child read reaches the parent with its result.
+                _propagate_child_profile_taint(parent_session, child)
             if final["error"]:
                 # The child's loop reported a provider/turn error; the job
                 # must settle failed with it, not completed with the partial
                 # text.
                 raise RuntimeError(_describe_child_failure(str(final["error"]), model_spec))
-            result_text = final["text"]
+            # Scrubbed HERE, once, because this one string becomes the comms
+            # record, the job row (the checkpoint's ``result_text``) and the
+            # parent's ``job_result`` message — all persisted history (PR
+            # #3756, QA Q6: a child's own text quoting a value reached disk raw).
+            result_text = _redact_child_result(parent_session, final["text"])
             # Recorded on the comms record, not just the job row: the manager
             # sweeps settled rows after its retention window while comms
             # records outlive them so a child stays resumable, and without
@@ -3441,14 +3527,23 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     still route and still reconnect (``manager._execute_tool_call``); only a schema
     changed mid-run is missed, over a window bounded by one prompt.
 
-    Activation is the parent's lazy path unchanged: ``read mcp://<server>``
-    lists a server, ``read mcp://<server>/<tool>`` activates exactly one tool —
-    into the CHILD's inventory. The child starts from the set the parent has
-    already activated, derived from the parent's live tool list rather than
-    plumbed out of ``wire_mcp_into_session``'s closure: a tool the manager
-    knows is in that list exactly when the parent activated it, so the fact is
-    already public. The parent paid those schemas' token cost for the very task
-    it is now delegating.
+    Selection is the parent's lazy path unchanged: ``read mcp://<server>``
+    lists a server, ``read mcp://<server>/<tool>`` shows one tool's schema
+    inline and DEFERS it — callable through the child's fallback resolver, not
+    published into the child's tools array (only an over-cap schema is
+    published, see ``make_mcp_resolver``). The child starts from two parent
+    sets. PUBLISHED: exactly what is in the parent's live tool list right now,
+    derived from it rather than plumbed out of ``wire_mcp_into_session``'s
+    closure — a tool the manager knows is in that list exactly when the parent
+    has it enabled, so the fact is already public, and it is lean by
+    construction: per-tool reads defer, and the parent's cold-boundary demotion
+    has already taken idle published schemas out. Every schema in it is re-sent
+    on each of the child's requests, which is why nothing beyond the parent's
+    enabled set is published here. DEFERRED: a copy of the parent's
+    ``_mcp_deferred_origins``, which includes everything the parent demoted, so
+    a tool the parent used earlier still resolves in the child by name or via
+    eval ``tool(...)`` — demoted never means unreachable. The copy is the
+    child's own: its discoveries do not leak back into the parent.
 
     ``restricted`` is the tool-allowlist case (a reviewer, a scout). Such a
     child used to get NO MCP at all, which cost it the reads its role is made
@@ -3635,6 +3730,7 @@ async def _build_child_session(
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Transfer child resource ownership only after construction succeeds.
 
@@ -3656,6 +3752,7 @@ async def _build_child_session(
             restricted=restricted,
             target=target,
             cleanup=cleanup,
+            profile_lineage=profile_lineage,
         )
     except BaseException:
         await _settle_child_cleanup(asyncio.create_task(cleanup.aclose()))
@@ -3878,6 +3975,7 @@ async def _construct_child_session(
     restricted: bool,
     cleanup: contextlib.AsyncExitStack,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
@@ -3963,6 +4061,11 @@ async def _construct_child_session(
     language_line = preferred_language_line()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
+    # A child of a Team-Bridge-latched parent is latched for life: the task
+    # prompt the parent writes can carry the hostile text. Read through the
+    # fail-closed property; a parent without one is a host that does not track
+    # taint. A parent that latches LATER is handled by the link below.
+    inherited_bridge_taint = bool(getattr(parent_session, "bridge_latched", False))
     # Whether this child runs on a role allowlist. Decided HERE, before the
     # ToolContext closes over the resolver, because the MCP surface is built
     # from it: a restricted child gets the read half (inherit + discover) and
@@ -4064,6 +4167,7 @@ async def _construct_child_session(
         job_label=label,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # The parent's variable store. DEFENSIVE PARITY, not a bug fix: no
         # current ``TOOL_BUILDERS`` entry reads ``context.variables`` at
         # construction time (the variables readers are all execute-time, and
@@ -4156,6 +4260,21 @@ async def _construct_child_session(
         tools = _with_readonly_shell_floor(tools, available_tools, shell_root=shell_write_root)
     if restricted and hub_tool is not None and not any(tool.name == "hub" for tool in tools):
         tools = list(tools) + [hub_tool]
+    # Same post-allowlist spare shape as ``hub``, for the receipt a reader is
+    # REQUIRED to file: a reviewer's allowlist has no write/edit, and a shell
+    # redirect into the repo reads as the reroute a careful auditor refuses, so
+    # without this it had no sanctioned way to put its own receipt where the
+    # repository mandates (session 4e70660bd1bf). Added AFTER the allowlist so
+    # no seed or registry row has to name it, and only here, so its schema
+    # costs nothing anywhere else.
+    # It binds to the brief's verified worktree; it does not sandbox ``bash``.
+    evidence_root = await asyncio.to_thread(
+        reader_evidence_root, agent, profile.name if profile is not None else None, prompt
+    )
+    if evidence_root is not None and not any(tool.name == "evidence" for tool in tools):
+        from local_operator.tools.evidence_tool import build_evidence_tool
+
+        tools = list(tools) + [build_evidence_tool(evidence_root)]
     # A restricted role receives the MCP tools its PARENT had already enabled
     # (see :func:`_child_mcp_wiring` for why inheriting is the honest line and
     # activation is not): withholding them cost a reviewer or scout the reads
@@ -4339,7 +4458,21 @@ async def _construct_child_session(
     agent_pin = getattr(slot, "saver", None)
     if agent_pin is None and profile is not None:
         agent_pin = profile.saver
+    # PROFILE AUTHORITY rides down only as the host's own seam plus the taint
+    # snapshot of the whole ancestor chain at THIS moment (operator ruling
+    # 2026-11: a clean local agent edits its own agents/teams; a lineage that
+    # read untrusted input proposes). A parent whose seam is a host callback,
+    # or no seam, hands its child none: unknown hosts fail closed.
+    # ``profile_lineage`` is the DISPATCH-time snapshot (``_make_runner``); a
+    # caller that did not take one gets a snapshot now.
+    inherits_seam, spawn_untrusted = (
+        profile_lineage
+        if profile_lineage is not None
+        else _snapshot_profile_lineage(parent_session)
+    )
     child = Session(
+        owner_prompt_consent=inherits_seam,
+        spawn_untrusted=spawn_untrusted,
         model=model_spec if model_spec is not None else parent_session.model,
         # A child's model was chosen HERE (tier or parent), never by the
         # ``hosting``/``model_name`` keys, so a later edit to those must not
@@ -4371,6 +4504,7 @@ async def _construct_child_session(
         # so the executor wraps every command the ``read``-tier schema admitted.
         shell_write_root=shell_write_root,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # Which job the child's approvals belong to, so a host can scope a
         # denial to the work that provoked it. Reaches the executor through
         # ``Session._build_tool_context``; the construction-time context above
@@ -4430,6 +4564,21 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # Link the two latches for the child's life (review R1, S-67): a parent
+    # that latches after this spawn can still write into the child (``hub``
+    # send/steer are read-tier), and whatever a latched child reports reaches
+    # the parent. Unlinked at dispose so a settled child is not kept alive by
+    # the parent's callback list. See ``bridge_egress.link_latches``.
+    _parent_latch = getattr(parent_session, "bridge_taint_latch", None)
+    _child_latch = getattr(child, "bridge_taint_latch", None)
+    if _parent_latch is not None and _child_latch is not None:
+        from local_operator.harness.bridge_egress import link_latches
+
+        _unlink_latches = link_latches(_parent_latch, _child_latch)
+        # Both stacks: the rollback stack for a launch that fails after this
+        # line, the child's own dispose hooks for its normal lifetime.
+        cleanup.callback(_unlink_latches)
+        child.add_dispose_hook(_unlink_latches)
     # The LIVE half of the same link: an event this child records for an opened or
     # acted-on code request is propagated to the parent's transcript as it happens, so
     # the operator's conversation shows the PR its subagent opened without waiting for

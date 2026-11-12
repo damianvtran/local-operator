@@ -221,7 +221,7 @@ JobStatus = Literal["running", "completed", "failed", "cancelled", "interrupted"
 #: its durable state is the ``video_job_v1`` transcript record (see
 #: ``local_operator.video.records``), so the ``persist_roster=type=="task"``
 #: sites deliberately do not cover it and ``restore`` never rehydrates it.
-JobType = Literal["bash", "task", "video"]
+JobType = Literal["bash", "task", "video", "music"]
 
 # run(job_id, signal, report_progress) -> awaitable text result
 JobRunFn = Callable[

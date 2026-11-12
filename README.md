@@ -345,25 +345,14 @@ More → [installation options, configuration, credentials and shell environment
 
 More → [safety model](docs/guide/safety.md) · [endpoint protection](docs/ENDPOINT_PROTECTION.md)
 
-## Examples
-
-[Example notebooks](examples/notebooks/) saved from live sessions:
-
-- [Commit message generation](examples/notebooks/github_commit.ipynb) from git diffs
-- [Pull request automation](examples/notebooks/github_pr.ipynb): creation, review, template completion
-- [MNIST digit recognition](examples/notebooks/kaggle_digit_recognizer.ipynb): 99.3% Kaggle accuracy
-- [House prices with XGBoost](examples/notebooks/kaggle_home_data_competition.ipynb): top 5% Kaggle score
-- [Titanic survival](examples/notebooks/kaggle_titanic_competition.ipynb) with LightGBM
-- [Web research and extraction](examples/notebooks/web_research_scraping.ipynb): scraping a sanctions list
-- [Business pricing analysis](examples/notebooks/business_pricing_margin.ipynb): optimal subscription pricing
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, development setup and
 pull requests; [AGENTS.md](./AGENTS.md) is the working guide for agents
 changing this codebase, and [docs/REWRITE.md](./docs/REWRITE.md) covers the
-architecture; `benchmarks/` holds the exploratory benchmark kit and `docs/`
-the verification evidence.
+architecture. The [documentation map](docs/README.md),
+[evaluation catalog](evals/README.md) and [benchmark catalog](benchmarks/README.md)
+index current guidance, reusable tooling and historical records.
 
 ## Credits
 

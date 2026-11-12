@@ -2775,7 +2775,10 @@ green. A red gate blocks the merge, and that is the point: no red pipeline
 reaches `main`. A push **after** the gate revokes that green — the check belongs
 to the SHA it ran on, so the new head sits in "Expected" — and
 `make merge-gate PR=<n>` re-arms it (remove + re-add the label, then print the
-triggered run and `gh run watch`/`gh pr checks`). Never test the label's NAME in
+triggered run and `gh run watch`/`gh pr checks`). Before changing labels, the
+ritual refuses an existing live gate on that head; see
+[gate ownership, duplicate-arm override, and stale-failure semantics](docs/ci-merge-gate.md).
+Never test the label's NAME in
 a job `if:`: GitHub counts a `skipped` job as satisfying a required status check,
 so a job conditional on the label reports `skipped` on a run started by any
 *other* label and a red PR would merge. Any label therefore starts one full run:
@@ -3565,13 +3568,30 @@ written by the `scripts/bench_*.py` harnesses and read by nothing at runtime —
 and was swept on its own: a measurement store is regenerable, so it belongs with
 the PR that cites it, and it is ignored now (`.gitignore`).
 
-The evidence still has to exist; it just lives where the review does. Attach
-images to the PR description or the review comment (drag them into the GitHub
-editor, or `gh pr comment --body-file` with the rendered markdown), paste
-measured numbers and commands inline, and keep the capture *scripts* — the
-reusable part — under `scripts/` when they are worth reusing. A PR reviewer
-reads the PR; a future agent reads `git log` and the PR it links to; neither
-needs the frames in the tree.
+**Testing evidence must not be committed to the product branch or its PR**,
+including under a new directory name. Keep reusable capture/reproduction code
+under `scripts/` (existing rigs are indexed in `scripts/repro/`), functional
+fixtures under `tests/fixtures/`, and evaluation corpora/baselines with their
+own kits; these inputs are not disposable proof artifacts.
+
+The evidence still has to exist; choose a reviewable location:
+
+- Attach images to the PR description or review comment using the GitHub
+  editor's upload, and paste actual commands, responses and measurements inline.
+  `gh pr comment --body-file` posts Markdown; it does not upload a local image.
+- When repository-hosted evidence is needed, push it to a **dedicated testing
+  branch**, link its immutable commit from the PR, and never merge that evidence
+  branch into the product branch.
+- Alternatively, describe the image and measured geometry in the PR and attach
+  the actual image locally to the linked Local Operator project for operator
+  review. Say explicitly that the image is local-only so a remote reviewer is
+  not told it is attached to the PR.
+
+An image description is not pixel validation: the responsible reviewer must
+still look at the rendered frame. If they cannot access it, record that visual
+validation is blocked rather than claiming it passed. A PR reviewer reads the
+PR; a future agent reads `git log` and the PR it links to; neither needs proof
+captures in the product tree.
 
 What DOES belong in the tree: the shot scripts in `scripts/`, the opt-in SVG
 goldens under `tests/unit/tui/__snapshots__` (a design aid, see above), and
@@ -3595,6 +3615,7 @@ The commit to retrieve each from:
 | `browser-extension` | `39691ea0` |
 | `sibling-modes-boot-layout` | `2c4ebc77` |
 | everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `fc80a967` (the last `main` before the sweep) |
+| the second sweep (PR #3683): every `docs/evidence/` path that survived the first, including `session-load-central-cache/bench_ab.json`, `search-bar-rung`, `team-bridge-h1`; plus root `fixtures/` and `examples/notebooks/` | `60a908c2` (`60a908c247c4c5067488356da9c935a505759b87`, the last `main` that tracked them; reusable rigs moved to `scripts/repro/`, fixtures to `tests/fixtures/`) |
 | `bench` | `ba225070` (the `main` this sweep branched from; the whole store is still present there — `git show ba225070:bench/README.md` retrieves the tables, `git show ba225070:bench/analytics-rollup-after.json` the numbers behind them) |
 
 ### Detached runner memory budgets

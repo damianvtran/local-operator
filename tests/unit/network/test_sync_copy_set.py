@@ -288,6 +288,14 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/harness/bridge_egress.py": (
+        1,
+        "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, "
+        "matched against a journal row's ``tool_name`` to find a taint source -- not a "
+        "file or directory name. The taint it detects is re-derived from the session's "
+        "own journal (which already travels), so nothing under this name is a session "
+        "entry to copy or exclude.",
+    ),
     "local_operator/vault_agent/eligibility.py": (
         2,
         "``ELIGIBILITY_NAME`` ('eligibility.json') and ``GRANT_NAME`` "
@@ -537,6 +545,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
         "beside the session directories, never an entry of a session",
     ),
+    "local_operator/server/loop_watchdog.py": (
+        1,
+        "``DUMP_SIGNAL_NAME`` ('SIGUSR2'): the ``signal`` attribute name serve's "
+        "watchdog registers faulthandler on, not a pathname or a session entry",
+    ),
     "local_operator/server/utils/local_tokens.py": (
         1,
         "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
@@ -585,6 +598,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_AUDIT_FILENAME`` name the operator-level public-copy audit log under "
         "``<config>/audit/``. None is an entry of a session directory, and the "
         "copy set must neither carry nor exclude them.",
+    ),
+    "local_operator/tools/evidence_tool.py": (
+        1,
+        "``TOOL_NAME`` (``evidence``) is the model-facing registry key, not a path or "
+        "an entry of a session directory: the tool writes ONE receipt the child "
+        "authored itself into an allow-listed directory of the BOUND WORKTREE "
+        "(``EVIDENCE_DIRS``, a tuple, names the checkout's own receipt directories), "
+        "so nothing here names a file in the session store and it owns no copy-set "
+        "entry for the copy set to carry or exclude.",
     ),
     "local_operator/harness_import/manifest.py": (
         1,
@@ -970,6 +992,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``INDEX_FILENAME``): a DEVICE-LOCAL record store beside ``sessions/``, never an "
         "entry of one and never carried in one — a card records THIS device's consent, "
         "so a move must not transport it",
+    ),
+    "local_operator/profile_proposals.py": (
+        2,
+        "``PROPOSALS_DIRNAME`` (``profile-proposals``) and its ``AUDIT_FILENAME`` "
+        "(``audit.jsonl``): the account-level proposal store under "
+        "``<config>/profile-proposals``, beside ``agents/``/``teams/`` — never a "
+        "session entry and never carried in one; a proposal targets this account's "
+        "profiles and is reviewed in Agents here",
     ),
     "local_operator/network/types.py": (
         1,

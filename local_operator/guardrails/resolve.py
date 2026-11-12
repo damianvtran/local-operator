@@ -34,6 +34,7 @@ scrutiny (opaque, empty, unknown cwd), never less.
 from __future__ import annotations
 
 import fnmatch
+import itertools
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -433,6 +434,12 @@ class Expanded:
     vanished: bool = False
     #: The opaque part is a ``$(mktemp …)`` path: a fresh temp entry (R6).
     temp: bool = False
+    #: Where each ``$NAME``/``${NAME}`` value landed in ``text`` (and in
+    #: ``pattern``): ``(name, text_start, text_end, pattern_start, pattern_end,
+    #: quoted)``. A ``for`` list fans a target out by rewriting exactly these
+    #: spans — never by searching the text for the variable's VALUE, which
+    #: once turned ``$l`` = ``es`` into ``s<fr>sions`` (incident 2026-11-09).
+    refs: list[tuple[str, int, int, int, int, bool]] = field(default_factory=list)
 
 
 def _glob_escape(text: str) -> str:
@@ -442,6 +449,8 @@ def _glob_escape(text: str) -> str:
 #: Upper bound on the words one brace expression may produce. Past it the word
 #: is opaque: ``{1..100000}`` is not something to enumerate per bash call.
 MAX_BRACE_RESULTS = 1024
+#: Same bound for the combinations nested literal ``for`` lists fan one word into.
+_MAX_FOR_COMBINATIONS = MAX_BRACE_RESULTS
 _BRACE_RANGE_RE = re.compile(r"^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$")
 
 
@@ -666,6 +675,9 @@ def expand_one(
     globbed = False
     literal_seen = False
     for index, part in enumerate(parts):
+        ref = _param_ref(part.text, env) if part.kind in ("pbare", "pdq") else None
+        text_at = sum(map(len, text_parts)) if ref is not None else 0
+        pattern_at = sum(map(len, pattern_parts)) if ref is not None else 0
         if part.kind in ("sub", "proc"):
             body = part.text.strip()
             out.substitutions.append(part.text)
@@ -703,6 +715,17 @@ def expand_one(
                     globbed = True
                 text_parts.append(value)
                 pattern_parts.append(value)
+            if ref is not None and value:
+                out.refs.append(
+                    (
+                        ref,
+                        text_at,
+                        sum(map(len, text_parts)),
+                        pattern_at,
+                        sum(map(len, pattern_parts)),
+                        part.kind == "pdq",
+                    )
+                )
             continue
         raw = part.text
         if part.kind == "bare" and index == 0:
@@ -727,6 +750,48 @@ def expand_one(
         out.opaque_contained = False
     out.vanished = not out.text and not literal_seen and not broken
     return out
+
+
+def _param_ref(form: str, env: Mapping[str, str]) -> str | None:
+    """The variable whose value ``form`` expands to verbatim, else ``None``.
+
+    ``$NAME``/``${NAME}``, and ``${NAME:-word}`` while NAME is set (its value
+    is used, not the default). Anything else (a default word, ``${#x}``) is
+    not a plain reference, so a ``for`` list never rewrites it.
+    """
+    inner = form[2:-1] if form.startswith("${") else form[1:]
+    if _NAME_RE.fullmatch(inner):
+        return inner
+    dm = _BRACE_DEFAULT_RE.match(inner)
+    if dm is not None:
+        current = env.get(dm.group(1))
+        if current is not None and not (dm.group(2).startswith(":") and current == ""):
+            return dm.group(1)
+    return None
+
+
+def _fan_out(exp: Expanded, values: Mapping[str, str]) -> Expanded:
+    """``exp`` with every recorded ref to a name in ``values`` rewritten."""
+    text, pattern = exp.text, exp.pattern
+    # Right to left, so earlier offsets stay valid.
+    for name, ts, te, ps, pe, quoted in sorted(exp.refs, key=lambda r: r[1], reverse=True):
+        if name not in values:
+            continue
+        text = text[:ts] + values[name] + text[te:]
+        if pattern is not None:
+            pattern = (
+                pattern[:ps]
+                + (_glob_escape(values[name]) if quoted else values[name])
+                + pattern[pe:]
+            )
+    return Expanded(
+        text=text,
+        pattern=pattern,
+        empty=list(exp.empty),
+        opaque=exp.opaque,
+        opaque_contained=exp.opaque_contained,
+        temp=exp.temp,
+    )
 
 
 def expand_all(word: _RawWord, env: Mapping[str, str], home: str) -> list[Expanded]:
@@ -831,6 +896,17 @@ class Target:
     #: ``--force``/``-f`` on that removal: git deletes uncommitted work, so the
     #: clean-worktree exemption no longer holds and the ordinary ranking applies.
     forced: bool = False
+    #: Double force is narrowly allowed for a verified stale git initialization lock.
+    force_count: int = 0
+    #: A ``touch`` handed to an interpreter (``node``/``python``) running a
+    #: script FILE: that script's absolute path. ``classify`` lets a read of a
+    #: same-task-tree session's scratch file rank LOW only when the script is
+    #: git-tracked (case 7, 2026-11-09: ``node scripts/i18n/ledger-assemble.mjs
+    #: --receipt <auditor pad>/…json`` from a sibling lane).
+    script: str | None = None
+    #: The mention sits in a word the command names as an OUTPUT (``-o``,
+    #: ``--out*``, ``--write*``, glued or as the next word): never a read.
+    as_output: bool = False
 
 
 @dataclass(frozen=True)
@@ -850,7 +926,9 @@ class Creation:
     snapshots the matches before the call and records only new ones after it.
     """
 
-    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone"
+    #: ``symlink`` is the link ENTRY ``ln -s[f] SRC LINK`` makes, never the
+    #: directory it points at (see ``provenance.owned_link``).
+    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone" | "symlink"
     path: str | None = None
     parent: str | None = None
     pattern: str | None = None
@@ -1028,6 +1106,45 @@ class Resolution:
     #: the raw text; see ``_RECURSIVE_GLOB_RE``). Only then does ``**`` match
     #: any depth (bash's default treats it as ``*``; review round 8, MAJOR-1).
     globstar: bool = False
+
+
+#: Interpreters whose first positional word is a script FILE they run.
+_INTERPRETER_RE = re.compile(r"(?:node|python(?:3(?:\.\d+)?)?)")
+#: An option naming an output: ``-o``, ``--out``, ``--output``, ``--outfile``,
+#: ``--write``, ``--write-to``… alone (value in the next word) or glued, and
+#: the in-place forms ``-i``/``--in-place``/``--inplace`` (review R2-m2): a
+#: script told to rewrite its input writes the file it was handed.
+_OUTPUT_FLAG_RE = re.compile(r"(?:-o|-i|--out[\w-]*|--write[\w-]*|--in-?place)")
+_OUTPUT_GLUED_RE = re.compile(r"(?:-o.|-i.|--out[\w-]*=|--write[\w-]*=|--in-?place=)")
+
+
+def _interpreter_script(name: str, words: list[Expanded], cwd: str | None) -> str | None:
+    """The script ``node``/``python`` runs, as an absolute path, else ``None``.
+
+    Only the plain shape ``<interpreter> <script> …``: any option before the
+    script (``-m``, ``-c``, ``-e``, ``--require x``) gives ``None``, so the
+    caller keeps the conservative ranking rather than guess which word runs.
+    """
+    if not _INTERPRETER_RE.fullmatch(name) or cwd is None:
+        return None
+    idx = next((i for i, w in enumerate(words) if os.path.basename(w.text) == name), None)
+    if idx is None or idx + 1 >= len(words):
+        return None
+    word = words[idx + 1]
+    if word.opaque or word.pattern is not None or not word.text or word.text.startswith("-"):
+        return None
+    return os.path.normpath(os.path.join(cwd, os.path.expanduser(word.text)))
+
+
+def _output_word_ids(words: list[Expanded]) -> set[int]:
+    """``id()`` of each word the command names as an output (see ``Target.as_output``)."""
+    out: set[int] = set()
+    for i, w in enumerate(words):
+        if _OUTPUT_GLUED_RE.match(w.text):
+            out.add(id(w))
+        if _OUTPUT_FLAG_RE.fullmatch(w.text) and i + 1 < len(words):
+            out.add(id(words[i + 1]))
+    return out
 
 
 def _operands(
@@ -1431,6 +1548,10 @@ class _Walker:
         self.linked: set[str] = set()
         #: ``for VAR in a b c`` literal lists: a target using $VAR fans out.
         self.for_lists: dict[str, list[str]] = {}
+        #: The loop variable each ``for_lists`` entry derives from (itself for
+        #: the loop variable; ``VAR`` for ``D=…/$VAR`` inside the body), so one
+        #: iteration rewrites every related reference together.
+        self.for_roots: dict[str, str] = {}
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -1599,16 +1720,21 @@ class _Walker:
         while words and words[0].text in _PREFIX_WORDS and not words[0].opaque:
             words = words[1:]
         raw_assigns: list[str] = []
+        assign_words: list[Expanded] = []
         while words and _ASSIGN_RE.match(words[0].text):
             text_value = words[0].text
             if words[0].temp and text_value.count(OPAQUE_MARK) == 1:
                 text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
             raw_assigns.append(text_value)
+            # Same length (one marker char for another): the refs still line up.
+            assign_words.append(
+                Expanded(text=text_value, refs=list(words[0].refs), pattern=words[0].pattern)
+            )
             words = words[1:]
         if not words:
             # A bare assignment segment sets a shell variable for what follows.
-            for a in raw_assigns:
-                self._assign(a)
+            for w in assign_words:
+                self._assign_word(w)
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
@@ -1659,7 +1785,7 @@ class _Walker:
         # under a read-only subcommand (``GIT_PAGER=sh git log``).
         assigned = [a.split("=", 1)[0] for a in raw_assigns]
         if not read_only_argv(name, [w.text for w in args], assigned=assigned):
-            exempt = self._touch(name, args)
+            exempt = self._touch(name, args) | _read_inputs(name, args)
             # The program word too: after ``env``/``xargs`` peeling a path can
             # BE the program (``xargs -Q <path>``).
             self._backstop(name, unpeeled, raw_assigns, exempt)
@@ -1720,9 +1846,17 @@ class _Walker:
             self._mv(args, stdin_fed)
             return
         if name in ("cp", "gcp", "install"):
-            operands, _ = _operands(args, _MV_VALUE_FLAGS)
+            operands, flags = _operands(args, _MV_VALUE_FLAGS)
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], name, operands[:-1])
+                dest = operands[-1]
+                if name != "install" and _no_clobber_new(dest, flags, self.state.cwd):
+                    # ``cp -n src <new path>`` replaces nothing: it CREATES the
+                    # destination (an append, ranked only where creation itself
+                    # matters — evidence, another session's pad). The sources
+                    # are reads either way.
+                    self._add(dest, "append", name)
+                else:
+                    self._add_overwrite_dest(dest, name, operands[:-1])
             return
         if name == "rsync":
             self._rsync(args)
@@ -2112,10 +2246,20 @@ class _Walker:
                 CREDENTIAL_MARK if any(CREDENTIAL_MARK in v.text for v in values) else OPAQUE_MARK
             )
             return
+        if len(values) > _MAX_FOR_COMBINATIONS:
+            # Review R1-B1 (PR #3710): a list too long to enumerate is
+            # unknowable, exactly as ``MAX_BRACE_RESULTS`` treats a brace
+            # list. Truncating it instead hid ``~`` at position 1101 and
+            # ranked ``rm -rf $d`` LOW.
+            st.env[var] = (
+                CREDENTIAL_MARK if any(CREDENTIAL_MARK in v.text for v in values) else OPAQUE_MARK
+            )
+            return
         # The body runs once per value; the walker sees it once, so the variable
         # carries EVERY value and ``_add`` fans a target out per value.
         st.env[var] = values[0].text
         self.for_lists[var] = [v.text for v in values]
+        self.for_roots[var] = var
 
     def _ln(self, args: list[Expanded]) -> None:
         operands, flags = _operands(args, frozenset({"-t", "--target-directory"}))
@@ -2125,6 +2269,20 @@ class _Walker:
         path, _ = _absolute(link.text, self.state.cwd)
         if path is not None:
             self.linked.add(path.rstrip("/"))
+        # Provenance (q1029 incident, remote node 0.101.44): a session that
+        # made ``ln -s <pad> ~/q1029`` could not remove that link later. Only
+        # the plain two-operand form names the link itself; ``-t DIR`` or
+        # several sources put links INSIDE a directory, and a trailing slash
+        # asks ln to place the link inside an existing directory. The ledger
+        # re-checks after the call that the link really appeared there
+        # (``provenance.commit_creations``), so a dereferenced directory
+        # destination records nothing.
+        if (
+            len(operands) == 2
+            and not _cluster_value(args, "t", "--target-directory")
+            and not link.text.endswith("/")
+        ):
+            self._create("symlink", self._literal_dir(link))
 
     def _find(self, args: list[Expanded]) -> None:
         roots: list[Expanded] = []
@@ -2289,9 +2447,13 @@ class _Walker:
         A misparse can therefore cost a judge call, never a LOW.
         """
         st = self.state
+        script = _interpreter_script(name, args, st.cwd)
+        outputs = _output_word_ids(args)
         words = [w for w in args if id(w) not in exempt]
-        texts = [w.text for w in words] + [a.split("=", 1)[1] for a in assigns if "=" in a]
-        for text in texts:
+        texts = [(w.text, id(w) in outputs) for w in words] + [
+            (a.split("=", 1)[1], False) for a in assigns if "=" in a
+        ]
+        for text, as_output in texts:
             for raw in _MENTION_RE.findall(text):
                 if OPAQUE_MARK in raw or TEMP_MARK in raw:
                     continue  # an opaque part: the word itself is added below
@@ -2311,7 +2473,13 @@ class _Walker:
                     )
                 else:
                     self.result.touched.append(
-                        Target(path=path, op="touch", program=name or "a program")
+                        Target(
+                            path=path,
+                            op="touch",
+                            program=name or "a program",
+                            script=script,
+                            as_output=as_output,
+                        )
                     )
             if st.cwd is None:
                 for part in re.split(r"[\s/'\"=]+", text):
@@ -2409,6 +2577,11 @@ class _Walker:
                     for target in self.result.targets[before:]:
                         target.worktree_remove = True
                         target.forced = forced
+                        target.force_count = sum(
+                            1 if f == "--force" else f[1:].count("f")
+                            for f in flags
+                            if f.startswith("-")
+                        )
                 finally:
                     self.state.cwd = saved
 
@@ -2427,23 +2600,82 @@ class _Walker:
                 target.opaque_contained = False
         self.result.targets.append(target)
         # R6: a literal ``for`` list binds its variable to each value in turn.
-        for var, values in self.for_lists.items():
-            first = values[0]
-            if not first or first not in exp.text or exp.text.count(first) != 1:
-                continue
-            for other in values[1:]:
-                alt = Expanded(
-                    text=exp.text.replace(first, other),
-                    pattern=exp.pattern.replace(first, other) if exp.pattern else None,
-                    empty=list(exp.empty),
-                    opaque=exp.opaque,
-                    opaque_contained=exp.opaque_contained,
-                    temp=exp.temp,
-                )
-                extra = _target(alt, op, program, self.state)
-                extra.selected = selected
-                self.result.targets.append(extra)
-            del var
+        # Only the spans the word's own ``$VAR`` references filled are
+        # rewritten (``Expanded.refs``); a target that never names the loop
+        # variable is recorded once, as written.
+        iterations = self._iterations(exp)
+        if iterations is None:
+            # Too many combinations to enumerate: the word is unknowable,
+            # never truncated (review R1-B1).
+            target.opaque = True
+            target.opaque_contained = False
+            return
+        for _roots, values in iterations:
+            extra = _target(_fan_out(exp, values), op, program, self.state)
+            extra.selected = selected
+            self.result.targets.append(extra)
+
+    def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
+        """``(loop vars, {ref name: value})`` for every iteration after the first.
+
+        ``None`` when the combinations exceed :data:`_MAX_FOR_COMBINATIONS`:
+        the caller marks the word opaque. Never a truncated list (review
+        R1-B1: values past the cap were silently dropped, hiding ``~``).
+        """
+        names = {r[0] for r in exp.refs if r[0] in self.for_lists}
+        # Variables move in step only when they share a loop AND a list length.
+        # A stale binding from an earlier loop of a different length (review
+        # R1-M3: ``D=$y`` from a 3-value loop, ``$y`` rebound by a 2-value
+        # one) is its own family, so the word takes the cartesian product —
+        # a superset of what bash runs, never a dropped value.
+        families: dict[tuple[str, int], list[str]] = {}
+        for n in sorted(names):
+            families.setdefault((self.for_roots[n], len(self.for_lists[n])), []).append(n)
+        if not families:
+            return []
+        total = 1
+        for _, length in families:
+            total *= length
+        if total > _MAX_FOR_COMBINATIONS:
+            return None
+        # Nested loops run every combination, so the word does too.
+        ranges = [range(length) for _, length in families]
+        out: list[tuple[tuple[str, ...], dict[str, str]]] = []
+        for combo in itertools.islice(itertools.product(*ranges), 1, None):
+            values: dict[str, str] = {}
+            for family, i in zip(families.values(), combo, strict=True):
+                values.update({n: self.for_lists[n][i] for n in family})
+            out.append((tuple(root for root, _ in families), values))
+        return out
+
+    def _assign_word(self, word: Expanded) -> None:
+        """Bind an assignment word, carrying any ``for`` fan-out it inherits.
+
+        ``D=$S/x-$l`` inside a loop body binds D once per iteration, so a
+        later ``$D`` target fans out with the loop like a direct ``$l`` one.
+        """
+        self._assign(word.text)
+        name = word.text.partition("=")[0]
+        self.for_lists.pop(name, None)
+        self.for_roots.pop(name, None)
+        if "=" not in word.text or not word.refs:
+            return
+        iterations = self._iterations(word)
+        if iterations is None:
+            # Unenumerable: the variable is unknowable (review R1-B1).
+            self.state.env[name] = OPAQUE_MARK
+            return
+        if not iterations:
+            return
+        # One loop: the variable moves in step with it. Several (nested): it
+        # carries every combination as its own list, so a later ``$NAME``
+        # still fans out over all of them.
+        roots = iterations[0][0]
+        self.for_roots[name] = roots[0] if len(roots) == 1 else name
+        self.for_lists[name] = [self.state.env.get(name, "")] + [
+            _tilde_value(_fan_out(word, values).text.partition("=")[2], self.state.home)
+            for _, values in iterations
+        ]
 
     def _add_overwrite_dest(
         self, exp: Expanded, program: str, sources: list[Expanded] | None = None
@@ -2569,10 +2801,161 @@ _FIND_WRITES = frozenset(
 )
 
 
+#: Readers that are read-only EXCEPT for one known writing switch or shape,
+#: so they cannot sit in :data:`READ_ONLY_PROGRAMS` (which admits no flag
+#: inspection). WHY (operator case, 2026-11-09): ``for s in …; done | sort |
+#: uniq`` with the cwd under ``<state>/sessions`` was refused as "session
+#: state handed to sort/uniq" — reading stdin or a file is not a delete.
+#: Writing shapes stay on the backstop:
+#:
+#: * ``sort -o FILE`` / ``--output`` writes (also a modelled write target in
+#:   ``_write_surface``, so a write into evidence is CRITICAL);
+#:   ``--compress-program`` runs a program; ``-T``/``--temporary-directory``
+#:   writes temp files there.
+#: * ``uniq IN OUT`` writes its second operand.
+#: * ``file -C`` / ``--compile`` writes a ``.mgc`` (review R6).
+#: * ``shasum``/``md5``/``*sum`` have no writing switch (``-c`` reads).
+_GUARDED_READERS = frozenset(
+    {"sort", "uniq", "file", "shasum", "md5", "md5sum", "sha1sum", "sha256sum", "sha512sum"}
+)
+
+
+#: Long options per guarded reader, split by whether they can write.
+#: WHY a closed allowlist (review round 2, M2): getopt_long accepts any
+#: unambiguous PREFIX, so ``sort --out=F``, ``--outp F``, ``--compress-prog=sh``,
+#: ``--temp=D`` and ``file --comp`` are the writing switches under other
+#: spellings — measured on this host (``/usr/bin/sort`` 2.3-Apple wrote ``o.txt``
+#: from ``--out=``; ``file --comp`` wrote ``magic.mgc``). A long option counts as
+#: read-only only when it is a prefix of a known read-only option AND of no
+#: writing one; anything unknown (another platform's spelling, a typo) fails
+#: closed to the backstop — a misread costs a judge call, never a LOW write.
+_SORT_WRITING_LONGS = ("--output", "--compress-program", "--temporary-directory")
+_SORT_READ_LONGS = (
+    "--ignore-leading-blanks", "--dictionary-order", "--ignore-case",
+    "--general-numeric-sort", "--ignore-nonprinting", "--month-sort",
+    "--human-numeric-sort", "--numeric-sort", "--random-sort", "--random-source",
+    "--reverse", "--sort", "--version-sort", "--batch-size", "--check", "--debug",
+    "--files0-from", "--key", "--merge", "--buffer-size", "--field-separator",
+    "--stable", "--unique", "--zero-terminated", "--parallel", "--help", "--version",
+    "--mmap", "--radixsort", "--mergesort", "--qsort", "--heapsort",
+)  # fmt: skip
+_FILE_WRITING_LONGS = ("--compile",)
+_FILE_READ_LONGS = (
+    "--apple", "--brief", "--checking-printout", "--dereference", "--exclude",
+    "--exclude-quiet", "--extension", "--files-from", "--keep-going", "--list",
+    "--magic-file", "--mime", "--mime-type", "--mime-encoding", "--no-buffer",
+    "--no-dereference", "--no-pad", "--print0", "--preserve-date", "--raw",
+    "--separator", "--special-files", "--uncompress", "--uncompress-noreport",
+    "--parameter", "--help", "--version",
+)  # fmt: skip
+
+
+def _long_prefixes(key: str, options: Sequence[str]) -> bool:
+    """Could ``key`` (``--x``, value stripped) be getopt_long's abbreviation of
+    any of ``options``? ``--`` alone ends options and abbreviates nothing."""
+    return len(key) > 2 and any(o.startswith(key) for o in options)
+
+
+def _longs_read_only(longs: list[str], reads: Sequence[str], writes: Sequence[str]) -> bool:
+    return all(
+        k == "--" or (_long_prefixes(k, reads) and not _long_prefixes(k, writes)) for k in longs
+    )
+
+
+def _guarded_reader_read_only(name: str, argv: list[str]) -> bool:
+    shorts = [a[1:] for a in argv if a.startswith("-") and not a.startswith("--") and a != "-"]
+    longs = [a.split("=", 1)[0] for a in argv if a.startswith("--")]
+    if name == "sort":
+        # Fail closed on any cluster holding o/T, even as another flag's value
+        # (``-to``): a misread costs a judge call, never a LOW write.
+        if any("o" in c or "T" in c for c in shorts):
+            return False
+        return _longs_read_only(longs, _SORT_READ_LONGS, _SORT_WRITING_LONGS)
+    if name == "uniq":
+        # A second operand is the output file. ``-f N``/``-s N`` values count
+        # as operands here — fail closed, never an unseen write.
+        operands = [a for a in argv if not a.startswith("-") or a == "-"]
+        return len(operands) <= 1
+    if name == "file":
+        if any("C" in c for c in shorts):
+            return False
+        return _longs_read_only(longs, _FILE_READ_LONGS, _FILE_WRITING_LONGS)
+    return True  # shasum/md5/*sum
+
+
+#: Programs that only READ their path operands and print a digest or a
+#: description (incident 2026-11-09: ``shasum`` of a subagent's receipts, kept
+#: apart from ``READ_ONLY_PROGRAMS`` so a sibling edit there never conflicts).
+#: None of them has a flag that writes a file. ``shasum``/``md5``/``*sum``
+#: also sit in :data:`_GUARDED_READERS` (PR #3700); this set is checked
+#: first in :func:`read_only_argv`, so the overlap is harmless.
+_DIGEST_READERS = frozenset(
+    {"shasum", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "b2sum"}
+    | {"md5", "md5sum", "cksum", "sum", "cmp", "diff"}
+)
+#: ImageMagick ``-write`` and coder-prefixed inputs (``msl:script``, a script
+#: format that can write files) make ``identify`` more than a read.
+_MAGICK_CODER_RE = re.compile(r"^[A-Za-z0-9]{2,}:")
+
+
+#: ``gh`` subcommands whose ``-F``/``--body-file``/``--notes-file`` value is a
+#: file gh READS and posts (incident 2026-11-09: ``gh pr comment -F <child's
+#: scratch file>`` was ranked as a write to another session's files).
+_GH_BODY_FILE_COMMANDS = frozenset(
+    {
+        ("pr", "comment"),
+        ("pr", "create"),
+        ("pr", "edit"),
+        ("pr", "review"),
+        ("pr", "merge"),
+        ("issue", "comment"),
+        ("issue", "create"),
+        ("issue", "edit"),
+        ("release", "create"),
+        ("release", "edit"),
+    }
+)
+_GH_BODY_FILE_FLAGS = ("-F", "--body-file", "--notes-file")
+
+
+def _read_inputs(name: str, args: list[Expanded]) -> set[int]:
+    """Ids of words a non-read-only program provably only READS.
+
+    The backstop skips them, exactly like the identified sources of a fully
+    modelled copy. Deliberately narrow: today only ``gh``'s body/notes file;
+    every other word of the call (``--repo``, a positional path) still meets
+    the backstop, and a glued ``--body-file=<p>`` is a read too.
+    """
+    if name != "gh":
+        return set()
+    positional = [w.text for w in args if not w.text.startswith("-")][:2]
+    if tuple(positional) not in _GH_BODY_FILE_COMMANDS:
+        return set()
+    out: set[int] = set()
+    for i, w in enumerate(args):
+        if w.text in _GH_BODY_FILE_FLAGS and i + 1 < len(args):
+            out.add(id(args[i + 1]))
+        elif w.text.startswith(("--body-file=", "--notes-file=")):
+            out.add(id(w))
+        elif w.text.startswith("-F") and len(w.text) > 2 and not w.text.startswith("--"):
+            out.add(id(w))
+    return out
+
+
+def _identify_read_only(argv: list[str]) -> bool:
+    return not any(a.lstrip("+-").startswith("write") or _MAGICK_CODER_RE.match(a) for a in argv)
+
+
 def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) -> bool:
     """Is ``name argv…`` a provably read-only invocation? Conservative: unknown → no."""
-    if name in READ_ONLY_PROGRAMS:
+    if name in READ_ONLY_PROGRAMS or name in _DIGEST_READERS:
         return True
+    if name in _GUARDED_READERS:
+        return _guarded_reader_read_only(name, argv)
+    if name == "identify":
+        return _identify_read_only(argv)
+    if name == "magick":
+        return bool(argv) and argv[0] == "identify" and _identify_read_only(argv[1:])
     if name == "find":
         return not any(a in _FIND_WRITES for a in argv)
     if name == "git":
@@ -2959,6 +3342,13 @@ def _write_surface(
         return _copy_dest(args, _MV_FLAGS), _flags_known(args, _MV_FLAGS)
     if name in ("tee",):
         return [], _flags_known(args, _TEE_FLAGS)  # resolver targets
+    if name == "sort":
+        # ``sort -o FILE`` writes FILE (it may also be an input: ``sort -o x x``).
+        # Never fully modelled, so its other path words reach the backstop too.
+        # ``--out=F``/``--outp F`` are getopt_long abbreviations of ``--output``
+        # (review round 2, M2): name them too, so a write into evidence stays
+        # CRITICAL rather than falling to the backstop's HIGH.
+        return _cluster_value(args, "o", "--output") + _sort_output_abbrev(args), False
     if name in ("mkdir", "gmkdir"):
         return [], _flags_known(args, _MKDIR_FLAGS)  # resolver creations
     if name in ("chmod", "chown", "chgrp", "xattr"):
@@ -3043,6 +3433,21 @@ def _write_surface(
     return None
 
 
+def _sort_output_abbrev(args: list[Expanded]) -> list[Expanded]:
+    """Values of ``--output`` abbreviations (``--o``…``--outpu``). No other sort
+    long option starts with ``o``, so even ``--o`` means ``--output``."""
+    out: list[Expanded] = []
+    for k, w in enumerate(args):
+        key, eq, value = w.text.partition("=")
+        if key == "--output" or not _long_prefixes(key, ("--output",)):
+            continue  # the full spelling is ``_cluster_value``'s
+        if eq:
+            out.append(Expanded(text=value, empty=w.empty))
+        elif k + 1 < len(args):
+            out.append(args[k + 1])
+    return out
+
+
 def _cluster_value(args: list[Expanded], letter: str, long: str) -> list[Expanded]:
     """Like ``_flag_value``, but finds ``letter`` inside a short cluster too:
     ``tar -czf OUT`` and ``tar -czfOUT`` both name ``OUT`` (review R4-MAJOR-1:
@@ -3058,6 +3463,32 @@ def _cluster_value(args: list[Expanded], letter: str, long: str) -> list[Expande
         elif k + 1 < len(args):
             out.append(args[k + 1])
     return out
+
+
+def _no_clobber_new(dest: Expanded, flags: list[str], cwd: str | None) -> bool:
+    """``cp -n``/``--no-clobber``/``--update=none`` onto a path that does not exist.
+
+    Only then is the destination a pure creation. Any flag that can force a
+    replacement (``-f``, ``-i`` — which may be answered yes —, ``--remove-
+    destination``, another ``--update``) keeps it an overwrite, and so does an
+    existing entry (a dangling symlink included), a directory (``cp`` writes
+    INTO it), an opaque or globbed word, or an unknown cwd.
+    """
+    no_clobber = False
+    for flag in flags:
+        if flag in ("--no-clobber", "--update=none"):
+            no_clobber = True
+        elif flag.startswith("--"):
+            if flag.startswith(("--force", "--remove-destination", "--update", "--interactive")):
+                return False
+        elif any(c in flag[1:] for c in "fi"):
+            return False
+        elif _short_has(flag, "n", _CP_FLAGS):
+            no_clobber = True
+    if not no_clobber or dest.opaque or dest.pattern is not None or not dest.text:
+        return False
+    path, _ = _absolute(dest.text, cwd)
+    return path is not None and not os.path.lexists(path) and not dest.text.endswith("/")
 
 
 def _short_has(text: str, letter: str, spec: _Flags) -> bool:

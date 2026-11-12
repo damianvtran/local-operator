@@ -989,6 +989,17 @@ def saved_tool_approval_is_auto(root: Path | None = None) -> bool:
         return False
 
 
+def _bridge_notice_prefix(bridge_latched: bool) -> str:
+    # No session reaches this gate (it is built before one exists), so it
+    # cannot read the latch's source kind and keeps the ``agent_message``
+    # wording -- the stronger of the two, never a looser one.
+    if not bridge_latched:
+        return ""
+    from local_operator.harness.bridge_egress import bridge_card_notice
+
+    return bridge_card_notice() + "\n"
+
+
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 
@@ -1010,7 +1021,17 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """
     if yolo:
 
-        async def auto_approve(tool_name: str, description: str) -> bool:
+        async def auto_approve(
+            tool_name: str,
+            description: str,
+            *,
+            taint_raised: bool = False,
+            bridge_latched: bool = False,
+        ) -> bool:
+            # The Team Bridge flags are accepted and deliberately NOT honoured
+            # here: --yolo in a latched session is the operator's recorded
+            # accepted risk (team-bridge-egress.md: "Status"). S-38 is closed for
+            # ask mode only; accepted risk in auto/yolo.
             # --yolo approves tool calls, never an account profile save: that
             # card must reach a person (``never_auto_approved``), so it takes
             # the interactive path — a y/N on a tty, a typed refusal without.
@@ -1022,7 +1043,13 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
 
         return auto_approve
 
-    async def prompt_approval(tool_name: str, description: str) -> bool:
+    async def prompt_approval(
+        tool_name: str,
+        description: str,
+        *,
+        taint_raised: bool = False,
+        bridge_latched: bool = False,
+    ) -> bool:
         # ``sys.stdin`` is checked for ``None`` BEFORE ``isatty()`` is called
         # because a launcher or daemoniser may start the process with fd 0
         # CLOSED, and Python leaves ``sys.stdin`` as ``None`` for that shape
@@ -1083,7 +1110,10 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
             # to block on human input anyway.
             answer = await asyncio.to_thread(
                 input,
-                "Allow tool '{}' ({})? [y/N] ".format(
+                "{}Allow tool '{}' ({})? [y/N] ".format(
+                    # The y/N prompt has no allow-all to suppress; it carries
+                    # the same latched-session notice every card does (S-46).
+                    _bridge_notice_prefix(bridge_latched),
                     sanitize_prompt_line(tool_name, limit=120),
                     sanitize_prompt_line(description),
                 ),
@@ -2837,6 +2867,9 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     # availability signal; the row lets the classifier offer it for "message
     # X's agent" turns instead of Slack/email fan-out.
     "bridge",
+    "generate_music",
+    "modify_music",
+    "music_status",
 )
 
 #: One tool row's description bound — the same scannable-row precedent the
@@ -5718,6 +5751,18 @@ def _accepted_kwargs(callee: Callable[..., Any], **candidates: Any) -> dict[str,
     return {name: value for name, value in candidates.items() if name in parameters}
 
 
+# Runs (``Session._generation`` ticks) an over-cap or otherwise published MCP
+# schema may go uncalled before a cold boundary demotes it to the deferred set.
+# The demotion only ever runs at a compaction commit or a >=90 min idle flush,
+# both rare, so this is not a hot-path knob: it decides whether a tool the model
+# used "recently" survives such a boundary. Eight runs covers a typical
+# multi-turn work burst on one task (investigate, fix, verify, report) while
+# still letting a tool from an earlier, finished task go; a wrong guess costs
+# little because a demoted tool stays callable, and re-reading its URL adds it
+# back to the tool list at the next turn.
+MCP_DEMOTE_AFTER_IDLE_RUNS = 8
+
+
 async def wire_mcp_into_session(
     session: Session,
     builtin_tools: list[AgentTool],
@@ -5734,7 +5779,11 @@ async def wire_mcp_into_session(
     Startup connects and caches servers exactly as before, but the session
     begins with its non-MCP tools only. A bounded ``<mcps>`` catalogue tells
     the model which servers exist. ``read mcp://<server>`` lists tools without
-    loading schemas; ``read mcp://<server>/<tool>`` activates exactly one tool.
+    loading schemas; ``read mcp://<server>/<tool>`` shows one tool's schema
+    inline and makes it callable through the deferred resolver without
+    publishing it (see ``make_mcp_resolver``). Only an over-cap schema or a
+    ``preload_tools`` server enters the published tools array, and the
+    cold-boundary demotion below takes an unused over-cap one back out.
     Live list-changed events refresh only schemas the model already selected.
     This keeps an unused MCP server at O(server names), not O(all tool schemas),
     on every provider request.
@@ -6035,9 +6084,78 @@ async def wire_mcp_into_session(
         installed_mcp.update(tool.name for tool in selected)
         return session.refresh_tools(base + selected)
 
+    # Per-origin USE clock, in session runs (``Session._generation``, bumped
+    # once per run). Stamped when an origin is published and on every real
+    # tools/call (``manager.on_tool_called`` fires for every route: advertised
+    # schema, deferred fallback, eval ``tool(...)``). It is read only by the
+    # cold-boundary demotion below.
+    last_used: dict[tuple[str, str], int] = {}
+
+    def run_clock() -> int:
+        return int(getattr(session, "_generation", 0) or 0)
+
+    def stamp_use(server_name: str, raw_tool_name: str) -> None:
+        last_used[(server_name, raw_tool_name)] = run_clock()
+
+    manager.on_tool_called = stamp_use
+
     def activate(server_name: str, raw_tool_name: str) -> bool:
         enabled_origins.add((server_name, raw_tool_name))
+        stamp_use(server_name, raw_tool_name)
         return refresh_selected(manager.get_tools())
+
+    def cold_boundary_prune() -> bool:
+        """Demote published-but-idle MCP schemas at a cache-cold boundary.
+
+        WHY. A published schema is re-sent on every request until the session
+        ends, and every subagent inherits it (``_child_mcp_wiring`` copies the
+        parent's live tools). Removing it is the fix, but WHEN matters more
+        than whether: the tools array is position 0 of the prompt-cache prefix,
+        so removing a tool while the cache is warm reprices the whole
+        conversation (``tools_changed``) — a tax larger than the schema it
+        saves for many turns. The session therefore calls this ONLY where the
+        request is already being re-written: a compaction commit and the idle
+        flush that has proved the cache cold (``Session._demote_cold_mcp_tools``
+        names both and makes the shrink land on that same request).
+
+        WHAT. Every origin in the enabled set that is NOT a ``preload_tools``
+        server (those are published on purpose, as a workflow contract) and has
+        not been called within ``MCP_DEMOTE_AFTER_IDLE_RUNS`` runs moves to the
+        DEFERRED set. Demoted is not unresolvable: the deferred fallback
+        resolver keeps serving the name, so a later call still runs — never
+        ``Tool not found`` — and, since only over-cap schemas are ever
+        published (so only they are demoted), re-reading the tool's URL goes
+        through the over-cap publish path and adds it back to the tool list at
+        the next turn rather than showing the schema inline.
+
+        Returns whether anything moved, so the session forces a republish only
+        when the array actually changed.
+        """
+        now = run_clock()
+        demoted: list[tuple[str, str]] = []
+        for origin in sorted(enabled_origins):
+            cfg = manager.get_server_config(origin[0])
+            if cfg is not None and bool(getattr(cfg, "preload_tools", False)):
+                continue
+            used = last_used.get(origin)
+            if used is None:
+                # Entered the set by a route that never stamped it; start its
+                # clock now rather than demote a tool we know nothing about.
+                last_used[origin] = now
+                continue
+            if now - used < MCP_DEMOTE_AFTER_IDLE_RUNS:
+                continue
+            demoted.append(origin)
+        if not demoted:
+            return False
+        for origin in demoted:
+            enabled_origins.discard(origin)
+            deferred_origins.add(origin)
+        refresh_selected(manager.get_tools())
+        logger.debug("demoted %d idle MCP tool schema(s) at a cold boundary", len(demoted))
+        return True
+
+    setattr(session, "_mcp_cold_boundary_prune", cold_boundary_prune)
 
     def preload_opted_in_tools(source: list[AgentTool]) -> bool:
         """Activate the whole inventory of every server that opted into it.

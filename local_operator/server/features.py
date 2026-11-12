@@ -38,7 +38,9 @@ from local_operator.supplements.contract import (
 #: calls it a SEPARATE additive capability a client may test without also
 #: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
 #: drops ``include_ask_reads`` and answers the same plain first page.
-DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection", "notification_bulk_ask_read"})
+DESKTOP_ONLY_FEATURES = frozenset(
+    {"notification_bulk_selection", "notification_bulk_ask_read", "profile_proposals"}
+)
 
 
 def feature_flags() -> dict[str, Any]:
@@ -605,6 +607,19 @@ def static_feature_flags() -> dict[str, Any]:
         # bump is of THIS FEATURE CONTRACT, never the package version,
         # and `1` remains readable by a renderer that gates on presence.
         "session_move": 2,
+        # Durable background settings intents
+        # (POST/DELETE /v1/desktop/sessions/{id}/settings-intents[/{kind}],
+        # GET /v1/desktop/settings-intents, and the `settings_intent` feed
+        # frame). A model/effort/fast/cwd pick is recorded and answered at
+        # once, then applied in the background with retries, surviving a
+        # conversation switch and a backend restart.
+        #
+        # ITS OWN KEY for the `session_search` rule above: the renderer's
+        # existing picker path (`/commands`, `/working-directory`) must keep
+        # working byte for byte against a backend without these routes, so a
+        # client gates the new path on this key's presence and falls back to
+        # today's path when it is absent.
+        "settings_intents": 1,
         # An explicit desktop-only `frontend.replace` frame on the event
         # stream, plus the additive `frontend_replace=1` subscription
         # flag that negotiates it (review R4).
@@ -967,6 +982,7 @@ def static_feature_flags() -> dict[str, Any]:
         "credential_approvals": 1,
         # Signed profile continuations disclose/apply through the same inbox.
         "profile_approvals": 1,
+        "profile_proposals": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the

@@ -36,6 +36,7 @@ from local_operator.logger import (
 )
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import early_paint_hold
+from local_operator.server import loop_watchdog as serve_loop_watchdog
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
@@ -65,6 +66,7 @@ from local_operator.server.routes import (
     desktop_monitors,
     desktop_notifications,
     desktop_preferences,
+    desktop_profile_proposals,
     desktop_profiles,
     desktop_projects,
     desktop_quota,
@@ -72,6 +74,7 @@ from local_operator.server.routes import (
     desktop_runtimes,
     desktop_session_files,
     desktop_sessions,
+    desktop_settings_intents,
     desktop_team_bridge,
     desktop_tunnel,
     desktop_tunnel_setup,
@@ -543,6 +546,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 reload_task.add_done_callback(serve_reload.observe_reload)
                 app.state.serve_reload = reload_task
 
+    # THE EVENT-LOOP WATCHDOG (serve wedges of pids 11196 and 9633, 2026-11-11):
+    # a thread that dumps every thread's traceback when the loop stops beating
+    # and, past a hard bound, re-execs this daemon in place (``loop_watchdog``
+    # carries the thresholds' measurement and the drain invariants). Only on an
+    # ANNOUNCED daemon: an unannounced boot (tests, ad-hoc apps) has no record a
+    # client relies on and no address a re-exec could re-serve.
+    loop_beat: asyncio.Task[None] | None = None
+    loop_guard: serve_loop_watchdog.LoopWatchdog | None = None
+    if announced is not None:
+        try:
+            loop_guard, loop_beat = serve_loop_watchdog.install(app, config_dir)
+        except Exception:  # noqa: BLE001 — a diagnostic must never fail startup
+            logger.warning("serve loop watchdog could not start", exc_info=True)
+
     # THE HUB UPDATE RUNNER: one asyncio task per daemon, started AFTER the serve
     # record and the reload task so readiness is never delayed by it (its first
     # tick waits ~45 s; see ``hub_sync.runner``). It runs for a bare-uvicorn daemon
@@ -592,8 +609,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:  # noqa: BLE001 — failed publication never authorizes reload
             logger.warning("rolling reload capability could not be published", exc_info=True)
 
+    # DURABLE SETTINGS INTENTS RESUME AT BOOT. A model/effort/fast/cwd pick is
+    # written to ``sessions/<id>/settings-intent.json`` and applied in the
+    # background; the desktop's self-spawned backend does not outlive an app
+    # quit, so a pick still applying when the app closed is re-armed here. In
+    # the background: startup must not wait on a glob, and the apply itself
+    # needs nothing that is not already up.
+    settings_intents_resume: asyncio.Task[int] | None = None
+    try:
+        settings_intents_resume = asyncio.create_task(
+            desktop_settings_intents.ensure_applier(app).resume(),
+            name="settings-intents-resume",
+        )
+    except Exception:  # noqa: BLE001 — a resume failure must never fail startup
+        logger.warning("settings intents could not be resumed", exc_info=True)
+
+    # ONE HUB CONNECTION POOL FOR THE SERVER LOOP. Every desktop Team Bridge
+    # read used to open its own TLS connection to the hub (41-124 ms each,
+    # bridge-instant-load); binding a pool here lets them reuse sockets. The
+    # lifespan OWNS it — closed in the ``finally`` below — because only an owned
+    # loop may hold long-lived sockets (``team_bridge/http_pool.py``). Bound
+    # last before ``yield`` so boot work above keeps its per-request shape.
+    from local_operator.team_bridge.http_pool import bind_hub_pool, unbind_hub_pool
+
+    bind_hub_pool()
     yield
     try:
+        # Stop the settings-intent workers before the session pool closes under
+        # them; an in-flight move is shielded and finishes on its own.
+        if settings_intents_resume is not None:
+            settings_intents_resume.cancel()
+            await asyncio.gather(settings_intents_resume, return_exceptions=True)
+        applier = getattr(app.state, "settings_applier", None)
+        if applier is not None:
+            await applier.close()
+            app.state.settings_applier = None
         # The boot warms are optional work nobody waits on: stop them first, so a
         # model warm parked in a provider read cannot keep issuing requests while
         # the server drains (PR #2992 review MINOR-1). Never raises.
@@ -648,6 +698,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.env_config = None
         app.state.scheduler_service = None
     finally:
+        # Close the hub pool even when the teardown above raised: a socket left
+        # open past the loop's exit can never be closed. Never raises.
+        try:
+            await unbind_hub_pool()
+        except Exception:  # noqa: BLE001 — teardown of a socket pool must never be the failure
+            logger.debug("hub http pool close failed at shutdown", exc_info=True)
         # The record outlives nothing: it is removed here, LAST, and under
         # `finally:` so that no exit path can leave a file behind claiming a
         # live daemon at a port nothing listens on. The heartbeat keeps running
@@ -668,6 +724,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # on the way out with a handover that the shutdown then makes. `stop`
         # ends a poll parked in its notice wait; the cancel covers one parked in
         # its check sleep, where the event is not what it awaits.
+        # The loop watchdog stops FIRST: a teardown can legitimately hold the
+        # loop for longer than the stall bound, and a re-exec mid-teardown would
+        # resurrect a daemon its operator just stopped.
+        if loop_guard is not None:
+            loop_guard.stop()
+        if loop_beat is not None:
+            loop_beat.cancel()
         if retire_stop is not None:
             retire_stop.set()
         if reload_stop is not None:
@@ -946,8 +1009,10 @@ app.include_router(desktop_claim.router)
 app.include_router(auth.router)
 app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
+app.include_router(desktop_settings_intents.router)
 app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
+app.include_router(desktop_profile_proposals.router)
 app.include_router(desktop_imports.router)
 # Agent Hub update availability/apply. Beside the profile routes it extends; no
 # sibling declares a `/v1/desktop/hub...` template, so nothing can swallow it.

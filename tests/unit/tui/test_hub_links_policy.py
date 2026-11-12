@@ -213,8 +213,14 @@ async def test_private_eligible_auto_push_enables_on_single_press(
         await pilot.pause()
         await _open_panel(app, pilot)
         await pilot.press("a")
-        await pilot.pause()
-        await pilot.pause()
+        # The write and inventory re-read both hop to a thread; draining the
+        # message pump does not establish that the persisted effect landed.
+        await _await_settle(
+            pilot,
+            lambda: _policy_values(tmp_path, identity.link_id)["auto_push"] is True
+            and not _mounted_panel(app)._refreshing,
+            what="the private auto-push write and re-read",
+        )
     assert _policy_values(tmp_path, identity.link_id)["auto_push"] is True
 
 
@@ -629,9 +635,14 @@ async def test_selected_row_is_painted_with_wrapped_rows(
     async with app.run_test(size=(40, 24)) as pilot:
         await pilot.pause()
         app.action_hub_links()
-        await pilot.pause()
-        await pilot.pause()
         panel = _mounted_panel(app)
+        # Inventory is loaded in a thread. Selecting while its rows are still
+        # absent paints Loading, as CI job 129220076198's failing frame shows.
+        await _await_settle(
+            pilot,
+            lambda: not panel._loading and len(panel._rows) == 20,
+            what="the wrapped-row inventory to install",
+        )
         panel._selected = 19
         panel._repaint()
         await pilot.pause()
@@ -1327,13 +1338,23 @@ async def test_policy_actions_are_inert_while_the_error_body_shows(
         assert "s subscribe" not in hint and "a auto-push" not in hint, hint
         assert "r refresh" in hint and "esc close" in hint, hint
         # Recovery is the taught key: `r` re-reads and reinstalls the rows.
+        # That re-read is the same inventory thread hop as the open, so wait
+        # on its installed state rather than a pause count.
         await pilot.press("r")
-        await pilot.pause()
-        await pilot.pause()
+        await _await_settle(
+            pilot,
+            lambda: panel._error == "" and bool(panel._rows),
+            what="the taught refresh to reinstall the rows",
+        )
         assert panel._error == "" and panel._rows, "the refresh must restore the rows"
         await pilot.press("s")
-        await pilot.pause()
-        await pilot.pause()
+        # Recovery has a second independent write/re-read thread round trip.
+        await _await_settle(
+            pilot,
+            lambda: _policy_values(tmp_path, identity.link_id)["subscribe"] is False
+            and not panel._refreshing,
+            what="the recovered subscribe write and re-read",
+        )
     assert _policy_values(tmp_path, identity.link_id)["subscribe"] is False
 
 

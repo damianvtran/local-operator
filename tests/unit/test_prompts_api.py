@@ -145,6 +145,11 @@ async def _notify_door_for_blocks() -> str:
     return "Notified."
 
 
+async def _music_journal_for_blocks(record: dict[str, object]) -> None:
+    """Presence-only ``music_job_v1`` journal door: the music trio's createIf
+    reads that it is bound, and an ordering test never calls it."""
+
+
 async def _quiet_door_for_blocks() -> None:
     """Minimal quiet-end door so create_tools includes no_reply for ordering
     checks (docs/design/quiet-turns.md §4; presence-only, like the ask hook
@@ -725,6 +730,11 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
     from local_operator.tools import artifact_data_tool
 
     monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
+    # The music trio is gated on a persisted Radient login a bare CI host does
+    # not hold (plus the jobs/journal doors below) — presence-only stub.
+    from local_operator.tools import music_tool
+
+    monkeypatch.setattr(music_tool, "radient_available", lambda *a, **k: True)
 
     tools = create_tools(
         ToolContext(
@@ -771,10 +781,17 @@ def test_inventory_block_matches_default_tool_order(monkeypatch: pytest.MonkeyPa
             # above, so the inventory below includes it and the assertion
             # compares like-for-like against DEFAULT_TOOL_NAMES.
             bridge_runtime=object(),
+            # ``skill`` (a deferred default since the profile-proposals change)
+            # is createIf-gated on the profile root every real session carries;
+            # presence-only here, same rule as the gates above.
+            memory_config_dir="/stub-profile-root",
             # ``notify`` (docs/design/notifications-inbox.md §3.2) is
             # createIf-gated on the inbox door a top-level session binds —
             # presence-only here, same rule as the gates above.
             notify_inbox=_notify_door_for_blocks,
+            # The music trio also needs the session's ``music_job_v1`` journal
+            # door — presence-only, never called by an ordering test.
+            journal_music_job=_music_journal_for_blocks,
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

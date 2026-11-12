@@ -204,6 +204,14 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
+            "A clean local agent creates/updates/reverts account agents and teams "
+            "ITSELF (a hub-linked row too: that edits the local copy; publishing is "
+            "separate). A run that read peer/Bridge/remote input files a proposal in "
+            "Agents → <name>; once the user agrees use profile_proposal op=apply with "
+            "its ID. Long text: ``show`` points at pages, read each with "
+            "``field``+``part``; patch with ``edits`` (omit ``old`` to append); a "
+            "rewrite dropping lines needs ``replace=true`` (your removal ack) + "
+            "``base_revision``. Ask the user with a 1-3 line summary + proposal ID.\n"
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
             "- ``action_class``: 'proactive' lets a profile attach hidden "
@@ -227,15 +235,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "conversation only: usable for the rest of the "
             "conversation (task, /agent, teams), invisible in every other one, and "
             "gone with it; a fork starts with a copy of this conversation's roles. "
-            "A DURABLE profile (saved for every conversation) is the "
-            "user's decision: ``scope='global'`` needs their confirmation, and "
-            "this host may not be able to ask — a create/install refusal offers "
-            "the conversation-only retry (omit ``scope`` or use "
-            "``scope='session'``) and, to change the account, names the TUI "
-            "/agent form. ``update``/``reset`` act on an existing row, whose "
-            "store does not move, so those refusals name the TUI /agent form "
-            "alone; ``sync`` is account-only and has no conversation retry "
-            "either (its refusal names ``lop agents sync``). On a host with no "
+            "A DURABLE profile (``scope='global'``, every conversation) is for a "
+            "role that should outlive this one; never promote silently. "
+            "``install``/``reset``/``sync`` keep their approval card; ``sync`` "
+            "is account-only (``lop agents sync``). On a host with no "
             "conversation store the omission "
             "writes the account (there is no conversation scope to default "
             "into), so the default means 'this conversation' only where the "
@@ -275,19 +278,22 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
         ),
         notes=(
+            "A clean local agent creates/updates/reverts account agents and teams "
+            "ITSELF (a hub-linked row too: that edits the local copy; publishing is "
+            "separate). A run that read peer/Bridge/remote input files a proposal in "
+            "Agents → <name>; once the user agrees use profile_proposal op=apply with "
+            "its ID. Long text: ``show`` points at pages, read each with "
+            "``field``+``part``; patch with ``edits`` (omit ``old`` to append); a "
+            "rewrite dropping lines needs ``replace=true`` (your removal ack) + "
+            "``base_revision``. Ask the user with a 1-3 line summary + proposal ID.\n"
             "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
             "when one covers the work; otherwise create it WITH NO ``scope`` so, "
             "where this host has a conversation store, it lives in THIS "
             "conversation only (usable until the conversation ends, "
             "invisible elsewhere, gone with it; a fork starts with a copy of this "
-            "conversation's teams). A team saved for every conversation "
-            "is the user's decision: ``scope='global'`` needs their confirmation, and "
-            "this host may not be able to ask — the refusal offers the "
-            "conversation-only retry (omit ``scope`` or use ``scope='session'``) "
-            "and, to change the account, names the TUI /team form. An "
-            "``update`` retry with no ``scope`` changes nothing (the store of an "
-            "existing row does not move), so that refusal names the TUI /team "
-            "form alone. On a host with no conversation store the omission "
+            "conversation's teams). ``scope='global'`` saves for every "
+            "conversation; never promote silently. On a host with no conversation "
+            "store the omission "
             "writes the account, so the default means 'this conversation' only "
             "where the host has one. `team_delete` removes a conversation team "
             "only; an account team must be deleted from a user surface, which "
@@ -326,7 +332,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "into your reply and waiting. Give each question at least two "
             "options, put the consequence of each in its description, and mark "
             "the one you recommend (it is moved to the top of the list and "
-            "preselected).\n"
+            "badged; nothing is ticked). A multi-select may recommend several.\n"
             "- Every question also offers the user a free-text answer, so the "
             "options do not have to be exhaustive.\n"
             "- Ask everything you need in ONE call; large option lists and "
@@ -1743,6 +1749,7 @@ def _url_name(url: str) -> str:
 def make_tool_doc_resolver(
     inventory: Callable[[], Sequence[AgentTool]],
     on_tool_read: Callable[[str], str | None] | None = None,
+    fallback: Callable[[str], AgentTool | None] | None = None,
 ) -> Callable[[str], str | None]:
     """Build the ``tool://`` adapter for the ``read`` tool.
 
@@ -1764,13 +1771,24 @@ def make_tool_doc_resolver(
     (``tools/deferral.py``): reading a tool's reference is the explicit
     request for it, the way ``mcp://server/tool`` is for an MCP tool. A hook
     that raises appends nothing — the doc still answers.
+
+    ``fallback(name)`` serves a tool the inventory does NOT hold but the
+    session can still dispatch — a deferred MCP tool (found through
+    ``mcp://?search=`` or ``mcp://<server>/<tool>``, or demoted at a cold
+    boundary), resolved by the session's fallback tool resolver. Without it,
+    the loop's invalid-argument hint ("read tool://<name>") would lead to
+    ``Unknown tool`` for exactly the tools whose schema the model lacks. Such
+    a hit renders the schema doc INLINE and never reaches ``on_tool_read``:
+    the published tools array is position 0 of the prompt-cache prefix, and
+    keeping unused MCP schemas out of it is the whole point of deferring
+    them, so reading one must not republish it.
     """
 
     def resolver(url: str) -> str | None:
         if not url.startswith(TOOL_DOC_SCHEME):
             return None
         try:
-            doc = _resolve_tool_url(url, inventory)
+            doc = _resolve_tool_url(url, inventory, fallback)
         except Exception as exc:  # noqa: BLE001 — the resolver contract is "never raises"
             return f"Tool reference unavailable: {exc}"
         name = _url_name(url)
@@ -1785,7 +1803,20 @@ def make_tool_doc_resolver(
     return resolver
 
 
-def _resolve_tool_url(url: str, inventory: Callable[[], Sequence[AgentTool]]) -> str:
+# Appended to a fallback-served doc so the reader knows the schema it just
+# read is the one to use, and that the tool is callable without joining the
+# tool list (it does not: see ``make_tool_doc_resolver``'s ``fallback``).
+OUTSIDE_TOOL_LIST_NOTE = (
+    "Not in your tool list: call it directly by this name with the arguments "
+    "above; reading this reference does not add it to the list."
+)
+
+
+def _resolve_tool_url(
+    url: str,
+    inventory: Callable[[], Sequence[AgentTool]],
+    fallback: Callable[[str], AgentTool | None] | None = None,
+) -> str:
     tools = list(inventory())
     name = _url_name(url)
     available = ", ".join(sorted(tool.name for tool in tools if not tool.hidden)) or "(none)"
@@ -1794,6 +1825,13 @@ def _resolve_tool_url(url: str, inventory: Callable[[], Sequence[AgentTool]]) ->
         # the listing is what tells the reader which names exist at all.
         return f"Tool URL missing a name: expected tool://<name>\nAvailable tools: {available}"
     tool = next((candidate for candidate in tools if candidate.name == name), None)
+    if tool is None and fallback is not None:
+        try:
+            outside = fallback(name)
+        except Exception:  # noqa: BLE001 — a failed lookup is just a miss
+            outside = None
+        if outside is not None:
+            return f"{render_tool_doc(outside)}\n\n{OUTSIDE_TOOL_LIST_NOTE}"
     if tool is None:
         # Served AS CONTENT (like ``Unknown skill``): the available set is the
         # model's self-correction path, in one tool round.
@@ -1872,6 +1910,7 @@ def chain_tool_docs(
     inventory: Callable[[], Sequence[AgentTool]],
     *,
     on_tool_read: Callable[[str], str | None] | None = None,
+    fallback: Callable[[str], AgentTool | None] | None = None,
 ) -> Callable[[str], str | None]:
     """Put the ``tool://`` resolver AHEAD of ``base``; every other scheme
     reaches ``base`` exactly as before, and with no base configured the
@@ -1883,7 +1922,7 @@ def chain_tool_docs(
     or subagent, each with its own live inventory — answers ``tool://`` without
     touching the factory chain or the subagent wiring. Returns a
     :class:`ToolDocsLink` rather than a bare closure so the identity-sensitive
-    parity guard can recognise it (see the class docstring). ``on_tool_read``:
-    see :func:`make_tool_doc_resolver`.
+    parity guard can recognise it (see the class docstring). ``on_tool_read``
+    and ``fallback``: see :func:`make_tool_doc_resolver`.
     """
-    return ToolDocsLink(base, make_tool_doc_resolver(inventory, on_tool_read))
+    return ToolDocsLink(base, make_tool_doc_resolver(inventory, on_tool_read, fallback))

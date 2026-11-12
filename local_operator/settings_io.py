@@ -435,6 +435,11 @@ class Setting:
     #: a desktop row with the rules that own it. Never authored twice — an
     #: empty string means "not a hotkey row".
     hotkey_scope: str = ""
+    #: Whether this HOTKEY row may be CLEARED to ``"none"`` (keymap.UNBOUND),
+    #: DERIVED from ``keymap.KeyAction.clearable`` like ``hotkey_scope`` —
+    #: never authored twice. Projected on the wire so the desktop app can
+    #: offer the Clear affordance only on rows that accept the sentinel.
+    clearable: bool = False
     #: SEARCH VOCABULARY for this row, never rendered: a query may match these
     #: words, but no surface ever draws them as a sentence — the settings page
     #: paints the row and, when it explains a match, names the word that hit.
@@ -3258,6 +3263,7 @@ SETTINGS: tuple[Setting, ...] = (
             default=action.default,
             help=_keymap_copy(action, "help"),
             hotkey_scope=action.scope,
+            clearable=action.clearable,
             synonyms=_HOTKEY_SYNONYMS,
         )
         for action in _keymap.KEY_ACTIONS
@@ -4469,6 +4475,43 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.compaction_mid_turn_enabled_choice_true_description()),
             _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
         ),
+    ),
+    # Idle / pre-wake compaction (``compaction/idle.py``). Defaults are literals
+    # mirroring ``compaction.thresholds.DEFAULT_IDLE_*`` (importing that module
+    # here would pull the pass engine into every settings read); the consumer
+    # map in ``tests/unit/test_settings_io.py`` pins each pair.
+    Setting(
+        key="compaction.idle_enabled",
+        path=("compaction", "idle_enabled"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.compaction_idle_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_idle_enabled_choice_true_description()),
+            _t(_ws.compaction_idle_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="compaction.idle_threshold_tokens",
+        path=("compaction", "idle_threshold_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_threshold_tokens_label()),
+        kind=Kind.INT,
+        default=200_000,
+        help=_t(_ws.compaction_idle_threshold_tokens_help()),
+        minimum=0,
+    ),
+    Setting(
+        key="compaction.idle_min_growth_tokens",
+        path=("compaction", "idle_min_growth_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_min_growth_tokens_label()),
+        kind=Kind.INT,
+        default=60_000,
+        help=_t(_ws.compaction_idle_min_growth_tokens_help()),
+        minimum=1,
     ),
     # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
     # ``compaction/thresholds.py``. The help text must keep saying that earlier
@@ -6284,6 +6327,30 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1,
         maximum=100_000,
         unit="screenings",
+    ),
+    # The one screening row that is NOT a ceiling, and the reason it is not a
+    # violation of the admission-gate invariant (
+    # ``test_no_setting_can_disable_the_admission_gate`` looks at it): it chooses
+    # which EVALUATED screener is tried first and cannot express "off".
+    # ``resolve_screening_chain`` only ever RE-ORDERS the vetted pairs for a
+    # value on the table; an off-table or empty value leaves the chain in its
+    # tested order, and the receiver's own default and fallback chains run
+    # behind the preference either way. So no value of this key can leave a
+    # machine unable to screen, which is the operator directive of 2026-11-04.
+    # TEXT rather than ENUM: the table of evaluated pairs lives in
+    # ``team_bridge.model_boundary`` and this module must not import it, and the
+    # desktop status route carries that vetted list to the renderer that draws
+    # the choice. ``empty_unsets`` because "" is a real choice (no preference),
+    # not a missing value to hide from the page.
+    Setting(
+        key="team_bridge.screening.model",
+        path=("team_bridge", "screening", "model"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_model_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.team_bridge_screening_model_help()),
+        empty_unsets=True,
     ),
     # -- asks ------------------------------------------------------------------
     # How long a LAPSED (timed-out, unanswered) ask stays shown, measured from

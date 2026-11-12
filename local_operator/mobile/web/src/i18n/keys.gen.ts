@@ -323,6 +323,8 @@ export type MessageParams = {
   "relay.session.list.start_idle": undefined;
   "relay.session.model.filter_placeholder": undefined;
   "relay.session.model.loading": undefined;
+  "relay.session.model.queued": undefined;
+  "relay.session.model.refused": { "model": string; "reason": string };
   "relay.session.model.sheet_title": undefined;
   "relay.session.past.back": undefined;
   "relay.session.past.heading": undefined;
@@ -445,6 +447,9 @@ export type MessageParams = {
   "relay.transcript.label.steered": undefined;
   "relay.transcript.label.wake": undefined;
   "relay.transcript.older.failed": undefined;
+  "relay.transcript.older.load": undefined;
+  "relay.transcript.older.loading": undefined;
+  "relay.transcript.older.start": undefined;
   "relay.transcript.session.unread_refused": undefined;
   "relay.transcript.turn.actions": { "label": string; "count": number };
   "relay.transcript.turn.completed": undefined;
@@ -464,6 +469,14 @@ export type MessageParams = {
   "relay.usage_reset.refused": undefined;
   "wire.aida_cadence.interval_hours.help": undefined;
   "wire.aida_cadence.interval_hours.label": undefined;
+  "wire.bridge_taint.ack_refused": undefined;
+  "wire.bridge_taint.ack_refused_other_session": undefined;
+  "wire.bridge_taint.card_notice": undefined;
+  "wire.bridge_taint.card_notice_other_session": undefined;
+  "wire.bridge_taint.card_options_off": undefined;
+  "wire.bridge_taint.full_request": { "request": string };
+  "wire.bridge_taint.grant_suspended": undefined;
+  "wire.bridge_taint.grant_suspended_other_session": undefined;
   "wire.console.description": undefined;
   "wire.console.max_live.help": undefined;
   "wire.console.max_live.label": undefined;
@@ -614,6 +627,7 @@ export type MessageParams = {
   "wire.errors.desktop.session_is_remote_open": { "session_id": string; "label": string };
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
   "wire.errors.desktop.session_not_found": { "session_id": string };
+  "wire.errors.desktop.settings_intent_generation_moved": undefined;
   "wire.errors.desktop.skill_alias_occupied": undefined;
   "wire.errors.desktop.skill_local_changes_unpublished": undefined;
   "wire.errors.desktop.skill_not_editable": undefined;
@@ -766,6 +780,12 @@ export type MessageParams = {
   "wire.memory.sync.help": undefined;
   "wire.memory.sync.label": undefined;
   "wire.memory.title": undefined;
+  "wire.music.cancel_requested": { "job": string };
+  "wire.music.failed": { "error": string };
+  "wire.music.label": undefined;
+  "wire.music.progress": { "completed": string; "total": string };
+  "wire.music.ready": { "job": string };
+  "wire.music.started": { "job": string };
   "wire.notification_sound.cli.add.help": undefined;
   "wire.notification_sound.cli.add.keep_loudness.help": undefined;
   "wire.notification_sound.cli.add.name.help": undefined;
@@ -1018,6 +1038,14 @@ export type MessageParams = {
   "wire.settings.compaction_enabled.choice.true.description": undefined;
   "wire.settings.compaction_enabled.help": undefined;
   "wire.settings.compaction_enabled.label": undefined;
+  "wire.settings.compaction_idle_enabled.choice.false.description": undefined;
+  "wire.settings.compaction_idle_enabled.choice.true.description": undefined;
+  "wire.settings.compaction_idle_enabled.help": undefined;
+  "wire.settings.compaction_idle_enabled.label": undefined;
+  "wire.settings.compaction_idle_min_growth_tokens.help": undefined;
+  "wire.settings.compaction_idle_min_growth_tokens.label": undefined;
+  "wire.settings.compaction_idle_threshold_tokens.help": undefined;
+  "wire.settings.compaction_idle_threshold_tokens.label": undefined;
   "wire.settings.compaction_keep_recent_tokens.help": undefined;
   "wire.settings.compaction_keep_recent_tokens.label": undefined;
   "wire.settings.compaction_mid_turn_enabled.choice.false.description": undefined;
@@ -1638,6 +1666,8 @@ export type MessageParams = {
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": undefined;
   "wire.settings.team_bridge_screening_budget_per_hour.help": undefined;
   "wire.settings.team_bridge_screening_budget_per_hour.label": undefined;
+  "wire.settings.team_bridge_screening_model.help": undefined;
+  "wire.settings.team_bridge_screening_model.label": undefined;
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": undefined;
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": undefined;
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": undefined;

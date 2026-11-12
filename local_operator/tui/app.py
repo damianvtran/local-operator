@@ -97,7 +97,12 @@ from local_operator.harness.approval import (
     LOOSENING_REFUSED_NOTICE,
     REARM_KEPT_BY_AUTO_NOTICE,
     loosening_is_authorised,
-    never_auto_approved,
+)
+from local_operator.harness.bridge_egress import (
+    bridge_card_notice,
+    card_options_off_notice,
+    requires_person,
+    session_grant_covers,
 )
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
@@ -4838,6 +4843,14 @@ def _quoted_echo_within_cells(text: str, budget: int = 20) -> str:
     return f"'{out}…'"
 
 
+def _accepts_bridge_ack(fn: Any) -> bool:
+    """Whether a ``route_shared_slash`` takes the Team Bridge ``bridge_ack`` keyword."""
+    try:
+        return "bridge_ack" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -8370,6 +8383,8 @@ class OperatorApp(App[None]):
             source.draft = await self._sidebar_drafts.get(session_id)
             if source.draft.approve_all is None:
                 source.draft.approve_all = self._approvals_default_auto
+                # The machine default, not a choice for this conversation.
+                source.draft.approve_scope = "global"
             source.preparations = 1
             # A newly leased source starts its clock at birth. Prewarm leases
             # sources the user never visits, and those are parked by
@@ -9103,8 +9118,12 @@ class OperatorApp(App[None]):
             and bool(source.draft.approve_all)
             and not require_card
             # An account profile save is never auto-approved, so approve-all
-            # does not discharge it: the card is still owed to a person.
-            and not never_auto_approved(str(getattr(gate, "title", "") or ""))
+            # does not discharge it: the card is still owed to a person. Nor
+            # is any card raised in a Team-Bridge-latched session (§4.2).
+            and not requires_person(
+                str(getattr(gate, "title", "") or ""),
+                bridge_latched=bool(getattr(gate, "bridge_latched", False)),
+            )
         ):
             return True
         card = self._ask_screen if gate.kind == "ask" else self._approval
@@ -12960,6 +12979,10 @@ class OperatorApp(App[None]):
                 if self._interaction.session is None
                 else self._approvals_default_auto
             )
+            # Adopted from the boot default / machine setting: global scope
+            # (team-bridge-egress.md: "Grants"). A conversation record read below re-scopes it.
+            source.draft.approve_scope = "global"
+            source.draft.approve_granted_while_latched = False
         self._interaction = source
         # Load THIS conversation's recorded approval choice (or its absence)
         # on every adoption. Doing it here rather than at boot is what stops
@@ -12987,7 +13010,7 @@ class OperatorApp(App[None]):
         # owner must count it again and paint any parked card in band.
         self._note_viewer_watching(source, displaying=True)
         self._watch_source_frontend(source)
-        self._set_approve_all(self._approve_all)
+        self._set_approve_all(self._approve_all, scope="keep")
         if getattr(session, "session_id", ""):
             self._sidebar_sources[session.session_id] = source
         # DISARM THE OUTGOING session's recall resolver before the binding
@@ -13231,6 +13254,7 @@ class OperatorApp(App[None]):
         session.set_approval_handler(
             partial(self._request_tool_approval_on_app_loop, source=source)
         )
+        self._watch_bridge_latch(session, source)
         # Installing this hook is what makes the ask tool exist for a UI host.
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
         # A gate reply the OWNER refuses (issue #1310) is not a race and must not
@@ -13866,6 +13890,7 @@ class OperatorApp(App[None]):
         session.set_approval_handler(
             partial(self._request_tool_approval_on_app_loop, source=source)
         )
+        self._watch_bridge_latch(session, source)
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
         _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
         if callable(_watch_refusals):
@@ -13995,6 +14020,8 @@ class OperatorApp(App[None]):
         *,
         job_id: str | None = None,
         source: SessionInteraction | None = None,
+        taint_raised: bool = False,
+        bridge_latched: bool = False,
     ) -> bool:
         """Enter the real approval surface from a pre-Textual socket task.
 
@@ -14009,7 +14036,12 @@ class OperatorApp(App[None]):
         return bool(
             await self._run_gate_on_app_loop(
                 lambda: self.request_tool_approval(
-                    tool_name, description, job_id=job_id, source=source
+                    tool_name,
+                    description,
+                    job_id=job_id,
+                    source=source,
+                    taint_raised=taint_raised,
+                    bridge_latched=bridge_latched,
                 )
             )
         )
@@ -28162,6 +28194,8 @@ class OperatorApp(App[None]):
         *,
         job_id: str | None = None,
         source: SessionInteraction | None = None,
+        taint_raised: bool = False,
+        bridge_latched: bool = False,
     ) -> bool:
         """The session's approval gate while this app owns the terminal.
 
@@ -28210,7 +28244,12 @@ class OperatorApp(App[None]):
             return False
         # Approve-all never covers an account profile save (see
         # ``harness.approval.never_auto_approved``): that card always shows.
-        if bool(source.draft.approve_all) and not never_auto_approved(tool_name):
+        # Nor does a SESSION approve-all granted before the conversation held
+        # Team Bridge content (team-bridge-egress.md: "Grants"): the call falls through to the
+        # card. The source's own latch is read too (fail-closed), so a card
+        # whose raiser passed no flag is still person-only.
+        latched = bool(bridge_latched) or self._source_bridge_latched(source)
+        if session_grant_covers(self._draft_grant(source), title=tool_name, bridge_latched=latched):
             return True
         # ADOPT THE CARD THE REVEAL ALREADY MOUNTED FOR THIS GATE, if there is
         # one. It is not a competing prompt — it IS this gate's card, built by
@@ -28249,7 +28288,12 @@ class OperatorApp(App[None]):
             # denied on waking by a latch that has nothing to do with it.
             if job_id is None and self._source_approvals_are_denied(source, epoch):
                 return False
-            if bool(source.draft.approve_all) and not never_auto_approved(tool_name):
+            # The queued asker's waking re-check: the same grant rule, so a
+            # pre-latch approve-all cannot answer a card queued in a latched
+            # session (T22g).
+            if session_grant_covers(
+                self._draft_grant(source), title=tool_name, bridge_latched=latched
+            ):
                 return True
         # The prompt is a transcript block, and the subagent page hides the
         # transcript — mounted behind it the question was invisible while
@@ -28294,6 +28338,8 @@ class OperatorApp(App[None]):
                 view_generation=view_generation,
                 tool_name=tool_name,
                 description=description,
+                bridge_latched=latched,
+                taint_raised=taint_raised,
             )
             self._approval = prompt
             # The QUESTION goes in the dock, where it cannot scroll away from
@@ -30619,8 +30665,15 @@ class OperatorApp(App[None]):
         view_generation: int,
         tool_name: str,
         description: str,
+        bridge_latched: bool = False,
+        taint_raised: bool = False,
     ) -> ApprovalPrompt:
         """Construct an approval card, wired to the latch the bridge answers through.
+
+        ``bridge_latched`` (team-bridge-egress.md: "Cards"): the conversation holds Team Bridge
+        content, so the card offers Allow/Deny only and its ``S``/``G``
+        setting keys get no callback (``_request_setting`` returns on
+        ``None``) -- no one-press loosening from any card in that session.
 
         ONE construction with two callers — the session's own gate ladder
         (``request_tool_approval``) and the reveal's pre-arm below. A second
@@ -30644,8 +30697,14 @@ class OperatorApp(App[None]):
             # when the key is pressed — a swap must not let one conversation's
             # card write another's record.
             policy=self._approval_policy_view(),
-            on_set_session_auto=partial(self._set_session_auto_for_card, source),
-            on_set_global_auto=partial(self._set_global_auto_for_card, source),
+            on_set_session_auto=(
+                None if bridge_latched else partial(self._set_session_auto_for_card, source)
+            ),
+            on_set_global_auto=(
+                None if bridge_latched else partial(self._set_global_auto_for_card, source)
+            ),
+            person_only=bridge_latched,
+            notice=bridge_card_notice(source.session) if bridge_latched else "",
         )
         # A gate on a PEER's session carries the hint that says where an allow
         # happens: an allow from THIS origin would be refused by the owner's
@@ -30654,6 +30713,12 @@ class OperatorApp(App[None]):
         self._mark_remote_gate(prompt)
         prompt.source_binding = (source.token, gate_key, view_generation)
         prompt.gate_question = (tool_name, description)
+        # Carried on the card so the follower projection
+        # (``mobile/tui_handle.note_approval_pending``) sends the same flags a
+        # runtime-owned gate sends (review S-62): desktop and phone key their
+        # Allow/Deny-only rendering on them.
+        prompt.bridge_latched = bool(bridge_latched)
+        prompt.taint_raised = bool(taint_raised)
         self._restore_gate_draft(source, prompt)
         return prompt
 
@@ -30786,8 +30851,9 @@ class OperatorApp(App[None]):
         pending = getattr(source.session, "pending_gate", None)
         if pending is None or getattr(pending, "kind", None) != "approval":
             return
-        if bool(source.draft.approve_all) and not never_auto_approved(
-            str(getattr(pending, "title", "") or "")
+        pending_latched = bool(getattr(pending, "bridge_latched", False))
+        if bool(source.draft.approve_all) and not requires_person(
+            str(getattr(pending, "title", "") or ""), bridge_latched=pending_latched
         ):
             return
         if self._source_approvals_are_denied(source, source.turn.epoch):
@@ -30798,6 +30864,8 @@ class OperatorApp(App[None]):
             view_generation=source.gate_view_generation,
             tool_name=str(getattr(pending, "title", "") or ""),
             description=str(getattr(pending, "detail", "") or ""),
+            bridge_latched=pending_latched,
+            taint_raised=bool(getattr(pending, "taint_raised", False)),
         )
         self._prearmed_approval = prompt
         self._approval = prompt
@@ -31167,6 +31235,125 @@ class OperatorApp(App[None]):
         if _is_viewer(source.session):
             source.session.preserve_viewer_gate_reply()
 
+    # -- Team Bridge taint (team-bridge-egress.md: "Grants")
+    # -----------------------------------------
+
+    def _source_bridge_latched(self, source: SessionInteraction | None) -> bool:
+        """Whether ``source``'s session holds Team Bridge content. Fail-closed.
+
+        A viewer's session has no local latch (the owner's runtime holds it);
+        its cards carry the owner's ``bridge_latched`` flag instead.
+        """
+        session = getattr(source, "session", None) if source is not None else None
+        if session is None:
+            return False
+        try:
+            return bool(getattr(session, "bridge_latched", False))
+        except Exception:  # noqa: BLE001 - §3.6: an error deriving taint means tainted
+            logger.warning("bridge latch read failed; treating as latched", exc_info=True)
+            return True
+
+    def _watch_bridge_latch(self, session: Any, source: SessionInteraction) -> None:
+        """Announce once, in this pane, that a pre-latch session auto stopped covering calls.
+
+        Only a session this app hosts has a local latch; a viewer's owner
+        announces through its own notice stream.
+        """
+        latch = getattr(session, "bridge_taint_latch", None)
+        if latch is None or getattr(source, "_bridge_watch_installed", False):
+            return
+        source._bridge_watch_installed = True  # type: ignore[attr-defined]
+
+        def announce() -> None:
+            suspended = self._draft_grant_suspended(source)
+            from local_operator.harness.bridge_egress import grant_suspended_notice
+
+            def paint() -> None:
+                # A card parked while the session was clean was built with
+                # Allow all and the S/G escapes; it becomes the latched card
+                # now (QA Q-11). The press-time refusal in the two setters is
+                # the guarantee; this keeps the card from offering keys it
+                # would refuse.
+                self._latch_parked_cards(source)
+                if suspended and source is self._interaction:
+                    self._append_block(NoticeBlock(grant_suspended_notice(latch), "warning"))
+                    self._set_approve_all(self._approve_all, scope="keep")
+
+            try:
+                self.call_later(paint)
+            except Exception:  # noqa: BLE001 - a notice is not the gate; logged at warning
+                logger.warning("could not schedule the Team Bridge approvals notice", exc_info=True)
+
+        latch.on_latched.append(announce)
+
+    def _latch_parked_cards(self, source: SessionInteraction) -> None:
+        """Re-render ``source``'s pending card(s) as latched cards (Q-11).
+
+        Only cards bound to ``source`` (``source_binding[0]`` is its token): a
+        latch in one conversation must not restyle another's card.
+        """
+        for card in (self._approval, self._prearmed_approval):
+            binding = getattr(card, "source_binding", None)
+            if card is None or not binding or binding[0] != source.token:
+                continue
+            enter = getattr(card, "enter_latched", None)
+            if enter is None:
+                continue
+            try:
+                enter(bridge_card_notice(source.session))
+            except Exception:  # noqa: BLE001 - the setters still refuse; logged
+                logger.warning("could not re-render a parked card as latched", exc_info=True)
+
+    def _card_setting_refused_while_latched(
+        self, source: SessionInteraction
+    ) -> ApprovalSettingOutcome | None:
+        """The press-time refusal of a card's ``S``/``G`` in a latched session.
+
+        Why at PRESS time (QA Q-11): the callbacks are bound when a card is
+        built (``None`` on a latched card), so a card parked before the latch
+        still holds them. Pressing one then reached ``_set_approve_all`` while
+        latched, which stamps ``granted_while_latched`` -- the marker only a
+        typed ``/approvals auto`` may carry -- and the next egress ran with no
+        card. Mirrors the ``A`` check in ``_latch_approval_answer``. Writes
+        nothing; the card is turned into the latched card in the same gesture.
+        """
+        card = self._approval
+        card_latched = (
+            card is not None
+            and bool(getattr(card, "bridge_latched", False))
+            and (getattr(card, "source_binding", None) or (None,))[0] == source.token
+        )
+        if not (self._source_bridge_latched(source) or card_latched):
+            return None
+        self._latch_parked_cards(source)
+        return ApprovalSettingOutcome(
+            kind="refused",
+            mode="auto" if self._approve_all else "ask",
+            provenance="session",
+            reason=card_options_off_notice(),
+        )
+
+    def _draft_grant(self, source: SessionInteraction) -> Any:
+        from local_operator.harness.bridge_egress import ApprovalGrant
+
+        draft = source.draft
+        return ApprovalGrant(
+            auto=bool(draft.approve_all),
+            scope="global" if draft.approve_scope == "global" else "session",
+            granted_while_latched=draft.approve_granted_while_latched is True,
+        )
+
+    def _draft_grant_suspended(self, source: SessionInteraction) -> bool:
+        """Whether a live session approve-all is void because the session latched."""
+        from local_operator.harness.bridge_egress import session_grant_covers
+
+        grant = self._draft_grant(source)
+        if not grant.auto or grant.scope != "session":
+            return False
+        return not session_grant_covers(
+            grant, title="", bridge_latched=self._source_bridge_latched(source)
+        )
+
     def _latch_approval_answer(self, answer: str) -> None:
         """What an answer means beyond the one call. Runs BEFORE the future.
 
@@ -31176,6 +31363,10 @@ class OperatorApp(App[None]):
         "allow all" and was immediately asked again for the next tool of the same
         batch.
         """
+        if answer == "a" and self._source_bridge_latched(self._interaction):
+            # Belt and braces behind the card's own refusal (team-bridge-egress.md: "Cards"): no
+            # allow-all is ever latched from a card in a latched session.
+            return
         if answer == "a":
             self._set_approve_all(True)
             # States the CHANGE, not its duration: "for the rest of this
@@ -31189,7 +31380,7 @@ class OperatorApp(App[None]):
                 )
             )
 
-    def _set_approve_all(self, approve_all: bool) -> None:
+    def _set_approve_all(self, approve_all: bool, *, scope: str = "session") -> None:
         """THE writer of the auto-approve mode, band included.
 
         One method because the band is an ASSERTION about the gate, and the two
@@ -31206,9 +31397,32 @@ class OperatorApp(App[None]):
         true is decided by the pair of flags this method owns.
         """
         self._approve_all = approve_all
+        # The grant's scope and latch stamp ride the same assignment
+        # (team-bridge-egress.md: "Grants"). ``scope`` defaults to ``session`` -- the fail-closed
+        # reading;
+        # only the machine-default adoptions pass ``global``, and a re-assertion
+        # of the band passes ``keep``. Stamped only when granted while the
+        # conversation ALREADY holds Team Bridge content.
+        draft = self._interaction.draft
+        if not approve_all:
+            draft.approve_global_issued_here = False
+        elif scope == "global" and draft.approve_global_issued_here:
+            # This conversation's own card ``G`` set the default: here it is
+            # a session grant (S-61), whichever path re-delivers the default.
+            scope = "session"
+        if scope != "keep":
+            draft.approve_scope = scope if scope in ("session", "global") else "session"
+            draft.approve_granted_while_latched = bool(
+                approve_all
+                and draft.approve_scope == "session"
+                and self._source_bridge_latched(self._interaction)
+            )
         if self._status is not None:
+            # The band reports the EFFECTIVE mode: a suspended pre-latch
+            # session auto asks, so the band must not claim auto.
             self._status.update(
-                approvals_auto=approve_all, approvals_always=self._approvals_default_auto
+                approvals_auto=approve_all and not self._draft_grant_suspended(self._interaction),
+                approvals_always=self._approvals_default_auto,
             )
 
     def _deny_queued_approvals(self) -> None:
@@ -31683,7 +31897,7 @@ class OperatorApp(App[None]):
             return
         self._approvals_default_auto = str(saved).strip().lower() == "auto"
         self._explicit_approvals_mode = None
-        self._set_approve_all(self._approvals_default_auto)
+        self._set_approve_all(self._approvals_default_auto, scope="global")
 
     # -- the conversation's own approval choice ------------------------------
     #
@@ -31744,7 +31958,7 @@ class OperatorApp(App[None]):
         directory = self._session_directory(source)
         if directory is None:
             if not attached and first_adoption:
-                self._set_approve_all(self._approvals_default_auto)
+                self._set_approve_all(self._approvals_default_auto, scope="global")
             return
         from local_operator.session.approval_policy import read_override
 
@@ -31759,13 +31973,22 @@ class OperatorApp(App[None]):
             return
         if override is None:
             if not attached and first_adoption:
-                self._set_approve_all(self._approvals_default_auto)
+                self._set_approve_all(self._approvals_default_auto, scope="global")
             return
         # Provenance follows the record on EVERY adoption, even when an
         # in-memory latch keeps the gate itself where it is.
         self._explicit_approvals_mode = override
         if not attached and first_adoption:
             self._set_approve_all(override == "auto")
+            # The record's latch stamp, absent = False (team-bridge-egress.md: "Grants"): a
+            # pre-latch record is void once the conversation latches.
+            from local_operator.session.approval_policy import (
+                read_granted_while_latched,
+            )
+
+            source.draft.approve_granted_while_latched = (
+                override == "auto" and read_granted_while_latched(directory)
+            )
 
     def _persist_approval_override(self, source: SessionInteraction, mode: str | None) -> str:
         """Record (or clear) this conversation's choice; ``""`` on success.
@@ -31783,7 +32006,13 @@ class OperatorApp(App[None]):
         try:
             from local_operator.session.approval_policy import write_override
 
-            write_override(directory, mode)
+            write_override(
+                directory,
+                mode,
+                # Stamped when chosen while the conversation already holds Team
+                # Bridge content, so a resume keeps that deliberate grant.
+                granted_while_latched=mode == "auto" and self._source_bridge_latched(source),
+            )
         except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
             logger.warning("could not save the approval override", exc_info=True)
             return error.__class__.__name__
@@ -31800,6 +32029,9 @@ class OperatorApp(App[None]):
         card mirrors only the owner's acknowledgement (``None`` means "in
         flight"; the route calls :meth:`ApprovalPrompt.show_setting_outcome`).
         """
+        refused = self._card_setting_refused_while_latched(source)
+        if refused is not None:
+            return refused
         if self._gate_is_owned_elsewhere():
             card = self._approval
             if card is None:
@@ -31839,6 +32071,9 @@ class OperatorApp(App[None]):
         Owned gate: the global write and the live move happen here. Attached
         gate: routed to the owner, whose acknowledgement is mirrored.
         """
+        refused = self._card_setting_refused_while_latched(source)
+        if refused is not None:
+            return refused
         if self._gate_is_owned_elsewhere():
             card = self._approval
             if card is None:
@@ -31877,6 +32112,10 @@ class OperatorApp(App[None]):
             )
         problem = self._persist_approval_override(source, None)
         self._approvals_default_auto = True
+        # Marked BEFORE the live move so it, and any later watcher delivery,
+        # lands as a session grant in this conversation (S-61); every other
+        # conversation keeps following the global default.
+        source.draft.approve_global_issued_here = True
         self._apply_approvals_default_live(True)
         if problem and previous_override is not None:
             # The default and this run are correct; what is not durable is this
@@ -31901,7 +32140,7 @@ class OperatorApp(App[None]):
         """
         if auto:
             self._allow_approvals_again()
-        self._set_approve_all(auto)
+        self._set_approve_all(auto, scope="global")
 
     def route_approvals_default_from_page(self, view: Any) -> None:
         """Route a settings-page ``auto`` write to the process holding the gate.
@@ -43534,7 +43773,9 @@ class OperatorApp(App[None]):
         # `_report_approvals` needs the pair to be able to disagree.
         self._approvals_default_auto = wanted_auto
         if wanted_auto == self._approve_all:
-            self._set_approve_all(self._approve_all)  # re-assert the band's `always` marker
+            self._set_approve_all(
+                self._approve_all, scope="keep"
+            )  # re-assert the band's `always` marker
             return _ApprovalsFollow("", False)
         if self._explicit_approvals_mode is not None:
             # THE HUMAN'S OWN CHOICE OUTRANKS THE FILE IN BOTH DIRECTIONS
@@ -43575,7 +43816,7 @@ class OperatorApp(App[None]):
                 # notice lands in. Recorded so its row reports the refusal
                 # instead of a success (UX round 1, U1).
                 self._page_kept_loosening = "tool_approval_mode"
-            self._set_approve_all(self._approve_all)
+            self._set_approve_all(self._approve_all, scope="keep")
             return _ApprovalsFollow("", True)
         if wanted_auto and not loosening_is_authorised(
             # ``announce=False`` IS this process's write (``_on_config_change``
@@ -43615,7 +43856,7 @@ class OperatorApp(App[None]):
                     self._page_kept_loosening = "tool_approval_mode"
             else:
                 self._system_notice(LOOSENING_REFUSED_NOTICE, "warning")
-            self._set_approve_all(self._approve_all)
+            self._set_approve_all(self._approve_all, scope="keep")
             return _ApprovalsFollow("", True)
         # `_explicit_approvals_mode` is deliberately NOT touched here. Reaching
         # this line means there is no recorded choice (the keep branch above
@@ -43625,7 +43866,7 @@ class OperatorApp(App[None]):
         # default <mode>` is the only command that changes this bit.
         if not wanted_auto:
             self._allow_approvals_again()
-        self._set_approve_all(wanted_auto)
+        self._set_approve_all(wanted_auto, scope="global")
         # A card already on screen states the mode in force; a followed change
         # that left it saying "Ask" over a gate that now runs without asking is
         # the contradiction `_note_approvals_on_parked_prompt` exists for in the
@@ -44795,7 +45036,18 @@ class OperatorApp(App[None]):
                     # The owner stores the standing goal, so its copy must
                     # contain paste payloads, not this terminal's private chips.
                     routed_arg = prompt_arg if command == "/goal" else arg
-                    outcome = await typed_route(command.removeprefix("/"), routed_arg, images)
+                    if command == "/approvals" and _accepts_bridge_ack(remote_route):
+                        # Typed (or picked) text is the deliberate loosening the
+                        # Team Bridge rule allows (team-bridge-egress.md: "bridge_ack"): mark it,
+                        # so the
+                        # owner can tell it from a card escape. The card's own
+                        # ``S``/``G`` route (``_route_approvals_setting``) never
+                        # sets this, and is inert on a latched card anyway.
+                        outcome = await cast(Callable[..., Awaitable[Any]], remote_route)(
+                            command.removeprefix("/"), routed_arg, images, bridge_ack=True
+                        )
+                    else:
+                        outcome = await typed_route(command.removeprefix("/"), routed_arg, images)
                 except Exception as error:
                     if (
                         self._session is route_session
@@ -63794,6 +64046,13 @@ class OperatorApp(App[None]):
             # The event carries the figures, so this is the one place that can
             # serve both.
             self._settle_context_reading(message.tokens_before, message.tokens_after)
+        elif message.reason == "idle":
+            # An IDLE pass the user never asked for, in a session nobody is
+            # working in, whose history is untouched by the failure: a red
+            # error would alarm about nothing actionable (PR #3753 design D5).
+            # One quiet line still closes the "compacting context…" notice the
+            # start handler printed, so the start is never left dangling.
+            self._append_block(NoticeBlock(_t(_x.compaction_idle_skipped()), "info"))
         elif message.reason != "manual":
             # AUTOMATIC only. A manual pass is narrated by `_compact_worker`,
             # which holds the outcome and therefore the reason it failed;
@@ -64569,7 +64828,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 152
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 154
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
@@ -64893,15 +65152,25 @@ def compaction_receipt(message: CompactionEnded) -> str:
     note = getattr(message, "detail", None) or ""
     before, after = message.tokens_before, message.tokens_after
     if before <= 0 or after <= 0 or after >= before:
-        return f"context compacted · {note}" if note else "context compacted"
-    saved = f"{(1 - after / before) * 100:.0f}% smaller"
-    detail = f"{format_context_tokens(before)} → {format_context_tokens(after)} tokens ({saved})"
-    label = _STRATEGY_LABELS.get(message.strategy, message.strategy)
-    if label:
-        detail += f", via {label}"
-    if note:
-        detail += f" · {note}"
-    return f"context compacted · {detail}"
+        detail = note
+    else:
+        saved = f"{(1 - after / before) * 100:.0f}% smaller"
+        detail = (
+            f"{format_context_tokens(before)} → {format_context_tokens(after)} tokens ({saved})"
+        )
+        label = _STRATEGY_LABELS.get(message.strategy, message.strategy)
+        if label:
+            detail += f", via {label}"
+        if note:
+            detail += f" · {note}"
+    if getattr(message, "reason", None) == "idle":
+        # A pass the session ran ON ITS OWN while nobody was working, below
+        # the threshold the user set, reads as a misfire unless the receipt
+        # says why it happened (PR #3753 design D4 / UX U4).
+        if detail:
+            return _t(_x.compaction_idle_receipt(detail=detail))
+        return _t(_x.compaction_idle_receipt_bare())
+    return f"context compacted · {detail}" if detail else "context compacted"
 
 
 def mode_word(auto: bool) -> str:
