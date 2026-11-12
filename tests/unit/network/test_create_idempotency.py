@@ -111,16 +111,27 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     assert _sessions(owner) == [minted]
     assert "lost" in first["detail"] and minted in first["detail"], first
     key = first["create_key"]
-    assert [f["op"] for f in wire.sent] == [
+    # Definition reconciliation legitimately precedes a create. Exclude only
+    # those frames: duplicate creates, missing lookups and every unexpected op
+    # must still fail this lost-reply contract rather than vanish in a whitelist.
+    create_frames = [f for f in wire.sent if f["op"] != "net_definitions"]
+    assert [f["op"] for f in create_frames] == [
         "net_session_create",
         "net_session_create_lookup",
     ]
-    assert wire.sent[0]["create_key"] == key and wire.sent[1]["create_key"] == key
+    assert all(f["create_key"] == key for f in create_frames)
 
     retry = requester._ctl_peer_create({"peer": "node-2", "create_key": key})  # noqa: SLF001
     assert retry["session_id"] == minted, retry
     assert retry["replayed"] is True, retry
     assert _sessions(owner) == [minted], "a retry with the same key made a second session"
+    create_frames = [f for f in wire.sent if f["op"] != "net_definitions"]
+    assert [f["op"] for f in create_frames] == [
+        "net_session_create",
+        "net_session_create_lookup",
+        "net_session_create",
+    ]
+    assert all(f["create_key"] == key for f in create_frames)
 
 
 def test_without_a_key_two_creates_are_two_sessions(
