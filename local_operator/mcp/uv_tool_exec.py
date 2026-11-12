@@ -16,7 +16,15 @@ unreclaimable on a disk that was critically low.
 When the tool is already installed (``uv tool install workspace-mcp``) and the
 config asks for nothing but the bare name, ``uvx`` would run exactly that
 installed console script anyway, so launching the script ourselves gives the
-same program with the same args, env and cwd — and no uv parent, no lock.
+same program with the same args and cwd — and no uv parent, no lock.
+
+The env must match too: ``uvx`` hands its child the caller's env plus two
+keys (measured 2026-11-11 with uv 0.10.8 by dumping a real ``uvx`` child's
+``os.environ``): ``PATH`` with ``<tool_dir>/<pkg>/bin`` prepended, and
+``UV=<the uv binary>``. No ``VIRTUAL_ENV`` is set. Without the PATH prepend a
+server that shells out to ``python``/``pip`` or a sibling console script by
+name would find the system interpreter instead of the tool's own, so
+:func:`resolve_uv_tool_command` returns that overlay with the command.
 
 Fallback rules (the original command is used UNCHANGED whenever any holds)
 -------------------------------------------------------------------------
@@ -31,6 +39,11 @@ Fallback rules (the original command is used UNCHANGED whenever any holds)
   an option would). ``UV_TOOL_DIR`` is honoured by asking uv itself, below.
 * ``uv tool dir`` fails, times out, or ``<tool_dir>/<pkg>/bin/<pkg>`` is
   missing or not executable.
+* The install is broken in a way ``uvx`` would repair by rebuilding the
+  environment: ``<tool_dir>/<pkg>/bin/python`` dangles (its base interpreter
+  was removed, e.g. a Homebrew or uv-managed Python upgrade) or
+  ``uv-receipt.toml`` is missing (uvx ignores a tool dir without a receipt).
+  Exec'ing the script directly would fail with exit 127 where uvx recovers.
 * Windows (the console script lives under ``Scripts\\`` as an ``.exe`` shim;
   not handled here).
 * The operator opted out with ``LOCAL_OPERATOR_MCP_UVX_DIRECT=0``.
@@ -38,7 +51,10 @@ Fallback rules (the original command is used UNCHANGED whenever any holds)
 The tool directory comes from ``uv tool dir`` run with the CHILD's environment
 (so a ``UV_TOOL_DIR`` / ``XDG_DATA_HOME`` the server would see is respected,
 including a ``uv.toml`` ``tool-dir`` setting we would otherwise have to
-re-implement), bounded by a timeout and cached per (uv binary, relevant env).
+re-implement) and the server's cwd, bounded by a timeout and cached per
+(uv binary, relevant env, cwd). Only successful answers are cached for good;
+a failure or timeout is remembered for :data:`FAILED_LOOKUP_TTL_S` so one slow
+lookup under load does not disable direct exec for the life of the process.
 """
 
 from __future__ import annotations
@@ -50,8 +66,10 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +82,11 @@ OPT_OUT_ENV = "LOCAL_OPERATOR_MCP_UVX_DIRECT"
 #: seconds sits well above the max; on expiry we simply keep ``uvx``.
 UV_TOOL_DIR_TIMEOUT_S = 5.0
 
+#: How long a failed or timed-out ``uv tool dir`` is remembered. Long enough
+#: that a burst of server spawns does not each pay up to the 5 s timeout again;
+#: short enough that a transient stall under load re-enables direct exec soon.
+FAILED_LOOKUP_TTL_S = 60.0
+
 # A bare package name exactly as uv normalises it for the tool directory
 # (PEP 503: lowercase, runs of ``-_.`` collapsed to ``-``). Anything else —
 # capitals, underscores, pins, extras, paths, URLs — falls back, because the
@@ -72,10 +95,24 @@ _BARE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*$")
 
 # Environment keys that decide where uv keeps tools; part of the cache key so
 # a server pointing elsewhere does not reuse another server's answer.
-_TOOL_DIR_ENV_KEYS = ("UV_TOOL_DIR", "XDG_DATA_HOME", "HOME", "UV_CONFIG_FILE")
+# XDG_CONFIG_HOME locates the user ``uv.toml`` (which may set ``tool-dir``).
+# ``UV_CONFIG_FILE`` is deliberately absent: a server env setting it already
+# falls back via the ``UV_*`` rule, and lop's own env does not set it.
+_TOOL_DIR_ENV_KEYS = ("UV_TOOL_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "HOME")
 
-_tool_dir_cache: dict[tuple[str, tuple[str | None, ...]], Path | None] = {}
+_CacheKey = tuple[str, tuple[str | None, ...], str | None]
+# Value: (tool dir or None, monotonic expiry; None = never expires).
+_tool_dir_cache: dict[_CacheKey, tuple[Path | None, float | None]] = {}
 _tool_dir_lock = threading.Lock()
+
+
+class UvToolExec(NamedTuple):
+    """How to launch an installed uv tool without the ``uvx`` parent."""
+
+    command: str
+    args: list[str]
+    #: Keys to overlay on the child's env so it sees what ``uvx`` would give it.
+    env: dict[str, str]
 
 
 def _opted_out() -> bool:
@@ -125,11 +162,14 @@ def _uv_binary(command: str, path_env: str | None) -> str | None:
     return shutil.which("uv", path=path_env)
 
 
-def _query_tool_dir(uv: str, env: Mapping[str, str]) -> Path | None:
+def _query_tool_dir(uv: str, env: Mapping[str, str], cwd: str | None) -> Path | None:
     try:
         proc = subprocess.run(
             [uv, "tool", "dir"],
             env=dict(env),
+            # The server's cwd, so a project-level uv config there is seen the
+            # way uvx (spawned in that cwd) would see it.
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -146,15 +186,18 @@ def _query_tool_dir(uv: str, env: Mapping[str, str]) -> Path | None:
     return Path(out.splitlines()[-1].strip())
 
 
-def uv_tool_dir(uv: str, env: Mapping[str, str]) -> Path | None:
+def uv_tool_dir(uv: str, env: Mapping[str, str], cwd: str | None = None) -> Path | None:
     """Cached, time-bounded ``uv tool dir`` under the child's environment."""
-    key = (uv, tuple(env.get(k) for k in _TOOL_DIR_ENV_KEYS))
+    key: _CacheKey = (uv, tuple(env.get(k) for k in _TOOL_DIR_ENV_KEYS), cwd)
+    now = time.monotonic()
     with _tool_dir_lock:
-        if key in _tool_dir_cache:
-            return _tool_dir_cache[key]
-    result = _query_tool_dir(uv, env)
+        hit = _tool_dir_cache.get(key)
+        if hit is not None and (hit[1] is None or hit[1] > now):
+            return hit[0]
+    result = _query_tool_dir(uv, env, cwd)
+    expiry = None if result is not None else time.monotonic() + FAILED_LOOKUP_TTL_S
     with _tool_dir_lock:
-        _tool_dir_cache[key] = result
+        _tool_dir_cache[key] = (result, expiry)
     return result
 
 
@@ -170,13 +213,15 @@ def resolve_uv_tool_command(
     *,
     env: Mapping[str, str],
     server_env: Mapping[str, str] | None = None,
-) -> tuple[str, list[str]] | None:
-    """Map a bare ``uvx <pkg> ...`` to ``(<tool_dir>/<pkg>/bin/<pkg>, [...])``.
+    cwd: str | None = None,
+) -> UvToolExec | None:
+    """Map a bare ``uvx <pkg> ...`` to the installed ``<tool_dir>/<pkg>/bin/<pkg>``.
 
     ``env`` is the environment the child would be spawned with; ``server_env``
     is the server's own configured ``env`` block (checked for ``UV_*``
-    overrides). Returns ``None`` whenever the original command must be kept;
-    see the module docstring for every rule.
+    overrides); ``cwd`` is the server's working directory. The result's
+    ``env`` must be overlaid on ``env`` at spawn. Returns ``None`` whenever the
+    original command must be kept; see the module docstring for every rule.
     """
     if sys.platform == "win32" or _opted_out():
         return None
@@ -189,13 +234,25 @@ def resolve_uv_tool_command(
     uv = _uv_binary(command, env.get("PATH"))
     if uv is None:
         return None
-    tool_dir = uv_tool_dir(uv, env)
+    tool_dir = uv_tool_dir(uv, env, cwd)
     if tool_dir is None:
         return None
-    binary = tool_dir / package / "bin" / package
+    env_root = tool_dir / package
+    bin_dir = env_root / "bin"
+    binary = bin_dir / package
     if not (binary.is_file() and os.access(binary, os.X_OK)):
         logger.debug("no executable installed uv tool for %r; keeping uvx", package)
         return None
+    # ``exists()`` follows the symlink, so a dangling interpreter link (base
+    # Python removed) fails here and uvx gets the chance to rebuild the env.
+    if not ((bin_dir / "python").exists() and (env_root / "uv-receipt.toml").is_file()):
+        logger.debug("installed uv tool %r looks broken; keeping uvx", package)
+        return None
+    path = env.get("PATH")
+    overlay = {
+        "PATH": f"{bin_dir}{os.pathsep}{path}" if path else str(bin_dir),
+        "UV": uv,
+    }
     # Names and paths only — never env values.
     logger.debug("exec installed uv tool %r directly at %s (bypassing uv parent)", package, binary)
-    return str(binary), tool_args
+    return UvToolExec(str(binary), tool_args, overlay)

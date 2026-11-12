@@ -1378,16 +1378,19 @@ async def _stdio_transport(
     # console script: `uvx` would otherwise stay alive as the server's parent
     # holding ~/.cache/uv/.lock for the session's lifetime, and one holder per
     # session blocks `uv cache prune` forever (see uv_tool_exec's docstring for
-    # the measurement and every fallback rule). Same args, env and cwd. Off the
-    # event loop because the first lookup runs `uv tool dir` (bounded, cached);
-    # the pure-string pre-check keeps every non-uvx spawn free of a thread hop.
+    # the measurement and every fallback rule). Same args and cwd; the env gets
+    # the two keys uvx itself adds (tool bin/ prepended to PATH, UV). Off the
+    # event loop because the first lookup per (uv, env, cwd) runs `uv tool dir`,
+    # bounded at 5 s (UV_TOOL_DIR_TIMEOUT_S) and then cached; the pure-string
+    # pre-check keeps every non-uvx spawn free of a thread hop.
     direct = None
     if is_uvx_candidate(command, args):
         direct = await anyio.to_thread.run_sync(
-            lambda: resolve_uv_tool_command(command, args, env=env, server_env=cfg.env)
+            lambda: resolve_uv_tool_command(command, args, env=env, server_env=cfg.env, cwd=cwd)
         )
     if direct is not None:
-        command, args = direct
+        command, args = direct.command, direct.args
+        env = env | direct.env
     argv = build_stdio_argv(command, args)
 
     # stderr on a PIPE, never inherited. `stderr=None` handed the child the

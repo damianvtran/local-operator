@@ -43,22 +43,63 @@ def rig(tmp_path: Path):
     )
     _exe(bindir / "uvx", "#!/bin/sh\nexit 3\n")
     binary = _exe(tools / "workspace-mcp" / "bin" / "workspace-mcp", "#!/bin/sh\n")
+    # A healthy install: bin/python links to an existing interpreter and the
+    # receipt uv writes on `uv tool install` is present.
+    (tools / "workspace-mcp" / "bin" / "python").symlink_to(sys.executable)
+    (tools / "workspace-mcp" / "uv-receipt.toml").write_text("[tool]\n")
     env = {"PATH": str(bindir), "HOME": str(tmp_path)}
     return {"tools": tools, "bindir": bindir, "binary": binary, "env": env}
+
+
+def _cmd(got):
+    assert got is not None
+    return (got.command, got.args)
 
 
 def test_bare_uvx_name_resolves_to_installed_binary(rig):
     got = resolve_uv_tool_command(
         "uvx", ["workspace-mcp", "--tool-tier", "core"], env=rig["env"], server_env={}
     )
-    assert got == (str(rig["binary"]), ["--tool-tier", "core"])
+    assert _cmd(got) == (str(rig["binary"]), ["--tool-tier", "core"])
+
+
+def test_env_overlay_matches_what_uvx_gives_its_child(rig):
+    """uvx prepends the tool's bin/ to PATH and sets UV (measured, uv 0.10.8)."""
+    got = resolve_uv_tool_command("uvx", ["workspace-mcp"], env=rig["env"], server_env={})
+    assert got is not None
+    bin_dir = rig["tools"] / "workspace-mcp" / "bin"
+    assert got.env == {
+        "PATH": f"{bin_dir}{os.pathsep}{rig['bindir']}",
+        "UV": str(rig["bindir"] / "uv"),
+    }
+    assert "VIRTUAL_ENV" not in got.env
+
+
+def test_env_overlay_without_path_is_just_the_bin_dir(rig):
+    got = resolve_uv_tool_command(
+        str(rig["bindir"] / "uvx"), ["workspace-mcp"], env={"HOME": rig["env"]["HOME"]}
+    )
+    assert got is not None
+    assert got.env["PATH"] == str(rig["tools"] / "workspace-mcp" / "bin")
+
+
+def test_dangling_python_symlink_falls_back(rig, tmp_path):
+    py = rig["tools"] / "workspace-mcp" / "bin" / "python"
+    py.unlink()
+    py.symlink_to(tmp_path / "removed" / "python3.14")
+    assert resolve_uv_tool_command("uvx", ["workspace-mcp"], env=rig["env"], server_env={}) is None
+
+
+def test_missing_receipt_falls_back(rig):
+    (rig["tools"] / "workspace-mcp" / "uv-receipt.toml").unlink()
+    assert resolve_uv_tool_command("uvx", ["workspace-mcp"], env=rig["env"], server_env={}) is None
 
 
 def test_absolute_uvx_path_resolves(rig):
     got = resolve_uv_tool_command(
         str(rig["bindir"] / "uvx"), ["workspace-mcp"], env=rig["env"], server_env={}
     )
-    assert got == (str(rig["binary"]), [])
+    assert _cmd(got) == (str(rig["binary"]), [])
 
 
 @pytest.mark.parametrize("sub", ["run", "uvx"])
@@ -66,7 +107,7 @@ def test_uv_tool_run_and_uvx_forms(rig, sub):
     got = resolve_uv_tool_command(
         "uv", ["tool", sub, "workspace-mcp", "-x"], env=rig["env"], server_env={}
     )
-    assert got == (str(rig["binary"]), ["-x"])
+    assert _cmd(got) == (str(rig["binary"]), ["-x"])
 
 
 @pytest.mark.parametrize(
@@ -144,6 +185,42 @@ def test_tool_dir_is_queried_once_then_cached(rig, tmp_path):
     assert counter.read_text().count("x") == 1
 
 
+def test_failed_lookup_is_retried_after_ttl(rig, tmp_path, monkeypatch):
+    """A failure is remembered briefly, not for the life of the process."""
+    good_uv = (rig["bindir"] / "uv").read_text()
+    _exe(rig["bindir"] / "uv", "#!/bin/sh\nexit 1\n")
+    clock = [1000.0]
+    monkeypatch.setattr(uv_tool_exec.time, "monotonic", lambda: clock[0])
+    assert resolve_uv_tool_command("uvx", ["workspace-mcp"], env=rig["env"]) is None
+    _exe(rig["bindir"] / "uv", good_uv)
+    # Still inside the TTL: the failure is served from cache.
+    clock[0] += uv_tool_exec.FAILED_LOOKUP_TTL_S - 1
+    assert resolve_uv_tool_command("uvx", ["workspace-mcp"], env=rig["env"]) is None
+    clock[0] += 2
+    assert resolve_uv_tool_command("uvx", ["workspace-mcp"], env=rig["env"]) is not None
+
+
+def test_lookup_runs_in_server_cwd_and_keys_on_it(rig, tmp_path):
+    log = tmp_path / "cwds"
+    _exe(rig["bindir"] / "uv", f'#!/bin/sh\npwd >> "{log}"\necho "{rig["tools"]}"\n')
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    for cwd in (a, b, a):
+        assert resolve_uv_tool_command("uvx", ["workspace-mcp"], env=rig["env"], cwd=str(cwd))
+    seen = [Path(p).resolve() for p in log.read_text().split()]
+    assert seen == [a.resolve(), b.resolve()]
+
+
+def test_xdg_config_home_is_part_of_the_cache_key(rig, tmp_path):
+    counter = tmp_path / "calls"
+    _exe(rig["bindir"] / "uv", f'#!/bin/sh\necho x >> "{counter}"\necho "{rig["tools"]}"\n')
+    for xdg in ("/one", "/two"):
+        env = dict(rig["env"], XDG_CONFIG_HOME=xdg)
+        assert resolve_uv_tool_command("uvx", ["workspace-mcp"], env=env)
+    assert counter.read_text().count("x") == 2
+
+
 def test_stdio_transport_spawns_resolved_binary(rig, monkeypatch):
     """The real spawn site hands ``open_process`` the binary, args unchanged."""
     import anyio
@@ -156,7 +233,7 @@ def test_stdio_transport_spawns_resolved_binary(rig, monkeypatch):
     async def _fake_open_process(target, **kwargs):
         seen["target"] = target
         seen["cwd"] = kwargs.get("cwd")
-        seen["env_keys"] = set(kwargs["env"])
+        seen["env"] = dict(kwargs["env"])
         raise RuntimeError("stop after spawn")
 
     monkeypatch.setattr(anyio, "open_process", _fake_open_process)
@@ -174,5 +251,10 @@ def test_stdio_transport_spawns_resolved_binary(rig, monkeypatch):
         anyio.run(_go)
     assert seen["target"] == [str(rig["binary"]), "--a"]
     assert seen["cwd"] == str(rig["tools"])
-    assert "FOO" in seen["env_keys"]  # type: ignore[operator]
+    child_env = seen["env"]
+    assert isinstance(child_env, dict)
+    assert child_env["FOO"] == "1"
+    # The spawn carries uvx's overlay, not the raw PATH.
+    assert child_env["PATH"].split(os.pathsep)[0] == str(rig["tools"] / "workspace-mcp" / "bin")
+    assert child_env["UV"] == str(rig["bindir"] / "uv")
     assert os.access(rig["binary"], os.X_OK)
