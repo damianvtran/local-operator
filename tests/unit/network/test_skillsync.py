@@ -546,11 +546,17 @@ def test_the_sweep_never_follows_a_symlinked_stage(tmp_path: Path) -> None:
     assert victim.exists(), "the sweep followed a symlinked stage into its target"
 
 
-def _own_skill_at(root: Path, folder: str, name: str, body: str) -> Path:
-    path = root / "skills" / folder
+def _own_skill_at(root: Path, folder: str, name: str | None, body: str) -> Path:
+    """An own skill at ``root/skills/<folder>``; ``name=None`` omits the ``name:`` line."""
+    return _own_skill_in(root / "skills", folder, name, body)
+
+
+def _own_skill_in(base: Path, folder: str, name: str | None, body: str) -> Path:
+    path = base / folder
     path.mkdir(parents=True)
+    name_line = f"name: {name}\n" if name is not None else ""
     (path / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: receiver OWN {body}\n---\n{body}\n", encoding="utf-8"
+        f"---\n{name_line}description: receiver OWN {body}\n---\n{body}\n", encoding="utf-8"
     )
     return path
 
@@ -575,7 +581,7 @@ def test_a_peer_skill_never_lands_beside_the_receivers_own_declared_elsewhere(
 
     # The receiver's state names it as its own, so the sender keeps it unasked.
     held = skillsync.skill_state(receiver)["skills"][name]
-    assert held["origin"] == "" and held["folder"] == folder, held
+    assert held["origin"] == "" and held["where"] == f"skills/{folder}", held
 
     answer = skillsync.apply_skill(receiver, _payload_from(honest, name), origin_device="dev-a")
     assert answer["outcome"] == "conflicts", answer
@@ -583,6 +589,136 @@ def test_a_peer_skill_never_lands_beside_the_receivers_own_declared_elsewhere(
     assert not (receiver / "skills" / name).exists(), "the peer's copy landed beside the own one"
     found, _warnings = discover_skills([receiver / "skills"], config_dir=receiver)
     assert {skill.name: skill for skill in found}[name].description == "receiver OWN kept"
+
+
+def test_a_nameless_own_skill_registers_by_its_folder_and_is_kept(tmp_path: Path) -> None:
+    """Round 3, M1: no ``name:`` means discovery uses the folder; so does the sync."""
+    receiver = tmp_path / "r"
+    _own_skill_at(receiver, "tools/foo", None, "kept")
+    sender = tmp_path / "s"
+    honest = _write_skill(sender, "foo", body="peer")
+
+    held = skillsync.skill_state(receiver)["skills"]["foo"]
+    assert held["origin"] == "" and held["where"] == "skills/tools/foo", held
+    answer = skillsync.apply_skill(receiver, _payload_from(honest, "foo"), origin_device="dev-a")
+    assert answer["outcome"] == "conflicts", answer
+    assert "skills/tools/foo" in answer["reason"], answer
+    assert not (receiver / "skills" / "foo").exists()
+    found, _warnings = discover_skills([receiver / "skills"], config_dir=receiver)
+    assert {skill.name: skill for skill in found}["foo"].description == "receiver OWN kept"
+
+
+@pytest.mark.parametrize("layout", ["claude", "extra-roots"])
+def test_a_peer_skill_never_shadows_the_receivers_own_ecosystem_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str
+) -> None:
+    """Round 3, M2: ecosystem roots rank BELOW ``~/.local-operator/skills``.
+
+    The receiver's config root is the isolated HOME's ``.local-operator``, and
+    the expectation is checked against ``default_skill_roots`` itself, the roots
+    the receiver's sessions read.
+    """
+    from local_operator.skills.api import default_skill_roots
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    if layout == "claude":
+        monkeypatch.delenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", raising=False)
+        own_base, expected = home / ".claude" / "skills", "~/.claude/skills/foo"
+    else:
+        own_base = tmp_path / "extra"
+        monkeypatch.setenv("LOCAL_OPERATOR_SKILL_EXTRA_ROOTS", str(own_base))
+        expected = str(own_base / "foo")
+    _own_skill_in(own_base, "foo", "foo", "eco")
+    receiver = home / ".local-operator"
+    (receiver / "skills").mkdir(parents=True)
+    honest = _write_skill(tmp_path / "s", "foo", body="peer")
+
+    held = skillsync.skill_state(receiver)["skills"]["foo"]
+    assert held["origin"] == "" and held["where"] == expected, held
+    answer = skillsync.apply_skill(receiver, _payload_from(honest, "foo"), origin_device="dev-a")
+    assert answer["outcome"] == "conflicts", answer
+    assert expected in answer["reason"], answer
+    assert not (receiver / "skills" / "foo").exists()
+    found, _warnings = discover_skills(default_skill_roots(home), config_dir=receiver)
+    resolved = {skill.name: skill for skill in found}["foo"]
+    assert resolved.description == "receiver OWN eco", resolved.file_path
+
+
+@pytest.mark.parametrize(
+    ("own_folder", "mirror_wins"),
+    [
+        ("my-foo", True),  # same depth, sorts after "foo": the stale mirror resolves
+        ("a-foo", False),  # sorts before "foo": the own copy resolves, mirror unused
+    ],
+)
+def test_a_stale_mirror_beside_a_later_own_skill_is_reported_honestly(
+    tmp_path: Path, own_folder: str, mirror_wins: bool
+) -> None:
+    """QA round 3, Q-8: never "kept as its own" while the peer's old copy wins."""
+    receiver = tmp_path / "r"
+    sender = tmp_path / "s"
+    first = _write_skill(sender, "foo", body="peer v1")
+    answer = skillsync.apply_skill(receiver, _payload_from(first, "foo"), origin_device="dev-a")
+    assert answer["outcome"] == "installed", answer
+    _own_skill_at(receiver, own_folder, "foo", "later")
+
+    held = skillsync.skill_state(receiver)["skills"]["foo"]
+    assert held["where"] == f"skills/{own_folder}", held
+    assert held["mirror"] is True and held["mirror_wins"] is mirror_wins, held
+
+    second = _write_skill(sender, "foo", body="peer v2")
+    for payload in (_payload_from(first, "foo"), _payload_from(second, "foo")):
+        answer = skillsync.apply_skill(receiver, payload, origin_device="dev-a")
+        assert answer["outcome"] == "conflicts", answer
+        if mirror_wins:
+            assert "still wins there; delete that copy" in answer["reason"], answer
+            assert "so it was kept" not in answer["reason"], answer
+        else:
+            assert "is unused there and can be deleted" in answer["reason"], answer
+    # Not refreshed, not deleted: the operator is told which copy to remove.
+    assert "peer v1" in (receiver / "skills" / "foo" / "SKILL.md").read_text(encoding="utf-8")
+    found, _warnings = discover_skills([receiver / "skills"], config_dir=receiver)
+    winner = {skill.name: skill for skill in found}["foo"].description
+    assert (winner == "foo for tests") is mirror_wins, winner
+
+    # `ready` agrees with the apply answer instead of saying "kept as its own".
+    member = type("M", (), {"device_id": "d_b"})()
+    row = readiness.skills_row(
+        member,
+        {"skills": readiness.skills_fact(receiver)},
+        peer_label="device-b",
+        local=skillsync.authored_skills(sender),
+        own_device_id="dev-a",
+    )
+    if mirror_wins:
+        assert row["observed"]["shadowed"] == ["foo"] and not row["observed"]["kept"], row
+        assert "earlier synced copy still wins" in row["detail"], row
+    else:
+        assert row["observed"]["kept"] == ["foo"], row
+
+
+def test_a_push_over_the_mesh_names_a_stale_mirror_that_still_wins(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Q-8 over two real relays: the sender's text names the clash and its remedy."""
+    server_a, server_b = _linked(request, monkeypatch)
+    _write_skill(server_a.root, "foo", body="head v1")
+    rc, payload = _run_json(capsys, "push", "--peer", server_b.identity.name)
+    assert rc == 0 and payload["peers"][0]["installed"] == [{"name": "foo"}], payload
+    _own_skill_at(server_b.root, "my-foo", "foo", "later")
+    _write_skill(server_a.root, "foo", body="head v2")
+    rc, payload = _run_json(capsys, "push", "--peer", server_b.identity.name)
+    assert rc == 0, payload
+    row = payload["peers"][0]
+    assert [kept["name"] for kept in row["kept"]] == ["foo"], row
+    reason = row["kept"][0]["reason"]
+    assert "(in skills/my-foo), but an earlier synced copy at skills/foo still wins" in reason
+    assert "head v1" in (server_b.root / "skills" / "foo" / "SKILL.md").read_text(encoding="utf-8")
+    server_b.stop()
 
 
 def test_a_push_over_the_mesh_reports_an_own_skill_in_another_folder_as_kept(

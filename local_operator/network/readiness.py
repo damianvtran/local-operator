@@ -1741,6 +1741,7 @@ def skills_row(
         )
     current: list[str] = []
     kept: list[str] = []
+    shadowed: list[str] = []
     missing: list[str] = []
     untravelled: list[str] = []
     for skill in local:
@@ -1752,16 +1753,26 @@ def skills_row(
         held = held if isinstance(held, Mapping) else None
         if held is not None and str(held.get("tree_hash") or "") == getattr(skill, "tree_hash", ""):
             current.append(name)
+        elif held is not None and held.get("mirror_wins"):
+            # The peer owns this name elsewhere, yet this device's EARLIER copy
+            # still sits in its skills/<name> and wins there; "kept as its own"
+            # would be false (QA round 3, Q-8). Counted as kept for the sums.
+            shadowed.append(name)
         elif held is not None and (
             not held.get("origin") or held.get("origin") != own_device_id or held.get("edited")
         ):
             kept.append(name)
         else:
             missing.append(name)
-    sendable = len(current) + len(kept) + len(missing)
+    sendable = len(current) + len(kept) + len(shadowed) + len(missing)
     parts = [f"{peer_label} holds {len(current)} of this device's {sendable} sendable skills"]
     if kept:
         parts.append(f"kept as its own: {_name_list(kept)}")
+    if shadowed:
+        parts.append(
+            f"has its own {_name_list(shadowed)}, but an earlier synced copy still wins "
+            f"there; delete skills/<name> on {peer_label} to use its own"
+        )
     if missing:
         parts.append(f"not synced yet: {_name_list(missing)}")
     if untravelled:
@@ -1785,6 +1796,7 @@ def skills_row(
         observed={
             "current": current,
             "kept": kept,
+            "shadowed": shadowed,
             "missing": missing,
             "untravelled": [
                 str(getattr(s, "name", "")) for s in local if getattr(s, "status", "") != "ready"

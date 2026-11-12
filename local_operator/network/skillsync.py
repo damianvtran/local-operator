@@ -236,56 +236,196 @@ def _skill_dirs(root: Path, *, with_links: bool = False) -> list[tuple[str, Path
     return found
 
 
-def _frontmatter_name(skill_md: Path) -> str:
-    """The ``name`` a SKILL.md declares, or ``""`` when it cannot be read."""
+def _frontmatter(skill_md: Path) -> Mapping[str, object]:
+    """A SKILL.md's frontmatter, or ``{}`` when it cannot be read (bounded read)."""
     from local_operator.hub_sync.skill_bundle import MAX_SKILL_MD_BYTES
     from local_operator.skills.discovery import parse_frontmatter
 
     try:
         with open(skill_md, "rb") as stream:
             text = stream.read(MAX_SKILL_MD_BYTES).decode("utf-8", errors="replace")
-        return str(parse_frontmatter(text).get("name") or "").strip()
+        return parse_frontmatter(text)
     except Exception:  # noqa: BLE001 — a label lookup; the folder name stands in
-        return ""
+        return {}
 
 
-def _declared_elsewhere(root: Path, name: str) -> Path | None:
-    """The first skill under ``skills/`` declaring ``name`` outside ``skills/<name>``.
+def _registered_name(skill_dir: Path) -> str:
+    """The name discovery registers ``skill_dir`` under (frontmatter, else folder).
 
-    WHY: discovery registers a skill by its frontmatter ``name`` anywhere in its
-    bounded walk, shallower first then sorted (``discovery._walk_skill_dirs``),
-    while the receiver installs by folder. A device's own ``skills/tools/foo``
-    (grouped) or ``skills/my-foo`` (folder != name) declaring ``foo`` is
-    invisible to a folder-keyed check, so an incoming ``foo`` landed beside it
-    and either shadowed it or was itself shadowed, with the conflict policy never
-    asked (review round 2, R2-1; QA round 2, Q-6). Such a skill is always the
-    node's OWN: a mirror is installed only at ``skills/<its name>`` with a
-    matching frontmatter (``expected_name``), and an edit that renamed one is the
-    node's work. Uses discovery's own walk and depth so the set checked is the
-    set that resolves.
+    Delegates the rule to discovery's own helper so the sync and the resolver
+    cannot drift (review round 3, M1: a ``name``-less own skill registers under
+    its folder name, and a frontmatter-only check never saw it).
     """
-    from local_operator.skills.discovery import _walk_skill_dirs, skill_max_depth
+    from local_operator.skills.discovery import skill_name_from_meta
 
-    base = skills_root(root)
-    dest = os.path.normpath(base / name)
-    try:
-        walked = [found[0] for found in _walk_skill_dirs(base, skill_max_depth())]
-    except Exception:  # noqa: BLE001 — the walk never raises; belt and braces
-        return None
-    for skill_dir in walked:
-        if os.path.normpath(skill_dir) == dest:
+    return skill_name_from_meta(_frontmatter(skill_dir / "SKILL.md"), skill_dir)
+
+
+# ---------------------------------------------------------------------------
+# Discovery as the oracle: which of the receiver's skills a name resolves to
+# ---------------------------------------------------------------------------
+#
+# THE INVARIANT: a peer copy must never shadow, or be shadowed by, a skill the
+# receiver owns. Rounds 2 and 3 found the class one layout at a time (grouped,
+# folder != name, ``name``-less, ecosystem roots, a stale mirror beside a later
+# own skill), each because the sync asked its own question instead of the one
+# discovery answers. So the sync now replays discovery's walk over the roots the
+# receiver's sessions read, in the same order, with the same name rule:
+#
+# * ``<config>/skills`` (where mirrors land), then ``ecosystem_skill_roots()``
+#   (``~/.omp/agent``, ``~/.claude``, ``~/.codex``, ``~/.agents`` or the
+#   ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS`` override), deduped by realpath exactly
+#   as ``default_skill_roots`` does.
+# * NOT the cwd walk-up project roots: they outrank ``~/.local-operator/skills``
+#   so the receiver's project skill wins anyway, and the relay cannot know a
+#   session's cwd (review round 3, out of scope).
+# * NOT the packaged builtins: release content is meant to be shadowed by user
+#   content, on the sender as on the receiver.
+#
+# A declaration counts whether or not discovery would LOAD it (``enabled:
+# false``, blank description): the conservative direction, deferred as round-3
+# m1. Which one RESOLVES is decided by the first loadable one, as discovery does.
+
+
+@dataclass(frozen=True)
+class _Holder:
+    """One skill directory that registers a given name on this device."""
+
+    path: Path
+    #: Discovery would load it (``_skill_from_file`` accepts it).
+    live: bool
+
+
+def _oracle_roots(root: Path) -> list[Path]:
+    from local_operator.skills.api import ecosystem_skill_roots
+
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in [skills_root(root), *ecosystem_skill_roots()]:
+        key = os.path.realpath(candidate)
+        if key in seen:
+            continue  # ``default_skill_roots``: first occurrence wins
+        seen.add(key)
+        roots.append(candidate)
+    return roots
+
+
+def _holders(root: Path) -> dict[str, list[_Holder]]:
+    """Every name the receiver's discovery roots register, holders in walk order."""
+    from local_operator.skills.discovery import (
+        _skill_from_file,
+        _walk_skill_dirs,
+        skill_max_depth,
+    )
+
+    found: dict[str, list[_Holder]] = {}
+    seen: set[str] = set()
+    for base in _oracle_roots(root):
+        try:
+            walked = [Path(entry[0]) for entry in _walk_skill_dirs(base, skill_max_depth())]
+        except Exception:  # noqa: BLE001 — the walk never raises; belt and braces
             continue
-        if _frontmatter_name(Path(skill_dir) / "SKILL.md") == name:
-            return Path(skill_dir)
-    return None
+        for skill_dir in walked:
+            skill_md = skill_dir / "SKILL.md"
+            real = os.path.realpath(skill_md)
+            if real in seen:
+                continue  # one physical skill linked into two roots is one skill
+            seen.add(real)
+            live = _skill_from_file(skill_md, skill_dir, str(base)) is not None
+            found.setdefault(_registered_name(skill_dir), []).append(_Holder(skill_dir, live))
+    return found
 
 
-def _own_elsewhere_reason(root: Path, path: Path) -> str:
+@dataclass(frozen=True)
+class _Ownership:
+    """What the receiver's discovery says about ``name`` beyond ``skills/<name>``."""
+
+    #: The receiver's own skill registering ``name`` outside the mirror slot.
+    own: Path
+    #: The mirror slot ``skills/<name>`` holds an untouched peer copy (Q-8).
+    mirror: bool
+    #: ...and that copy is what discovery resolves, shadowing ``own``.
+    mirror_wins: bool
+
+
+def _ownership(
+    root: Path,
+    name: str,
+    holders: Mapping[str, list[_Holder]] | None = None,
+    *,
+    index: Mapping[str, Any] | None = None,
+) -> _Ownership | None:
+    """The receiver's own ``name`` outside ``skills/<name>``, or ``None``.
+
+    Anything that registers ``name`` and is not the mirror slot itself is the
+    node's own: a mirror is installed only at ``skills/<its name>`` with a
+    matching frontmatter (``expected_name``), and an edit that renamed one is
+    the node's work.
+    """
+    rows = (holders if holders is not None else _holders(root)).get(name) or []
+    slot = skills_root(root) / name
+    slot_real = os.path.realpath(slot / "SKILL.md")
+    own = [holder for holder in rows if os.path.realpath(holder.path / "SKILL.md") != slot_real]
+    if not own:
+        return None
+    # The own copy that matters is the one discovery would load, else the first.
+    chosen = next((holder for holder in own if holder.live), own[0]).path
+    recorded = _recorded(index if index is not None else definitions.read_index(root), name)
+    current = _current_tree(slot)
+    mirror = (
+        recorded is not None
+        and current is not None
+        and current == str(recorded.get("landed") or "")
+    )
+    winner = next((holder for holder in rows if holder.live), None)
+    mirror_wins = bool(
+        mirror and winner is not None and os.path.realpath(winner.path / "SKILL.md") == slot_real
+    )
+    return _Ownership(own=chosen, mirror=mirror, mirror_wins=mirror_wins)
+
+
+def _where(root: Path, path: Path) -> str:
+    """``skills/<rel>`` inside the config root, else the path with ``~`` for home."""
     try:
-        where = path.relative_to(skills_root(root)).as_posix()
+        return "skills/" + path.relative_to(skills_root(root)).as_posix()
     except ValueError:
-        where = str(path)
-    return f"this device has its own skill by that name (in skills/{where}), so it was kept"
+        pass
+    home = str(Path.home())
+    text = str(path)
+    if text == home or text.startswith(home + os.sep):
+        return "~" + text[len(home) :]
+    return text
+
+
+def _kept_reason(
+    name: str, where: str, *, mirror: bool, mirror_wins: bool, label: str = "this device"
+) -> str:
+    """One sentence for a skill kept as the node's own, honest about a stale mirror.
+
+    Shared by the receiver's ``apply`` answer and the sender's push text (built
+    from ``skill_state``), so both say the same thing. Never "kept as its own"
+    while the peer's earlier copy is what resolves (QA round 3, Q-8): the sync
+    stops refreshing that copy, since the node's own skill now owns the name,
+    but does not delete it. Deleting a file a running session may be reading is
+    not clearly reversible, so the operator is told which file to remove.
+    """
+    if mirror_wins:
+        return (
+            f"{label} has its own '{name}' (in {where}), but an earlier synced copy at "
+            f"skills/{name} still wins there; delete that copy to use its own"
+        )
+    if mirror:
+        return (
+            f"{label} has its own skill by that name (in {where}), so it was kept; an "
+            f"earlier synced copy at skills/{name} is unused there and can be deleted"
+        )
+    return f"{label} has its own skill by that name (in {where}), so it was kept"
+
+
+def _ownership_reason(root: Path, name: str, owned: _Ownership) -> str:
+    return _kept_reason(
+        name, _where(root, owned.own), mirror=owned.mirror, mirror_wins=owned.mirror_wins
+    )
 
 
 def _grouped_rows(group: str, path: Path, taken: frozenset[str] = frozenset()) -> list[LocalSkill]:
@@ -306,7 +446,7 @@ def _grouped_rows(group: str, path: Path, taken: frozenset[str] = frozenset()) -
     except Exception:  # noqa: BLE001 — unreadable group: fall back to naming the folder
         nested = []
     for skill_dir in sorted(nested):
-        name = _frontmatter_name(skill_dir / "SKILL.md") or skill_dir.name
+        name = _registered_name(skill_dir)
         if name in taken:
             # "Move it to skills/<name>" would point at a folder that is already
             # taken by the top-level skill that wins here (review round 2, R2-3).
@@ -489,26 +629,25 @@ def skill_state(root: Path) -> dict[str, Any]:
             "origin": origin,
             "edited": bool(recorded is not None and current != str(recorded.get("landed") or "")),
         }
-    # THE SAME KEY DISCOVERY USES: a skill this device declares from another
-    # folder (grouped, or folder != name) is reported under its declared name as
-    # the node's own, so the sender says "kept" exactly when ``apply`` would
-    # (review round 2, R2-1 / QA Q-6). It overrides a ``skills/<name>`` row: the
-    # apply refuses that name for the same reason.
-    from local_operator.skills.discovery import _walk_skill_dirs, skill_max_depth
-
-    base = skills_root(root)
-    for skill_dir, _stat in _walk_skill_dirs(base, skill_max_depth()):
-        path = Path(skill_dir)
-        declared = _frontmatter_name(path / "SKILL.md")
-        if not declared or os.path.normpath(path) == os.path.normpath(base / declared):
+    # DISCOVERY IS THE ORACLE (see "Discovery as the oracle" above): a name the
+    # node registers anywhere outside ``skills/<name>`` (grouped, folder !=
+    # name, ``name``-less, an ecosystem root) is reported as the node's own, so
+    # the sender says "kept" exactly when ``apply`` would (review rounds 2-3,
+    # R2-1 / M1 / M2; QA Q-6). It overrides a ``skills/<name>`` row, because the
+    # apply refuses that name for the same reason; ``mirror``/``mirror_wins``
+    # carry a stale peer copy still in the slot, so the text stays honest (Q-8).
+    holders = _holders(root)
+    for name in holders:
+        owned = _ownership(root, name, holders, index=index)
+        if owned is None:
             continue
-        if declared in rows and rows[declared].get("folder"):
-            continue  # walk order: the first declaration is the one that resolves
-        rows[declared] = {
-            "tree_hash": _tree_hash(path),
+        rows[name] = {
+            "tree_hash": _tree_hash(owned.own),
             "origin": "",
             "edited": False,
-            "folder": path.relative_to(base).as_posix(),
+            "where": _where(root, owned.own),
+            "mirror": owned.mirror,
+            "mirror_wins": owned.mirror_wins,
         }
     return {"kind": BUNDLE_KIND, "version": BUNDLE_VERSION, "skills": rows}
 
@@ -601,9 +740,11 @@ def _apply_locked(root: Path, name: str, ref: Any, data: bytes, origin: str) -> 
     index = definitions.read_index(root)
     recorded = _recorded(index, name)
     bucket, reason = _decide(recorded, _current_tree(dest), ref.tree_hash, origin)
-    elsewhere = None if bucket else _declared_elsewhere(root, name)
-    if elsewhere is not None:
-        bucket, reason = "conflicts", _own_elsewhere_reason(root, elsewhere)
+    # "unchanged" is re-checked too: an identical stale mirror beside a later own
+    # skill is still a clash the operator must hear about (Q-8).
+    owned = _ownership(root, name, index=index) if bucket in ("", "unchanged") else None
+    if owned is not None:
+        bucket, reason = "conflicts", _ownership_reason(root, name, owned)
     if bucket:
         return {"outcome": bucket, "name": name, **({"reason": reason} if reason else {})}
     stage = _stage_root(root) / uuid.uuid4().hex
@@ -637,9 +778,9 @@ def _apply_locked(root: Path, name: str, ref: Any, data: bytes, origin: str) -> 
             bucket, reason = _decide(recorded, current, ref.tree_hash, origin)
             # Re-checked under the lock for the same reason as ``_decide``: an
             # editor may have created the other declaration meanwhile (R2-1).
-            elsewhere = None if bucket else _declared_elsewhere(root, name)
-            if elsewhere is not None:
-                bucket, reason = "conflicts", _own_elsewhere_reason(root, elsewhere)
+            owned = _ownership(root, name, index=index) if bucket in ("", "unchanged") else None
+            if owned is not None:
+                bucket, reason = "conflicts", _ownership_reason(root, name, owned)
             if bucket:
                 return {"outcome": bucket, "name": name, **({"reason": reason} if reason else {})}
             skills_root(root).mkdir(parents=True, exist_ok=True)
@@ -838,10 +979,16 @@ def _push_locked(server: "RelayServer", device_id: str) -> dict[str, Any]:
             # under its lock anyway; this is economy, not authority.
             held_origin = str(held.get("origin") or "")
             if not held_origin:
-                folder = str(held.get("folder") or "")
+                where = str(held.get("where") or "")
                 reason = (
-                    f"{label} has its own skill by that name (in skills/{folder}), so it was kept"
-                    if folder
+                    _kept_reason(
+                        skill.name,
+                        where,
+                        mirror=bool(held.get("mirror")),
+                        mirror_wins=bool(held.get("mirror_wins")),
+                        label=label,
+                    )
+                    if where
                     else f"{label} has its own skill by that name, so it was kept"
                 )
             elif held_origin != own_id:
