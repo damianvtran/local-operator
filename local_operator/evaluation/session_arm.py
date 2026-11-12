@@ -4216,6 +4216,21 @@ async def run_session_episode(
         # session cannot score), so the wedge stays the reported diagnostic --
         # the root cause, not its sequel. Everywhere else a score failure is
         # the outcome's reason, exactly as before.
+        #
+        # WHY THERE IS NO "RESCUE, THEN SCORE" ATTEMPT. The poison message says
+        # "rescue is required", but rescue (``_attempt_rescue``) is the
+        # descriptor-driven RELEASE of the episode's resources, not a way back
+        # into the episode: poisoning already terminated the adapter worker
+        # (``VerifiedAdapterSession._poison_after_ambiguous_mutation`` ->
+        # ``supervisor.terminate()``), and the environment handle the scorer
+        # needs -- the task's evaluator and its setup state -- lived only in
+        # that worker's memory. The adapter protocol has no "attach to a live
+        # target without resetting it" method, so a fresh worker could only
+        # ``reset_start``, which destroys the very state that would be scored.
+        # The way to keep a reached state scorable is therefore to not poison a
+        # live target in the first place (the run_command lost-reply probe
+        # window, sealed run ``t32v-t054-20261112-050615``); a target that is
+        # genuinely gone has nothing left to score.
         diagnostic = bridge.end_diagnostic or stop_diagnostic
         if score_error is not None:
             if terminal_reason != BRIDGE_WEDGED_TERMINAL:
@@ -4721,9 +4736,12 @@ def _make_run_command(
             ),
             # Leave the target time to stop the child and serialize its result,
             # AND to answer a lost reply. The OSWorld adapter bounds its own
-            # wait at ``timeout_s + 10`` wall-clock and then takes one liveness
-            # probe (worst case ~4 s) before deciding between an unknown-outcome
-            # answer and the poisoning error; at ``+ 15`` that answer would
+            # wait at ``timeout_s + 10`` wall-clock and then probes liveness
+            # before deciding between an unknown-outcome answer and the
+            # poisoning error. A reply lost EARLY (a dropped connection) may
+            # probe until that same ``+ 10`` instant, and one lost AT it gets a
+            # single probe window, so either way the call ends within
+            # ``+ 10`` plus one probe (worst case ~4 s); at ``+ 15`` that answer would
             # land within ~1 s of this deadline, and a deadline that fires first
             # tears the RPC channel down -- losing the episode the probe exists
             # to keep. ``+ 20`` leaves ~6 s of scheduling margin.
