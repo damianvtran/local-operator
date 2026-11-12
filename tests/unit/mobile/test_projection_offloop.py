@@ -203,7 +203,14 @@ def test_wire_bytes_are_unchanged_for_the_same_projection() -> None:
 #: Verified the same way: dropping those three keys from the new frame
 #: reproduces ``4ae1f9c3...`` byte for byte, so the frame is otherwise
 #: unchanged and the re-pin is cost-only, not a format change.
-_EXPECTED_DEGRADED_FRAME_DIGEST = "cd56998ba77c103af1772132b21307fa461d19c22ef3ec224a15bc76a2c28e10"
+#: Re-pinned again, for the Team Bridge gate flags on ``PendingRequest``
+#: (PR #3796, CoS egress slice 1): the pending card gained exactly two
+#: defaulted booleans — ``taint_raised`` and ``bridge_latched`` — both False on
+#: this ask fixture, +48 bytes. Verified the same way: dropping those two keys
+#: from the new frame reproduces ``cd56998b...`` byte for byte. Additive by
+#: design: an older client reads a missing key as "not latched", which the
+#: owner backs by re-checking every grant press itself.
+_EXPECTED_DEGRADED_FRAME_DIGEST = "8b7563a443620b5d0b0f9691977dcce25b10a0106032401224b823234425bcbd"
 
 
 # ---------------------------------------------------------------------------

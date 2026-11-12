@@ -1170,6 +1170,34 @@ class TuiSessionHandle(SessionHandle):
         self._refresh_state()
         return f"ran {line}"
 
+    def _bridge_ack_refusal(self, command: str, args: str, bridge_ack: bool) -> Any:
+        """The receipt for an unacknowledged routed loosening, or ``None``."""
+        from local_operator.slash_commands import primary_slash_name
+
+        if (
+            bridge_ack
+            or primary_slash_name(str(command).strip().lower().lstrip("/")) != "approvals"
+        ):
+            return None
+        if (args or "").strip().lower() not in ("auto", "off", "yolo"):
+            return None
+        try:
+            latched = bool(getattr(self._session(), "bridge_latched", False))
+        except Exception:  # noqa: BLE001 - §3.6: an error deriving taint means tainted
+            logger.warning("bridge latch read failed; treating as latched", exc_info=True)
+            latched = True
+        if not latched:
+            return None
+        from local_operator.harness.bridge_egress import ack_refused_notice
+        from local_operator.session.frontend_state import SlashResult
+
+        return SlashResult(
+            kind="notice",
+            text=ack_refused_notice(self._session()),
+            style="warning",
+            data={"ok": False, "approval_reason": "bridge_latched"},
+        ).model_dump(mode="json")
+
     async def run_slash_authoritative(
         self,
         command: str,
@@ -1186,8 +1214,16 @@ class TuiSessionHandle(SessionHandle):
         consumers: Iterable[str] | None = None,
         may_loosen: bool | None = None,
         capabilities: frozenset[str] | None = None,
+        bridge_ack: bool = False,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
+
+        ``bridge_ack`` (team-bridge-egress.md: "bridge_ack"): a routed loosening ``approvals auto``
+        for
+        a Team-Bridge-latched conversation is refused here unless the frame
+        carried the capability marker -- the TUI-hosted twin of the runtime's
+        rule, so an older desktop build's card escape cannot re-loosen a
+        latched conversation whichever process owns its gate.
 
         The host-side backend for a follower's ``route_shared_slash``. Unlike
         ``slash_images`` — which runs the command's UI in the HOST's terminal
@@ -1230,6 +1266,9 @@ class TuiSessionHandle(SessionHandle):
         that knows what this connection resolved. ``None`` = "not said", which
         the gate reads as withheld.
         """
+        refusal = self._bridge_ack_refusal(command, args, bridge_ack)
+        if refusal is not None:
+            return refusal
         owner_loop = await self._on_app(asyncio.get_running_loop)
         done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
 
@@ -1559,12 +1598,24 @@ class TuiSessionHandle(SessionHandle):
         """
         request_id = secrets.token_hex(8)
         setattr(card, "_mobile_request_id", request_id)
+        # The Team Bridge flags and notice, exactly as a runtime-owned gate
+        # projects them (``serving.py`` push_pending; review S-62). The TUI
+        # paints its notice as a widget row, not in the description, so the
+        # follower detail gains the prefix here.
+        latched = getattr(card, "bridge_latched", False) is True
+        description = str(getattr(card, "description", "") or "")
+        if latched:
+            from local_operator.harness.bridge_egress import bridge_card_notice
+
+            description = f"{bridge_card_notice(self._session())}\n{description}"
         self._publish_pending_gate(
             PendingRequest(
                 request_id=request_id,
                 kind="approval",
                 title=str(getattr(card, "tool_name", "") or "tool approval"),
-                detail=str(getattr(card, "description", "") or ""),
+                detail=description,
+                taint_raised=getattr(card, "taint_raised", False) is True,
+                bridge_latched=latched,
             )
         )
 

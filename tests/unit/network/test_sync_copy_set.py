@@ -288,6 +288,14 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/harness/bridge_egress.py": (
+        1,
+        "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, "
+        "matched against a journal row's ``tool_name`` to find a taint source -- not a "
+        "file or directory name. The taint it detects is re-derived from the session's "
+        "own journal (which already travels), so nothing under this name is a session "
+        "entry to copy or exclude.",
+    ),
     "local_operator/vault_agent/eligibility.py": (
         2,
         "``ELIGIBILITY_NAME`` ('eligibility.json') and ``GRANT_NAME`` "
@@ -536,6 +544,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
         "beside the session directories, never an entry of a session",
+    ),
+    "local_operator/server/loop_watchdog.py": (
+        1,
+        "``DUMP_SIGNAL_NAME`` ('SIGUSR2'): the ``signal`` attribute name serve's "
+        "watchdog registers faulthandler on, not a pathname or a session entry",
     ),
     "local_operator/server/utils/local_tokens.py": (
         1,

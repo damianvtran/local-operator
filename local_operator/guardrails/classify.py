@@ -952,13 +952,41 @@ def link_entry(target: Target) -> str | None:
 
 def _link_spellings(path: str, link: str) -> set[str]:
     """``_spellings`` without following the link itself: the lexical path and
-    the canonical link path (parent resolved), each re-cased from disk."""
+    the canonical link path (parent resolved), each re-cased from disk.
+
+    Only the PARENT goes through ``_on_disk_case``: handed the link entry
+    itself, it opens the path (``F_GETPATH``) or tests ``isdir``, and both
+    follow the link, so the pointee's path leaked in as a "spelling" of the
+    link. ``rm LINK`` never touches the pointee, and a pointee in another
+    session's scratchpad made the refusal say "another session's files" on
+    some hash seeds and the link reason on others (#3793's flake). The leaf
+    is re-cased from the parent's listing, which never dereferences it.
+    """
     out = {_norm(path), link}
     for spelled in list(out):
-        cased = _on_disk_case(spelled)
-        if cased is not None:
-            out.add(cased)
+        parent, name = os.path.split(spelled)
+        cased_parent = _on_disk_case(parent) or parent
+        try:
+            names = os.listdir(cased_parent)
+        except OSError:
+            names = []
+        if name not in names:
+            name = next((n for n in names if n.casefold() == name.casefold()), name)
+        out.add(os.path.join(cased_parent, name))
     return out
+
+
+def _spelling_order(path: str, spellings: set[str]) -> list[str]:
+    """``spellings`` in a stable order: the caller's own (normalised) spelling
+    first, the resolved and re-cased forms after it, sorted.
+
+    ``_rank`` returns the first spelling's reason, so iterating the bare set
+    made the refusal text depend on ``PYTHONHASHSEED``; an agent reading a
+    refusal must get the same answer for the same command. The lexical
+    spelling leads because it names what the command actually addresses.
+    """
+    lexical = _norm(path)
+    return sorted(spellings, key=lambda s: (s != lexical, s))
 
 
 def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarget:
@@ -976,11 +1004,10 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
         notes.append("relative to a working directory that cannot be determined")
     if path is None:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes) or "unresolved target")
-    if spellings is None:
-        spellings = _spellings(path)
+    ordered = _spelling_order(path, spellings if spellings is not None else _spellings(path))
     # A link's OWN path that is protected (``~/.local-operator``, config.yml,
     # the install layout) is still CRITICAL here: those spellings are lexical.
-    for spelling in spellings:
+    for spelling in ordered:
         if target.glob_children and not target.glob_all and not target.opaque:
             # R2-5: ``rm *.log`` at $HOME removes matching CHILDREN; it is
             # CRITICAL only when the pattern itself can reach a protected name.
@@ -1081,29 +1108,40 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
             # ranking applies, but the state stays in whatever reason it gives.
             worktree_note = f"linked worktree state: {state}; {facts}"
             notes.append(worktree_note)
-    for spelling in spellings:
-        reason = _high_reason(spelling, target, prot, link=link is not None)
-        if reason is not None:
-            in_state = any(_under(spelling, st) for st in prot.state_roots)
-            if target.selected and not in_state and _is_work_tree(spelling):
-                # S2-3: a find with a selecting predicate (``-name '*.pyc'``)
-                # removes a SUBSET of a working tree — the R6 cleanup shape. It
-                # overrides ONLY the working-tree reasons: a repo root, even one
-                # at $HOME's top level (``~/<project>``). State-root children,
-                # other sessions and non-repo home dirs (``~/Documents``) stay
-                # HIGH, because their contents are the data a confused
-                # predicate would destroy.
-                return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
-            owned = _owned_by_session(target, path, prot, session_id)
-            if owned is not None:
-                reason, matches = owned
-                shown = ""
-                if target.pattern is not None:
-                    shown = ", ".join(matches[:4]) + (
-                        f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
-                    )
-                return RankedTarget(target, Risk.LOW, reason, shown)
-            return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
+    # Every spelling is ranked, not just the first with a reason: the verdict
+    # must not hinge on which spelling is looked at first. The most severe
+    # outcome wins (the selecting-find exemption applies only when EVERY
+    # spelling that has a reason qualifies for it); the reason text is the
+    # first in ``ordered``, i.e. the lexical spelling's when it has one.
+    reasons = [
+        (spelling, reason)
+        for spelling in ordered
+        if (reason := _high_reason(spelling, target, prot, link=link is not None)) is not None
+    ]
+    if reasons:
+        reason = reasons[0][1]
+        if target.selected and all(
+            not any(_under(spelling, st) for st in prot.state_roots) and _is_work_tree(spelling)
+            for spelling, _ in reasons
+        ):
+            # S2-3: a find with a selecting predicate (``-name '*.pyc'``)
+            # removes a SUBSET of a working tree — the R6 cleanup shape. It
+            # overrides ONLY the working-tree reasons: a repo root, even one
+            # at $HOME's top level (``~/<project>``). State-root children,
+            # other sessions and non-repo home dirs (``~/Documents``) stay
+            # HIGH, because their contents are the data a confused
+            # predicate would destroy.
+            return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
+        owned = _owned_by_session(target, path, prot, session_id)
+        if owned is not None:
+            reason, matches = owned
+            shown = ""
+            if target.pattern is not None:
+                shown = ", ".join(matches[:4]) + (
+                    f" … and {len(matches) - 4} more" if len(matches) > 4 else ""
+                )
+            return RankedTarget(target, Risk.LOW, reason, shown)
+        return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     if worktree_note:

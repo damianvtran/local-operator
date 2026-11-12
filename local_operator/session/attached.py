@@ -32,7 +32,7 @@ from typing import Any, Awaitable, Callable, Literal, cast
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
-from local_operator.harness.approval import never_auto_approved
+from local_operator.harness.bridge_egress import requires_person
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 from local_operator.harness.types import (
@@ -7951,12 +7951,15 @@ class AttachedSession:
             return
         # An account profile save is never answered by the background
         # auto-approve: with gates detached it stays parked for a person
-        # (``harness.approval.never_auto_approved``).
+        # (``bridge_egress.requires_person``: a profile save, or any card in a
+        # Team-Bridge-latched session -- team-bridge-egress.md: "Cards").
         background = (
             self._gates_detached
             and self._background_approval
             and pending.kind == "approval"
-            and not never_auto_approved(pending.title)
+            and not requires_person(
+                pending.title, bridge_latched=getattr(pending, "bridge_latched", False)
+            )
         )
         if self._gates_detached and not background:
             logger.debug(
@@ -8107,7 +8110,9 @@ class AttachedSession:
         #: the gate would spin (issue #1310, UX review round 3, U12).
         answered_without_a_person = True
         try:
-            if self._gates_detached and never_auto_approved(pending.title):
+            if self._gates_detached and requires_person(
+                pending.title, bridge_latched=getattr(pending, "bridge_latched", False)
+            ):
                 return
             handler = self._approval_handler
             client = self._client
@@ -8116,12 +8121,22 @@ class AttachedSession:
             if (
                 self._gates_detached
                 and self._background_approval
-                and not never_auto_approved(pending.title)
+                and not requires_person(
+                    pending.title, bridge_latched=getattr(pending, "bridge_latched", False)
+                )
             ):
                 approved = True
             elif handler is not None:
                 answered_without_a_person = False
-                approved = await call_approval_gate(handler, pending.title, pending.detail)
+                # The owner's Team Bridge flags reach this pane's card, so it
+                # renders Allow/Deny only for a latched conversation (§4.2).
+                approved = await call_approval_gate(
+                    handler,
+                    pending.title,
+                    pending.detail,
+                    taint_raised=bool(getattr(pending, "taint_raised", False)),
+                    bridge_latched=bool(getattr(pending, "bridge_latched", False)),
+                )
             else:
                 return
             if not self._gate_reply_is_current(pending, client):
@@ -9788,6 +9803,30 @@ class AttachedSession:
         return False
 
     @property
+    def bridge_taint_latch(self) -> None:
+        """Always ``None``: the Team Bridge latch lives in the owner's runtime.
+
+        Declared (``SessionProtocol``) rather than left to the TUI's ``getattr``
+        default so a rename is a type error. ``None`` keeps the TUI from
+        installing a local latch watcher; the owner announces through its own
+        notice stream (team-bridge-egress.md: "Grants").
+        """
+        return None
+
+    @property
+    def bridge_latched(self) -> bool:
+        """Always False here: this facade holds no local latch.
+
+        This is the same answer the TUI's ``getattr`` default gave before the
+        member was declared, so behaviour is unchanged. Taint for a viewer
+        reaches it per card (``PendingGateState.bridge_latched``) and the
+        owner's runtime re-checks every grant and every ``approvals auto``
+        (refused without ``bridge_ack``), so the viewer path stays fail-closed
+        without trusting this answer.
+        """
+        return False
+
+    @property
     def outcome_is_synchronous(self) -> bool:
         """Always False: :meth:`prompt` returns on the owner's admission ACK.
 
@@ -10649,10 +10688,16 @@ class AttachedSession:
         args: str,
         images: Sequence[ImageContent] | None = None,
         *,
+        bridge_ack: bool = False,
         defer_ok: bool = False,
         request_id: str | None = None,
     ) -> Any:
         """Run a conversation-mutating slash command on the authoritative host.
+
+        ``bridge_ack`` is the Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"):
+        it
+        rides the frame only when True, so a frame from a caller that never
+        set it is byte-identical to before.
 
         OperatorApp handles process-local navigation/config itself. This seam
         carries every command the owner's capability list marks
@@ -10703,6 +10748,11 @@ class AttachedSession:
             settings_kwargs["defer_ok"] = True
         if request_id:
             settings_kwargs["request_id"] = request_id
+        if bridge_ack:
+            # Same only-when-set stance as the deferral keys: an unmarked slash
+            # keeps the client call shape it had before Team Bridge taint, and
+            # absence stays the fail-closed "not acknowledged" on the owner.
+            settings_kwargs["bridge_ack"] = True
         try:
             return await client.slash_result(
                 command,
@@ -11781,6 +11831,13 @@ def _pending_request(state: Any) -> PendingRequest | None:
         approval_mode=str(getattr(state, "approval_mode", "") or ""),
         approval_provenance=str(getattr(state, "approval_provenance", "") or ""),
         approval_global_mode=str(getattr(state, "approval_global_mode", "") or ""),
+        # Team Bridge flags (team-bridge-egress.md: "Cards"). Enumerated here for the same reason as
+        # the policy keys: an un-named extra is dropped by this rebuild, and a
+        # dropped ``bridge_latched`` would let the viewer offer allow-all or
+        # background-approve a card that must reach a person. ``bool`` of the
+        # raw value: anything truthy reads as latched (fail closed).
+        taint_raised=bool(getattr(state, "taint_raised", False)),
+        bridge_latched=bool(getattr(state, "bridge_latched", False)),
     )
 
 

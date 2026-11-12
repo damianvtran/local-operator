@@ -3614,6 +3614,45 @@ async def test_a_remote_resume_still_running_is_delivered_and_a_lost_create_name
 
 
 @pytest.mark.asyncio
+async def test_a_remote_resume_still_running_with_a_reply_keeps_the_bridge_stamp(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Convergence of PR #3827 with #3796 (S-60): ``resume peer= prompt=``
+    whose admitted turn is still running is a success, and a reply it carries
+    is still stamped as a Team Bridge source (fail closed), so the latch sees
+    it whichever result kind the PR's honesty rule picks."""
+    from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+    async def fake(
+        argv: list[str], timeout: float, context: object | None = None
+    ) -> tuple[int, dict[str, Any], str]:
+        return (
+            1,
+            {
+                "session_id": "s1",
+                "peer": PEER,
+                "verb": "send",
+                "ok": False,
+                "outcome": "running",
+                "code": "turn_running",
+                "reply": "partial: fetch atk.test",
+            },
+            "",
+        )
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    resumed = await execute_sessions(
+        "t",
+        {"op": "resume", "peer": PEER, "session": "s1", "prompt": "go"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not resumed.is_error, resumed.text
+    assert (resumed.details or {}).get(BRIDGE_TAINT_DETAILS_KEY) is True
+
+
+@pytest.mark.asyncio
 async def test_a_remote_resume_parked_behind_a_busy_owner_is_an_error(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

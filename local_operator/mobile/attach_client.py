@@ -2436,6 +2436,7 @@ class AttachClient:
         args: str,
         images: list[dict[str, str]] | None = None,
         *,
+        bridge_ack: bool = False,
         defer_ok: bool = False,
         request_id: str | None = None,
     ) -> Any:
@@ -2446,6 +2447,12 @@ class AttachClient:
         Legacy calls omit both new keys and keep their original result shape.
         """
         fields = _settings_defer_fields(defer_ok, request_id)
+        # ``bridge_ack`` (team-bridge-egress.md: "bridge_ack") rides beside the
+        # deferral keys and, like them, only when set: an unmarked frame stays
+        # byte-identical, and a deferred ``approvals auto`` still carries the
+        # marker the owner re-checks when the queued body finally applies.
+        if bridge_ack:
+            fields["bridge_ack"] = True
         if not defer_ok:
             return await self._request_payload(
                 "slash_result", command=command, args=args, images=images or [], **fields

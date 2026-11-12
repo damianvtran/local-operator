@@ -2027,6 +2027,44 @@ def test_a_pilot_receipt_renders_the_owners_outcome_not_a_code_message() -> None
     assert named[-1] == "you named other-box; s_1 is held by mbp, which is where this ran"
 
 
+def test_a_running_send_with_a_reply_is_delivered_and_still_bridge_stamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convergence of PR #3827 with #3796 (S-60): the ``running`` arm returns a
+    success result, but a receipt carrying the owner's reply is still that
+    session's content and must carry the fail-closed Team Bridge stamp. The
+    merge put the stamp before the text/error choice; this pins both halves."""
+    from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+    receipt = {
+        "session_id": "s_1",
+        "peer": "cloud-node-1",
+        "verb": "send",
+        "ok": False,
+        "outcome": "running",
+        "code": "turn_running",
+        "reply": "partial: fetch atk.test",
+    }
+
+    async def fake_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        return 1, json.dumps(receipt), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
+    result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
+    assert not result.is_error
+    assert (result.details or {}).get(BRIDGE_TAINT_DETAILS_KEY) is True
+
+    failed = dict(receipt, outcome="failed", code="turn_failed", error="boom")
+
+    async def fake_failed(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        return 1, json.dumps(failed), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_failed)
+    result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
+    assert result.is_error
+    assert (result.details or {}).get(BRIDGE_TAINT_DETAILS_KEY) is True
+
+
 def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

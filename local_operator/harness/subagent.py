@@ -2103,6 +2103,45 @@ def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> 
     )
 
 
+def _snapshot_profile_lineage(parent_session: Any) -> tuple[bool, bool]:
+    """``(seam_inherited, untrusted)`` of the parent right now (host-only).
+
+    A parent that cannot say (an unknown host or test double) hands its child
+    no seam and a tainted lineage: unknown provenance fails closed.
+    """
+    lineage = getattr(parent_session, "profile_lineage", None)
+    if not callable(lineage):
+        return False, True
+    try:
+        snapshot = lineage()
+    except Exception:  # noqa: BLE001 — unknown provenance fails closed
+        return False, True
+    # Validate the shape at runtime instead of trusting the annotation: an
+    # unknown host may return anything, and anything else fails closed.
+    if not isinstance(snapshot, tuple) or len(snapshot) != 2:
+        return False, True
+    seam, untrusted = snapshot
+    return bool(seam), bool(untrusted)
+
+
+def _propagate_child_profile_taint(parent_session: Any, child: Any) -> None:
+    """Taint the parent's profile episode when its child ended tainted.
+
+    HOST metadata only (the child's own lineage), never a field of the child's
+    result text, so a model cannot claim a child was clean. A child whose
+    lineage cannot be read is treated as tainted; a parent without the hook
+    (a reduced host) has no autonomous profile writes to protect.
+    """
+    note = getattr(parent_session, "note_child_profile_taint", None)
+    if not callable(note):
+        return
+    if _snapshot_profile_lineage(child)[1]:
+        try:
+            note()
+        except Exception:  # noqa: BLE001 — must never fail the child's job
+            logger.warning("could not record the child's profile taint", exc_info=True)
+
+
 def _redact_child_result(parent_session: "Session", text: str) -> str:
     """``text`` through the session store's redactor (known values, then shapes).
 
@@ -2142,6 +2181,10 @@ def _make_runner(
     # accessors. ``_emit`` gives the parent's isolated handler fan-out.
     emit = parent_session._emit
     comms = getattr(parent_session, "subagent_comms", None)
+    # PROFILE TAINT IS SNAPSHOT AT DISPATCH, here, not when a queued child
+    # finally gets a slot: by then the parent's run may have ended and reset
+    # its flags, and a peer-tainted request would reach the child clean.
+    profile_lineage = _snapshot_profile_lineage(parent_session)
 
     async def runner(
         job_id: str, signal: Any, report_progress: Callable[[str], None]
@@ -2186,6 +2229,7 @@ def _make_runner(
                 profile=profile,
                 restricted=restricted,
                 target=target,
+                profile_lineage=profile_lineage,
             )
             try:
                 interval = float(os.environ.get("LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S", "30"))
@@ -2413,6 +2457,9 @@ def _make_runner(
                 bridge.cancel()
                 with contextlib.suppress(BaseException):
                     await bridge
+                # Upward, on every settle (completed, failed, cancelled): what
+                # the child read reaches the parent with its result.
+                _propagate_child_profile_taint(parent_session, child)
             if final["error"]:
                 # The child's loop reported a provider/turn error; the job
                 # must settle failed with it, not completed with the partial
@@ -3683,6 +3730,7 @@ async def _build_child_session(
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Transfer child resource ownership only after construction succeeds.
 
@@ -3704,6 +3752,7 @@ async def _build_child_session(
             restricted=restricted,
             target=target,
             cleanup=cleanup,
+            profile_lineage=profile_lineage,
         )
     except BaseException:
         await _settle_child_cleanup(asyncio.create_task(cleanup.aclose()))
@@ -3926,6 +3975,7 @@ async def _construct_child_session(
     restricted: bool,
     cleanup: contextlib.AsyncExitStack,
     target: LaunchTarget | None = None,
+    profile_lineage: tuple[bool, bool] | None = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
@@ -4011,6 +4061,11 @@ async def _construct_child_session(
     language_line = preferred_language_line()
     cwd = parent_session._cwd
     request_approval = parent_session._request_approval
+    # A child of a Team-Bridge-latched parent is latched for life: the task
+    # prompt the parent writes can carry the hostile text. Read through the
+    # fail-closed property; a parent without one is a host that does not track
+    # taint. A parent that latches LATER is handled by the link below.
+    inherited_bridge_taint = bool(getattr(parent_session, "bridge_latched", False))
     # Whether this child runs on a role allowlist. Decided HERE, before the
     # ToolContext closes over the resolver, because the MCP surface is built
     # from it: a restricted child gets the read half (inherit + discover) and
@@ -4112,6 +4167,7 @@ async def _construct_child_session(
         job_label=label,
         has_ui=parent_session._has_ui,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # The parent's variable store. DEFENSIVE PARITY, not a bug fix: no
         # current ``TOOL_BUILDERS`` entry reads ``context.variables`` at
         # construction time (the variables readers are all execute-time, and
@@ -4402,7 +4458,21 @@ async def _construct_child_session(
     agent_pin = getattr(slot, "saver", None)
     if agent_pin is None and profile is not None:
         agent_pin = profile.saver
+    # PROFILE AUTHORITY rides down only as the host's own seam plus the taint
+    # snapshot of the whole ancestor chain at THIS moment (operator ruling
+    # 2026-11: a clean local agent edits its own agents/teams; a lineage that
+    # read untrusted input proposes). A parent whose seam is a host callback,
+    # or no seam, hands its child none: unknown hosts fail closed.
+    # ``profile_lineage`` is the DISPATCH-time snapshot (``_make_runner``); a
+    # caller that did not take one gets a snapshot now.
+    inherits_seam, spawn_untrusted = (
+        profile_lineage
+        if profile_lineage is not None
+        else _snapshot_profile_lineage(parent_session)
+    )
     child = Session(
+        owner_prompt_consent=inherits_seam,
+        spawn_untrusted=spawn_untrusted,
         model=model_spec if model_spec is not None else parent_session.model,
         # A child's model was chosen HERE (tier or parent), never by the
         # ``hosting``/``model_name`` keys, so a later edit to those must not
@@ -4434,6 +4504,7 @@ async def _construct_child_session(
         # so the executor wraps every command the ``read``-tier schema admitted.
         shell_write_root=shell_write_root,
         request_approval=request_approval,
+        inherited_bridge_taint=inherited_bridge_taint,
         # Which job the child's approvals belong to, so a host can scope a
         # denial to the work that provoked it. Reaches the executor through
         # ``Session._build_tool_context``; the construction-time context above
@@ -4493,6 +4564,21 @@ async def _construct_child_session(
         ),
     )
     cleanup.push_async_callback(child.dispose)
+    # Link the two latches for the child's life (review R1, S-67): a parent
+    # that latches after this spawn can still write into the child (``hub``
+    # send/steer are read-tier), and whatever a latched child reports reaches
+    # the parent. Unlinked at dispose so a settled child is not kept alive by
+    # the parent's callback list. See ``bridge_egress.link_latches``.
+    _parent_latch = getattr(parent_session, "bridge_taint_latch", None)
+    _child_latch = getattr(child, "bridge_taint_latch", None)
+    if _parent_latch is not None and _child_latch is not None:
+        from local_operator.harness.bridge_egress import link_latches
+
+        _unlink_latches = link_latches(_parent_latch, _child_latch)
+        # Both stacks: the rollback stack for a launch that fails after this
+        # line, the child's own dispose hooks for its normal lifetime.
+        cleanup.callback(_unlink_latches)
+        child.add_dispose_hook(_unlink_latches)
     # The LIVE half of the same link: an event this child records for an opened or
     # acted-on code request is propagated to the parent's transcript as it happens, so
     # the operator's conversation shows the PR its subagent opened without waiting for

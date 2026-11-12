@@ -53,10 +53,11 @@ Design constraints:
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.cells import cell_len
 from rich.console import Group, RenderableType
@@ -72,6 +73,8 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import SPINE_INDENT, TranscriptBlock
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.harness.types import AskQuestion
@@ -980,7 +983,9 @@ ALLOW_ALL_KEY = "A"
 ALLOW_ALL_ANSWER = "a"
 
 
-def approval_question(tool_name: str, description: str) -> "AskQuestion":
+def approval_question(
+    tool_name: str, description: str, *, person_only: bool = False, notice: str = ""
+) -> "AskQuestion":
     """The approval gate as a question the anchored picker can put to the user.
 
     Reusing the ``ask`` picker rather than growing a second list widget is what
@@ -1012,13 +1017,29 @@ def approval_question(tool_name: str, description: str) -> "AskQuestion":
             detail = f"{words}{detail[len(marker):].strip()}"
             break
     question = f"Allow {strip_control_sequences(tool_name)}? {detail}".rstrip()
+    clean_notice = " ".join(strip_control_sequences(notice).split()) if notice else ""
+    if clean_notice and clean_notice in detail:
+        # A runtime-raised card already carries the line in its detail (so an
+        # older desktop shows it too); lift it out rather than print it twice.
+        detail = " ".join(detail.replace(clean_notice, "", 1).split())
+        question = f"Allow {strip_control_sequences(tool_name)}? {detail}".rstrip()
+    # The notice is NOT part of the question: the question row stays exactly
+    # what a clean card shows, so the target owns row 1 at every size (design
+    # D1: as a prefix, the notice alone filled the one row the question is
+    # granted, and the address never showed at 100x30 or 80x24). The card
+    # paints the notice in its own rows instead (``ApprovalPrompt``).
+    # ``person_only`` (host-computed: a profile save, or any card in a
+    # Team-Bridge-latched session -- team-bridge-egress.md: "Cards") drops the "Allow all" row. The
+    # formatting branch above keys on the profile save alone (S-59): a latched
+    # card keeps ordinary single-paragraph formatting.
+    two_choice = profile_save or person_only
     return AskQuestion(
         id="approval",
         question=question,
         options=[
             AskOption(label=label, description=consequence)
             for label, _key, consequence in (
-                APPROVAL_CHOICES[:2] if profile_save else APPROVAL_CHOICES
+                APPROVAL_CHOICES[:2] if two_choice else APPROVAL_CHOICES
             )
         ],
     )
@@ -1075,6 +1096,17 @@ class ApprovalSettingOutcome:
 #: and the callback it invokes cannot disagree.
 SETTING_KEYS: dict[str, str] = {"S": "session", "G": "global"}
 
+#: The keys a latched card withdraws (Allow all and the two set-auto
+#: destinations). Pressed from muscle memory they used to do nothing at all
+#: (UX round 1, U4); now they flash the card's own "why these are off" line.
+LATCHED_INERT_KEYS: frozenset[str] = frozenset({ALLOW_ALL_KEY, *SETTING_KEYS})
+
+#: How long that flash holds. A feedback pulse, not a policy threshold: long
+#: enough to read one line (~2 s at ordinary reading speed for ~25 words is
+#: the low end), short enough that the card is back to rest before the next
+#: deliberate keypress.
+LATCHED_FLASH_SECONDS = 2.5
+
 #: The mode words as a human reads them. ``auto`` in the command vocabulary is
 #: "Auto" in prose; the same capitalisation the band and the receipts use.
 _MODE_WORD = {"ask": "Ask", "auto": "Auto"}
@@ -1112,6 +1144,15 @@ class ApprovalPrompt(AskPickerScreen):
     #: card's hint says the different truth its own gate has (see
     #: ``AskPickerScreen.set_remote_device``).
     REMOTE_HINT_KIND = "approval"
+
+    #: Team Bridge gate flags (team-bridge-egress.md: "Cards"), stamped by the
+    #: host after construction and read back by ``mobile.tui_handle`` when it
+    #: publishes the card as a ``PendingRequest``. Declared at class level so
+    #: pyright sees the attributes and an unstamped card reads the safe
+    #: "not raised by taint" default; ``bridge_latched`` is also set True by
+    #: the latching path below, never back to False.
+    taint_raised: bool = False
+    bridge_latched: bool = False
 
     #: Escape must reach the APP, which stops the run, rather than answering
     #: this one question.
@@ -1189,14 +1230,37 @@ class ApprovalPrompt(AskPickerScreen):
         policy: ApprovalPolicy | None = None,
         on_set_session_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
         on_set_global_auto: Callable[[], ApprovalSettingOutcome | None] | None = None,
+        person_only: bool = False,
+        notice: str = "",
     ) -> None:
         from local_operator.harness.approval import never_auto_approved
 
+        #: Drives the profile-diff question LAYOUT only (``_question_lines``).
         self._profile_save = never_auto_approved(tool_name)
-        if self._profile_save:
+        #: Drives the answer and setting refusals and the chrome (S-59): a
+        #: profile save, or any card the host raised in a Team-Bridge-latched
+        #: session. ``A``, ``S`` and ``G`` are inert on such a card and only
+        #: Allow/Deny are offered: a fatigued one-press loosening on a reply
+        #: card is exactly how a pre-latch-style grant would come back
+        #: (team-bridge-egress.md: "Cards", S-50).
+        self._person_only = self._profile_save or bool(person_only)
+        if self._person_only:
             self._ANSWER_KEYS = frozenset({"y", "n"})
+        #: The Team Bridge notice and the "why no Allow all" line, painted in
+        #: the slot the approvals-policy chrome uses on a clean card (design
+        #: D1, D2, D5). Empty for every card that is not latched.
+        self._latched_notice = (
+            " ".join(strip_control_sequences(notice).split())
+            if notice and person_only and not self._profile_save
+            else ""
+        )
+        self._latched_take = 0
+        #: U4: whether the "options are off" line is flashing, and its timer.
+        self._options_flash = False
+        self._options_flash_timer: Any = None
+        self._latched_notice_rows = 0
         super().__init__(
-            [approval_question(tool_name, description)],
+            [approval_question(tool_name, description, person_only=person_only, notice=notice)],
             self._answered,
             allow_free_text=False,
             # A UNIQUE id per prompt, not the bare "approval-prompt".
@@ -1284,6 +1348,48 @@ class ApprovalPrompt(AskPickerScreen):
         self._invalidate_description_wraps()
         self._repaint()
 
+    def enter_latched(self, notice: str) -> None:
+        """Turn a card raised BEFORE the latch into the latched card, in place.
+
+        Why (QA Q-11): the ``S``/``G`` callbacks and the "Allow all" row are
+        bound when the card is BUILT. A card parked while the session was clean
+        kept them after a teammate's-agent message latched the session, and a
+        press then reached ``_set_approve_all`` while latched -- which stamps
+        ``granted_while_latched``, the marker reserved for a TYPED
+        ``/approvals auto``. The app's setters refuse at press time too; this is
+        the visible half, so the card stops offering what it will refuse.
+
+        In place rather than rebuilt: the parked future, its binding and the
+        reader's place on the card are the gate's single answer path
+        (``request_tool_approval``'s adoption rule), and a replacement card
+        would be a second one. A settled card is a receipt and is left alone,
+        as is a profile-save card (already two-choice, and never latched-styled).
+        """
+        if self._answer is not None or self._profile_save:
+            return
+        clean = " ".join(strip_control_sequences(notice).split()) if notice else ""
+        if self._person_only and self._latched_notice == clean:
+            return
+        self._person_only = True
+        self._ANSWER_KEYS = frozenset({"y", "n"})
+        self._on_set_session_auto = None
+        self._on_set_global_auto = None
+        self._latched_notice = clean
+        self._latched_take = 0
+        self._latched_rows_cache = None
+        self.bridge_latched = True
+        question = self._questions[0]
+        # Allow and Deny are the first two choices (``approval_question``), so
+        # the latched card's options are exactly the head of the clean card's.
+        self._questions[0] = question.model_copy(update={"options": list(question.options[:2])})
+        state = self._states[0]
+        if state.selected > 1:
+            # The cursor sat on the row that no longer exists; Deny is the
+            # nearest row and the safe one for a stray Enter.
+            state.selected = 1
+        self._invalidate_description_wraps()
+        self._repaint()
+
     def show_setting_outcome(self, scope: str, outcome: ApprovalSettingOutcome) -> None:
         """Acknowledge a setting gesture in the callout's reserved slot.
 
@@ -1327,7 +1433,7 @@ class ApprovalPrompt(AskPickerScreen):
         can write a file; a second press while the first is running would be
         two writes of one gesture.
         """
-        if self._profile_save or self._answer is not None or self._policy.saving:
+        if self._person_only or self._answer is not None or self._policy.saving:
             return
         callback = self._on_set_session_auto if scope == "session" else self._on_set_global_auto
         if callback is None:
@@ -1422,11 +1528,33 @@ class ApprovalPrompt(AskPickerScreen):
         which is the spec's constraint 6.
         """
         plan = super()._layout(reveal=reveal)
-        if self._profile_save:
+        if self._person_only:
             # No session-auto chrome or compact three-answer rail: this is a
             # two-choice, always-human permission, regardless of tool policy.
-            self._chrome_off = True
             self._shape = (False, False, False)
+            if self._latched_notice:
+                # The latched notice takes the policy chrome's rows, paid the
+                # same way (the spacers first, then body rows the two answers
+                # do not need), and never at the cost of an answer label.
+                rows = len(self._latched_rows(plan.width))
+                spacers = int(plan.space_above) + int(plan.space_below)
+                take = min(rows, max(0, plan.body_line_budget + spacers - self.row_count))
+                if take > 0:
+                    self._chrome_off = False
+                    self._latched_take = take
+                    budget = max(0, plan.body_line_budget + spacers - take)
+                    narrowed = replace(
+                        plan, space_above=False, space_below=False, body_line_budget=budget
+                    )
+                    if budget < self.row_count + sum((plan.description_rows or {}).values()):
+                        # The base plan granted description rows against the
+                        # budget BEFORE the notice took its share; keeping them
+                        # pushed Deny below the viewport. Both answer labels
+                        # outrank the consequence lines.
+                        narrowed = replace(narrowed, description_rows={}, show_descriptions=False)
+                    return narrowed
+            self._chrome_off = True
+            self._latched_take = 0
             return plan
         width = plan.width
         budget = getattr(self, "_last_body_budget", plan.body_line_budget + 3)
@@ -1659,10 +1787,92 @@ class ApprovalPrompt(AskPickerScreen):
             row.append(text, style=state if kind == "state" else handle)
         return row
 
+    def _latched_rows(self, width: int) -> list[Text]:
+        """The latched notice, word-wrapped to ``width``, then the options line.
+
+        The notice wears ``warning`` (the ink this card already gives a
+        hazard), the explanation ``muted`` (the policy line's ink, kept above
+        the 4.5:1 floor). Wrapped, not ellipsised: the notice is the one line
+        the reader must be able to finish. Cached per width, because the plan
+        is recomputed on every paint and hit-test.
+        """
+        cache = getattr(self, "_latched_rows_cache", None)
+        if cache is not None and cache[0] == width:
+            return cache[1]
+        from rich.console import Console
+
+        from local_operator.harness.bridge_egress import card_options_off_notice
+
+        console = Console(width=max(1, width), legacy_windows=False, color_system=None)
+        rows: list[Text] = []
+        for text, ink in (
+            (self._latched_notice, "warning"),
+            (" ".join(card_options_off_notice().split()), "muted"),
+        ):
+            ink_style = Style(color=theme_mod.semantic_color(ink))
+            for line in Text(text).wrap(console, max(1, width)):
+                # The ink is a SPAN, not the line's base style: the card is
+                # spliced with ``append_text`` and painted under the card's own
+                # base ink, which a base style on the row does not survive.
+                row = Text(line.plain.rstrip(), no_wrap=True, overflow="ellipsis")
+                row.stylize(ink_style)
+                rows.append(row)
+            if ink == "warning":
+                self._latched_notice_rows = len(rows)
+        self._latched_rows_cache = (width, rows)
+        return rows
+
+    def _flash_options_off(self) -> None:
+        """Flash the card's own "Allow all and auto are off" line (UX r1, U4).
+
+        Same row count as the resting card, so the flash never reflows the
+        frame: where every options row is on screen they are re-inked; where
+        the row budget cut them, the last visible row becomes the line on one
+        row, ellipsised. A press while flashing restarts the timer.
+        """
+        self._options_flash = True
+        timer = self._options_flash_timer
+        if timer is not None:
+            timer.stop()
+        try:
+            self._options_flash_timer = self.set_timer(
+                LATCHED_FLASH_SECONDS, self._end_options_flash
+            )
+        except Exception:  # noqa: BLE001 - feedback only; the card stays correct unflashed
+            logger.warning("could not time the latched-card flash", exc_info=True)
+            self._options_flash_timer = None
+        self._repaint()
+
+    def _end_options_flash(self) -> None:
+        self._options_flash = False
+        self._options_flash_timer = None
+        self._repaint()
+
+    def _flashed_latched_rows(self, rows: list[Text], width: int) -> list[Text]:
+        from local_operator.harness.bridge_egress import card_options_off_notice
+
+        ink = Style(color=theme_mod.semantic_color("warning"), bold=True)
+        if len(rows) >= len(self._latched_rows(width)):
+            head = rows[: self._latched_notice_rows]
+            tail = [Text(row.plain, no_wrap=True, overflow="ellipsis") for row in rows[len(head) :]]
+            for row in tail:
+                row.stylize(ink)
+            return head + tail
+        line = Text(" ".join(card_options_off_notice().split()), no_wrap=True, overflow="ellipsis")
+        line.truncate(max(1, width), overflow="ellipsis")
+        line.stylize(ink)
+        return [*rows[:-1], line]
+
     def _callout_rows(
         self, width: int, *, two_row: bool
     ) -> tuple[list[Text], list[tuple[int, int, int, str]]]:
         """The callout as painted rows plus their hit spans."""
+        if self._latched_notice:
+            # No hit spans: nothing on a latched card loosens the gate.
+            rows = self._latched_rows(width)[: self._latched_take]
+            if self._options_flash and rows:
+                rows = self._flashed_latched_rows(rows, width)
+            return rows, []
         state = self._state_text(width)
         if two_row:
             parts, spans = self._handles(width)
@@ -1717,7 +1927,7 @@ class ApprovalPrompt(AskPickerScreen):
         row moves and no budget changes.
         """
         text = super()._row_description(index)
-        if not self._profile_save and self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
+        if not self._person_only and self._policy.mode == "auto" and text == ALLOW_ASK_CONSEQUENCE:
             return ALLOW_AUTO_CONSEQUENCE
         return text
 
@@ -2038,7 +2248,7 @@ class ApprovalPrompt(AskPickerScreen):
         authorised. It is also where ``A`` becomes ``a``: see
         :data:`ALLOW_ALL_ANSWER`.
         """
-        if self._profile_save and key not in {"y", "n"}:
+        if self._person_only and key not in {"y", "n"}:
             return
         if key == ALLOW_ALL_KEY:
             self.resolve(True, answer=ALLOW_ALL_ANSWER)
@@ -2080,6 +2290,15 @@ class ApprovalPrompt(AskPickerScreen):
         """
         character = event.character
         if character is None:
+            return
+        if character in LATCHED_INERT_KEYS and self._latched_notice and self._answer is None:
+            # A withdrawn key on a latched card: consumed (it must not reach
+            # the composer) and answered with the card's own explanation, so a
+            # habitual press is never silent (UX r1, U4). Never a setting or
+            # an answer.
+            event.stop()
+            event.prevent_default()
+            self._flash_options_off()
             return
         # The two SETTING destinations are taken before the answer letters and
         # never through `_answer_with`: they change the rule for the NEXT
