@@ -615,8 +615,10 @@ def test_public_team_update_check_sends_no_netrc_credential(tmp_path, hub, monke
     hub.team()
     _netrc_control(hub)
     ctx = _ctx(tmp_path, hub.base)
+    # ``tenant_id=""`` is the public arm's documented convention (see
+    # ``record_team_pull``): the record names no organization, stored as None.
     record = prov.record_team_pull(
-        ctx.config_dir, _team(), TEAM_DOC, tenant_id=None, scope_known=True
+        ctx.config_dir, _team(), TEAM_DOC, tenant_id="", scope_known=True
     )
     assert record is not None and record.tenant_id is None
 
@@ -788,10 +790,9 @@ def test_public_skill_update_check_sends_no_netrc_credential(tmp_path, monkeypat
 
 def test_credential_free_download_and_skill_refuse_a_bearer_request():
     client = RadientClient(api_key=None, base_url="http://127.0.0.1:9/v1")
-    bearer = {"with_" + "credential": True}
     with pytest.raises(ValueError):
         client.download_agent_from_marketplace(
-            AGENT_HUB, Path("unused.zip"), credential_free=True, **bearer
+            AGENT_HUB, Path("unused.zip"), credential_free=True, with_credential=True
         )
     with pytest.raises(ValueError):
-        client.get_skill(AGENT_HUB, credential_free=True, **bearer)
+        client.get_skill(AGENT_HUB, credential_free=True, with_credential=True)
