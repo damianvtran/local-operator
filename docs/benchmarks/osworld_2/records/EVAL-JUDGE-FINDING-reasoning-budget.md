@@ -99,17 +99,91 @@ Readings:
 - **deepseek-chat** fits the caps by design, but on 8843 it missed `c1_1[1]` in 2 of 3
   calls (0.8824), so it is less accurate than deepseek-flash.
 
-## Wiring
+## Decision (2026-11-12)
 
-- An OpenRouter model (e.g. qwen3-vl-235b-a22b-instruct) needs only
-  `JUDGE_MODEL=<id>` on `launch_episode_21.sh`, which passes it through to the runner
-  unchanged. No new code.
-- DeepSeek direct needs a runner variant (`RUNNER_SUBDIR`), not passthrough alone.
-  `JUDGE_PROVIDER=openai_compatible` and `JUDGE_MODEL=deepseek-flash` already pass
-  through. What is missing is an `OSWORLD_EVAL_MODEL_BASE_URL=https://api.deepseek.com`
-  infra value (seeded, plus `--infra-ref benchmark_judge:OSWORLD_EVAL_MODEL_BASE_URL=…`).
-  The adapter also requires the key as the secret named exactly
-  `OSWORLD_EVAL_MODEL_API_KEY` (`adapter._JUDGE_KEY`, `vendor_bridge.JUDGE_KEY_ENV`), so
-  `JUDGE_ENV_NAME` cannot point it at another row. The DeepSeek key lives in lop's login
-  store (`auth.db`, provider `deepseek`), so a scratch-store-only alias is needed, in the
-  same shape as `alias_fixture_gitlab_pat.py`. No adapter or checker change is needed.
+**The campaign judge is `deepseek-flash` on DeepSeek's direct API (`api.deepseek.com`).**
+The campaign owner chose it for these reasons:
+
+- It is the most accurate judge measured. It matched the 8843 reference (0.8235) on 5 of 5
+  calls and both 1040NR/540NR controls, and gave the right YES/NO under task_003's cap of
+  5. DeepSeek does not count reasoning against `max_tokens`, so the unchanged caps fit.
+- Upstream judges with `gpt-5.2` whatever the agent's model family. Using a judge from the
+  same family as the deepseek study route is therefore consistent with upstream practice.
+  The judge sees only the checker's payload (a prompt, a JSON union or two images), never
+  the agent's trajectory.
+- The operator excludes Western providers, so upstream's own judge is not available.
+
+**Rule for existing results.** A judged task's result scored with the
+`qwen/qwen3.8-max-0902` judge is **flagged unreliable**. It is not a capability
+measurement, whatever its score. A judged task is one that the adapter's
+`requirements.is_judged` reports, 21 of the 108. On a cap-5 task that judge always
+answers NO. On task_025 it crashes. A pass on such a task can still come from the
+checker's non-judge half, but a fail or an unscored result says nothing about the
+agent. Unjudged tasks are unaffected. Results from the two judges are not comparable on
+judged tasks. Judged tasks need a re-run under the new judge before they enter a
+headline figure.
+
+## Wiring (implemented 2026-11-12)
+
+The judge is wired in the campaign tree (`~/worktrees/osworld/osworld-21/scripts/`),
+not in this repository. No adapter or checker change was needed.
+
+- **Runner.** The judge route lives in a new runner variant, `v2/run_arm_21.sh`, selected
+  with `RUNNER_SUBDIR=v2`. It is a copy of `verifier/run_arm_21.sh` (the variant that adds
+  `VERIFIER_ROUNDS`). Neither existing runner was edited in place, because bash reads a
+  running script incrementally and live episodes were reading them.
+- **`JUDGE_ROUTE=deepseek-direct`.** This setting is passed through by
+  `launch_episode_21.sh` (the allowlist edit was an atomic temp-file rename). It makes
+  the runner do the following:
+  - set `JUDGE_PROVIDER=openai_compatible` and `JUDGE_MODEL=deepseek-flash`, the model
+    ID that api.deepseek.com serves (every proof call returned `model: deepseek-flash`);
+  - seed `OSWORLD_INFRA_JUDGE_BASE_URL=https://api.deepseek.com` and pass it as
+    `--infra-ref benchmark_judge:OSWORLD_EVAL_MODEL_BASE_URL=OSWORLD_INFRA_JUDGE_BASE_URL`;
+  - run `alias_judge_key.py`, described in the next item.
+- **Key alias.** `alias_judge_key.py` reads lop's own persisted `deepseek` API key, the
+  login lop's deepseek provider authenticates with
+  (`AuthStore.get_persisted_api_key("deepseek", kinds={"api_key"})`). It reads from the
+  episode's scratch snapshot of the credential store. It writes the key into the scratch
+  store row `OSWORLD_EVAL_MODEL_API_KEY`, replacing the OpenRouter key seeded there. That
+  row name is the only one the adapter reads. The value is copied in-process and never
+  appears in argv, the environment, stdout or a file outside the scratch store. The
+  script refuses any config directory outside `LOP_RUN_SCRATCH_ROOT`.
+- **Refusals.** The runner refuses three kinds of launch rather than guess what was meant:
+  - an unknown `JUDGE_ROUTE`;
+  - an explicit `JUDGE_PROVIDER`, `JUDGE_MODEL` or `JUDGE_ENV_NAME` that contradicts the
+    route;
+  - a user simulator on a non-DeepSeek endpoint. The judge key is also the simulator's
+    fallback key, so after the swap the simulator would receive the DeepSeek key.
+- **Default.** With `JUDGE_ROUTE` unset, the `run_episode` argv and the scratch-store
+  writes are identical to the verifier variant.
+- **Judge stamp.** Every v2 run, whatever the route, writes `judge.json` to the run root.
+  The stamp holds the route, provider, model, base URL and key row name, never the key.
+  `seal_run_21.py --judge-json` copies it into each sealed bundle and adds it as a
+  `judge` field to the bundle's `RESULTS.jsonl` row. Without the flag (older runners),
+  the helper's output is unchanged; this was checked by a row-for-row diff against the
+  previous helper.
+
+To launch a judged episode on the new judge:
+
+```
+RUNNER_SUBDIR=v2 JUDGE_ROUTE=deepseek-direct ARM=main31 WORKSPACE_NAME=<workspace> \
+  launch_episode_21.sh [--mode launchd] <task-id> [steps] [usd] [wall] [settle]
+```
+
+**Dry proof, with no VM and no episode.** `dry_judge_route.sh` sources the v2 runner's
+judge-route block byte for byte, and runs it against a throwaway scratch store cloned
+from the launcher's own store snapshot. It then resolves the judge names through the
+worker's resolver (`CredentialStoreResolver`) and calls the vendored
+`model_client.generate_text` with real checker payloads. It made 3 paid calls, measured
+2026-11-12:
+
+| payload | expected | served model / finish | result |
+|---|---|---|---|
+| task_003 `_llm_judge`, t30a rainy background, cap 5 | NO | deepseek-flash / stop, r=179 | `NO` |
+| task_003 golden vs golden, cap 5 | YES | deepseek-flash / stop, r=30 | `YES` |
+| task_025 `_score_form_with_model`, t30a 8843 union, cap 1500 | 0.8235 | deepseek-flash / stop, r=2372 | parsed, 0.8235 |
+
+A fourth call, after a harness teardown fix, repeated the golden control: `YES`, r=244.
+Four negative controls refused as designed: an unknown route, a contradictory model, a
+simulator on OpenRouter, and the alias script pointed at the real config directory. With
+the route unset, the block added no argv and wrote nothing.

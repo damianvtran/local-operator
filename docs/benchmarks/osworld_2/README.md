@@ -162,8 +162,8 @@ token caps (see "Judge configuration" next).
 Upstream's judged checkers call `model_client.generate_text(...,
 default_model="gpt-5.2")` with caps sized for that judge. Most caps are tiny:
 `max_tokens` 5, 10 or 16 for a YES/NO verdict, and 1500 for task_025's JSON form
-judgment. The operator excludes Western providers for benchmark use, so this
-campaign judges with `OSWORLD_EVAL_MODEL_PROVIDER=openrouter` and
+judgment. The operator excludes Western providers for benchmark use, so until
+2026-11-12 this campaign judged with `OSWORLD_EVAL_MODEL_PROVIDER=openrouter` and
 `OSWORLD_EVAL_MODEL_NAME=qwen/qwen3.8-max-0902` (`run_arm_21.sh`
 `JUDGE_PROVIDER`/`JUDGE_MODEL`). **Every judged score is therefore a
 judge-configuration deviation and must name the judge; scores from different
@@ -182,8 +182,16 @@ answer inside the unchanged caps and accept images (15 of the 21 judged tasks
 pass them). The candidate measurements, sealed-result impact and the wiring each
 candidate needs are in
 [`records/EVAL-JUDGE-FINDING-reasoning-budget.md`](records/EVAL-JUDGE-FINDING-reasoning-budget.md).
-Until a replacement is chosen and recorded here, a judged result from the
-qwen3.8-max judge is not a capability measurement.
+**Decision (2026-11-12): the judge is `deepseek-flash` on DeepSeek's direct
+API.** It was the most accurate judge measured and answers inside the
+unchanged caps. Upstream also judges with one model whatever the agent's
+family, and the judge sees only the checker's payload, never the trajectory.
+It is selected with `RUNNER_SUBDIR=v2 JUDGE_ROUTE=deepseek-direct`. Every v2
+run stamps its judge into the sealed bundle and its `RESULTS.jsonl` row.
+**A judged task's result scored with the qwen3.8-max judge is flagged
+unreliable.** It is not a capability measurement and must be re-run under the
+new judge before it enters a headline figure. Unjudged tasks are unaffected.
+The record has the rationale, the wiring and the dry proof.
 
 ### Step budget
 
