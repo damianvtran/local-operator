@@ -54740,7 +54740,13 @@ class OperatorApp(App[None]):
             root = config_dir()
             if onboarding.greeting_settled(root):
                 return
-            if not await asyncio.to_thread(onboarding.first_run_pending, root):
+            # `fresh_install`, not `first_run_pending`: the latter is exactly
+            # "not settled AND fresh", and the ledger half was answered on the
+            # line above, so calling it here only re-read the same file.
+            # A greeting that settles between the two reads changes nothing:
+            # `_open_aida_first_run` re-asks `first_run_pending` before it
+            # routes, and `cadence_allowed` reads the ledger itself.
+            if not await asyncio.to_thread(onboarding.fresh_install, root):
                 await asyncio.to_thread(onboarding.cadence_allowed, root)
                 return
         except Exception:  # noqa: BLE001 — a predicate, never a boot dependency
