@@ -3249,7 +3249,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   paints them, so comparing them would repaint on a change no pixel
     #:   reflects. THE DAY A TUI SURFACE RENDERS THEM, they move into
     #:   `_SIGNATURE_FIELDS` — the rule `degraded`'s entry above states.
-    #: * `remote_attention` / `remote_notice` are the origin-only completion and
+    #: * `remote_attention` / `remote_notices` are the origin-only completion and
     #:   notify facts an owner stamps on a REMOTE row for the inbox forwarder
     #:   (`notifications/remote_attention`). No picker pixel paints them; the
     #:   same move-when-rendered rule applies.
@@ -3263,7 +3263,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "team",
         "agent",
         "remote_attention",
-        "remote_notice",
+        "remote_notices",
     )
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form

@@ -17968,7 +17968,9 @@ class Session:
                 forwarded_notice_sentence,
             )
 
-            sentence += await asyncio.to_thread(forwarded_notice_sentence, root, self.session_id)
+            sentence += await asyncio.to_thread(
+                forwarded_notice_sentence, root, self.session_id, key
+            )
         return sentence
 
     def _notification_owner(self) -> "Session | None":

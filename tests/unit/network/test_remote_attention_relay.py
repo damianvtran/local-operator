@@ -9,7 +9,7 @@ naming its origin.
 
 Pinned here, each over the wire rather than against a helper:
 
-* the origin viewer gets ``attention``/``notice`` on the session's row, and the
+* the origin viewer gets ``attention``/``notices`` on the session's row, and the
   origin's watcher turns that reply into exactly one ``remote-done:`` row and
   one ``remote-notice:`` row in ITS inbox;
 * a viewer that is NOT the session's origin gets the row without either field;
@@ -100,8 +100,9 @@ def test_the_origin_gets_both_fields_and_its_watcher_raises_the_rows(
     finally:
         link.close("test")
     assert row["attention"] == {"token": TOKEN, "outcome": "complete"}
-    assert row["notice"]["key"] == "release"
-    assert row["notice"]["priority"] == "high"
+    [notice_block] = row["notices"]
+    assert notice_block["key"] == "release"
+    assert notice_block["priority"] == "high"
 
     # THE ORIGIN HALF, from the bytes that crossed: the production parse, the
     # production row builder, the production watcher.
@@ -122,6 +123,7 @@ def test_the_origin_gets_both_fields_and_its_watcher_raises_the_rows(
             return [PeerRow.from_json(row, device_id=owner)]
 
     monkeypatch.setattr(ra, "_deliver_async", lambda *_a, **_k: None)
+    monkeypatch.setattr(ra, "_deliver_done_banner", lambda *_a, **_k: None)
     head = tmp_path / "head-inbox"
     rows = peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
     ra.RemoteAttentionWatcher(head).observe(rows)
@@ -144,7 +146,7 @@ def test_a_non_origin_viewer_gets_neither_field(
         row = _catalog_row(link)
     finally:
         link.close("test")
-    assert "attention" not in row and "notice" not in row
+    assert "attention" not in row and "notices" not in row
 
 
 def test_an_old_viewer_gets_the_row_shape_it_always_did(
@@ -163,7 +165,7 @@ def test_an_old_viewer_gets_the_row_shape_it_always_did(
         row = _catalog_row(link)
     finally:
         link.close("test")
-    assert "attention" not in row and "notice" not in row
+    assert "attention" not in row and "notices" not in row
 
 
 def test_types_module_is_untouched_by_the_capability() -> None:

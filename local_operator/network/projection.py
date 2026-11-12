@@ -239,8 +239,33 @@ def _attention_block(value: Any) -> tuple[str, str] | None:
     return token[:128], (outcome if isinstance(outcome, str) else "")[:32]
 
 
+#: The most notice blocks one row may carry, read side. It matches the owner's
+#: cap (``remote_attention.NOTICES_ON_WIRE``) and is spelled here, not
+#: imported, so the projection keeps no import edge into the notifications
+#: package; a test asserts the two equal. A row claiming more is cut to the
+#: first (newest) ones rather than refused, so one over-long list costs only
+#: its tail.
+NOTICES_MAX = 8
+
+
+def _notices_block(value: Any) -> tuple[tuple[str, int, str, str], ...] | None:
+    """``notices: [{key, revision, priority, title}, ...]`` as tuples, else no claim.
+
+    Each entry follows :func:`_notice_block`'s refusal rule; a malformed entry is
+    dropped on its own, so one bad item cannot hide the others beside it. An
+    empty result is no claim (``None``), the same reading as an older owner's
+    row that has no key at all.
+    """
+    if not isinstance(value, list):
+        return None
+    parsed = tuple(
+        block for block in (_notice_block(item) for item in value[:NOTICES_MAX]) if block
+    )
+    return parsed or None
+
+
 def _notice_block(value: Any) -> tuple[str, int, str, str] | None:
-    """``notice: {key, revision, priority, title}`` as a tuple, else no claim.
+    """One ``{key, revision, priority, title}`` notice as a tuple, else no claim.
 
     Same refusal rule as :func:`_attention_block`; the revision must be a real
     positive integer (a bool is not one) because it is the episode identity the
@@ -346,9 +371,9 @@ class PeerRow:
     source_ref: str = ""
     native_provider_ids: tuple[str, ...] | None = None
     #: The origin-only completion/notice facts (``notifications/remote_attention``),
-    #: parsed by :func:`_attention_block`/:func:`_notice_block`. ``None`` is no claim.
+    #: parsed by :func:`_attention_block`/:func:`_notices_block`. ``None`` is no claim.
     attention: tuple[str, str] | None = None
-    notice: tuple[str, int, str, str] | None = None
+    notices: tuple[tuple[str, int, str, str], ...] | None = None
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -478,7 +503,7 @@ class PeerRow:
             # A STALE row's runtime is gone, so its live notice claim is too; the
             # completion is a stored fact and rides either way.
             attention=_attention_block(data.get("attention")),
-            notice=None if stale else _notice_block(data.get("notice")),
+            notices=None if stale else _notices_block(data.get("notices")),
         )
 
     def to_row_json(self) -> dict[str, Any]:

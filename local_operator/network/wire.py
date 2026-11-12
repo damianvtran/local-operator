@@ -192,7 +192,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "remote-attention-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
-#: Catalogue rows carry ``attention``/``notice`` for the session's ORIGIN
+#: Catalogue rows carry ``attention``/``notices`` for the session's ORIGIN
 #: (``notifications/remote_attention``). An owner stamps them only on a link
 #: whose viewer advertised this, so an older viewer — which would parse the keys
 #: as nothing, or forbid them on a strict model — receives the exact row shape it

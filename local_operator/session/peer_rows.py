@@ -45,7 +45,7 @@ import math
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session.catalog import live_state_from_flags
@@ -478,8 +478,8 @@ class RemoteNotice(NamedTuple):
 
 
 def _carry_silent(
-    previous: Mapping[tuple[str, str], object],
-    state: dict[tuple[str, str], object],
+    previous: Mapping[Any, object],
+    state: dict[Any, Any],
     unanswered: Iterable[str],
 ) -> None:
     """``park_edges``' SILENCE rule, shared: a silent device's episodes are carried.
@@ -535,41 +535,52 @@ def completion_edges(
     return edges, {key: str(value) for key, value in state.items()}
 
 
+#: One tracked notice: ``(device, session, owner item key)``.
+NoticeKey = tuple[str, str, str]
+
+
 def notice_edges(
-    previous: Mapping[tuple[str, str], tuple[str, int]],
+    previous: Mapping[NoticeKey, int],
     rows: Iterable[SessionRow],
     *,
     unanswered: Iterable[str] = (),
-) -> tuple[tuple[RemoteNotice, ...], dict[tuple[str, str], tuple[str, int]]]:
+) -> tuple[tuple[RemoteNotice, ...], dict[NoticeKey, int]]:
     """New notice EPISODES among ``rows``: a new owner item key or a new revision.
 
-    Same keying and silence rule as :func:`completion_edges`. A notice that
-    leaves the map is NOT settled by the caller: the owner's item going read
-    there says nothing about whether the operator saw the forwarded row here,
-    so the origin's row keeps its own read/dismiss marks.
+    KEYED PER OWNER ITEM, ``(device, session, item key)`` -> revision (review
+    round 1, M2). A row now carries a bounded LIST of the owner's newest unread
+    items, and each is its own episode: keying per session made two notices
+    inside one listing TTL replace each other, so a ``high`` "Tests failed"
+    followed by a ``normal`` "Deploy done" lost the high one. The silence rule
+    is :func:`completion_edges`' (``_carry_silent`` reads ``key[0]``, the
+    device, which this key keeps first). A notice that leaves the map is NOT
+    settled by the caller: the owner's item going read there says nothing about
+    whether the operator saw the forwarded row here, so the origin's row keeps
+    its own read/dismiss marks.
     """
-    current: dict[tuple[str, str], object] = {}
-    fresh: dict[tuple[str, str], RemoteNotice] = {}
+    current: dict[NoticeKey, int] = {}
+    fresh: dict[NoticeKey, RemoteNotice] = {}
     for row in rows:
-        claim = row.remote_notice
-        if not claim or not claim[0]:
-            continue
-        key = (str(row.owner_device or ""), row.id)
-        current[key] = (claim[0], int(claim[1]))
-        fresh[key] = RemoteNotice(
-            session_id=row.id,
-            device_id=key[0],
-            device_name=str(row.owner_device_name or ""),
-            key=claim[0],
-            revision=int(claim[1]),
-            priority=claim[2] or "normal",
-            title=claim[3],
-            name=_chosen_name(row),
-        )
-    state = dict(current)
+        device_id = str(row.owner_device or "")
+        for claim in row.remote_notices or ():
+            if not claim or not claim[0]:
+                continue
+            key = (device_id, row.id, claim[0])
+            current[key] = int(claim[1])
+            fresh[key] = RemoteNotice(
+                session_id=row.id,
+                device_id=device_id,
+                device_name=str(row.owner_device_name or ""),
+                key=claim[0],
+                revision=int(claim[1]),
+                priority=claim[2] or "normal",
+                title=claim[3],
+                name=_chosen_name(row),
+            )
+    state: dict[NoticeKey, int] = dict(current)
     _carry_silent(previous, state, unanswered)
     edges = tuple(fresh[key] for key, value in current.items() if previous.get(key) != value)
-    return edges, {key: value for key, value in state.items()}  # type: ignore[misc]
+    return edges, state
 
 
 def _chosen_name(row: SessionRow) -> str:
@@ -762,7 +773,7 @@ def _read(
                 # catalogue double or an older parse has neither attribute, which
                 # is no claim.
                 remote_attention=getattr(peer_row, "attention", None),
-                remote_notice=getattr(peer_row, "notice", None),
+                remote_notices=getattr(peer_row, "notices", None),
             )
         )
     # THE PEERS THAT DID NOT ANSWER, and the exclusion is by DEVICE rather than

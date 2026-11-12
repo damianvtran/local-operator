@@ -1017,6 +1017,37 @@ class NotificationStore:
 
         return self._read(body, None, "get_by_key")
 
+    def unread_with_key_prefix(self, prefix: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Unread, undismissed items whose ``key`` starts with ``prefix``, oldest first.
+
+        For a writer that owns a key NAMESPACE and must reconcile its unread
+        rows against an outside fact on every read rather than against process
+        memory: the remote-attention forwarder marks a ``remote-done:`` row read
+        once the owner's listing no longer claims that completion (QA round 1,
+        Q1 — a receipt that landed while no watcher ran left the row unread for
+        good, because the in-memory map that used to drive the settle started
+        empty after a restart). One indexed query per poll instead of one
+        lookup per listed session. Read-only, like :meth:`get_by_key`. ``%``
+        and ``_`` in ``prefix`` are escaped, so the prefix is matched literally.
+        """
+        if not prefix:
+            return []
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params = (f"{escaped}%", max(1, int(limit)))
+
+        def body(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            return [
+                _row_dict(row)
+                for row in conn.execute(
+                    f"SELECT {_ITEM_COLUMNS} FROM items WHERE key LIKE ? ESCAPE '\\' "
+                    "AND dismissed_at IS NULL AND read_rev < revision "
+                    "ORDER BY created_at, id LIMIT ?",
+                    params,
+                )
+            ]
+
+        return self._read(body, [], "unread_with_key_prefix")
+
     def find_by_key(self, key: str) -> list[dict[str, Any]]:
         """Every item holding ``key``, across all sessions (dismissed ones included).
 
