@@ -578,6 +578,22 @@ transcript and Files-panel acceptance.
   and `tests/unit/test_settings_io.py`. Wrap with `run_bounded.py`, ≤ 10 min each. CI runs
   the suite.
 
+**Where the core PR differs from this plan (and why):**
+- `sensitive`: the owner's Files index already drops credential-shaped paths before a
+  row exists (`make_deny`), so such a pad file is never LISTED to a peer — stronger than a
+  `sensitive` row. `readability()` still answers `sensitive` (pinned by a unit cell) for
+  the `row` phase and for names the denylist does not cover.
+- Library feed cadence: the feeder runs inside the indexer's `reconcile`, which is woken
+  at most every `REMOTE_FEED_S` = 300 s while this device is in a network (a peer's
+  session has no local journal event to wake on). A session is re-listed when its
+  catalogue `mtime` moved; the owner `revision` is stored as the checkpoint but is only
+  known after a listing, so it cannot be the cheap pre-check.
+- Not done here: "the viewer's own Files panel upserts its page rows into the Library for
+  free" (§5 Feed). The 300 s feed covers the same rows; the upsert is an optimisation and
+  is left for a follow-up.
+- `pull_file(land="cache")` also skips the transfer when the stat's digest is already
+  cached (a PATH source cannot be looked up before its stat phase).
+
 ### UI PR — `feat/remote-files-parity` (feature, ≤3 h; coder/reviewer/QA + designer + ux-reviewer)
 
 Change sites:
