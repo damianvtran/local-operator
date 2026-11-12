@@ -7049,7 +7049,13 @@ class TemporaryRefusal(ValueError):
         self.status = self._STATUS.get(code, 409)
         super().__init__(code)
 
-    def envelope(self) -> dict[str, Any]:
+    def envelope(self, *, locale: str | None = None) -> dict[str, Any]:
+        """The wire body; ``locale`` as :meth:`Msg.envelope` (``None``: active).
+
+        The desktop routes take the default. A caller OUTSIDE the HTTP plane
+        (the relay, the TUI) names its locale, as the envelope-locale ratchet
+        requires of every non-route envelope.
+        """
         sid = self.session_id
         message = {
             "session_temporary": lambda: _wd.session_temporary(session_id=sid),
@@ -7060,7 +7066,7 @@ class TemporaryRefusal(ValueError):
             "session_not_found": lambda: _wd.session_not_found(session_id=sid),
             "temporary_peer_unsupported": _wd.temporary_peer_unsupported,
         }.get(self.code, lambda: _wd.temporary_mark_failed(session_id=sid))()
-        body = message.envelope(code=self.code)
+        body = message.envelope(code=self.code, locale=locale)
         body.update(self.extra)
         return body
 

@@ -2165,7 +2165,9 @@ def _temporary_refusal(code: str, session_id: str, **extra: Any) -> "JSONRespons
     from local_operator.server.utils.desktop_sessions import TemporaryRefusal
 
     refusal = TemporaryRefusal(code, session_id, **extra)
-    body = refusal.envelope()
+    # The relay's config-resolved language, like its other refusals: not the
+    # process's active locale, which ambient TUI state can move.
+    body = refusal.envelope(locale=resolve_language())
     return JSONResponse({"error": body.get("text") or code, **body}, status_code=refusal.status)
 
 
@@ -11672,13 +11674,23 @@ def build_app(daemon: MobileDaemon):
         ``/api/sessions/{session_id}`` route makes the order structural, the
         desktop pool's door twin. The gate runs first so an unauthenticated
         caller learns nothing about which ids were deleted.
+
+        AN UNAUTHENTICATED CALLER GETS THE ROUTE'S OWN REFUSAL. Each route
+        family dresses its 401 in its response policy (sound: nosniff +
+        same-origin CORP; supplements: nosniff + no-store), so answering with
+        the bare ``gate`` refusal here stripped those headers from every
+        wrapped route. Every wrapped endpoint gates before touching state, so
+        the endpoint is handed the refused request to answer and the tombstone
+        is never read for it. Fail closed: anything but the gate's status from
+        that call is discarded for the bare refusal.
         """
 
         @functools.wraps(endpoint)
         async def wrapped(request: Request) -> Response:
             denied = gate(request)
             if denied is not None:
-                return denied
+                own = await endpoint(request)
+                return own if own.status_code == denied.status_code else denied
             session_id = str(request.path_params.get("session_id") or "")
             gone = await asyncio.to_thread(_temporary_deleted_response, session_id)
             if gone is not None:

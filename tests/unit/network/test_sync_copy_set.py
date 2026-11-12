@@ -293,12 +293,13 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/temporary.py": (
-        2,
-        "``TOMBSTONES_NAME`` ('.temporary-tombstones.json') and ``STATE_NAME`` "
-        "('.temporary-state.json') are STORE-level records beside the session "
-        "directories (sessions/<file>), written by the cleanup pass on this device, "
-        "never an entry of a session directory. The per-session mark (``MARK_NAME``) "
-        "is in sync.COPY_SET_NAMES and travels.",
+        3,
+        "``TOMBSTONES_NAME`` ('.temporary-tombstones.json'), ``STATE_NAME`` "
+        "('.temporary-state.json') and ``CHANGES_NAME`` ('.temporary-changed', the "
+        "empty change stamp a mark or Keep touches) are STORE-level records beside the "
+        "session directories (sessions/<file>), written on this device, never an entry "
+        "of a session directory. The per-session mark (``MARK_NAME``) is in "
+        "sync.COPY_SET_NAMES and travels.",
     ),
     "local_operator/vault_agent/eligibility.py": (
         2,

@@ -15,7 +15,7 @@ from typing import Any
 
 from local_operator.i18n.keys import tui_app as _ta
 from local_operator.i18n.keys import tui_notices as _tn
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import active_locale, tr
 from local_operator.session import temporary
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,8 @@ def refused_sentence(session_id: str, code: str = temporary.CODE_MARK_FAILED) ->
     """``this chat cannot be made temporary: <reason>`` for a refusal ``code``."""
     from local_operator.server.utils.desktop_sessions import TemporaryRefusal
 
-    reason = TemporaryRefusal(code, session_id).envelope().get("text") or code
+    # The active locale, the one the ``tui.notices`` sentence around it uses.
+    reason = TemporaryRefusal(code, session_id).envelope(locale=active_locale()).get("text") or code
     return str(tr("tui.notices")(_tn.temporary_refused(reason=reason)))
 
 
@@ -166,7 +167,8 @@ def pin_refusal_sentence(root: Path, session_id: str) -> str:
         return ""
     from local_operator.server.utils.desktop_sessions import TemporaryRefusal
 
-    return str(TemporaryRefusal(temporary.CODE_TEMPORARY, session_id).envelope().get("text"))
+    refusal = TemporaryRefusal(temporary.CODE_TEMPORARY, session_id)
+    return str(refusal.envelope(locale=active_locale()).get("text"))
 
 
 def deleted_sentence(root: Path, session_id: str) -> str:

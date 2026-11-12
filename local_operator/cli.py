@@ -19297,9 +19297,14 @@ def main() -> int:
                     provider_controller=tui_controller,
                     on_config_changed=config_manager.reload,
                     warm_session_imports=False,
-                    # ``lop --temporary``: the app marks its first bound session.
-                    start_temporary=bool(getattr(args, "temporary", False)),
                 )
+                # ``lop --temporary``: the app marks its first bound session.
+                # Bound only when asked, so a plain ``lop`` start keeps the
+                # exact ``run_tui`` call it had before temporary chats existed;
+                # an ``run_tui`` stand-in (an embedder's, the suite's) written
+                # against that call keeps working.
+                if getattr(args, "temporary", False):
+                    tui_entry = functools.partial(tui_entry, start_temporary=True)
 
                 # ``/resume <id>`` in the TUI needs a factory that boots an
                 # ARBITRARY session, not just the one the launch args named.

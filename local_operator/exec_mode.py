@@ -928,15 +928,20 @@ def _make_default_session_factory(exec_args: ExecArgs, team: Any | None = None) 
             # narrow namespaces (here and the detached worker's) because the
             # factory receives this namespace and nothing wider.
             workstream=exec_args.workstream,
-            # Read by ``session_factory._prepare`` on the FRESH path only: the
-            # temporary mark, written and verified before the first turn.
-            temporary=exec_args.temporary,
             # The team-launch model suggestion (§4.4), or None for every run
             # without a team. ``session_factory.resolve_hosting_model_with_source``
             # reads it on the fresh path, below agent/flag and above config;
             # an ordinary attribute, so it can never masquerade as a user flag.
             team_model_suggestion=team.model_suggestion if team is not None else None,
         )
+        # ``lop exec --temporary``: read by ``session_factory._prepare`` (via
+        # ``getattr``, default off) on the FRESH path only, which writes and
+        # verifies the mark before the first turn. Bound ONLY when asked: this
+        # namespace is pinned field-for-field to ``SessionSpec.to_namespace``
+        # (the SDK's published eight-field shape, which has no temporary
+        # chats), so an ordinary run must hand the factory exactly that shape.
+        if exec_args.temporary:
+            session_args.temporary = True
         # Exec constructs an in-process Session, so it never calls _spawn_runtime.
         # Keep the shared resolver here at that separate lifetime boundary.
         # A RESUME HONOURS THE SESSION'S RECORDED MOVE, like every other path that

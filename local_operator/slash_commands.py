@@ -1653,17 +1653,6 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.WORD,
         desktop_destination="session.fast",
     ),
-    # A TEMPORARY CHAT (``session/temporary.py``): bare toggles, ``on`` asks
-    # before marking a chat that has messages, ``off`` keeps it. A WORD like
-    # `/fast`: one token is the command, so a sentence stays a message. No
-    # desktop destination: the desktop has its own pill and menu verbs
-    # (`test_desktop_controls.py` pins the withheld set).
-    SlashCommand(
-        "temporary",
-        **_desc(wire_slash.temporary()),
-        arguments=ArgumentMode.OPTIONAL,
-        argument_shape=ArgumentShape.WORD,
-    ),
     # NOT an echo, same rule as `/approvals`: the argument is a setting, and
     # the receipt names the theme that ended up in force — strictly more than
     # the typed word, which may have been an abbreviation the matcher resolved.
@@ -2379,6 +2368,24 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # whatever it says (see ArgumentShape's precedence note).
         argument_shape=ArgumentShape.ANY,
         desktop_destination="session.team",
+    ),
+    # A TEMPORARY CHAT (``session/temporary.py``): bare toggles, ``on`` asks
+    # before marking a chat that has messages, ``off`` keeps it. NOT an echo,
+    # `/fast`'s rule: the receipt names the resulting state and the band
+    # carries it. A WORD like `/fast`: one token is the command, so a sentence
+    # stays a message (not a prompt, so it neither consumes nor prefixes). No
+    # desktop destination: the desktop has its own pill and menu verbs
+    # (`test_desktop_controls.py` pins the withheld set).
+    #
+    # REGISTERED AFTER `/team`, deliberately: the prefix tier is flat and
+    # registration order breaks its ties (``autocomplete.match_commands``), so
+    # an earlier slot would make `/te` complete to `/temporary` and change the
+    # `/te` -> `/team` Tab every existing user has learned.
+    SlashCommand(
+        "temporary",
+        **_desc(wire_slash.temporary()),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.WORD,
     ),
     # Same echo reasoning as `/team`, which this command mirrors surface for
     # surface: bare `/agent` is a listing (the listing is the receipt), a

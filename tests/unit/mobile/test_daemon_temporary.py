@@ -286,6 +286,78 @@ def test_a_chat_this_daemon_still_holds_answers_the_tombstone_first(relay) -> No
     assert anonymous.get(f"/api/sessions/{TEMP}/history").status_code == 401
 
 
+def _wrapped_session_routes(app) -> list[Any]:
+    from starlette.routing import Route
+
+    return [
+        route
+        for route in app.routes
+        if isinstance(route, Route) and route.path.startswith("/api/sessions/{session_id:str}")
+    ]
+
+
+def test_an_anonymous_caller_gets_each_route_s_own_refusal_and_no_tombstone_read(
+    relay, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The C-1 wrapper answered every unauthenticated request with the bare
+    # ``gate`` refusal, stripping the route family's refusal policy (sound:
+    # nosniff + CORP; supplements: nosniff + no-store). It now hands the
+    # refused request to the route's own gate. Pinned on EVERY wrapped route,
+    # against a tombstoned id: 401 each time, and the tombstone is never read,
+    # so a probe cannot tell a deleted temporary chat from any other id.
+    _client, cfg, _daemon, app = relay
+    _reap(cfg, TEMP, time.time())
+    reads: list[str] = []
+    real_deleted_at = temporary.deleted_at
+
+    def counting_deleted_at(*args: Any, **kwargs: Any) -> Any:
+        reads.append(str(args[1:]))
+        return real_deleted_at(*args, **kwargs)
+
+    monkeypatch.setattr(temporary, "deleted_at", counting_deleted_at)
+    anonymous = TestClient(app, follow_redirects=False)
+    routes = _wrapped_session_routes(app)
+    assert len(routes) >= 15, "the census must see the session routes"
+    for route in routes:
+        url = (
+            route.path.replace("{session_id:str}", TEMP)
+            .replace("{job_id:str}", "3f9c1a7e5b20")
+            .replace("{digest:str}", "0" * 32)
+            .replace("{job:str}", "3f9c1a7e5b20")
+        )
+        assert "{" not in url, url
+        method = sorted(set(route.methods or {"GET"}) - {"HEAD"})[0].lower()
+        response = getattr(anonymous, method)(url)
+        assert response.status_code == 401, (route.path, response.status_code)
+    assert reads == [], "an anonymous request read the tombstone"
+    # The families whose refusals carry a policy keep it through the wrapper.
+    sound = anonymous.get(f"/api/sessions/{TEMP}/sound", params={"digest": "0" * 64})
+    assert sound.headers["x-content-type-options"] == "nosniff"
+    assert sound.headers["cross-origin-resource-policy"] == "same-origin"
+
+
+def test_every_wrapped_session_route_gates_before_anything_else(relay) -> None:
+    # The invariant the wrapper's anonymous path relies on: each wrapped
+    # endpoint's FIRST statement is ``denied = gate(request)`` and its second
+    # returns on a refusal, so handing it a refused request runs nothing else.
+    import ast
+    import inspect
+    import textwrap
+
+    _client, _cfg, _daemon, app = relay
+    for route in _wrapped_session_routes(app):
+        endpoint = inspect.unwrap(route.endpoint)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(endpoint)))
+        body = tree.body[0].body  # type: ignore[attr-defined]
+        if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            body = body[1:]
+        first, second = body[0], body[1]
+        assert ast.unparse(first) == "denied = gate(request)", (route.path, ast.unparse(first))
+        assert isinstance(second, ast.If), route.path
+        assert ast.unparse(second.test) == "denied is not None", route.path
+        assert len(second.body) == 1 and isinstance(second.body[0], ast.Return), route.path
+
+
 def test_an_expiry_elsewhere_repaints_the_list_without_the_chat(relay) -> None:
     # C-1 + C-10 on the list stream (``api_list_events``): an expiry by any
     # host's sweeper rings the list, and the chat the table still held is gone
