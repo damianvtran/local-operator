@@ -648,6 +648,56 @@ def test_the_session_door_banners_a_high_item_and_suppresses_its_completion_bann
     assert session._finalize_attention_notify(_end("")) is True
 
 
+def test_a_slow_forwarded_notice_read_does_not_let_the_held_banner_run_inside_the_call(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """PR #3830 CI race: the hold must start only after the tool call returns.
+
+    The forwarded-notice read is a thread hop. Awaited AFTER the held-banner
+    task is spawned, it yields the loop long enough for that task to raise and
+    set ``_run_notified_banner`` inside the call; a slow disk made the test
+    above fail intermittently. The delay makes that timing deterministic.
+    """
+    import time
+
+    from local_operator.notifications import remote_attention
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    session = make_session(tmp_path, ScriptedStream([]))
+    session._config_dir = tmp_path / "root"
+
+    def fake_route(*args: Any, **kwargs: Any) -> delivery.DeliveryResult:
+        return delivery.DeliveryResult(rung=RUNG_DETACHED, detail="runtime will raise")
+
+    def fake_deliver(*args: Any, **kwargs: Any) -> delivery.DeliveryResult:
+        return delivery.DeliveryResult(raised=True, rung=RUNG_DETACHED, claimed=True)
+
+    real_notice = remote_attention.forwarded_notice_sentence
+
+    def slow_notice(*args: Any, **kwargs: Any) -> str:
+        time.sleep(0.05)
+        return real_notice(*args, **kwargs)
+
+    monkeypatch.setattr(delivery, "route_item", fake_route)
+    monkeypatch.setattr(delivery, "deliver_item", fake_deliver)
+    monkeypatch.setattr(remote_attention, "forwarded_notice_sentence", slow_notice)
+    door = session._notify_inbox_callable()
+    assert door is not None
+
+    async def turn() -> tuple[str, bool]:
+        sentence = await door(
+            title="Outside PR", body="b", priority="high", key="pr", links=[], anchor_id="c1"
+        )
+        banner_during_call = session._run_notified_banner
+        await session._settle_item_banners()
+        return sentence, banner_during_call
+
+    sentence, banner_during_call = _run_awaitable(turn())
+    assert banner_during_call is False, "the held raise ran before the tool returned"
+    assert sentence.startswith("Notified (id n_")
+    assert session._run_notified_banner is True
+
+
 def test_a_gated_item_leaves_the_completion_banner_alone(tmp_path: Path, monkeypatch) -> None:
     """R1/R2: a gated high item raises nothing, so nothing is suppressed either."""
     from tests.unit.session.test_session import ScriptedStream, make_session
