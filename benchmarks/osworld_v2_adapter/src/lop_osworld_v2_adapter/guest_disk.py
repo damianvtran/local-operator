@@ -99,21 +99,45 @@ no metadata, and ``Observation.metadata`` feeds ``observation_content_id``, so
 putting guest disk state there would make a content-addressed observation id a
 function of the guest's filesystem rather than of what the model saw.
 
-WHAT IS DELIBERATELY NOT DONE: growing the partition. See
-``docs/benchmarks/osworld_2/README.md`` for the evidence; briefly, ``growpart``
-is absent, the in-place ``sfdisk`` alternative rewrites the root partition table
-and a wrong start sector destroys the guest -- a hygiene step that can fail HARD
-is precisely what this module must not contain -- and once snapd is held and its
-download scratch cleared the 29.5G partition has room for a full episode
-(measured: ~2.2 GB free after a successful hold+clear, on the run that completed
-and scored). The disk vs partition geometry is REPORTED instead, read-only,
-because that pair is what shows ``AWS_ROOT_VOLUME_SIZE`` changing nothing at all:
-30,993,747,968 bytes of filesystem inside both a 40 GiB and a 120 GiB volume.
+GROWING THE ROOT FILESYSTEM -- ONLY WHEN A VOLUME SIZE WAS REQUESTED, AS
+UPSTREAM DOES. An earlier revision refused to grow the partition at all, and
+the record it left shows what that cost: all 84 ``guest-preparation.json``
+records of the 2026-11 campaign read ``disk_bytes`` 128,849,018,880 (the 120
+GiB ``AWS_ROOT_VOLUME_SIZE`` volume) around ``filesystem_bytes`` 30,993,747,968,
+so every episode started with ~2.2 GB free next to ~90 GiB that was paid for
+and unreachable, and a task that ``pip install``s a wheel the size of
+``onnxruntime`` had nowhere to put it. Upstream's contract is explicit:
+``DesktopEnv(volume_size=N)`` both sizes the EBS volume AND runs
+``expand_guest_volume`` (vendored ``desktop_env/providers/volume.py``:
+``growpart`` + ``resize2fs``/``xfs_growfs``, installing ``cloud-guest-utils``
+first when ``growpart`` is missing), while ``volume_size=None`` leaves the
+AMI's 29.5G filesystem inside upstream's 40 GiB default volume untouched. The
+adapter's ``AWS_ROOT_VOLUME_SIZE`` (or a task's own ``volume_size``) IS that
+upstream parameter, so ``grow_root`` mirrors upstream's gate exactly: grow when
+a size was requested, never otherwise. That gives the agent what upstream gives
+an agent run with the same ``--volume_size``, no more -- and a run that used the
+knob is already disclosed in its manifest (``aws_root_volume_size_override``).
+
+The objections the earlier revision recorded are answered rather than ignored:
+``growpart`` IS absent from the AMI, which is why the step installs it the way
+upstream does -- and at preparation time the guest has ~2.2 GB free (measured on
+every record above), so ``apt-get`` can run; the "cannot install onto a full
+disk" observation was made at 0 bytes free, late in a dying episode. ``sfdisk``
+is still never called directly: ``growpart`` is the standard, upstream-chosen
+tool, and it refuses (``NOCHANGE``) rather than rewriting a partition that cannot
+grow. The step is ADVISORY, never blocking: upstream itself tolerates a failed
+``growpart``/``resize2fs`` (both ``|| true`` in its script), and a guest whose
+snapd hold landed runs a full episode at 2.2 GB free, so refusing an episode
+over a failed grow would trade a recorded fidelity gap for a lost episode. The
+filesystem size AFTER the step is recorded (``filesystem_bytes_after``), so the
+gap, when there is one, is visible in every bundle.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import time
 from dataclasses import dataclass
 from typing import Callable, Literal, Sequence
 
@@ -128,8 +152,73 @@ RECLAIM_BELOW_FREE_BYTES = 12 * 1024**3
 # readiness and upstream's own task setup, so hygiene gets a small fixed slice
 # and a wedged guest cannot eat the reset budget: once the budget is spent the
 # remaining steps are recorded as skipped rather than attempted.
+#
+# 270 s, up from 180 s, to fund the hold's transient-failure retries below: the
+# measured failure (t33v-t054) spent ~60 s on ``hold-snap-auto-refresh`` and
+# ~60 s on its fallback before ``clear-snapd-download-scratch`` ran, so 180 s
+# left no room for a single retry of the hold without starving the clear. Four
+# full sends (hold, its retry, fallback, clear) plus the abort, the
+# measurements and the cadence's waits need a little over 240 s; 270 s funds
+# them with margin. A guest whose hold lands at once spends what it always did.
 COMMAND_TIMEOUT_S = 60.0
-TOTAL_BUDGET_S = 180.0
+TOTAL_BUDGET_S = 270.0
+
+# Retrying the snapd hold when the control server could not answer it.
+#
+# THE MEASURED CASE. Two of 84 campaign records show ``hold-snap-auto-refresh``
+# as ``unreachable`` / ``HTTPError`` while the steps on either side of it
+# (``abort-in-flight-snap-changes`` before, ``clear-snapd-download-scratch``
+# after) came back ``ok`` -- so the control server was up, and the error was
+# the server's own non-2xx answer, not a dead guest. The server answers 500 from
+# its ``except Exception`` arm, ``subprocess.TimeoutExpired`` among them, and
+# ``snap refresh --hold`` is a ``configure`` hook change the CLI WAITS on behind
+# whatever hook the just-aborted auto-refresh is still undoing (see
+# ``_reclaim``) -- the most likely reading, though the record kept only the
+# exception type. In one of the two the fallback then landed; in the other
+# (t33v-t054-20261112-090503) both did not, and the episode was refused.
+#
+# WHY A RETRY IS SAFE HERE when the provider's own transport policy forbids
+# replaying a sent request: holding refreshes is IDEMPOTENT. A hold that did
+# land on the guest after its HTTP answer was lost is simply re-asserted, which
+# is the state the step exists to reach. Nothing else is retried: the abort and
+# the clear are not where the failures were, and a COMPLETED step that exited
+# non-zero (an old snapd's unknown flag) is an answer, not a transient, so it
+# goes straight to the fallback as before.
+#
+# TWO BOUNDS, for the reason ``providers/base.py`` gives for its transport
+# retries: an attempt count bounds nothing when each attempt can spend a full
+# command timeout, and a window alone bounds nothing on a guest that refuses in
+# milliseconds. A retry also never starts unless the session can still fund
+# the retry itself AND every step after it -- the fallback and the clear for
+# the hold, the clear for the fallback -- because the clear is the step that
+# actually returns the space. Worst case, every send spending its whole 60 s:
+# hold 0-60 s, one retry 60-120 s, fallback 120-180 s, clear 180-240 s.
+HOLD_RETRY_ATTEMPTS = 4  # TOTAL sends: the first attempt plus three retries
+HOLD_RETRY_WINDOW_S = 90.0
+
+# The waits between those attempts, by default. The provider passes its own
+# recovery-probe cadence (``providers/aws.py`` ``_RECOVERY_PROBE_DELAYS_S``:
+# 0.5, 0.5, 1, 1, then 2 s) so a guest that is briefly not answering is
+# re-tried on the same schedule as every other recovery in the adapter; this
+# default is that schedule's head, for callers (and tests) that inject none.
+DEFAULT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 0.5, 1.0)
+
+# The grow step's own ceiling, OUTSIDE ``TOTAL_BUDGET_S``: it runs after the
+# protective steps and must neither starve them nor be starved by them.
+# ``apt-get update`` plus one small package install is the long pole (tens of
+# seconds on a fresh guest); ``growpart`` and an online ``resize2fs`` of ~90 GiB
+# are seconds. Upstream allows 600 s for the same script, but upstream's reset
+# budget is not shared with ours: worst case here is 270 s + 180 s of
+# preparation inside the runner's 900 s ``reset_start``, and the common case
+# (hold lands first time, grow in well under a minute) is unchanged from before.
+GROW_TIMEOUT_S = 180.0
+
+# A filesystem within this much of its block device is already grown. The
+# AMI's own partition table, alignment and an ESP/BIOS-boot partition account
+# for well under a GiB; the gap the grow step exists for is ~90 GiB (or ~11 GiB
+# at upstream's 40 GiB default), so 2 GiB separates the two without touching
+# either.
+GROWN_WITHIN_BYTES = 2 * 1024**3
 
 # Two directions of the same download, and only one of them is where this
 # image puts the bytes.
@@ -214,6 +303,11 @@ class StepOutcome:
     status: StepStatus
     returncode: int | None = None
     detail: str = ""
+    # How many times the command was SENT. 1 for every ordinary step, 0 for a
+    # skipped one, and up to ``HOLD_RETRY_ATTEMPTS`` for the retried hold -- so
+    # a hold that landed on its third send reads differently from one that
+    # landed at once, and a reader never mistakes a retried step for a clean one.
+    attempts: int = 1
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -221,6 +315,7 @@ class StepOutcome:
             "status": self.status,
             "returncode": self.returncode,
             "detail": self.detail,
+            "attempts": self.attempts,
         }
 
 
@@ -246,6 +341,14 @@ class GuestDiskReport:
     reclamation_attempted: bool
     reason: str
     steps: tuple[StepOutcome, ...] = ()
+    # Whether a volume size was requested, i.e. whether upstream would have
+    # grown this guest (see the module docstring), and the filesystem size once
+    # the grow step ran. ``filesystem_bytes_after`` is None when growth was not
+    # requested, was skipped as unnecessary, or could not be re-measured; set,
+    # it is the number that proves the grow landed (``disk_bytes`` within
+    # ``GROWN_WITHIN_BYTES``) or shows the fidelity gap it left.
+    root_grow_requested: bool = False
+    filesystem_bytes_after: int | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -256,6 +359,8 @@ class GuestDiskReport:
             # root partition was never grown into an AWS_ROOT_VOLUME_SIZE
             # override -- the measured 29.5G-in-100GiB case.
             "disk_bytes": self.disk_bytes,
+            "root_grow_requested": self.root_grow_requested,
+            "filesystem_bytes_after": self.filesystem_bytes_after,
             "threshold_bytes": self.threshold_bytes,
             "reclamation_attempted": self.reclamation_attempted,
             # Derived, not stored: the steps are the record, and this is the
@@ -335,13 +440,31 @@ def _first_int(text: str) -> int | None:
 class _Session:
     """One preparation pass: runs steps, records them, and honours the budget."""
 
-    def __init__(self, run: GuestCommand, clock: Clock) -> None:
+    def __init__(
+        self,
+        run: GuestCommand,
+        clock: Clock,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._run = run
         self._clock = clock
+        self._sleep = sleep
         self._deadline = clock() + TOTAL_BUDGET_S
         self.steps: list[StepOutcome] = []
 
-    def step(self, name: str, script: str) -> CommandResult | None:
+    def extend(self, seconds: float) -> None:
+        """Fund a step that has its own ceiling outside ``TOTAL_BUDGET_S``.
+
+        Measured from NOW, not added to the old deadline: a reclamation that
+        finished early must not hand its unused seconds to the grow step, and
+        one that ran out must not leave the grow step with nothing.
+        """
+
+        self._deadline = self._clock() + seconds
+
+    def step(
+        self, name: str, script: str, *, timeout_s: float = COMMAND_TIMEOUT_S
+    ) -> CommandResult | None:
         """Run one step, record it, and return its result or None on failure.
 
         Never raises: a step that cannot run is a recorded fact, not an
@@ -350,32 +473,99 @@ class _Session:
         ``providers/aws.py`` refuses an episode whose reclamation did not land.
         """
 
+        outcome, result = self._attempt(name, script, timeout_s)
+        self.steps.append(outcome)
+        return result
+
+    def step_retrying_unreachable(
+        self, name: str, script: str, *, delays: Sequence[float], reserve_s: float
+    ) -> CommandResult | None:
+        """``step``, re-sent while the control server could not answer it.
+
+        ONLY for an idempotent fragment (see ``HOLD_RETRY_ATTEMPTS`` for why
+        the hold qualifies). Only ``unreachable`` is retried: ``failed`` is the
+        guest's own answer and ``skipped`` means the budget is gone. ONE step is
+        recorded whatever happens -- its final outcome, with ``attempts`` saying
+        how many sends it took -- because ``blocking_steps`` and the covering
+        fallback key on the step's name, and a retried step written once per
+        send would make an early failure shadow the send that landed.
+
+        ``reserve_s`` is what the steps AFTER this one need; a retry starts
+        only when the budget still covers one more full send plus that.
+        """
+
+        first_failure: float | None = None
+        attempt = 0
+        while True:
+            attempt += 1
+            outcome, result = self._attempt(name, script, COMMAND_TIMEOUT_S)
+            if outcome.status != "unreachable" or attempt >= HOLD_RETRY_ATTEMPTS:
+                break
+            now = self._clock()
+            if first_failure is None:
+                first_failure = now
+            # Indexed by the send that just failed, holding on the last entry:
+            # the cadence is a schedule of waits, not a cap on how many fit.
+            delay = delays[min(attempt - 1, len(delays) - 1)] if delays else 0.0
+            if now + delay - first_failure > HOLD_RETRY_WINDOW_S:
+                break
+            if self._deadline - (now + delay) < COMMAND_TIMEOUT_S + reserve_s:
+                break
+            self._sleep(delay)
+        # A skipped final round sent nothing, so it does not count as a send.
+        sends = attempt if outcome.status != "skipped" else attempt - 1
+        self.steps.append(dataclasses.replace(outcome, attempts=sends))
+        return result
+
+    def _attempt(
+        self, name: str, script: str, timeout_s: float
+    ) -> tuple[StepOutcome, CommandResult | None]:
         remaining = self._deadline - self._clock()
         if remaining <= 0:
-            self.steps.append(StepOutcome(name=name, status="skipped", detail="budget exhausted"))
-            return None
+            return (
+                StepOutcome(name=name, status="skipped", detail="budget exhausted", attempts=0),
+                None,
+            )
         try:
-            result = self._run(_bash(script), min(COMMAND_TIMEOUT_S, remaining))
+            result = self._run(_bash(script), min(timeout_s, remaining))
         except Exception as error:
             # A transport failure (control server down, timeout, malformed
             # response) is indistinguishable from a guest that never answered,
             # and both mean the same thing to a reader: the guest was not
             # prepared. The TYPE is recorded; the message is not, because a
             # requests exception echoes the URL and query it was given.
-            self.steps.append(
-                StepOutcome(name=name, status="unreachable", detail=type(error).__name__)
+            return (
+                StepOutcome(name=name, status="unreachable", detail=_describe_error(error)),
+                None,
             )
-            return None
         detail = (result.stderr or result.stdout or "").strip()[:200]
-        self.steps.append(
+        return (
             StepOutcome(
                 name=name,
                 status="ok" if result.returncode == 0 else "failed",
                 returncode=result.returncode,
                 detail=detail,
-            )
+            ),
+            result,
         )
-        return result
+
+
+def _describe_error(error: BaseException) -> str:
+    """The exception's type, plus the HTTP status when the server sent one.
+
+    The status is the one value-free fact that separates "the control server
+    answered 500" (its exception envelope: a guest-side ``TimeoutExpired``, for
+    one) from "nothing answered at all" -- exactly what the t33v-t054 record
+    could not say, because it kept only ``HTTPError``. The message stays out for
+    the reason the caller gives: it echoes the URL, and the guest's own 500
+    message would echo the command, whose escalation ladder carries a password.
+    """
+
+    name = type(error).__name__
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if type(status) is int:
+        return f"{name} status={status}"
+    return name
 
 
 def _measure_free_bytes(session: _Session, name: str) -> int | None:
@@ -390,68 +580,136 @@ def prepare_guest_disk(
     *,
     client_password: str,
     clock: Clock,
+    grow_root: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
+    retry_delays: Sequence[float] = DEFAULT_RETRY_DELAYS_S,
 ) -> GuestDiskReport:
-    """Measure the guest's root filesystem and, if it is tight, reclaim it.
+    """Measure the guest's root filesystem, reclaim it if tight, grow it if asked.
 
     Returns a report in every case, including the cases where nothing could be
     measured or nothing could be run. It raises nothing by construction: see the
     module docstring for why an unreachable guest must not cost an episode that
     would otherwise have worked.
+
+    ``grow_root`` is upstream's own gate -- "was a volume size requested" --
+    and the caller passes exactly that; see the module docstring for why
+    growing on any other condition would hand the agent a disk upstream would
+    not. ``sleep`` and ``retry_delays`` pace the hold's retries (injected so the
+    provider uses its own recovery cadence and tests use no wall time).
     """
 
-    session = _Session(run, clock)
+    session = _Session(run, clock, sleep)
     free_before = _measure_free_bytes(session, "measure-free-before")
-    filesystem_bytes = None
-    disk_bytes = None
-
-    size_result = session.step("measure-geometry", _GEOMETRY_SCRIPT)
-    # Parsed whenever a number is present, NOT only on exit 0: the script
-    # prints the filesystem size first and the whole-disk size second, so a
-    # partial answer (an image without ``lsblk``, a ``df`` that printed and
-    # then something else failed) still yields what was measured. Gating on the
-    # exit code discarded a real ``df`` figure over a missing block-device
-    # tool, which is observability lost for no safety gained.
-    if size_result is not None:
-        numbers = [int(line) for line in size_result.stdout.split() if line.strip().isdigit()]
-        if numbers:
-            filesystem_bytes = numbers[0]
-        if len(numbers) > 1:
-            disk_bytes = numbers[1]
+    filesystem_bytes, disk_bytes = _measure_geometry(session, "measure-geometry")
 
     if free_before is not None and free_before >= RECLAIM_BELOW_FREE_BYTES:
-        return GuestDiskReport(
-            free_bytes_before=free_before,
-            free_bytes_after=free_before,
-            filesystem_bytes=filesystem_bytes,
-            disk_bytes=disk_bytes,
-            threshold_bytes=RECLAIM_BELOW_FREE_BYTES,
-            reclamation_attempted=False,
-            reason="above-threshold",
-            steps=tuple(session.steps),
-        )
+        reclamation_attempted = False
+        reason = "above-threshold"
+    else:
+        # An unmeasurable guest is reclaimed anyway. The steps are safe and
+        # reversible; the failure they prevent destroys a paid episode. Choosing
+        # to skip on a failed measurement would make the protection absent
+        # exactly when the guest is least healthy.
+        reclamation_attempted = True
+        reason = "below-threshold" if free_before is not None else "unmeasured"
+        _reclaim(session, client_password, retry_delays)
 
-    # An unmeasurable guest is reclaimed anyway. The steps are safe and
-    # reversible; the failure they prevent destroys a paid episode. Choosing to
-    # skip on a failed measurement would make the protection absent exactly when
-    # the guest is least healthy.
-    reason = "below-threshold" if free_before is not None else "unmeasured"
-    _reclaim(session, client_password)
-    free_after = _measure_free_bytes(session, "measure-free-after")
+    # AFTER the reclamation, never before: the hold and clear are what stop the
+    # fill, and they must not wait behind an ``apt-get update``. Growing first
+    # would also race snapd's downloads for the very space apt needs.
+    filesystem_after: int | None = None
+    grew = False
+    if grow_root:
+        grew = _grow_root_filesystem(session, client_password, filesystem_bytes, disk_bytes)
+        if grew:
+            filesystem_after, _ = _measure_geometry(session, "measure-geometry-after")
+
+    if reclamation_attempted or grew:
+        free_after = _measure_free_bytes(session, "measure-free-after")
+    else:
+        free_after = free_before
     return GuestDiskReport(
         free_bytes_before=free_before,
         free_bytes_after=free_after,
         filesystem_bytes=filesystem_bytes,
         disk_bytes=disk_bytes,
         threshold_bytes=RECLAIM_BELOW_FREE_BYTES,
-        reclamation_attempted=True,
+        reclamation_attempted=reclamation_attempted,
         reason=reason,
         steps=tuple(session.steps),
+        root_grow_requested=grow_root,
+        filesystem_bytes_after=filesystem_after,
     )
 
 
+def _measure_geometry(session: _Session, name: str) -> tuple[int | None, int | None]:
+    """(filesystem bytes, whole-disk bytes), each None when not measured.
+
+    Parsed whenever a number is present, NOT only on exit 0: the script prints
+    the filesystem size first and the whole-disk size second, so a partial
+    answer (an image without ``lsblk``, a ``df`` that printed and then something
+    else failed) still yields what was measured. Gating on the exit code
+    discarded a real ``df`` figure over a missing block-device tool, which is
+    observability lost for no safety gained.
+    """
+
+    result = session.step(name, _GEOMETRY_SCRIPT)
+    if result is None:
+        return None, None
+    numbers = [int(line) for line in result.stdout.split() if line.strip().isdigit()]
+    filesystem_bytes = numbers[0] if numbers else None
+    disk_bytes = numbers[1] if len(numbers) > 1 else None
+    return filesystem_bytes, disk_bytes
+
+
+def _grow_root_filesystem(
+    session: _Session,
+    client_password: str,
+    filesystem_bytes: int | None,
+    disk_bytes: int | None,
+) -> bool:
+    """Grow the root partition and filesystem into the volume; True if it ran.
+
+    IDEMPOTENT by two independent checks. Here: a filesystem already within
+    ``GROWN_WITHIN_BYTES`` of its disk is recorded as ``skipped`` and nothing is
+    sent. In the guest: ``growpart`` answers ``NOCHANGE`` for a partition that
+    cannot grow, which the fragment reads as success, and ``resize2fs`` on a
+    filesystem that already fills its partition is a no-op. A geometry that
+    could not be measured is grown anyway: upstream runs its script without
+    measuring at all, and both guest-side checks still hold.
+
+    BOUNDED by ``GROW_TIMEOUT_S``, funded outside the reclamation budget (see
+    that constant). ADVISORY: never in ``_RECLAMATION_STEP_NAMES``, so a failed
+    grow is recorded, not refused -- the module docstring has the reasoning.
+    """
+
+    if (
+        filesystem_bytes is not None
+        and disk_bytes is not None
+        and disk_bytes - filesystem_bytes <= GROWN_WITHIN_BYTES
+    ):
+        session.steps.append(
+            StepOutcome(
+                name=GROW_STEP_NAME,
+                status="skipped",
+                detail="filesystem already spans the volume",
+                attempts=0,
+            )
+        )
+        return False
+    session.extend(GROW_TIMEOUT_S + COMMAND_TIMEOUT_S)
+    session.step(
+        GROW_STEP_NAME,
+        escalation_script(_GROW_ROOT_FRAGMENT, client_password),
+        timeout_s=GROW_TIMEOUT_S,
+    )
+    return True
+
+
 # Filesystem size, then the size of the whole block device the root filesystem
-# sits on. Read-only: nothing here alters the partition table (see the module
-# docstring for why growing it is deliberately out of scope). The block-device
+# sits on. Read-only: growing is the separate, gated ``grow-root-filesystem``
+# step (``_GROW_ROOT_FRAGMENT``), and this script runs again after it as
+# ``measure-geometry-after`` to show what the grow achieved. The block-device
 # half is best-effort (``|| true``): without it a guest lacking ``findmnt`` or
 # ``lsblk`` exits 127 from the ``&&`` chain and the ``df`` figure that WAS
 # printed arrives under a non-zero status. Its own stderr is dropped so the
@@ -517,6 +775,65 @@ _CLEAR_DOWNLOAD_SCRATCH_FRAGMENT = (
     f"exit $rc"
 )
 
+#: The grow step's name in ``guest-preparation.json``. Deliberately NOT in
+#: ``_RECLAMATION_STEP_NAMES``: it is advisory (see the module docstring).
+GROW_STEP_NAME = "grow-root-filesystem"
+
+# Upstream's ``_expand_linux_guest_volume`` (vendored
+# ``desktop_env/providers/volume.py``), as one privileged fragment. The same
+# discovery (``findmnt`` for the root source and fstype, ``lsblk PKNAME`` for
+# the disk, ``/sys/class/block/<dev>/partition`` then ``lsblk PARTN`` for the
+# partition number), the same install of ``cloud-guest-utils`` when ``growpart``
+# is missing, and the same per-fstype resize. Differences, each on purpose:
+#
+# * It runs INSIDE the escalation ladder's ``sudo bash -c``, so there is no
+#   ``sudo_cmd`` helper and the password is never embedded in the script body.
+# * A failure EXITS NON-ZERO with a one-line ``grow=<reason>`` instead of
+#   upstream's ``|| true``: the step is advisory either way, but the record must
+#   say which link broke, or a fidelity gap is invisible.
+# * ``growpart``'s ``NOCHANGE`` (the partition already fills the disk) is
+#   success, which is what makes the fragment safe to run twice.
+# * apt waits up to 60 s for the dpkg lock: a fresh Ubuntu guest runs
+#   ``unattended-upgrades`` at boot, and upstream's bare ``apt-get`` would fail
+#   on the lock instead of waiting it out. Its output is discarded so the
+#   step's 200-character detail is the summary line, not apt's progress.
+# * ``parted`` is not installed and ``partprobe`` not run: ``growpart`` informs
+#   the kernel itself (``partx --update`` / ``resizepart``), and upstream treats
+#   ``partprobe`` as optional (``|| true``).
+# * No ``[ -b ]`` test: ``lsblk`` returning a parent disk is the same evidence
+#   (it fails for anything that is not a partition of a block device) and keeps
+#   the fragment exercisable against stubs.
+_GROW_ROOT_FRAGMENT = (
+    "src=$(findmnt -no SOURCE /) || { echo grow=unsupported root=unknown; exit 3; }; "
+    "fstype=$(findmnt -no FSTYPE /); "
+    'dev=$(readlink -f -- "$src" 2>/dev/null || printf %s "$src"); '
+    "name=${dev##*/}; "
+    'disk=$(lsblk -ndo PKNAME "$dev" 2>/dev/null | head -n 1); '
+    'part=$(cat "/sys/class/block/$name/partition" 2>/dev/null); '
+    '[ -n "$part" ] || part=$(lsblk -ndo PARTN "$dev" 2>/dev/null | head -n 1); '
+    'if [ -z "$disk" ] || [ -z "$part" ]; then echo "grow=unsupported dev=$dev"; exit 3; fi; '
+    "installed=0; "
+    "if ! command -v growpart >/dev/null 2>&1; then "
+    "apt-get -qq -o DPkg::Lock::Timeout=60 update >/dev/null 2>&1; "
+    "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=60 "
+    "--no-install-recommends cloud-guest-utils >/dev/null 2>&1; "
+    "command -v growpart >/dev/null 2>&1 || { echo grow=no-growpart install=failed; exit 4; }; "
+    "installed=1; fi; "
+    'out=$(growpart "/dev/$disk" "$part" 2>&1); gprc=$?; '
+    'case "$out" in *NOCHANGE*) state=nochange;; '
+    "*) if [ $gprc -ne 0 ]; then echo grow=growpart-failed rc=$gprc; exit 5; fi; "
+    "state=grown;; esac; "
+    "udevadm settle >/dev/null 2>&1 || true; "
+    'case "$fstype" in '
+    'ext2|ext3|ext4) resize2fs "$dev" >/dev/null 2>&1;; '
+    "xfs) xfs_growfs / >/dev/null 2>&1;; "
+    "btrfs) btrfs filesystem resize max / >/dev/null 2>&1;; "
+    '*) echo "grow=unsupported-fs fs=$fstype"; exit 6;; esac; '
+    "rs=$?; "
+    'echo "grow=$state fs=$fstype resize_rc=$rs growpart_installed=$installed"; '
+    "exit $rs"
+)
+
 #: The steps whose failure means the guest is still on the trajectory the
 #: measurements describe: snapd downloading into a filesystem that has no room
 #: for it. ``blocking_steps`` reports them and ``providers/aws.py`` refuses the
@@ -537,7 +854,7 @@ _RECLAMATION_STEP_NAMES = frozenset(
 _COVERING_STEPS = {"hold-snap-auto-refresh": "hold-snap-auto-refresh-fallback"}
 
 
-def _reclaim(session: _Session, client_password: str) -> None:
+def _reclaim(session: _Session, client_password: str, retry_delays: Sequence[float]) -> None:
     """Stop snapd filling the disk, then delete what it already downloaded.
 
     ORDER IS LOAD-BEARING: abort, then hold, then clear.
@@ -582,11 +899,27 @@ def _reclaim(session: _Session, client_password: str) -> None:
     # thing. Running the fallback unconditionally would be a second write to the
     # same setting on every modern guest, so it is conditional on the first
     # failing.
-    held = session.step("hold-snap-auto-refresh", privileged("snap refresh --hold=forever"))
+    #
+    # Both are re-sent while the control server cannot answer them (see
+    # ``HOLD_RETRY_ATTEMPTS`` for the measured case and why a hold may be
+    # re-sent when nothing else may). The fallback still runs if the hold is
+    # unreachable after its retries: it is the same hold by another name, and a
+    # step that never landed is never silently dropped -- it stays in the record
+    # and in ``blocking_steps``.
+    held = session.step_retrying_unreachable(
+        "hold-snap-auto-refresh",
+        privileged("snap refresh --hold=forever"),
+        delays=retry_delays,
+        # The fallback and the clear may both still have to run.
+        reserve_s=2 * COMMAND_TIMEOUT_S,
+    )
     if held is None or held.returncode != 0:
-        session.step(
+        session.step_retrying_unreachable(
             "hold-snap-auto-refresh-fallback",
             privileged(f"snap set system refresh.hold={_FALLBACK_HOLD_UNTIL}"),
+            delays=retry_delays,
+            # Only the clear is left after the fallback.
+            reserve_s=COMMAND_TIMEOUT_S,
         )
 
     # The contents, not the directory: snapd expects the directory to exist.

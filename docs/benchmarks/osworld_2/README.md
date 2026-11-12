@@ -379,7 +379,8 @@ filling on a clock rather than on workload:
 > **INERT** — the guest's root filesystem measured **30,993,747,968 bytes** in
 > both a 40 GiB and a 120 GiB volume, because the adapter builds
 > `DesktopEnv(...)` without `volume_size=`, so upstream's `expand_guest_volume`
-> never runs.
+> never runs. (Fixed 2026-11-12: the preparation step `grow-root-filesystem`
+> now does upstream's grow whenever a volume size is requested — see below.)
 
 The measured consumer is **snapd**, inside the guest:
 
@@ -432,13 +433,18 @@ carries no `growpart` and `apt-get install cloud-guest-utils` cannot run on a
 disk with no free space" — is now the measured END state of every run, at every
 volume size. Do not read a longer run as the volume buying room.
 
-The value is still accepted (validated at `prepare`, stamped into the evidence
-manifest when set) and setting it is harmless. What it is not is a lever for
-this failure. The one-line change that would make it a lever — passing
-`volume_size=` to the `DesktopEnv` construction — is NOT made here: it changes
-the guest's hardware contract inside the benchmark, and the reclamation below
-addresses the cause instead. See "Growing the partition is deliberately not
-done".
+**Since 2026-11-12 the filesystem IS grown when a volume size is requested**,
+because that is upstream's own contract: `DesktopEnv(volume_size=N)` both sizes
+the EBS volume and runs `expand_guest_volume` (`growpart` + `resize2fs`,
+installing `cloud-guest-utils` first), while `volume_size=None` leaves the
+AMI's 29.5G filesystem inside the 40 GiB default untouched. The adapter's
+`AWS_ROOT_VOLUME_SIZE` (or a task's own `volume_size`) is that parameter, so
+the preparation step `grow-root-filesystem` runs exactly when it is set — the
+agent gets the disk upstream gives a run with the same `--volume_size`, no
+more, and the run is already disclosed by `aws_root_volume_size_override`.
+Before this, all 84 `guest-preparation.json` records of the 2026-11 campaign
+started at ~2.2 GB free beside ~90 GiB of paid, unreachable volume. See "Growing
+the root filesystem" below.
 
 It is infra rather than a task field for the same reason as the instance type:
 task files are **content-hash verified**, so editing `volume_size` invalidates
@@ -677,13 +683,32 @@ future change could cross without noticing:
   `observation_content_id`, and a content-addressed observation id must be a
   function of what the model saw, not of the guest's filesystem.
 
-**Growing the partition is deliberately not done.** `growpart` is absent, and
-the in-place `sfdisk` alternative rewrites the root partition table where a
-wrong start sector destroys the guest. A hygiene step that can fail *hard* is
-exactly what this must not be. The disk-vs-filesystem geometry is **reported**
-instead, read-only — and that pair of numbers is what made the
-`AWS_ROOT_VOLUME_SIZE` claim above checkable from any bundle: 30,993,747,968 in
-a 40 GiB volume says the override never reached the filesystem.
+**Growing the root filesystem — only when a volume size was requested.** The
+step `grow-root-filesystem` runs after the snapd reclamation (the hold and clear
+must not wait behind `apt-get`), mirrors upstream's `_expand_linux_guest_volume`
+(root source/fstype from `findmnt`, disk and partition from `lsblk` and
+`/sys/class/block`, `cloud-guest-utils` installed when `growpart` is missing,
+then `resize2fs` / `xfs_growfs` / `btrfs resize`), and runs through the same
+escalation ladder as every privileged step. It is idempotent (`growpart`
+`NOCHANGE` is success; a filesystem within 2 GiB of its disk is recorded as
+`skipped` without a send), bounded by its own 180 s ceiling outside the
+reclamation budget, and **advisory**: a failed grow is recorded with a one-line
+`grow=<reason>` and never refuses the episode, because upstream itself tolerates
+a failed `growpart` and a held guest runs at 2.2 GB free. `sfdisk` is still never
+called directly. The report carries `root_grow_requested` and
+`filesystem_bytes_after`: a grown guest reads `filesystem_bytes_after` within
+2 GiB of `disk_bytes`; one that is not shows the fidelity gap and the step's
+detail names the link that broke.
+
+**The snapd hold is retried while the control server cannot answer it.** Two of
+84 campaign records show `hold-snap-auto-refresh` `unreachable / HTTPError`
+between an `ok` abort and an `ok` clear — the server was up and answered
+non-2xx — and one of them (t33v-t054) refused its episode. The hold and its
+fallback are idempotent, so an `unreachable` send is re-sent on the provider's
+recovery cadence (up to 4 sends within 90 s, and only while the budget still
+funds the steps after it); the step is recorded once with `attempts`, and a hold
+that never lands still blocks. `unreachable` details now carry the HTTP status
+(`HTTPError status=500`) so the next such record says whether the guest answered.
 
 ### Guest X-display leak: upstream's fix applied at episode start (deviation from the stock AMI)
 
