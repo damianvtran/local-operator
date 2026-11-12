@@ -4461,8 +4461,15 @@ def _make_run_command(
                 timeout_s=timeout_s,
                 max_output_bytes=64 * 1024,
             ),
-            # Leave the target time to stop the child and serialize its result.
-            timeout=timeout_s + 15,
+            # Leave the target time to stop the child and serialize its result,
+            # AND to answer a lost reply. The OSWorld adapter bounds its own
+            # wait at ``timeout_s + 10`` wall-clock and then takes one liveness
+            # probe (worst case ~4 s) before deciding between an unknown-outcome
+            # answer and the poisoning error; at ``+ 15`` that answer would
+            # land within ~1 s of this deadline, and a deadline that fires first
+            # tears the RPC channel down -- losing the episode the probe exists
+            # to keep. ``+ 20`` leaves ~6 s of scheduling margin.
+            timeout=timeout_s + 20,
         )
 
     return run
