@@ -163,6 +163,19 @@ _EXECUTE_PATH = "/execute"
 # bound lives in ``providers.base`` (``TRANSPORT_RETRY_ATTEMPTS``), where every
 # remote provider can share it.
 _EXECUTE_READINESS_TIMEOUT_S = 2.0
+# A command's host-side deadline past its own ``timeout_s``: the guest wrapper
+# stops the shell at ``timeout_s``, ``/execute``'s own deadline is ``timeout_s +
+# 5`` (``remote_command.payload_for``), and this is the transport slack beyond
+# that -- the same ordering ``GUEST_TRANSPORT_MARGIN_S`` explains. Enforced as a
+# WALL-CLOCK bound in ``run_command``, which the harness's RPC deadline
+# (``session_arm._make_run_command``) must exceed by the probe below.
+_COMMAND_SOCKET_SLACK_S = 10.0
+# The liveness probe taken after a LOST command reply (``_command_reply_lost``).
+# ``/platform`` measured 0.05-0.18 s in every guest state (``_LIVENESS_PATH``,
+# 10 samples per state), so 2 s is >10x the observed max; ``requests`` applies it
+# to connect and read separately, so the probe's worst case is ~4 s. Kept short
+# because it runs inside the same RPC deadline as the command.
+_COMMAND_REPLY_LOST_PROBE_TIMEOUT_S = 2.0
 
 # Waiting for the action server while the supervisor's receipt is unreadable.
 #
@@ -1500,11 +1513,26 @@ class AwsProvider:
         same class: ``http_post_json`` raises before ``decode_result`` sees it,
         and an unreadable answer is not a lost reply.
 
-        A genuine channel failure still escapes without retries: connection
-        refused, a lost reply, a redirect, a body that is not the guest's
-        protocol answer at all. A command that may already have run must never
-        be replayed, and that ambiguity is the session's to end, not this
-        layer's to paper over.
+        A LOST REPLY (connection refused or reset, a read that timed out, the
+        whole call outrunning its wall-clock deadline) is never retried -- a
+        command that may already have run must not be replayed -- but it is
+        followed by ONE cheap liveness probe (``_command_reply_lost``). A guest
+        that answers gets an unknown-outcome RESULT and the session lives; a
+        guest that does not answer gets the original error re-raised, which
+        poisons exactly as before. A redirect, or a non-2xx body that is not the
+        guest's protocol answer, still escapes unprobed: the guest did not
+        speak, and there is nothing a liveness check could add.
+
+        WHY THE SPLIT IS HERE, not in the harness beside ``ObservationPhaseError``
+        / ``ActionNotAppliedError``. The harness sees only an answered
+        ``adapter_error`` whose phase is ``unknown`` -- the same wire shape as an
+        ``AdapterStateError`` or a provider bug -- so it could make this split
+        only by matching exception names (which ``worker._error_phase`` refuses
+        to do) or by a new ``ErrorPhase`` value (a closed ``Literal``: a schema
+        bump that re-pins every arm). This layer is the one that KNOWS the
+        failure was transport, and it owns the liveness endpoint. ``execute``
+        (the GUI batch) is untouched: its own lost-reply contract lives in
+        ``guest_loss`` and the harness's ambiguous-delivery gate.
         """
         import requests  # local, like ``build_clients``: the HTTP client is optional
         from lop_osworld_v2_adapter.remote_command import (
@@ -1518,12 +1546,27 @@ class AwsProvider:
         # Built OUTSIDE the ``try`` below, so the ``ValueError`` arm can only ever
         # mean the transport answered something unreadable.
         payload = payload_for(params)
+        deadline = params.timeout_s + _COMMAND_SOCKET_SLACK_S
         try:
-            body = await asyncio.to_thread(
-                self._clients.http_post_json,
-                url,
-                payload,
-                params.timeout_s + 10,
+            # ``wait_for`` makes ``deadline`` a WALL-CLOCK bound. ``requests``
+            # applies its timeout per socket read, so on its own it is not one:
+            # both sealed losses took 75.3/75.4 s against a 70 s socket timeout
+            # because the status line arrived and the BODY read then stalled
+            # (the failure surfaced in ``models.py content``, as a
+            # ``ConnectionError`` wrapping ``ReadTimeoutError``, not as
+            # ``ReadTimeout`` from ``adapters.send``). That overrun had already
+            # eaten the harness's whole RPC slack (``timeout_s + 15``), leaving
+            # no room for the probe below. A cancelled wait leaves the worker
+            # thread to finish its own bounded read and drop the result; nothing
+            # in it is replayed.
+            body = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._clients.http_post_json,
+                    url,
+                    payload,
+                    deadline,
+                ),
+                timeout=deadline,
             )
         except requests.HTTPError as error:
             response = error.response
@@ -1552,7 +1595,45 @@ class AwsProvider:
             # session.
             logger.warning("guest answered an unreadable 2xx body for a command: %r", error)
             return unreadable_answer(error)
+        except (requests.ConnectionError, requests.Timeout, TimeoutError) as error:
+            # ``requests.ConnectionError`` covers refused/reset connects, a
+            # ConnectTimeout, and the body-read stall the sealed runs hit;
+            # ``requests.Timeout`` the header-read ``ReadTimeout``;
+            # ``TimeoutError`` the wall-clock bound above. None of them says
+            # whether the command ran.
+            return await self._command_reply_lost(error, deadline)
         return decode_result(body, params)
+
+    async def _command_reply_lost(self, error: BaseException, deadline: float) -> RunCommandResult:
+        """Answer a lost command reply if the guest is alive; else re-raise it.
+
+        Reuses the mid-episode liveness probe (``_probe_control_server_outcome``,
+        ``/platform``: no desktop, AT-SPI or subprocess work) that the
+        harness's ``probe`` RPC already trusts after an ambiguous ``execute``.
+        It is a GET, so it cannot replay the command. Its value-free record is
+        logged either way, so the next loss says whether the guest was alive --
+        the one fact the two sealed runs could not tell us, because the poisoned
+        session never touched the guest again.
+        """
+
+        from lop_osworld_v2_adapter.remote_command import reply_lost_answer
+
+        answered, record = await asyncio.to_thread(
+            self._probe_control_server_outcome, _COMMAND_REPLY_LOST_PROBE_TIMEOUT_S
+        )
+        # Type name only: a ``requests`` message embeds the guest's address.
+        kind = type(error).__name__
+        logger.warning(
+            "command reply lost (%s, deadline %.1f s); liveness probe: %s",
+            kind,
+            deadline,
+            record,
+        )
+        if not answered:
+            # A guest that does not answer is the dead-environment case the
+            # poison exists for: the ORIGINAL error escapes, unchanged.
+            raise error
+        return reply_lost_answer(kind, deadline)
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float
