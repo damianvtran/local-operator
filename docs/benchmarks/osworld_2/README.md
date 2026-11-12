@@ -153,7 +153,37 @@ it is diagnostics, not prevention. The four defects the campaign measured on
 that side — a judge the apparatus cannot construct, an evaluator that read the
 wrong browser tab, a provider-prefix re-billing class, and the boundary of what
 these records can classify at all — are recorded under
-[Measured scoring-side defects](#measured-scoring-side-defects) in section 8.
+[Measured scoring-side defects](#measured-scoring-side-defects) in section 8,
+together with a fifth: a reasoning judge that cannot answer inside the checkers'
+token caps (see "Judge configuration" next).
+
+#### Judge configuration (deviation from upstream)
+
+Upstream's judged checkers call `model_client.generate_text(...,
+default_model="gpt-5.2")` with caps sized for that judge. Most caps are tiny:
+`max_tokens` 5, 10 or 16 for a YES/NO verdict, and 1500 for task_025's JSON form
+judgment. The operator excludes Western providers for benchmark use, so this
+campaign judges with `OSWORLD_EVAL_MODEL_PROVIDER=openrouter` and
+`OSWORLD_EVAL_MODEL_NAME=qwen/qwen3.8-max-0902` (`run_arm_21.sh`
+`JUDGE_PROVIDER`/`JUDGE_MODEL`). **Every judged score is therefore a
+judge-configuration deviation and must name the judge; scores from different
+judges are not comparable.**
+
+That judge is **unusable at upstream's caps**, measured on 2026-11-11. It always
+reasons (OpenRouter refuses `reasoning_effort=none` with HTTP 400 "Reasoning is
+mandatory"), and the reasoning counts against the cap. task_003's cap-5 call
+returns `finish_reason=length` with empty content, which the checker reads as a
+silent NO. task_025's cap-1500 call does the same (`reasoning_tokens=1500/1500`)
+and raises `Task025EvaluationError`, which left `t30a-t025-20261111-222346`
+unscored. The apparatus cannot raise the cap or bound the reasoning: the worker
+environment is a closed allowlist, and the checker's `options` take precedence
+over `OSWORLD_EVAL_MODEL_MAX_OUTPUT_TOKENS`. A replacement judge must therefore
+answer inside the unchanged caps and accept images (15 of the 21 judged tasks
+pass them). The candidate measurements, sealed-result impact and the wiring each
+candidate needs are in
+[`records/EVAL-JUDGE-FINDING-reasoning-budget.md`](records/EVAL-JUDGE-FINDING-reasoning-budget.md).
+Until a replacement is chosen and recorded here, a judged result from the
+qwen3.8-max judge is not a capability measurement.
 
 ### Step budget
 
@@ -1417,6 +1447,15 @@ allocation** for anything unrecognised — is in review as PR #1887 (which
 also discloses the spend surface, since an enabled judge now spends the call it
 was always configured for). The record is
 [`records/EVAL-JUDGE-FINDING-1830-task_003.md`](records/EVAL-JUDGE-FINDING-1830-task_003.md).
+
+**A reasoning judge cannot answer inside the checkers' token caps.** Even with
+the provider fixed (above), `qwen/qwen3.8-max-0902` spends the whole cap on
+mandatory reasoning and returns empty content: a silent NO for task_003 (cap 5)
+and an `unscored` crash for task_025 (cap 1500). In this campaign's 20-task
+sample, both sealed task_003 zeros were also failed independently by a
+mechanical check, so neither score changed. The judge could never have passed
+them, though. See "Judge configuration" in section 1 and
+[`records/EVAL-JUDGE-FINDING-reasoning-budget.md`](records/EVAL-JUDGE-FINDING-reasoning-budget.md).
 
 **An evaluator can read the wrong browser tab and score the task 0.** task_009's
 evaluator selects a tab by `tab_prefix`, which for that task is the **bare
