@@ -245,6 +245,33 @@ OPERATOR_INSTRUCTIONS_CARRIED_FIELDS: tuple[str, ...] = ("name", "text")
 OPERATOR_INSTRUCTIONS_INDEX_KEY = "operator_instructions"
 OPERATOR_INSTRUCTIONS_CONFLICT_KEY = "operator_instructions_conflict"
 
+#: THE OPERATOR'S SUBAGENT MODEL TIERS (``values.subagents.models`` plus
+#: ``values.subagents.model_choice``) as one singleton row. WHY IT TRAVELS: a role
+#: or team slot pinned to ``effort: hi`` resolves that tier against the config of
+#: the device the session RUNS on (``harness.subagent.resolve_member_model``), so a
+#: session on a mesh node whose config had no ``subagents.models`` refused every
+#: pinned launch — measured on lop-remote-node-2 as "effort tier 'hi' is
+#: unavailable: no model configured at subagents.models.hi", which left designer
+#: and ux-reviewer unlaunchable there. The roles travel in this bundle already; the
+#: tier map they point at did not.
+#:
+#: WHAT TRAVELS IS THE TIER MAP AND NOTHING ELSE: tier name -> ``provider/model``
+#: selector (or the ``{model, effort}`` mapping #2428 allows), and the
+#: ``model_choice`` switch. Never a credential, never any other config key — the
+#: row is BUILT from those two leaves (:func:`_subagent_tiers_row`), so a sibling
+#: key cannot ride along, and the credential scan runs over it like every row.
+#: Same author-owns-the-row policy as the operator instructions, and the same
+#: exception: a conflict is recorded, never a failed push or create.
+SUBAGENT_TIERS_KIND = "subagent_tiers"
+SUBAGENT_TIERS_CARRIED_FIELDS: tuple[str, ...] = ("name", "models", "model_choice")
+SUBAGENT_TIERS_INDEX_KEY = "subagent_tiers"
+SUBAGENT_TIERS_CONFLICT_KEY = "subagent_tiers_conflict"
+#: Receipt bounds. A real map is three ``provider/model`` ids (~150 bytes); 4 KiB
+#: is generous headroom and still makes a hostile or corrupt row cheap to refuse.
+#: 256 characters per selector is past every model id in the catalogue.
+MAX_SUBAGENT_TIERS_BYTES = 4096
+MAX_TIER_SELECTOR_CHARS = 256
+
 #: Bounds, all of them the ones the product already applies locally where one
 #: exists: a definition rides in front of a session's prompt on every turn, so an
 #: unbounded body is an unbounded per-turn bill, and an unbounded ROW COUNT is an
@@ -579,6 +606,10 @@ def _row_texts(row: Mapping[str, Any]) -> list[str]:
     the top level — see :func:`_agent_row_from_bundle`/:func:`_team_row_from_bundle`.
     """
     out: list[str] = []
+    if str(row.get("kind") or "") == SUBAGENT_TIERS_KIND:
+        for name in SUBAGENT_TIERS_CARRIED_FIELDS:
+            out.extend(_flatten_text(row.get(name)))
+        return out
     if str(row.get("kind") or "") == OPERATOR_INSTRUCTIONS_KIND:
         for name in OPERATOR_INSTRUCTIONS_CARRIED_FIELDS:
             out.extend(_flatten_text(row.get(name)))
@@ -795,6 +826,350 @@ def operator_instructions_state(root: Path) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# The subagent model tiers singleton
+# ---------------------------------------------------------------------------
+
+
+def _tier_names() -> tuple[str, ...]:
+    # The closed set the launch path honours: a tier outside it is never read, so
+    # carrying one would only be bytes (and an unvalidated key) on the node.
+    from local_operator.model.effort import CANONICAL_EFFORT_TIERS
+
+    return tuple(CANONICAL_EFFORT_TIERS)
+
+
+def _model_choices() -> tuple[str, ...]:
+    from local_operator.harness.subagent import (
+        MODEL_CHOICE_MODEL,
+        MODEL_CHOICE_OPERATOR,
+    )
+
+    return (MODEL_CHOICE_OPERATOR, MODEL_CHOICE_MODEL)
+
+
+def _normalise_tier_selector(value: Any) -> Any:
+    """A tier value in its canonical, comparable form, or ``None`` when unusable.
+
+    One normaliser for both ends, so the digest the node records on install is the
+    digest it re-reads from its own config (no re-send loop): a string is stripped;
+    a mapping goes through the launch path's own parser (``parse_tier_mapping``) so
+    a value accepted here is one the node's launch resolves.
+    """
+    from local_operator.model.effort import parse_tier_mapping
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or len(text) > MAX_TIER_SELECTOR_CHARS or text.startswith("{"):
+            return None
+        if any(ord(char) < 32 for char in text):
+            return None
+        return text
+    if isinstance(value, Mapping):
+        if not all(isinstance(item, str) for item in value.values()):
+            return None
+        parsed = parse_tier_mapping(dict(value))
+        if parsed is None or len(parsed[0]) > MAX_TIER_SELECTOR_CHARS:
+            return None
+        # The stored effort word is kept as written (lowercased), ``auto`` included:
+        # the node then holds exactly what the head holds, which is what the digest
+        # compares.
+        effort = value.get("effort")
+        return {
+            "model": parsed[0],
+            **({"effort": str(effort).strip().lower()} if effort is not None else {}),
+        }
+    return None
+
+
+def _subagent_tiers_row(models: Any, model_choice: Any) -> dict[str, Any] | None:
+    """The singleton row for an incoming or local tier map, or ``None`` if empty.
+
+    STRICT: every carried tier must be a known tier name with a usable value, and
+    ``model_choice`` (when present) one of the two words the reader accepts.
+    Raises ``ValueError`` naming the first problem, which is the receiver's refusal
+    reason and the sender's reason for not sending.
+    """
+    if models is None:
+        models = {}
+    if not isinstance(models, Mapping):
+        raise ValueError("subagents.models is not a mapping")
+    known = _tier_names()
+    out: dict[str, Any] = {}
+    for tier, value in models.items():
+        if not isinstance(tier, str) or tier not in known:
+            raise ValueError(f"{tier!r} is not a model tier ({', '.join(known)})")
+        selector = _normalise_tier_selector(value)
+        if selector is None:
+            raise ValueError(f"subagents.models.{tier} is not a usable model id")
+        out[tier] = selector
+    row: dict[str, Any] = {"kind": SUBAGENT_TIERS_KIND, "name": SUBAGENT_TIERS_KIND}
+    if out:
+        row["models"] = {tier: out[tier] for tier in known if tier in out}
+    if model_choice is not None:
+        choice = model_choice.strip().lower() if isinstance(model_choice, str) else None
+        if choice not in _model_choices():
+            raise ValueError("subagents.model_choice is not 'operator' or 'model'")
+        row["model_choice"] = choice
+    if "models" not in row and "model_choice" not in row:
+        return None
+    if len(canonical(row).encode("utf-8")) > MAX_SUBAGENT_TIERS_BYTES:
+        raise ValueError(f"the tier map is over {MAX_SUBAGENT_TIERS_BYTES} bytes")
+    return row
+
+
+def _subagent_tiers_on_disk(root: Path) -> tuple[dict[str, Any] | None, bool]:
+    """``(row or None, unreadable)`` for this device's own tier map.
+
+    Reads ONLY the canonical tiers and ``model_choice`` out of ``subagents``: a
+    leftover non-canonical key is never sent (the launch never reads it) and never
+    makes the node "own" its tiers. A value the strict builder refuses is still the
+    operator's choice on THIS device, so it is kept as its text — the row is then
+    non-empty and distinct, the node reads as ``authored``/``edited``, and a mirror
+    never overwrites a (broken) value somebody typed here.
+    """
+    from local_operator.config import ConfigManager
+
+    try:
+        raw = ConfigManager(root).get_config_value("subagents", None)
+    except Exception:  # noqa: BLE001 — unreadable is a state, reported, never written over
+        logger.debug("definitions: could not read subagents config", exc_info=True)
+        return None, True
+    raw_models = raw.get("models") if isinstance(raw, Mapping) else None
+    raw_choice = raw.get("model_choice") if isinstance(raw, Mapping) else None
+    models: dict[str, Any] = {}
+    if isinstance(raw_models, Mapping):
+        for tier in _tier_names():
+            value = raw_models.get(tier)
+            if value in (None, ""):
+                # Empty and absent both REMOVE a tier (``read_effort_tier_selectors``).
+                continue
+            models[tier] = _normalise_tier_selector(value) or str(value)[:MAX_TIER_SELECTOR_CHARS]
+    row: dict[str, Any] = {"kind": SUBAGENT_TIERS_KIND, "name": SUBAGENT_TIERS_KIND}
+    if models:
+        row["models"] = models
+    if raw_choice is not None and raw_choice != "":
+        choice = str(raw_choice).strip().lower()
+        row["model_choice"] = choice if choice in _model_choices() else str(raw_choice)[:64]
+    if "models" not in row and "model_choice" not in row:
+        return None, False
+    return row, False
+
+
+def subagent_tiers_state(root: Path) -> dict[str, Any]:
+    """What this device holds for the tier singleton: the peer state reply and the CLI.
+
+    Same vocabulary as :func:`operator_instructions_state`: ``absent``,
+    ``unreadable``, ``authored``, ``mirror``, ``edited``; ``conflict`` is the last
+    revision this device refused. The ``models`` map is included because it is a
+    handful of model ids and the operator's first question on a node is "which
+    model does hi run on here".
+    """
+    index = read_index(root)
+    row, unreadable = _subagent_tiers_on_disk(root)
+    recorded = index.get(SUBAGENT_TIERS_INDEX_KEY)
+    recorded = recorded if isinstance(recorded, Mapping) else None
+    conflict = index.get(SUBAGENT_TIERS_CONFLICT_KEY)
+    digest = digest_of(row) if row is not None else ""
+    if unreadable:
+        status = "unreadable"
+    elif row is None:
+        status = "absent"
+    elif recorded is None:
+        status = "authored"
+    elif str(recorded.get("digest") or "") == digest:
+        status = "mirror"
+    else:
+        status = "edited"
+    return {
+        "digest": digest,
+        "status": status,
+        "origin": str(recorded.get("origin") or "") if recorded is not None else "",
+        "models": dict(row.get("models") or {}) if row is not None else {},
+        "conflict": dict(conflict) if isinstance(conflict, Mapping) else None,
+    }
+
+
+def _write_subagent_tiers(root: Path, row: Mapping[str, Any], origin: str) -> None:
+    """Install the tier map through the settings registry's own write path.
+
+    WHY NOT A YAML EDIT: ``config.yml`` holds every other setting the node's
+    operator chose. ``settings_io._store`` -> ``ConfigManager.set_config_value``
+    is the writer every settings surface funnels through: it re-reads the file
+    under the config write lock, keeps every key the payload does not model,
+    and lands the result with a same-directory temp file + ``os.replace`` (atomic:
+    a session booting never reads a torn config). The whole ``subagents`` section
+    is written as ONE store, so the tiers and ``model_choice`` change together.
+
+    Each value is first checked by the registry's own row validator
+    (``settings_io.validate``) so a mirror can never store what the Settings page
+    would refuse. ``notify`` is deliberately not fired: the in-process watcher's
+    fan-out is the operator's ``source="local"`` attribution, which a write a PEER
+    caused must not mint; the config watcher's poll still delivers the change.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.config_writer import config_write_lock
+
+    manager = ConfigManager(root)
+    rows = {setting.key: setting for setting in settings_io.SETTINGS}
+    models = dict(row.get("models") or {})
+    with config_write_lock(manager.config_dir):
+        settings_io._reload_before_write(manager)  # noqa: SLF001 — the registry's writer
+        values = manager.get_config().values
+        for tier, value in models.items():
+            setting = rows.get(f"subagents.models.{tier}")
+            problem = settings_io.validate(setting, value, values) if setting else None
+            if problem is not None:
+                raise ValueError(f"subagents.models.{tier}: {problem}")
+        existing = manager.get_config_value("subagents", None)
+        section: dict[str, Any] = dict(existing) if isinstance(existing, Mapping) else {}
+        old_models = section.get("models")
+        new_models: dict[str, Any] = dict(old_models) if isinstance(old_models, Mapping) else {}
+        drop: dict[tuple[str, ...], str] = {}
+        reason = f"mirrored subagent tiers from {origin or 'a peer'}"
+        for tier in _tier_names():
+            if tier in models:
+                new_models[tier] = models[tier]
+            elif tier in new_models:
+                # The author removed this tier: an untouched mirror follows it.
+                del new_models[tier]
+                drop[("subagents", "models", tier)] = reason
+        section["models"] = new_models
+        if "model_choice" in row:
+            section["model_choice"] = row["model_choice"]
+        elif "model_choice" in section:
+            del section["model_choice"]
+            drop[("subagents", "model_choice")] = reason
+        settings_io._store(manager, ("subagents",), section, drop=drop)  # noqa: SLF001
+    settings_io._invalidate_caches()  # noqa: SLF001 — same post-write step as write_setting
+
+
+def _apply_subagent_tiers_locked(
+    root: Path, row: dict[str, Any], origin: str, index: dict[str, Any]
+) -> dict[str, Any]:
+    """Install the author's tier map here unless this device's operator set their own.
+
+    The operator-instructions policy (:func:`_apply_operator_instructions_locked`),
+    row for row: install when the node has no tiers or holds an untouched mirror
+    from the SAME origin; otherwise keep its tiers and record the conflict, which
+    ``lop network definitions state`` and readiness read. A conflict never fails a
+    push or a create: a node whose operator chose other models is a legitimate
+    state, and the push's agent/team rows must still land.
+    """
+    incoming = digest_of(row)
+    recorded_in = index.get(SUBAGENT_TIERS_INDEX_KEY)
+    recorded = recorded_in if isinstance(recorded_in, Mapping) else None
+    recorded_digest = str(recorded.get("digest") or "") if recorded is not None else ""
+
+    def conflict(reason: str, code: str) -> dict[str, Any]:
+        previous = index.get(SUBAGENT_TIERS_CONFLICT_KEY)
+        record = {"origin": origin, "offered": incoming, "reason": reason, "code": code}
+        changed = not (
+            isinstance(previous, Mapping)
+            and all(previous.get(key) == value for key, value in record.items())
+        )
+        if changed:
+            index[SUBAGENT_TIERS_CONFLICT_KEY] = {**record, "at": time.time()}
+        return {"outcome": "conflict", "reason": reason, "code": code, "index_dirty": changed}
+
+    current, unreadable = _subagent_tiers_on_disk(root)
+    if unreadable:
+        return conflict(
+            "the config here could not be read, so its subagent model tiers were not replaced",
+            "unreadable",
+        )
+    if current is not None:
+        current_digest = digest_of(current)
+        if recorded is None:
+            return conflict(
+                "this device has its own subagent model tiers, so they were not overwritten",
+                "own",
+            )
+        if str(recorded.get("origin") or "") != origin:
+            return conflict(
+                f"the subagent model tiers here are a copy of {recorded.get('origin')}'s, so "
+                f"{origin or 'the sender'}'s were not installed",
+                "other_origin",
+            )
+        if current_digest != recorded_digest:
+            return conflict(
+                "the subagent model tiers here were edited after being mirrored, so they "
+                "were not overwritten",
+                "edited",
+            )
+        if current_digest == incoming:
+            return {"outcome": "unchanged"}
+    _write_subagent_tiers(root, row, origin)
+    index[SUBAGENT_TIERS_INDEX_KEY] = {"origin": origin, "digest": incoming, "at": time.time()}
+    index.pop(SUBAGENT_TIERS_CONFLICT_KEY, None)
+    return {
+        "outcome": "updated" if current is not None else "installed",
+        "index_dirty": True,
+    }
+
+
+def _tiers_to_send(
+    bundle: Mapping[str, Any], remote: Mapping[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """``(row to send or None, report)`` for the tier singleton.
+
+    :func:`_instructions_to_send`'s rules: only to a peer whose state reply
+    carries the key (an older build would drop it), only when the digest differs,
+    and not again for a revision the peer already refused while it still holds
+    its own tiers.
+    """
+    remote_in = remote.get(SUBAGENT_TIERS_KIND)
+    if not isinstance(remote_in, Mapping):
+        return None, {"outcome": "unsupported"}
+    withheld = str(bundle.get("subagent_tiers_withheld") or "")
+    if withheld:
+        return None, {"outcome": "withheld", "reason": withheld}
+    ours = bundle.get(SUBAGENT_TIERS_KIND)
+    if not isinstance(ours, Mapping):
+        return None, {"outcome": "none"}
+    digest = digest_of(ours)
+    if str(remote_in.get("digest") or "") == digest:
+        return None, {"outcome": "in_sync"}
+    prior = remote_in.get("conflict")
+    if (
+        isinstance(prior, Mapping)
+        and str(prior.get("offered") or "") == digest
+        and str(remote_in.get("status") or "") != "absent"
+    ):
+        return None, {
+            "outcome": "conflict",
+            "reason": str(prior.get("reason") or ""),
+            **({"code": str(prior["code"])} if prior.get("code") else {}),
+        }
+    return dict(ours), {"outcome": "sent"}
+
+
+def tiers_conflict_notice(conflict: Mapping[str, Any], *, peer_label: str) -> str:
+    """The sender-voiced sentence for a peer that kept its own tiers, with the remedy.
+
+    Shared by the push CLI and the readiness row so the remedy cannot drift. The
+    consequence is named because it is the one the operator meets: a role pinned to
+    a tier runs on the PEER's model for it there (or refuses if the peer lacks it).
+    """
+    code = str(conflict.get("code") or "")
+    remedy = (
+        f"clear subagents.models on {peer_label} (lop config, or the Settings page) to "
+        "receive this device's"
+    )
+    if code == "unreadable":
+        return (
+            f"{peer_label} could not read its own config, so the subagent model tiers "
+            "were not installed"
+        )
+    what = {
+        "own": "keeps its own subagent model tiers",
+        "edited": "keeps its own edited copy of the subagent model tiers",
+        "other_origin": "keeps a copy of another device's subagent model tiers",
+    }.get(code, "kept its own subagent model tiers")
+    return f"{peer_label} {what}, so roles pinned to a tier run on its models there; {remedy}"
+
+
 def expand_named_teams(root: Path, names: Mapping[str, Iterable[str]]) -> tuple[set[str], set[str]]:
     """The names a create should reconcile: what it named, PLUS a team's roster.
 
@@ -940,6 +1315,28 @@ def local_bundle(
             bundle["operator_instructions_withheld"] = label
         else:
             bundle[OPERATOR_INSTRUCTIONS_KIND] = instructions
+    # THE SUBAGENT TIER MAP RIDES EVERY BUNDLE TOO, for the same reason: a create
+    # naming one role pinned to ``effort: hi`` needs the map that tier resolves
+    # against. Only an authored (or edited) map is sent — a mirror stays its
+    # author's, as above — and only a map the strict builder accepts: a broken
+    # local value is reported as withheld, never shipped for the node to refuse.
+    tiers_state = subagent_tiers_state(root)
+    if include_mirrors or tiers_state["status"] in ("authored", "edited"):
+        own, _ = _subagent_tiers_on_disk(root)
+        if own is not None:
+            try:
+                tiers = _subagent_tiers_row(own.get("models"), own.get("model_choice"))
+            except ValueError as exc:
+                bundle["subagent_tiers_withheld"] = f"{exc}, so they were not sent"
+                tiers = None
+            if tiers is not None:
+                label = _withheld(tiers)
+                if label:
+                    bundle["subagent_tiers_withheld"] = (
+                        f"they are shaped like a credential ({label}), so they were not sent"
+                    )
+                else:
+                    bundle[SUBAGENT_TIERS_KIND] = tiers
     payload = canonical(bundle).encode("utf-8")
     if len(payload) > MAX_BUNDLE_BYTES:
         raise DefinitionsRefused(
@@ -1199,6 +1596,38 @@ def _apply_bundle_locked(
             routing_result = {"outcome": "refused", "reason": str(exc)}
         index_dirty = index_dirty or bool(routing_result.pop("index_dirty", False))
         summary[routing_sync.ROUTING_KIND] = routing_result
+    raw_tiers = bundle.get(SUBAGENT_TIERS_KIND)
+    if isinstance(raw_tiers, Mapping):
+        # Its own summary key, never ``conflicts``/``refused`` (which abort a create),
+        # exactly as for the instructions above. VALIDATED ON RECEIPT whatever the
+        # sender's build: known tier names, string ids, bounded size — the
+        # strict builder is the one gate, and a row it refuses writes nothing.
+        try:
+            if len(canonical(dict(raw_tiers)).encode("utf-8")) > MAX_SUBAGENT_TIERS_BYTES:
+                raise ValueError(f"the tier map is over {MAX_SUBAGENT_TIERS_BYTES} bytes")
+            tiers = _subagent_tiers_row(raw_tiers.get("models"), raw_tiers.get("model_choice"))
+            if tiers is None:
+                raise ValueError("the tier map is empty")
+        except (ValueError, TypeError) as exc:
+            summary[SUBAGENT_TIERS_KIND] = {"outcome": "refused", "reason": str(exc)}
+        else:
+            label = _withheld(tiers)
+            if label:
+                summary[SUBAGENT_TIERS_KIND] = {
+                    "outcome": "refused",
+                    "reason": (
+                        f"its text is shaped like a credential ({label}), which is never "
+                        "installed"
+                    ),
+                }
+            else:
+                try:
+                    tiers_result = _apply_subagent_tiers_locked(root, tiers, origin, index)
+                except Exception as exc:  # noqa: BLE001 — the rows above already landed
+                    logger.debug("definitions: could not apply subagent tiers", exc_info=True)
+                    tiers_result = {"outcome": "refused", "reason": str(exc)}
+                index_dirty = index_dirty or bool(tiers_result.pop("index_dirty", False))
+                summary[SUBAGENT_TIERS_KIND] = tiers_result
     if index_dirty:
         write_index(root, index)
     return summary
@@ -1752,6 +2181,8 @@ def definition_state(
         # ADDITIVE: the failover routing mirror (``routing_sync``). Its presence is
         # how a sender knows this build can hold it; an older peer omits it.
         routing_sync.ROUTING_KIND: routing_sync.routing_state(root),
+        # Same presence contract: an older peer's reply lacks it and is never sent it.
+        SUBAGENT_TIERS_KIND: subagent_tiers_state(root),
     }
 
 
@@ -1855,14 +2286,17 @@ def push_to_peer(
         origin=str(bundle.get("origin_device") or ""),
         root=server.root,
     )
+    tiers_out, tiers_report = _tiers_to_send(bundle, remote)
     peer_label = _peer_sentence(server, device_id)
     if (
         not missing_agents
         and not missing_teams
         and instructions_out is None
         and routing_out is None
+        and tiers_out is None
     ):
         _attach_instructions_notice(instructions_report, peer_label=peer_label)
+        _attach_tiers_notice(tiers_report, peer_label=peer_label)
         return {
             "ok": True,
             "code": "in_sync",
@@ -1881,6 +2315,7 @@ def push_to_peer(
             "withheld": bundle.get("withheld") or [],
             OPERATOR_INSTRUCTIONS_KIND: instructions_report,
             routing_sync.ROUTING_KIND: routing_report,
+            SUBAGENT_TIERS_KIND: tiers_report,
         }
     outbound = {
         "kind": BUNDLE_KIND,
@@ -1893,6 +2328,8 @@ def push_to_peer(
         outbound[OPERATOR_INSTRUCTIONS_KIND] = instructions_out
     if routing_out is not None:
         outbound[routing_sync.ROUTING_KIND] = routing_out
+    if tiers_out is not None:
+        outbound[SUBAGENT_TIERS_KIND] = tiers_out
     try:
         reply = link.request(
             {
@@ -1944,6 +2381,23 @@ def push_to_peer(
             if isinstance(answered_routing, Mapping)
             else {"outcome": "no_answer"}
         )
+    if tiers_out is not None:
+        # Like the instructions: the outcome is reported, never folded into ``ok``.
+        answered_tiers = summary.get(SUBAGENT_TIERS_KIND)
+        tiers_report = (
+            {
+                "outcome": str(answered_tiers.get("outcome") or ""),
+                **(
+                    {"reason": str(answered_tiers["reason"])}
+                    if answered_tiers.get("reason")
+                    else {}
+                ),
+                **({"code": str(answered_tiers["code"])} if answered_tiers.get("code") else {}),
+            }
+            if isinstance(answered_tiers, Mapping)
+            else {"outcome": "no_answer"}
+        )
+    _attach_tiers_notice(tiers_report, peer_label=peer_label)
     ok = not conflicts and not refused
     # WHAT WAS SENT, named by what actually moved (QA round 1, Q-2): a push that
     # carried only the instructions used to read "sent 0 agents and 0 team
@@ -1959,6 +2413,8 @@ def push_to_peer(
         sent.append("the custom instructions")
     if routing_out is not None:
         sent.append("the failover routing")
+    if tiers_out is not None:
+        sent.append("the subagent model tiers")
     return {
         "ok": ok,
         "code": "applied" if ok else "conflict",
@@ -1984,6 +2440,7 @@ def push_to_peer(
         "teams": {str(row["name"]): digest_of(row) for row in bundle["teams"]},
         OPERATOR_INSTRUCTIONS_KIND: instructions_report,
         routing_sync.ROUTING_KIND: routing_report,
+        SUBAGENT_TIERS_KIND: tiers_report,
     }
 
 
@@ -2094,6 +2551,12 @@ def _attach_instructions_notice(report: dict[str, Any], *, peer_label: str) -> N
     """Stamp a push report's ``notice`` when the peer kept its own instructions."""
     if report.get("outcome") == "conflict":
         report["notice"] = instructions_conflict_notice(report, peer_label=peer_label)
+
+
+def _attach_tiers_notice(report: dict[str, Any], *, peer_label: str) -> None:
+    """Stamp a push report's ``notice`` when the peer kept its own tier map."""
+    if report.get("outcome") == "conflict":
+        report["notice"] = tiers_conflict_notice(report, peer_label=peer_label)
 
 
 def _peer_sentence(server: "RelayServer", device_id: str) -> str:
@@ -2516,6 +2979,9 @@ def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[
                                 )
                                 for key in ("installed", "updated", "removed")
                             },
+                            SUBAGENT_TIERS_KIND: str(
+                                (summary.get(SUBAGENT_TIERS_KIND) or {}).get("outcome") or ""
+                            ),
                         },
                     )
                 )

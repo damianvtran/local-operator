@@ -1,0 +1,373 @@
+"""The operator's subagent model tiers over the mesh (`network/definitions.py`).
+
+WHY THESE CELLS EXIST: a role or team slot pinned to ``effort: hi`` resolves that
+tier against the config of the device the session runs on. On lop-remote-node-2 the
+config had no ``subagents.models``, so every pinned launch refused with "effort tier
+'hi' is unavailable: no model configured at subagents.models.hi" (designer and
+ux-reviewer could not launch there). The definitions bundle now carries the tier map
+as a singleton row, under the operator-instructions policy (#3829). Each cell pins
+one claim:
+
+* a node with no tiers gets the head's map from a push, a second push sends nothing,
+  and ``effort='hi'`` then resolves on the node through the real launch resolver;
+* the install goes through the settings write path, so every other key survives;
+* a node's own tiers, or an edited mirror, are kept and the conflict recorded, and
+  the push still succeeds;
+* a malformed row (unknown tier, non-string id, oversize, bad model_choice) is
+  refused on receipt and writes nothing;
+* nothing but the tier map travels: no other config key, and a credential-shaped
+  selector is withheld at the sender and refused at the receiver.
+
+The "peer" is a second config root behind a fake link routed to the real
+``definition_state`` / ``apply_bundle``, as in the operator-instructions tests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.config import ConfigManager
+from local_operator.network import definitions
+
+HEAD_DEVICE = "d_" + "a" * 32
+NODE_DEVICE = "d_" + "b" * 32
+HEAD_TIERS = {
+    "lo": "deepseek/deepseek-flash",
+    "med": "deepseek/deepseek-flash",
+    "hi": "anthropic/claude-opus-5-5",
+}
+#: A credential SHAPE (GitHub classic PAT), synthetic. Used to prove nothing but the
+#: tier map leaves the head, and that a credential-shaped selector never travels.
+FAKE_TOKEN = "ghp_" + "A1b2C3d4E5" * 3 + "f6G7h8"
+
+
+def _root(tmp_path: Path, name: str) -> Path:
+    root = tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _set_subagents(root: Path, section: dict[str, Any], *, drop: tuple[str, ...] = ()) -> None:
+    # ``set_config_value`` keeps every disk leaf the payload omits unless dropped.
+    ConfigManager(root).set_config_value(
+        "subagents", section, drop={("subagents", *leaf.split(".")): "test" for leaf in drop}
+    )
+
+
+def _subagents(root: Path) -> dict[str, Any]:
+    raw = ConfigManager(root).get_config_value("subagents", None)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+class _PeerLink:
+    def __init__(self, peer_root: Path, *, legacy: bool = False) -> None:
+        self.peer_root = peer_root
+        self.legacy = legacy
+        self.frames: list[dict[str, Any]] = []
+
+    def request(self, frame: dict[str, Any], timeout: float = 0) -> Any:
+        self.frames.append(frame)
+        if frame["phase"] == "state":
+            detail = definitions.definition_state(self.peer_root, names=frame.get("names"))
+            if self.legacy:
+                detail.pop(definitions.SUBAGENT_TIERS_KIND)
+            return {"op": "ok", "detail": detail}
+        summary = definitions.apply_bundle(
+            self.peer_root, frame["bundle"], origin_device=HEAD_DEVICE
+        )
+        return {"op": "ok", "detail": summary}
+
+    def applies(self) -> list[dict[str, Any]]:
+        return [frame for frame in self.frames if frame["phase"] == "apply"]
+
+
+class _Server:
+    def __init__(self, root: Path, link: _PeerLink) -> None:
+        self.root = root
+        self._link = link
+
+    def _ensure_link(self, device_id: str) -> Any:
+        return self._link
+
+    def _next_relay_req(self) -> int:
+        return 1
+
+    def _own_label(self) -> str:
+        return "head"
+
+
+def _push(head: Path, link: _PeerLink) -> dict[str, Any]:
+    return definitions.push_to_peer(_Server(head, link), NODE_DEVICE)  # type: ignore[arg-type]
+
+
+def test_a_push_installs_the_heads_tiers_and_keeps_every_other_key(tmp_path: Path) -> None:
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS), "model_choice": "operator"})
+    # The node's own unrelated settings, inside AND outside ``subagents``.
+    _set_subagents(node, {"max_running": 3})
+    ConfigManager(node).set_config_value("tool_approval_mode", "ask")
+    link = _PeerLink(node)
+
+    result = _push(head, link)
+
+    assert result["ok"] is True, result
+    assert result[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "installed"}, result
+    assert "the subagent model tiers" in result["message"], result
+    section = _subagents(node)
+    assert section["models"] == HEAD_TIERS
+    assert section["model_choice"] == "operator"
+    assert section["max_running"] == 3
+    assert ConfigManager(node).get_config_value("tool_approval_mode", None) == "ask"
+    state = definitions.subagent_tiers_state(node)
+    assert state["status"] == "mirror" and state["origin"] == HEAD_DEVICE, state
+
+    # Idempotent through the node's state digest.
+    link.frames.clear()
+    again = _push(head, link)
+    assert again["code"] == "in_sync", again
+    assert again[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "in_sync"}
+    assert link.applies() == []
+
+    # The head changes hi and drops lo: an untouched mirror follows exactly.
+    _set_subagents(
+        head,
+        {"models": {"med": "deepseek/deepseek-flash", "hi": "openai/gpt-6"}},
+        drop=("models.lo", "model_choice"),
+    )
+    updated = _push(head, link)
+    assert updated[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "updated"}, updated
+    section = _subagents(node)
+    assert section["models"] == {"med": "deepseek/deepseek-flash", "hi": "openai/gpt-6"}
+    assert "model_choice" not in section
+    assert definitions.subagent_tiers_state(node)["status"] == "mirror"
+
+
+def test_effort_hi_resolves_on_the_node_after_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The incident's real path: the tool-argument resolver ``builtin.py`` uses
+    (``effort_tier_rejection``) and the launch resolver, read on the node's root."""
+    from local_operator.harness.subagent import (
+        effort_tier_rejection,
+        resolve_member_model,
+    )
+
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(node))
+
+    before = effort_tier_rejection("hi")
+    assert before is not None and "unavailable" in before, before
+    assert resolve_member_model("designer", launch_tier="hi").unavailable
+
+    assert _push(head, _PeerLink(node))["ok"] is True
+
+    assert effort_tier_rejection("hi") is None
+    resolved = resolve_member_model("designer", launch_tier="hi")
+    assert resolved.unavailable == "", resolved
+    assert resolved.selector == HEAD_TIERS["hi"], resolved
+
+
+def test_a_nodes_own_tiers_are_kept_and_the_conflict_recorded(tmp_path: Path) -> None:
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    _set_subagents(node, {"models": {"hi": "openai/gpt-6"}})
+    link = _PeerLink(node)
+
+    result = _push(head, link)
+
+    # A conflict never fails the push.
+    assert result["ok"] is True, result
+    report = result[definitions.SUBAGENT_TIERS_KIND]
+    assert report["outcome"] == "conflict" and report["code"] == "own", report
+    assert "keeps its own subagent model tiers" in report["notice"], report
+    assert _subagents(node)["models"] == {"hi": "openai/gpt-6"}
+    state = definitions.subagent_tiers_state(node)
+    assert state["status"] == "authored"
+    assert state["conflict"]["origin"] == HEAD_DEVICE and state["conflict"]["code"] == "own"
+
+    # The refused revision is not re-sent every tick.
+    link.frames.clear()
+    again = _push(head, link)
+    assert again[definitions.SUBAGENT_TIERS_KIND]["outcome"] == "conflict", again
+    assert link.applies() == []
+
+
+def test_a_mirror_edited_on_the_node_is_kept(tmp_path: Path) -> None:
+    from local_operator import settings_io
+
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    link = _PeerLink(node)
+    assert _push(head, link)[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "installed"}
+
+    # The node's operator edits hi through the Settings write path.
+    row = next(s for s in settings_io.SETTINGS if s.key == "subagents.models.hi")
+    settings_io.write_setting(ConfigManager(node), row, "openai/gpt-6", notify=False)
+    assert definitions.subagent_tiers_state(node)["status"] == "edited"
+
+    _set_subagents(head, {"models": {**HEAD_TIERS, "lo": "openai/gpt-6-mini"}})
+    result = _push(head, link)
+    assert result["ok"] is True, result
+    assert result[definitions.SUBAGENT_TIERS_KIND]["code"] == "edited", result
+    assert _subagents(node)["models"]["hi"] == "openai/gpt-6"
+    assert _subagents(node)["models"]["lo"] == HEAD_TIERS["lo"]
+
+
+@pytest.mark.parametrize(
+    "tiers, needle",
+    [
+        ({"models": {"ultra": "openai/gpt-6"}}, "not a model tier"),
+        ({"models": {"hi": 5}}, "not a usable model id"),
+        ({"models": {"hi": {"model": "openai/gpt-6", "effort": {"x": 1}}}}, "not a usable"),
+        ({"models": {"hi": ["openai/gpt-6"]}}, "not a usable"),
+        ({"models": {"hi": "x" * 300}}, "not a usable"),
+        ({"models": {"hi": "openai/gpt-6"}, "model_choice": "always"}, "model_choice"),
+        ({"models": {"hi": "openai/gpt-6"}, "pad": "y" * 5000}, "bytes"),
+        ({"models": "openai/gpt-6"}, "not a mapping"),
+        ({}, "empty"),
+    ],
+)
+def test_a_malformed_row_is_refused_and_writes_nothing(
+    tmp_path: Path, tiers: dict[str, Any], needle: str
+) -> None:
+    node = _root(tmp_path, "node")
+    _set_subagents(node, {"max_running": 2})
+    bundle = {
+        "kind": definitions.BUNDLE_KIND,
+        "version": definitions.BUNDLE_VERSION,
+        "origin_device": HEAD_DEVICE,
+        "agents": [],
+        "teams": [],
+        definitions.SUBAGENT_TIERS_KIND: {"kind": definitions.SUBAGENT_TIERS_KIND, **tiers},
+    }
+
+    summary = definitions.apply_bundle(node, bundle, origin_device=HEAD_DEVICE)
+
+    result = summary[definitions.SUBAGENT_TIERS_KIND]
+    assert result["outcome"] == "refused" and needle in result["reason"], result
+    # The agent/team half is untouched, and nothing was written.
+    assert summary["conflicts"] == [] and summary["refused"] == []
+    assert _subagents(node) == {"max_running": 2}
+    assert definitions.subagent_tiers_state(node)["status"] == "absent"
+
+
+def test_only_the_tier_map_travels_and_a_credential_shape_never_does(tmp_path: Path) -> None:
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    # Credential-shaped values elsewhere in the head's config, inside and outside
+    # ``subagents``: none of them may reach the wire.
+    _set_subagents(head, {"models": dict(HEAD_TIERS), "github_token": FAKE_TOKEN})
+    ConfigManager(head).set_config_value("api_token", FAKE_TOKEN)
+    link = _PeerLink(node)
+
+    assert _push(head, link)[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "installed"}
+    sent = link.applies()[0]["bundle"][definitions.SUBAGENT_TIERS_KIND]
+    assert set(sent) == {"kind", "name", "models"}, sent
+    assert FAKE_TOKEN not in json.dumps(link.frames)
+    assert "github_token" not in _subagents(node)
+
+    # A credential-shaped SELECTOR is withheld at the sender ...
+    _set_subagents(head, {"models": {"hi": f"openai/{FAKE_TOKEN}"}})
+    other = _root(tmp_path, "other")
+    other_link = _PeerLink(other)
+    withheld = _push(head, other_link)
+    assert withheld[definitions.SUBAGENT_TIERS_KIND]["outcome"] == "withheld", withheld
+    assert FAKE_TOKEN not in json.dumps(other_link.frames)
+    assert definitions.subagent_tiers_state(other)["status"] == "absent"
+
+    # ... and refused at the receiver whatever an older sender put on the wire.
+    summary = definitions.apply_bundle(
+        other,
+        {
+            "kind": definitions.BUNDLE_KIND,
+            "version": definitions.BUNDLE_VERSION,
+            "agents": [],
+            "teams": [],
+            definitions.SUBAGENT_TIERS_KIND: {"models": {"hi": f"openai/{FAKE_TOKEN}"}},
+        },
+        origin_device=HEAD_DEVICE,
+    )
+    result = summary[definitions.SUBAGENT_TIERS_KIND]
+    assert result["outcome"] == "refused" and "credential" in result["reason"], result
+    assert definitions.subagent_tiers_state(other)["status"] == "absent"
+
+
+def test_an_older_peer_is_never_sent_the_tiers(tmp_path: Path) -> None:
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    link = _PeerLink(node, legacy=True)
+
+    result = _push(head, link)
+
+    assert result[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "unsupported"}, result
+    assert link.applies() == []
+    assert _subagents(node) == {}
+
+
+def test_a_mirror_is_never_re_sent_as_the_nodes_own(tmp_path: Path) -> None:
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    _push(head, _PeerLink(node))
+    assert definitions.SUBAGENT_TIERS_KIND not in definitions.local_bundle(node)
+
+
+def test_mapping_tiers_round_trip_without_a_resend(tmp_path: Path) -> None:
+    """The ``{model, effort}`` form (#2428) installs and re-reads to the same digest."""
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    tiers = {"hi": {"model": "anthropic/claude-opus-5-5", "effort": "High"}}
+    _set_subagents(head, {"models": tiers})
+    link = _PeerLink(node)
+
+    assert _push(head, link)[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "installed"}
+    assert _subagents(node)["models"] == {
+        "hi": {"model": "anthropic/claude-opus-5-5", "effort": "high"}
+    }
+    link.frames.clear()
+    assert _push(head, link)["code"] == "in_sync"
+
+
+def test_state_and_readiness_name_the_tiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    from local_operator.network import cli as network_cli
+    from local_operator.network import readiness
+
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    _set_subagents(node, {"models": {"hi": "openai/gpt-6"}})
+    _push(head, _PeerLink(node))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(node))
+
+    args = argparse.Namespace(definitions_command="state", json=False)
+    assert network_cli._cmd_definitions(args) == 0
+    text = capsys.readouterr().out
+    assert "subagent model tiers: yours (hi=openai/gpt-6)" in text, text
+    assert f"subagent model tiers from {HEAD_DEVICE} not installed" in text, text
+
+    args = argparse.Namespace(definitions_command="state", json=True)
+    assert network_cli._cmd_definitions(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = payload.get(definitions.SUBAGENT_TIERS_KIND) or payload.get("detail", {}).get(
+        definitions.SUBAGENT_TIERS_KIND
+    )
+    assert row["status"] == "authored" and row["conflict"]["code"] == "own", payload
+
+    member = SimpleNamespace(device_id=NODE_DEVICE, name="device-b")
+    facts = {"subagent_tiers": readiness.subagent_tiers_fact(node)}
+    ready_row = readiness.subagent_tiers_row(member, facts, peer_label="device-b")
+    assert ready_row is not None
+    assert readiness.row_state(ready_row) == readiness.ROW_STATE_WARN, ready_row
+    assert ready_row["detail"].startswith("device-b keeps its own subagent model tiers")
+    assert readiness.onboarding_failures([ready_row]) == []
+    # A clean mirror has nothing to name.
+    mirror = _root(tmp_path, "mirror")
+    _push(head, _PeerLink(mirror))
+    facts = {"subagent_tiers": readiness.subagent_tiers_fact(mirror)}
+    assert readiness.subagent_tiers_row(member, facts, peer_label="x") is None

@@ -11840,6 +11840,24 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                     else f"  custom instructions: {instructions.get('outcome')}"
                     + (f" ({why})" if why else "")
                 )
+            # The subagent model tiers: same reasoning, same line shape. A peer that
+            # kept its own map is why a pinned role runs on a different model there.
+            tiers = item.get(definitions.SUBAGENT_TIERS_KIND)
+            if isinstance(tiers, dict) and tiers.get("outcome") in (
+                "installed",
+                "updated",
+                "conflict",
+                "refused",
+                "withheld",
+            ):
+                tiers_notice = str(tiers.get("notice") or "")
+                tiers_why = str(tiers.get("reason") or "")
+                lines.append(
+                    f"  subagent model tiers: {tiers_notice}"
+                    if tiers_notice
+                    else f"  subagent model tiers: {tiers.get('outcome')}"
+                    + (f" ({tiers_why})" if tiers_why else "")
+                )
         return _emit(
             args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
         )
@@ -11905,6 +11923,41 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             lines.append(f"failover routing {unit}: yours")
     if routing.get("status") == "unreadable":
         lines.append("failover routing: config.yml could not be read")
+    # The subagent model tiers (``subagents.models``): whose map this is, which
+    # model each tier runs on HERE, and the last peer revision kept out. Answers
+    # "why does effort=hi refuse / run on another model on this node" locally.
+    tiers = state.get(definitions.SUBAGENT_TIERS_KIND) or {}
+    tiers_status = str(tiers.get("status") or "absent")
+    tier_models = tiers.get("models") or {}
+    tier_text = ", ".join(
+        f"{tier}={value.get('model') if isinstance(value, dict) else value}"
+        for tier, value in tier_models.items()
+    )
+    tier_suffix = f" ({tier_text})" if tier_text else ""
+    if tiers_status == "mirror":
+        lines.append(
+            f"subagent model tiers: mirrored from {tiers.get('origin') or '?'}{tier_suffix}"
+        )
+    elif tiers_status == "edited":
+        lines.append(
+            "subagent model tiers: yours (edited after being mirrored from "
+            f"{tiers.get('origin') or '?'}){tier_suffix}"
+        )
+    elif tiers_status == "authored":
+        lines.append(f"subagent model tiers: yours{tier_suffix}")
+    elif tiers_status == "unreadable":
+        lines.append("subagent model tiers: the config could not be read")
+    tiers_conflict = tiers.get("conflict")
+    if isinstance(tiers_conflict, dict):
+        lines.append(
+            f"subagent model tiers from {tiers_conflict.get('origin') or '?'} not installed: "
+            f"{tiers_conflict.get('reason') or 'this device kept its own'}"
+            + (
+                "; clear subagents.models here to receive those"
+                if tiers_status in ("authored", "edited")
+                else ""
+            )
+        )
     if not lines:
         lines = ["no agent or team definitions on this device"]
     # Routing authority (review r2, m3), after the empty-state line so a bare
@@ -11935,6 +11988,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "mirrored": mirrored,
             definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
             routing_sync.ROUTING_KIND: routing,
+            definitions.SUBAGENT_TIERS_KIND: tiers,
         },
         lines,
     )

@@ -116,6 +116,12 @@ CAPABILITY_CUSTOM_INSTRUCTIONS = "custom_instructions"
 #: peer. Informational (non-gating): the cadence repairs it within a minute, and
 #: the create path pushes first.
 CAPABILITY_SKILLS = "skills"
+#: (m) the operator's subagent model tiers (``subagents.models``): did this peer
+#: keep its own map over another device's
+#: (``definitions._apply_subagent_tiers_locked``)? The (k) row's twin, for the
+#: same reason: a pinned role resolving against a different (or missing) tier on
+#: the node is the consequence, and the operator reads this report. Non-gating.
+CAPABILITY_SUBAGENT_TIERS = "subagent_tiers"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -169,6 +175,8 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # A missing skill is a sync in flight or a skill that cannot travel; the
         # row names which, and nothing about onboarding depends on it.
         CAPABILITY_SKILLS,
+        # A node keeping its own tier map is the node operator's choice, never a gate.
+        CAPABILITY_SUBAGENT_TIERS,
     }
 )
 
@@ -1771,6 +1779,8 @@ def collect_peer_facts(
         # this device's own). An older viewer ignores it; an older peer omits it
         # and the model-credential row then reads byte-for-byte as before.
         "failover": _failover_fact(root, model),
+        # Same additive contract as ``custom_instructions``.
+        "subagent_tiers": subagent_tiers_fact(root),
     }
 
 
@@ -2002,6 +2012,71 @@ def _attach_failover(row: dict[str, Any], facts: Mapping[str, Any], *, server: A
         if key in fact
     }
     row["observed"] = observed
+
+
+def subagent_tiers_fact(root: Path) -> dict[str, Any] | None:
+    """Whose subagent tier map this device holds, and the last revision it refused.
+
+    Status, origin and the refusal's ``code``/``reason`` only; ``None`` when the
+    state cannot be read, so a readiness answer never fails on it.
+    """
+    try:
+        from local_operator.network import definitions
+
+        state = definitions.subagent_tiers_state(root)
+    except Exception:  # noqa: BLE001 — a readiness answer must not fail on this
+        return None
+    conflict = state.get("conflict")
+    return {
+        "status": str(state.get("status") or ""),
+        "origin": str(state.get("origin") or ""),
+        "conflict": (
+            {
+                key: str(conflict.get(key) or "")
+                for key in ("origin", "code", "reason")
+                if conflict.get(key)
+            }
+            if isinstance(conflict, Mapping)
+            else None
+        ),
+    }
+
+
+def subagent_tiers_row(
+    member: Any, facts: Mapping[str, Any], *, peer_label: str
+) -> dict[str, Any] | None:
+    """(m) Did this peer keep its own subagent tier map over another device's?
+
+    :func:`custom_instructions_row`'s rules: no row for an older peer, a mirror,
+    no map, or a refusal about a map that is gone; a refusal still standing is a
+    non-gating ``warn`` row with the shared sentence
+    (:func:`definitions.tiers_conflict_notice`).
+    """
+    fact = facts.get("subagent_tiers")
+    if not isinstance(fact, Mapping):
+        return None
+    conflict = fact.get("conflict")
+    if not isinstance(conflict, Mapping) or str(fact.get("status") or "") not in (
+        "authored",
+        "edited",
+        "unreadable",
+    ):
+        return None
+    from local_operator.network import definitions
+
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SUBAGENT_TIERS,
+        ok=False,
+        code="kept_own",
+        detail=definitions.tiers_conflict_notice(conflict, peer_label=peer_label),
+        source=SOURCE_PEER,
+        observed={
+            "status": str(fact.get("status") or ""),
+            "origin": str(conflict.get("origin") or ""),
+        },
+    )
 
 
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
@@ -6036,6 +6111,9 @@ def _peer_checks(
     )
     if instructions_row is not None:
         rows.append(instructions_row)
+    tiers_row = subagent_tiers_row(member, facts, peer_label=peer_label)
+    if tiers_row is not None:
+        rows.append(tiers_row)
     rows.append(serve_daemon_row(member, facts, peer_label=peer_label))
     rows.extend(
         mcp_credential_rows(
