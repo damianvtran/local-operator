@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tui.composer",
-  "history_sha256": "30d2cd7355ec03fadb16b9d85d83588afd20c574d74dd4909fdf079218cdb42f",
+  "history_sha256": "375a201fcce5573916702f7bb197121b298dcb2255d82568909af0fb8e74c04b",
   "entries": [
     {
       "locale": "ur",
@@ -65,6 +65,31 @@
       },
       "status": "passed",
       "note": "Round 3 (in-PR apply) 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): read all 1 changed/added key(s) against i18n/glossary.md and i18n/style-guides/ur.md; mechanical: placeholders, CLDR plural arms, NFC/bidi/ellipsis/fr U+202F, maxCells via rich cell_len; 1 unchanged key(s) byte-identical to the passed, fresh base row at origin/main 27bfbdb21. Target ur/tui.composer.json sha256 5f152c21b579db11c0f9b2260d02c96d708d669567bf15a78d163f1b3d84003d. Dispositions: I3-3 MINOR (deferred in PR thread): keep rendered with محفوظ (temporary_off 'محفوظ:', '/temporary off اسے محفوظ رکھتا ہے', status_off, placeholder, wire.slash, session_temporary) while relay buttons and tui.app holds use رکھیں/رکھی گئی; glossary keep row is رکھیں, never save; align."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.composer",
+      "source_sha256": "1164aebe2e66934357cecbda131b79ce7d73064016b8f188c5e835fc0bd98be6",
+      "translator": {
+        "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in the relayed source",
+        "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+        "session": "5c6cf4252f37",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source 1164aebe2e66934357cecbda131b79ce7d73064016b8f188c5e835fc0bd98be6 and target 5f152c21b579db11c0f9b2260d02c96d708d669567bf15a78d163f1b3d84003d recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/ur/tui.composer/temporary-r3-5c6cf4252f37/record.json"
     }
   ]
 }

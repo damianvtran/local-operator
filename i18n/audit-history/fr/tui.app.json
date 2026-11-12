@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "tui.app",
-  "history_sha256": "90744d1a66afbc2a353fe82b3f25178e45679170ac2c9cac35a93eaa07244edd",
+  "history_sha256": "2d742b8a9f3f4649f432339e68403c3ec14e9156d9a092142b92e2807665fc32",
   "entries": [
     {
       "locale": "fr",
@@ -48,6 +48,31 @@
       },
       "status": "passed",
       "note": "Round 3 (in-PR apply) 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): read all 13 changed/added key(s) against i18n/glossary.md and i18n/style-guides/fr.md; mechanical: placeholders, CLDR plural arms, NFC/bidi/ellipsis/fr U+202F, maxCells via rich cell_len; 49 unchanged key(s) byte-identical to the passed, fresh base row at origin/main 27bfbdb21. Target fr/tui.app.json sha256 b1b7124fd7c7b05cd939c8e94f1c7d25485b4b2b76bde4f3f113c186be21f97f. Dispositions: I3-4 MINOR (deferred in PR thread): maxCells overrun: tui.app.temporary_deletes_in fr/ru 21 cells at 2-digit minutes (es 22, fr/ru 23 at 1440) vs 20; temporary_hold_unsaved_files es 33 / fr 34 vs 32 (rich.cells.cell_len); sidebar truncate_cells crops it; shorten or record a width exception."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.app",
+      "source_sha256": "3ffea9a3761c7d4d4f384819700bafbbe0c9aefb223fccee8d5336843a73bf2e",
+      "translator": {
+        "agent": "core-backend coder cf2843d74957; round-1 remediation coder 1c07b39051ed (lopdev coder role) — relayed from PR #3832 i18n audit comments 6811281029/6812645445, not independently verified",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in the relayed source",
+        "date": "2026-11-11..2026-11-12 (git: 09839b6de, 75606914f, eaff8c7a9)"
+      },
+      "auditor": {
+        "agent": "independent i18n auditor (lopdev reviewer role, task i18n-inpr-core, session 5c6cf4252f37; independent of the translators and of the round-1/2 auditors 506f24a144fa/2d1500d56d0e, whose artifacts were not read)",
+        "session": "5c6cf4252f37",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Round 3 evidence binding 2026-11-12, reviewer 5c6cf4252f37 (anthropic/claude-opus-5-5, no fallback): same audit and verdict as the preceding row, re-appended so the cg1 byte pin moves to a committed record. Source 3ffea9a3761c7d4d4f384819700bafbbe0c9aefb223fccee8d5336843a73bf2e and target b1b7124fd7c7b05cd939c8e94f1c7d25485b4b2b76bde4f3f113c186be21f97f recomputed from the shipped files at 4f6f57986. Evidence: i18n/audits/evidence/fr/tui.app/temporary-r3-5c6cf4252f37/record.json"
     }
   ]
 }
