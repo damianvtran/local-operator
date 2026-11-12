@@ -6862,9 +6862,22 @@ async def test_a_queued_command_cut_by_the_mcp_client_is_never_dispatched(
     decl.config_path.write_text(json.dumps(document), encoding="utf-8")
     manager = McpManager(str(tmp_path))
     try:
+        # Connect under a generous budget, cut the CALLS at 1 s. The per-server
+        # ``timeout`` also becomes the session's read timeout for
+        # ``initialize`` and ``tools/list``, and a cold stdio action server
+        # (a fresh interpreter importing local_operator) can take over 1 s to
+        # answer on a loaded runner: CI saw no tool listed (StopIteration
+        # below), reproduced here with a 1.5 s interpreter-start delay. The
+        # env override outranks the config only while connecting; ``call_tool``
+        # resolves the timeout per call, so once it is dropped both calls read
+        # the per-server 1000 ms this test is about.
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "20000")
         await manager.discover_and_connect()
         await manager.wait_settled(20)
-        tool = next(t for t in manager.get_tools() if t.name == decl.command_tool_name)
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS")
+        tools = {t.name: t for t in manager.get_tools()}
+        assert decl.command_tool_name in tools, f"action server not listed: {sorted(tools)}"
+        tool = tools[decl.command_tool_name]
 
         async def call(call_id: str, command: str) -> Any:
             return await tool.execute(call_id, {"command": command}, None, None, ToolContext())
