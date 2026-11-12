@@ -2451,7 +2451,7 @@ class AttachClient:
         # deferral keys and, like them, only when set: an unmarked frame stays
         # byte-identical, and a deferred ``approvals auto`` still carries the
         # marker the owner re-checks when the queued body finally applies.
-        if bridge_ack:
+        if bridge_ack is True:
             fields["bridge_ack"] = True
         if not defer_ok:
             return await self._request_payload(
