@@ -59,6 +59,7 @@ from local_operator.server.models.desktop_session_files import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import errors, host, reply
+from local_operator.server.utils import remote_session_files
 from local_operator.session import compression, user_attachments
 from local_operator.session_files import ledger, service
 from local_operator.session_files.family import family_for
@@ -188,7 +189,27 @@ async def list_session_files(
     async with errors(request):
         kind_of_target, directory = await host(request).files_target(session_id)
     if kind_of_target == "peer":
-        return reply(service.empty_listing(query, state="unsupported"))
+        # The OWNER answers its own index (remote files parity §2); this device adds
+        # ``remote``/``origin_device`` from its catalogue row, never from the owner.
+        async with errors(request):
+            answer = await remote_session_files.listing(
+                config_dir,
+                session_id,
+                index="files",
+                query={
+                    "scope": query.scope,
+                    "kinds": sorted(query.kinds),
+                    "origins": sorted(query.origins),
+                    "highlighted": query.highlighted,
+                    "q": query.q,
+                    "sort": query.sort,
+                    "order": query.order,
+                    "limit": query.limit,
+                    "cursor": query.cursor,
+                },
+                empty=service.empty_listing(query),
+            )
+        return reply(answer)
     if directory is None:
         return reply(service.empty_listing(query))
 
@@ -291,7 +312,15 @@ async def list_user_attachments(session_id: SessionID, request: Request):
     async with errors(request):
         kind_of_target, directory = await host(request).files_target(session_id)
     if kind_of_target == "peer":
-        return reply(UserAttachmentsListing(state="unsupported"))
+        async with errors(request):
+            answer = await remote_session_files.listing(
+                _config_dir(request),
+                session_id,
+                index="user_attachments",
+                query={},
+                empty={"items": [], "truncated": False},
+            )
+        return reply(UserAttachmentsListing(**answer))
     if directory is None:
         return reply(UserAttachmentsListing())
     try:
@@ -376,4 +405,60 @@ async def materialise_user_attachment(
         raise HTTPException(status, message.envelope(code=f"session_files_{error.code}")) from None
     except compression.ArchiveError:
         raise not_found from None
+    return reply(receipt)
+
+
+def _remote_only(kind_of_target: str) -> None:
+    """The content and download routes serve PEER rows only (remote files parity §3).
+
+    A local row already has a path (or ``materialise``), so a local id answers the same
+    404 an unknown row does.
+    """
+    if kind_of_target != "peer":
+        raise HTTPException(
+            404,
+            _wd.session_files_file_not_found().envelope(code="session_files_file_not_found"),
+        )
+
+
+@router.get("/v1/desktop/sessions/{session_id}/files/{file_id}/content")
+async def remote_file_content(session_id: SessionID, file_id: FileID, request: Request):
+    """The bytes of one row of a PEER's conversation, streamed, with ``Range`` (206).
+
+    The owner names the row (``net_session_files`` phase ``row``) and its pull source;
+    the bytes come through the transcript attachments' fetch-on-miss and land in the
+    bounded remote cache, so statuses are that family's: 200/206; 504
+    ``attachment_owner_unreachable`` / ``attachment_fetch_pending`` (retryable); 409
+    ``session_files_remote_unreadable`` (``params.reason``), ``attachment_peer_outdated``
+    or ``attachment_on_peer`` (permanent); 404 for an unknown row or a local session.
+    Passive types are served as themselves; anything else as opaque bytes, with
+    ``nosniff`` and a sandbox CSP.
+    """
+    async with errors(request):
+        kind_of_target, _directory = await host(request).files_target(session_id)
+    _remote_only(kind_of_target)
+    async with errors(request):
+        return await remote_session_files.content(
+            _config_dir(request), session_id, file_id, request.headers.get("range")
+        )
+
+
+@router.post("/v1/desktop/sessions/{session_id}/files/{file_id}/download")
+async def remote_file_download(session_id: SessionID, file_id: FileID, request: Request):
+    """Land one row of a PEER's conversation on THIS device; the receipt names the path.
+
+    Destination: ``~/Downloads`` when it is a folder, else ``<config>/downloads``.
+    Never overwrites: a same-bytes file is reused (``created: false``), a different one
+    moves the landing to ``name (1).ext`` … ``name (99).ext``. The copy is verified
+    against the content address before it is published (a no-replace link), so a
+    mismatch lands nothing (409 ``session_files_download_mismatch``). A credential-
+    shaped name is 409 ``session_files_sensitive_name``. Fetch statuses are the content
+    route's; a re-POST while the fetch is pending joins it. Receipt: ``{path, name,
+    bytes, sha256, created, origin_device}``.
+    """
+    async with errors(request):
+        kind_of_target, _directory = await host(request).files_target(session_id)
+    _remote_only(kind_of_target)
+    async with errors(request):
+        receipt = await remote_session_files.download(_config_dir(request), session_id, file_id)
     return reply(receipt)

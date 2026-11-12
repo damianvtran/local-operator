@@ -189,6 +189,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "member-list-push-v1",
     # The single-file pull (``files.py``'s ``net_file_get``); see MESH_FILE_V1.
     "mesh-file-v1",
+    # A peer session's Files index (``file_index.py``'s ``net_session_files``).
+    "mesh-file-index-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
@@ -237,6 +239,11 @@ MESH_RESTART_V1 = "mesh-restart-v1"
 #: answered by some other route (the base64-through-the-model path this replaces is
 #: what corrupted bytes).
 MESH_FILE_V1 = "mesh-file-v1"
+#: A peer session's Files index (``network/file_index.py``; remote-files-parity.md §2).
+#: Checked by the viewer BEFORE asking, so an owner that predates it is answered with
+#: ``peer_update_required`` (the desktop says "update <device>") rather than asked an op
+#: it would refuse as unknown — and never answered by a viewer-side scan.
+MESH_FILE_INDEX_V1 = "mesh-file-index-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it

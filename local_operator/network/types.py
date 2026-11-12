@@ -358,6 +358,9 @@ NET_OPS: tuple[str, ...] = (
     # One file out of one session this device owns, by digest-framed chunks
     # (network/files.py; docs/design/mesh-file-transfer.md S1).
     "net_file_get",
+    # A peer session's Files index, answered by the owner (network/file_index.py;
+    # docs/design/remote-files-parity.md §2).
+    "net_session_files",
     "net_broker",
     "net_session_lifecycle",
     "net_session_receipt",
@@ -501,6 +504,8 @@ LOCAL_OPS: tuple[str, ...] = (
     # ``lop network files pull``: ask THIS device's relay to pull one file from a
     # peer's session. Local for the family's reason: the link lives in the relay.
     "session_file_pull",
+    # The desktop's ask for a peer session's Files index (remote-files-parity.md §2).
+    "peer_session_files",
     "session_lifecycle",
     "session_receipt",
     # The credential broker's leg 1 (runtime → its own relay, §2.3).
@@ -666,6 +671,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # file out of that same set is a narrower read of bytes the role already reads
     # (mesh-file-transfer.md, Decision 2). A drive-only pull is a one-row narrowing.
     "net_file_get": "view",
+    # ``view`` WIDENS NOTHING either: the listing is metadata of the journal ``net_sync``
+    # already serves a view member, and every byte still goes through ``net_file_get``.
+    "net_session_files": "view",
     "net_broker": "broker_credential",
     "net_session_lifecycle": "delete",
     # ``view``, the same row the stream plane's ``acknowledge_attention`` carries

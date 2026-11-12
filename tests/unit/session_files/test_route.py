@@ -168,15 +168,25 @@ async def test_draft_answers_an_empty_ready_page_not_a_404(api) -> None:
     assert data["state"] == "ready" and data["rows"] == [] and data["total"] == 0
 
 
-async def test_peer_session_answers_unsupported_with_no_rows(api, monkeypatch) -> None:
+async def test_peer_session_with_no_relay_is_a_retryable_504_not_a_list(api, monkeypatch) -> None:
+    """A peer's Files index is the OWNER's (remote files parity §2). With no relay on this
+    device the owner cannot be asked, which is retryable (504), never an empty ``ready``
+    list and never the old ``unsupported``. The loopback suite
+    (tests/unit/network/test_remote_files_index.py) covers the answered case."""
+    from types import SimpleNamespace
+
     client, _, root = api
+    row = SimpleNamespace(
+        owner_device="d_" + "7" * 32, owner_device_name="build-box", owner_label="build-box"
+    )
     monkeypatch.setattr(
         "local_operator.session.remote_open.remote_row_and_silence",
-        lambda session_id, root=None: (object() if session_id == OTHER else None, ()),
+        lambda session_id, root=None: (row if session_id == OTHER else None, ()),
     )
     peer = await client.get(f"/v1/desktop/sessions/{OTHER}/files")
-    assert peer.status_code == 200
-    assert peer.json()["result"]["state"] == "unsupported" and peer.json()["result"]["rows"] == []
+    assert peer.status_code == 504, peer.text
+    detail = peer.json()["detail"]
+    assert detail["code"] == "session_files_owner_unreachable" and "build-box" in detail["text"]
     assert (
         await client.get(URL)
     ).status_code == 404, "an id nobody holds is still the ordinary 404"

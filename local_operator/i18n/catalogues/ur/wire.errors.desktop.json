@@ -80,6 +80,7 @@
   "wire.errors.desktop.session_files_file_not_found": "وہ فائل اس گفتگو کی فہرست میں نہیں ہے۔",
   "wire.errors.desktop.session_files_materialise_failed": "فائل محفوظ نہیں ہو سکی: {reason}۔",
   "wire.errors.desktop.session_files_not_an_artifact": "وہ فائل پہلے سے ڈسک پر اپنے پاتھ میں موجود ہے، اس لیے محفوظ کرنے کو کچھ نہیں۔",
+  "wire.errors.desktop.session_files_owner_unreachable": "یہ گفتگو {device} پر ہے اور وہ ابھی دستیاب نہیں، اس لیے اس کی فائلیں ابھی یہاں نہیں دکھائی جا سکتیں۔ جب {device} دوبارہ آن لائن ہوگا تو یہ نظر آئیں گی۔",
   "wire.errors.desktop.session_files_remote_unreadable": "یہ فائل اس آلے سے نہیں کھولی جا سکتی: {reason, select, outside_session_files {یہ {device} کی ورک اسپیس میں ہے، گفتگو کے scratchpad سے باہر۔ گفتگو سے کہیں کہ اسے اپنے scratchpad میں کاپی کرے۔} missing {یہ اب {device} پر موجود نہیں۔} too_large {یہ اس 256 MiB حد سے بڑی ہے جو ایک آلہ دوسرے کو بھیج سکتا ہے۔} sensitive {یہ کسی اسناد جیسی لگتی ہے، اس لیے {device} اسے نہیں بھیجتا۔} not_referenced {{device} پر گفتگو اب اس کا حوالہ نہیں دیتی۔} other {{device} اسے اس آلے کے ساتھ شیئر نہیں کرتا۔}}",
   "wire.errors.desktop.session_files_sensitive_name": "{name} اسناد کی فائل جیسی لگتی ہے، اس لیے اسے اس آلے پر محفوظ نہیں کیا گیا۔",
   "wire.errors.desktop.session_is_remote_open": "{session_id} {label} پر ہے، اور یہ ڈیسکٹاپ ابھی دوسرے ڈیوائس پر کوئی گفتگو نہیں کھول سکتا۔ اسے `lop sessions move {session_id} --to local` سے یہاں واپس لائیں، یا ٹرمینل سے `/network sessions --peer {label} --engage {session_id}` کے ذریعے چلائیں۔",

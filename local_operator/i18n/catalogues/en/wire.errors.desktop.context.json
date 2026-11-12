@@ -70,5 +70,11 @@
     "tone": "plain, calm, says why and what to do",
     "width": "one or two sentences; inline in a row tooltip or a toast",
     "note": "409: integrity check of a downloaded remote file failed; nothing landed. {device} is the other device's name."
+  },
+  "wire.errors.desktop.session_files_owner_unreachable": {
+    "role": "API refusal text shown in the Files panel of a conversation held on another device",
+    "tone": "plain, calm, tells the user what happens next",
+    "width": "one or two sentences; shown in the panel body",
+    "note": "504, retryable: the Files panel of a conversation held on another device cannot be listed because that device (or this device's relay) is not answering. {device} is the other device's name; keep both mentions."
   }
 }

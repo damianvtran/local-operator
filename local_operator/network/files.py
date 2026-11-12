@@ -817,6 +817,30 @@ def pull_file(
     asker = _Asker(server, link, label, session_id, source)
     meta = _validated_stat(asker.ask(phase="stat"), label)
     root = Path(server.root)
+    if land == "cache":
+        from local_operator.remote_files.cache import cache_root, touch
+
+        # A PATH source is keyed by the owner's stat sha256 only after this phase, so
+        # the viewer cannot look the cache up first; the bytes may already be here
+        # (content-addressed, verified when they landed). Skip the transfer then.
+        digest = meta["sha256"][len("sha256:") :][:32]
+        cached = cache_root(root) / f"{digest}.bin"
+        if cached.is_file():
+            touch(cached)
+            return {
+                "ok": True,
+                "peer": label,
+                "device_id": device_id,
+                "session_id": session_id,
+                "name": meta["name"],
+                "path": str(cached),
+                "bytes": meta["bytes"],
+                "sha256": meta["sha256"],
+                "attachment": digest,
+                "mime": meta["mime"],
+                "verified": True,
+                "resumed_bytes": 0,
+            }
     try:
         scope = sync.write_scope(root, staging_root(root))
     except sync.SyncRefused:
@@ -929,8 +953,21 @@ def local_pull_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
 
 def install(server: "RelayServer") -> None:
     """Register ``net_file_get`` (slow: a stat hashes up to 256 MiB) and the local verb."""
+    from local_operator.network import file_index
+
     server.register_ops(
-        {"net_file_get": make_handler(server)},
-        local_handlers={"session_file_pull": local_pull_handler(server)},
-        slow={"net_file_get": FILE_OP_DEADLINE_S},
+        {
+            "net_file_get": make_handler(server),
+            # The Files index rides this module's install so SLICE_MODULES is untouched
+            # (remote-files-parity.md §2): same family, same view capability.
+            "net_session_files": file_index.make_handler(server),
+        },
+        local_handlers={
+            "session_file_pull": local_pull_handler(server),
+            "peer_session_files": file_index.local_handler(server),
+        },
+        slow={
+            "net_file_get": FILE_OP_DEADLINE_S,
+            "net_session_files": file_index.INDEX_OP_DEADLINE_S,
+        },
     )

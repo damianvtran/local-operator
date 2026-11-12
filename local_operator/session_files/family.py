@@ -281,7 +281,7 @@ def contained_descendants(
     return children, skipped
 
 
-async def family_for(
+def family_blocking(
     config_dir: Path,
     session_id: str,
     directory: Path,
@@ -289,34 +289,28 @@ async def family_for(
     scope: str = "family",
     budget_s: float | None = None,
 ) -> tuple[Any, Any]:
-    """``(service.Family, ledger.Snapshot | None)`` for one session's files index.
+    """``(service.Family, ledger.Snapshot | None)`` for one session's files index. Blocking.
 
     Lifted from ``routes/desktop_session_files._family`` so the desktop route and the
-    relay's ``net_session_files`` answer from ONE definition of a family.
+    relay's ``net_session_files`` (which runs on a relay op thread, no event loop) answer
+    from ONE definition of a family.
     """
     from local_operator.session_files import ledger, service
 
     if scope == "self":
         return service.Family(session_id, directory), None
-
     # Roster absence is indexed during the SAME resumable pass as files. A sidecar still
     # wins; the indexed fallback cannot reparse a huge no-roster journal before the budget.
-    def refresh_parent() -> ledger.Snapshot | None:
-        # to_thread arguments are evaluated ON the event loop. Keep the real cwd/registry,
-        # HOME and denylist filesystem readers inside the worker, not in its argument list.
-        return ledger.refresh(
-            config_dir,
-            session_id,
-            directory,
-            cwd=service.session_cwd(config_dir, session_id, directory),
-            home=str(Path.home()),
-            deny=service.make_deny(config_dir),
-            budget_s=budget_s,
-        )
-
-    snapshot = await asyncio.to_thread(refresh_parent)
-    children, skipped = await asyncio.to_thread(
-        contained_descendants,
+    snapshot = ledger.refresh(
+        config_dir,
+        session_id,
+        directory,
+        cwd=service.session_cwd(config_dir, session_id, directory),
+        home=str(Path.home()),
+        deny=service.make_deny(config_dir),
+        budget_s=budget_s,
+    )
+    children, skipped = contained_descendants(
         config_dir,
         session_id,
         indexed_roster=snapshot.scan.roster if snapshot else None,
@@ -330,4 +324,18 @@ async def family_for(
             skipped=skipped,
         ),
         snapshot,
+    )
+
+
+async def family_for(
+    config_dir: Path,
+    session_id: str,
+    directory: Path,
+    *,
+    scope: str = "family",
+    budget_s: float | None = None,
+) -> tuple[Any, Any]:
+    """:func:`family_blocking` off the event loop (the desktop route's form)."""
+    return await asyncio.to_thread(
+        family_blocking, config_dir, session_id, directory, scope=scope, budget_s=budget_s
     )

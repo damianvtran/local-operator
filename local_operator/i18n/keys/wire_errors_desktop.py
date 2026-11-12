@@ -340,6 +340,10 @@ def session_files_not_an_artifact() -> Msg:
     return Msg("wire.errors.desktop.session_files_not_an_artifact", {})
 
 
+def session_files_owner_unreachable(*, device: str) -> Msg:
+    return Msg("wire.errors.desktop.session_files_owner_unreachable", {"device": device})
+
+
 def session_files_remote_unreadable(*, reason: str, device: str) -> Msg:
     return Msg(
         "wire.errors.desktop.session_files_remote_unreadable",

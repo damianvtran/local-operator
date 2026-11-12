@@ -629,6 +629,7 @@ export type MessageParams = {
   "wire.errors.desktop.session_files_file_not_found": undefined;
   "wire.errors.desktop.session_files_materialise_failed": { "reason": string };
   "wire.errors.desktop.session_files_not_an_artifact": undefined;
+  "wire.errors.desktop.session_files_owner_unreachable": { "device": string };
   "wire.errors.desktop.session_files_remote_unreadable": { "reason": string; "device": string };
   "wire.errors.desktop.session_files_sensitive_name": { "name": string };
   "wire.errors.desktop.session_is_remote_open": { "session_id": string; "label": string };

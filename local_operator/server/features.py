@@ -1139,6 +1139,14 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # REMOTE FILES PARITY (docs/design/remote-files-parity.md §6): a PEER's conversation
+        # answers like a local one — transcript attachments/waveforms/supplements fetched on
+        # miss (504 retryable, 409 permanent), `…/files` and `…/user-attachments` listed by the
+        # owner with `remote`/`origin_device`/`remote_read`/`remote_unreadable` on each row, and
+        # the peer-only `…/files/{id}/content` and `POST …/files/{id}/download` routes.
+        # ABSENT MEANS a peer's Files panel is still `state: "unsupported"` and the renderer
+        # keeps today's message. `1` is the first contract revision.
+        "remote_files": 1,
         # THE USER-ATTACHMENT INVENTORY: `GET /v1/desktop/sessions/{id}/user-attachments`,
         # every document and picture the PERSON attached to the conversation, scanned from the
         # whole journal (`session/user_attachments.py`). Its OWN key rather than a bump of

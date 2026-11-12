@@ -80,6 +80,7 @@
   "wire.errors.desktop.session_files_file_not_found": "此会话的列表中没有该文件。",
   "wire.errors.desktop.session_files_materialise_failed": "无法保存文件：{reason}。",
   "wire.errors.desktop.session_files_not_an_artifact": "该文件已存在于磁盘上的自身路径，无需保存。",
+  "wire.errors.desktop.session_files_owner_unreachable": "此对话保存在 {device} 上，该设备目前无法连接，因此暂时无法在此列出其文件。{device} 重新上线后文件会显示出来。",
   "wire.errors.desktop.session_files_remote_unreadable": "无法在此设备上打开此文件：{reason, select, outside_session_files {它位于 {device} 的工作区中，不在对话的 scratchpad 内。请让该对话把它复制到自己的 scratchpad。} missing {它在 {device} 上已不存在。} too_large {它超过了设备之间可发送的 256 MiB 上限。} sensitive {它看起来像凭据，因此 {device} 不会发送。} not_referenced {{device} 上的对话已不再引用它。} other {{device} 未与此设备共享它。}}",
   "wire.errors.desktop.session_files_sensitive_name": "{name} 看起来像凭据文件，因此未保存到此设备。",
   "wire.errors.desktop.session_is_remote_open": "{session_id}位于{label}，此桌面端尚不能打开其他设备上的会话。使用`lop sessions move {session_id} --to local`将其移回本机，或在终端中使用`/network sessions --peer {label} --engage {session_id}`操控。",
