@@ -127,7 +127,7 @@ from local_operator.evaluation.lifecycle import (
     CleanupPlan,
     aggregate_cleanup,
 )
-from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.protocol import ActionBatch, AskUserAction, Observation
 from local_operator.evaluation.receipts import BudgetAuthorization
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
@@ -602,9 +602,22 @@ _PROSE_COMPLETION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
-#: ``FinishAction.reason``'s field bound (``protocol.py``); a prose claim is
-#: synthesised into one, so it takes that field's bound rather than inventing
-#: a second one.
+#: Upstream OSWorld's reply to a response that carries NO actions when the
+#: task has no user simulator, VERBATIM: ``DEFAULT_USER_RESPONSE`` in upstream
+#: ``lib_run_single.py`` (L17-19 of the OSWorld 2.0 tree the main29 arm ran
+#: against), sent by its ``ASK_USER`` branch (L745-771). Kept byte-identical on
+#: purpose: :meth:`ActionBridge.text_only_continuation` exists to give this
+#: arm the continuation upstream baselines get, and a paraphrase would make
+#: the two protocols differ in the one sentence the comparison rests on.
+OSWORLD_DEFAULT_USER_RESPONSE = (
+    "I have no further information to provide. "
+    "I trust you can figure it out based on the current observation and the instruction. "
+    "Please proceed with the next action. DO NOT ask me any more questions for this task."
+)
+
+#: The question bound for a text-only continuation: ``AskUserAction.question``
+#: and ``FinishAction.reason`` share this field bound (``protocol.py``), so the
+#: terminal prose is cut to it rather than to a second invented one.
 _PROSE_CLAIM_MAX_CHARS = 10_000
 
 
@@ -618,9 +631,18 @@ def prose_claims_completion(text: str) -> bool:
     ended its final answer as prose -- "Done. Summary of what I determined
     and did: ..." with NO tool call -- and the turn simply ended
     (``agent_stop``): the gate never fired, and the run reads as an unverified
-    finish, which is exactly what the gate exists to prevent. This predicate is
-    the gate's answer-side detector for that terminal message (see
-    ``ActionBridge.prose_completion_challenge`` for when it is consulted).
+    finish, which is exactly what the gate exists to prevent. This predicate
+    USED to be the trigger of a one-shot prose challenge.
+
+    TODAY IT ONLY LABELS. Arm main29's ``t29a-t003`` measured the trigger's
+    false negative ending an episode upstream OSWorld would have continued,
+    so the trigger is gone: EVERY text-only ending now gets the protocol's
+    ``ASK_USER`` continuation (``ActionBridge.text_only_continuation``),
+    whatever its phrasing. This predicate is consulted only by
+    ``_agent_stop_terminal_reason`` to NAME an ending that still lands in
+    ``agent_stop`` (``completion-claim`` vs ``no-tool-call``); it decides
+    nothing about whether the episode goes on. The trade notes below are the
+    label's precision history.
 
     WHAT IT IS AND IS NOT. A narrow positive list of assertion shapes the
     corpus actually exhibits -- not a general "did the model succeed"
@@ -1211,7 +1233,7 @@ class ActionBridge:
         #: ``fold`` on every ``MessageEndEvent``, so once the turn ends this is
         #: the message the run ended on -- a prose "Done" never reaches
         #: ``call``, so the event stream is the only place the bridge can see
-        #: it (see ``prose_completion_challenge``).
+        #: it (see ``text_only_continuation``).
         self._last_assistant_message: Message | None = None
         #: The ask answer's delivery, staged by ``call`` for THIS call only and
         #: consumed by whichever result path answers it (the normal return, a
@@ -1251,6 +1273,10 @@ class ActionBridge:
         #: list is trimmed to ``RECENT_TURNS_WINDOW`` -- the runner's bound.
         #: Stays empty when the policy is off.
         self._progress_turns: list[EpisodeTurn] = []
+        #: Assistant message ids already answered by
+        #: :meth:`text_only_continuation`: one continuation per message, so a
+        #: delivery that yields no new assistant message cannot loop on it.
+        self._continued_message_ids: set[str] = set()
 
     def arm(self, observation: Observation) -> None:
         """Arm the token with the episode's first observation.
@@ -1590,96 +1616,211 @@ class ActionBridge:
         if isinstance(event, (TurnEndEvent, AgentEndEvent)):
             self._finalize_output_group()
 
-    def prose_completion_challenge(self) -> list[Any] | None:
-        """The gate's re-prompt for a terminal message that CLAIMS completion.
+    async def text_only_continuation(self) -> list[Any] | None:
+        """See :meth:`_text_only_continuation`; serialised with :meth:`call`.
 
-        THE BYPASS THIS CLOSES. The gate inside ``call`` only ever sees a claim
-        the model made THROUGH the action tool. Arm 1748's first field run
-        (task_003) ended its final answer as prose -- "Done. Summary of what I
-        determined and did: ..." with no tool call at all -- and the turn
-        simply ended: ``agent_stop``, no challenge, no chance for the model to
-        compare its claim against the screen. This method is the gate's
-        answer-side arm; the driver calls it the moment the turn ends, and the
-        challenge itself -- text builder, reply guidance, bound -- is the ONE
-        already shipped on this channel, so the two arms cannot drift.
+        The bridge's ONE mutation lane: the step clocks, the progress window
+        and the ask seam are the state ``call`` mutates under ``_lock``, so the
+        continuation takes the same lock rather than relying on the turn
+        having ended.
+        """
 
-        WHEN IT FIRES (all required, each load-bearing):
+        async with self._lock:
+            return await self._text_only_continuation()
 
-        * the episode has NOT already ended (``end_requested is None`` and the
-          token is not terminal): a finish or a truncation has its own ending,
-          and the summary prose that often FOLLOWS an accepted finish (every
-          completed run in the corpus ends that way) must not earn a second
-          exchange;
-        * the gate is enabled and the SHARED budget is not spent -- the prose
-          arm draws from the same ``completion_challenges`` counter as the
-          finish-call arm, so one episode can never exceed the configured
-          number of challenges across BOTH paths;
-        * the terminal assistant message carries NO tool call -- a message with
-          one is ``call``'s business, not this arm's;
-        * its text matches :func:`prose_claims_completion` -- which the
-          round-1 review's eight adversarial narration shapes are the pinned
-          regression table for: next-work announcements, partial-scope
-          statements and ordinal sub-tasks do not fire, nor do plain answers
-          or the silent-provider ending class's empty terminal messages (the
-          residual class is named in the detector's docstring).
+    async def _text_only_continuation(self) -> list[Any] | None:
+        """The protocol's continuation for a turn that ended with NO tool call.
 
-        RETURNS the challenge content (the challenge text plus the SAME
-        rendered blocks the model was last shown, re-attached -- never
-        re-rendered) for the driver to deliver as one harness-injected user
-        turn, or ``None`` when the gate does not apply. The counter and the
-        record are updated HERE, so a firing is counted and auditable even if
-        the delivery then fails.
+        WHY (arm main29, local-operator ``ad1aa4162a6e``, ``t29a-t003``). A
+        session turn ends the moment the model replies with prose and no tool
+        call. The arm used to give such an ending ONE follow-up, and only when
+        a regex list (:func:`prose_claims_completion`) recognised the prose as a
+        completion claim; anything else ended the episode as ``agent_stop`` /
+        ``no-tool-call``. t003's last message claimed completion in prose
+        ("Both slides verified in LibreOffice... Summary of what was done...")
+        that matched none of the patterns, so the episode simply ended -- and
+        the benchmark's own loop would NOT have ended there. Upstream OSWorld's
+        ``lib_run_single.py`` (the ``if not actions:`` branch at L745-771, and
+        the same branch at L1094/L1536/L1731/L1818) treats ANY response
+        without actions as ``ASK_USER``: it answers with the task's user
+        simulator when the environment has one, else with
+        ``DEFAULT_USER_RESPONSE`` (L17-19), counts ONE step, and loops. Upstream
+        baselines get that continuation; this arm now gives the same one, so
+        the decision no longer depends on how the prose happens to be phrased.
+
+        WHAT IT DOES, in the runner's order for an ask step:
+
+        1. eligibility (all required): the episode has not ended (no accepted
+           finish -- the summary prose that follows every accepted finish must
+           not earn an exchange -- no truncation, no wedge); the terminal
+           assistant message carries no tool call and was not already
+           continued (one continuation per message, so a delivery that yields
+           no new message cannot spin); both step clocks have room;
+        2. ONE step is charged on the official output-epoch clock (upstream's
+           ``step_idx += 1``), as an admitted ``ask_user`` batch is;
+        3. the turn enters the progress window as a single-``ask_user`` batch
+           -- exactly what it is in the protocol -- so the EXISTING
+           ``ask-loop`` guard (``runner.guards.AskLoopGuard``) bounds a run of
+           text-only turns, together with any real ``ask_user`` batches, with
+           no new counter. A guard verdict truncates here, BEFORE the simulator
+           is consulted (an answer the model would never read is not spent);
+           a step that exhausts the budget ends ``max-steps`` the same way;
+        4. the answer: the task's user simulator through the adapter's ask
+           seam when the episode has one (the prose is the question, as
+           upstream passes ``response``), else -- or when the simulator
+           declines -- ``DEFAULT_USER_RESPONSE`` verbatim.
+
+        CONSTRAINTS. With the progress policy OFF (``progress_guards`` is
+        ``None``, the arm's historical opt-out) the window is not kept, and a
+        text-only chain is bounded only by the step budget and the wall --
+        upstream's own bound; the operator opted out of no-progress
+        truncation, and this method does not quietly opt them back in. A
+        failed simulator exchange is recorded and ENDS the continuation
+        (``None``): substituting the default for a task that has a simulator
+        would invent an answer the protocol would not give. An empty-text
+        message has no question to put to a simulator, so it gets the default.
+        Every outcome writes one ``text_only_continuation`` row, delivered or
+        not, so the record says why the episode went on or stopped.
+
+        RETURNS the content to deliver as one harness-injected user turn (the
+        answer text, then the screen the model was last shown with its budget
+        line restated -- the blocks it must bind its next call to), or
+        ``None`` when the episode ends here.
         """
 
         if self.end_requested is not None:
             return None
-        if self._token is None or self._token.terminal:
-            return None
-        if not self.completion_gate or self._completion_fired >= self.completion_challenges:
+        token = self._token
+        if token is None or token.terminal:
             return None
         message = self._last_assistant_message
         if message is None or message.tool_calls:
             return None
-        text = message.text.strip()
-        if not prose_claims_completion(text):
+        if message.stop_reason in ("error", "aborted"):
+            # A faulted or aborted message is not the model's reply (the
+            # output-group clock treats it the same way); its ending keeps the
+            # driver's label.
             return None
-        observation = self._last_observation
-        if observation is None:  # pragma: no cover - arm() always sets it
+        if message.id in self._continued_message_ids:
             return None
-        # The claim is a CLAIM whether it arrived as a finish action or as
-        # prose; quoting it back through the same builder is what keeps the two
-        # arms' challenges byte-identical above the channel sentence. The
-        # synthesised status is ``done`` because that is what the message
-        # asserts, and it binds to the same last observation the challenge
-        # re-attaches -- the screen the claim is about.
-        claim = FinishAction(
+        observation = token.pending
+        if observation is None:  # pragma: no cover - an armed, non-terminal token holds one
+            return None
+        if self._steps >= self.max_steps or self._attempted_groups >= self.max_steps:
+            # No step left to spend on an answer (the prose message itself may
+            # have taken the last attempted group): nothing is charged, the
+            # budget stop the driver's sink already raised ends the episode,
+            # and the row says why it did not go on.
+            self._continued_message_ids.add(message.id)
+            if self.record is not None:
+                self.record(
+                    "text_only_continuation",
+                    {
+                        "message_id": message.id,
+                        "steps": self._steps,
+                        "delivered": False,
+                        "stopped": "max-steps",
+                    },
+                )
+            return None
+        self._continued_message_ids.add(message.id)
+        text = (message.text or "").strip()
+        question = text[:_PROSE_CLAIM_MAX_CHARS]
+        self._consume_output_epoch("text-only-continuation")
+        row: dict[str, Any] = {
+            "message_id": message.id,
+            "question": question,
+            "steps": self._steps,
+        }
+        if self._steps >= self.max_steps:
+            # Upstream's ``step_idx += 1`` reached ``max_steps``: its loop
+            # exits on that count, so the answer is never read. End here,
+            # named, rather than hand the model a turn whose next action the
+            # bridge can only refuse with the budget ACK.
+            token.mark_terminal()
+            self.end_requested = "max-steps"
+            self._record_continuation(row, delivered=False, stopped="max-steps")
+            return None
+        # The turn as the protocol sees it: ONE ask_user batch on the screen
+        # the model was shown. Bound to the pending observation, never
+        # executed -- nothing on the screen changed, so the token stays armed
+        # on it and the model's next call binds to the same observation.
+        batch = ActionBatch(
+            protocol_version="1.0",
+            task_id=observation.task_id,
+            episode_id=observation.episode_id,
             observation_id=observation.observation_id,
-            status="done",
-            reason=text[:_PROSE_CLAIM_MAX_CHARS],
+            actions=(
+                AskUserAction(
+                    observation_id=observation.observation_id,
+                    request_id=f"text-only-{self._steps}-{uuid.uuid4().hex[:8]}",
+                    question=question or "(no text)",
+                ),
+            ),
         )
-        challenge = build_completion_challenge(
-            claim=claim,
-            instruction=self.instruction,
-            observation=observation,
-            reply_guidance=self.reply_guidance,
-        )
-        self._completion_fired += 1
+        verdict = self._evaluate_progress(observation, batch, observation)
+        if verdict is not None:
+            self._apply_progress_stop(token, verdict)
+            self._record_continuation(row, delivered=False, stopped=verdict.code)
+            return None
+        answer: str | None = None
+        # ``ask_exchange`` says what the seam did, so a reader can tell "the
+        # task has no simulator / it declined" (the adapter answers both as a
+        # clean decline) from "no exchange was attempted" (no adapter-owned
+        # seam, or an empty message with nothing to ask).
+        row["ask_exchange"] = "none"
+        if self.ask is not None and question:
+            try:
+                delivery = await self.ask(batch)
+            except Exception as error:  # noqa: BLE001 - recorded, and the episode ends legibly
+                row["ask_exchange"] = "failed"
+                row["error"] = f"{type(error).__name__}: {error}"[:400]
+                self._record_continuation(row, delivered=False, stopped="ask-exchange-failed")
+                return None
+            receipt, answer = _split_ask_delivery(delivery)
+            if self.record is not None and receipt is not None:
+                self.record("ask_exchange", {"receipt": receipt})
+            row["ask_exchange"] = "answered" if answer is not None else "declined"
+        if answer is not None:
+            row["answer_source"] = "user-simulator"
+        else:
+            answer = OSWORLD_DEFAULT_USER_RESPONSE
+            row["answer_source"] = "default-user-response"
+        row["answer"] = answer
+        self._record_continuation(row, delivered=True, stopped=None)
+        return [TextContent(text=answer), *self._shown_blocks(observation)]
+
+    def _record_continuation(
+        self, row: dict[str, Any], *, delivered: bool, stopped: str | None
+    ) -> None:
+        """Write the one ``text_only_continuation`` row for a continuation."""
+
+        if self.record is None:
+            return
+        payload = {**row, "delivered": delivered}
+        if stopped is not None:
+            payload["stopped"] = stopped
+        self.record("text_only_continuation", payload)
+
+    def _apply_progress_stop(self, token: Any, verdict: GuardVerdict) -> None:
+        """End the episode on a progress-guard verdict (the runner's truncation).
+
+        One definition for the executed-batch path in :meth:`call` and the
+        text-only continuation: the token goes terminal so any later call is
+        refused before execute, ``end_requested`` carries the guard's stable
+        code, and the driver maps ``progress_stop_code`` to ``truncated`` and
+        asks the session for its graceful stop.
+        """
+
+        token.mark_terminal()
+        self.end_requested = verdict.code
+        self.end_diagnostic = verdict.detail
+        self.progress_stop_code = verdict.code
         if self.record is not None:
-            # Same record kind as the finish-call arm -- one counter, one
-            # budget -- and the ``trigger`` key is the discriminator for
-            # readers counting which arm fired; the finish-call row keeps its
-            # own historical shape.
             self.record(
-                "completion_challenged",
-                {
-                    "status": "done",
-                    "reason": claim.reason,
-                    "challenge": challenge,
-                    "observation_id": observation.observation_id,
-                    "trigger": "terminal-message",
-                },
+                "progress_stop",
+                {"code": verdict.code, "detail": verdict.detail, "steps": self._steps},
             )
-        return [TextContent(text=challenge), *self._shown_blocks(observation)]
 
     async def start(self) -> None:
         self.endpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -2081,8 +2222,9 @@ class ActionBridge:
                             "observation_id": pending.observation_id,
                         }
                         # The ``done`` row keeps its historical shape (no
-                        # trigger key); the new rule is discriminated the way
-                        # the prose arm's row is, by ``trigger``.
+                        # trigger key); the premature rule is discriminated by
+                        # ``trigger``, as the retired prose challenge's
+                        # ``terminal-message`` rows in older records are.
                         if kind == "premature-terminal":
                             row["trigger"] = "premature-terminal"
                         self.record("completion_challenged", row)
@@ -2232,16 +2374,11 @@ class ActionBridge:
                 # before execute, and ``end_requested`` carries the guard's
                 # stable code -- the driver maps it to ``truncated`` and asks
                 # the session for the same graceful stop it uses at the budget.
-                token.mark_terminal()
-                self.end_requested = verdict.code
-                self.end_diagnostic = verdict.detail
-                self.progress_stop_code = verdict.code
-                if self.record is not None:
-                    self.record(
-                        "progress_stop",
-                        {"code": verdict.code, "detail": verdict.detail, "steps": self._steps},
-                    )
-                rendered = [*rendered, TextContent(text=PROGRESS_STOP_ACK.format(verdict.detail))]
+                self._apply_progress_stop(token, verdict)
+                rendered = [
+                    *rendered,
+                    TextContent(text=PROGRESS_STOP_ACK.format(verdict.detail)),
+                ]
                 details["terminal"] = PROGRESS_GUARD_TERMINAL
             return {
                 "content": [*self._pending_ask_delivery, *rendered],
@@ -3086,6 +3223,21 @@ def _bounded_text_keeping_tail(text: str, limit: int, *, tail: int) -> str:
     return f"{head} … {kept}"
 
 
+def _turn_ended_cleanly(end: AgentEndEvent | None) -> bool:
+    """Whether a turn ended because the MODEL stopped, not because it was cut.
+
+    The text-only continuation answers the model's own reply; a turn that
+    ended on a provider error, an abort or a stamped cut-off cause ended for a
+    reason the model did not choose, and its ending keeps the label
+    :func:`_agent_stop_terminal_reason` gives it. ``None`` (no end frame seen)
+    is not clean: nothing proves the model stopped.
+    """
+
+    if end is None:
+        return False
+    return not (end.error or end.aborted or end.cut_off_cause)
+
+
 def _agent_stop_terminal_reason(
     *,
     wall_fired: bool,
@@ -3709,25 +3861,30 @@ async def run_session_episode(
                 wall_timer = asyncio.get_running_loop().call_later(max_wall_s, _on_wall)
             try:
                 await handle.session.prompt(prompt, images=images or None)
-                # The completion gate's prose arm: a terminal message that
-                # CLAIMS completion without a tool call gets the SAME challenge
-                # a finish call gets, delivered against the state the model
-                # last saw. Arm 1748's task_003 ended with "Done. Summary ..."
-                # as prose and escaped the gate entirely; the re-prompt is one
-                # harness-injected user turn (the reply channel's re-prompt, in
-                # this channel's vocabulary -- the challenge text is the same
-                # builder the finish-call arm uses). The loop is bounded by the
-                # SHARED challenge budget inside the bridge, and it is skipped
-                # when the wall bound fired: the wall is a kill switch, and a
-                # re-prompt after it would spend past it.
-                while not wall_fired:
-                    challenge = bridge.prose_completion_challenge()
-                    if challenge is None:
+                # THE PROTOCOL'S ASK_USER CONTINUATION. Upstream OSWorld
+                # answers EVERY response without actions (user simulator, or
+                # DEFAULT_USER_RESPONSE), counts a step and loops; a session
+                # turn instead ENDS on prose. Each text-only ending therefore
+                # gets the bridge's continuation, delivered as one
+                # harness-injected user turn. It replaces the regex-gated
+                # prose challenge, whose trigger missed t003's completion
+                # prose (see ``ActionBridge.text_only_continuation``); a
+                # model that then calls finish meets the completion gate on
+                # the finish-call arm, as every finish does. Bounded inside
+                # the bridge by the step budget and the ask-loop guard, one
+                # continuation per message; skipped when the wall bound fired
+                # (a kill switch -- a re-prompt after it would spend past it)
+                # and when the turn did not end cleanly: an error, abort or
+                # cut-off is the harness's or provider's ending, not the
+                # model's text-only reply, and keeps its own label.
+                while not wall_fired and _turn_ended_cleanly(last_turn_end):
+                    continuation = await bridge.text_only_continuation()
+                    if continuation is None:
                         break
-                    challenge_text, challenge_images = split_prompt_content(challenge)
+                    continuation_text, continuation_images = split_prompt_content(continuation)
                     await handle.session.prompt(
-                        challenge_text,
-                        images=challenge_images or None,
+                        continuation_text,
+                        images=continuation_images or None,
                         harness_injected=True,
                     )
             finally:

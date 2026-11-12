@@ -492,6 +492,29 @@ async with open_session(spec, roots=roots) as session:
   (the campaign builds arms with ``git archive <commit>``). Pinned by the new
   unit tests and the spawned rig's ``--ending prose-claim``/``narration``
   cases (the latter the discriminating negative, verbatim from 005).
+  **Superseded 2026-11-11 by the text-only continuation below.**
+- **Text-only continuation (ASK_USER parity, 2026-11-11).** Arm main29
+  (``ad1aa4162a6e``) measured the prose arm's false negative: ``t29a-t003``
+  ended on completion prose ("Both slides verified in LibreOffice... Summary
+  of what was done...") that matched no claim pattern, so the episode ended
+  ``agent_stop``/``no-tool-call`` where upstream OSWorld's own loop would have
+  continued. Upstream (``lib_run_single.py``, the ``if not actions:`` branch)
+  treats ANY response without actions as ``ASK_USER``: the task's user
+  simulator answers, else ``DEFAULT_USER_RESPONSE`` (verbatim), one step is
+  counted, and the loop goes on. The driver now calls
+  ``ActionBridge.text_only_continuation`` after every cleanly ended turn: no
+  regex decides; the answer is the simulator's (through the adapter's ask
+  seam) or upstream's default text verbatim; ONE step is charged; the turn
+  enters the progress window as a single ``ask_user`` batch so the existing
+  ``ask-loop`` guard bounds a chain (policy off: the step budget and wall,
+  upstream's own bound); one continuation per message; one
+  ``text_only_continuation`` record row per continuation, delivered or not.
+  ``prose_claims_completion`` survives only as the ``agent_stop`` label. A
+  model that then calls finish meets the finish-call gate, whose done-challenge
+  now asks for verification at the source (requirements re-read in their exact
+  wording, saved files inspected for contents, derived numbers recomputed) --
+  ``t29a-t010`` re-checked a rendering while one table cell held a false
+  product, and ``t29a-t003`` set opacity where the task said transparency.
 - **No-progress guards, opt-in (landed 2026-10-28).** The reply arm always
   runs the runner's turn-window guards (``RepeatedBatchGuard`` 4,
   ``NoChangeGuard`` 6, ``AskLoopGuard`` 3); the session arm ran none. On a
