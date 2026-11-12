@@ -1145,6 +1145,15 @@ class ApprovalPrompt(AskPickerScreen):
     #: ``AskPickerScreen.set_remote_device``).
     REMOTE_HINT_KIND = "approval"
 
+    #: Team Bridge gate flags (team-bridge-egress.md: "Cards"), stamped by the
+    #: host after construction and read back by ``mobile.tui_handle`` when it
+    #: publishes the card as a ``PendingRequest``. Declared at class level so
+    #: pyright sees the attributes and an unstamped card reads the safe
+    #: "not raised by taint" default; ``bridge_latched`` is also set True by
+    #: the latching path below, never back to False.
+    taint_raised: bool = False
+    bridge_latched: bool = False
+
     #: Escape must reach the APP, which stops the run, rather than answering
     #: this one question.
     #:

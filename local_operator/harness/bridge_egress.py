@@ -490,11 +490,13 @@ def link_latches(parent: BridgeTaintLatch, child: BridgeTaintLatch) -> Callable[
     child.on_latched.append(child_cb)
 
     def unlink() -> None:
+        # Filtered in place rather than ``list.remove``: each callback is a
+        # closure unique to this link, so dropping every identical entry is the
+        # same effect, the call stays idempotent without a ValueError arm, and
+        # the session-deletion guard (tests/unit/session/test_no_session_deletion.py)
+        # has no ``<path>.remove`` call shape to mistake for a directory removal.
         for latch, callback in ((parent, parent_cb), (child, child_cb)):
-            try:
-                latch.on_latched.remove(callback)
-            except ValueError:
-                pass
+            latch.on_latched[:] = [cb for cb in latch.on_latched if cb is not callback]
 
     return unlink
 

@@ -30,7 +30,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -562,7 +562,13 @@ def _real_grep(home: Path, **args: Any) -> str:
 
     context = ToolContext(cwd=str(home), session_id="reader")
     call = {"pattern": "IGNORE PRIOR", "path": str(home), **args}
-    result = asyncio.run(builtin.execute_grep("g1", call, None, None, context))
+
+    # ``execute_grep`` is typed as returning an ``Awaitable``; ``asyncio.run``
+    # takes a coroutine, so await it inside one.
+    async def _run() -> Any:
+        return await builtin.execute_grep("g1", call, None, None, context)
+
+    result = asyncio.run(_run())
     return "".join(getattr(part, "text", "") for part in result.content)
 
 
@@ -860,7 +866,9 @@ async def test_m3_no_latch_object_records_the_decision_for_the_filter(
         "local_operator.web_search.tool.WebSearchService.__init__",
         lambda self, *a, **k: None,
     )
-    assert tainted_provider_allowlist(context, _Settings()) == frozenset({"brave"})
+    # A duck-typed stand-in: the allowlist reads only ``searxng_endpoint``.
+    settings = cast(Any, _Settings())
+    assert tainted_provider_allowlist(context, settings) == frozenset({"brave"})
 
 
 def test_m3_no_context_at_all_refuses_a_latched_search() -> None:
@@ -952,7 +960,10 @@ def test_s63_static_read_tier_inventory_is_pinned() -> None:
             if not (isinstance(tier, ast.Constant) and tier.value == "read"):
                 continue
             name = keywords.get("name")
-            found.add(name.value if isinstance(name, ast.Constant) else ast.unparse(name))
+            if isinstance(name, ast.Constant) and isinstance(name.value, str):
+                found.add(name.value)
+            elif name is not None:
+                found.add(ast.unparse(name))
     added = found - set(STATIC_READ_TIER)
     assert not added, (
         f"new read-tier tool(s) {sorted(added)}: decide in harness/bridge_egress.py whether "

@@ -9803,6 +9803,30 @@ class AttachedSession:
         return False
 
     @property
+    def bridge_taint_latch(self) -> None:
+        """Always ``None``: the Team Bridge latch lives in the owner's runtime.
+
+        Declared (``SessionProtocol``) rather than left to the TUI's ``getattr``
+        default so a rename is a type error. ``None`` keeps the TUI from
+        installing a local latch watcher; the owner announces through its own
+        notice stream (team-bridge-egress.md: "Grants").
+        """
+        return None
+
+    @property
+    def bridge_latched(self) -> bool:
+        """Always False here: this facade holds no local latch.
+
+        This is the same answer the TUI's ``getattr`` default gave before the
+        member was declared, so behaviour is unchanged. Taint for a viewer
+        reaches it per card (``PendingGateState.bridge_latched``) and the
+        owner's runtime re-checks every grant and every ``approvals auto``
+        (refused without ``bridge_ack``), so the viewer path stays fail-closed
+        without trusting this answer.
+        """
+        return False
+
+    @property
     def outcome_is_synchronous(self) -> bool:
         """Always False: :meth:`prompt` returns on the owner's admission ACK.
 
@@ -10724,12 +10748,16 @@ class AttachedSession:
             settings_kwargs["defer_ok"] = True
         if request_id:
             settings_kwargs["request_id"] = request_id
+        if bridge_ack:
+            # Same only-when-set stance as the deferral keys: an unmarked slash
+            # keeps the client call shape it had before Team Bridge taint, and
+            # absence stays the fail-closed "not acknowledged" on the owner.
+            settings_kwargs["bridge_ack"] = True
         try:
             return await client.slash_result(
                 command,
                 args,
                 [_image_to_wire(image) for image in (images or [])],
-                bridge_ack=bridge_ack,
                 **settings_kwargs,
             )
         except ConnectionError as error:
