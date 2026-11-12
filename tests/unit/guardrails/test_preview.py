@@ -433,6 +433,7 @@ async def test_the_builtin_branch_is_what_the_checkpoint_does(
         assert "literal path" in allowed.text
         assert "ask the operator" not in allowed.text
         assert str(guarded_home) not in allowed.text, "the variable's value must not be shown"
+        assert ctx.cwd is not None
         assert ctx.cwd not in allowed.text, "the cwd is not the target"
     else:
         assert allowed is not None and allowed.blocked is True

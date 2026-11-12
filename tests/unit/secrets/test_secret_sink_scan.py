@@ -45,7 +45,7 @@ from local_operator.harness.secret_sinks import (
     scan_command,
     scan_python,
 )
-from local_operator.harness.types import AbortSignal, ToolContext
+from local_operator.harness.types import AbortSignal, ToolContext, ToolResult
 from local_operator.tools import builtin
 from local_operator.tools import eval as eval_tool
 from local_operator.tools.eval import execute_eval
@@ -2690,7 +2690,7 @@ def _escaped_spellings(value: str) -> list[str]:
     ]
 
 
-async def _bash(tmp_path: Path, command: str, context: ToolContext | None = None) -> object:
+async def _bash(tmp_path: Path, command: str, context: ToolContext | None = None) -> ToolResult:
     return await builtin.execute_bash(
         "bash-round1", {"command": command}, AbortSignal(), None, context or _context(tmp_path)
     )
@@ -2853,22 +2853,22 @@ async def test_round1_e14_eval_repr_of_a_quote_heavy_value_is_masked(
 # Frozen round-2 ledger: these are mask-defeating predicates/transformations,
 # not new quoting forms. Exercise the actual tool gate before a child can run.
 _ROUND2_SHELL = (
-    'v=$(lop secret get K); if [[ $v == synthetic* ]]; then echo PREFIX-YES; fi',
-    'v=$(lop secret get K); { [[ $v == synthetic* ]] && echo PREFIX-YES; }',
-    'v=$(lop secret get K); [[ -n $v && $v == synthetic* ]] && echo PREFIX-YES',
-    'v=$(lop secret get K); ! [[ $v == synthetic* ]] || echo PREFIX-YES',
-    'v=$(lop secret get K); [[ -n $v && $v == synthetic* && -n $v ]] && echo PREFIX-YES',
+    "v=$(lop secret get K); if [[ $v == synthetic* ]]; then echo PREFIX-YES; fi",
+    "v=$(lop secret get K); { [[ $v == synthetic* ]] && echo PREFIX-YES; }",
+    "v=$(lop secret get K); [[ -n $v && $v == synthetic* ]] && echo PREFIX-YES",
+    "v=$(lop secret get K); ! [[ $v == synthetic* ]] || echo PREFIX-YES",
+    "v=$(lop secret get K); [[ -n $v && $v == synthetic* && -n $v ]] && echo PREFIX-YES",
     'v=$(lop secret get K); if test "$v" = synthetic*; then echo PREFIX-YES; fi',
-    'v=$(lop secret get K); while [[ $v == synthetic* ]]; do echo PREFIX-YES; break; done',
-    'lop secret get K | tac -s -',
-    'lop secret get K | tac --separator=-',
-    'lop secret get K | tac --separator -',
-    'lop secret get K | tac -bs-',
-    'lop secret get K | diff -W 24 -y - /dev/null',
-    'lop secret get K | diff -yW24 - /dev/null',
-    'lop secret get K | diff --width=24 --side-by-side - /dev/null',
-    'lop secret get K | diff --width 24 - /dev/null',
-    'lop secret get K | diff --side-by-side - /dev/null',
+    "v=$(lop secret get K); while [[ $v == synthetic* ]]; do echo PREFIX-YES; break; done",
+    "lop secret get K | tac -s -",
+    "lop secret get K | tac --separator=-",
+    "lop secret get K | tac --separator -",
+    "lop secret get K | tac -bs-",
+    "lop secret get K | diff -W 24 -y - /dev/null",
+    "lop secret get K | diff -yW24 - /dev/null",
+    "lop secret get K | diff --width=24 --side-by-side - /dev/null",
+    "lop secret get K | diff --width 24 - /dev/null",
+    "lop secret get K | diff --side-by-side - /dev/null",
     'v=$(lop secret get K); echo "${v@E}"',
     'v=$(lop secret get K); echo "${v@U}"',
     'v=$(lop secret get K); echo "${v@L}"',
