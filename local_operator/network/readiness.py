@@ -197,6 +197,11 @@ CODE_LOW_MEMORY = "low_memory"
 #: The peer has not granted this device the lifecycle capability net_restart
 #: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
 CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
+#: The peer lacks some of this device's skills at this device's revision. A
+#: named constant (not a literal at the emit site) because enrollment's
+#: ``public_report`` admits only ``CODE_*`` values: a bare literal made a failed
+#: ``skills`` row refuse the whole terminal receipt (PR #3839).
+CODE_SKILLS_NOT_SYNCED = "skills_not_synced"
 #: Serve daemon (2026-10-28): its build differs from the install's, or nothing
 #: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
 CODE_SERVE_STALE = "serve_stale"
@@ -1782,7 +1787,7 @@ def skills_row(
         device_name=peer_label,
         capability=CAPABILITY_SKILLS,
         ok=not missing,
-        code="" if not missing else "skills_not_synced",
+        code="" if not missing else CODE_SKILLS_NOT_SYNCED,
         detail="; ".join(parts),
         remedies=(
             [
