@@ -765,6 +765,16 @@ def action_server_mcp_timeout_s() -> float:
     NOT forwarded as a cancellation (``action_server.forward_call`` half-closes
     only for ``run_command``): the bridge finishes the batch, the reply is
     lost, and the next call re-binds -- a lost reply, never a poisoned session.
+
+    WHAT THIS DOES NOT COVER: QUEUE TIME. The client's timer starts when the
+    request is SENT, but a ``run_command`` dispatches only once it holds the
+    bridge's single mutation lane -- behind an earlier command, a GUI batch, or
+    a command whose caller already left (``ActionBridge._handle`` detaches
+    those). This bound nests only the command's own deadlines; the bridge
+    closes the remainder itself by bounding the lane wait to the headroom this
+    bound leaves (:meth:`ActionBridge.call_command`), refusing an unsent
+    command instead of letting the client cut it, and by never dispatching a
+    command whose caller left while it was queued.
     """
 
     from local_operator.evaluation import action_server
@@ -774,6 +784,49 @@ def action_server_mcp_timeout_s() -> float:
         + COMMAND_RPC_MARGIN_S
         + ACTION_SERVER_REPLY_SLACK_S
     )
+
+
+def action_server_client_timeout_s() -> float | None:
+    """The request bound the MCP client will ACTUALLY apply to the action server.
+
+    The declared per-server ``timeout`` run through the manager's own precedence
+    (``resolve_mcp_timeout_s``: ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks it;
+    ``0`` disables it, ``None``). The episode's MCP client lives in THIS process
+    (``sdk.open_session``), so this process's environment is the client's.
+    Resolved here rather than restated so the precheck, the declaration and the
+    bridge's lane-wait bound can never disagree with the client.
+    """
+
+    from local_operator.mcp.config import MCPStdioServerConfig
+    from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+    declared = MCPStdioServerConfig(timeout=int(action_server_mcp_timeout_s() * 1000))
+    return resolve_mcp_timeout_s(declared)
+
+
+def assert_action_server_timeout_nests(resolved_timeout: float | None = None) -> None:
+    """Refuse an episode whose MCP client would cut the longest legal command.
+
+    ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks a per-server ``timeout``
+    (``resolve_mcp_timeout_s``), so an inherited env override could silently
+    undo the nesting the declaration sets and bring back the measured loss (a
+    300 s command cut by the MCP client, the session poisoned). It depends only
+    on the environment and constants, so ``run_session_episode`` calls it
+    BEFORE ``launch``/``prepare``: a refused run never provisions or resets a
+    target. ``assert_declaration_resolved`` repeats it on the DISCOVERED
+    config (``resolved_timeout``), proving the declaration that was actually
+    read resolves the same way.
+    """
+
+    if resolved_timeout is None:
+        resolved_timeout = action_server_client_timeout_s()
+    required_timeout = action_server_mcp_timeout_s()
+    if resolved_timeout is not None and resolved_timeout < required_timeout:
+        raise SessionArmError(
+            f"the action server's MCP request timeout resolves to {resolved_timeout:g} s, "
+            f"below the {required_timeout:g} s its longest command needs; "
+            "unset LOCAL_OPERATOR_MCP_TIMEOUT_MS (or raise it) for episode runs"
+        )
 
 
 @dataclass(frozen=True)
@@ -947,22 +1000,16 @@ def assert_declaration_resolved(
             f"the action server {server_name!r} was not discovered from {resolved_cwd}; "
             "the declaration and the session's cwd disagree"
         )
-    # ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks a per-server ``timeout``
-    # (``resolve_mcp_timeout_s``), so an inherited env override could silently
-    # undo the nesting the declaration sets and bring back the measured loss
-    # (a 300 s command cut by the MCP client, the session poisoned). Refuse
-    # that at episode start, where it costs nothing, rather than mid-run.
+    # The env-override refusal, re-checked on the config discovery actually
+    # read. ``run_session_episode`` already ran it before provisioning
+    # anything (``assert_action_server_timeout_nests``); this proves the
+    # discovered declaration resolves the same way.
     if server_name == SERVER_NAME:
         from local_operator.mcp.manager import resolve_mcp_timeout_s
 
         resolved_timeout = resolve_mcp_timeout_s(configs[server_name])
-        required_timeout = action_server_mcp_timeout_s()
-        if resolved_timeout is not None and resolved_timeout < required_timeout:
-            raise SessionArmError(
-                f"the action server's MCP request timeout resolves to {resolved_timeout:g} s, "
-                f"below the {required_timeout:g} s its longest command needs; "
-                "unset LOCAL_OPERATOR_MCP_TIMEOUT_MS (or raise it) for episode runs"
-            )
+        if resolved_timeout is not None:
+            assert_action_server_timeout_nests(resolved_timeout)
     return sources
 
 
@@ -2010,15 +2057,107 @@ class ActionBridge:
         Transport failures remain errors, not synthetic exit statuses. Recording
         metadata excludes output: sealed artifacts still identify exactly what ran.
 
-        ``caller_gone`` is set by :meth:`_handle` when the MCP caller cancelled
-        after dispatch: the command is then left to settle (see there) and its
-        row is sealed as the unknown outcome the caller was left with.
+        ``caller_gone`` is set by :meth:`_handle` when the MCP caller left (a
+        client request timeout, an interrupted turn). Before dispatch the
+        command is then never sent (``cancelled_before_dispatch``); after
+        dispatch it is left to settle (see :meth:`_handle`) and its row is
+        sealed as the unknown outcome the caller was left with.
+
+        THE LANE WAIT IS BOUNDED. The MCP client's request timer runs from send,
+        so time spent queued here comes out of the budget
+        :func:`action_server_mcp_timeout_s` nested around the command's own
+        deadlines. A command may wait for the lane only as long as that bound
+        still leaves its full ``timeout_s + COMMAND_RPC_MARGIN_S +
+        ACTION_SERVER_REPLY_SLACK_S`` after dispatch -- i.e. the headroom below
+        the advertised maximum (``COMMAND_MAX_TIMEOUT_S - timeout_s`` at the
+        declared bound; none at the maximum itself). Past it the command is
+        refused UNSENT with a reply the caller still receives, instead of being
+        cut by the client as a generic timeout whose outcome the model cannot
+        know. No new number: the bound is derived from the deadlines already
+        nested, and an unbounded client (``LOCAL_OPERATOR_MCP_TIMEOUT_MS=0``)
+        leaves the wait unbounded.
         """
+        from local_operator.evaluation.action_server import (
+            COMMAND_DEFAULT_TIMEOUT_S,
+            COMMAND_MAX_TIMEOUT_S,
+        )
+
+        requested = arguments.get("timeout_s", COMMAND_DEFAULT_TIMEOUT_S)
+        client_timeout = action_server_client_timeout_s()
+        lane_budget: float | None = None
+        if (
+            client_timeout is not None
+            and type(requested) is int
+            and 1 <= requested <= COMMAND_MAX_TIMEOUT_S
+        ):
+            # Invalid arguments get no budget: the locked path refuses them at
+            # once, and a bound computed from a malformed value means nothing.
+            lane_budget = client_timeout - (
+                requested + COMMAND_RPC_MARGIN_S + ACTION_SERVER_REPLY_SLACK_S
+            )
         # Screen actions, terminal admission and commands share ONE mutation
         # lane. Keep the ended-state check inside it so queued calls cannot run
         # after a finish accepted while they were waiting.
-        async with self._lock:
+        if lane_budget is None:
+            await self._lock.acquire()
+        else:
+            acquired = False
+            if lane_budget > 0:
+                try:
+                    await asyncio.wait_for(self._lock.acquire(), lane_budget)
+                    acquired = True
+                except TimeoutError:
+                    pass
+            elif not self._lock.locked():
+                # No headroom (a command at the advertised maximum): it may
+                # take a FREE lane, but cannot afford to wait for a busy one.
+                # ``wait_for(..., 0)`` would refuse even the free lane.
+                await self._lock.acquire()
+                acquired = True
+            if not acquired:
+                return self._refuse_unsent_command(
+                    arguments,
+                    outcome="refused_lane_busy",
+                    text=(
+                        "Not run: the remote computer is still busy with an earlier "
+                        f"call, and waiting for it would leave this command's "
+                        f"timeout_s of {requested} s too little time before the call "
+                        "itself times out. Nothing was sent. Earlier calls -- "
+                        "including one that was cut short and may still be running "
+                        "-- finish first; retry after they have, or with a smaller "
+                        "timeout_s."
+                    ),
+                )
+        try:
             return await self._call_command_locked(arguments, caller_gone)
+        finally:
+            self._lock.release()
+
+    def _refuse_unsent_command(
+        self, arguments: Mapping[str, Any], *, outcome: str, text: str
+    ) -> dict[str, Any]:
+        """Refuse a command that was NEVER sent, and say so in the record.
+
+        ``target_may_have_run: False`` is the point: unlike
+        ``cancelled_after_dispatch`` this command provably did not reach the
+        target, so a later reader (and a re-issue) need not treat it as an
+        unknown mutation. No ``command_started`` row precedes it -- that row
+        marks a dispatch.
+        """
+        if self.record is not None:
+            self.record(
+                "command",
+                {
+                    "call_id": f"command-{uuid.uuid4().hex[:12]}",
+                    "command": arguments.get("command"),
+                    "timeout_s": arguments.get("timeout_s"),
+                    "cancelled": outcome == "cancelled_before_dispatch",
+                    "dispatched": False,
+                    "outcome": outcome,
+                    "target_may_have_run": False,
+                },
+            )
+        return {"content": [TextContent(text=text)], "is_error": True}
 
     async def _call_command_locked(
         self, arguments: Mapping[str, Any], caller_gone: asyncio.Event | None = None
@@ -2048,6 +2187,18 @@ class ActionBridge:
         ):
             return refusal(
                 "Invalid command arguments: supply a command and a bounded integer timeout_s."
+            )
+        if caller_gone is not None and caller_gone.is_set():
+            # The caller left while this command was QUEUED on the lane (an
+            # interrupted turn, or a client timeout the lane bound could not
+            # prevent). It was told the call failed, so dispatching it now
+            # would mutate the target unseen -- and twice if it re-issues.
+            # Nothing is awaited between this check and dispatch below, so a
+            # caller leaving after it is the after-dispatch case.
+            return self._refuse_unsent_command(
+                arguments,
+                outcome="cancelled_before_dispatch",
+                text="Not run: the caller cancelled this command before it was sent.",
             )
         row: dict[str, Any] = {
             "call_id": f"command-{uuid.uuid4().hex[:12]}",
@@ -3705,6 +3856,10 @@ async def run_session_episode(
         rescue_required = True
 
     try:
+        # Before ``launch``: a run whose MCP client would cut its longest
+        # command is refused while nothing is provisioned (QA round 1, Q2 --
+        # the check had run after prepare + reset, i.e. after an AWS VM was up).
+        assert_action_server_timeout_nests()
         # --- launch + prepare (mirrors EpisodeRunner._launch_and_prepare) ----
         supervisor = launch(selector)
         handshake: Handshake = await supervisor.handshake(timeout=config.handshake_timeout)
