@@ -1033,11 +1033,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        2,
+        3,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory",
+        "reply-channel/action-tool precedent), never a file in a session directory. "
+        "``ENUMERATION_CACHE_NAME`` (``github-pushable.json``): the OWNER's cache of "
+        "the repos its own GitHub login can push to, at ``<config>/network/`` "
+        "(``network_root``), keyed by token hash and login hint — DEVICE-LOCAL and "
+        "never copied to a peer: a borrower receives the narrowed list inside the "
+        "grant, never this record, and ``copy_set``/``content_trees`` walk only "
+        "``sessions/<id>/``, so no sync path reaches it",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,
