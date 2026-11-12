@@ -616,9 +616,13 @@ export type MessageParams = {
   "wire.errors.desktop.session_files_file_not_found": undefined;
   "wire.errors.desktop.session_files_materialise_failed": { "reason": string };
   "wire.errors.desktop.session_files_not_an_artifact": undefined;
+  "wire.errors.desktop.session_in_project": { "session_id": string };
   "wire.errors.desktop.session_is_remote_open": { "session_id": string; "label": string };
   "wire.errors.desktop.session_is_remote_write": { "noun": string; "session_id": string; "label": string };
   "wire.errors.desktop.session_not_found": { "session_id": string };
+  "wire.errors.desktop.session_pinned": { "session_id": string };
+  "wire.errors.desktop.session_temporary": { "session_id": string };
+  "wire.errors.desktop.session_temporary_deleted": undefined;
   "wire.errors.desktop.settings_intent_generation_moved": undefined;
   "wire.errors.desktop.skill_alias_occupied": undefined;
   "wire.errors.desktop.skill_local_changes_unpublished": undefined;
@@ -627,6 +631,9 @@ export type MessageParams = {
   "wire.errors.desktop.skill_stale": undefined;
   "wire.errors.desktop.sort_unknown": { "sorts": string };
   "wire.errors.desktop.start_after_end": undefined;
+  "wire.errors.desktop.temporary_mark_failed": { "session_id": string };
+  "wire.errors.desktop.temporary_not_user": { "session_id": string };
+  "wire.errors.desktop.temporary_peer_unsupported": undefined;
   "wire.errors.desktop.unknown_command": undefined;
   "wire.errors.desktop.unknown_provider": undefined;
   "wire.errors.files.audio_type": { "mime_type": string };

@@ -505,21 +505,51 @@ def row_info(
     }
 
 
-def configured_idle_minutes(config_manager: Any = None) -> int:
-    """The live window from config, clamped; 30 when it cannot be read."""
-    if config_manager is None:
-        try:
-            from local_operator.config import ConfigManager
-            from local_operator.paths import config_dir
+def configured_idle_minutes(config_dir: Path) -> int:
+    """The live window from ``<config_dir>/config.yml``, clamped; 30 when unreadable.
 
-            config_manager = ConfigManager(config_dir())
-        except Exception:  # noqa: BLE001 — unreadable config means the default
-            return DEFAULT_IDLE_MINUTES
-    getter = getattr(config_manager, "get_nested_value", None)
-    if getter is None:
-        return DEFAULT_IDLE_MINUTES
+    Through ``config.read_config_values``, the read-only reader: a listing must
+    never build a ``ConfigManager``, whose construction moves an unparsable
+    config aside.
+    """
     try:
-        value = getter(("session", "cleanup", "temporary", "idle_minutes"), DEFAULT_IDLE_MINUTES)
-    except Exception:  # noqa: BLE001
+        from local_operator.config import read_config_values
+
+        values = read_config_values(Path(config_dir))
+    except Exception:  # noqa: BLE001 — unreadable config means the default
         return DEFAULT_IDLE_MINUTES
-    return clamp_idle_minutes(value)
+    node: Any = values or {}
+    for part in ("session", "cleanup", "temporary", "idle_minutes"):
+        node = node.get(part) if isinstance(node, dict) else None
+    return clamp_idle_minutes(DEFAULT_IDLE_MINUTES if node is None else node)
+
+
+class RowProjector:
+    """The ``temporary`` wire field for many rows of ONE listing.
+
+    Reads the window and the pass state at most once per listing, and only when
+    a temporary row is actually present: a store that never used the feature
+    pays nothing beyond the flag the scan already computed.
+    """
+
+    def __init__(self, config_dir: Path, *, now: float | None = None) -> None:
+        self._root = Path(config_dir)
+        self._now = now
+        self._loaded = False
+        self._state: dict[str, Any] = {}
+        self._minutes = DEFAULT_IDLE_MINUTES
+
+    def info(self, session_id: str, flagged: bool | None = None) -> dict[str, Any] | None:
+        """``row_info`` for ``session_id``; ``flagged=False`` skips the read."""
+        if flagged is False or not _plain_id(session_id):
+            return None
+        if not self._loaded:
+            self._state = read_state(self._root)
+            self._minutes = configured_idle_minutes(self._root)
+            self._loaded = True
+        return row_info(
+            self._root / "sessions" / session_id,
+            idle_minutes=self._minutes,
+            state=self._state,
+            now=self._now,
+        )
