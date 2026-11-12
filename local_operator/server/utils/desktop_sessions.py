@@ -6860,10 +6860,20 @@ class PeerAttachmentRetryable(Exception):
     the next ask joins it.
     """
 
-    def __init__(self, session_id: str, row: SessionRow, *, pending: bool) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        row: SessionRow | None,
+        *,
+        pending: bool,
+        device: str | None = None,
+    ) -> None:
         from local_operator.resume import UNNAMED_DEVICE
 
-        self.device = row.owner_label or UNNAMED_DEVICE
+        # ``row`` is ``None`` when the owner's row could not be read at all (it is
+        # offline, so the listing has no row for it): ``device`` then names it from
+        # the listing's silence (#3872 Q3-1/Q3-2).
+        self.device = device or (row.owner_label if row is not None else "") or UNNAMED_DEVICE
         self.pending = pending
         self.code = "attachment_fetch_pending" if pending else "attachment_owner_unreachable"
         super().__init__(self.code)
@@ -6886,6 +6896,13 @@ class PeerAttachmentOutdated(Exception):
         super().__init__(self.code)
         self.session_id = session_id
         self.row = row
+
+
+class _OnPeer:
+    """A digest route's read found no local directory: the peer branch answers."""
+
+
+_ON_PEER = _OnPeer()
 
 
 @dataclass(frozen=True)
@@ -6932,6 +6949,82 @@ async def peer_blob(
     return await _fetch_peer(
         root, session_id, row, member_id, {"attachment": digest}, digest, replicas
     )
+
+
+def peer_row(root: Path, session_id: str, *, owner: str = "") -> SessionRow:
+    """The owner's row for a peer session whose bytes are NOT on this device. Blocking.
+
+    Called only after :func:`local_peer_blob` missed: the row is what a PULL needs,
+    never what a local copy needs. ``KeyError`` when every device answered and none
+    holds the id (the ordinary 404). When the read missed and a device stayed
+    SILENT, the owner may simply be asleep — its sessions drop out of the listing —
+    so the answer is the retryable 504, never a "not found" this device cannot
+    support (#3872 Q3-1/Q3-2). ``owner`` (the Library's indexed origin device)
+    narrows that silence to the device that holds it: an owner that answered
+    without the session no longer has it.
+    """
+    from local_operator.resume import UNNAMED_DEVICE
+    from local_operator.session.remote_open import remote_row_and_silence
+
+    row, silent = remote_row_and_silence(session_id, root)
+    if row is not None:
+        return row
+    if owner:
+        silent = tuple(peer for peer in silent if peer.device_id == owner)
+    if not silent:
+        raise KeyError("Unknown session")
+    names = dict.fromkeys(peer.name or UNNAMED_DEVICE for peer in silent)
+    raise PeerAttachmentRetryable(session_id, None, pending=False, device=", ".join(names))
+
+
+def indexed_owner(root: Path, session_id: str) -> str:
+    """The owner device the Library index recorded for a peer session, or ``""``.
+
+    Blocking. The index keeps a silent owner's sessions (``library/remote.py``
+    ages out only devices that answered), so this is the existence proof that
+    survives the owner going offline, where the listing's row does not. No index
+    file means no proof; it is never created from here.
+    """
+    from local_operator.library.store import LibraryStore
+
+    store = LibraryStore(root)
+    if not store.path.is_file():
+        return ""
+    try:
+        record = store.session(session_id)
+    except Exception:  # noqa: BLE001 — an unreadable index proves nothing
+        return ""
+    return str((record or {}).get("origin_device") or "")
+
+
+async def local_peer_blob(
+    root: Path, session_id: str, digest: str, *, member_id: str, owner: str = ""
+) -> tuple[Any, SessionRow | None]:
+    """``(blob, row)`` for a digest of a session this device holds no directory for.
+
+    THIS DEVICE'S COPIES FIRST, WITHOUT THE OWNER'S ROW (#3872 R3-2/Q3-1/Q3-2):
+    store, replica, then the remote-files cache, by ``stat`` only; ``row`` is
+    ``None`` for such a hit. Only a miss resolves the row (:func:`peer_row`) and
+    pulls through :func:`peer_blob`. Reading the row first made a precached file
+    404 exactly when the cache matters most — the owner offline — and dialled a
+    listing read for bytes already here.
+
+    The session id stays an EXISTENCE check: a row-free hit needs the id known as
+    a peer's session on this device — ``owner`` (the caller's indexed origin, as
+    the Library's own occurrence gives) or :func:`indexed_owner`. An id nobody
+    recorded takes the row path, as before, so it cannot read the shared store or
+    cache by guessing.
+    """
+    from local_operator.remote_files import cache as remote_cache
+
+    known = owner or await asyncio.to_thread(indexed_owner, root, session_id)
+    if known:
+        replicas = tuple(dict.fromkeys((member_id, session_id)))
+        blob = await asyncio.to_thread(remote_cache.lookup, root, replicas, digest)
+        if blob is not None:
+            return blob, None
+    row = await asyncio.to_thread(peer_row, root, session_id, owner=known)
+    return await peer_blob(root, session_id, row, digest, member_id=member_id), row
 
 
 async def _fetch_peer(
@@ -8195,12 +8288,26 @@ class DesktopSessions:
 
         return await asyncio.to_thread(claim)
 
+    async def _peer_lookup(
+        self, session_id: str, digest: str, *, member_id: str, child: bool = False
+    ) -> tuple[Any, SessionRow | None]:
+        """:func:`local_peer_blob` for this pool; a CHILD route's unknown parent keeps
+        the containment refusal it always had, not the generic 404."""
+        try:
+            return await local_peer_blob(self.root, session_id, digest, member_id=member_id)
+        except KeyError:
+            if child:
+                raise SubagentChildUnavailable() from None
+            raise
+
     async def _peer_file(
-        self, session_id: str, row: SessionRow, digest: str, *, member_id: str
+        self, session_id: str, digest: str, *, member_id: str, child: bool = False
     ) -> PeerAttachmentFile:
-        """``peer_blob``, OPENED; one re-lookup if an eviction won the race to the open."""
+        """The peer branch's blob, OPENED; one re-lookup if an eviction won the race."""
         for attempt in (1, 2):
-            blob = await peer_blob(self.root, session_id, row, digest, member_id=member_id)
+            blob, row = await self._peer_lookup(
+                session_id, digest, member_id=member_id, child=child
+            )
             try:
                 return await asyncio.to_thread(_open_blob, blob)
             except FileNotFoundError:
@@ -8252,7 +8359,7 @@ class DesktopSessions:
         here exactly as a local one does.
         """
 
-        def read() -> tuple[bytes, str] | SessionRow:
+        def read() -> tuple[bytes, str] | _OnPeer:
             # Both halves of this gate carry weight and neither is redundant.
             # The shape check keeps a crafted id from escaping the sessions
             # namespace through ``..`` before a path is ever built; the origin
@@ -8263,17 +8370,14 @@ class DesktopSessions:
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
-            if not path.is_dir() or not is_user_session(path):
-                from local_operator.session.remote_open import remote_row_for
-
-                row = remote_row_for(session_id, self.root)
-                if row is None:
-                    raise KeyError("Unknown session")
+            if not path.is_dir():
                 # THE PEER BRANCH (remote files parity §1): this device's store
                 # first (a moved session still serves), then the replica, then the
-                # remote cache, and only then one pull from the owner — answered
-                # as an open file the route STREAMS, never a whole-file buffer.
-                return row
+                # remote cache, and only then the owner's row and one pull —
+                # answered as an open file the route STREAMS, never a buffer.
+                return _ON_PEER
+            if not is_user_session(path):
+                raise KeyError("Unknown session")
             resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
             if resolved is None:
                 raise KeyError("Unknown attachment")
@@ -8281,8 +8385,8 @@ class DesktopSessions:
             return base64.b64decode(data_b64), mime_type
 
         result = await asyncio.to_thread(read)
-        if isinstance(result, SessionRow):
-            return await self._peer_file(session_id, result, digest, member_id=session_id)
+        if isinstance(result, _OnPeer):
+            return await self._peer_file(session_id, digest, member_id=session_id)
         return result
 
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
@@ -8305,39 +8409,36 @@ class DesktopSessions:
         a placeholder.
         """
 
-        def read() -> dict[str, Any] | SessionRow:
+        def read() -> dict[str, Any] | _OnPeer:
             from local_operator.audiogen.recovery import waveform_payload
 
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
             store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
-            if not path.is_dir() or not is_user_session(path):
-                from local_operator.session.remote_open import remote_row_for
-
-                row = remote_row_for(session_id, self.root)
-                if row is None:
-                    raise KeyError("Unknown session")
+            if not path.is_dir():
                 # The byte route's lookup order (remote files parity §1): the
                 # peaks are a sidecar of whichever store holds the bytes.
-                return row
+                return _ON_PEER
+            if not is_user_session(path):
+                raise KeyError("Unknown session")
             payload = waveform_payload(store, digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
 
         result = await asyncio.to_thread(read)
-        if isinstance(result, SessionRow):
-            return await self._peer_waveform(session_id, result, digest, member_id=session_id)
+        if isinstance(result, _OnPeer):
+            return await self._peer_waveform(session_id, digest, member_id=session_id)
         return result
 
     async def _peer_waveform(
-        self, session_id: str, row: SessionRow, digest: str, *, member_id: str
+        self, session_id: str, digest: str, *, member_id: str, child: bool = False
     ) -> dict[str, Any]:
         """Peaks for a peer-held blob, computed beside wherever the bytes landed."""
         from local_operator.audiogen.recovery import waveform_payload
 
-        blob = await peer_blob(self.root, session_id, row, digest, member_id=member_id)
+        blob, _row = await self._peer_lookup(session_id, digest, member_id=member_id, child=child)
         payload = await asyncio.to_thread(
             waveform_payload, AttachmentStore(blob.path.parent), digest
         )
@@ -8390,25 +8491,22 @@ class DesktopSessions:
                 # reader remedy as a missing blob, so the same ordinary 404.
                 raise KeyError("Unknown supplement component") from None
 
-        def read() -> str | SessionRow:
-            from local_operator.session.remote_open import remote_row_for
-
+        def read() -> str | _OnPeer:
             store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
             if not SESSION_ID.fullmatch(session_id):
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
-            if not path.is_dir() or not is_user_session(path):
-                row = remote_row_for(session_id, self.root)
-                if row is None:
-                    raise KeyError("Unknown session")
+            if not path.is_dir():
                 # The byte route's lookup order (remote files parity §1); a
                 # refusal still names the device (409 attachment_on_peer).
-                return row
+                return _ON_PEER
+            if not is_user_session(path):
+                raise KeyError("Unknown session")
             return assemble(store)
 
         result = await asyncio.to_thread(read)
-        if isinstance(result, SessionRow):
-            blob = await peer_blob(self.root, session_id, result, digest, member_id=session_id)
+        if isinstance(result, _OnPeer):
+            blob, _row = await self._peer_lookup(session_id, digest, member_id=session_id)
             # ``get`` re-verifies the digest against the bytes, as for a local blob.
             return await asyncio.to_thread(assemble, AttachmentStore(blob.path.parent))
         return result
@@ -8560,10 +8658,9 @@ class DesktopSessions:
         without the subagent marker.
         """
 
-        def read() -> tuple[bytes, str] | SessionRow:
-            row = self._peer_parent_row(session_id, child_id)
-            if row is not None:
-                return row
+        def read() -> tuple[bytes, str] | _OnPeer:
+            if self._peer_parent(session_id, child_id):
+                return _ON_PEER
             _contained_child_dir(self.root, session_id, child_id)
             resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
             if resolved is None:
@@ -8572,12 +8669,16 @@ class DesktopSessions:
             return base64.b64decode(data_b64), mime_type
 
         result = await asyncio.to_thread(read)
-        if isinstance(result, SessionRow):
-            return await self._peer_file(session_id, result, digest, member_id=child_id)
+        if isinstance(result, _OnPeer):
+            return await self._peer_file(session_id, digest, member_id=child_id, child=True)
         return result
 
-    def _peer_parent_row(self, session_id: str, child_id: str) -> SessionRow | None:
-        """The peer row when the PARENT is a peer's, else ``None`` (blocking).
+    def _peer_parent(self, session_id: str, child_id: str) -> bool:
+        """Whether the PARENT is not on this disk, so the peer branch answers (blocking).
+
+        The peer branch serves this device's copy first and resolves the owner's
+        row only on a miss (:func:`local_peer_blob`); a parent nobody holds is
+        still the containment refusal (``_peer_lookup``'s ``child``).
 
         The local containment proof (``_contained_child_dir``) needs the parent's
         directory on this disk, so a remote subagent's image used to be a 404. When
@@ -8587,13 +8688,9 @@ class DesktopSessions:
         left to ``_contained_child_dir``'s own refusal, so it never reaches a path
         or the wire and its answer is unchanged.
         """
-        from local_operator.session.remote_open import remote_row_for
-
         if not SESSION_ID.fullmatch(session_id) or not SESSION_ID.fullmatch(child_id):
-            return None
-        if (self.root / "sessions" / session_id).is_dir():
-            return None
-        return remote_row_for(session_id, self.root)
+            return False
+        return not (self.root / "sessions" / session_id).is_dir()
 
     async def child_attachment_waveform(
         self, session_id: str, child_id: str, digest: str
@@ -8607,12 +8704,11 @@ class DesktopSessions:
         the 404 fallback are identical to the parent's.
         """
 
-        def read() -> dict[str, Any] | SessionRow:
+        def read() -> dict[str, Any] | _OnPeer:
             from local_operator.audiogen.recovery import waveform_payload
 
-            row = self._peer_parent_row(session_id, child_id)
-            if row is not None:
-                return row
+            if self._peer_parent(session_id, child_id):
+                return _ON_PEER
             _contained_child_dir(self.root, session_id, child_id)
             payload = waveform_payload(AttachmentStore(self.root / ATTACHMENTS_DIRNAME), digest)
             if payload is None:
@@ -8620,8 +8716,8 @@ class DesktopSessions:
             return payload
 
         result = await asyncio.to_thread(read)
-        if isinstance(result, SessionRow):
-            return await self._peer_waveform(session_id, result, digest, member_id=child_id)
+        if isinstance(result, _OnPeer):
+            return await self._peer_waveform(session_id, digest, member_id=child_id, child=True)
         return result
 
     async def create(

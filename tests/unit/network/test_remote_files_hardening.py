@@ -425,6 +425,8 @@ async def cached_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         library_service, "_remote_occurrence", lambda _config, _id: {"session_id": SID}
     )
     monkeypatch.setattr(rsf, "_row_for", lambda _config, _sid: _row())
+    # The digest open reads the row only on a local miss (#3872 R3-2).
+    monkeypatch.setattr(desktop_utils, "peer_row", lambda _root, _sid, owner="": _row())
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "t")
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)

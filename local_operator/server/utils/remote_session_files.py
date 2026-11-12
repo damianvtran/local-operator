@@ -250,7 +250,7 @@ async def content(config_dir: Path, session_id: str, file_id: str, range_header:
     )
     return byte_range.handle_response(
         handle,
-        media_type=_servable(blob.mime),
+        media_type=servable_type(blob.mime),
         headers={
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox",
@@ -260,7 +260,7 @@ async def content(config_dir: Path, session_id: str, file_id: str, range_header:
     )
 
 
-def _servable(mime: str | None) -> str:
+def servable_type(mime: str | None) -> str:
     """The type a remote byte route may answer with: passive types as themselves,
     anything else (HTML, SVG…, or a type another device made up) as opaque bytes."""
     from local_operator.server.routes.desktop_sessions import (
@@ -437,7 +437,7 @@ async def library_content(
 
     from local_operator.library import service as library_service
     from local_operator.server.utils import byte_range
-    from local_operator.server.utils.desktop_sessions import peer_blob
+    from local_operator.server.utils.desktop_sessions import local_peer_blob
 
     config_dir = Path(config_dir)
     occurrence = await asyncio.to_thread(library_service.remote_occurrence, config_dir, asset_id)
@@ -451,9 +451,15 @@ async def library_content(
     digest = asset.digest
     if digest:
 
+        owner = str(occurrence.get("origin_device") or "")
+
         async def resolve() -> tuple[Any, Any, Any]:
-            row = await asyncio.to_thread(_row_for, config_dir, session_id)
-            blob = await peer_blob(config_dir, session_id, row, digest, member_id=member_id)
+            # This device's copy first, the owner's row only on a miss: a cached
+            # asset opens with its owner offline, and a miss with the owner silent
+            # is the retryable 504, not "not found" (#3872 R3-2/Q3-1).
+            blob, row = await local_peer_blob(
+                config_dir, session_id, digest, member_id=member_id, owner=owner
+            )
             return blob, None, row
 
     else:
@@ -470,7 +476,7 @@ async def library_content(
     # as the session-files content route (R1-5), not served inline as declared.
     return byte_range.handle_response(
         handle,
-        media_type=_servable(asset.content_type),
+        media_type=servable_type(asset.content_type),
         headers={
             "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(name, safe='')}",
             "X-Content-Type-Options": "nosniff",

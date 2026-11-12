@@ -191,7 +191,8 @@ def test_the_total_ceiling_still_catches_an_oversized_payload(
     # the per-namespace ceiling cannot see (a single over-total file would also
     # trip the per-file ceiling, which would prove the wrong guard).
     # The last file takes the remainder, so the sum sits one byte under ANY
-    # ceiling (64 KiB divided evenly by luck; 80 KiB does not).
+    # ceiling (at 64 KiB, 3 * (ceiling // 3) happened to be ceiling - 1, because
+    # 65,536 is 1 mod 3; 80 KiB is not, so the remainder is computed).
     third = EAGER_TOTAL_MAX_BYTES // 3
     sizes = [third, third, EAGER_TOTAL_MAX_BYTES - 1 - 2 * third]
     paths = []

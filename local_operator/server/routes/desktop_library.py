@@ -485,14 +485,16 @@ async def library_thumbnail(
             404,
             _wd.library_content_missing().envelope(code="library_content_missing"),
         ) from None
-    return StreamingResponse(
-        iter((data,)),
-        media_type=content.content_type,
-        headers={
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, max-age=86400",
-        },
-    )
+    headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=86400"}
+    media_type = content.content_type
+    if content.remote:
+        from local_operator.server.utils.remote_session_files import servable_type
+
+        # A peer's cached original carries the OWNER's declared type: the content
+        # route's allowlist and sandbox, not that type inline (#3872 R3-3).
+        media_type = servable_type(media_type)
+        headers["Content-Security-Policy"] = "sandbox"
+    return StreamingResponse(iter((data,)), media_type=media_type, headers=headers)
 
 
 @router.get("/v1/desktop/library/assets/{asset_id}/waveform")
