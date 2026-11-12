@@ -239,6 +239,36 @@ def _cause(failure: BaseException) -> str:
     return f"{type(failure).__name__}: {failure}"[:200]
 
 
+def describe_failure(failure: BaseException) -> str:
+    """A log-safe name for a refresh/connect failure: never an empty string.
+
+    WHY: `str(TimeoutError())` and httpcore's timeouts are EMPTY, so the
+    service log of 2026-11-11 read `relay token refresh failed: ` with nothing
+    after the colon and the cause was unrecoverable. The TYPE is always named,
+    and so is every exception the failure was chained from, because
+    `RadientTunnels.request` wraps the real cause (a store lock timeout, a
+    transport error) in one shared ValueError sentence.
+
+    WHAT IS LEFT OUT, deliberately: the messages of the chained links. Only the
+    outermost message is shown. For `/connect` that is either one of the tunnel
+    client's fixed literals (which never echo a provider body, token or URL) or
+    an httpx/OS transport message that `RadientTunnels.request` lets escape
+    unwrapped (e.g. `[Errno 61] Connection refused`) — the same text this line
+    logged before it named types. An inner link could be a third-party exception
+    whose text carries a request URL or a server-supplied string, so the chain
+    is named by type alone.
+    """
+    message = str(failure).strip()
+    text = type(failure).__name__ + (f": {message}" if message else " (no message)")
+    seen = {id(failure)}
+    link = failure.__cause__ or failure.__context__
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        text += f" <- {type(link).__name__}"
+        link = link.__cause__ or link.__context__
+    return text[:300]
+
+
 async def pipe_to_gateway(
     stream: yamux.Stream,
     host: str,
@@ -681,6 +711,13 @@ class RelayConnector:
         return backoff_delay(self._unstable_closes)
 
     async def _fresh_grant(self, *, force: bool = False) -> RelayGrant | None:
+        # Reconnect-without-/connect is exactly this branch, and the contract
+        # caps it (C1.6 "Token reuse"): a new session reuses the token only while
+        # it has >= TOKEN_REUSE_MARGIN left, else it MUST call /connect first.
+        # The token lives 600 s (C2.3 `exp = iat + 600`) and is refreshed only
+        # when a dial needs it, while sessions rotate every ~50 min (C1.5), so a
+        # drop late in a session normally finds it expired and /connect gates the
+        # redial by contract — not something to route around here.
         if not force and self.grant.fresh():
             return self.grant
         refreshed = await self._refresh()
@@ -698,7 +735,7 @@ class RelayConnector:
             try:
                 grant = await self._fresh_grant()
             except Exception as failure:  # noqa: BLE001 - a /connect blip is a retry
-                self.announce(f"relay token refresh failed: {failure}")
+                self.announce(f"relay token refresh failed: {describe_failure(failure)}")
                 await asyncio.sleep(backoff_delay(attempt))
                 return None
             if grant is None:
@@ -724,14 +761,14 @@ class RelayConnector:
                 await asyncio.sleep(backoff_delay(attempt))
                 return None
             except (OSError, ConnectionError, TimeoutError) as failure:
-                self.announce(f"relay connect failed: {type(failure).__name__}: {failure}")
+                self.announce(f"relay connect failed: {describe_failure(failure)}")
                 if session.close_code in (4400, 4408):
                     # C1.6: a 4400/4408 before `ready` (hello_mismatch: the token
                     # no longer matches this tunnel) is answered by /connect
                     # first, then backoff — never a retry with the same token.
                     self.grant = RelayGrant(grant.url, grant.token, 0.0, grant.protocol)
             except Exception as failure:  # noqa: BLE001 - websockets' own errors
-                self.announce(f"relay connect failed: {type(failure).__name__}: {failure}")
+                self.announce(f"relay connect failed: {describe_failure(failure)}")
             await asyncio.sleep(backoff_delay(attempt))
             return None
         return None

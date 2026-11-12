@@ -2375,6 +2375,16 @@ class ToolContext(BaseModel):
     #: guardrail creation ledger writes a child's creations under these ids
     #: too, so a parent may clean up after its subagents.
     ancestor_session_ids: tuple[str, ...] = ()
+    #: The session's Team Bridge taint latch (``harness/bridge_egress.py``
+    #: ``BridgeTaintLatch``), owned by the session and injected per turn. The
+    #: loop's tier seam and the web tools' provider filter read it; ``None`` on
+    #: a host that does not track taint, which is then judged by the live
+    #: context alone. Never serialized: it is host state, not tool input.
+    bridge_taint: Any = Field(default=None, exclude=True, repr=False)
+    #: Set on a ``task`` child spawned from a latched session
+    #: (team-bridge-egress.md: "Propagation between sessions").
+    #: Tighten-only: a child inherits its parent's taint for life.
+    inherited_bridge_taint: bool = False
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""

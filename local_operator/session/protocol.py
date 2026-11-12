@@ -758,7 +758,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 152 public members and a POSITIVE
+    than stylistic. This protocol carries 154 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -845,7 +845,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     account-profile consent door needed ``answer_profile_action`` and
     ``profile_action_status`` — the TUI opens every session as a viewer, and
     the revert action bound to a profile-save receipt is read and answered
-    through it, so a facade without them could not revert a save at all), so
+    through it, so a facade without them could not revert a save at all, 154
+    once the Team Bridge approval card needed ``bridge_latched`` and
+    ``bridge_taint_latch`` declared rather than duck-probed — a rename would
+    otherwise have silently defaulted the latch read), so
     recompute it
     rather
     than adjusting it by the size of your own change.
@@ -1556,8 +1559,15 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         command: str,
         args: str,
         images: Sequence[ImageContent] | None = None,
+        *,
+        bridge_ack: bool = False,
     ) -> Any:
-        """Run a slash command on the runtime and return its result."""
+        """Run a slash command on the runtime and return its result.
+
+        ``bridge_ack`` is the Team Bridge capability marker
+        (team-bridge-egress.md: "bridge_ack"); callers pass it only when True,
+        and absence is the fail-closed "not acknowledged".
+        """
         ...
 
     async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -2218,6 +2228,32 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     ) -> ProfileActionReply: ...
 
     async def answer_profile_action(self, action_id: str, approved: bool) -> ProfileActionReply: ...
+
+    # --- Team Bridge taint (team-bridge-egress.md: "Grants") ----------------
+    # The TUI reads these through ``SessionInteraction.session`` with a
+    # duck-typed ``getattr``; declared so a rename is a pyright error rather
+    # than a silent default. Both classes implement them (``Session`` holds the
+    # real latch, the facade answers "no local latch"), which this protocol's
+    # convention covers: runtimes are not forced to grow a stub.
+
+    @property
+    def bridge_taint_latch(self) -> Any:
+        """This process's ``BridgeTaintLatch``, or ``None`` when it holds none.
+
+        Only a session whose runtime lives in this process has a latch; an
+        attached facade answers ``None`` and the owner's runtime enforces.
+        """
+        ...
+
+    @property
+    def bridge_latched(self) -> bool:
+        """Whether THIS process's latch says the session holds Team Bridge content.
+
+        A facade has no local latch and answers False; its gate cards carry the
+        owner's ``bridge_latched`` flag and the owner re-checks every press, so
+        a viewer never decides taint from this answer alone.
+        """
+        ...
 
 
 @runtime_checkable

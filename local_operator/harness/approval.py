@@ -123,22 +123,65 @@ def _job_id_style(gate: ApprovalGate) -> _JobIdStyle:
     return "none"
 
 
+def _accepts_bridge_flags(gate: ApprovalGate) -> bool:
+    """Whether ``gate`` can receive the typed Team Bridge flags by keyword.
+
+    A gate qualifies when it names both ``taint_raised`` and ``bridge_latched``
+    as keyword-bindable parameters, or takes ``**kwargs``. An unreadable
+    signature does not qualify: guessing wide there would raise inside the
+    gate, and guessing narrow would drop the flag silently.
+    """
+    try:
+        parameters = list(inspect.signature(gate).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is p.VAR_KEYWORD for p in parameters):
+        return True
+    names = {p.name for p in parameters if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)}
+    return {"taint_raised", "bridge_latched"} <= names
+
+
+#: The ``reason`` an :class:`ApprovalUnavailableError` carries when a gate
+#: cannot receive the Team Bridge flags. Model- and log-facing.
+BRIDGE_FLAGS_UNSUPPORTED_REASON = (  # i18n: ignore model-facing refusal reason
+    "this approval surface cannot show that the conversation holds Team Bridge content"
+)
+
+
 async def ask_approval(
     gate: ApprovalGate,
     tool_name: str,
     description: str,
     job_id: str | None = None,
+    *,
+    taint_raised: bool = False,
+    bridge_latched: bool = False,
 ) -> bool:
-    """Put one approval question to the host. ``True`` means proceed."""
+    """Put one approval question to the host. ``True`` means proceed.
+
+    ``taint_raised`` (the Team Bridge seam raised this call's tier) and
+    ``bridge_latched`` (the session holds Team Bridge content) are host-set
+    and reach the gate as KEYWORDS, through this adapter rather than as new
+    positional parameters, so every existing two/three-argument host keeps
+    working while neither flag is set. When either IS set and the gate cannot
+    receive them, the call is refused with :class:`ApprovalUnavailableError`
+    (team-bridge-egress.md: "Fail-closed"): a gate that cannot see the flag
+    might auto-answer a card that must reach a person.
+    """
+    flags: dict[str, bool] = {}
+    if taint_raised or bridge_latched:
+        if not _accepts_bridge_flags(gate):
+            raise ApprovalUnavailableError(tool_name, BRIDGE_FLAGS_UNSUPPORTED_REASON)
+        flags = {"taint_raised": bool(taint_raised), "bridge_latched": bool(bridge_latched)}
     style = _job_id_style(gate)
     if style == "positional":
-        wide = cast("Callable[[str, str, str | None], Awaitable[bool]]", gate)
-        return bool(await wide(tool_name, description, job_id))
+        wide = cast("Callable[..., Awaitable[bool]]", gate)
+        return bool(await wide(tool_name, description, job_id, **flags))
     if style == "keyword":
         by_keyword = cast("Callable[..., Awaitable[bool]]", gate)
-        return bool(await by_keyword(tool_name, description, job_id=job_id))
-    narrow = cast("Callable[[str, str], Awaitable[bool]]", gate)
-    return bool(await narrow(tool_name, description))
+        return bool(await by_keyword(tool_name, description, job_id=job_id, **flags))
+    narrow = cast("Callable[..., Awaitable[bool]]", gate)
+    return bool(await narrow(tool_name, description, **flags))
 
 
 #: The sentence every surface renders when a gate could NOT ask anyone and

@@ -242,6 +242,8 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
         approval_mode="ask",
         approval_provenance="session",
         approval_global_mode="auto",
+        taint_raised=True,
+        bridge_latched=True,
     )
     approval_payload = SessionProjection(session_id="s1", pid=0, pending=approval).to_json()
     approval_received = _projection_from_json(approval_payload, _record())
@@ -250,6 +252,15 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     assert approval_received.pending.approval_provenance == "session"
     assert approval_received.pending.approval_global_mode == "auto"
     assert approval_payload["pending"]["approval_global_mode"] == "auto"
+    # Team Bridge flags: host-set on a gate card only. A dropped
+    # ``bridge_latched`` would let a viewer offer allow-all on a card that must
+    # reach a person, so both rebuilds must carry them NON-DEFAULT.
+    assert approval_received.pending.taint_raised is True
+    assert approval_received.pending.bridge_latched is True
+    approval_from_gate = _pending_request(PendingGateState(**approval_payload["pending"]))
+    assert approval_from_gate is not None
+    assert approval_from_gate.taint_raised is True
+    assert approval_from_gate.bridge_latched is True
 
     # The fields this question cannot exercise, each with why. `secret` and
     # `persist` are covered non-default by the secret test below, which is the
@@ -264,6 +275,10 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
         "approval_mode",
         "approval_provenance",
         "approval_global_mode",
+        # Team Bridge gate flags: never set on an ask; asserted non-default
+        # through both approval rebuilds above.
+        "taint_raised",
+        "bridge_latched",
     }
     assert set(derived) | not_derivable_here == set(defaults), (
         "a PendingRequest field is neither asserted with a derived value nor "

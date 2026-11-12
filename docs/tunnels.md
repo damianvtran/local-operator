@@ -163,6 +163,17 @@ the relay authorization (its network may be down, or Radient may be
 unreachable). It reauthorizes by itself once the control plane answers again —
 check this computer's network connection if it does not clear." No local command
 is needed; the connector retries every 10 seconds.
+- `control_plane_timeout` — "This computer's request to Radient to renew the
+relay authorization timed out (that computer may be heavily loaded, or its
+connection slow). It reauthorizes by itself once a request completes." The
+request went out and no answer came back in time; `lop tunnel status` labels it
+"request to Radient timed out". A connection that could not be opened at all,
+including a connect timeout, stays `control_plane_unreachable`.
+- `credential_store_busy` — "The computer running this tunnel could not open its
+own credential store in time because another Local Operator process was using
+it. It reauthorizes by itself once the store is free." Nothing was sent to
+Radient; `lop tunnel status` labels it "local credential store busy". The
+connector retries the store briefly before reporting it.
 - `authorization_refused` — Radient answered and refused the check, so the login
 may have expired or this tunnel's billing may be inactive. Both are fixed at
 <https://console.radienthq.com/dashboard/tunnels>.
