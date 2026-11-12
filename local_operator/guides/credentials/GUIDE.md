@@ -1,13 +1,13 @@
 ---
 name: credentials
-description: How to use a stored secret from bash and eval without reading it, when to store one and when not to, and what to never do with a credential (echo, save, commit, paste it).
+description: Use stored secrets from bash and eval, rotate or update them autonomously for authorized tasks, review masked output, and keep raw credentials out of commits, messages and logs.
 ---
 
 # Working with credentials and secrets
 
 This is for an agent in the middle of a task that has just been handed a
 credential, or needs one that is already stored. It says how to use a secret
-without ever reading it, and what the store does and does not protect against.
+without exposing its raw value, and what the store does and does not protect against.
 
 ## The three places a secret can live
 
@@ -355,21 +355,22 @@ history, not as a signal about this session.
 
 ## What you must never do
 
-- **Never echo, print, or log a secret**, in any surface — bash output, an eval
-  cell, a notice, a commit message.
-- **Never write one into the repository** — not `.env`, not a config file, not a
-  scratch note, not a commit. And never leave a plaintext copy outside it
-  either: delete it as soon as the command that needed it is done, **without
-  reading it**.
+- **Never expose raw secrets in messages, commits or logs.** Authorized use,
+  rotation and updates can proceed autonomously; masked bash/eval output and
+  masked file review are allowed, not reasons to halt or ask permission.
+- **Never stage or commit secrets.** An untracked local `.env` or config edit
+  needed by the requested task is allowed; keep it out of version control and
+  avoid unnecessary plaintext copies.
 - **Never put one in a commit, a PR body, an issue, or a message** to anyone.
   If you think you have, say so immediately. Whether it has to be rotated
   depends on where it went: a value that reached the model's context must be
-  rotated by the user, while one that only reached a shell or a file needs the
-  copy deleted — unread — and nothing more.
+  rotated by the user. A value used only by an authorized shell command or local
+  config edit is not by itself compromised; remove unnecessary copies safely.
 - **Never paste one into a tool argument** that is echoed back, including your
   own reasoning text.
-- **Never dump a whole secret object to learn what it holds.** `kubectl get
-  secret NAME -o yaml|json`, `printenv` and `cat .env` print every value. A
+- **Prefer metadata or key names to whole-object output.** `kubectl get
+  secret NAME -o yaml|json`, `printenv` and `cat .env` may print every value;
+  masked review needed by the task is allowed. A
   `bash` result for one carries a `[credential guard] …` line under its exit
   code that names the safer form: key names only (`kubectl get secret NAME -o
   jsonpath='{.data}' | jq 'keys'`), or one key piped straight into the command
@@ -379,9 +380,9 @@ history, not as a signal about this session.
   `$( )`-captured, it stays quiet), Terraform Cloud's `/plans/<id>/json-output` (read
   `json-output-redacted`) and `terraform show -json` (the human view masks
   sensitive values). The
-  line steers; it never blocks. A Secret's `data`/`stringData` values, and any
-  base64/%xx/JSON-escaped token that decodes to a credential, are masked anyway
-  — that is the backstop, not a reason to dump one.
+  warning is steering, not a command to halt or ask permission. Masking is a
+  backstop, not a guarantee for unknown or short values or every transformed
+  spelling; avoid exposing raw values and prefer the safer consumer forms.
 - **Never move a secret between stores** without being asked. Reading one out of
   the long-term store to put it somewhere more convenient defeats the store.
 

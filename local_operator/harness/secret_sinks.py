@@ -1804,24 +1804,11 @@ def _stage_transforms(command: str, args: Sequence[str]) -> bool:
         # Byte mode in any spelling, a short-option CLUSTER included: GNU
         # `head -qc8` is `-q -c 8` (R7).
         return any(arg.startswith("--bytes") or re.match(r"^-[^-]*c", arg) for arg in flags)
-    if command == "tac":
-        # A custom record separator reorders fragments, not registered lines.
-        for index, arg in enumerate(args):
-            if arg in ("-s", "--separator"):
-                if index + 1 >= len(args) or args[index + 1] != "\n":
-                    return True
-            elif arg.startswith("--separator="):
-                if arg.split("=", 1)[1] != "\n":
-                    return True
-            elif re.match(r"^-[^-]*s", arg):
-                return True
-    if command == "diff":
-        # Side-by-side output truncates lines to the selected display width.
-        return any(
-            arg.startswith(("--side-by-side", "--width"))
-            or re.match(r"^-[^-]*[yW]", arg)
-            for arg in flags
-        )
+    if command in ("tac", "diff"):
+        # Only bare whole-line forms are proved maskable. GNU long options
+        # accept abbreviations, so enumerating unsafe spellings leaves fragment
+        # reordering/truncation paths open (R13). Fail closed on every option.
+        return bool(flags)
     if command == "cat":
         # `-A`/`-v`/`-e`/`-t` re-spell control bytes, `-n`/`-b` interleave
         # numbers, `-s` drops blank lines: only `-u` prints the bytes as read.

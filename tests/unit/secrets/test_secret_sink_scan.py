@@ -2890,6 +2890,96 @@ _ROUND2_PYTHON = (
 )
 
 
+_R13_ABBREVIATED_OPTIONS = (
+    "lop secret get K | diff --side --wid=24 - /dev/null",
+    "lop secret get K | tac --sep=-",
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        *_R13_ABBREVIATED_OPTIONS,
+        "lop secret get K | diff --unproved - /dev/null",
+        "lop secret get K | tac --unproved",
+    ),
+)
+def test_r13_unproved_options_fail_closed(command: str) -> None:
+    result = scan_command(command)
+    assert result.blocking and result.transformed, result
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "lop secret get K | diff - /dev/null",
+        "lop secret get K | tac",
+        'echo "$(lop secret get K)"',
+        "export K=$(lop secret get K); env | sort",
+    ),
+)
+def test_r13_whole_line_controls_remain_warning(command: str) -> None:
+    result = scan_command(command)
+    assert result.verdict == "printing" and not result.blocking, result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", _R13_ABBREVIATED_OPTIONS)
+async def test_r13_abbreviations_refuse_before_spawn(
+    command: str,
+    tmp_path: Path,
+    config_root: Path,
+    stored_secret: str,
+    shimmed_path: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "r13-must-not-run"
+    from unittest.mock import AsyncMock
+
+    # A refusal must happen before child creation, not just before output.
+    spawn = AsyncMock(side_effect=AssertionError("refused command spawned a child"))
+    monkeypatch.setattr(builtin.asyncio, "create_subprocess_exec", spawn)
+    updates = []
+    exact = command.replace("secret get K", f"secret get {stored_secret}")
+    result = await builtin.execute_bash(
+        "r13-synthetic",
+        {"command": f"touch {marker}; {exact}"},
+        AbortSignal(),
+        updates.append,
+        _context(tmp_path),
+    )
+    text = _result_text(result)
+    assert result.is_error and "nothing was executed" in text, text
+    spawn.assert_not_called()
+    assert not updates and not marker.exists()
+    assert _SYNTHETIC not in text and "syntheti" not in text
+    assert "9f2c41value-scan-sink-synthetic-" not in text
+    print(
+        f"R13 {command}: is_error={result.is_error}; spawns={spawn.call_count}; "
+        f"frames={len(updates)}; marker={marker.exists()}; output={text!r}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    ('echo "$(lop secret get K)"', "export K=$(lop secret get K); env | sort"),
+)
+async def test_r13_routine_real_path_remains_masked_warning(
+    command: str,
+    tmp_path: Path,
+    config_root: Path,
+    stored_secret: str,
+    shimmed_path: None,
+) -> None:
+    result = await _bash(tmp_path, command.replace("secret get K", f"secret get {stored_secret}"))
+    text = _result_text(result)
+    assert not result.is_error and "[secret sink] ran:" in text and "[redacted]" in text, text
+    assert _SYNTHETIC not in text, text
+    visible = [line for line in text.splitlines() if "[secret sink]" in line or "[redacted]" in line]
+    print(f"R13 control {command}: is_error={result.is_error}; output={visible!r}")
+
+
 @pytest.mark.parametrize("command", _ROUND2_SHELL)
 def test_round2_shell_frozen_ledger_blocks(command: str) -> None:
     assert scan_command(command).blocking, command
