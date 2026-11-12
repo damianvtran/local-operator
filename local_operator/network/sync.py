@@ -3025,11 +3025,19 @@ def _opened_regular(fd: int, before: os.stat_result, name: str) -> int:
     return fd
 
 
-def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
-    """Open every parent no-follow from the stable anchor, never a derived root."""
+def _open_directory(scope: _WriteScope, relative: Path, name: str, *, create: bool = True) -> int:
+    """Open every parent no-follow from the stable anchor, never a derived root.
+
+    ``create=False`` is the READ mode a peer-named path needs (``network/files.py``):
+    a missing component is ``SyncRefused("missing", …)``, never a ``mkdir``. The write
+    paths create their parents by design; a read that did the same would hand a
+    read-only peer a directory-creation primitive inside the owner's session state
+    (#3794 review R1-1), because the path it names need not exist.
+    """
     flags = os.O_RDONLY | _O_BINARY | _O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
     _assert_contained(scope, scope.allowed_root / relative, leaf_link=False)
-    scope.allowed_root.mkdir(parents=True, exist_ok=True)
+    if create:
+        scope.allowed_root.mkdir(parents=True, exist_ok=True)
     # The anchor is already resolved, so its own spelling is not a link question;
     # only a root that is not a real directory (or was swapped for one) refuses.
     if scope.anchor.is_symlink() or not scope.anchor.is_dir():
@@ -3052,8 +3060,14 @@ def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
                     os.close(child)
                     raise _refuse_io(name, f"parent component {part!r} changed during open.")
             except FileNotFoundError:
+                if not create:
+                    raise SyncRefused("missing", f"{name} does not exist") from None
                 os.mkdir(part, dir_fd=fd)
                 child = os.open(part, flags, dir_fd=fd)
+            except NotADirectoryError:
+                if not create:
+                    raise SyncRefused("missing", f"{name} does not exist") from None
+                raise _refuse_io(name, f"parent component {part!r} is not a directory.") from None
             except OSError as error:
                 raise _refuse_io(name, f"parent component {part!r} is unsafe: {error}.") from error
             os.close(fd)
@@ -3064,14 +3078,37 @@ def _open_directory(scope: _WriteScope, relative: Path, name: str) -> int:
         raise
 
 
-def _open_for_read(path: Path, scope: _WriteScope) -> int:
+def _open_for_read(path: Path, scope: _WriteScope, *, nonblock: bool = False) -> int:
+    """Open ``path`` no-follow, regular-only, from the scope's anchor.
+
+    ``nonblock=True`` is the PEER-NAMED read (``network/files.py``): it also never
+    creates a parent (see ``_open_directory``'s ``create``), and a missing leaf or
+    parent is ``SyncRefused("missing", …)`` so the caller can say "not found" rather
+    than "unsafe".
+    """
     _assert_contained(scope, path, leaf_link=False)
-    parent = _open_directory(scope, scope.relative_in(path.parent), path.name)
+    parent = _open_directory(scope, scope.relative_in(path.parent), path.name, create=not nonblock)
     try:
         try:
-            before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            try:
+                before = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                if nonblock:
+                    raise SyncRefused("missing", f"{path.name} does not exist") from None
+                raise
+            flags = os.O_RDONLY | _O_BINARY | _O_NOFOLLOW
+            if nonblock:
+                # A PEER NAMES THIS FILE (``network/files.py``), so the open itself must
+                # not be a wait the peer controls: a FIFO opened read-only blocks until a
+                # writer appears, parking a slow worker indefinitely, and opening a device
+                # can have side effects. Refuse a non-regular leaf BEFORE opening it, and
+                # open non-blocking so a swap in the window between stat and open cannot
+                # block either; ``_opened_regular`` then refuses whatever was opened.
+                if not stat.S_ISREG(before.st_mode):
+                    raise _refuse_io(path.name, "it is not a regular file.")
+                flags |= getattr(os, "O_NONBLOCK", 0)
             return _opened_regular(
-                os.open(path.name, os.O_RDONLY | _O_BINARY | _O_NOFOLLOW, dir_fd=parent),
+                os.open(path.name, flags, dir_fd=parent),
                 before,
                 path.name,
             )
@@ -3144,6 +3181,22 @@ def _symlink_at(target: str, root: Path, name: str, scope: _WriteScope) -> None:
         os.symlink(target, name, dir_fd=parent)
     finally:
         os.close(parent)
+
+
+#: PUBLIC NAMES for the containment primitives, for ``network/files.py``
+#: (docs/design/mesh-file-transfer.md, S1). ONE implementation of "open no-follow
+#: from a trusted anchor, refuse links and non-regular files, rename dirfd-relative"
+#: is the point: a second copy in the file-transfer slice would be a second set of
+#: rules to keep in step with this one, and the first divergence would be a hole.
+#: Aliases rather than renames, so the sync code's own call sites stay untouched.
+WriteScope = _WriteScope
+write_scope = _write_scope
+open_directory = _open_directory
+opened_regular = _opened_regular
+open_for_read = _open_for_read
+replace_at = _replace_at
+unlink_at = _unlink_at
+stream_digest = _stream_digest
 
 
 def _copy_contained(source: Path, destination: Path, scope: _WriteScope) -> None:
