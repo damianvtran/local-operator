@@ -534,7 +534,7 @@ def test_writer_holding_reserved_does_not_stall_or_hide_foreign_rows(
 def test_exclusive_lock_bounds_foreign_lookup_and_keeps_main_rank(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """m5: under an EXCLUSIVE writer the foreign lookup uses the short busy wait, then ranks as main.
+    """m5: under an EXCLUSIVE writer the foreign lookup waits briefly, then ranks as main.
 
     WHY THIS ASSERTS THE MECHANISM AND NOT A WALL-CLOCK BOUND: the elapsed time
     is dominated by SQLite's own lock-reporting latency, not by the busy
