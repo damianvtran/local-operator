@@ -305,5 +305,17 @@
     "note": "Three claims to preserve. (1) The choice is tried FIRST, so it RE-ORDERS the tested list (Sonnet first, then Opus) and never narrows it. (2) Empty means the tested order, which is the safest default — say that, because an unset row is a real recommendation, not a missing value. (3) A choice can never block delivery: if the chosen model is unavailable or out of quota, this machine's own configured model and its fallbacks still screen. Do not transliterate model ids or numbers into this copy. No ICU arguments.",
     "role": "Settings row help",
     "tone": "concise, neutral"
+  },
+  "wire.settings.desktop_remote_files_cache_bytes.label": {
+    "role": "settings row label in the desktop section",
+    "tone": "terse, lowercase like its neighbours",
+    "width": "short label column",
+    "note": "'bytes' is the unit of the number the user types"
+  },
+  "wire.settings.desktop_remote_files_cache_bytes.help": {
+    "role": "settings row help text",
+    "tone": "plain",
+    "width": "one to three short sentences under the field",
+    "note": "Explains the budget for cached copies of files fetched from another device's conversations; default is 1 GiB; 0 means the cache is staging only. No placeholders."
   }
 }

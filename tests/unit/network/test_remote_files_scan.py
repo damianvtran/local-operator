@@ -23,7 +23,12 @@ from local_operator.network import cli as net_cli
 from local_operator.network import sync
 from local_operator.session.attachments import AttachmentStore
 from tests.unit.network.test_mesh_file_pull import PEER, mesh  # noqa: F401 — fixture
-from tests.unit.network.test_mobility import SESSION, Devices, devices, pair  # noqa: F401
+from tests.unit.network.test_mobility import (  # noqa: F401
+    SESSION,
+    Devices,
+    devices,
+    pair,
+)
 
 
 def _count_transcript_reads(monkeypatch: pytest.MonkeyPatch, counter: list[int]) -> None:

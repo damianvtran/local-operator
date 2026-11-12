@@ -20,7 +20,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Annotated, Iterator
+from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -53,6 +53,7 @@ from local_operator.server.models.desktop_library import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.server.utils import byte_range
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,6 @@ router = APIRouter(tags=["Desktop library"], dependencies=[Depends(require_deskt
 AssetID = Annotated[str, PathParam(pattern=r"^la_[0-9a-f]{16}$")]
 TagID = Annotated[str, PathParam(pattern=r"^[a-f0-9]{10}$")]
 SessionIDShape = re.compile(r"^[a-f0-9]{12}$")
-
-_CHUNK = 64 * 1024
 
 
 def _config_dir(request: Request) -> Path:
@@ -355,45 +354,10 @@ async def put_library_asset_tags(asset_id: AssetID, body: LibraryTagsWrite, requ
     return reply(row)
 
 
-def _stream(path: Path, start: int, length: int) -> Iterator[bytes]:
-    with path.open("rb") as handle:
-        handle.seek(start)
-        remaining = length
-        while remaining > 0:
-            chunk = handle.read(min(_CHUNK, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-
-
-def _parse_range(header: str, size: int) -> tuple[int, int] | None:
-    """``(start, end)`` inclusive for one satisfiable byte range, else ``None``.
-
-    Only a single ``bytes=`` range is honoured. Multi-range answers are legal
-    multipart responses, but no Library surface asks for one and a wrong
-    multipart body is worse than a clean 200 whole-file answer.
-    """
-    if not header.startswith("bytes=") or "," in header:
-        return None
-    spec = header[6:].strip()
-    if "-" not in spec:
-        return None
-    raw_start, raw_end = spec.split("-", 1)
-    try:
-        if raw_start == "":
-            suffix = int(raw_end)
-            if suffix <= 0:
-                return None
-            start = max(0, size - suffix)
-            return start, size - 1
-        start = int(raw_start)
-        end = int(raw_end) if raw_end else size - 1
-    except ValueError:
-        return None
-    if start < 0 or start > end or start >= size:
-        return None
-    return start, min(end, size - 1)
+# ONE implementation, shared with the session attachment routes (remote files
+# parity §1): the names stay so this module's call sites read as before.
+_stream = byte_range.stream_path
+_parse_range = byte_range.parse_range
 
 
 @router.get("/v1/desktop/library/assets/{asset_id}/content")

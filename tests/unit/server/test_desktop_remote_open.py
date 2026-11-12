@@ -58,7 +58,10 @@ from local_operator.config import ConfigManager
 from local_operator.harness.types import Message
 from local_operator.resume import ORIGIN_NAME, SessionRow
 from local_operator.server.routes import desktop_sessions
-from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.server.utils.desktop_sessions import (
+    DesktopSessions,
+    PeerAttachmentFile,
+)
 from local_operator.session import peer_rows as peer_rows_mod
 from local_operator.session.attached import AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
@@ -754,15 +757,21 @@ async def test_a_peer_completion_is_read_from_the_peer_not_from_a_local_store(
 async def test_a_peers_attachment_names_the_device_instead_of_500ing(
     remote_api: tuple[AsyncClient, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bytes are on the peer's disk, and the answer says so."""
+    """The bytes are on the peer's disk, and the answer says so.
+
+    Since remote files parity (§1) a miss is FETCHED from the owner; with no relay
+    running on this device the fetch cannot start, and the answer is the
+    retryable 504 naming the device — never a 500, and never the permanent 409
+    the renderer would stop asking after.
+    """
     client, root = remote_api
     _answer_rows(monkeypatch, _peer_row())
     digest = "a" * 32
 
     response = await client.get(f"/v1/desktop/sessions/{OTHER}/attachments/{digest}")
-    assert response.status_code == 409, response.text
+    assert response.status_code == 504, response.text
     detail = response.json()["detail"]
-    assert detail["code"] == "attachment_on_peer"
+    assert detail["code"] == "attachment_owner_unreachable"
     assert "build-box" in detail["text"], detail
 
     # AND THE ORDINARY CASES DO NOT MOVE: an unknown id is still the 404, and a
@@ -913,9 +922,14 @@ async def test_a_peer_bound_prompt_sends_and_stages_what_the_owner_will_journal(
     # peer is never consulted for them.
     _answer_rows(monkeypatch, row)
     pool = DesktopSessions(root)
-    served, served_mime = await pool.attachment(OTHER, digest)
+    # A peer session's blob is answered OPEN, for the route to stream (remote
+    # files parity §1), whichever local step found it — here the store.
+    opened = await pool.attachment(OTHER, digest)
+    assert isinstance(opened, PeerAttachmentFile), opened
+    with opened.handle as handle:
+        served = handle.read()
     assert served == settled_bytes
-    assert served_mime == prepared[0]["mime_type"]
+    assert opened.mime_type == prepared[0]["mime_type"]
 
     # AN IMAGE THE OWNER WOULD DISCARD IS NOT SENT, and stages nothing.
     junk = {

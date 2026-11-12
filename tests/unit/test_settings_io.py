@@ -137,6 +137,7 @@ def _consumer_defaults() -> dict[str, object]:
         RetrySettings,
     )
     from local_operator.remote_compute import DEFAULT_REMOTE_COMPUTE_ENABLED
+    from local_operator.remote_files.cache import REMOTE_FILES_CACHE_BYTES
     from local_operator.saver.gate import DEFAULT_MODE as SAVER_DEFAULT_MODE
     from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
@@ -283,6 +284,7 @@ def _consumer_defaults() -> dict[str, object]:
         # one empty string), so THIS is what stops the two drifting — the same
         # guard `tui.theme` gets for the same reason.
         "desktop.launch_command": DESKTOP_LAUNCH_COMMAND_DEFAULT,
+        "desktop.remote_files_cache_bytes": REMOTE_FILES_CACHE_BYTES,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
         "hub.auto_update.agents": DEFAULT_AUTO_UPDATE_AGENTS,
         "hub.auto_update.teams": DEFAULT_AUTO_UPDATE_TEAMS,

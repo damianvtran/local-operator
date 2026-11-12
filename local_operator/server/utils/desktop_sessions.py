@@ -31,7 +31,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, cast
 
 from anyio import CancelScope
 from fastapi import HTTPException
@@ -6830,6 +6830,129 @@ class PeerAttachmentUnavailable(Exception):
         self.row = row
 
 
+class PeerAttachmentRetryable(Exception):
+    """A peer session's bytes could not be fetched NOW; asking again may succeed.
+
+    docs/design/remote-files-parity.md §1's status table: the owner (or this
+    device's relay) is unreachable, or the pull is still running at the route's
+    wait bound. Both are 504, never 503 — an undeclared 503 under ``/v1/desktop/``
+    reads to the renderer as the PLANE closing — and never 409, which the renderer
+    treats as permanent. ``pending`` adds ``Retry-After``: the transfer continues and
+    the next ask joins it.
+    """
+
+    def __init__(self, session_id: str, row: SessionRow, *, pending: bool) -> None:
+        from local_operator.resume import UNNAMED_DEVICE
+
+        self.device = row.owner_label or UNNAMED_DEVICE
+        self.pending = pending
+        self.code = "attachment_fetch_pending" if pending else "attachment_owner_unreachable"
+        super().__init__(self.code)
+        self.session_id = session_id
+        self.row = row
+
+
+class PeerAttachmentOutdated(Exception):
+    """The owner predates mesh file transfer: a named update, never a fallback."""
+
+    code = "attachment_peer_outdated"
+
+    def __init__(self, session_id: str, row: SessionRow) -> None:
+        from local_operator.resume import UNNAMED_DEVICE
+
+        self.device = row.owner_label or UNNAMED_DEVICE
+        super().__init__(self.code)
+        self.session_id = session_id
+        self.row = row
+
+
+@dataclass(frozen=True)
+class PeerAttachmentFile:
+    """A peer session's blob, OPENED, for a route to stream.
+
+    Opened before the route answers so a concurrent cache eviction cannot take the
+    bytes away mid-body (POSIX keeps an unlinked inode alive for its open fds).
+    """
+
+    handle: BinaryIO
+    mime_type: str
+
+
+async def peer_blob(
+    root: Path,
+    session_id: str,
+    row: SessionRow,
+    digest: str,
+    *,
+    member_id: str,
+) -> Any:
+    """``digest`` for a peer-held session: store, replica, cache, then one pull.
+
+    docs/design/remote-files-parity.md §1's lookup order — every local step is a
+    ``stat``, and only a miss on all three asks the owner, through
+    ``remote_files.fetch`` (single-flight, bounded wait). ``member_id`` is the
+    session whose transcript references the digest (the child for a subagent's
+    image); the owner's ``_session_scope`` admits any session it owns.
+
+    Returns a :class:`~local_operator.remote_files.cache.CachedBlob`. Raises
+    :class:`PeerAttachmentUnavailable` for a permanent owner refusal (not
+    referenced, view revoked…), :class:`PeerAttachmentOutdated` for an owner
+    without mesh file transfer, :class:`PeerAttachmentRetryable` otherwise.
+    """
+    from local_operator.remote_files import cache as remote_cache
+
+    replicas = tuple(dict.fromkeys((member_id, session_id)))
+    blob = await asyncio.to_thread(remote_cache.lookup, root, replicas, digest)
+    if blob is not None:
+        return blob
+    if not row.owner_device:
+        raise PeerAttachmentUnavailable(session_id, row)
+    return await _fetch_peer(
+        root, session_id, row, member_id, {"attachment": digest}, digest, replicas
+    )
+
+
+async def _fetch_peer(
+    root: Path,
+    session_id: str,
+    row: SessionRow,
+    member_id: str,
+    source: dict[str, str],
+    key: str,
+    replicas: tuple[str, ...],
+) -> Any:
+    """One ``remote_files.fetch``, its failure kinds mapped to the route family."""
+    from local_operator.remote_files import fetch as remote_fetch
+
+    try:
+        return await remote_fetch.fetch(
+            root,
+            owner=row.owner_device,
+            member_id=member_id,
+            source=source,
+            key=key,
+            session_ids=replicas,
+        )
+    except remote_fetch.RemoteFetchError as error:
+        if error.kind == "outdated":
+            raise PeerAttachmentOutdated(session_id, row) from None
+        if error.kind in ("unreachable", "pending"):
+            raise PeerAttachmentRetryable(
+                session_id, row, pending=error.kind == "pending"
+            ) from None
+        logger.info("peer refused %s of %s: %s", key, member_id, error.code)
+        raise PeerAttachmentUnavailable(session_id, row) from None
+
+
+def _open_blob(blob: Any) -> PeerAttachmentFile:
+    from local_operator.remote_files import cache as remote_cache
+
+    handle = open(blob.path, "rb")  # noqa: SIM115 — the response body closes it
+    if blob.source == "cache":
+        remote_cache.touch(blob.path)
+    return PeerAttachmentFile(handle=handle, mime_type=blob.mime)
+
+
 #: How many times the OWNER's own ingest may be re-applied before the bytes this
 #: device sends are declared a fixed point of it.
 #:
@@ -8293,7 +8416,22 @@ class DesktopSessions:
 
         return await asyncio.to_thread(claim)
 
-    async def attachment(self, session_id: str, digest: str) -> tuple[bytes, str]:
+    async def _peer_file(
+        self, session_id: str, row: SessionRow, digest: str, *, member_id: str
+    ) -> PeerAttachmentFile:
+        """``peer_blob``, OPENED; one re-lookup if an eviction won the race to the open."""
+        for attempt in (1, 2):
+            blob = await peer_blob(self.root, session_id, row, digest, member_id=member_id)
+            try:
+                return await asyncio.to_thread(_open_blob, blob)
+            except FileNotFoundError:
+                if attempt == 2:
+                    raise PeerAttachmentRetryable(session_id, row, pending=False) from None
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def attachment(
+        self, session_id: str, digest: str
+    ) -> tuple[bytes, str] | PeerAttachmentFile:
         """Decoded bytes and mime type for one content-addressed attachment.
 
         Durable transcript rows reference images by digest, not by payload:
@@ -8335,7 +8473,7 @@ class DesktopSessions:
         here exactly as a local one does.
         """
 
-        def read() -> tuple[bytes, str]:
+        def read() -> tuple[bytes, str] | SessionRow:
             # Both halves of this gate carry weight and neither is redundant.
             # The shape check keeps a crafted id from escaping the sessions
             # namespace through ``..`` before a path is ever built; the origin
@@ -8352,23 +8490,21 @@ class DesktopSessions:
                 row = remote_row_for(session_id, self.root)
                 if row is None:
                     raise KeyError("Unknown session")
-                # THIS DEVICE'S STORE FIRST: the digest is content-addressed, so a
-                # session that moved here (or one this device holds a copy of)
-                # has the bytes under the same name, so hanging the lookup on
-                # the id's placement before looking would take a working image
-                # away from a conversation that can serve it.
-                resolved_elsewhere = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
-                if resolved_elsewhere is None:
-                    raise PeerAttachmentUnavailable(session_id, row)
-                data_b64, mime_type = resolved_elsewhere
-                return base64.b64decode(data_b64), mime_type
+                # THE PEER BRANCH (remote files parity §1): this device's store
+                # first (a moved session still serves), then the replica, then the
+                # remote cache, and only then one pull from the owner — answered
+                # as an open file the route STREAMS, never a whole-file buffer.
+                return row
             resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
             if resolved is None:
                 raise KeyError("Unknown attachment")
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
 
-        return await asyncio.to_thread(read)
+        result = await asyncio.to_thread(read)
+        if isinstance(result, SessionRow):
+            return await self._peer_file(session_id, result, digest, member_id=session_id)
+        return result
 
     async def attachment_waveform(self, session_id: str, digest: str) -> dict[str, Any]:
         """The waveform payload ``{version, bars, peaks}`` for one attachment.
@@ -8390,7 +8526,7 @@ class DesktopSessions:
         a placeholder.
         """
 
-        def read() -> dict[str, Any]:
+        def read() -> dict[str, Any] | SessionRow:
             from local_operator.audiogen.recovery import waveform_payload
 
             if not SESSION_ID.fullmatch(session_id):
@@ -8403,18 +8539,32 @@ class DesktopSessions:
                 row = remote_row_for(session_id, self.root)
                 if row is None:
                     raise KeyError("Unknown session")
-                # THIS DEVICE'S STORE FIRST, exactly as the byte route does:
-                # a moved conversation that kept a local copy still serves it.
-                payload = waveform_payload(store, digest)
-                if payload is None:
-                    raise PeerAttachmentUnavailable(session_id, row)
-                return payload
+                # The byte route's lookup order (remote files parity §1): the
+                # peaks are a sidecar of whichever store holds the bytes.
+                return row
             payload = waveform_payload(store, digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
 
-        return await asyncio.to_thread(read)
+        result = await asyncio.to_thread(read)
+        if isinstance(result, SessionRow):
+            return await self._peer_waveform(session_id, result, digest, member_id=session_id)
+        return result
+
+    async def _peer_waveform(
+        self, session_id: str, row: SessionRow, digest: str, *, member_id: str
+    ) -> dict[str, Any]:
+        """Peaks for a peer-held blob, computed beside wherever the bytes landed."""
+        from local_operator.audiogen.recovery import waveform_payload
+
+        blob = await peer_blob(self.root, session_id, row, digest, member_id=member_id)
+        payload = await asyncio.to_thread(
+            waveform_payload, AttachmentStore(blob.path.parent), digest
+        )
+        if payload is None:
+            raise KeyError("Unknown waveform")
+        return payload
 
     async def supplement_document(self, session_id: str, digest: str) -> str:
         """The assembled HTML document of one stored supplement component.
@@ -8447,22 +8597,9 @@ class DesktopSessions:
         bytes (one assembler, memo §2.6).
         """
 
-        def read() -> str:
-            from local_operator.session.remote_open import remote_row_for
-            from local_operator.supplements.document import assemble_stored_component
+        from local_operator.supplements.document import assemble_stored_component
 
-            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
-            if not SESSION_ID.fullmatch(session_id):
-                raise KeyError("Unknown session")
-            path = self.root / "sessions" / session_id
-            if not path.is_dir() or not is_user_session(path):
-                row = remote_row_for(session_id, self.root)
-                if row is None or store.get(digest) is None:
-                    if row is not None:
-                        # The conversation exists, the bytes are not HERE: name the
-                        # device (409 attachment_on_peer), never 404 a live row.
-                        raise PeerAttachmentUnavailable(session_id, row)
-                    raise KeyError("Unknown session")
+        def assemble(store: AttachmentStore) -> str:
             resolved = store.get(digest)
             if resolved is None:
                 raise KeyError("Unknown supplement component")
@@ -8474,7 +8611,28 @@ class DesktopSessions:
                 # reader remedy as a missing blob, so the same ordinary 404.
                 raise KeyError("Unknown supplement component") from None
 
-        return await asyncio.to_thread(read)
+        def read() -> str | SessionRow:
+            from local_operator.session.remote_open import remote_row_for
+
+            store = AttachmentStore(self.root / ATTACHMENTS_DIRNAME)
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            path = self.root / "sessions" / session_id
+            if not path.is_dir() or not is_user_session(path):
+                row = remote_row_for(session_id, self.root)
+                if row is None:
+                    raise KeyError("Unknown session")
+                # The byte route's lookup order (remote files parity §1); a
+                # refusal still names the device (409 attachment_on_peer).
+                return row
+            return assemble(store)
+
+        result = await asyncio.to_thread(read)
+        if isinstance(result, SessionRow):
+            blob = await peer_blob(self.root, session_id, result, digest, member_id=session_id)
+            # ``get`` re-verifies the digest against the bytes, as for a local blob.
+            return await asyncio.to_thread(assemble, AttachmentStore(blob.path.parent))
+        return result
 
     async def child_transcript(
         self,
@@ -8610,7 +8768,7 @@ class DesktopSessions:
 
     async def child_attachment(
         self, session_id: str, child_id: str, digest: str
-    ) -> tuple[bytes, str]:
+    ) -> tuple[bytes, str] | PeerAttachmentFile:
         """Decoded bytes and mime type for one attachment in a CHILD transcript.
 
         The mirror of :meth:`attachment`, and the same containment proof runs
@@ -8623,7 +8781,10 @@ class DesktopSessions:
         without the subagent marker.
         """
 
-        def read() -> tuple[bytes, str]:
+        def read() -> tuple[bytes, str] | SessionRow:
+            row = self._peer_parent_row(session_id, child_id)
+            if row is not None:
+                return row
             _contained_child_dir(self.root, session_id, child_id)
             resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
             if resolved is None:
@@ -8631,7 +8792,29 @@ class DesktopSessions:
             data_b64, mime_type = resolved
             return base64.b64decode(data_b64), mime_type
 
-        return await asyncio.to_thread(read)
+        result = await asyncio.to_thread(read)
+        if isinstance(result, SessionRow):
+            return await self._peer_file(session_id, result, digest, member_id=child_id)
+        return result
+
+    def _peer_parent_row(self, session_id: str, child_id: str) -> SessionRow | None:
+        """The peer row when the PARENT is a peer's, else ``None`` (blocking).
+
+        The local containment proof (``_contained_child_dir``) needs the parent's
+        directory on this disk, so a remote subagent's image used to be a 404. When
+        no local parent exists and a peer holds it, the owner is the one that can
+        prove the child is its parent's: it serves only a digest the CHILD's
+        transcript references, under its own ``_session_scope``. A malformed id is
+        left to ``_contained_child_dir``'s own refusal, so it never reaches a path
+        or the wire and its answer is unchanged.
+        """
+        from local_operator.session.remote_open import remote_row_for
+
+        if not SESSION_ID.fullmatch(session_id) or not SESSION_ID.fullmatch(child_id):
+            return None
+        if (self.root / "sessions" / session_id).is_dir():
+            return None
+        return remote_row_for(session_id, self.root)
 
     async def child_attachment_waveform(
         self, session_id: str, child_id: str, digest: str
@@ -8645,16 +8828,22 @@ class DesktopSessions:
         the 404 fallback are identical to the parent's.
         """
 
-        def read() -> dict[str, Any]:
+        def read() -> dict[str, Any] | SessionRow:
             from local_operator.audiogen.recovery import waveform_payload
 
+            row = self._peer_parent_row(session_id, child_id)
+            if row is not None:
+                return row
             _contained_child_dir(self.root, session_id, child_id)
             payload = waveform_payload(AttachmentStore(self.root / ATTACHMENTS_DIRNAME), digest)
             if payload is None:
                 raise KeyError("Unknown waveform")
             return payload
 
-        return await asyncio.to_thread(read)
+        result = await asyncio.to_thread(read)
+        if isinstance(result, SessionRow):
+            return await self._peer_waveform(session_id, result, digest, member_id=child_id)
+        return result
 
     async def create(
         self,

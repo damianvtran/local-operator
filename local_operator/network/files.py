@@ -771,8 +771,14 @@ def pull_file(
     session_id: str,
     path: str = "",
     attachment: str = "",
+    land: str = "store",
 ) -> dict[str, Any]:
     """Pull one file from ``peer``'s session into THIS device's attachment store.
+
+    ``land="cache"`` files it in the viewer's bounded remote-files cache instead
+    (``remote_files.cache``, docs/design/remote-files-parity.md §4): the desktop's
+    fetch-on-miss lands there so eviction can never delete a local session's only
+    copy from the authoritative store. ``"store"`` keeps S1's CLI receipt.
 
     Returns the receipt ``{ok, peer, device_id, session_id, name, path, bytes,
     sha256, attachment, mime, verified, resumed_bytes}``; raises :class:`MeshRefusal`
@@ -783,6 +789,8 @@ def pull_file(
 
     if not session_id:
         raise _refuse("bad_request", "a file pull names the session it reads from")
+    if land not in ("store", "cache"):
+        raise _refuse("bad_request", f"a file pull lands in 'store' or 'cache', not {land!r}")
     if bool(path) == bool(attachment):
         raise _refuse(
             "bad_request",
@@ -864,7 +872,12 @@ def pull_file(
                 raise
             os.close(fd)
             break
-        store = AttachmentStore(root / ATTACHMENTS_DIRNAME)
+        if land == "cache":
+            from local_operator.remote_files.cache import cache_root
+
+            store = AttachmentStore(cache_root(root))
+        else:
+            store = AttachmentStore(root / ATTACHMENTS_DIRNAME)
         # The store re-hashes while adopting: its own gate is what makes a file
         # visible under a content name, and it must not rest on a caller's check.
         ref = store.adopt_file(part, meta["mime"], expected_sha256=meta["sha256"])
@@ -875,6 +888,13 @@ def pull_file(
                 "the pulled file verified but could not be filed in this device's attachment "
                 "store; nothing was saved",
             )
+        if land == "cache":
+            # An existing blob is not re-written by ``adopt_file``, so its mtime is
+            # whenever it first landed: bump it, or the eviction pass that follows
+            # this landing would treat the file just asked for as the oldest.
+            from local_operator.remote_files.cache import touch
+
+            touch(store.root / f"{ref.digest}.bin")
     return {
         "ok": True,
         "peer": label,
@@ -901,6 +921,7 @@ def local_pull_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
             session_id=str(frame.get("session_id") or ""),
             path=str(frame.get("path") or ""),
             attachment=str(frame.get("attachment") or ""),
+            land=str(frame.get("land") or "store"),
         )
 
     return _handle

@@ -28,5 +28,47 @@
     "tone": "plain, calm, reassuring: nothing went wrong",
     "width": "one sentence, shown in a toast or under the settings chip",
     "note": "409 generation_moved: the user picked again for the same setting after the change they tried to cancel, so the newer pick stands and there is nothing to cancel. 'change' means a requested settings change, not a code change. No placeholders."
+  },
+  "wire.errors.desktop.attachment_owner_unreachable": {
+    "role": "API refusal text shown where a remote conversation's file would render (image tile, audio player, document preview)",
+    "tone": "plain, calm, tells the user what happens next",
+    "width": "one or two sentences; shown inline in a tile or in a toast",
+    "note": "504, retryable: the device that holds a remote conversation (or this device's relay) is not answering, so a picture, recording or document from it cannot be fetched. The desktop retries on its own and then offers a retry. {device} is the other device's name; keep both mentions."
+  },
+  "wire.errors.desktop.attachment_fetch_pending": {
+    "role": "API refusal text shown where a remote conversation's file would render (image tile, audio player, document preview)",
+    "tone": "plain, calm, tells the user what happens next",
+    "width": "one or two sentences; shown inline in a tile or in a toast",
+    "note": "504 with Retry-After, retryable: a large file from another device is still transferring when the request's wait ends; the transfer continues. {device} is the other device's name."
+  },
+  "wire.errors.desktop.attachment_peer_outdated": {
+    "role": "API refusal text shown where a remote conversation's file would render (image tile, audio player, document preview)",
+    "tone": "plain, calm, tells the user what happens next",
+    "width": "one or two sentences; shown inline in a tile or in a toast",
+    "note": "409, permanent until the other device updates. 'lop network update' is a command and stays untranslated; {device} is the other device's name, used twice."
+  },
+  "wire.errors.desktop.session_files_remote_unreadable": {
+    "role": "API refusal text for a file listed in a conversation held on another device (Files panel, download)",
+    "tone": "plain, calm, says why and what to do",
+    "width": "one or two sentences; inline in a row tooltip or a toast",
+    "note": "409, permanent: a file listed in a conversation held on another device cannot be read from here. {device} is the other device's name; {reason} is a machine code selecting the clause and is never shown. 'scratchpad' is the conversation's own shared folder (glossary term). Keep the 256 MiB figure."
+  },
+  "wire.errors.desktop.session_files_sensitive_name": {
+    "role": "API refusal text for a file listed in a conversation held on another device (Files panel, download)",
+    "tone": "plain, calm, says why and what to do",
+    "width": "one or two sentences; inline in a row tooltip or a toast",
+    "note": "409: download of a remote file refused because its name matches the credential vocabulary (.env, id_rsa…). {name} is the file name."
+  },
+  "wire.errors.desktop.session_files_download_exhausted": {
+    "role": "API refusal text for a file listed in a conversation held on another device (Files panel, download)",
+    "tone": "plain, calm, says why and what to do",
+    "width": "one or two sentences; inline in a row tooltip or a toast",
+    "note": "409: every collision-free name for a downloaded file is taken. {name} is the file name, {folder} the destination folder path."
+  },
+  "wire.errors.desktop.session_files_download_mismatch": {
+    "role": "API refusal text for a file listed in a conversation held on another device (Files panel, download)",
+    "tone": "plain, calm, says why and what to do",
+    "width": "one or two sentences; inline in a row tooltip or a toast",
+    "note": "409: integrity check of a downloaded remote file failed; nothing landed. {device} is the other device's name."
   }
 }
