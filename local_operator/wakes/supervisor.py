@@ -1242,8 +1242,14 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
     quiet = verdict.get("verdict") == "quiet"
     raw_rss = verdict.get("maxrss_kib")
     maxrss: dict[str, Any] = raw_rss if isinstance(raw_rss, dict) else {}
-    # maxrss is LOGGED, not capped: the distribution a cap must be derived from
-    # (delivery rule: measure before you cap) is collected from these lines.
+    # maxrss is LOGGED, not capped. Measured on the isolated evidence rig
+    # (2026-11-12, stub stdio/HTTP MCP servers, web_fetch, code_requests, glob):
+    # probe self n=31, median 106 MiB, max 139 MiB; reaped stdio children max
+    # 67 MiB. No cap is set because (a) macOS refuses to lower RLIMIT_AS/
+    # RLIMIT_RSS below an interpreter's current limits ("current limit exceeds
+    # maximum limit"), so a cap would need a watcher, and (b) the distribution
+    # that matters — real servers such as Slack's — cannot be measured in
+    # isolation. A cap, if one is wanted, is derived from these log lines.
     logger.info(
         "parked monitors %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
         session_id,
