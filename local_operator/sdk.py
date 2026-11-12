@@ -92,6 +92,7 @@ if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from contextlib import AbstractAsyncContextManager
 
     from local_operator.harness.types import AgentEvent, EventHandler
+    from local_operator.harness.verifier_evidence import VerifierEvidence, VerifierEvidenceItem
     from local_operator.i18n.messages import Msg
     from local_operator.output_contract import MarkdownSchema, decode_output
     from local_operator.session.protocol import (
@@ -126,6 +127,8 @@ __all__ = [
     "SessionSpecError",
     "SteerErrand",
     "ViewerSessionProtocol",
+    "VerifierEvidence",
+    "VerifierEvidenceItem",
     "WakeErrand",
     "WarmErrand",
     "decode_output",
@@ -157,6 +160,8 @@ _LAZY_REEXPORTS: dict[str, str] = {
     "decode_output": "local_operator.output_contract",
     "SessionProtocol": "local_operator.session.protocol",
     "ViewerSessionProtocol": "local_operator.session.protocol",
+    "VerifierEvidence": "local_operator.harness.verifier_evidence",
+    "VerifierEvidenceItem": "local_operator.harness.verifier_evidence",
 }
 
 

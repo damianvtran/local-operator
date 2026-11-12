@@ -4751,6 +4751,25 @@ class ChatRequest(BaseModel):
     top_p: float | None = None
     stop_sequences: list[str] = Field(default_factory=list)
     tool_choice: Literal["auto", "none", "required"] = "auto"
+    # Opt-in transport invariant, not a role-name special case. Failover must
+    # recheck it against the model and content it actually dispatches.
+    required_image_count: int = Field(default=0, ge=0)
+
+    def validate_required_images(self) -> None:
+        if not self.required_image_count:
+            return
+        count = sum(
+            isinstance(block, ImageContent)
+            for message in self.messages
+            for block in message.content
+        )
+        if (
+            not self.model.supports_images
+            or not self.model.supports_images_stated
+            or count < self.required_image_count
+        ):
+            raise ValueError("required image evidence cannot be sent to the serving model")
+
     # A reasoning-effort ceiling the harness set DELIBERATELY (an empty
     # truncation retry stepped the effort down one rung). The session's
     # frozen auto-effort override must not raise the request back above it:
