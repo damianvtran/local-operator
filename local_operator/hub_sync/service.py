@@ -1155,9 +1155,11 @@ def repair_proven_public_scope(
     # records what the public client is now served, not the stale org-scoped
     # answer -- often ``no-credential`` when nobody is signed in. One more
     # GET, once per repaired row, never on later checks. It is the ORDINARY
-    # public check (bearer-less, with every public read's environment
-    # behaviour); only the probe above is hardened to ``credential_free``,
-    # because only the probe's answer is read as proof of scope.
+    # public check, and every ordinary public read is ``credential_free``
+    # (``check._detail_read_auth``): a public read must never carry a
+    # credential, not even an ambient ``~/.netrc`` entry ``requests`` would
+    # attach as Basic auth -- otherwise this fold could record a signed-in
+    # answer as what the public is served, and leak the netrc secret to the hub.
     try:
         if c.kind == "team":
             again = chk.check_hub_teams(

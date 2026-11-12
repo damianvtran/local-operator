@@ -62,6 +62,9 @@ class FakeHub:
     def __init__(self) -> None:
         self.routes: dict[str, tuple[int, Any, dict[str, str]]] = {}
         self.seen: list[tuple[str, bool]] = []
+        # The Authorization VALUE per request (``seen`` keeps only presence),
+        # so a test can tell netrc's ``Basic`` from the org bearer.
+        self.auth: list[str | None] = []
         self.delay = 0.0
         hub = self
 
@@ -71,6 +74,7 @@ class FakeHub:
 
             def do_GET(self) -> None:
                 hub.seen.append((self.path, self.headers.get("Authorization") is not None))
+                hub.auth.append(self.headers.get("Authorization"))
                 if hub.delay:
                     time.sleep(hub.delay)
                 status, body, headers = hub.routes.get(self.path, (404, {"msg": "nf"}, {}))
@@ -361,9 +365,9 @@ def test_probe_ignores_an_ambient_netrc_entry(tmp_path, hub, monkeypatch):
     svc.check_items(ctx, kinds=("team",))
     assert json.loads(path.read_text())["identity"]["visibility"] == "public"
     # The FIRST GET is the probe -- the request whose 200 is read as proof.
-    # The second is the ordinary public check re-reading the repaired row; its
-    # netrc behaviour is every public read's and is deliberately unchanged.
-    assert hub.seen[0] == (f"/v1/teams/{HUB}", False), hub.seen
+    # The second is the ordinary public check re-reading the repaired row; a
+    # public read never carries a credential either (Q2-netrc(b)).
+    assert hub.seen == [(f"/v1/teams/{HUB}", False)] * 2, hub.seen
 
     # The agent arm of the same probe.
     hub.seen.clear()
@@ -526,3 +530,158 @@ def test_operator_ask_repaired_public_team_keeps_syncing(tmp_path, hub):
     record = prov.read_baseline(ctx.config_dir, "team", team.id)
     assert record is not None and record.identity is not None
     assert record.identity.visibility == "public" and record.tenant_id is None
+
+
+# --- Q2-netrc(b): EVERY public hub-sync read is credential-free ----------------
+#
+# WHY. #3813 hardened only the repair PROBE. ``requests`` attaches an ambient
+# ``~/.netrc`` entry for the hub's host as HTTP Basic auth to any request that
+# passes no ``auth`` -- so the post-repair re-read and every ordinary update
+# check of a PUBLIC team/agent link leaked that secret to the hub, and their
+# answer could be a signed-in one recorded as the public one. These tests put a
+# real ``~/.netrc`` in an isolated HOME (the file ``requests`` reads when NETRC
+# is unset) and read the Authorization header the loopback hub actually
+# received -- never whether a keyword was passed. Org links must keep their
+# bearer: an org row is 404 to anyone who cannot prove membership.
+
+ORG = "9c1e0d2a-0000-4000-8000-0000000000aa"
+AGENT_LOCAL = "agent-local"
+AGENT_HUB = "agent-hub"
+
+
+def _home_netrc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An isolated HOME whose ``~/.netrc`` has an entry for the loopback hub."""
+
+    home = tmp_path / "home"
+    home.mkdir()
+    netrc = home / ".netrc"
+    netrc.write_text("machine 127.0.0.1 login probe password netrc-secret\n")
+    netrc.chmod(0o600)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("NETRC", raising=False)
+
+
+def _netrc_control(hub: FakeHub) -> None:
+    """NEGATIVE CONTROL: a plain GET under this HOME does send netrc's Basic auth."""
+
+    import requests
+
+    requests.get(f"{hub.base}/teams/{HUB}", timeout=5)
+    assert hub.auth and str(hub.auth[0]).startswith("Basic "), hub.auth
+    hub.seen.clear()
+    hub.auth.clear()
+
+
+def _agent_ctx(tmp_path: Path, hub: FakeHub, *, tenant: str | None, for_tenant: Any = None) -> Any:
+    """A linked hub agent (``hub:`` marker + baseline) in ``tenant``'s scope."""
+
+    ctx = _ctx(tmp_path, hub.base, for_tenant=for_tenant)
+    agent = SimpleNamespace(id=AGENT_LOCAL, name="a", description="d", tags=[f"hub:{AGENT_HUB}"])
+    registry = SimpleNamespace(
+        config_dir=ctx.config_dir,
+        list_agents=lambda: [agent],
+        get_agent=lambda _id: agent,
+        get_agent_system_prompt=lambda _id: "x",
+    )
+    prov.write_baseline(
+        ctx.config_dir,
+        prov.make_record(
+            "agent",
+            AGENT_LOCAL,
+            AGENT_HUB,
+            tenant,
+            {"instructions": "x", "description": "d"},
+            "pull",
+        ),
+    )
+    hub.routes[f"/v1/agents/{AGENT_HUB}"] = (
+        200,
+        {"result": {"id": AGENT_HUB, "instructions": "x", "description": "d"}},
+        {},
+    )
+    return SimpleNamespace(ctx=ctx, registry=registry)
+
+
+def _org_clients(base: str) -> Any:
+    """Signed in: a keyed org client for ORG, the key-less public client otherwise."""
+
+    keyed = RadientClient(api_key=SecretStr("org-bearer"), base_url=base)
+    public = RadientClient(api_key=None, base_url=base)
+    return lambda tenant: keyed if tenant == ORG else public
+
+
+def test_public_team_update_check_sends_no_netrc_credential(tmp_path, hub, monkeypatch):
+    _home_netrc(tmp_path, monkeypatch)
+    hub.team()
+    _netrc_control(hub)
+    ctx = _ctx(tmp_path, hub.base)
+    record = prov.record_team_pull(
+        ctx.config_dir, _team(), TEAM_DOC, tenant_id=None, scope_known=True
+    )
+    assert record is not None and record.tenant_id is None
+
+    (check,) = chk.check_hub_teams(ctx.teams(), client_for_tenant=ctx.client_for_tenant)
+
+    assert check.verdict == "up-to-date", check
+    assert hub.seen == [(f"/v1/teams/{HUB}", False)] and hub.auth == [None], hub.auth
+
+
+def test_public_agent_update_check_sends_no_netrc_credential(tmp_path, hub, monkeypatch):
+    _home_netrc(tmp_path, monkeypatch)
+    hub.team()
+    _netrc_control(hub)
+    linked = _agent_ctx(tmp_path, hub, tenant=None)
+
+    (check,) = chk.check_hub_agents(linked.registry, client_for_tenant=linked.ctx.client_for_tenant)
+
+    assert check.verdict == "up-to-date", check
+    # One detail read, no credential -- and no zip fallback (it would be a second GET).
+    assert hub.seen == [(f"/v1/agents/{AGENT_HUB}", False)] and hub.auth == [None], hub.auth
+
+
+def test_post_repair_reread_sends_no_netrc_credential(tmp_path, hub, monkeypatch):
+    """The re-read right after a scope repair is a public read too."""
+
+    _home_netrc(tmp_path, monkeypatch)
+    hub.team()
+    _netrc_control(hub)
+    ctx = _ctx(tmp_path, hub.base)
+    path = _legacy(ctx)
+
+    svc.check_items(ctx, kinds=("team",))
+
+    assert json.loads(path.read_text())["identity"]["visibility"] == "public"
+    # probe, then the re-read of the repaired row: both bare.
+    assert hub.seen == [(f"/v1/teams/{HUB}", False)] * 2, hub.seen
+    assert hub.auth == [None, None], hub.auth
+
+
+def test_org_reads_still_send_their_bearer(tmp_path, hub, monkeypatch):
+    """Org links keep their credential: the org bearer reaches the hub.
+
+    Isolated HOME WITHOUT a netrc: ``requests`` lets a matching netrc entry
+    REPLACE an explicit ``Authorization`` header, so with one present an org
+    read sends netrc's Basic instead of the bearer. That is pre-existing org
+    behaviour this change deliberately leaves alone; here the point is only
+    that the public-read fix did not strip the org credential.
+    """
+
+    home = tmp_path / "bare-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("NETRC", raising=False)
+    hub.team(document={**TEAM_DOC, "tenant_id": ORG})
+    ctx = _ctx(tmp_path, hub.base, for_tenant=_org_clients(hub.base))
+    prov.record_team_pull(
+        ctx.config_dir, _team(), {**TEAM_DOC, "tenant_id": ORG}, tenant_id=ORG, scope_known=True
+    )
+    chk.check_hub_teams(ctx.teams(), client_for_tenant=ctx.client_for_tenant)
+    assert hub.seen == [(f"/v1/teams/{HUB}", True)], hub.seen
+    assert hub.auth == ["Bearer org-bearer"], hub.auth
+
+    hub.seen.clear()
+    hub.auth.clear()
+    linked = _agent_ctx(tmp_path, hub, tenant=ORG, for_tenant=_org_clients(hub.base))
+    chk.check_hub_agents(linked.registry, client_for_tenant=linked.ctx.client_for_tenant)
+    assert hub.seen[0] == (f"/v1/agents/{AGENT_HUB}", True), hub.seen
+    assert hub.auth[0] == "Bearer org-bearer", hub.auth

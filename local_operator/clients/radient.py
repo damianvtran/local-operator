@@ -708,10 +708,12 @@ def _no_ambient_credential(request: requests.PreparedRequest) -> requests.Prepar
     (``Session.prepare_request``), and this hook additionally drops a header
     that might have reached the request some other way.
 
-    CONSTRAINTS. Used only where a caller needs the guarantee "this request
-    carries no credential, ever" -- the legacy public-scope probe, whose 200 is
-    read as PROOF that the hub serves a row publicly; a request that could have
-    authenticated proves nothing. It is deliberately NOT ``trust_env=False``:
+    CONSTRAINTS. Used where a caller needs the guarantee "this request carries
+    no credential, ever" -- the legacy public-scope probe, whose 200 is read as
+    PROOF that the hub serves a row publicly (a request that could have
+    authenticated proves nothing), and every hub-sync update check of a PUBLIC
+    team/agent link, which must neither leak a netrc secret to the hub nor
+    record a signed-in answer as the public one. It is deliberately NOT ``trust_env=False``:
     that would also drop ``HTTP(S)_PROXY``/``NO_PROXY`` and ``REQUESTS_CA_BUNDLE``,
     which people behind a corporate proxy rely on, and the probe must reach the
     hub the same way the check does. Every caller of this hook also refuses
@@ -999,10 +1001,10 @@ class RadientClient:
                 credential at all -- not even an ambient ``~/.netrc`` entry,
                 which ``requests`` would otherwise attach as Basic auth (see
                 :func:`_no_ambient_credential`). For the public-scope probe,
-                whose answer is read as proof of public visibility. Off by
-                default: ordinary public pulls keep ``requests``' environment
-                behaviour. Refused together with ``with_credential``; implies
-                ``refuse_redirects``.
+                whose answer is read as proof of public visibility, and for
+                hub-sync checks of public links. Off by default, so other
+                callers keep ``requests``' environment behaviour. Refused
+                together with ``with_credential``; implies ``refuse_redirects``.
 
         Returns:
             Optional[Dict[str, Any]]: The agent details as a dictionary if found,
@@ -1662,10 +1664,10 @@ class RadientClient:
 
         ``credential_free`` hardens that ``False`` into "no credential, ever":
         ``requests`` would otherwise attach an ambient ``~/.netrc`` entry for
-        the hub's host as Basic auth (see :func:`_no_ambient_credential`). Only
-        the public-scope probe asks for it -- its 200 is read as PROOF of public
-        visibility -- so ordinary public pulls keep ``requests``' environment
-        behaviour. Refused together with ``with_credential``.
+        the hub's host as Basic auth (see :func:`_no_ambient_credential`). The
+        public-scope probe asks for it -- its 200 is read as PROOF of public
+        visibility -- and so does every hub-sync check of a public link; other
+        callers keep ``requests``' environment behaviour. Refused together with ``with_credential``.
 
         Returns:
             The team document: ``id``, ``tenant_id``, ``name``, ``description``,
