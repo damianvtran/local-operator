@@ -155,7 +155,9 @@ def test_bound_image_re_encodes_a_damaged_png_deterministically(damage):
 
 def test_bound_image_keeps_a_clean_png_verbatim():
     clean = _clean_png()
-    payload, mime, summary = bound_image_for_model(clean, sniff_image(clean))
+    info = sniff_image(clean)
+    assert info is not None
+    payload, mime, summary = bound_image_for_model(clean, info)
     assert payload == clean and mime == "image/png"
     assert "damaged" not in summary
 

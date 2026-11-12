@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -24,6 +25,7 @@ from local_operator.harness.types import (
     Message,
     ModelSpec,
     StreamEndEvent,
+    StreamEvent,
     TextContent,
     ToolCall,
 )
@@ -106,8 +108,8 @@ def _sse_ok() -> bytes:
     return f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
 
 
-def _wire_images(body: dict) -> list[str]:
-    found = []
+def _wire_images(body: dict[str, Any]) -> list[str]:
+    found: list[str] = []
     for message in body["messages"]:
         content = message.get("content")
         if isinstance(content, list):
@@ -119,7 +121,7 @@ def _wire_images(body: dict) -> list[str]:
     return found
 
 
-def _index_of(body: dict, payload: str) -> int:
+def _index_of(body: dict[str, Any], payload: str) -> int:
     for index, message in enumerate(body["messages"]):
         content = message.get("content")
         if isinstance(content, list) and any(
@@ -134,7 +136,7 @@ class _DeepSeek:
     """Refuses any request carrying ``BAD``, naming it by its wire index."""
 
     def __init__(self) -> None:
-        self.bodies: list[dict] = []
+        self.bodies: list[dict[str, Any]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -145,7 +147,7 @@ class _DeepSeek:
         return httpx.Response(200, content=_sse_ok())
 
 
-async def _run(client, request) -> list:
+async def _run(client, request) -> list[StreamEvent]:
     return [event async for event in client.stream(request, "fixture")]
 
 
