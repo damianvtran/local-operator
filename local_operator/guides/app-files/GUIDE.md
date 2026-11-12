@@ -41,7 +41,10 @@ placeholder was. These are silent defects; a screenshot will not show them.
 - **The user's negative constraints bind what you create.** "Don't rename,
   move, resize or re-encode" applies to objects you add, not only existing ones.
 - **Edit the named file in place**: the deliverable is the file the user
-  pointed at, not a renamed sibling copy.
+  pointed at (edit, fill or fix alike), not a renamed sibling copy. When the
+  change can't be undone — a lossy re-encode, flattened layers, a file with no
+  other copy — back it up elsewhere first; write a new file only when asked
+  for a copy.
 
 ## Prove it loads as intended
 
@@ -51,3 +54,8 @@ placeholder was. These are silent defects; a screenshot will not show them.
   ids, types, names or counts is a defect to fix, not noise.
 - **Check mechanical properties with a command**: parse the file and print
   every object's id, type, name and source, rather than judging a render.
+- **Check every requested element, not a sample**: "every clip/slide/layer
+  does X" needs a check over all of them that counts the failures. "Make it
+  match B" needs a property diff against B (links, metadata, types), not a
+  look. Before calling something untestable, try two safe routes (never the
+  irreversible action itself); still untested means unmet, so say so.

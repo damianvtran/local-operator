@@ -1354,5 +1354,15 @@ def test_app_files_guide_states_the_native_shape_rules() -> None:
     assert "Edit the named file in place" in prose
     assert "Round-trip it through the app" in prose
     assert "Check mechanical properties with a command" in prose
+    # The system prompt states these at their minimum to stay inside the
+    # start-context budget; the guide carries the elaboration the prompt
+    # dropped (irreversible-edit examples, every-element and "match B" checks,
+    # the two-safe-routes rule and its "unmet" consequence).
+    assert "back it up elsewhere first" in prose
+    assert "write a new file only when asked for a copy" in prose
+    assert "needs a check over all of them that counts the failures" in prose
+    assert "property diff against B (links, metadata, types)" in prose
+    assert "try two safe routes (never the irreversible action itself)" in prose
+    assert "still untested means unmet" in prose
     # The guide is general harness guidance, not benchmark advice.
     assert "grader" not in prose
