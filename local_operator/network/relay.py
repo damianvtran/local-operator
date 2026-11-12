@@ -510,6 +510,10 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # One peer's own relay recovery; the member answers before its
         # supervisor replaces the process, and the origin verifies on reconnect.
         "net_restart",
+        # The remote peek (network/peek.py): the owner runs the local peek's
+        # readers on its own journal. Slow by registration — a deep search may
+        # take seconds and must not hold the link reader.
+        "net_session_peek",
     }
 )
 
@@ -541,6 +545,8 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         # ``net_update``).
         "peer_update",
         "peer_restart",
+        # The remote peek's local half (``net_session_peek`` is the peer half).
+        "peer_session_peek",
     }
 )
 
@@ -570,6 +576,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # thread — and it opens no record by itself: the trigger that does is
     # S3b's, so this slice ships inert in production by construction.
     "local_operator.network.rollouts",
+    # The remote peek: one slow peer op plus its local half, no threads.
+    "local_operator.network.peek",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.

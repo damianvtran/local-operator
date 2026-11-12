@@ -1372,9 +1372,18 @@ def test_a_stored_session_refuses_peek_and_is_never_bound(
     """
     viewer = _FakeViewer(rows=[_Message("assistant", "should not be seen")])
     opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
+    # The gate now fires only for an owner too OLD to read its own journal (a
+    # current owner serves the stored session; see the journal cells below),
+    # and its sentence carries that reason.
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, **fields: {"unsupported": True, "reason": "old build"},  # noqa: ARG005
+    )
     assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["code"] == "session_stored", payload
+    assert "(old build)" in payload["message"], payload
     assert SESSION in payload["message"] and PEER in payload["message"], payload
     assert "--engage" in payload["message"], payload
     assert "resume" in payload["message"], payload
@@ -1448,3 +1457,147 @@ def test_the_peek_bound_carries_no_spawn_and_no_turn() -> None:
     # And the TUI's child budget still outlasts it, so a composer shows THIS
     # verb's own answer rather than a timeout about a call that was working.
     assert net_cli.PILOT_PEEK_TIMEOUT_S < tui_mod.PILOT_CALL_TIMEOUT_S
+
+
+# ---------------------------------------------------------------------------
+# --peek journal windows: the owner reads its own journal (net_session_peek)
+# ---------------------------------------------------------------------------
+
+
+def _owner_journal(tmp_path: Path, rows: int = 6) -> Path:
+    """A real journal on a fake OWNER root, read by the owner's real handler."""
+    directory = tmp_path / "owner" / "sessions" / SESSION
+    directory.mkdir(parents=True)
+    lines = [
+        json.dumps(
+            {
+                "id": f"{i:032x}",
+                "ts": i,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "user" if i % 2 else "assistant",
+                    "content": [{"text": f"row {i}"}],
+                },
+            }
+        )
+        for i in range(1, rows + 1)
+    ]
+    (directory / "transcript.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return tmp_path / "owner"
+
+
+def _owner_relay(monkeypatch: pytest.MonkeyPatch, owner_root: Path) -> list[dict[str, Any]]:
+    """``_relay_answer`` answered by the OWNER's real ``net_session_peek`` body."""
+    from local_operator.network import peek as net_peek
+
+    frames: list[dict[str, Any]] = []
+
+    def _answer(op: str, **fields: Any) -> dict[str, Any]:
+        frames.append({"op": op, **fields})
+        assert op == "peer_session_peek"
+        frame = {k: v for k, v in fields.items() if k not in ("peer", "timeout")}
+        return net_peek.serve(owner_root, frame, own_label=PEER)
+
+    monkeypatch.setattr(net_cli, "_relay_answer", _answer)
+    return frames
+
+
+def test_a_stored_session_is_peeked_from_the_owners_journal_without_a_bind(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Stored sessions are readable now — and STILL never opened or warmed: the
+    owner answers from its disk, and the original request is one `--head` away."""
+    viewer = _FakeViewer(rows=[_Message("assistant", "should not be seen")])
+    opened = _patch(monkeypatch, viewer, _remote_row(live_state=""))
+    frames = _owner_relay(monkeypatch, _owner_journal(tmp_path))
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION, "--head", "2"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["source"] == "journal" and payload["mode"] == "head", payload
+    assert [step["body"] for step in payload["window"]["steps"]] == ["row 1", "row 2"]
+    assert frames[0]["head"] == 2 and frames[0]["session_id"] == SESSION, frames
+    assert opened.calls == 0 and viewer.bound is False
+
+
+def test_a_journal_query_reaches_the_owner_and_renders_the_local_shape(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A live session with a journal window goes to the owner too (the display
+    window cannot search), and the printed lines are the local peek's own."""
+    _patch(monkeypatch, _FakeViewer(rows=[]), _remote_row())
+    _owner_relay(monkeypatch, _owner_journal(tmp_path))
+    assert (
+        _run(["sessions", "--peer", PEER, "--peek", SESSION, "--query=row 3", "--steps", "1"]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "around the match for 'row 3'" in out and "← match" in out, out
+
+
+def test_an_old_owner_degrades_a_journal_window_to_the_tail_and_names_why(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Acceptance: an old peer answers the live tail, with the reason AND the
+    dropped window in a note — never a tail passed off as the asked window."""
+    viewer = _FakeViewer(rows=[_Message("user", "one"), _Message("assistant", "two")])
+    _patch(monkeypatch, viewer, _remote_row())
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, **fields: {  # noqa: ARG005
+            "unsupported": True,
+            "reason": f"{PEER} runs a build without the remote peek (session-peek-v1)",
+        },
+    )
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION, "--digest"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert [row["text"] for row in payload["rows"]] == ["one", "two"]
+    assert "session-peek-v1" in payload["fallback"], payload
+    assert payload["note"].startswith("showing the newest steps instead of --digest"), payload
+
+
+def test_an_old_local_relay_degrades_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A CLI updated before its long-lived relay restarts: the relay's
+    unknown-op refusal is a fallback with the restart named, not a failure."""
+    from local_operator.network.types import MeshRefusal
+
+    viewer = _FakeViewer(rows=[_Message("user", "one")])
+    _patch(monkeypatch, viewer, _remote_row())
+
+    def _old(op: str, **fields: Any) -> dict[str, Any]:
+        raise MeshRefusal("unknown_local_op", f"unknown local op {op!r}")
+
+    monkeypatch.setattr(net_cli, "_relay_answer", _old)
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION, "--head", "3"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert "restart it" in payload["fallback"], payload
+
+
+def test_a_live_plain_tail_keeps_the_display_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No journal window and a live session: unchanged — no owner journal call."""
+    calls: list[str] = []
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **f: calls.append(op) or {})
+    _patch(monkeypatch, _FakeViewer(rows=[_Message("user", "one")]), _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--peek", SESSION]) == 0
+    assert ok(capsys.readouterr().out)["rows"], "the display tail still answers"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "words"),
+    [
+        (["--head", "2"], "applies to --peek only"),
+        (["--peek", SESSION, "--head", "2", "--steps", "2"], "one window at a time"),
+        (["--peek", SESSION, "--head", "51"], "too many for one peek"),
+        (["--peek", SESSION, "--regex"], "`regex` needs `query`"),
+    ],
+)
+def test_journal_flags_refuse_like_the_tool(
+    argv: list[str], words: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Usage errors (rc 2) in the tool's own sentences, before any lookup."""
+    assert _run(["sessions", "--peer", PEER, *argv]) == 2
+    assert words in capsys.readouterr().err
