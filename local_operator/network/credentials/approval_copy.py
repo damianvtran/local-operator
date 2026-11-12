@@ -132,6 +132,18 @@ _UNWORDED_CODES = frozenset(
         "placement_conflict",
         "unavailable",
         "unsupported",
+        # The borrower's GitHub designation narrowing (``github._remember_authoritative``
+        # and its generation check): a delivered repository list that was not a list,
+        # was cut at the peer boundary's entry ceiling, failed the owner's digest, or
+        # came on a fresh grant whose owner generation went backwards. Each is recorded
+        # as the reason on the narrowing's audit row (the first three also in the
+        # delivery result's ``error``) --
+        # never stored on an approval card, so none needs card copy; listed so the
+        # vocabulary a reviewer reads is complete.
+        "digest_mismatch",
+        "generation_regressed",
+        "too_many_entries",
+        "unreadable",
         "consent_action_refused",
         "consent_execution_missing",
         "consent_identity_invalid",

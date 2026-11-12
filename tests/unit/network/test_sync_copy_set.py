@@ -428,6 +428,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "open-time rewrite clears the stamp.",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/server/utils/settings_intents.py": (
+        1,
+        "``PEER_INTENTS_DIRNAME`` ('peer-session-intents'): a CONFIG-ROOT sibling of "
+        "sessions/ (<config>/peer-session-intents/<id>/) holding THIS viewing device's "
+        "pending desktop settings picks for a conversation a MESH PEER owns -- never an "
+        "entry of a session directory, so no session copy carries it. It must not travel: "
+        "the picks are this viewer's requests about somebody else's runtime, applied "
+        "through this device's peer bridge, and the directory sits outside sessions/ "
+        "precisely so no reader mistakes the peer's id for a local session (the "
+        "two-writer case mesh-session-mobility.md 3.4 forbids). The module's other "
+        "constant, ``INTENT_FILE``, IS a session entry and is classified in the copy set.",
+    ),
     "local_operator/disk_pressure.py": (
         1,
         "``RECEIPT_DIRNAME`` ('disk-reclaim-receipts'): lives at the DEVICE-level "
@@ -970,6 +982,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/create_keys.py": (
+        1,
+        "``INDEX_FILENAME`` (``create-keys.json``): the OWNER device's per-device "
+        "create-idempotency index under ``<config>/network`` -- it binds a requesting "
+        "device's create_key to the session THIS device created, so it describes this "
+        "device's mesh state, never an entry of a session directory, and must not "
+        "travel with a session",
+    ),
     "local_operator/network/relay.py": (
         1,
         "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
@@ -1056,11 +1076,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        2,
+        4,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory",
+        "reply-channel/action-tool precedent), never a file in a session directory; "
+        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER``: per-device files "
+        "under the config root's ``network/`` directory (this device's repository "
+        "narrowing; the marker that a designation, including a cleared one, was "
+        "delivered) — device state that must stay on the device, never a file in a "
+        "session directory, so it never travels with a session",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,

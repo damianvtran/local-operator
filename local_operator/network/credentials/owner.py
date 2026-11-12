@@ -1718,7 +1718,7 @@ class MeshCredentialBroker:
             # THE DELIVERY (§3.4): the allow-list this mint was narrowed to
             # travels WITH the bearer, so the borrower materialises the same
             # bound the token carries (github.remember_delivered_repositories).
-            narrowing=github_app.grant_narrowing(repositories),
+            narrowing=_app_arm_narrowing(self.root, repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
         lender.register(
@@ -1768,8 +1768,13 @@ class MeshCredentialBroker:
             identity={},
             # §3.4's bound for the token arms is the helper's allow-list ALONE,
             # so it must reach the helper's device too (see _serve_github_app's
-            # note on the delivery; read fresh per serve, like the token).
-            narrowing=github_app.grant_narrowing(github_app.repositories_for(self.root)),
+            # note on the delivery; read fresh per serve, like the token). An
+            # operator who CLEARED the list — which every settings surface does
+            # by deleting the key — sends an explicit empty designation once this
+            # owner has ever lent one (borrowers refuse all); one who never set
+            # it sends nothing, so a borrower's hand-set backstop survives
+            # (``github.owner_designation``).
+            narrowing=_token_arm_narrowing(self.root),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 
@@ -3573,3 +3578,24 @@ def _grant_ttl_s(root: Path | None) -> float:
     from local_operator.network.credentials import grant_ttl_s
 
     return float(grant_ttl_s(root))
+
+
+def _token_arm_narrowing(root: Path | None) -> dict[str, Any]:
+    """The token arms' delivery: the designation as set, or nothing if never set."""
+    from local_operator.network.credentials import github as github_app
+
+    repositories, explicit = github_app.owner_designation(root)
+    return github_app.grant_narrowing(repositories, explicit=explicit)
+
+
+def _app_arm_narrowing(root: Path | None, repositories: Any) -> dict[str, Any]:
+    """The App arm's delivery: the list this mint was narrowed to, always explicit.
+
+    Also marks the owner as having lent a designation, so a later clear on this
+    owner reaches token-arm borrowers too if the source ladder moves off the App.
+    """
+    from local_operator.network.credentials import github as github_app
+
+    if repositories:
+        github_app.mark_designation_delivered(root)
+    return github_app.grant_narrowing(repositories, explicit=True)

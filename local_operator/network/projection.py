@@ -78,6 +78,7 @@ from local_operator.session.placement import (
 )
 from local_operator.session.runtime.types import (
     JOURNAL_ORDER_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_JOURNAL_SOURCE_CAPABILITY,
     PEER_JOURNAL_SOURCE_FLAG,
@@ -1338,6 +1339,9 @@ class RemoteSessionClient(AttachClient):
             INPUT_MODE_CAPABILITY in capabilities
         )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in capabilities
+        # MAY A MESH ``send`` USE THE OWNER'S MAILBOX (``peer_message``) — read off
+        # the OWNER's welcome like its neighbours; see ``MESH_PEER_MESSAGE_CAPABILITY``.
+        self._mesh_peer_message_supported = MESH_PEER_MESSAGE_CAPABILITY in capabilities
         # THE SIGNATURE GATE — the mirror a remote dial needs on its own
         # account, not for parity alone: a mesh viewer never holds the spawn
         # capability (the peer's runtime was not started by this process), so

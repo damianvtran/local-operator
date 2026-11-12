@@ -1383,187 +1383,438 @@ class TestProseClaimDetector:
         assert prose_claims_completion(text) is True
 
 
-class TestProseCompletionGate:
-    """The gate's answer-side arm: a terminal PROSE claim earns the one challenge.
+#: The shape of arm main29's ``t29a-t003`` final message (row 14728,
+#: ``stop_reason: stop``, no tool call): completion claimed in prose that the
+#: old regex trigger did not recognise, so the episode ended where upstream
+#: OSWorld's loop would have continued.
+T003_PROSE = (
+    "Both slides verified in LibreOffice. Summary of what was done: the title "
+    "slide background was changed and the image on slide 2 was set to 40%."
+)
 
-    WHY THIS EXISTS. The gate landed in #1696 fires inside ``ActionBridge.call``,
-    so it only sees TOOL-mediated claims. The first field run of arm 1748
-    (task_003) ended its final answer as prose -- "Done. Summary of what I
-    determined and did: ..." with NO tool call -- and the turn simply ended:
-    the gate never fired and the run reads as an unverified finish, exactly the
-    case the gate exists to prevent. These tests pin both sides of the fix:
 
-    * a terminal message that CLAIMS completion earns the SAME one challenge a
-      finish call earns -- the same shared budget, the same challenge text,
-      delivered against the state the model last saw;
-    * everything else -- the mid-work narration classes (including the eight
-      adversarial shapes the round-1 review found; the predicate's tables
-      above pin them), empty terminal messages (the silent-provider ending
-      class 005/006 exhibit), messages that carry a tool call, and any episode
-      that already ended -- does not fire.
+class TestTextOnlyContinuation:
+    """Every text-only terminal turn gets the protocol's ASK_USER continuation.
+
+    WHY. Upstream OSWorld's loop (``lib_run_single.py``'s ``if not actions:``
+    branch) answers ANY response without actions -- with the task's user
+    simulator, else ``DEFAULT_USER_RESPONSE`` -- counts one step and loops. The
+    arm used to continue only when a regex recognised a completion claim, and
+    ``t29a-t003`` ended on prose the regex missed. These tests pin the
+    replacement: no phrasing dependence, one step per continuation, the
+    simulator's answer when there is one, the existing ask-loop guard as the
+    bound, and a record row for every continuation.
     """
 
     @pytest.mark.asyncio
-    async def test_a_terminal_prose_claim_is_challenged_and_recorded(self, tmp_path: Path) -> None:
-        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+    async def test_prose_matching_no_claim_pattern_is_continued_with_the_default(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
+        # The discriminating precondition: the old trigger would NOT have fired.
+        assert prose_claims_completion(T003_PROSE) is False
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        _fold_assistant_message(bridge, T003_PROSE)
+        bridge.fold(TurnEndEvent())
+
+        continuation = await bridge.text_only_continuation()
+
+        assert continuation is not None
+        assert continuation[0].text == OSWORLD_DEFAULT_USER_RESPONSE
+        # Upstream's DEFAULT_USER_RESPONSE, verbatim (lib_run_single.py L17-19).
+        assert OSWORLD_DEFAULT_USER_RESPONSE == (
+            "I have no further information to provide. I trust you can figure it out "
+            "based on the current observation and the instruction. Please proceed with "
+            "the next action. DO NOT ask me any more questions for this task."
+        )
+        # The screen the model must bind its next call to rides with it, after
+        # the note that tells its ``Step:`` line from the budget count (Q-2).
+        from local_operator.evaluation.session_arm import CONTINUATION_SCREEN_NOTE
+
+        assert continuation[1].text == CONTINUATION_SCREEN_NOTE
+        assert '"Step:" line numbers that screen' in CONTINUATION_SCREEN_NOTE
+        assert continuation[2].text == "seen 0"
+        # ONE step on the official clock, as upstream's ``step_idx += 1``.
+        assert bridge.steps == 1
+        assert bridge.end_requested is None and bridge.terminal is False
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["answer_source"] == "default-user-response"
+        assert rows[0]["answer"] == OSWORLD_DEFAULT_USER_RESPONSE
+        assert rows[0]["question"] == T003_PROSE
+        # No adapter-owned ask seam on this bridge: no exchange was attempted.
+        assert rows[0]["ask_exchange"] == "none"
+        assert rows[0]["delivered"] is True
+        assert rows[0]["steps"] == 1
+        assert "completion_challenged" not in [kind for kind, _ in events]
+
+    @pytest.mark.asyncio
+    async def test_the_session_continues_to_a_later_finish(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        _fold_assistant_message(bridge, T003_PROSE)
+        bridge.fold(TurnEndEvent())
+        assert await bridge.text_only_continuation() is not None
+        # The token stayed armed on the same screen: the model's next call
+        # binds to it, and its finish meets the completion gate as usual.
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "verified"}]}
+        challenged = await bridge.call(claim)
+        assert challenged["details"]["terminal"] == "completion-challenged"
+        accepted = await bridge.call(claim)
+        assert accepted["details"]["terminal"] == "finish"
+        assert bridge.end_requested == "finish"
+        # continuation + challenged claim + accepted finish
+        assert bridge.steps == 3
+
+    @pytest.mark.asyncio
+    async def test_the_user_simulator_answers_when_the_episode_has_one(
+        self, tmp_path: Path
+    ) -> None:
+        asked: list[Any] = []
+
+        async def ask(batch: Any) -> str:
+            asked.append(batch)
+            return "Use the second sheet."
 
         events: list[tuple[str, dict[str, Any]]] = []
-        obs = _observation()
         bridge = _bridge(
             tmp_path,
-            observation=obs,
+            ask=ask,
             record=lambda kind, payload: events.append((kind, payload)),
-            reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions"),
         )
-        claim = "Done. Summary of what I determined and did: both composites were applied"
-        _fold_assistant_message(bridge, claim)
-        challenge = bridge.prose_completion_challenge()
-        assert challenge is not None
-        text = challenge[0].text
-        assert "That declaration is a CLAIM" in text
-        assert claim in text
-        assert "the task as stated" in text
-        assert "Reply with a single `apply_actions` call" in text
-        # The state the model was last shown rides WITH the challenge: the same
-        # rendered blocks, attached -- never re-rendered.
-        assert len(challenge) == 2
-        assert challenge[1].text == "seen 0"
-        assert bridge.end_requested is None
-        assert bridge.terminal is False
-        assert bridge.steps == 0
-        # The record names WHICH arm of the gate fired; the finish-call arm's
-        # row keeps its own historical shape.
-        assert [kind for kind, _ in events] == ["completion_challenged"]
-        assert events[0][1]["trigger"] == "terminal-message"
-        assert events[0][1]["reason"] == claim
-        assert events[0][1]["observation_id"] == obs.observation_id
+        _fold_assistant_message(bridge, "Which sheet should hold the totals?")
+
+        continuation = await bridge.text_only_continuation()
+
+        assert continuation is not None
+        assert continuation[0].text == "Use the second sheet."
+        # The prose IS the question, as upstream passes ``response``, and the
+        # turn is one ask_user batch on the shown screen.
+        assert len(asked) == 1
+        (action,) = asked[0].actions
+        assert action.kind == "ask_user"
+        assert action.question == "Which sheet should hold the totals?"
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["answer_source"] == "user-simulator"
+        assert rows[0]["ask_exchange"] == "answered"
+        assert bridge.steps == 1
 
     @pytest.mark.asyncio
-    async def test_the_prose_challenge_re_attaches_the_last_executed_screen(
+    async def test_a_declining_simulator_falls_back_to_the_default(self, tmp_path: Path) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
+        async def ask(batch: Any) -> None:
+            del batch
+            return None
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            ask=ask,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        _fold_assistant_message(bridge, T003_PROSE)
+        continuation = await bridge.text_only_continuation()
+        assert continuation is not None
+        assert continuation[0].text == OSWORLD_DEFAULT_USER_RESPONSE
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["answer_source"] == "default-user-response"
+        assert rows[0]["ask_exchange"] == "declined"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_simulator_exchange_ends_legibly_without_inventing_an_answer(
         self, tmp_path: Path
     ) -> None:
-        bridge = _bridge(tmp_path)
-        executed = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
-        assert executed["is_error"] is False
-        # The turn boundary re-arms the token, exactly as the live loop delivers
-        # it; the prose arm reads the state from the same seam.
-        bridge.fold(TurnEndEvent())
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        challenge = bridge.prose_completion_challenge()
-        assert challenge is not None
-        assert challenge[1].text == "seen 1"
+        async def ask(batch: Any) -> str:
+            del batch
+            raise RuntimeError("simulator unreachable")
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            ask=ask,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        _fold_assistant_message(bridge, T003_PROSE)
+        assert await bridge.text_only_continuation() is None
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "ask-exchange-failed"
+        assert "simulator unreachable" in rows[0]["error"]
 
     @pytest.mark.asyncio
-    async def test_the_prose_challenge_is_byte_identical_to_the_finish_call_challenge(
+    async def test_an_empty_text_turn_is_still_put_to_the_simulator(self, tmp_path: Path) -> None:
+        # Upstream calls ``respond("")`` for an empty response whenever the
+        # task has a simulator (lib_run_single.py L747-749); the wire refuses
+        # an empty question, so the stand-in is asked and the row keeps "".
+        from local_operator.evaluation.session_arm import EMPTY_REPLY_QUESTION
+
+        asked: list[Any] = []
+
+        async def ask(batch: Any) -> str:
+            asked.append(batch)
+            return "Carry on with the export."
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, ask=ask, record=lambda kind, payload: events.append((kind, payload))
+        )
+        _fold_assistant_message(bridge, "")
+        continuation = await bridge.text_only_continuation()
+        assert continuation is not None
+        assert continuation[0].text == "Carry on with the export."
+        assert len(asked) == 1
+        (action,) = asked[0].actions
+        assert action.question == EMPTY_REPLY_QUESTION
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["question"] == ""
+        assert rows[0]["ask_exchange"] == "answered"
+        assert rows[0]["answer_source"] == "user-simulator"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_text_turn_the_simulator_declines_gets_the_default(
         self, tmp_path: Path
     ) -> None:
-        """The two arms quote the SAME challenge for the same claim and screen.
+        # A ``None`` answer is substituted with the default on purpose: the
+        # model must be handed text (upstream would pass ``None`` on).
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
 
-        The widening must not change the challenge's kind: for a claim stated
-        in the same words against the same observation, the prose arm's user
-        turn is byte-identical to the finish-call arm's tool result -- same
-        builder, same channel sentence.
-        """
-        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+        asked: list[Any] = []
 
-        guidance = CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions")
-        claim_text = "Done. everything was applied"
-        via_call = _bridge(tmp_path, reply_guidance=guidance)
-        call_reply = await via_call.call(
-            {"actions": [{"kind": "finish", "status": "done", "reason": claim_text}]}
+        async def ask(batch: Any) -> None:
+            asked.append(batch)
+            return None
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, ask=ask, record=lambda kind, payload: events.append((kind, payload))
         )
-        via_prose = _bridge(tmp_path, reply_guidance=guidance)
-        _fold_assistant_message(via_prose, claim_text)
-        prose = via_prose.prose_completion_challenge()
-        assert prose is not None
-        assert prose[0].text == call_reply["content"][0].text
-        assert prose[1].text == call_reply["content"][1].text
+        _fold_assistant_message(bridge, "")
+        continuation = await bridge.text_only_continuation()
+        assert continuation is not None
+        assert continuation[0].text == OSWORLD_DEFAULT_USER_RESPONSE
+        assert len(asked) == 1
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["ask_exchange"] == "declined"
+        assert rows[0]["answer_source"] == "default-user-response"
 
     @pytest.mark.asyncio
-    async def test_a_finish_after_the_prose_challenge_is_accepted(self, tmp_path: Path) -> None:
-        bridge = _bridge(tmp_path)
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is not None
-        # ONE budget for both arms: the re-declaration is the episode's second
-        # declaration, so it is accepted rather than challenged again -- the
-        # gate cannot loop across the two paths.
-        reply = await bridge.call(
-            {"actions": [{"kind": "finish", "status": "done", "reason": "re-checked"}]}
+    async def test_a_halt_while_the_answer_was_obtained_delivers_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        # R1-1 at the bridge: the kill switch is re-read once the answer is
+        # in hand, so a wall that fired during the exchange is honoured.
+        halted_now: list[bool] = [False]
+
+        async def ask(batch: Any) -> str:
+            del batch
+            halted_now[0] = True  # the wall fires while the simulator answers
+            return "Use the second sheet."
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path, ask=ask, record=lambda kind, payload: events.append((kind, payload))
         )
-        assert reply["details"]["terminal"] == "finish"
-        assert bridge.end_requested == "finish"
+        _fold_assistant_message(bridge, "Which sheet should hold the totals?")
+        continuation = await bridge.text_only_continuation(
+            halted=lambda: "wall-bound" if halted_now[0] else None
+        )
+        assert continuation is None
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "wall-bound"
+        # The step was spent obtaining the answer; it stays on the clock.
+        assert bridge.steps == 1
 
     @pytest.mark.asyncio
-    async def test_a_spent_finish_budget_blocks_the_prose_arm(self, tmp_path: Path) -> None:
+    async def test_one_continuation_per_message(self, tmp_path: Path) -> None:
         bridge = _bridge(tmp_path)
-        await bridge.call({"actions": [{"kind": "finish", "status": "done", "reason": "claimed"}]})
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is None
+        _fold_assistant_message(bridge, T003_PROSE)
+        assert await bridge.text_only_continuation() is not None
+        # A delivery that produced no new assistant message cannot spin.
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 1
 
     @pytest.mark.asyncio
-    async def test_the_prose_arm_does_not_fire_once_the_episode_ended(self, tmp_path: Path) -> None:
-        bridge = _bridge(tmp_path)
+    async def test_no_continuation_once_the_episode_ended(self, tmp_path: Path) -> None:
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
         claim = {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
         await bridge.call(claim)
-        accepted = await bridge.call(claim)  # the second declaration always stands
+        accepted = await bridge.call(claim)
         assert accepted["details"]["terminal"] == "finish"
-        # Every completed run in the corpus ends with exactly this shape: a
-        # summary prose message AFTER the accepted finish. It must not earn a
-        # second exchange.
+        steps = bridge.steps
+        # Every completed run ends with a summary prose message AFTER the
+        # accepted finish; it must not earn an exchange or a step.
         _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is None
-
-    @pytest.mark.parametrize(
-        ("gate", "challenges"),
-        [(False, 1), (True, 0)],
-        ids=["gate-disabled", "zero-budget"],
-    )
-    @pytest.mark.asyncio
-    async def test_the_prose_arm_obeys_the_gate_controls(
-        self, tmp_path: Path, gate: bool, challenges: int
-    ) -> None:
-        bridge = _bridge(tmp_path, completion_gate=gate, completion_challenges=challenges)
-        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
-        assert bridge.prose_completion_challenge() is None
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == steps
+        assert "text_only_continuation" not in [kind for kind, _ in events]
 
     @pytest.mark.asyncio
-    async def test_an_empty_terminal_message_is_never_a_claim(self, tmp_path: Path) -> None:
-        # The silent-provider ending class (005/006): the model's next response
-        # came back EMPTY and the loop ended. There is no claim to answer.
-        bridge = _bridge(tmp_path)
-        _fold_assistant_message(bridge, "")
-        assert bridge.prose_completion_challenge() is None
-
-    @pytest.mark.asyncio
-    async def test_mid_work_narration_is_never_a_claim(self, tmp_path: Path) -> None:
-        # Arm 1716's 005/006 ended after exactly these texts: a mid-work report
-        # plus what was about to be done. They are the discriminating case for
-        # the predicate -- a wider rule would trip on them.
-        bridge = _bridge(tmp_path)
-        _fold_assistant_message(
-            bridge,
-            "Filenames corrected. Opening all 12 numbered document scans as an eog collection "
-            "in fullscreen.",
-        )
-        assert bridge.prose_completion_challenge() is None
-        _fold_assistant_message(
-            bridge,
-            "Downloads mostly succeeded. Now fix #20 (Drive confirm page), inspect #15, "
-            "extract PDF text with pdftotext, and find CV links in the homepages.",
-        )
-        assert bridge.prose_completion_challenge() is None
-
-    @pytest.mark.asyncio
-    async def test_a_message_that_carries_a_tool_call_is_not_this_arms_business(
+    async def test_a_message_that_carries_a_tool_call_is_not_continued(
         self, tmp_path: Path
     ) -> None:
         bridge = _bridge(tmp_path)
         _fold_assistant_message(
             bridge,
-            "Done. Summary of what I determined and did: X",
+            T003_PROSE,
             tool_calls=[ToolCall(id="call-1", name="apply_actions", arguments={})],
         )
-        assert bridge.prose_completion_challenge() is None
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_faulted_message_is_not_continued(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        bridge.fold(
+            MessageEndEvent(message=Message(role="assistant", content=[], stop_reason="error"))
+        )
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_spent_group_clock_ends_without_a_continuation(self, tmp_path: Path) -> None:
+        # The prose message itself took the last attempted output group: there
+        # is no step left to answer it with, so nothing is charged and the row
+        # says why the episode did not go on.
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            max_steps=2,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 10}]})
+        bridge.fold(TurnEndEvent())
+        _fold_assistant_message(bridge, T003_PROSE)
+        assert bridge.attempted_groups == 2
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 1
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["stopped"] == "max-steps" and rows[0]["delivered"] is False
+        assert "steps" in rows[0] and rows[0]["steps"] == 1
+        # The ending is NAMED as the budget, matching the row (R1-2): the
+        # official clock (1) is under the budget, so only this names it.
+        assert bridge.end_requested == "max-steps"
+        assert bridge.terminal is True
+
+    @pytest.mark.asyncio
+    async def test_the_step_that_exhausts_the_budget_ends_max_steps(self, tmp_path: Path) -> None:
+        # The fail-closed branch: the group clock still has room but the
+        # continuation's own step is the last one. Upstream's ``step_idx += 1``
+        # reaching ``max_steps`` exits its loop, so the answer is never read.
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(
+            tmp_path,
+            max_steps=2,
+            record=lambda kind, payload: events.append((kind, payload)),
+        )
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 10}]})
+        bridge.fold(TurnEndEvent())
+        _fold_assistant_message(bridge, T003_PROSE)
+        bridge._attempted_groups = 1  # the group clock under the official one
+        assert await bridge.text_only_continuation() is None
+        assert bridge.steps == 2
+        assert bridge.end_requested == "max-steps"
+        assert bridge.terminal is True
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert rows[0]["stopped"] == "max-steps" and rows[0]["delivered"] is False
+
+
+def _fold_turn_message(bridge: ActionBridge, text: str) -> None:
+    """One text-only turn: the message and its turn boundary, as the loop emits them."""
+
+    _fold_assistant_message(bridge, text)
+    bridge.fold(TurnEndEvent())
+
+
+class TestTextOnlyContinuationAskLoop:
+    """The repeat bound is the EXISTING ask-loop guard, not a new counter."""
+
+    def _guarded(self, tmp_path: Path, **kwargs: Any) -> tuple[ActionBridge, list[Any]]:
+        from local_operator.evaluation.runner.guards import progress_guards
+        from tests.unit.evaluation.runner.conftest import build_spec
+
+        events: list[tuple[str, Any]] = []
+        bridge = ActionBridge(
+            endpoint=tmp_path / "b.sock",
+            surface=ActionSurface(),
+            render=lambda observation: [TextContent(text=f"seen {observation.sequence}")],
+            execute=kwargs.pop("execute"),
+            max_steps=kwargs.pop("max_steps", 30),
+            record=lambda kind, payload: events.append((kind, payload)),
+            progress_guards=progress_guards(),
+            progress_budget=build_spec("ep-session-arm").budget,
+        )
+        bridge.arm(_observation())
+        return bridge, events
+
+    @staticmethod
+    def _moving_world() -> Any:
+        state = {"step": 0}
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            state["step"] += 1
+            before = _observation(sequence=state["step"] - 1, text=f"screen {state['step'] - 1}")
+            after = _observation(sequence=state["step"], text=f"screen {state['step']}")
+            return _result(input_observation=before, output_observation=after)
+
+        return execute
+
+    @pytest.mark.asyncio
+    async def test_repeated_text_only_turns_stop_at_the_ask_loop_threshold(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.runner.guards import AskLoopGuard
+
+        bridge, events = self._guarded(tmp_path, execute=self._moving_world())
+        threshold = AskLoopGuard().describe()["threshold"]
+        delivered = 0
+        for index in range(threshold + 2):
+            _fold_turn_message(bridge, f"{T003_PROSE} ({index})")
+            if await bridge.text_only_continuation() is None:
+                break
+            delivered += 1
+        # The guard reads the continuation as the ask_user batch it is: the
+        # threshold-th consecutive one is charged and then truncates, before
+        # any answer is spent on it.
+        assert delivered == threshold - 1
+        assert bridge.steps == threshold
+        assert bridge.end_requested == "ask-loop"
+        assert bridge.progress_stop_code == "ask-loop"
+        assert bridge.terminal is True
+        rows = [payload for kind, payload in events if kind == "text_only_continuation"]
+        assert [row["delivered"] for row in rows] == [True] * (threshold - 1) + [False]
+        assert rows[-1]["stopped"] == "ask-loop"
+        stops = [payload for kind, payload in events if kind == "progress_stop"]
+        assert stops == [
+            {
+                "code": "ask-loop",
+                "detail": f"{threshold} consecutive ask_user turns",
+                "steps": 3,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_executed_batch_between_text_only_turns_resets_the_chain(
+        self, tmp_path: Path
+    ) -> None:
+        bridge, _ = self._guarded(tmp_path, execute=self._moving_world())
+        for _ in range(2):
+            _fold_turn_message(bridge, T003_PROSE)
+            assert await bridge.text_only_continuation() is not None
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 10}]})
+        assert reply["is_error"] is False
+        bridge.fold(TurnEndEvent())
+        for _ in range(2):
+            _fold_turn_message(bridge, T003_PROSE)
+            assert await bridge.text_only_continuation() is not None
+        assert bridge.end_requested is None
+        assert bridge.steps == 5
 
 
 def _confinement_fake_opener(installed: list[Any]) -> Any:
@@ -2987,6 +3238,12 @@ class _WedgeAdapter(FakeAdapter):
         super().__init__(*args, **kwargs)
         self.fail_executes = fail_executes
         self.recoverable = recoverable
+        #: What the task's user simulator answers an ask with; ``None`` is a
+        #: task without one.
+        self.simulator_answer: str | None = None
+        #: How long the simulator takes to answer -- long enough, in the wall
+        #: tests, for the episode wall to fire mid-exchange (R1-1).
+        self.ask_delay_s = 0.0
         self.executes = 0
         self.observes = 0
 
@@ -3000,6 +3257,21 @@ class _WedgeAdapter(FakeAdapter):
         )
 
     async def _call_raw(self, method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+        if method == "ask_user_exchange":
+            # The OSWorld adapter's answer for a task with NO user simulator
+            # (``adapter.ask_user_exchange``): a clean decline. The base fake's
+            # ``accepted=True`` with no answer is invalid for adapter-owned
+            # asks and poisons the session -- a shape no real adapter sends.
+            from local_operator.evaluation.adapters.api import AskUserExchangeResult
+
+            if self.ask_delay_s:
+                await asyncio.sleep(self.ask_delay_s)
+            return AskUserExchangeResult(
+                ask_id=params.ask_id,
+                request_digest=params.request_digest,
+                accepted=self.simulator_answer is not None,
+                answer=self.simulator_answer,
+            )
         if method == "execute":
             self.executes += 1
             if self.executes <= self.fail_executes:
@@ -3671,6 +3943,7 @@ class TestAgentStopOutcome:
         hold_s: float = 0.0,
         max_wall_s: float | None = None,
         confinement_root: Path | None = None,
+        session: _ScriptedSession | None = None,
     ) -> tuple[Any, _ScriptedSession, Any]:
         home = scratch_root / "home"
         config_dir = home / ".local-operator"
@@ -3697,7 +3970,7 @@ class TestAgentStopOutcome:
             recoverable=True,
             score=ScoreArtifact(status="scored", binary=0),
         )
-        session = _ScriptedSession(
+        session = session or _ScriptedSession(
             scratch_root,
             script,
             terminal_message=terminal_message,
@@ -3768,9 +4041,11 @@ class TestAgentStopOutcome:
         assert len(session.replies) == 1
 
     @pytest.mark.asyncio
-    async def test_a_completion_claim_ending_says_so_after_the_challenge(
+    async def test_a_completion_claim_ending_is_continued_then_named(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
     ) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
         claim = "Done. Summary of what I determined and did: everything checks out."
         run, session, adapter = self._fixture(
             tmp_path=tmp_path,
@@ -3784,15 +4059,17 @@ class TestAgentStopOutcome:
         )
         outcome = await run()
 
+        # The protocol's continuation was delivered (harness-injected), and
+        # this double re-emits the SAME message on every prompt, so the
+        # one-per-message rule ends it: the ending still names itself.
+        assert [prompt[1] for prompt in session.prompts] == [False, True]
+        assert session.prompts[1][0].startswith(OSWORLD_DEFAULT_USER_RESPONSE)
         assert outcome.status == "agent_stop"
         assert outcome.terminal_reason == "completion-claim"
         assert outcome.diagnostic is not None
         assert "claims completion" in outcome.diagnostic
-        assert "challenged it 1 time(s)" in outcome.diagnostic
-        # The gate really delivered: the claim got its re-prompt, and the
-        # episode still ended without a batch.
-        assert [prompt[1] for prompt in session.prompts] == [False, True]
-        assert outcome.steps == 1
+        # The wait and the continuation: one step each.
+        assert outcome.steps == 2
         assert adapter.calls.count("execute") == 1
 
     @pytest.mark.asyncio
@@ -3903,6 +4180,309 @@ class TestAgentStopOutcome:
         first = await self._first_prompt(tmp_path, monkeypatch, short_scratch, installed_at_open="")
         assert "run in a local workspace on a different machine" in first
         assert "isolated" not in first
+
+
+class _TurnScriptedSession(_ScriptedSession):
+    """A scripted session whose EVERY prompt has its own turn.
+
+    ``turns[i]`` answers the i-th ``prompt``: the action batches the model
+    sends over the real bridge socket, then the terminal assistant message
+    (a FRESH message each turn, as a live model produces) and a clean
+    ``agent_end``. Lets a test script the conversation across the
+    harness-injected continuation instead of replaying one ending.
+    """
+
+    def __init__(
+        self,
+        scratch_root: Path,
+        turns: list[tuple[list[list[dict[str, Any]]], str]],
+        *,
+        cancel_ends_aborted: bool = False,
+    ) -> None:
+        super().__init__(scratch_root, [])
+        self._turns = list(turns)
+        #: End a turn ``aborted`` once a graceful cancel was requested in it,
+        #: as the real ``Session`` does even for a completed text-only reply
+        #: (QA round 1, Q-1, measured on the real session).
+        self._cancel_ends_aborted = cancel_ends_aborted
+
+    async def prompt(
+        self, text: str, *, images: Any = None, harness_injected: bool = False
+    ) -> None:
+        del images
+        self.prompts.append((text, harness_injected))
+        if not self._turns:
+            return
+        script, final_text = self._turns.pop(0)
+        endpoint = next(iter(sorted(self._scratch_root.glob("b-*.sock"))))
+        for actions in script:
+            reply = await self._call(endpoint, actions)
+            self.replies.append(reply)
+            self._emit(TurnEndEvent())
+            if self.cancels:
+                break
+        self._emit(
+            MessageEndEvent(
+                message=Message(
+                    role="assistant",
+                    content=[TextContent(text=final_text)] if final_text else [],
+                    stop_reason="stop",
+                )
+            )
+        )
+        self._emit(AgentEndEvent(aborted=self._cancel_ends_aborted and bool(self.cancels)))
+
+
+def _record_kinds(outcome: Any) -> list[str]:
+    """The ``kind`` sequence of an episode's ``events.jsonl``."""
+
+    lines = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line)["kind"] for line in lines if line.strip()]
+
+
+class TestTextOnlyContinuationThroughTheDriver:
+    """The continuation through ``run_session_episode``, on the real bridge socket."""
+
+    _fixture = TestAgentStopOutcome._fixture
+
+    @pytest.mark.asyncio
+    async def test_a_t003_shaped_prose_ending_continues_to_a_later_finish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        from local_operator.evaluation.session_arm import OSWORLD_DEFAULT_USER_RESPONSE
+
+        assert prose_claims_completion(T003_PROSE) is False
+        finish = [{"kind": "finish", "status": "done", "reason": "verified at the source"}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [
+                ([[{"kind": "wait", "duration_ms": 10}]], T003_PROSE),
+                # The continuation's turn: the finish is challenged once (the
+                # completion gate), then the re-declaration stands.
+                ([finish, finish], "Finished."),
+            ],
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert outcome.status == "completed", outcome
+        assert outcome.terminal_reason == "finish"
+        # wait (1) + the continuation (1) + the challenged finish (1) + the
+        # accepted finish (1): the continuation is ONE step on the clock.
+        assert outcome.steps == 4
+        assert [injected for _, injected in session.prompts] == [False, True]
+        assert session.prompts[1][0].startswith(OSWORLD_DEFAULT_USER_RESPONSE)
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is True
+        assert rows[0]["question"] == T003_PROSE
+        assert rows[0]["answer"] == OSWORLD_DEFAULT_USER_RESPONSE
+        # The summary prose after the ACCEPTED finish earns nothing.
+        assert len(session.prompts) == 2
+        assert adapter.calls.count("execute") == 1
+
+    @pytest.mark.asyncio
+    async def test_the_task_simulator_answers_through_the_adapter(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        finish = [{"kind": "finish", "status": "done", "reason": "verified"}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [
+                (
+                    [[{"kind": "wait", "duration_ms": 10}]],
+                    "Should the totals include tax?",
+                ),
+                ([finish, finish], "Finished."),
+            ],
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        adapter.simulator_answer = "Yes, include tax."
+        outcome = await run()
+
+        assert outcome.status == "completed", outcome
+        assert session.prompts[1][0].startswith("Yes, include tax.")
+        assert session.prompts[1][1] is True
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert rows[0]["answer_source"] == "user-simulator"
+        assert rows[0]["question"] == "Should the totals include tax?"
+        # The exchange's canonical receipt is recorded like a model ask's.
+        assert [row["kind"] for row in events].count("action_ask_exchange") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_wall_that_fires_during_the_answer_ends_the_episode_wall_bound(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """R1-1: no continuation turn runs past the episode wall.
+
+        The wall fires while the simulator is still answering. Before the fix
+        the driver checked the wall only at its loop head, so the abort landed
+        on an idle session and the continuation's turn ran two more executes,
+        recorded ``truncated`` / ``max-steps`` (the reviewer's repro, here at
+        0.3 s / 1.0 s instead of 1.5 s / 3 s).
+        """
+
+        wait = [{"kind": "wait", "duration_ms": 10}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [([wait], "Should I keep going?"), ([wait, wait], "More work.")],
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+            max_wall_s=0.3,
+        )
+        adapter.simulator_answer = "Yes, keep going."
+        adapter.ask_delay_s = 1.0
+        outcome = await run()
+
+        assert session.aborts == ["episode wall budget"]
+        assert len(session.prompts) == 1, session.prompts
+        assert adapter.calls.count("execute") == 1
+        assert outcome.status == "agent_stop", outcome
+        assert outcome.terminal_reason == "wall-bound"
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "wall-bound"
+        assert rows[0]["answer"] == "Yes, keep going."
+
+    @pytest.mark.parametrize("cancel_ends_aborted", [False, True], ids=["clean-end", "aborted-end"])
+    @pytest.mark.asyncio
+    async def test_prose_on_the_last_attempted_group_ends_max_steps(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        short_scratch: Path,
+        cancel_ends_aborted: bool,
+    ) -> None:
+        """R1-2 and Q-1: the budget ending is named, and its row is written.
+
+        A refused group charges only the attempted clock, so the prose message
+        can take the last attempted group (4 of 4) while two steps remain.
+        ``clean-end`` is the reviewer's repro (row said ``max-steps``, outcome
+        ``agent_stop`` / ``completion-claim``); ``aborted-end`` is QA's real
+        session shape, where the budget cancel ends the turn ``aborted`` (no
+        row at all, outcome ``agent_stop`` / ``aborted``).
+        """
+
+        wait = [{"kind": "wait", "duration_ms": 10}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [([[{"kind": "bogus"}], wait, wait], "All done, the task is complete.")],
+            cancel_ends_aborted=cancel_ends_aborted,
+        )
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert outcome.steps == 2
+        assert outcome.status == "truncated", outcome
+        assert outcome.terminal_reason == "max-steps"
+        assert len(session.prompts) == 1
+        kinds = _record_kinds(outcome)
+        assert "budget_stop" in kinds
+        events = [
+            json.loads(line)
+            for line in (outcome.record_root / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        rows = [row for row in events if row["kind"] == "action_text_only_continuation"]
+        assert len(rows) == 1
+        assert rows[0]["delivered"] is False
+        assert rows[0]["stopped"] == "max-steps"
+
+    @pytest.mark.asyncio
+    async def test_a_normal_finish_run_records_the_base_event_sequence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        """A run that calls finish normally is unchanged by the continuation.
+
+        The expected sequence was captured from this same scripted run on the
+        base commit (``371ce48ace08``, before the continuation existed); the
+        only path the change adds is unreachable once a finish is accepted.
+        """
+
+        finish = [{"kind": "finish", "status": "done", "reason": "verified"}]
+        session = _TurnScriptedSession(
+            short_scratch,
+            [([[{"kind": "wait", "duration_ms": 10}], finish, finish], "All done.")],
+        )
+        run, session, _ = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            session=session,
+        )
+        outcome = await run()
+
+        assert outcome.status == "completed"
+        assert len(session.prompts) == 1
+        kinds = _record_kinds(outcome)
+        assert "action_text_only_continuation" not in kinds
+        assert kinds == BASE_FINISH_EVENT_KINDS
+
+
+#: Captured from the identical scripted run on the base commit ``371ce48ace08``
+#: (see the test's docstring); pinned so a later change to this path is a
+#: visible diff here rather than a silent drift.
+BASE_FINISH_EVENT_KINDS: list[str] = [
+    "reset",
+    "declaration",
+    "progress_guards",
+    "mcp_settle",
+    "tools",
+    "action_output_epoch",
+    "action_batch",
+    "agent_event",
+    "action_output_epoch",
+    "action_completion_challenged",
+    "agent_event",
+    "action_output_epoch",
+    "action_finish",
+    "agent_event",
+    "agent_event",
+    "action_attempted_group",
+    "agent_event",
+    "requests",
+    "shutdown",
+]
 
 
 class TestRenderPromptHeader:

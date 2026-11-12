@@ -699,8 +699,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- A session with no message sent in it yet (a fresh `/new`) is not a "
             "recipient: sends to it are refused.\n"
             "- With `peer`, the target addresses a session on that device (mesh): "
-            "the send drives a turn there and returns the owner's reply; "
-            "`wake`/`now`/`patience`/`model` are local-only and refused there."
+            "the message lands in that session's mailbox exactly as a local send "
+            "does (`wake`/`now` honoured; the receiver sees your session and device "
+            "and replies with `send peer=`); `patience`/`model` are local-only and "
+            "refused there."
         ),
     ),
     # -- bridge -------------------------------------------------------------

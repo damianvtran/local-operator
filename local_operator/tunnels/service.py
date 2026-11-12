@@ -20,11 +20,13 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
+import httpcore
 import httpx
 
 from local_operator.mobile.auth import load_password
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.providers.auth_store import (
+    AuthStoreBusyError,
     CredentialInvalidError,
     RefreshUnconfirmedError,
 )
@@ -37,6 +39,8 @@ from local_operator.tunnels.errors import (
 )
 from local_operator.tunnels.gateway import (
     AUTHORIZATION_DEFERRED,
+    CONTROL_PLANE_TIMEOUT,
+    CREDENTIAL_STORE_BUSY,
     LOCAL_PREREQUISITE,
     LOGIN_REQUIRED,
     REENROLMENT_REQUIRED,
@@ -370,6 +374,47 @@ def _could_not_reach_control_plane(failure: BaseException) -> bool:
     return any(isinstance(link, httpx.TransportError) for link in _failure_chain(failure))
 
 
+def _local_cause(failure: BaseException) -> str | None:
+    """`CREDENTIAL_STORE_BUSY` or `CONTROL_PLANE_TIMEOUT` when either explains the failure.
+
+    Checked BEFORE `_could_not_reach_control_plane`, because both used to land
+    there and both are a different claim. A busy store means nothing was sent,
+    so no answer from Radient was ever possible. An httpx timeout is a
+    `TransportError` subclass, yet "no answer in time" is not "could not
+    connect" (a connect timeout stays unreachable, below): on 2026-11-11 a
+    machine at load ~50 showed "control plane unreachable" while the API
+    answered every other caller. The builtin
+    `TimeoutError` counts too — `asyncio.wait_for` and socket timeouts raise it,
+    and its empty message is why the connector's log line used to read
+    `relay token refresh failed: ` with nothing after the colon.
+    """
+    chain = list(_failure_chain(failure))
+    if any(isinstance(link, AuthStoreBusyError) for link in chain):
+        return CREDENTIAL_STORE_BUSY
+    # A failed or timed-out CONNECT made no connection at all, which IS the
+    # unreachable claim — and it must be ruled out before the TimeoutError walk
+    # below, because httpcore raises its `ConnectTimeout` from the socket's
+    # builtin `TimeoutError`, so every real connect timeout carries one in its
+    # chain (round 1, R1-1: `httpx.ConnectTimeout <- httpcore.ConnectTimeout <-
+    # TimeoutError` read as "timed out"). Read/write timeouts mean the request
+    # went out and no answer came back in time; a pool timeout is the local
+    # client's own queue.
+    connect_failures = (
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpcore.ConnectTimeout,
+        httpcore.ConnectError,
+    )
+    if any(isinstance(link, connect_failures) for link in chain):
+        return None
+    if any(
+        isinstance(link, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, TimeoutError))
+        for link in chain
+    ):
+        return CONTROL_PLANE_TIMEOUT
+    return None
+
+
 def _is_a_dead_login(failure: BaseException) -> bool:
     """Whether the credential store judged the tunnel's grant unusable.
 
@@ -423,6 +468,9 @@ def authorization_failure_reason(failure: BaseException) -> str:
     transport error it hit while refreshing. The wording each reason produces
     lives with the gateway, so one cause cannot drift into two sentences.
     """
+    local = _local_cause(failure)
+    if local is not None:
+        return local
     if _could_not_reach_control_plane(failure):
         return UNREACHABLE
     if isinstance(failure, httpx.HTTPError):
@@ -473,6 +521,10 @@ def classify_failure(failure: BaseException) -> Failure:
     two families it catches (fail closed, with a traceback) rather than parking
     on a shape it cannot describe.
     """
+    local = _local_cause(failure)
+    if local is not None:
+        # Transient: both clear by themselves (see `_local_cause`).
+        return Failure("transient", local, TERMINAL_DETAIL[local])
     if _could_not_reach_control_plane(failure):
         return Failure("transient", UNREACHABLE, TERMINAL_DETAIL[UNREACHABLE])
     if _is_a_dead_login(failure):
@@ -510,7 +562,10 @@ def _retry_detail(verdict: Failure, failure: BaseException) -> str:
     failure's own text: it is what carries the transport detail an operator debugs
     with, and for those the shared literal is not a misreport.
     """
-    if verdict.reason == AUTHORIZATION_DEFERRED:
+    # The two local causes join it: a timeout's own text is often EMPTY (the
+    # builtin TimeoutError, httpcore's timeouts), which left this line ending
+    # in nothing, and the busy store's text is a shared literal too.
+    if verdict.reason in (AUTHORIZATION_DEFERRED, CONTROL_PLANE_TIMEOUT, CREDENTIAL_STORE_BUSY):
         return verdict.detail
     return str(failure)
 

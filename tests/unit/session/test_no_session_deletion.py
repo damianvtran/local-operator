@@ -797,6 +797,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
         "<config>/run after a failed write or replace",
     ),
+    # The owner-side create-key index (`network/create_keys.py`): ONE fixed-name
+    # FILE, `<config>/network/create-keys.json`, rewritten atomically from a
+    # mkstemp sidecar in the same directory. A sibling of `sessions/`, never a
+    # parent of it, and never a directory.
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.replace",
+        "Atomic replacement of the fixed config-root FILE <config>/network/create-keys.json "
+        "from this call's own mkstemp sidecar; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.unlink",
+        "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
+        "<config>/network after a failed write or replace",
+    ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
         "<path>.unlink",
@@ -1699,6 +1715,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/definitions.py::write_index",
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "os.replace",
+        "mkstemp-created temp FILE -> <config>/system_prompt.md (the only caller "
+        "passes aida.profile.instruction_file(root)); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "<path>.unlink",
+        "only the mkstemp temp FILE this write created, on a failed write",
     ),
     # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
     # the marker FILE beside the transcript, whose name is the fixed
@@ -4143,6 +4171,48 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "child, meta is its hex digest + '.json', neither session-derived",
         2,
     ),
+    # -- mesh file pull (network/files.py; docs/design/mesh-file-transfer.md S1) --
+    # ``AttachmentStore.adopt_file`` moves a VERIFIED staged file into the
+    # content-addressed store. Destination: ``self._content_path(digest)``, i.e.
+    # ``<config>/attachments/<hex digest>.bin``, a sibling of ``sessions/``, never under
+    # it, named by the digest of the bytes it just hashed. Source: its one caller
+    # (``files.pull_file``) passes the relay's own ``<root>/network/staging/files/
+    # <sha256>.part``, outside ``sessions/`` by construction. Both calls run only
+    # AFTER the source was streamed through ``open("rb")`` and hashed to the
+    # announced sha256, so a directory never reaches them (it fails the open), and
+    # ``unlink`` takes a file entry only.
+    (
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
+        "os.replace",
+        "Renames the verified staging part (<root>/network/staging/files/) to "
+        "<config>/attachments/<digest>.bin; never session-derived",
+    ),
+    (
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
+        "<path>.unlink",
+        "Drops the verified staging part when the store already holds that digest; a "
+        "FILE under <root>/network/staging/files/, never session-derived",
+    ),
+    # ``lop network files pull --out``: ``_land_out``'s source is the
+    # NamedTemporaryFile it just created beside ``out``; ``out`` is the target
+    # ``_out_target`` returned, which REFUSES anything whose resolved path (realpath of
+    # the parent plus the name, and the leaf's own resolution) is inside this device's
+    # config dir -- so neither ``sessions/`` nor anything else of Local Operator's own
+    # data is reachable (#3794 gate remediation; measured before it: ``--force`` over a
+    # transcript replaced it). A directory target is refused too, and a rename of a
+    # file onto a directory raises EISDIR.
+    (
+        "local_operator/network/cli.py::_land_out",
+        "os.replace",
+        "--force rename of our own sibling temp onto the user's --out FILE; _out_target "
+        "refuses any resolved target inside the config dir, so sessions/ is unreachable",
+    ),
+    (
+        "local_operator/network/cli.py::_land_out",
+        "<path>.unlink",
+        "Removes only the NamedTemporaryFile this function created beside --out, which "
+        "_out_target keeps outside the config dir",
+    ),
     # -- the delegated content layer's rescue-bundle housekeeping ------------
     # Both calls touch the SAME two artefacts, both spelled from the plan's
     # ``bundle_path`` (``<pad>/reap-rescue-<tree>.bundle``, strictly inside a
@@ -4606,6 +4676,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # tmp -> approvals.json, a FILE inside the conversation's own directory
         # (the atomic-write shape every other sidecar writer here uses).
         "local_operator/session/approval_policy.py::write_override",
+        # verified staging part (<root>/network/staging/files/) -> attachments/<d>.bin
+        "local_operator/session/attachments.py::AttachmentStore.adopt_file",
     }
 )
 

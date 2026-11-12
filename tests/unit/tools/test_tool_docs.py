@@ -524,7 +524,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # (8,190 chars, per main's own note). This branch's net delta over that is
     # +7 tokens: the `setvalue` row and its `selector`/`text` help, less the
     # prose trims listed above. Rendered: 8,091 chars against the 8,192 cap.
-    "browser": 2121,
+    "browser": 2143,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -732,7 +732,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "skill": 427,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
-    "send": 779,
+    "send": 796,
     # Spawn's tags field/description deliberately adds 21 reference tokens.
     # RE-MEASURED 2026-10-23 (session self-identity): the description gains one
     # sentence pointing at the listing's `(this session)` marker, so the doc

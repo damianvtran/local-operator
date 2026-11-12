@@ -44,8 +44,11 @@ import argparse
 import asyncio  # stdlib, so add_parser's import graph stays stdlib-only.
 import json
 import logging
+import os
+import re
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -108,6 +111,9 @@ _ACTIONS = (
     # THE APPROVAL RECORDS (remote-onboarding §2.3): the durable half of the one
     # onboarding gesture — file, read, answer, and run when this build has a runner.
     "approvals",
+    # MESH FILE TRANSFER (docs/design/mesh-file-transfer.md): bytes out of a session
+    # on another device, verified end to end. S1 ships `pull` only.
+    "files",
 )
 
 
@@ -438,6 +444,63 @@ def add_parser(
     approval_run.add_argument("approval")
     approval_run.add_argument("--json", action="store_true")
 
+    # `lop network files pull`: one file out of a session on another device, byte for
+    # byte. A subparser rather than another `network sessions` flag: `sessions` is a
+    # flag family over one address, and a verb that takes a SOURCE and a DESTINATION
+    # path does not fit that shape (mesh-file-transfer.md, Decision 5).
+    # The help is the whole path from "I have a peer" to a working pull (#3794 UX U4):
+    # where the session id comes from, and where a scratchpad:// path comes from.
+    files_epilog = (
+        "Find the session id with `lop network sessions --peer PEER`. A scratchpad://\n"
+        "path or attachment:<id> is what that session reports when it saves a file;\n"
+        "read its replies with `lop network sessions --peer PEER --peek SESSION`.\n\n"
+        "  lop network files pull laptop 9f3ac1e0b7d2 scratchpad://shots/frame.png "
+        "--out frame.png"
+    )
+    files_parser = actions.add_parser(
+        "files",
+        help="Copy files out of sessions on other devices, verified",
+        description=(
+            "Copy a file a session on another device saved (its scratchpad, or an image "
+            "or file in its conversation) to this device, byte for byte, checked against "
+            "its sha256 before anything is written."
+        ),
+        epilog=files_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    file_actions = files_parser.add_subparsers(dest="files_command")
+    file_pull = file_actions.add_parser(
+        "pull",
+        help="Pull one scratchpad file or referenced attachment from a peer's session",
+        description=(
+            "Pull one file out of a session on another device. It is verified end to end, "
+            "kept in this device's attachment store, and written to --out if given. A pull "
+            "cut off part-way resumes when the same command is run again."
+        ),
+        epilog=files_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    file_pull.add_argument("peer", help="The device that holds the session (name or id)")
+    file_pull.add_argument(
+        "session", help="The session id, from `lop network sessions --peer PEER`"
+    )
+    file_pull.add_argument(
+        "source",
+        help="scratchpad://<path> the session saved, or attachment:<id> of an image or "
+        "file in its conversation",
+    )
+    file_pull.add_argument(
+        "--out",
+        metavar="PATH",
+        help="Write the verified file here too (it is always kept in this device's "
+        "attachment store). A directory receives it under its own name; an existing file "
+        "is refused without --force",
+    )
+    file_pull.add_argument(
+        "--force", action="store_true", help="Let --out replace an existing file"
+    )
+    file_pull.add_argument("--json", action="store_true")
+
     peers = actions.add_parser("peers", help="Reachable peers right now")
     peers.add_argument("--json", action="store_true")
 
@@ -469,6 +532,16 @@ def add_parser(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
     )
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
+    # IDEMPOTENCY FOR A RETRY (``network/create_keys.py``). Every create carries a
+    # key the relay mints; this flag lets a retry of a create whose reply was LOST
+    # send the key it was told, so the owner answers with the session it already
+    # made instead of creating a second one.
+    net_sessions.add_argument(
+        "--create-key",
+        default="",
+        metavar="KEY",
+        help="with --create: retry a create whose reply was lost, without duplicating it",
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
@@ -529,6 +602,26 @@ def add_parser(
         metavar="SESSION",
         default="",
         help="deliver a turn to that session on its device, and wait for the outcome",
+    )
+    # THE MAILBOX SPELLING OF ``--send`` (PR #3827 A1): what the agent ``send
+    # peer=`` tool runs. ``--send`` alone drives a TURN (``prompt``) and waits for
+    # it, which a busy owner parks behind its running turn; ``--mailbox`` delivers
+    # a ``peer_message`` instead, exactly as a local ``lop send`` does, and answers
+    # on mailbox admission. ``--no-wake``/``--now`` are that path's two modes.
+    net_sessions.add_argument(
+        "--mailbox",
+        action="store_true",
+        help="with --send: deliver as a peer message to its mailbox, not as a turn",
+    )
+    net_sessions.add_argument(
+        "--no-wake",
+        action="store_true",
+        help="with --send --mailbox: a quiet drop that does not wake an idle session",
+    )
+    net_sessions.add_argument(
+        "--now",
+        action="store_true",
+        help="with --send --mailbox: steer it into the running turn at the next tool call",
     )
     net_sessions.add_argument(
         "--steer",
@@ -3250,7 +3343,89 @@ def _cmd_credential_refresh(args: argparse.Namespace) -> int:
         )
     # A grant contains access material. Emit a new allowlisted receipt, never
     # the broker detail or a redacted copy whose future fields could leak.
-    return _emit(args, {"ok": True, "credential_name": key}, [key])
+    payload: dict[str, Any] = {"ok": True, "credential_name": key}
+    lines = [key]
+    from local_operator.network.credentials.github import is_github_key
+
+    if is_github_key(key):
+        delivery = _apply_refreshed_narrowing(detail)
+        payload["narrowing"] = delivery
+        lines.extend(_narrowing_lines(delivery))
+    return _emit(args, payload, lines)
+
+
+def _apply_refreshed_narrowing(detail: dict[str, Any]) -> dict[str, Any]:
+    """Apply a refreshed github grant's narrowing here and say what it did.
+
+    THE FIELD FINDING THIS EXISTS FOR: refresh re-minted on the owner and then
+    dropped the grant, so a widened designation never reached this device's
+    allow-list and a push to the new repo still died at ``could not read
+    Username``. The receipt carries only the LIST and its bookkeeping — never
+    the grant — and says whether anything changed.
+
+    ``applies`` is when the change governs git: ``now`` for every arm here,
+    because the force-refresh just re-minted (App: the token is narrowed
+    server-side to the list it was minted for) or re-read (PAT/gh) at the owner,
+    and the helper reads the list at use time. ``not_delivered`` is an owner
+    that sent no designation (never set, or a build older than the field): this
+    device's standing list is untouched. ``after_next_mint`` is a delivery
+    older than one already applied here — nothing was written.
+    """
+    from local_operator.network.credentials import github as github_app
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    try:
+        client = MeshCredentialClient.for_this_device(None)
+    except Exception:  # noqa: BLE001 — attribution only; the delivery still applies
+        client = None
+    result = github_app.apply_grant_narrowing(detail, client=client, root=None)
+    if not result:
+        return {
+            "delivered": False,
+            "applies": "not_delivered",
+            "repositories": list(github_app.repositories_for(None)),
+            "changed": False,
+        }
+    if result.get("error"):
+        # A REFUSED delivery: report the list this device actually holds, not the
+        # rejected one the result carries (QA Q-1 — a digest mismatch printed the
+        # delivered list as "still" in force).
+        applies = "not_applied"
+        repositories = list(github_app.repositories_for(None))
+    else:
+        applies = "after_next_mint" if result.get("stale") else "now"
+        repositories = list(result.get("repositories") or [])
+    receipt: dict[str, Any] = {
+        "delivered": True,
+        "repositories": repositories,
+        "changed": bool(result.get("changed")),
+        "applies": applies,
+    }
+    for field in ("previous", "digest", "generation", "error", "owner_unknown"):
+        if result.get(field) not in (None, ""):
+            receipt[field] = result[field]
+    return receipt
+
+
+def _narrowing_lines(delivery: dict[str, Any]) -> list[str]:
+    repositories = (
+        ", ".join(delivery.get("repositories") or []) or "none (refuses every repository)"
+    )
+    if not delivery.get("delivered"):
+        return [f"repositories: {repositories} (the owner sent no designation; unchanged here)"]
+    if delivery.get("error"):
+        return [f"repositories: not applied ({delivery['error']}); still {repositories}"]
+    if delivery.get("applies") == "after_next_mint":
+        # Matches the JSON's ``after_next_mint`` (review R1-5). On refresh this is
+        # reachable only when the owner's generation went backwards.
+        return [
+            f"repositories: {repositories} (not applied: this delivery is older than "
+            "the one already here; applies after the next mint)"
+        ]
+    state = "changed" if delivery.get("changed") else "unchanged"
+    if delivery.get("owner_unknown"):
+        state += "; the owner was not named, so delivery order was not recorded"
+    return [f"repositories: {repositories} ({state})"]
 
 
 #: The CLI's wait for the share push: one dial plus the holder's 10 s answer budget
@@ -7085,6 +7260,15 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
             file=sys.stderr,
         )
         return 2
+    mailbox: _MailboxMode | None = None
+    if verb == "send" and bool(getattr(args, "mailbox", False)):
+        mailbox = _MailboxMode(
+            wake=not bool(getattr(args, "no_wake", False)),
+            now=bool(getattr(args, "now", False)),
+        )
+    elif getattr(args, "no_wake", False) or getattr(args, "now", False):
+        print("--no-wake and --now go with --send --mailbox", file=sys.stderr)
+        return 2
     steps = getattr(args, "steps", None)
     # The RANGE was validated where the flag was read (``_cmd_sessions``); this
     # is only the default, for every verb — the driving acts merely ignore it.
@@ -7108,6 +7292,7 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
                     text=text,
                     config_dir=Path(config_dir()),
                     steps=int(steps),
+                    mailbox=mailbox,
                 ),
                 # ONE bound around the whole act, at the number its parts add up
                 # to — the sum of the rungs alone is not a bound on the act,
@@ -7134,6 +7319,7 @@ async def _pilot_act(
     text: str,
     config_dir: Path,
     steps: int = _PEEK_DEFAULT_STEPS,
+    mailbox: "_MailboxMode | None" = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Open the target on the peer as its viewer, perform ONE act, report it.
 
@@ -7273,6 +7459,8 @@ async def _pilot_act(
             # driving acts, because the rows come from the same synced display
             # window an attached terminal paints.
             payload, lines = await _pilot_peek(viewer, session_id, device, steps)
+        elif verb == "send" and mailbox is not None:
+            payload, lines = await _pilot_mailbox(viewer, session_id, device, text, mailbox)
         elif verb == "send":
             payload, lines = await _pilot_send(viewer, session_id, device, text)
         elif verb == "steer":
@@ -7304,31 +7492,201 @@ async def _pilot_act(
     return payload, lines
 
 
+class _MailboxMode:
+    """How a ``--send --mailbox`` lands: the local ``send`` tool's two switches.
+
+    ``now`` is the ``steer`` mode (read at the next tool-call boundary of the
+    running turn); otherwise ``mailbox``, where ``wake`` decides whether an idle
+    session starts a turn for it or simply finds it next time.
+    """
+
+    __slots__ = ("wake", "now")
+
+    def __init__(self, *, wake: bool, now: bool) -> None:
+        self.wake = wake
+        self.now = now
+
+
+#: The advisory sender fields that mean something on ANOTHER device. ``pid`` and
+#: ``cwd`` name this machine's process and directory; the owner drops them for a
+#: relayed card anyway (``server._stamp_peer_sender``), so they are not sent.
+_MESH_SENDER_FIELDS = ("session_id", "conversation_name", "model_label")
+
+
+async def _pilot_mailbox(
+    viewer: Any, session_id: str, peer: str, text: str, mode: _MailboxMode
+) -> tuple[dict[str, Any], list[str]]:
+    """Deliver ``text`` to the peer session's MAILBOX — local ``send`` parity.
+
+    WHY NOT A TURN (PR #3827 A1): ``_pilot_send``'s ``prompt`` is parked behind a
+    busy owner's running turn, unacknowledged and in memory only. A
+    ``peer_message`` is what a local ``lop send`` delivers: a row read at the
+    next tool-call boundary, honouring wake/steer, and acknowledged at mailbox
+    admission — so "delivered" here means the row exists there.
+
+    The sending SESSION is advisory (read off this machine's registry by
+    ancestry: the tool's own session, or nothing from a plain shell). The
+    sending DEVICE is never claimed: the owner stamps it from the link.
+
+    AN OWNER WITHOUT THE MAILBOX (``MESH_PEER_MESSAGE_CAPABILITY`` absent) gets
+    today's prompt path for a plain send, with ``fallback: "prompt"`` and that
+    path's honest receipt. A quiet drop or a steer cannot be expressed as a turn
+    — a turn always wakes — so those are refused rather than silently changed.
+    """
+    from local_operator.mobile.peer_send import (
+        mint_peer_message_id,
+        peer_sender_identity_async,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    if not viewer.owner_takes_mesh_peer_message():
+        if mode.now or not mode.wake:
+            asked = "a steer (now)" if mode.now else "a quiet drop (no wake)"
+            raise MeshRefusal(
+                "mailbox_unsupported",
+                f"{peer}'s build cannot take a mesh peer message, so {asked} cannot be "
+                f"delivered to {session_id} there; a plain send would run as a turn "
+                "instead — send without that switch, or update that device first",
+            )
+        payload, lines = await _pilot_send(viewer, session_id, peer, text)
+        payload["fallback"] = "prompt"
+        return payload, [*lines, prompt_fallback_line(peer)]
+
+    identity = await peer_sender_identity_async(os.getpid())
+    sender = {key: identity[key] for key in _MESH_SENDER_FIELDS if identity.get(key)}
+    message_id = mint_peer_message_id()
+    wire_mode = "steer" if mode.now else "mailbox"
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "peer": peer,
+        "verb": "send",
+        "delivery_path": "mailbox",
+        "mode": wire_mode,
+        "wake": bool(mode.wake),
+        "message_id": message_id,
+    }
+    try:
+        reply = await asyncio.wait_for(
+            viewer.send_peer_message(
+                text, mode=wire_mode, wake=bool(mode.wake), sender=sender, message_id=message_id
+            ),
+            timeout=PILOT_REPLY_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        # NOT CONFIRMED IS NOT DELIVERED: the owner's loop did not answer the
+        # admission in time, which is a failure the caller must see.
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{session_id} on {peer} was too busy to confirm the message within "
+            f"{PILOT_REPLY_TIMEOUT_S:.0f}s (id {message_id}); it is not confirmed "
+            f"delivered — check `lop network sessions --peer {peer} --peek {session_id}` "
+            "before you retry",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    except RuntimeError as exc:
+        # The owner's own refusal (unengaged window, retiring runtime, …).
+        raise MeshRefusal("message_refused", f"{peer} refused the message: {exc}") from exc
+    delivery = reply.get("delivery") if isinstance(reply.get("delivery"), dict) else {}
+    duplicate = bool(delivery.get("duplicate"))
+    payload.update(
+        ok=True,
+        outcome="duplicate" if duplicate else "delivered",
+        delivery=delivery,
+        receipt=str(reply.get("detail") or "").strip(),
+    )
+    return payload, mailbox_receipt_lines(payload)
+
+
+def mailbox_receipt_lines(payload: dict[str, Any]) -> list[str]:
+    """The sentences for a ``--send --mailbox`` receipt that DELIVERED.
+
+    One builder for the CLI and the agent tool (``tool._pilot_receipt_lines``),
+    so "delivered" is worded once and always names the mode actually used.
+    """
+    session_id = str(payload.get("session_id") or "")
+    peer = str(payload.get("peer") or "")
+    message_id = str(payload.get("message_id") or "")
+    if payload.get("outcome") == "duplicate":
+        head = f"{session_id} on {peer} already had this message (id {message_id})."
+    elif payload.get("mode") == "steer":
+        head = (
+            f"delivered to {session_id} on {peer} as a steer (id {message_id}): its running "
+            "turn reads it at the next tool call."
+        )
+    elif payload.get("wake"):
+        head = (
+            f"delivered to {session_id}'s mailbox on {peer} (id {message_id}): it reads it at "
+            "the next tool call, or wakes for it if idle."
+        )
+    else:
+        head = (
+            f"delivered to {session_id}'s mailbox on {peer} (id {message_id}), quietly: an idle "
+            "session reads it on its next turn."
+        )
+    lines = [head]
+    because = str(payload.get("receipt") or "")
+    if because:
+        lines.append(f"{peer}: {because}")
+    return lines
+
+
+#: The receipt for a prompt-path send whose wait ended before the owner admitted
+#: it (PR #3827 A1). Shared by the CLI and the agent tool.
+def queued_behind_turn_lines(session_id: str, peer: str) -> list[str]:
+    return [
+        f"{session_id} on {peer} is busy: the message is queued behind its running "
+        "turn and was NOT delivered yet.",
+        f"After {PILOT_TURN_TIMEOUT_S:.0f}s it is still waiting in that runtime's "
+        "memory, and is lost if the runtime stops first. Check "
+        f"`lop --resume {session_id}` before sending it again.",
+    ]
+
+
+#: The note a mailbox send carries when the owner was too old and it ran as a turn.
+def prompt_fallback_line(peer: str) -> str:
+    return f"({peer}'s build has no mesh mailbox, so this was sent as a turn.)"
+
+
 async def _pilot_send(
     viewer: Any, session_id: str, peer: str, text: str
 ) -> tuple[dict[str, Any], list[str]]:
-    """Deliver a turn and wait for the owner's terminal outcome.
+    """Deliver a TURN (a ``prompt`` frame) and wait for the owner's terminal outcome.
 
-    ``prompt_and_wait`` rather than ``prompt`` for exactly the reason its own
-    docstring gives: ``prompt`` returns on durable ADMISSION, which a shell
-    caller cannot tell from completion. It also routes the frame to the owner's
-    ``steer`` op when the peer is already streaming — the reconciliation the
-    composer makes, kept here rather than re-decided, so a message sent into a
-    live turn is delivered rather than refused for a race the client owns.
+    ``prompt_and_wait`` sends a plain ``prompt`` (``send_command(streaming=False)``)
+    and correlates the owner's events on the id it carries. It does NOT steer: a
+    BUSY owner parks the prompt in its in-memory prompt queue and acks only when
+    the running turn ends, and a runtime disposed meanwhile loses it (PR #3827
+    A1, from a live trace). So stopping the wait proves nothing by itself, and
+    the timeout below asks the window whether the row exists before saying which
+    of the two it was. The agent ``send peer=`` tool takes ``_pilot_mailbox``
+    instead; this path serves ``sessions resume peer= prompt=``, a shell's
+    ``--send`` and an owner too old for the mailbox.
     """
     from local_operator.session.errors import RuntimeRetiring
 
     payload: dict[str, Any] = {"session_id": session_id, "peer": peer, "verb": "send"}
+    # OUR id on the user row, so a stopped wait can tell admitted from parked.
+    message_id = str(uuid.uuid4())
     try:
-        await asyncio.wait_for(viewer.prompt_and_wait(text), timeout=PILOT_TURN_TIMEOUT_S)
+        await asyncio.wait_for(
+            viewer.prompt_and_wait(text, message_id=message_id), timeout=PILOT_TURN_TIMEOUT_S
+        )
     except TimeoutError:
-        payload.update(ok=False, outcome="running", code="turn_running")
-        return payload, [
-            f"{session_id} on {peer} took the turn and is still running it.",
-            "It was admitted there, so the work is happening — this command simply "
-            f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
-            f"`lop --resume {session_id}`",
-        ]
+        holds = getattr(viewer, "holds_message", None)
+        if callable(holds) and holds(message_id):
+            payload.update(ok=False, outcome="running", code="turn_running")
+            return payload, [
+                f"{session_id} on {peer} took the turn and is still running it.",
+                "Its message row is there, so the work is happening — this command "
+                f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
+                f"`lop --resume {session_id}`",
+            ]
+        # NOT ADMITTED: parked behind the turn already running there (or the
+        # owner never answered). Never reported as delivered — it is in that
+        # runtime's memory only, and a runtime that goes away first loses it.
+        payload.update(ok=False, outcome="queued", code="queued_behind_turn")
+        return payload, queued_behind_turn_lines(session_id, peer)
     except RuntimeRetiring as exc:
         payload.update(ok=False, outcome="queued", code="runtime_retiring", error=str(exc))
         return payload, [
@@ -7868,6 +8226,23 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--create needs --peer: the peer mints the session id"
             )
+        typed_key = str(getattr(args, "create_key", "") or "").strip()
+        if typed_key:
+            from local_operator.network.create_keys import normalize_key
+
+            if not normalize_key(typed_key):
+                # A KEY THE CALLER NAMED ON PURPOSE IS NEVER SILENTLY REPLACED
+                # (review round 1, R1-m3 / QA Q1): the relay mints a fresh key for
+                # a malformed one, so a truncated copy-paste would create a SECOND
+                # session and re-send the first prompt — the duplicate the flag
+                # exists to prevent. Refused before anything is dialled.
+                print(
+                    f"--create-key {typed_key!r} is not a create key this device sent; "
+                    "copy the key from the create receipt whole, or drop the flag to "
+                    "make a new session",
+                    file=sys.stderr,
+                )
+                return 2
         # ``--yolo`` IS FORWARDED, NOT JUDGED HERE, and that is the granted model
         # (design §2 OQ4): the device that would RUN the session decides, checking
         # ITS member row for us — a fact this side does not hold, so a check here
@@ -7979,6 +8354,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 agent_id=agent_id,
                 team=team,
                 effort=effort,
+                # ONE KEY FOR BOTH ATTEMPTS when the caller named one: the yolo
+                # fallback's first attempt was refused above the owner's mint,
+                # which reserves nothing, so the key is still free for the second.
+                create_key=str(getattr(args, "create_key", "") or ""),
                 timeout=120.0,  # a spawn plus its first turn's admission
             )
 
@@ -8017,6 +8396,13 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        if (detail.get("create_unconfirmed") or detail.get("replayed")) and not prompt:
+            # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
+            # owner confirmed the id by key, or this was a retry the owner matched
+            # to the session it had already made. Either way the first turn's fate
+            # is not something this receipt saw, and the sentence says so. (With a
+            # prompt, the prompt branch below prints this same sentence.)
+            lines.append(str(detail.get("detail") or ""))
         if unattended_notice:
             # THE FALLBACK IS SAID OUT LOUD. The same sentence rides the payload
             # (``**detail`` below carries ``unattended_notice``), so a ``--json``
@@ -8061,6 +8447,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # worked" report this slice exists to make impossible. The reconciliation block
         # is the relay's (it is the half that saw the push) and is printed whenever it is
         # not clean; ``--json`` carries the whole block either way (``**detail``).
+        # The peer kept its own custom instructions (R1-2): informational, the
+        # session was created, but it runs without this device's standing rules.
+        if detail.get("custom_instructions_notice"):
+            lines.append(str(detail["custom_instructions_notice"]))
         notes = detail.get("definitions")
         if isinstance(notes, dict) and not notes.get("ok"):
             lines.append(
@@ -10822,6 +11212,220 @@ def _guard_approvals_subcommand(args: argparse.Namespace) -> int:
     return 2
 
 
+def _guard_files_subcommand(args: argparse.Namespace) -> int:
+    """``lop network files`` with no verb is a usage error: S1 ships ``pull`` only."""
+    if getattr(args, "files_command", None) == "pull":
+        return _cmd_files_pull(args)
+    print(
+        "usage: lop network files pull <peer> <session> <scratchpad://path|digest> "
+        "[--out PATH] [--force] [--json]",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _file_pull_source(raw: str) -> dict[str, str]:
+    """``{"path": …}`` or ``{"attachment": …}`` from what the person typed.
+
+    Refused HERE, before the relay is asked, because a malformed source can only ever
+    be refused by the owner too — asking costs a dial for a sentence this side can give.
+    The owner still re-checks both forms: this is a courtesy, never the confinement.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    text = str(raw or "").strip()
+    if text.startswith("scratchpad://"):
+        return {"path": text}
+    digest = text.removeprefix("attachment:")
+    if re.fullmatch(r"[0-9a-f]{32}", digest):
+        return {"attachment": digest}
+    hint = f"; did you mean scratchpad://{text}?" if text and "://" not in text else ""
+    raise MeshRefusal(
+        "bad_request",
+        f"{text!r} is neither a scratchpad:// path nor an attachment:<id> (32 hex); "
+        f"only those two are pulled{hint}",
+    )
+
+
+def _source_basename(source: dict[str, str]) -> str:
+    """The name a ``--out`` directory receives the file under, from the SOURCE.
+
+    Taken from what the person asked for, not from the owner's reply, so the
+    pre-transfer checks (exists? writable?) run on the real target before a byte
+    moves. An attachment has no name of its own; its id stands in, like the store's.
+    """
+    from urllib.parse import unquote, urlsplit
+
+    if "path" in source:
+        parts = urlsplit(source["path"])
+        name = unquote(parts.netloc + parts.path).rstrip("/").rsplit("/", 1)[-1]
+        return name or "file"
+    return f"{source['attachment']}.bin"
+
+
+def _out_target(out: Path, source: dict[str, str], *, force: bool) -> Path:
+    """Resolve ``--out`` and refuse, BEFORE the transfer, what landing would refuse.
+
+    #3794 QA Q2 / UX U1: these checks ran only after the whole transfer, and the
+    directory case's advice ("pass --force") led straight into a traceback. Like
+    ``cp``/``scp``, an existing directory receives the file under the source's name,
+    with the same no-overwrite rule applied to THAT file.
+    """
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    target = out / _source_basename(source) if out.is_dir() else out
+    # NEVER INSIDE LOCAL OPERATOR'S OWN DATA FOLDER (#3794 gate remediation). With
+    # --force this replaced a session's transcript with the pulled bytes (measured),
+    # and the same write reaches network/networks/*.secrets.json, identity/ and the
+    # credential stores — damage no pull is for. Judged on the RESOLVED target:
+    # realpath of the parent plus the final name, so a symlinked parent or a `..`
+    # cannot route around it, and the final component's own resolution too, so a
+    # leaf that is a symlink into the config dir is refused rather than followed by
+    # the --force rename. Before any dial, with or without --force.
+    data = Path(os.path.realpath(config_dir()))
+    parent_text = str(target.parent) if str(target.parent) else "."
+    resolved = (
+        Path(os.path.realpath(parent_text)) / target.name,
+        Path(os.path.realpath(target)),
+    )
+    if any(candidate == data or candidate.is_relative_to(data) for candidate in resolved):
+        raise MeshRefusal(
+            "out_invalid",
+            f"--out can't write inside Local Operator's own data folder ({data}); choose a "
+            "path outside it, so nothing was pulled",
+        )
+    if target.is_dir():
+        raise MeshRefusal(
+            "out_invalid", f"{target} is a directory; give --out a file path or a directory"
+        )
+    parent = target.parent if str(target.parent) else Path(".")
+    if not parent.is_dir():
+        raise MeshRefusal("out_invalid", f"{parent} is not a directory, so nothing was pulled")
+    if not os.access(parent, os.W_OK | os.X_OK):
+        raise MeshRefusal("out_invalid", f"{parent} is not writable by you, so nothing was pulled")
+    if target.exists() and not force:
+        raise MeshRefusal(
+            "out_exists",
+            f"{target} already exists, so nothing was pulled; pass --force to replace it",
+        )
+    return target
+
+
+def _land_out(store_path: Path, out: Path, sha256: str, *, force: bool) -> None:
+    """Copy the verified store file to ``out``: verified again, never over a file.
+
+    A SIBLING TEMP, HASHED WHILE COPYING, THEN LINKED INTO PLACE. ``out`` never
+    exists half-written (a reader of a partial PNG sees a corrupt image, which is the
+    failure this verb exists to end), the copy is checked against the digest the owner
+    announced rather than trusted because the store held it, and ``os.link`` makes "do
+    not overwrite" atomic: two pulls to one name cannot both win. ``--force`` is the
+    one replacing path, and it replaces by rename, so it is never a torn write either.
+    """
+    import hashlib
+    import tempfile
+
+    from local_operator.network.types import MeshRefusal
+
+    directory = out.parent if str(out.parent) else Path(".")
+    handle = tempfile.NamedTemporaryFile(
+        dir=directory, prefix=f".{out.name}.", suffix=".part", delete=False
+    )
+    temp = Path(handle.name)
+    try:
+        digest = hashlib.sha256()
+        with handle, store_path.open("rb") as source:
+            while True:
+                block = source.read(1 << 20)
+                if not block:
+                    break
+                digest.update(block)
+                handle.write(block)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if "sha256:" + digest.hexdigest() != sha256:
+            raise MeshRefusal(
+                "integrity_failed",
+                f"the stored copy no longer hashes to {sha256}, so {out} was not written",
+            )
+        if force:
+            os.replace(temp, out)
+            return
+        try:
+            os.link(temp, out)
+        except FileExistsError:
+            raise MeshRefusal(
+                "out_exists", f"{out} already exists; pass --force to replace it"
+            ) from None
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _cmd_files_pull(args: argparse.Namespace) -> int:
+    """``lop network files pull``: ask THIS device's relay to pull, then land ``--out``.
+
+    The relay does the transfer (it holds the links) and files the verified bytes in
+    this device's attachment store; this side receives a PATH, never bytes, and copies
+    from it. The receipt is the same dictionary on both surfaces, with ``path`` naming
+    the copy the person asked for (``--out``, else the store file).
+    """
+    from local_operator.network import files
+    from local_operator.network.types import MeshRefusal
+
+    source = _file_pull_source(args.source)
+    out: Path | None = None
+    if getattr(args, "out", None):
+        # Resolved and checked BEFORE the transfer: refusing an existing or unwritable
+        # --out after moving 256 MiB would spend the whole pull to say no.
+        out = _out_target(Path(args.out).expanduser(), source, force=bool(args.force))
+    detail = _relay_answer(
+        "session_file_pull",
+        timeout=files.FILE_PULL_CLIENT_TIMEOUT_S,
+        peer=str(args.peer),
+        session_id=str(args.session),
+        **source,
+    )
+    store_path = str(detail.get("path") or "")
+    attachment = str(detail.get("attachment") or "")
+    if out is not None:
+        try:
+            _land_out(
+                Path(store_path), out, str(detail.get("sha256") or ""), force=bool(args.force)
+            )
+        except OSError as error:
+            # NEVER A TRACEBACK (#3794 QA Q2): the bytes are already verified and kept,
+            # so the honest refusal says where they are as well as what went wrong.
+            raise MeshRefusal(
+                "out_invalid",
+                f"{out} could not be written ({error.strerror or error}); the verified copy "
+                f"is kept in this device's attachment store at {store_path}",
+            ) from None
+    receipt = {
+        **detail,
+        "path": str(out) if out is not None else store_path,
+        "landed": {"store": store_path, "out": str(out) if out is not None else None},
+    }
+    size = int(receipt.get("bytes") or 0)
+    name = files._printable(str(receipt.get("name") or ""))  # noqa: SLF001 — one escaper
+    peer = files._printable(str(receipt.get("peer") or ""))  # noqa: SLF001
+    lines = [
+        f"pulled {name} from {peer}: {files.human_bytes(size)} ({size} bytes), "
+        f"{receipt.get('sha256')}, verified",
+    ]
+    if out is not None:
+        lines.append(f"saved to {out}")
+        lines.append(f"also kept in this device's attachment store as attachment:{attachment}")
+    else:
+        lines.append(
+            f"saved in this device's attachment store as attachment:{attachment} ({store_path})"
+        )
+        lines.append(f"pass --out PATH to save it as {name}")
+    resumed = int(receipt.get("resumed_bytes") or 0)
+    if resumed > 0:
+        lines.append(f"resumed: {files.human_bytes(resumed)} was already here")
+    return _emit(args, receipt, lines)
+
+
 def _guard_member_subcommand(args: argparse.Namespace) -> int:
     """``lop network member`` with no verb is a usage error, not the destructive one.
 
@@ -10915,6 +11519,28 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                         f"  {conflict.get('kind') or 'row'} {conflict.get('name')!r}: "
                         f"{conflict.get('reason') or 'refused'}"
                     )
+            # The operator's custom instructions report on their own line: their
+            # outcome never fails the push (a node's own instructions are a state, not
+            # an error), so it would otherwise be invisible exactly when it matters.
+            instructions = item.get(definitions.OPERATOR_INSTRUCTIONS_KIND)
+            if isinstance(instructions, dict) and instructions.get("outcome") in (
+                "installed",
+                "updated",
+                "conflict",
+                "refused",
+                "withheld",
+            ):
+                # A kept-own-copy conflict reads in the push's own peer-naming
+                # sentence with its remedy (Q-2): the receiver's reason says "this
+                # device", which on the head reads as the head.
+                notice = str(instructions.get("notice") or "")
+                why = str(instructions.get("reason") or "")
+                lines.append(
+                    f"  custom instructions: {notice}"
+                    if notice
+                    else f"  custom instructions: {instructions.get('outcome')}"
+                    + (f" ({why})" if why else "")
+                )
         return _emit(
             args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
         )
@@ -10937,6 +11563,35 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             lines.append(
                 f"{kind[:-1]}: {name}" + (f" (mirrored from {origin})" if origin else " (yours)")
             )
+    # The operator's custom instructions (``system_prompt.md``): whose they are, and
+    # the last revision a peer offered that this device kept its own copy against.
+    # Local and relay-free like the rest of ``state``, so a node answers "why is the
+    # head's review gate not in my prompt" without the head being up.
+    instructions = state.get(definitions.OPERATOR_INSTRUCTIONS_KIND) or {}
+    status = str(instructions.get("status") or "absent")
+    if status == "mirror":
+        lines.append(f"custom instructions: mirrored from {instructions.get('origin') or '?'}")
+    elif status == "edited":
+        lines.append(
+            "custom instructions: yours (edited after being mirrored from "
+            f"{instructions.get('origin') or '?'})"
+        )
+    elif status == "authored":
+        lines.append("custom instructions: yours")
+    elif status == "unreadable":
+        lines.append("custom instructions: present but could not be read")
+    conflict = instructions.get("conflict")
+    if isinstance(conflict, dict):
+        reason = str(conflict.get("reason") or "this device kept its own copy")
+        lines.append(
+            f"custom instructions from {conflict.get('origin') or '?'} not installed: {reason}"
+            # The remedy, on the device where it is run (R1-2).
+            + (
+                "; delete or blank them here to receive those"
+                if status in ("authored", "edited", "unreadable")
+                else ""
+            )
+        )
     if not lines:
         lines = ["no agent or team definitions on this device"]
     return _emit(
@@ -10946,6 +11601,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "agents": state.get("agents") or {},
             "teams": state.get("teams") or {},
             "mirrored": mirrored,
+            definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
         },
         lines,
     )
@@ -11795,6 +12451,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     # ``approvals`` has sub-verbs, so it needs the same "tell me what you meant"
     # guard ``member``/``identity``/``credential`` have.
     "approvals": _guard_approvals_subcommand,
+    "files": _guard_files_subcommand,
     "peers": _cmd_peers,
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,

@@ -1660,6 +1660,17 @@ def _validate_github_repositories(value: object) -> object:
     """
     if not isinstance(value, (list, tuple)):
         raise ValueError("GitHub repositories must be a list of owner/repo entries.")
+    # The SAME ceiling the mesh boundary carries (GitHub's App mint maximum): a
+    # longer designation could neither be minted nor delivered whole, so it is
+    # refused here, where a person can fix it, rather than truncated downstream.
+    # Lazy import: this module loads on every CLI start; the validator runs on write.
+    from local_operator.network.credentials.types import MAX_NARROWING_LIST_ENTRIES
+
+    if len(value) > MAX_NARROWING_LIST_ENTRIES:
+        raise ValueError(
+            f"at most {MAX_NARROWING_LIST_ENTRIES} GitHub repositories can be designated "
+            f"(GitHub's limit for one App token); got {len(value)}"
+        )
     for entry in value:
         text = str(entry).strip()
         owner, sep, repo = text.partition("/")
