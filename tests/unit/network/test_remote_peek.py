@@ -9,6 +9,8 @@ contract edges: authority, wire typing, the old-peer answer and the regex caps.
 from __future__ import annotations
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -143,8 +145,9 @@ def test_a_current_peer_is_asked_with_only_the_named_fields() -> None:
     ],
 )
 def test_the_owner_bounds_a_peer_regex(tmp_path: Path, query: str, words: str) -> None:
-    """A peer-supplied regex runs on the owner's CPU and ``re`` cannot be
-    interrupted, so length and the catastrophic shape are refused there."""
+    """A peer-supplied regex runs on the owner's CPU, so the length cap and the
+    classic catastrophic shape are refused up front (the cheap pre-check; the
+    match timeout below is the real bound)."""
     _journal(tmp_path)
     frame = {"session_id": SESSION, "query": query, "regex": True}
     if words:
@@ -152,3 +155,140 @@ def test_the_owner_bounds_a_peer_regex(tmp_path: Path, query: str, words: str) -
             net_peek.serve(tmp_path, frame, own_label="b")
     else:
         net_peek.serve(tmp_path, frame, own_label="b")
+
+
+def _row(directory: Path, text: str) -> None:
+    row = {
+        "id": f"{99:032x}",
+        "ts": 99,
+        "type": "message",
+        "payload": {"kind": "message", "role": "user", "content": [{"text": text}]},
+    }
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+#: PR #3831 review M1 / QA Q1: every pattern that slipped past the shape
+#: heuristic, plus the reviewer's polynomial one. Under ``re`` each of these
+#: ran for seconds-to-forever on a row like the one below.
+_HEURISTIC_BYPASSES = [
+    "((a+))+$",
+    "(?:(a+))+$",
+    "(a|a)+$",
+    "(-|--)+$",
+    "(a+){,30}$",
+    "\\w*\\w*\\w*\\w*\\w*\\w*!",
+    "((-+))+$",
+]
+
+
+def test_a_catastrophic_peer_regex_is_cut_by_the_deadline_and_frees_its_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MATCH is bounded, not the shape: each bypass returns (a result or the
+    named ``regex_timeout`` refusal) inside the slow-lane deadline, and ONE
+    worker serves all of them and then an ordinary peek — the slot a pattern
+    held is back in the pool, which is what four such peeks used to take from
+    every peer."""
+    directory = _journal(tmp_path)
+    _row(directory, "a" * 40 + "-" * 40 + "!" + "a" * 60)
+    monkeypatch.setattr(net_peek, "PEER_REGEX_REPLY_RESERVE_S", 0.4)
+    monkeypatch.setattr(net_peek, "_owner_record", lambda session_id: None)
+    deadline_s = 1.0
+
+    budget_s = deadline_s - net_peek.PEER_REGEX_REPLY_RESERVE_S
+
+    def _serve(frame: dict[str, Any]) -> tuple[float, str]:
+        # ``regex`` bounds THREAD CPU time (see PEER_REGEX_REPLY_RESERVE_S), so
+        # that is the clock asserted on; wall time on a loaded CI box stretches.
+        cpu = time.thread_time()
+        try:
+            with relay._slow_deadline(time.monotonic() + deadline_s):
+                answer = net_peek.serve(tmp_path, frame, own_label="device-b")
+        except MeshRefusal as refusal:
+            assert refusal.code == "regex_timeout", refusal.sentence
+            assert "ran out of time on device-b" in refusal.sentence
+            return time.thread_time() - cpu, refusal.code
+        return time.thread_time() - cpu, str(answer["mode"])
+
+    outcomes = []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        for query in _HEURISTIC_BYPASSES:
+            frame = {"session_id": SESSION, "query": query, "regex": True}
+            # A worker that never returned fails here (generous for a loaded
+            # box), instead of hanging the suite as the ``re`` version would.
+            cpu_s, outcome = pool.submit(_serve, frame).result(timeout=30)
+            # The budget plus the walk's own row parsing/imports.
+            assert cpu_s < budget_s + 0.5, (query, cpu_s)
+            outcomes.append(outcome)
+        _elapsed, mode = pool.submit(_serve, {"session_id": SESSION, "head": 1}).result(timeout=5)
+    assert mode == "head"
+    # The discriminating rows really did hit the bound (not just happen to be fast).
+    assert outcomes.count("regex_timeout") >= 3, outcomes
+
+
+@pytest.mark.parametrize("session_id", ["../outside", "a/b", "a\\b", ".", "..", "/etc"])
+def test_the_owner_refuses_a_session_id_with_path_syntax(tmp_path: Path, session_id: str) -> None:
+    """PR #3831 review m1: the path is built from a peer's string, so it must be
+    one safe component whatever the chokepoint decided — even when it names a
+    directory that exists."""
+    _journal(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "transcript.jsonl").write_text("SECRET\n", encoding="utf-8")
+    with pytest.raises(MeshRefusal) as caught:
+        net_peek.serve(tmp_path, {"session_id": session_id}, own_label="b")
+    assert caught.value.code == "invalid_request"
+    assert "without path syntax" in caught.value.sentence
+
+
+def test_the_header_prefers_the_live_conversation_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3831 review m2: parity with the local peek's ``_peek_name`` — a live
+    record's ``conversation_name`` first, then the stored title."""
+    _journal(tmp_path)
+    live = SimpleNamespace(conversation_name="renamed-live")
+    monkeypatch.setattr(net_peek, "_owner_record", lambda session_id: live)
+    answer = net_peek.serve(tmp_path, {"session_id": SESSION, "head": 1}, own_label="b")
+    assert answer["name"] == "renamed-live"
+    monkeypatch.setattr(net_peek, "_owner_record", lambda session_id: None)
+    answer = net_peek.serve(tmp_path, {"session_id": SESSION, "head": 1}, own_label="b")
+    # Not live: the stored title, exactly what the local peek falls back to.
+    assert answer["name"] == "row 1"
+
+
+def _silent_server(calls: list[Any]) -> Any:
+    def _call(op: str, peer: str, *, timeout: float, **fields: Any) -> dict[str, Any]:
+        calls.append(op)
+        raise MeshRefusal("peer_unreachable", f"{peer} stopped answering before it replied")
+
+    return SimpleNamespace(
+        _resolve_peer=lambda peer: peer,
+        _ensure_link=lambda peer: SimpleNamespace(capabilities=frozenset({wire.SESSION_PEEK_V1})),
+        _peer_label=lambda peer: "device-b",
+        _local_peer_call=_call,
+    )
+
+
+def test_a_peek_that_outlasts_its_deadline_says_the_owner_ran_out_of_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #3831 QA Q3: silence for the whole budget is the owner's read
+    overrunning, worded by the member's NAME — not a raw device id "stopped
+    answering", which read as a liveness failure."""
+    monkeypatch.setattr(net_peek, "SESSION_PEEK_DEADLINE_S", 0.0)
+    handler = net_peek.local_handler(_silent_server([]))
+    with pytest.raises(MeshRefusal) as caught:
+        handler({"peer": "d_raw", "session_id": SESSION, "head": 1})
+    assert caught.value.code == "peer_timeout"
+    assert caught.value.sentence.startswith("device-b did not finish this peek within")
+    assert "ran out of time" in caught.value.sentence
+
+
+def test_a_quick_transport_failure_stays_unreachable() -> None:
+    """Failing before the deadline is a reachability fact, kept verbatim."""
+    handler = net_peek.local_handler(_silent_server([]))
+    with pytest.raises(MeshRefusal) as caught:
+        handler({"peer": "d_raw", "session_id": SESSION, "head": 1})
+    assert caught.value.code == "peer_unreachable"

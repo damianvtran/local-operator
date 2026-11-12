@@ -7080,9 +7080,19 @@ def _peek_journal_fields(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _peek_journal_refusal(journal: dict[str, Any], steps: int | None) -> str:
-    """The tool's own refusal for this combination, or ``""``."""
+    """The tool's own refusal for this combination, or ``""``.
 
-    from local_operator.session.peek import WirePeekRequest, peek_validation_error
+    The peer-regex bounds (length cap, nested-quantifier pre-check, a pattern
+    that does not compile) are checked here too, so they refuse as usage
+    errors (rc 2) before a hop, like every other malformed window (QA Q4) —
+    the owner still enforces them, and the match timeout, on its side.
+    """
+
+    from local_operator.session.peek import (
+        WirePeekRequest,
+        compile_peek_pattern,
+        peek_validation_error,
+    )
 
     given = set(journal) | ({"steps"} if steps is not None else set())
     request = WirePeekRequest(
@@ -7095,7 +7105,11 @@ def _peek_journal_refusal(journal: dict[str, Any], steps: int | None) -> str:
         digest=bool(journal.get("digest")),
         given=frozenset(given),
     )
-    return peek_validation_error(request, given) or ""
+    refusal = peek_validation_error(request, given)
+    if refusal:
+        return refusal
+    compiled = compile_peek_pattern(request, remote=True)
+    return compiled if isinstance(compiled, str) else ""
 
 
 def _peek_journal_call(
@@ -7869,32 +7883,24 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     # ``--steps`` IS THE SAME CLASS as ``--force`` above: it means one thing —
     # how much of a ``--peek`` window to show — so a caller who passes it beside
     # anything else (or alone) has asked for a read this command is not
-    # performing. Its range is checked against ``comms.PEEK_MAX_STEPS`` — the
-    # SAME ceiling ``hub``'s peek and the sessions tool refuse with — read here
-    # rather than copied, so the surfaces cannot come to disagree about "too
-    # many".
+    # performing.
     peek = str(getattr(args, "peek", "") or "")
     steps = getattr(args, "steps", None)
     if steps is not None and not peek:
         print("--steps applies to --peek only", file=sys.stderr)
         return 2
-    if peek and steps is not None:
-        from local_operator.harness.comms import PEEK_MAX_STEPS
-
-        if not 1 <= steps <= PEEK_MAX_STEPS:
-            print(f"--steps takes 1..{PEEK_MAX_STEPS} (asked for {steps})", file=sys.stderr)
-            return 2
     # The journal windows are the same class: each describes a peek, so naming
-    # one without ``--peek`` is refused, and their combinations are judged by
-    # the SAME validator the sessions tool and the owner apply
-    # (``session.peek.peek_validation_error``) — one sentence for "over budget"
-    # on every surface.
+    # one without ``--peek`` is refused, and their combinations — ``--steps``'s
+    # range included (PR #3831 QA Q4: it used to answer in a CLI-only sentence)
+    # — are judged by the SAME validator the sessions tool and the owner apply
+    # (``session.peek.peek_validation_error``): one sentence for "over budget"
+    # on every surface, and every such refusal is a usage error (rc 2).
     journal = _peek_journal_fields(args)
     if journal and not peek:
         named_flags = ", ".join(f"--{name.replace('_', '-')}" for name in journal)
         print(f"{named_flags} applies to --peek only", file=sys.stderr)
         return 2
-    if peek and journal:
+    if peek and (journal or steps is not None):
         refusal = _peek_journal_refusal(journal, steps)
         if refusal:
             print(refusal, file=sys.stderr)

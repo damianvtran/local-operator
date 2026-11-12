@@ -1431,11 +1431,22 @@ def test_steps_without_peek_is_a_usage_error(capsys: pytest.CaptureFixture[str])
     assert "--steps applies to --peek only" in captured.err
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "51", "1000"])
-def test_steps_out_of_range_reads_nothing(value: str, capsys: pytest.CaptureFixture[str]) -> None:
-    """The window's bounds are the family's (1..``comms.PEEK_MAX_STEPS``), enforced."""
+@pytest.mark.parametrize(
+    ("value", "words"),
+    [
+        ("0", "`steps` needs a count of at least 1."),
+        ("-1", "`steps` needs a count of at least 1."),
+        ("51", "`steps=51` is too many for one peek (max 50)"),
+        ("1000", "`steps=1000` is too many for one peek (max 50)"),
+    ],
+)
+def test_steps_out_of_range_reads_nothing(
+    value: str, words: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The window's bounds are the family's (1..``comms.PEEK_MAX_STEPS``), enforced
+    in the sessions tool's own sentence (PR #3831 QA Q4), as a usage error."""
     assert _run(["sessions", "--peer", PEER, "--peek", SESSION, "--steps", value]) == 2
-    assert "1..50" in capsys.readouterr().err
+    assert words in capsys.readouterr().err
 
 
 def test_the_peek_bound_carries_no_spawn_and_no_turn() -> None:
@@ -1593,6 +1604,10 @@ def test_a_live_plain_tail_keeps_the_display_read(
         (["--peek", SESSION, "--head", "2", "--steps", "2"], "one window at a time"),
         (["--peek", SESSION, "--head", "51"], "too many for one peek"),
         (["--peek", SESSION, "--regex"], "`regex` needs `query`"),
+        # The peer-regex bounds are usage errors too (rc 2, QA Q4), not rc 1.
+        (["--peek", SESSION, "--query", "a" * 257, "--regex"], "capped at 256"),
+        (["--peek", SESSION, "--query=(a+)+$", "--regex"], "nest quantifiers"),
+        (["--peek", SESSION, "--query=(", "--regex"], "invalid regex"),
     ],
 )
 def test_journal_flags_refuse_like_the_tool(

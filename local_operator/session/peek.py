@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,13 @@ from typing import TYPE_CHECKING, AbstractSet, Any, NamedTuple, Protocol
 
 if TYPE_CHECKING:
     from local_operator.session.transcript import TranscriptEntry
+
+
+class RowMatcher(Protocol):
+    """What the needle search calls per row: ``re.Pattern`` locally, and
+    :class:`BoundedPeerPattern` for a peer's regex (the owner-side bound)."""
+
+    def search(self, string: str, /) -> object | None: ...
 
 
 class PeekRequest(Protocol):
@@ -455,7 +463,7 @@ def _peek_around(
 
 
 def _peek_search(
-    directory: Path, *, needle: str, pattern: re.Pattern[str] | None, need: int
+    directory: Path, *, needle: str, pattern: RowMatcher | None, need: int
 ) -> _PeekWindow | str:
     """Locate a needle walking backward from EOF, then window around the hit.
 
@@ -708,7 +716,7 @@ def _peek_read(
     params: PeekRequest,
     *,
     need: int,
-    pattern: re.Pattern[str] | None,
+    pattern: RowMatcher | None,
 ) -> tuple[_PeekWindow | str, str]:
     """Run the one read the request describes; return ``(window|refusal, mode)``.
 
@@ -737,20 +745,85 @@ def _peek_read(
 # ---------------------------------------------------------------------------
 
 #: Longest ``query`` a PEER may hand this device as a regex. A peer-supplied
-#: pattern runs on THIS machine's CPU against THIS machine's journal, and
-#: Python's ``re`` has no timeout, so the remote path bounds the pattern itself
-#: on top of the walk's ``_PEEK_SCAN_BYTES``. 256 characters is far longer than
-#: any needle a coordinator types ("original request", a ticket id, a SHA) and
-#: short enough that the nested-quantifier check below reads the whole thing.
-#: The LOCAL tool does not apply it: there the caller already owns the CPU.
+#: pattern runs on THIS machine's CPU against THIS machine's journal, so the
+#: remote path caps its length on top of the walk's ``_PEEK_SCAN_BYTES``. 256
+#: characters is far longer than any needle a coordinator types ("original
+#: request", a ticket id, a SHA). The cap is NOT what bounds the CPU — a
+#: 9-character pattern can backtrack for hours — :class:`BoundedPeerPattern`'s
+#: per-call timeout is. The LOCAL tool applies neither: there the caller
+#: already owns the CPU.
 PEER_REGEX_MAX_CHARS = 256
 
 #: ``(…+)+``-shaped patterns — a quantified group whose body is itself
-#: quantified — are the classic catastrophic-backtracking shape. Refusing them
-#: on the peer path costs a coordinator nothing it needs (a literal ``query``
-#: still works) and keeps one hostile or careless pattern from pinning an owner
-#: thread no deadline can cancel.
+#: quantified — are the classic catastrophic-backtracking shape. This is a FAST
+#: PRE-CHECK only (PR #3831 review M1 / QA Q1): it names the commonest shape in
+#: words before any work starts, but it is a heuristic and is bypassed by
+#: redundant grouping (``((a+))+``), overlapping alternation (``(a|a)+``) and
+#: polynomial runs (``\w*\w*\w*!``). The bound that actually holds is the
+#: match timeout in :class:`BoundedPeerPattern`.
 _NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d)")
+
+
+class PeerRegexTimeout(Exception):
+    """A peer's regex used up its time on this device before the search ended.
+
+    Raised out of :func:`serve_peek` (like ``FileNotFoundError``) so the relay
+    handler, which knows this device's name, words the refusal.
+    """
+
+    def __init__(self, budget_s: float) -> None:
+        super().__init__(f"peer regex exceeded {budget_s:g} s")
+        self.budget_s = budget_s
+
+
+class BoundedPeerPattern:
+    """A peer-supplied regex whose every ``search`` stops at one deadline.
+
+    WHY (PR #3831 review M1 / QA Q1). The owner runs a peer's pattern in a
+    shared slow-lane worker (``relay.SLOW_OP_WORKERS``). Python's ``re`` cannot
+    be interrupted, and the slow lane's deadline only ANSWERS the requester — it
+    does not stop the worker — so one catastrophic pattern held its slot until
+    the match returned, i.e. effectively forever, and four of them took the
+    pool from every peer (broker borrows, moves, restarts). A shape check alone
+    cannot close that: catastrophic backtracking has too many spellings.
+
+    So the match itself is bounded. The third-party ``regex`` module (declared
+    as a direct dependency for exactly this) accepts ``timeout=`` per call and
+    checks it inside its backtracking loop; each row's search gets whatever is
+    left of ONE absolute monotonic deadline, so the whole walk — not each row —
+    is bounded, and a timeout raises :class:`PeerRegexTimeout`, which the
+    handler turns into a named refusal while the worker returns its slot.
+    ``regex`` counts that timeout in the thread's CPU seconds, not wall time
+    (measured; see ``network.peek.PEER_REGEX_REPLY_RESERVE_S``): the CPU a
+    pattern may take is hard-bounded, while on a contended machine one row's
+    wall time can run past the budget.
+    ``concurrent=True`` releases the GIL during the match so the relay's link
+    reader and timers keep running beside it.
+
+    Syntax: ``regex``'s default (VERSION0) mode is the ``re``-compatible one,
+    so a pattern that compiles locally means the same thing here.
+    """
+
+    def __init__(self, compiled: Any, *, deadline: float, budget_s: float) -> None:
+        self._compiled = compiled
+        self._deadline = deadline
+        self._budget_s = budget_s
+
+    def search(self, string: str, /) -> object | None:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise PeerRegexTimeout(self._budget_s)
+        try:
+            return self._compiled.search(string, timeout=remaining, concurrent=True)
+        except TimeoutError:
+            raise PeerRegexTimeout(self._budget_s) from None
+
+
+#: Time a peer's regex gets on this device when the caller names no deadline
+#: (the viewer-side pre-check never searches; tests call ``serve_peek``
+#: directly). The relay handler passes the slow lane's REMAINING deadline
+#: instead, see ``network.peek.serve``.
+PEER_REGEX_DEFAULT_BUDGET_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -815,12 +888,18 @@ def request_from_wire(frame: Mapping[str, Any]) -> WirePeekRequest | str:
     return WirePeekRequest(**values, given=given)
 
 
-def compile_peek_pattern(params: PeekRequest, *, remote: bool) -> re.Pattern[str] | None | str:
+def compile_peek_pattern(
+    params: PeekRequest, *, remote: bool, budget_s: float | None = None
+) -> RowMatcher | None | str:
     """The request's regex, ``None`` for literal mode, or a refusal sentence.
 
     The STRIPPED query is compiled, the same spelling every other consumer
     strips to (round-2 review of the local tool, R-6). ``remote=True`` adds the
-    peer-path bounds documented on :data:`PEER_REGEX_MAX_CHARS`.
+    peer-path bounds: the length cap (:data:`PEER_REGEX_MAX_CHARS`), the
+    nested-quantifier pre-check, and — the real bound — a
+    :class:`BoundedPeerPattern` whose searches together stop ``budget_s``
+    seconds from now (default :data:`PEER_REGEX_DEFAULT_BUDGET_S`). The local
+    path keeps plain ``re``, unbounded by design.
     """
 
     if not params.regex:
@@ -839,6 +918,15 @@ def compile_peek_pattern(params: PeekRequest, *, remote: bool) -> re.Pattern[str
                 "(`(a+)+`-shaped patterns can run without bound); simplify it, or "
                 "search literally without `regex`."
             )
+    if remote:
+        import regex as bounded_re
+
+        budget = PEER_REGEX_DEFAULT_BUDGET_S if budget_s is None else max(0.0, budget_s)
+        try:
+            compiled = bounded_re.compile(query)
+        except bounded_re.error as exc:
+            return f"invalid regex '{query}': {exc}"
+        return BoundedPeerPattern(compiled, deadline=time.monotonic() + budget, budget_s=budget)
     try:
         return re.compile(query)
     except re.error as exc:
@@ -889,7 +977,12 @@ def window_from_wire(raw: Mapping[str, Any]) -> _PeekWindow:
 
 
 def serve_peek(
-    directory: Path, params: PeekRequest, given: AbstractSet[str], *, live_state: str
+    directory: Path,
+    params: PeekRequest,
+    given: AbstractSet[str],
+    *,
+    live_state: str,
+    regex_budget_s: float | None = None,
 ) -> dict[str, Any]:
     """Answer one REMOTE peek from this device's own journal (owner side).
 
@@ -898,12 +991,15 @@ def serve_peek(
     tool refuses with, because validation and the readers are the same
     functions. ``FileNotFoundError`` propagates: the caller owns the wording for
     a session with no transcript yet, exactly like the local tool does.
+    :class:`PeerRegexTimeout` propagates the same way: a peer's regex that ran
+    out of ``regex_budget_s`` is refused in the handler's words, which name
+    this device.
     """
 
     refusal = peek_validation_error(params, given)
     if refusal is not None:
         return {"refusal": refusal}
-    pattern = compile_peek_pattern(params, remote=True)
+    pattern = compile_peek_pattern(params, remote=True, budget_s=regex_budget_s)
     if isinstance(pattern, str):
         return {"refusal": pattern}
     if params.digest:
