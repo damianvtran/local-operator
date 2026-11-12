@@ -355,11 +355,18 @@ NET_OPS: tuple[str, ...] = (
     "net_forward",
     "net_stream",
     "net_sync",
+    # One file out of one session this device owns, by digest-framed chunks
+    # (network/files.py; docs/design/mesh-file-transfer.md S1).
+    "net_file_get",
     "net_broker",
     "net_session_lifecycle",
     "net_session_receipt",
     "net_session_move",
     "net_session_create",
+    # The create's idempotency read (``network/create_keys.py``): a requester that
+    # lost a create's reply asks whether its own key made a session. Peer-scope,
+    # names no session id, and answers only keys the ASKING device sent.
+    "net_session_create_lookup",
     "net_session_engage",
     "net_session_stop",
     # THE OWNER'S OWN STORED JOURNAL, read over the relay (mesh-cold-read-
@@ -495,6 +502,9 @@ LOCAL_OPS: tuple[str, ...] = (
     # control-handler comment gives the rule).
     "session_move",
     "session_sync",
+    # ``lop network files pull``: ask THIS device's relay to pull one file from a
+    # peer's session. Local for the family's reason: the link lives in the relay.
+    "session_file_pull",
     "session_lifecycle",
     "session_receipt",
     # The credential broker's leg 1 (runtime → its own relay, §2.3).
@@ -655,6 +665,11 @@ OP_CAPABILITY: dict[str, str | None] = {
     # so a read-only member may open a stream and may not prompt through it.
     "net_stream": "view",
     "net_sync": "view",
+    # ``view`` WIDENS NOTHING: ``net_sync`` above already serves this session's whole
+    # ``scratchpad/`` tree and its referenced attachments to any view member, so one
+    # file out of that same set is a narrower read of bytes the role already reads
+    # (mesh-file-transfer.md, Decision 2). A drive-only pull is a one-row narrowing.
+    "net_file_get": "view",
     "net_broker": "broker_credential",
     "net_session_lifecycle": "delete",
     # ``view``, the same row the stream plane's ``acknowledge_attention`` carries
@@ -669,6 +684,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # (it admits one), warming a cold one is a read, and the kill switch is its
     # own capability.
     "net_session_create": "prompt",
+    # ``prompt``, the create's own row: only a member that may create may ask what
+    # its create made, and the answer is scoped to keys that member sent.
+    "net_session_create_lookup": "prompt",
     "net_session_engage": "view",
     "net_session_stop": "stop",
     # ``view``, and the conservative end of the choice for the same reason the

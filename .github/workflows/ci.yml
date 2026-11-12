@@ -1285,14 +1285,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Fail on any failed or cancelled needed job
+      # FAIL CLOSED: an ALLOWLIST of passing results, never a denylist of bad
+      # ones. A need passes only when its result is exactly `success` or
+      # `skipped` (skipped stays a pass: path-filtered jobs legitimately skip on
+      # a docs-only head). Anything else -- failure, cancelled, an empty/null
+      # result, or a value GitHub invents later -- fails the gate and names the
+      # job and its result. The old denylist (`failure`/`cancelled` only) let
+      # GitHub's 2026-11-11 Actions incident (20:48-21:29Z) report this check
+      # SUCCESS over jobs that never ran: their result was `abandoned`
+      # (PR #3804: `CI Gate` job 130798073631, `Merge gate (full suite)` job
+      # 130788458667). tests/unit/test_ci_hygiene.py runs this exact step
+      # script against such a NEEDS payload.
+      - name: Fail unless every needed job succeeded or was skipped
         env:
           NEEDS: ${{ toJSON(needs) }}
         run: |
           set -euo pipefail
           echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')"
+          bad="$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"')"
           if [ -n "$bad" ]; then
-            echo "::error title=CI Gate::failed or cancelled: $(echo "$bad" | tr '\n' ' ')"
+            echo "::error title=CI Gate::needed jobs not success or skipped: $(echo "$bad" | tr '\n' ' ')"
             exit 1
           fi

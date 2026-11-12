@@ -20,11 +20,13 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
+import httpcore
 import httpx
 
 from local_operator.mobile.auth import load_password
 from local_operator.procstate import install_loop_signal_handlers
 from local_operator.providers.auth_store import (
+    AuthStoreBusyError,
     CredentialInvalidError,
     RefreshUnconfirmedError,
 )
@@ -37,6 +39,8 @@ from local_operator.tunnels.errors import (
 )
 from local_operator.tunnels.gateway import (
     AUTHORIZATION_DEFERRED,
+    CONTROL_PLANE_TIMEOUT,
+    CREDENTIAL_STORE_BUSY,
     LOCAL_PREREQUISITE,
     LOGIN_REQUIRED,
     REENROLMENT_REQUIRED,
@@ -52,6 +56,33 @@ from local_operator.tunnels.relay.connector import (
 )
 
 POLL_SECONDS = 10
+
+#: cloudflared's own origin idle timeout (`originRequest.keepAliveTimeout`,
+#: default 1m30s): the dual-run's other client of this gateway.
+CLOUDFLARED_IDLE_CONN_TIMEOUT = 90.0
+#: How long the gateway keeps an idle keep-alive connection open.
+#:
+#: WHY IT MUST OUTLAST EVERY CLIENT'S IDLE POOL. Both clients of the gateway pool
+#: idle connections: the relay keeps up to 4 idle yamux streams per session for
+#: 30 s (C1.3, ``relay.connector.RELAY_IDLE_CONN_TIMEOUT``) and cloudflared keeps origin
+#: connections for 90 s. uvicorn's default is 5 s. With that default the
+#: GATEWAY closed a pooled connection the client still considered reusable, and
+#: a request the client had already sent on it raced the close: the connector
+#: found the loopback socket closed (ECONNRESET / ENOTCONN), reset the stream,
+#: and the relay answered 502 ``relay_upstream_reset``. Go retries an idempotent
+#: request on a reused connection, so only POST/PUT/PATCH/DELETE reached the
+#: phone — but every one of them in the window failed at once.
+#:
+#: The race window is the gap between uvicorn's close and the relay reading the
+#: device's FIN: one WAN RTT plus however long this process's event loop is
+#: stalled. On a machine at load average ~100 that stall reaches hundreds of
+#: milliseconds (measured: the relay rig in PR evidence reproduces a 4-of-4 POST
+#: failure under a 300 ms stall with the 5 s default and none with this value).
+#: The fix is the standard rule for HTTP keep-alive: the server's idle timeout
+#: must exceed the client's, so the client (which knows no request is in
+#: flight) is always the side that closes an idle connection. Bounded rather
+#: than unlimited so a client that never closes cannot pin sockets forever.
+GATEWAY_KEEP_ALIVE_SECONDS = 120
 
 #: The kinds a supervisor must never retry, because nothing the process can do
 #: changes them: each one needs an act by the operator.
@@ -343,6 +374,47 @@ def _could_not_reach_control_plane(failure: BaseException) -> bool:
     return any(isinstance(link, httpx.TransportError) for link in _failure_chain(failure))
 
 
+def _local_cause(failure: BaseException) -> str | None:
+    """`CREDENTIAL_STORE_BUSY` or `CONTROL_PLANE_TIMEOUT` when either explains the failure.
+
+    Checked BEFORE `_could_not_reach_control_plane`, because both used to land
+    there and both are a different claim. A busy store means nothing was sent,
+    so no answer from Radient was ever possible. An httpx timeout is a
+    `TransportError` subclass, yet "no answer in time" is not "could not
+    connect" (a connect timeout stays unreachable, below): on 2026-11-11 a
+    machine at load ~50 showed "control plane unreachable" while the API
+    answered every other caller. The builtin
+    `TimeoutError` counts too — `asyncio.wait_for` and socket timeouts raise it,
+    and its empty message is why the connector's log line used to read
+    `relay token refresh failed: ` with nothing after the colon.
+    """
+    chain = list(_failure_chain(failure))
+    if any(isinstance(link, AuthStoreBusyError) for link in chain):
+        return CREDENTIAL_STORE_BUSY
+    # A failed or timed-out CONNECT made no connection at all, which IS the
+    # unreachable claim — and it must be ruled out before the TimeoutError walk
+    # below, because httpcore raises its `ConnectTimeout` from the socket's
+    # builtin `TimeoutError`, so every real connect timeout carries one in its
+    # chain (round 1, R1-1: `httpx.ConnectTimeout <- httpcore.ConnectTimeout <-
+    # TimeoutError` read as "timed out"). Read/write timeouts mean the request
+    # went out and no answer came back in time; a pool timeout is the local
+    # client's own queue.
+    connect_failures = (
+        httpx.ConnectTimeout,
+        httpx.ConnectError,
+        httpcore.ConnectTimeout,
+        httpcore.ConnectError,
+    )
+    if any(isinstance(link, connect_failures) for link in chain):
+        return None
+    if any(
+        isinstance(link, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, TimeoutError))
+        for link in chain
+    ):
+        return CONTROL_PLANE_TIMEOUT
+    return None
+
+
 def _is_a_dead_login(failure: BaseException) -> bool:
     """Whether the credential store judged the tunnel's grant unusable.
 
@@ -396,6 +468,9 @@ def authorization_failure_reason(failure: BaseException) -> str:
     transport error it hit while refreshing. The wording each reason produces
     lives with the gateway, so one cause cannot drift into two sentences.
     """
+    local = _local_cause(failure)
+    if local is not None:
+        return local
     if _could_not_reach_control_plane(failure):
         return UNREACHABLE
     if isinstance(failure, httpx.HTTPError):
@@ -446,6 +521,10 @@ def classify_failure(failure: BaseException) -> Failure:
     two families it catches (fail closed, with a traceback) rather than parking
     on a shape it cannot describe.
     """
+    local = _local_cause(failure)
+    if local is not None:
+        # Transient: both clear by themselves (see `_local_cause`).
+        return Failure("transient", local, TERMINAL_DETAIL[local])
     if _could_not_reach_control_plane(failure):
         return Failure("transient", UNREACHABLE, TERMINAL_DETAIL[UNREACHABLE])
     if _is_a_dead_login(failure):
@@ -483,7 +562,10 @@ def _retry_detail(verdict: Failure, failure: BaseException) -> str:
     failure's own text: it is what carries the transport detail an operator debugs
     with, and for those the shared literal is not a misreport.
     """
-    if verdict.reason == AUTHORIZATION_DEFERRED:
+    # The two local causes join it: a timeout's own text is often EMPTY (the
+    # builtin TimeoutError, httpcore's timeouts), which left this line ending
+    # in nothing, and the busy store's text is a shared literal too.
+    if verdict.reason in (AUTHORIZATION_DEFERRED, CONTROL_PLANE_TIMEOUT, CREDENTIAL_STORE_BUSY):
         return verdict.detail
     return str(failure)
 
@@ -553,6 +635,26 @@ def active(record: Any) -> bool:
             "billing" not in record
             or (isinstance(record["billing"], dict) and record["billing"].get("eligible") is True)
         )
+    )
+
+
+def gateway_server_config(app: Any, port: int) -> Any:
+    """The uvicorn ``Config`` the loopback gateway is served with.
+
+    One function so the keep-alive invariant (see ``GATEWAY_KEEP_ALIVE_SECONDS``)
+    is testable against the exact server the service runs, not a copy of it.
+    """
+    import uvicorn
+
+    return uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=port,
+        log_level="warning",
+        access_log=False,
+        proxy_headers=False,
+        timeout_graceful_shutdown=2,
+        timeout_keep_alive=GATEWAY_KEEP_ALIVE_SECONDS,
     )
 
 
@@ -753,17 +855,7 @@ async def run() -> int:
                     ready_file.unlink(missing_ok=True)
                     token_file.unlink(missing_ok=True)
 
-            server = uvicorn.Server(
-                uvicorn.Config(
-                    gateway.app(),
-                    host="127.0.0.1",
-                    port=value["gateway_port"],
-                    log_level="warning",
-                    access_log=False,
-                    proxy_headers=False,
-                    timeout_graceful_shutdown=2,
-                )
-            )
+            server = uvicorn.Server(gateway_server_config(gateway.app(), value["gateway_port"]))
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
             # ONE helper for every server boot path: `add_signal_handler` is

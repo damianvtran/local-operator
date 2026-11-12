@@ -132,6 +132,14 @@ REPLACED_LITERALS = {
     "fast_mode_refused": (
         "fast mode: refused by {selector} — {reason}; switched off, serving at standard speed"
     ),
+    # NEW copy as well, same rule as ``fast_mode_refused``: the deferred-ack
+    # settings lane (PR #3697) added these for the attached viewer's /model
+    # switch outcome (session/attached.py, ``_settings_notice`` calls). A
+    # ``defer_ok`` switch acks as queued before the owner applies it, so the
+    # viewer states "queued" first and "not applied" only if the owner later
+    # refuses — there was no earlier literal to preserve.
+    "model_switch_queued": "switch to {model} queued — applies at the next step",
+    "model_switch_refused": "{model} was not applied: {reason}",
 }
 
 
@@ -180,6 +188,8 @@ _SAMPLE_PARAMS = {
     "model_default_changed": {"model": "gpt-x"},
     "effort_default_changed": {"effort": "high"},
     "fast_mode_refused": {"selector": "anthropic/claude-opus-5", "reason": "no fast tier"},
+    "model_switch_queued": {"model": "gpt-x"},
+    "model_switch_refused": {"model": "gpt-x", "reason": "model not available"},
 }
 
 

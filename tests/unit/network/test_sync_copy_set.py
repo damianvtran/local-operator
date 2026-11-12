@@ -288,6 +288,14 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/harness/bridge_egress.py": (
+        1,
+        "``BRIDGE_TOOL_NAME`` ('bridge') is the Team Bridge TOOL's registered name, "
+        "matched against a journal row's ``tool_name`` to find a taint source -- not a "
+        "file or directory name. The taint it detects is re-derived from the session's "
+        "own journal (which already travels), so nothing under this name is a session "
+        "entry to copy or exclude.",
+    ),
     "local_operator/vault_agent/eligibility.py": (
         2,
         "``ELIGIBILITY_NAME`` ('eligibility.json') and ``GRANT_NAME`` "
@@ -410,6 +418,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "not exist there.",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/server/utils/settings_intents.py": (
+        1,
+        "``PEER_INTENTS_DIRNAME`` ('peer-session-intents'): a CONFIG-ROOT sibling of "
+        "sessions/ (<config>/peer-session-intents/<id>/) holding THIS viewing device's "
+        "pending desktop settings picks for a conversation a MESH PEER owns -- never an "
+        "entry of a session directory, so no session copy carries it. It must not travel: "
+        "the picks are this viewer's requests about somebody else's runtime, applied "
+        "through this device's peer bridge, and the directory sits outside sessions/ "
+        "precisely so no reader mistakes the peer's id for a local session (the "
+        "two-writer case mesh-session-mobility.md 3.4 forbids). The module's other "
+        "constant, ``INTENT_FILE``, IS a session entry and is classified in the copy set.",
+    ),
     "local_operator/disk_pressure.py": (
         1,
         "``RECEIPT_DIRNAME`` ('disk-reclaim-receipts'): lives at the DEVICE-level "
@@ -537,6 +557,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
         "beside the session directories, never an entry of a session",
     ),
+    "local_operator/server/loop_watchdog.py": (
+        1,
+        "``DUMP_SIGNAL_NAME`` ('SIGUSR2'): the ``signal`` attribute name serve's "
+        "watchdog registers faulthandler on, not a pathname or a session entry",
+    ),
     "local_operator/server/utils/local_tokens.py": (
         1,
         "``GENERATION_FILENAME`` (``generation``): the per-boot counter beside the serve "
@@ -585,6 +610,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_AUDIT_FILENAME`` name the operator-level public-copy audit log under "
         "``<config>/audit/``. None is an entry of a session directory, and the "
         "copy set must neither carry nor exclude them.",
+    ),
+    "local_operator/tools/evidence_tool.py": (
+        1,
+        "``TOOL_NAME`` (``evidence``) is the model-facing registry key, not a path or "
+        "an entry of a session directory: the tool writes ONE receipt the child "
+        "authored itself into an allow-listed directory of the BOUND WORKTREE "
+        "(``EVIDENCE_DIRS``, a tuple, names the checkout's own receipt directories), "
+        "so nothing here names a file in the session store and it owns no copy-set "
+        "entry for the copy set to carry or exclude.",
     ),
     "local_operator/harness_import/manifest.py": (
         1,
@@ -938,6 +972,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/create_keys.py": (
+        1,
+        "``INDEX_FILENAME`` (``create-keys.json``): the OWNER device's per-device "
+        "create-idempotency index under ``<config>/network`` -- it binds a requesting "
+        "device's create_key to the session THIS device created, so it describes this "
+        "device's mesh state, never an entry of a session directory, and must not "
+        "travel with a session",
+    ),
     "local_operator/network/relay.py": (
         1,
         "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
@@ -1024,11 +1066,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        2,
+        4,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory",
+        "reply-channel/action-tool precedent), never a file in a session directory; "
+        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER``: per-device files "
+        "under the config root's ``network/`` directory (this device's repository "
+        "narrowing; the marker that a designation, including a cleared one, was "
+        "delivered) — device state that must stay on the device, never a file in a "
+        "session directory, so it never travels with a session",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,
@@ -1333,6 +1380,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(``mesh-repair:<network>:<credential key>:<generation>``, see "
         "``repair_inbox.item_key``): a primary key inside SQLite, never a path on disk "
         "and never a session directory entry, so there is nothing for the copy to carry",
+    ),
+    "local_operator/notifications/remote_attention.py": (
+        3,
+        "``remote-done`` and ``remote-notice`` (``DONE_PREFIX``/``NOTICE_PREFIX``) prefix "
+        "a forwarded completion's/notice's row KEY in ``notifications.db``: primary "
+        "keys inside SQLite, never paths on disk. "
+        "``ORIGINS_FILE`` ('remote-attention-origins.json') lives ONLY at the config "
+        "root (``_origins_path(root)``, root = the relay's config dir): a per-device "
+        "record of which mesh viewers collect this node's forwarded items. It is never "
+        "an entry of a session directory and must not travel with one -- a moved "
+        "session would carry another device's viewer list to a node those viewers "
+        "never collected from",
     ),
     "local_operator/notifications/remote_park.py": (
         1,

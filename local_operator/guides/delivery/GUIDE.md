@@ -73,7 +73,9 @@ The manager (or lead coder) owns ONE PR worktree in `<repo>/.worktrees/` from
 latest origin/main, briefs its absolute path and SHA, and freezes the head while
 readers work. Reviewer/QA/UX/design/copy/i18n reuse it read-only every round
 at the briefed head (targeted tests, shared deps): no clone, install or new
-worktree, and no full-tree copies into scratch. Never move it off that head;
+worktree, and no full-tree copies into scratch. A reader files its own NEW
+receipt with `evidence` (bound to the briefed worktree), not `bash` or `write`.
+Never move it off that head;
 base/before reads use `git show <base>:<path>` or `git archive` into scratch. Python:
 `PYTHONPATH=<worktree>` with the primary `.venv`; `python -c 'import
 local_operator;print(local_operator.__file__)'` must print a worktree path.

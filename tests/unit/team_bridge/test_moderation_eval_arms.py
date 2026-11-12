@@ -3,7 +3,7 @@
 WHAT THIS SUITE PINS, and why each one is a money-or-honesty bug rather than a style
 nit. Nothing here reaches a network, starts a hub, or calls a model: the arm's job is to
 make a REAL hub run possible, and this file proves the parts that can be proved without
-one. A live run is a separate, budgeted step (docs/evidence/team-bridge-hub-arm.md).
+one. A live run is a separate, budgeted step (evals/team_bridge_moderation/HUB_ARM.md).
 
 1. ``--limit`` bounds the RUN. Measured 2026-10-29: ``--limit 12`` selected ~201 cases
    because the flag was per category, which is how someone spends a corpus budget by

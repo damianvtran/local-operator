@@ -311,7 +311,19 @@ MEASURED_TOKENS: dict[str, int] = {
     # backup_id) shortened to win back the start-context budget the deferred
     # ``skill``/``profile_proposal`` inventory entries cost; the full
     # action_class/kind rationale stays in this tool's notes. Same printed table.
-    "agent": 1471,
+    # RE-MEASURED (proposal ask summary): 1471 -> 1500 (+29), the notes line
+    # telling the agent to ask with a 1-3 line summary + proposal id, never
+    # the full instructions (a pasted brief filled the ask card).
+    # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1471 -> 1562
+    # (+91). The ``edits``/``base_revision``/``replace`` params (and the shared
+    # ``TextEdit`` item) plus the notes line on clean-local autonomy and
+    # lossless editing; the scope paragraph's confirmation clauses were cut to
+    # pay part of it. ``team`` gains the same params/notes (1500 -> 1574).
+    # RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1):
+    # 1562 -> 1632 (+70): main's summary-plus-id ask clause folded into the
+    # notes line, the ``field``/``part`` show params, and the notes line now
+    # naming paged reads; ``team`` the same params plus ``project`` (1646).
+    "agent": 1632,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -512,7 +524,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # (8,190 chars, per main's own note). This branch's net delta over that is
     # +7 tokens: the `setvalue` row and its `selector`/`text` help, less the
     # prose trims listed above. Rendered: 8,091 chars against the 8,192 cap.
-    "browser": 2121,
+    "browser": 2143,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -694,7 +706,9 @@ MEASURED_TOKENS: dict[str, int] = {
     "project_delete": 91,
     # NEW (profile proposals, PR #3704): the deferred list/show/apply/reject
     # tool for Agents proposals; 116 tokens through this test's printed table.
-    "profile_proposal": 116,
+    # RE-MEASURED (proposal ask summary): 116 -> 131 (+15), the description's
+    # "ask with a short summary plus the proposal id" sentence.
+    "profile_proposal": 131,
     "read": 345,
     # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
     # 237 tokens measured through this test's own table; deliberately small —
@@ -718,7 +732,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "skill": 427,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
-    "send": 779,
+    "send": 796,
     # Spawn's tags field/description deliberately adds 21 reference tokens.
     # RE-MEASURED 2026-10-23 (session self-identity): the description gains one
     # sentence pointing at the listing's `(this session)` marker, so the doc
@@ -790,7 +804,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # per-slot ``saver`` member field; the same printed table as ``agent``.
     # RE-MEASURED (profile proposals, PR #3704): 1464 -> 1500 (+36), the same
     # Agents-proposal notes line as ``agent``.
-    "team": 1500,
+    # RE-MEASURED (proposal ask summary): 1500 -> 1529 (+29), the same
+    # summary-plus-id notes line as ``agent``.
+    # RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): 1500 -> 1574
+    # (+74), the same params and notes line as ``agent``.
+    # RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1):
+    # 1574 -> 1646 (+72), the same params and notes line as ``agent``.
+    "team": 1646,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -845,7 +865,13 @@ MEASURED_TOKENS: dict[str, int] = {
 #: Agents-proposal notes line as the canonical arm; ``task`` stays 764.
 #: RE-MEASURED (PR #3704 context-budget trim): agent 1527 -> 1500, the same
 #: -27 field-description trim as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1500, "task": 764}
+#: RE-MEASURED (proposal ask summary): agent 1500 -> 1529, the same +29
+#: summary-plus-id notes line as the canonical arm; ``task`` stays 764.
+#: RE-MEASURED (agent/team autonomy + lossless edits, 2026-11): agent
+#: 1500 -> 1591, the same +91 params/notes as the canonical arm; ``task`` 764.
+#: RE-MEASURED (merge of main #3777 + paged show, PR #3804 round 1): agent
+#: 1591 -> 1661, the same +70 as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1661, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

@@ -1,6 +1,6 @@
 """The registry's wire, asserted against the frozen fixture contract.
 
-Push/ack-sync S3 (ADR 0006 §3.1/§4 @ ``b03aeb15``). ``fixtures/push/`` is the
+Push/ack-sync S3 (ADR 0006 §3.1/§4 @ ``b03aeb15``). ``tests/fixtures/push/`` is the
 contract the app and the cloud build against, so these cells drive the **real**
 routes and builders and compare their answers to the FILED literals — the same
 equality guard as the payload suite, applied to the half of the freeze this repo
@@ -43,7 +43,7 @@ from local_operator.mobile.push_devices import (
 )
 from local_operator.paths import config_dir
 
-FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "push"
+FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "push"
 
 _TYPES: dict[str, type] = {
     "str": str,

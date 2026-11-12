@@ -36,6 +36,7 @@ from local_operator.logger import (
 )
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import early_paint_hold
+from local_operator.server import loop_watchdog as serve_loop_watchdog
 from local_operator.server import registry as serve_registry
 from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
@@ -545,6 +546,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 reload_task.add_done_callback(serve_reload.observe_reload)
                 app.state.serve_reload = reload_task
 
+    # THE EVENT-LOOP WATCHDOG (serve wedges of pids 11196 and 9633, 2026-11-11):
+    # a thread that dumps every thread's traceback when the loop stops beating
+    # and, past a hard bound, re-execs this daemon in place (``loop_watchdog``
+    # carries the thresholds' measurement and the drain invariants). Only on an
+    # ANNOUNCED daemon: an unannounced boot (tests, ad-hoc apps) has no record a
+    # client relies on and no address a re-exec could re-serve.
+    loop_beat: asyncio.Task[None] | None = None
+    loop_guard: serve_loop_watchdog.LoopWatchdog | None = None
+    if announced is not None:
+        try:
+            loop_guard, loop_beat = serve_loop_watchdog.install(app, config_dir)
+        except Exception:  # noqa: BLE001 — a diagnostic must never fail startup
+            logger.warning("serve loop watchdog could not start", exc_info=True)
+
     # THE HUB UPDATE RUNNER: one asyncio task per daemon, started AFTER the serve
     # record and the reload task so readiness is never delayed by it (its first
     # tick waits ~45 s; see ``hub_sync.runner``). It runs for a bare-uvicorn daemon
@@ -609,7 +624,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — a resume failure must never fail startup
         logger.warning("settings intents could not be resumed", exc_info=True)
 
+    # REMOTE ATTENTION, hosted where no TUI is needed (remote-session parity): a
+    # turn that finishes, or a ``notify``, on a mesh node reaches THIS device's
+    # inbox when this device started that session. The TUI hosts the same
+    # watcher; the store's episode digest keeps the two to one row. A device in
+    # no mesh pays one directory check per poll (``peer_rows`` short-circuits).
+    remote_attention_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.notifications import remote_attention
+
+        remote_attention_task = asyncio.create_task(
+            remote_attention.run_forever(app.state.config_manager.config_dir),
+            name="remote-attention-watch",
+        )
+    except Exception:  # noqa: BLE001 — a forwarder must never fail startup
+        logger.warning("remote attention watch could not start", exc_info=True)
+
+    # ONE HUB CONNECTION POOL FOR THE SERVER LOOP. Every desktop Team Bridge
+    # read used to open its own TLS connection to the hub (41-124 ms each,
+    # bridge-instant-load); binding a pool here lets them reuse sockets. The
+    # lifespan OWNS it — closed in the ``finally`` below — because only an owned
+    # loop may hold long-lived sockets (``team_bridge/http_pool.py``). Bound
+    # last before ``yield`` so boot work above keeps its per-request shape.
+    from local_operator.team_bridge.http_pool import bind_hub_pool, unbind_hub_pool
+
+    bind_hub_pool()
     yield
+    if remote_attention_task is not None:
+        remote_attention_task.cancel()
+        await asyncio.gather(remote_attention_task, return_exceptions=True)
     try:
         # Stop the settings-intent workers before the session pool closes under
         # them; an in-flight move is shielded and finishes on its own.
@@ -674,6 +717,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.env_config = None
         app.state.scheduler_service = None
     finally:
+        # Close the hub pool even when the teardown above raised: a socket left
+        # open past the loop's exit can never be closed. Never raises.
+        try:
+            await unbind_hub_pool()
+        except Exception:  # noqa: BLE001 — teardown of a socket pool must never be the failure
+            logger.debug("hub http pool close failed at shutdown", exc_info=True)
         # The record outlives nothing: it is removed here, LAST, and under
         # `finally:` so that no exit path can leave a file behind claiming a
         # live daemon at a port nothing listens on. The heartbeat keeps running
@@ -694,6 +743,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # on the way out with a handover that the shutdown then makes. `stop`
         # ends a poll parked in its notice wait; the cancel covers one parked in
         # its check sleep, where the event is not what it awaits.
+        # The loop watchdog stops FIRST: a teardown can legitimately hold the
+        # loop for longer than the stall bound, and a re-exec mid-teardown would
+        # resurrect a daemon its operator just stopped.
+        if loop_guard is not None:
+            loop_guard.stop()
+        if loop_beat is not None:
+            loop_beat.cancel()
         if retire_stop is not None:
             retire_stop.set()
         if reload_stop is not None:

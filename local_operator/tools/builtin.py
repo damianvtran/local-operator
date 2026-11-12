@@ -163,6 +163,7 @@ from local_operator.redaction_shapes import (
     REDACTION_MARKER,
     ShapeHit,
     ShapeReport,
+    StructureStreamGuard,
     credential_dump_notice,
     credential_forms,
     has_shape_anchor,
@@ -2392,7 +2393,18 @@ async def _check_approval(context: ToolContext | None, tier: str, description: s
     request_approval = getattr(context, "request_approval", None) if context else None
     if request_approval is None:
         return True
-    return await ask_approval(request_approval, tier, description, getattr(context, "job_id", None))
+    # A self-gating tool's card in a Team-Bridge-latched session is as
+    # person-only as a tier-gated one (team-bridge-egress.md: "Cards": every card, whatever raised
+    # it). The latch lookup fails closed.
+    from local_operator.harness.bridge_egress import context_is_latched
+
+    return await ask_approval(
+        request_approval,
+        tier,
+        description,
+        getattr(context, "job_id", None),
+        bridge_latched=context_is_latched(context),
+    )
 
 
 async def _run_with_abort(
@@ -2753,6 +2765,9 @@ class BashParams(BaseModel):
 #: mirrors rather than imports (the tool layer must not depend on the TUI layer);
 #: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
 _LIVE_PENDING_TEXT = "no output yet"
+#: The live card's line while a Terraform plan is held whole for the credential
+#: check (round-2 review R2-1 (c)): the output is coming, not withheld.
+_LIVE_HELD_TEXT = "[output held for a credential check]"
 
 #: What the live view carries once the pipe filter has faulted. The text is
 #: withheld rather than guessed at: a filter that cannot vouch for the bytes must
@@ -2853,6 +2868,10 @@ class _BashOutput:
         #: output yet" instead of the settled "``(empty)``" while a command is
         #: demonstrably producing output (see ``_LIVE_PENDING_TEXT``).
         self.withheld = 0
+        #: Whether those bytes include a Terraform plan parked for the credential
+        #: check (``StructureStreamGuard.park``): the live card says so, since a
+        #: multi-MiB plan can keep it quiet for a second or more.
+        self.held_for_check = False
 
     @property
     def retained_bytes(self) -> int:
@@ -3092,6 +3111,15 @@ class _PipeRedactor:
         self._set(values)
         self.pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        #: Holds and lookbehind for the Kubernetes Secret / Terraform plan rules,
+        #: which need a whole object a newline-aligned release does not give them
+        #: (see the section note above ``StructureStreamGuard``).
+        self._structures = StructureStreamGuard()
+
+    @property
+    def held_for_check(self) -> int:
+        """Characters of a Terraform plan parked for the whole-plan check, else 0."""
+        return self._structures.parked_chars
 
     def _set(self, values: Iterable[str]) -> None:
         self.secrets = sorted({value for value in values if value}, key=len, reverse=True)
@@ -3160,11 +3188,45 @@ class _PipeRedactor:
             return b""
 
     def _feed_scrubbed(self, chunk: bytes, *, final: bool = False) -> bytes:
-        text = self.pending + self.decoder.decode(chunk, final=final)
+        structures = self._structures
+        decoded = self.decoder.decode(chunk, final=final)
+        lead = ""
+        if structures.parked:
+            # An open Terraform plan is parked in the guard: scan only this read
+            # and publish nothing until its closing brace, so holding it stays
+            # linear (re-joining it into ``pending`` re-searched the whole plan
+            # on every read — round-2 review R2-1). ``absorb`` hands back the
+            # whole text once the plan is complete, over the bound, or final.
+            whole = structures.absorb(self.pending, decoded, final=final)
+            if whole is None:
+                return b""
+            text = whole
+            # Past the bound the plan goes to the ordinary rules; its notice
+            # LEADS the release so the sink's head keeps it (a notice after a
+            # 32 MiB release would land in the middle the sink drops).
+            lead = structures.withheld_notice()
+        else:
+            text = self.pending + decoded
+        # A data block too large to hold is WITHHELD, not released unchecked:
+        # its bytes are dropped here as they arrive (notice already sent).
+        text = structures.discard(text, final=final)
         cut = self._release_point(text, final=final)
+        # Applied AFTER the cap: these holds have their own, larger bound
+        # (``STRUCTURE_HOLD_LIMIT``) because a Secret or a plan is only
+        # judgeable whole, and the 8 KiB cap is exactly what split them.
+        cut = structures.hold(text, cut, final=final)
         ready, self.pending = text[:cut], text[cut:]
+        notice = ""
+        if structures.withholding:
+            self.pending = structures.discard(self.pending, final=final)
+            notice = structures.withheld_notice()
+        elif not final:
+            self.pending = structures.park(self.pending)
         ready = self._mask_open_key_block(ready)
+        ready, structure_hits = structures.scrub_release(ready)
         scrubbed, hits = scrub_secrets_with_hits(ready, self.secrets)
+        hits = structure_hits + hits
+        scrubbed = lead + scrubbed + notice
         # REPORT FROM HERE. This filter is the only layer that sees a credential
         # that exists only in a command's OUTPUT — the production case this
         # feature was written for — and it masks the bytes before the result
@@ -4700,7 +4762,10 @@ async def execute_bash(
                     continue
                 redactor.refresh(values)
                 safe = redactor.feed(chunk)
-                sink.withheld = len(redactor.pending)
+                # A parked Terraform plan is held too; counted so the card does
+                # not read ``(empty)`` while it waits, and flagged so it can say why.
+                sink.withheld = len(redactor.pending) + redactor.held_for_check
+                sink.held_for_check = redactor.held_for_check > 0
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
@@ -4758,6 +4823,9 @@ async def execute_bash(
             # Bytes are arriving and being held; ``(empty)`` would tell the
             # operator the opposite of what is happening.
             stdout = _LIVE_PENDING_TEXT
+        if stdout_chunks.held_for_check or stderr_chunks.held_for_check:
+            # Live view only (this snapshot is never the settled result).
+            stdout = f"{stdout}\n{_LIVE_HELD_TEXT}" if stdout else _LIVE_HELD_TEXT
         summary = _bash_output_summary(stdout, stderr)
         # The soft (memory.high) advisory is carried as its OWN field, not
         # prepended to the output text (design review D1). Prepended, it rode the
@@ -13707,8 +13775,15 @@ async def _ripgrep_scan(
     # shared path:line:text grammar both expect to carry a path).
     # --column is what keeps a clipped long line's MATCH in view (see
     # ``_RG_LINE_RE``). --max-filesize is the caller's cap in plain bytes.
+    # --no-config: a ``RIPGREP_CONFIG_PATH`` file (the operator's, or one an
+    # environment sets) can add ``--hidden``/``--no-ignore`` and silently widen
+    # what this tool walks. The Team Bridge pull classifier
+    # (``harness/bridge_egress._ancestor_search_skips``) assumes rg's defaults,
+    # and the Python engine has no config at all, so both engines now answer
+    # the same arguments the same way (review S-71).
     argv = [
         rg,
+        "--no-config",
         "--no-heading",
         "--color",
         "never",
@@ -16109,7 +16184,7 @@ class SendParams(BaseModel):
         default="",
         description=(
             "Message a session on ANOTHER device over the mesh (a peer name or id); "
-            "drives a turn there and returns the owner's reply."
+            "delivered to its mailbox there, like a local send."
         ),
     )
 
@@ -16388,17 +16463,50 @@ def _role_words(context: "ToolContext | None") -> "dict[str, tuple[str, ...]]":
     return role_word_set(registry)
 
 
-#: The fields that mean one thing on THIS machine's loopback/registrant
-#: substrate and nothing on the mesh — refused, never dropped, beside `peer`
-#: (design §3B).
-_MESH_LOCAL_ONLY_MODES = ("wake", "now", "patience", "model")
+#: The fields that mean one thing on THIS machine and nothing on the mesh —
+#: refused, never dropped, beside `peer` (design §3B). ``wake`` and ``now`` left
+#: this list when a mesh send became a mailbox delivery (PR #3827 A1): the owner
+#: honours both exactly as a local send's target does. ``patience`` arms a wait
+#: on this machine's reply ledger, which a mesh reply does not write; ``model``
+#: is its own act.
+_MESH_LOCAL_ONLY_MODES = ("patience", "model")
 
 
-def _mesh_send_argv(peer: str, address: str, text: str) -> list[str]:
+def _mesh_send_argv(
+    peer: str,
+    address: str,
+    text: str,
+    *,
+    mailbox: bool = False,
+    wake: bool = True,
+    now: bool = False,
+) -> list[str]:
     """The one spelling of a mesh send (design §3A): ``--json`` BEFORE the act —
     a trailing one would be delivered to the peer as payload — and the text
-    ALWAYS after ``--``, where it is DATA the CLI takes as-is to end of line."""
-    return ["network", "sessions", "--json", "--peer", peer, "--send", address, "--", text]
+    ALWAYS after ``--``, where it is DATA the CLI takes as-is to end of line.
+
+    ``mailbox`` is the ``send peer=`` spelling (a ``peer_message``, local-send
+    parity); without it ``--send`` drives a turn, which ``sessions resume peer=
+    prompt=`` still wants."""
+    flags: list[str] = []
+    if mailbox:
+        flags.append("--mailbox")
+        if now:
+            flags.append("--now")
+        elif not wake:
+            flags.append("--no-wake")
+    return [
+        "network",
+        "sessions",
+        "--json",
+        "--peer",
+        peer,
+        "--send",
+        address,
+        *flags,
+        "--",
+        text,
+    ]
 
 
 async def _execute_send_peer(
@@ -16406,13 +16514,16 @@ async def _execute_send_peer(
 ) -> ToolResult:
     """``send(peer=…)``: drive a turn in a session on ANOTHER device.
 
-    NOT THE LOOPBACK MAILBOX (design §8.1/§8.2, locked): the local path spools to
-    a registrant on this machine; this one runs the SAME pilot act the CLI drives
-    (``lop network sessions --peer P --send <id-or-name> -- <text>``), where the
-    owner admits the turn through its own prompt admission
-    (``viewer.prompt_and_wait``) and answers with a receipt carrying its reply —
-    no new wire op, no second writer, and the CLI keeps every bound and refusal.
-    This function builds the argv, relays refusals, and renders the outcome.
+    THE OWNER'S MAILBOX, OVER THE MESH (PR #3827 A1): this runs the pilot act
+    ``lop network sessions --peer P --send <id-or-name> --mailbox -- <text>``,
+    which delivers a ``peer_message`` frame — the op a local ``send`` delivers —
+    so a busy owner reads it at its next tool-call boundary instead of parking a
+    ``prompt`` behind its running turn, ``wake``/``now`` mean what they mean
+    locally, and the answer comes at mailbox admission. The owner stamps the
+    sending device from the authenticated link, so the receiver can reply with
+    ``send peer=``. An owner too old for that falls back to the turn path, whose
+    timeout is reported as NOT delivered. This function builds the argv, relays
+    refusals, and renders the outcome.
     """
     peer = params.peer.strip()
     given = params.model_fields_set
@@ -16423,9 +16534,9 @@ async def _execute_send_peer(
             tool_call_id,
             "send",
             f"{spelled} {'is a local-only mode' if len(refused) == 1 else 'are local-only modes'}"
-            " — the loopback mailbox and the model switch act on THIS machine. With "
-            "`peer` the send drives a turn on that device and returns the owner's "
-            "reply: drop `wake`/`now`/`patience`/`model` for a peer send.",
+            " — a patience wait and the model switch act on THIS machine. With "
+            "`peer` the message goes to that session's mailbox on its device: drop "
+            "`patience`/`model` for a peer send.",
         )
 
     if params.message is None or not params.message.strip():
@@ -16461,7 +16572,9 @@ async def _execute_send_peer(
         )
 
     timeout = _mesh_pilot_timeout_s()
-    argv = _mesh_send_argv(peer, address, params.message)
+    argv = _mesh_send_argv(
+        peer, address, params.message, mailbox=True, wake=bool(params.wake), now=bool(params.now)
+    )
     try:
         code, payload, stderr = await _mesh_cli_json(argv, timeout, context)
     except (asyncio.TimeoutError, TimeoutError):
@@ -16491,15 +16604,40 @@ async def _execute_send_peer(
     reply = str(payload.get("reply") or "")
     if reply:
         details["reply"] = reply
+        # S-60, fail closed: a mesh owner's reply is that session's content,
+        # and no peer reports its Team Bridge latch today.
+        from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+        details[BRIDGE_TAINT_DETAILS_KEY] = True
     for key in ("code", "error", "peer_named"):
         if payload.get(key):
             details[key] = payload[key]
-    if payload.get("ok") is False:
-        # ``running``/``queued``/``failed``/``lost`` are the owner's honest
-        # NON-completions — the same states the CLI exits non-zero for, so a
-        # delivery is never read as a completion.
+    if _mesh_send_failed(payload):
+        # ``queued``/``failed``/``lost`` are the owner's honest NON-completions:
+        # not delivered yet (parked behind its running turn), no turn ran, it
+        # failed, or nobody knows. See ``_mesh_send_failed``.
         return _error(tool_call_id, "send", text, details=details)
     return _text(tool_call_id, "send", text, details=details)
+
+
+def _mesh_send_failed(payload: Mapping[str, Any]) -> bool:
+    """Is a pilot ``send`` receipt a failure the TOOL result must flag?
+
+    Only on the TURN path (``sessions resume peer= prompt=``, or an owner too old
+    for the mailbox). ``running`` there is reported ONLY when the owner's user row
+    for our message id is in the window (``network.cli._pilot_send``): admitted,
+    and still working when the CLI stopped waiting. That is a delivered message,
+    so success with ``details.outcome == "running"``. A wait that ended BEFORE
+    admission is ``queued`` (``code == "queued_behind_turn"``): the prompt is
+    parked in that runtime's memory behind its running turn and lost if it stops
+    first — NOT delivered, so an error (PR #3827 A1: an earlier revision called
+    every timeout ``running``, which would have told agents a parked message had
+    landed). The CLI keeps its non-zero exit for ``running``: a shell script
+    waiting for a reply still must not read admission as completion.
+    """
+    if payload.get("ok") is not False:
+        return False
+    return str(payload.get("outcome") or "") != "running"
 
 
 # A pathological attention turn must not retain every unique payload forever.
@@ -19913,7 +20051,11 @@ async def _sessions_peek_mesh(
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
-    return _text(tool_call_id, "sessions", text, details=details)
+    from local_operator.harness.bridge_egress import stamp_details
+
+    # S-60, fail closed: no mesh peer reports its session's Team Bridge latch
+    # today, so any peeked rows count as a teammate's agent message.
+    return _text(tool_call_id, "sessions", text, details=stamp_details(details, bool(rows)))
 
 
 async def _sessions_peek(
@@ -20030,7 +20172,18 @@ async def _sessions_peek(
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
-    return _text(tool_call_id, "sessions", text, details=details)
+    # A PULL of another session's transcript (review S-60): when that session
+    # holds a teammate's agent message, so does this result, and the stamp
+    # latches the reader exactly as the bridge result itself would have. The
+    # whole target journal is judged, not the window -- the window can carry
+    # the restatement without the source row. See bridge_egress.
+    from local_operator.harness.bridge_egress import (
+        session_directory_latched,
+        stamp_details,
+    )
+
+    target_latched = await asyncio.to_thread(session_directory_latched, directory)
+    return _text(tool_call_id, "sessions", text, details=stamp_details(details, target_latched))
 
 
 def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[str]:
@@ -20650,7 +20803,13 @@ async def _sessions_spawn_mesh(
     if minted:
         head += f" (session {identifier_text(context, minted)})"
     lines = [head]
-    if str(params.prompt or ""):
+    if payload.get("create_unconfirmed") or payload.get("replayed"):
+        # The create's own reply was lost (confirmed by key) or this was a retry
+        # the owner matched to the session it already made: the first prompt's
+        # admission was not observed by THIS call, so "not admitted" would be a
+        # claim nobody saw. The owner/relay sentence says what is known.
+        lines.append(str(payload.get("detail") or ""))
+    elif str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
         lines.append("the prompt was admitted there" if admitted else "the prompt was not admitted")
     notice = str(payload.get("unattended_notice") or "")
@@ -20709,7 +20868,13 @@ async def _sessions_resume_mesh(
         reply = str(payload.get("reply") or "")
         if reply:
             details["reply"] = reply
-        if payload.get("ok") is False:
+            # S-60, fail closed: see the mesh ``send`` reply above.
+            from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+            details[BRIDGE_TAINT_DETAILS_KEY] = True
+        # The same pilot-send receipt as ``send peer=``, so the same rule: an
+        # admitted turn still running there is a delivery, not a failure.
+        if _mesh_send_failed(payload):
             return _error(tool_call_id, "sessions", text, details=details)
         return _text(tool_call_id, "sessions", text, details=details)
 
@@ -22834,7 +22999,9 @@ def _validate_adoption_handle(action: str, params: BrowserParams) -> str:
     if action != "open":
         return (
             f"'tab' is only valid for 'open' (got it on '{action}'): it names a tab "
-            "to ADOPT, and adoption happens once, when the surface is taken"
+            "to ADOPT, and adoption happens once, when the surface is taken. "
+            "('close' also takes 'tab', but only for a tab a child session handed "
+            "to this one — 'tabs' marks those '(yours — handed from child …)'.)"
         )
     if not NON_CMUX_SURFACE_HANDLE_RE.fullmatch(handle):
         return (
@@ -26773,7 +26940,7 @@ def _owns_redacted_tab(own_surface: str, redacted: str) -> bool:
     return own_surface == redacted
 
 
-def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
+def _format_bridge_tab(entry: dict[str, Any], own_surface: str, handed: Any = ()) -> str:
     """One listed tab: handle, page, recency — the caller's own marked.
 
     The "(yours)" marker matters because the listing shows EVERY session's
@@ -26787,6 +26954,22 @@ def _format_bridge_tab(entry: dict[str, Any], own_surface: str) -> str:
     title = str(entry.get("title", "")).strip() or "(untitled)"
     url = str(entry.get("url", "")).strip() or "(no URL)"
     mine = " (yours)" if _owns_redacted_tab(own_surface, token) else ""
+    if not mine:
+        # A tab a finished CHILD handed to this session is this session's now
+        # (see `browser_bridge.handoff`), even though it never opened it. Marked
+        # with where it came from and the one call that closes it, because
+        # nothing else in the listing would tell the parent it owns it.
+        for item in handed or ():
+            if _owns_redacted_tab(item.surface_id, token):
+                from local_operator.browser_bridge.handoff import public_surface_label
+
+                label = public_surface_label(item.surface_id)
+                why = f": {item.reason}" if item.reason else ""
+                mine = (
+                    f" (yours — handed from child {item.from_session}{why}; "
+                    f"close it with action='close' tab='{label}')"
+                )
+                break
     when = ""
     last_used = entry.get("lastUsedAt")
     if isinstance(last_used, (int, float)) and last_used > 0:
@@ -26825,7 +27008,8 @@ async def _bridge_tabs(
             f"{_BROWSER_TABS_CLEANUP_FOOTER}",
             details={"tab_count": 0},
         )
-    lines = [_format_bridge_tab(entry, state.surface_id) for entry in entries]
+    handed = getattr(state, "handed", None) or ()
+    lines = [_format_bridge_tab(entry, state.surface_id, handed) for entry in entries]
     return _text(
         tool_call_id,
         "browser",
@@ -29041,6 +29225,22 @@ async def close_browser_surface(state: BrowserSurfaceProtocol) -> str:
 
 async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> ToolResult:
     if not state.surface_id:
+        handed = getattr(state, "handed", None) or ()
+        if handed:
+            from local_operator.browser_bridge.handoff import public_surface_label
+
+            # Without this, a parent holding only a child's handed sign-in tab
+            # was told "No browser surface open." and could reasonably conclude
+            # nothing needed closing — the stranding this handoff exists to end.
+            labels = ", ".join(public_surface_label(item.surface_id) for item in handed)
+            return _text(
+                tool_call_id,
+                "browser",
+                "No browser surface of your own is open. Tabs handed to you by "
+                f"finished child sessions: {labels}. Close one with action='close' "
+                "tab='<handle>'.",
+                useless=True,
+            )
         return _text(tool_call_id, "browser", "No browser surface open.", useless=True)
     surface = state.surface_id
     problem = await close_browser_surface(state)
@@ -29056,6 +29256,152 @@ async def _browser_close(tool_call_id: str, state: BrowserSurfaceProtocol) -> To
 
 @_guard("browser")
 async def execute_browser(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """The browser tool: handed-tab closes, the owned lane, and a child's fate note.
+
+    Two concerns of the child → parent handoff (``browser_bridge.handoff``) sit
+    HERE, around the owned lane, rather than inside it:
+
+    * ``close tab=<handle>`` for a tab a child handed to this session is served
+      before the lane, because the lane speaks with THIS session's ownership
+      record and the handed tab lives under the child's;
+    * in a SUBAGENT, the results of ``open``/``retain``/``release`` and a pending
+      access request carry one sentence stating what happens to the tab when
+      the child finishes. This is the enforceable point the brief asked for: a
+      child that tells a human "the tab is open" must have been told, at the
+      moment it acted, that an unretained tab is closed when it ends — and the
+      runner's fate line (``Browser: closed ui:N``) contradicts any such claim
+      to the parent in the same result. Parsing the child's final prose for
+      "left open" claims was rejected: it is a heuristic over free text, and
+      the authoritative line already makes the claim harmless.
+    """
+    # Deliberately AHEAD of ``_execute_browser_owned`` (review R5): that lane
+    # would refuse ``close tab=`` as an adoption handle, and nothing it guards
+    # applies here — this only closes a tab already in THIS session's own
+    # ``handed`` list (so a confined session that never launched a child has
+    # none), through the child's own ownership record.
+    handed_close = await _browser_handed_close(tool_call_id, args, context)
+    if handed_close is not None:
+        return handed_close
+    # Read, never created, here: a holder created up front would turn a
+    # read-only inspection into state (the inner lane creates one when it
+    # genuinely needs it), which the inspection contract forbids.
+    before = getattr(getattr(context, "browser", None), "surface_id", "")
+    result = await _execute_browser_owned(tool_call_id, args, signal, on_update, context)
+    state = getattr(context, "browser", None)
+    if state is None:
+        return result
+    return _child_browser_fate_note(state, args, result, before)
+
+
+async def _browser_handed_close(
+    tool_call_id: str, args: dict[str, Any], context: ToolContext | None
+) -> ToolResult | None:
+    """Close a tab a finished child handed to this session, or ``None`` to pass."""
+    if str(args.get("action", "")).strip().lower() != "close":
+        return None
+    handle = str(args.get("tab", "") or "").strip()
+    browser = getattr(context, "browser", None) if context is not None else None
+    if not handle or browser is None:
+        return None
+    from local_operator.browser_bridge.handoff import close_handed, surface_matches
+
+    for item in list(getattr(browser, "handed", None) or ()):
+        if surface_matches(item.surface_id, handle):
+            fate = await close_handed(browser, item, outcome="completed")
+            text = f"{fate} (handed from child {item.from_session})."
+            if fate.startswith("Browser: closed"):
+                return _text(tool_call_id, "browser", text, details={"handed_closed": True})
+            return _error(tool_call_id, "browser", text)
+    handed = getattr(browser, "handed", None) or ()
+    if handed:
+        from local_operator.browser_bridge.handoff import public_surface_label
+
+        # A typo or an already-closed handle (QA Q3): the adoption-lane error
+        # ("'tab' is only valid for 'open'") is true but sends the reader
+        # looking at adoption, when what they need is the handles that DO match.
+        labels = ", ".join(public_surface_label(item.surface_id) for item in handed)
+        return _error(
+            tool_call_id,
+            "browser",
+            f"No handed tab matches {handle!r}. Tabs handed to you by finished child "
+            f"sessions: {labels}; close one with action='close' tab='<handle>'.",
+        )
+    return None
+
+
+def _child_browser_fate_note(
+    state: BrowserSurfaceProtocol, args: dict[str, Any], result: ToolResult, before: str
+) -> ToolResult:
+    """In a subagent, append the tab's end-of-task fate to the result text."""
+    parent = str(getattr(state, "parent_session_id", "") or "")
+    if not parent or result.is_error or not state.surface_id:
+        return result
+    from local_operator.browser_bridge.handoff import public_surface_label
+
+    action = str(args.get("action", "")).strip().lower()
+    label = public_surface_label(state.surface_id)
+    resource = getattr(state, "resource", None)
+    retention = str(((getattr(resource, "record", None) or {}).get("retention")) or "")
+    if action == "open" and state.surface_id != before:
+        # The top-level reminder ("…unless the user needs it left open")
+        # contradicts the subagent rule below in the same result (QA Q2): a
+        # child cannot leave a tab open past its own end, only hand it up.
+        result = _replace_result_text(result, f"\n{_BROWSER_OPEN_CLEANUP_REMINDER}", "")
+        note = (
+            f"You are a subagent: {label} is CLOSED when you finish unless you 'retain' it, "
+            f"which hands it to your parent session {parent} (it then owns and closes it). "
+            "A tab a human must use belongs with the parent: retain it before you finish. "
+            f"Report its fate as 'closed {label}' or 'handed {label} to parent {parent}' — "
+            "never as 'left open'."
+        )
+    elif action == "retain" and retention:
+        note = (
+            f"When you finish, {label} is HANDED to your parent session {parent}, which owns "
+            f"and closes it from then on. Report it as 'handed {label} to parent {parent}', "
+            "never as 'left open'."
+        )
+    elif action == "release":
+        note = f"Released: {label} is now CLOSED when you finish; report it as 'closed {label}'."
+    elif action in ("request_access", "await_access") and retention:
+        note = (
+            f"While this approval is pending, {label} is retained: if you finish now it is "
+            f"handed to your parent session {parent}; report it as 'handed {label} to parent "
+            f"{parent}'."
+        )
+    else:
+        return result
+    return _append_result_text(result, note)
+
+
+def _replace_result_text(result: ToolResult, old: str, new: str) -> ToolResult:
+    """``result`` with ``old`` replaced by ``new`` in every text block."""
+    content = [
+        TextContent(text=block.text.replace(old, new)) if isinstance(block, TextContent) else block
+        for block in result.content
+    ]
+    return result.model_copy(update={"content": content})
+
+
+def _append_result_text(result: ToolResult, note: str) -> ToolResult:
+    """``result`` with ``note`` appended to its last text block."""
+    content = list(result.content)
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
+        if isinstance(block, TextContent):
+            content[index] = TextContent(text=f"{block.text}\n\n{note}")
+            break
+    else:
+        content.append(TextContent(text=note))
+    return result.model_copy(update={"content": content})
+
+
+async def _execute_browser_owned(
     tool_call_id: str,
     args: dict[str, Any],
     signal: AbortSignal | None = None,
@@ -30361,7 +30707,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
             "navigate it. Call 'close' before your final response unless a pending "
             "interaction needs it; 'tabs' lists every tab (handles redacted) and 'close' "
-            "ends only your own tab. "
+            "ends only your own tab. A subagent's unretained tab closes when it ends; "
+            "'retain' hands it to the parent. "
             "An unapproved site fails with origin_not_allowed: call 'request_access', "
             "NOTIFY the operator, then 'await_access' before retrying. "
             "Never install or script a browser engine instead. Playbook: `guide://browser`."

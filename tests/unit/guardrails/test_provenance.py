@@ -56,8 +56,16 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Nor do they have a GitHub remote: stub "GitHub, no open PR" so the clean
     # worktree path is reachable. The PR-state controls live in
     # ``test_worktree_remove_and_refusal_scope.py``.
+    # ``worktree_activity`` asks the history lookup (``_gh_prs``/``_glab_mrs``)
+    # first and falls back to the open-only one only on a full page, so "no open
+    # PR" needs BOTH stubbed: stubbing only the open lookup let these tests reach
+    # the real ``gh``, which passed where an authenticated gh was on PATH and read
+    # "PR state unknown" (HIGH) on CI. Forge-neutral: GitLab is stubbed too.
     monkeypatch.setattr(prov, "_github_repo", lambda _: "o/r")
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_mrs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_glab_open_mrs", lambda repo, branch: [])
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
     for key in [k for k in os.environ if k.startswith(("CMUX_", "GIT_"))]:
@@ -243,6 +251,33 @@ def test_worktree_remove_clean_low_dirty_forced_primary_high(home: Path, repo: P
     (wt / "untracked").write_text("work")
     assert prov.worktree_state(str(wt)) == "dirty"
     assert _verdict(home, f"git worktree remove {wt}").risk is Risk.HIGH
+
+
+def test_clean_worktree_low_without_any_forge_cli(
+    home: Path, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``home`` stubs alone keep the clean path LOW: no forge CLI is consulted.
+
+    Regression for a fixture that stubbed only the open-PR lookup, so the history
+    lookup ran the real ``gh``: green on a machine with an authenticated gh, HIGH
+    ("PR state unknown") on CI. PATH here holds only ``git`` plus tripwire
+    ``gh``/``glab`` scripts that record any call and fail, so a lookup leaking past
+    the stubs fails this test on every machine, authenticated or not.
+    """
+    real_git = shutil.which("git")
+    assert real_git is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").symlink_to(real_git)
+    calls = tmp_path / "forge-calls"
+    for name in ("gh", "glab"):
+        tool = bin_dir / name
+        tool.write_text(f'#!/bin/sh\necho {name} "$@" >> "{calls}"\nexit 1\n')
+        tool.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    wt = repo / ".worktrees" / "wt"
+    assert _verdict(home, f"git -C {repo} worktree remove {wt}").risk is Risk.LOW
+    assert not calls.exists(), calls.read_text()
 
 
 # -- trusted operator words --------------------------------------------------------------
@@ -577,7 +612,8 @@ def test_preview_reports_the_checkpoint_branch_and_text(home: Path) -> None:
     theirs = preview_tool_call(
         "bash", {"command": "rm -rf ~/theirs"}, ctx, settings=GuardSettings()
     )
-    assert theirs.builtin_risk == "HIGH" and "no evidence" in theirs.render()
+    assert theirs.builtin_risk == "HIGH" and "no history evidence" in theirs.render()
+    assert "ledger: no row for this session" in theirs.render()
     assert "cannot authorise a delete" in theirs.builtin_text
     crit = preview_tool_call(
         "bash", {"command": "rm -rf ~/.local-operator"}, ctx, settings=GuardSettings()
