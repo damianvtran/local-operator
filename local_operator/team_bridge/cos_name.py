@@ -56,15 +56,24 @@ opt-in.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
+import os
 import re
+import threading
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
+
+#: Sentinel for :func:`published_agent`'s ``designated``: "resolve it here".
+#: ``None`` cannot play that part, because ``None`` is a real answer ("no
+#: designated chief of staff") the caller may already have resolved.
+UNRESOLVED: Any = object()
 
 #: The bridge's label cap, in code points (agent-server ``bridge.LabelMaxChars``).
 #: ``agent_name`` follows the label rules, so the same cap applies.
@@ -214,7 +223,24 @@ def _name_key(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
-def published_agent(config_dir: Path | str | None) -> PublishedAgent | None:
+def designated_aida(config_dir: Path | str | None) -> tuple[Path | None, str | None] | None:
+    """The ON-LOOP half of :func:`published_agent`: who the designated CoS is.
+
+    Split out so an async caller can resolve this part on the event loop and
+    hand the rest (agent.yml scan + picture normalisation, the expensive part)
+    to a worker thread. It must stay on the loop thread because it polls the
+    process config watcher, and ``ConfigWatcher.poll_now`` fans a detected
+    change out to listeners that touch loop-affine session state — running it
+    from a worker would call those listeners off-thread. It is cheap: one stat
+    of ``config.yml`` (a parse only when it moved) and one short state read.
+    """
+
+    return _designated_aida(config_dir)
+
+
+def published_agent(
+    config_dir: Path | str | None, *, designated: Any = UNRESOLVED
+) -> PublishedAgent | None:
     """The local agent definition behind the designated chief of staff, or ``None``.
 
     ``None`` is the answer for every case where this machine has nothing to say
@@ -231,7 +257,11 @@ def published_agent(config_dir: Path | str | None) -> PublishedAgent | None:
     file this side will not resolve — and a doubt publishes nothing.
     """
 
-    resolved = _designated_aida(config_dir)
+    # ``designated`` is the caller's :func:`designated_aida` answer when it ran
+    # that half on the loop and called this from a worker thread; everything
+    # below it is filesystem + Pillow only, with its memos behind locks, so it
+    # is safe off the loop.
+    resolved = _designated_aida(config_dir) if designated is UNRESOLVED else designated
     if resolved is None:
         return None
     root, name = resolved
@@ -297,19 +327,73 @@ def _aida_definition(root: Path) -> tuple[str, Path, Mapping[str, Any]] | None:
         candidates = sorted(agents_dir.iterdir())
     except OSError:
         return None
+    _prune_definition_memo({agent_dir / "agent.yml" for agent_dir in candidates})
     for agent_dir in candidates:
         try:
             if not agent_dir.is_dir():
                 continue
-            definition = yaml.safe_load((agent_dir / "agent.yml").read_text(encoding="utf-8"))
+            definition = _memoised_definition(agent_dir / "agent.yml", yaml, ROLE_NAME)
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
-        if not isinstance(definition, Mapping):
-            continue
-        raw_name = definition.get("name")
-        if isinstance(raw_name, str) and raw_name.strip().casefold() == ROLE_NAME.casefold():
+        if definition is not None:
             return agent_dir.name, agent_dir, definition
     return None
+
+
+# -- agent.yml scan memo -------------------------------------------------------
+#
+# WHY: every full status check scans EVERY agent definition for the one named
+# after Aida's role (72 on the operator's machine) with the pure-Python YAML
+# loader — ~0.35 s profiled on v0.101.50, repeated on every status-cache expiry
+# though the files almost never change. The memo keeps, per ``agent.yml`` path,
+# the file's stat fingerprint and whether it is the role definition (plus that
+# one definition), so an unchanged file is never re-parsed.
+#
+# INVARIANT: a changed file always re-parses. The fingerprint is (inode, size,
+# mtime_ns, ctime_ns), taken BEFORE the read, so a write racing the read stores
+# a fingerprint OLDER than the content adopted — the next scan then sees a
+# mismatch and re-parses (self-correcting, never stale). The agent store writes
+# by ``os.replace`` (a new inode), and any in-place write moves ctime_ns.
+# BOUND: entries are pruned to the paths present in the current directory
+# listing, so the memo never outgrows the agents directory. Thread-safe: the
+# scan runs on a worker thread (``avatar_publish.reconcile``) and may race a
+# concurrent explicit publish.
+
+_DefinitionEntry = tuple[tuple[int, int, int, int], "Mapping[str, Any] | None"]
+_DEFINITION_MEMO: dict[Path, _DefinitionEntry] = {}
+_DEFINITION_MEMO_LOCK = threading.Lock()
+
+
+def _prune_definition_memo(present: set[Path]) -> None:
+    with _DEFINITION_MEMO_LOCK:
+        for stale in [path for path in _DEFINITION_MEMO if path not in present]:
+            del _DEFINITION_MEMO[stale]
+
+
+def _memoised_definition(path: Path, yaml: Any, role_name: str) -> Mapping[str, Any] | None:
+    """``path``'s definition when it is the role definition, else ``None``.
+
+    Raises what the uncached read raised (``OSError``, ``UnicodeDecodeError``,
+    ``yaml.YAMLError``) so the caller's skip rule is unchanged; a parse error is
+    NOT memoised, so a half-written file is re-read on the next scan. The
+    returned mapping is a deep copy: callers must never share one with the memo.
+    """
+
+    st = os.stat(path)
+    fingerprint = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    with _DEFINITION_MEMO_LOCK:
+        entry = _DEFINITION_MEMO.get(path)
+    if entry is not None and entry[0] == fingerprint:
+        return None if entry[1] is None else copy.deepcopy(entry[1])
+    definition = yaml.safe_load(path.read_text(encoding="utf-8"))
+    matched: Mapping[str, Any] | None = None
+    if isinstance(definition, Mapping):
+        raw_name = definition.get("name")
+        if isinstance(raw_name, str) and raw_name.strip().casefold() == role_name.casefold():
+            matched = definition
+    with _DEFINITION_MEMO_LOCK:
+        _DEFINITION_MEMO[path] = (fingerprint, matched)
+    return None if matched is None else copy.deepcopy(matched)
 
 
 def _avatar_of(agent_dir: Path, block: object) -> dict[str, Any]:
@@ -376,18 +460,53 @@ def _stored_avatar_bytes(agent_dir: Path, block: Mapping[str, Any]) -> bytes | N
 
     try:
         meta = AgentAvatarMeta.model_validate(dict(block))
-        data, mime, _sha = agent_avatar.read(agent_dir, meta)
+        data, mime, source_sha = agent_avatar.read(agent_dir, meta)
         from local_operator.media import sniff_image
 
         info = sniff_image(data)
         if info is None or info.mime_type != mime or mime not in {"image/png", "image/jpeg"}:
             return None
-        data = agent_avatar.normalise(data).data
+        data = _memoised_normalise(source_sha, data)
     except Exception:  # noqa: BLE001 — a doubt of any kind publishes nothing and deletes nothing
         return None
     if not data or len(data) > AVATAR_MAX_BYTES:
         return None
     return data
+
+
+# -- normalise memo --------------------------------------------------------------
+#
+# WHY: re-encoding the picture through Pillow cost ~0.5 s per full status check
+# (profiled on v0.101.50) although the stored file almost never changes.
+#
+# INVARIANT: a changed file always re-normalises. The key is the SHA-256 of the
+# exact input bytes — ``agent_avatar.read`` already hashed the body it read and
+# refused any mismatch with the block, so the key costs nothing extra and
+# describes the bytes themselves, not a path or a timestamp that could lie.
+# ``normalise`` is a pure function of those bytes within one process (same
+# Pillow), so equal keys give equal output. Failures are not memoised. BOUND:
+# the few most recent pictures (one per agent in practice), LRU-evicted.
+
+_NORMALISE_MEMO_MAX = 4
+_NORMALISE_MEMO: OrderedDict[str, bytes] = OrderedDict()
+_NORMALISE_MEMO_LOCK = threading.Lock()
+
+
+def _memoised_normalise(source_sha256: str, data: bytes) -> bytes:
+    from local_operator import agent_avatar
+
+    with _NORMALISE_MEMO_LOCK:
+        hit = _NORMALISE_MEMO.get(source_sha256)
+        if hit is not None:
+            _NORMALISE_MEMO.move_to_end(source_sha256)
+            return hit
+    normalised = agent_avatar.normalise(data).data
+    with _NORMALISE_MEMO_LOCK:
+        _NORMALISE_MEMO[source_sha256] = normalised
+        _NORMALISE_MEMO.move_to_end(source_sha256)
+        while len(_NORMALISE_MEMO) > _NORMALISE_MEMO_MAX:
+            _NORMALISE_MEMO.popitem(last=False)
+    return normalised
 
 
 #: Cached answer for :func:`_avatar_survives_registry`; ``None`` = not asked yet.
@@ -447,5 +566,6 @@ __all__ = [
     "bridge_agent_name",
     "cos_display_name",
     "degenerate_agent_name",
+    "designated_aida",
     "published_agent",
 ]
