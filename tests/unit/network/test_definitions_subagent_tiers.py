@@ -371,3 +371,128 @@ def test_state_and_readiness_name_the_tiers(
     _push(head, _PeerLink(mirror))
     facts = {"subagent_tiers": readiness.subagent_tiers_fact(mirror)}
     assert readiness.subagent_tiers_row(member, facts, peer_label="x") is None
+
+
+def _tiers_bundle(tiers: dict[str, Any], origin: str = HEAD_DEVICE) -> dict[str, Any]:
+    return {
+        "kind": definitions.BUNDLE_KIND,
+        "version": definitions.BUNDLE_VERSION,
+        "origin_device": origin,
+        "agents": [],
+        "teams": [],
+        definitions.SUBAGENT_TIERS_KIND: {"kind": definitions.SUBAGENT_TIERS_KIND, **tiers},
+    }
+
+
+def test_a_broken_config_is_reported_unreadable_and_never_moved_aside(tmp_path: Path) -> None:
+    """Review round 1, M1: peer-reachable reads never let ConfigManager rename config.
+
+    ``ConfigManager`` recovers a malformed file by renaming it ``config.yml.bad.*``
+    and loading defaults; a peer's state probe used to trigger that, and the next
+    apply then installed over defaults. Every peer path must leave the bytes alone.
+    """
+    from local_operator.network import readiness
+
+    node = _root(tmp_path, "node")
+    config = node / "config.yml"
+    broken = b"subagents:\n  models: {hi: openai/gpt-6\n\tmax_running: [\n"
+    config.write_bytes(broken)
+
+    def untouched() -> None:
+        assert config.read_bytes() == broken
+        assert sorted(p.name for p in node.iterdir() if ".bad" in p.name) == []
+
+    state = definitions.subagent_tiers_state(node)
+    assert state["status"] == "unreadable", state
+    untouched()
+    detail = definitions.definition_state(node, names=None)
+    assert detail[definitions.SUBAGENT_TIERS_KIND]["status"] == "unreadable"
+    untouched()
+    fact = readiness.subagent_tiers_fact(node)
+    assert fact is not None and fact["status"] == "unreadable", fact
+    untouched()
+
+    summary = definitions.apply_bundle(
+        node, _tiers_bundle({"models": dict(HEAD_TIERS)}), origin_device=HEAD_DEVICE
+    )
+    result = summary[definitions.SUBAGENT_TIERS_KIND]
+    assert result["outcome"] == "conflict" and result["code"] == "unreadable", result
+    untouched()
+
+
+def test_a_tiers_mirror_from_another_origin_is_kept(tmp_path: Path) -> None:
+    """Review round 1, m2: a copy of device C's tiers is not replaced by A's."""
+    other = "d_" + "c" * 32
+    node = _root(tmp_path, "node")
+    first = definitions.apply_bundle(
+        node, _tiers_bundle({"models": {"hi": "openai/gpt-6"}}, other), origin_device=other
+    )
+    assert first[definitions.SUBAGENT_TIERS_KIND] == {"outcome": "installed"}, first
+
+    summary = definitions.apply_bundle(
+        node, _tiers_bundle({"models": dict(HEAD_TIERS)}), origin_device=HEAD_DEVICE
+    )
+    result = summary[definitions.SUBAGENT_TIERS_KIND]
+    assert result["outcome"] == "conflict" and result["code"] == "other_origin", result
+    assert _subagents(node)["models"] == {"hi": "openai/gpt-6"}
+    state = definitions.subagent_tiers_state(node)
+    assert state["status"] == "mirror" and state["origin"] == other, state
+    assert state["conflict"]["code"] == "other_origin", state
+    notice = definitions.tiers_conflict_notice(state["conflict"], peer_label="device-b")
+    assert notice.startswith("device-b keeps a copy of another device's"), notice
+
+
+def test_a_settings_save_racing_the_mirror_write_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, m1: the policy read is re-checked inside the write lock.
+
+    The node had no tiers when apply decided to install, then its operator saved
+    ``hi`` through ``/settings`` before the mirror took the lock. That save wins.
+    """
+    import contextlib
+
+    from local_operator import config_writer, settings_io
+
+    node = _root(tmp_path, "node")
+    _set_subagents(node, {"max_running": 2})
+    real_lock = config_writer.config_write_lock
+    raced = {"done": False}
+
+    @contextlib.contextmanager
+    def lock_after_a_settings_save(config_dir: Path, **kwargs: Any) -> Any:
+        if not raced["done"]:
+            raced["done"] = True
+            row = next(s for s in settings_io.SETTINGS if s.key == "subagents.models.hi")
+            settings_io.write_setting(ConfigManager(node), row, "openai/gpt-6", notify=False)
+        with real_lock(config_dir, **kwargs):
+            yield
+
+    monkeypatch.setattr(config_writer, "config_write_lock", lock_after_a_settings_save)
+    summary = definitions.apply_bundle(
+        node, _tiers_bundle({"models": dict(HEAD_TIERS)}), origin_device=HEAD_DEVICE
+    )
+
+    assert raced["done"]
+    result = summary[definitions.SUBAGENT_TIERS_KIND]
+    assert result["outcome"] == "conflict" and result["code"] == "edited", result
+    assert _subagents(node)["models"] == {"hi": "openai/gpt-6"}
+    assert _subagents(node)["max_running"] == 2
+    assert definitions.subagent_tiers_state(node)["status"] == "authored"
+
+
+def test_an_in_sync_push_after_a_tiers_conflict_does_not_claim_the_same_definitions(
+    tmp_path: Path,
+) -> None:
+    """QA round 1, Q-1: a refused tiers revision is not "the same definitions"."""
+    head, node = _root(tmp_path, "head"), _root(tmp_path, "node")
+    _set_subagents(head, {"models": dict(HEAD_TIERS)})
+    _set_subagents(node, {"models": {"hi": "openai/gpt-6"}})
+    link = _PeerLink(node)
+    _push(head, link)
+
+    again = _push(head, link)
+
+    assert again["code"] == "in_sync", again
+    assert again[definitions.SUBAGENT_TIERS_KIND]["outcome"] == "conflict", again
+    assert again["message"].endswith("hold the same agent and team definitions"), again

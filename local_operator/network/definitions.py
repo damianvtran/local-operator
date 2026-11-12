@@ -928,8 +928,22 @@ def _subagent_tiers_on_disk(root: Path) -> tuple[dict[str, Any] | None, bool]:
     non-empty and distinct, the node reads as ``authored``/``edited``, and a mirror
     never overwrites a (broken) value somebody typed here.
     """
-    from local_operator.config import ConfigManager
+    from local_operator import settings_io
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 
+    # GUARD BEFORE CONSTRUCTING (review round 1, M1): ``ConfigManager`` never
+    # raises on a malformed config.yml — it renames the file to
+    # ``config.yml.bad.<stamp>`` and loads defaults. This read is reachable from a
+    # PEER (definitions state, readiness, apply), so without the guard a peer's
+    # read-only probe would move this node's config aside and the next apply would
+    # install over defaults. A peer request must never construct a manager that
+    # can rename or rewrite config, so a file the strict parser refuses is
+    # reported as ``unreadable`` and left byte-for-byte as it is.
+    try:
+        settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)
+    except settings_io.ConfigUnreadableError:
+        logger.debug("definitions: config is unreadable; tiers left alone", exc_info=True)
+        return None, True
     try:
         raw = ConfigManager(root).get_config_value("subagents", None)
     except Exception:  # noqa: BLE001 — unreadable is a state, reported, never written over
@@ -990,7 +1004,17 @@ def subagent_tiers_state(root: Path) -> dict[str, Any]:
     }
 
 
-def _write_subagent_tiers(root: Path, row: Mapping[str, Any], origin: str) -> None:
+class _TiersChangedUnderLock(Exception):
+    """The tier map on disk moved between the policy decision and the write.
+
+    Raised from inside ``config_write_lock`` so the caller records a conflict
+    instead of overwriting what a concurrent ``/settings`` save just stored.
+    """
+
+
+def _write_subagent_tiers(
+    root: Path, row: Mapping[str, Any], origin: str, *, expected_digest: str
+) -> None:
     """Install the tier map through the settings registry's own write path.
 
     WHY NOT A YAML EDIT: ``config.yml`` holds every other setting the node's
@@ -1006,15 +1030,29 @@ def _write_subagent_tiers(root: Path, row: Mapping[str, Any], origin: str) -> No
     would refuse. ``notify`` is deliberately not fired: the in-process watcher's
     fan-out is the operator's ``source="local"`` attribution, which a write a PEER
     caused must not mint; the config watcher's poll still delivers the change.
+
+    ``expected_digest`` is the digest of the tier map the apply policy decided on
+    (``""`` for none). It is re-checked INSIDE the write lock (review round 1, m1):
+    the policy read happened outside it, so a ``/settings`` save landing in
+    between would otherwise be overwritten by a mirror the policy only allowed
+    because the node had no tiers of its own a moment earlier.
     """
     from local_operator import settings_io
-    from local_operator.config import ConfigManager
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
     from local_operator.config_writer import config_write_lock
 
+    # Same guard as the read path (M1): constructing the manager on a malformed
+    # file would rename it aside before ``_reload_before_write`` could refuse.
+    settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)
     manager = ConfigManager(root)
     rows = {setting.key: setting for setting in settings_io.SETTINGS}
     models = dict(row.get("models") or {})
     with config_write_lock(manager.config_dir):
+        current, unreadable = _subagent_tiers_on_disk(root)
+        if unreadable:
+            raise settings_io.ConfigUnreadableError("config.yml became unreadable")
+        if (digest_of(current) if current is not None else "") != expected_digest:
+            raise _TiersChangedUnderLock()
         settings_io._reload_before_write(manager)  # noqa: SLF001 — the registry's writer
         values = manager.get_config().values
         for tier, value in models.items():
@@ -1100,7 +1138,27 @@ def _apply_subagent_tiers_locked(
             )
         if current_digest == incoming:
             return {"outcome": "unchanged"}
-    _write_subagent_tiers(root, row, origin)
+    from local_operator.settings_io import ConfigUnreadableError
+
+    try:
+        _write_subagent_tiers(
+            root,
+            row,
+            origin,
+            expected_digest=digest_of(current) if current is not None else "",
+        )
+    except ConfigUnreadableError:
+        return conflict(
+            "the config here could not be read, so its subagent model tiers were not replaced",
+            "unreadable",
+        )
+    except _TiersChangedUnderLock:
+        # Whatever just landed is this operator's edit; it reads as "edited".
+        return conflict(
+            "the subagent model tiers here changed while the copy was being installed, so "
+            "they were not overwritten",
+            "edited",
+        )
     index[SUBAGENT_TIERS_INDEX_KEY] = {"origin": origin, "digest": incoming, "at": time.time()}
     index.pop(SUBAGENT_TIERS_CONFLICT_KEY, None)
     return {
@@ -2301,11 +2359,12 @@ def push_to_peer(
             "ok": True,
             "code": "in_sync",
             "message": self_sentence(server) + " and this device hold the same "
-            # A refused instructions revision is not "the same definitions" (Q-2):
-            # the agent/team rows are, and the notice says the rest.
+            # A refused instructions or tiers revision is not "the same
+            # definitions" (Q-2, and Q-1 for the tiers): the agent/team rows are,
+            # and the notice says the rest.
             + (
                 "agent and team definitions"
-                if instructions_report.get("outcome") == "conflict"
+                if "conflict" in (instructions_report.get("outcome"), tiers_report.get("outcome"))
                 else "definitions"
             ),
             "device_id": device_id,
