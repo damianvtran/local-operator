@@ -30108,7 +30108,12 @@ async def _execute_browser(
     # computed from the SAME readings as the decision above (empty when nothing
     # was demoted).
     demotion = _bridge_demotion_hint(bridge_liveness) + _ui_demotion_hint(ui_liveness)
-    if not cmux_available and not bridge_available and not ui_available:
+    state = _browser_state(context)
+    # Discovery chooses a NEW host, not whether an existing capability may reach
+    # its pinned transport. Its bounded pre-delivery recovery must get a chance
+    # even when every discovery probe failed; never hop to an unrelated host.
+    held_host = _host_of_surface(state.surface_id)
+    if not held_host and not cmux_available and not bridge_available and not ui_available:
         # A bridge daemon that is UP but has no browser attached is not an
         # unconfigured host: "run 'lop browser status' and 'lop browser install'
         # to set up the bridge" sends a user with an installed, paired bridge to
@@ -30148,8 +30153,6 @@ async def _execute_browser(
         refusal = _browser_secret_ref(tool_call_id, params, context)
         if refusal is not None:
             return refusal
-    state = _browser_state(context)
-
     if action in OWNERSHIP_BROWSER_ACTIONS:
         # Reachable ONLY when the ownership lane in `execute_browser` did not run,
         # which means no host here can own a surface: either this session has no
@@ -30387,9 +30390,12 @@ async def _execute_browser(
     if action == "tabs":
         # Discovery works without an owned surface (its point is finding out
         # what is open), but cmux keeps no multi-surface registry, so a
-        # cmux-pinned session degrades exactly like scroll/logs.
+        # cmux-pinned session degrades exactly like scroll/logs. Discovery only
+        # selects an unpinned host: a held capability must reach its own client.
         pinned = _host_of_surface(state.surface_id)
-        if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
+        if state.surface_id.startswith("surface:") or (
+            not pinned and not (ui_available or bridge_available)
+        ):
             return _error(
                 tool_call_id,
                 "browser",
