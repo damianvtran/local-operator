@@ -62,9 +62,29 @@ def record(message: str, level: int = logging.WARNING) -> logging.LogRecord:
     return logging.LogRecord("fixture", level, __file__, 1, message, (), None)
 
 
+def instrumented_handler(stream: io.StringIO, **kwargs) -> ServeLogHandler:
+    """Inject only the consumer write for deterministic queue/formatting tests.
+
+    Production intentionally drops streams without a private fd. These synthetic
+    sinks measure queue behavior, not destination selection; subprocess tests
+    below separately exercise the real private-fd and unavailable-fd paths.
+    """
+    handler = ServeLogHandler(stream, **kwargs)
+    instrument_sink(handler, stream)
+    return handler
+
+
+def instrument_sink(handler: ServeLogHandler, stream: io.StringIO) -> None:
+    def write(text: str) -> None:
+        stream.write(text)
+        stream.flush()
+
+    handler._write = write
+
+
 def test_blocked_background_write_does_not_block_event_loop_or_close() -> None:
     sink = BlockedSink()
-    handler = ServeLogHandler(sink)
+    handler = instrumented_handler(sink)
     handler.handle(record("background cache warning"))
     assert sink.entered.wait(2)
     finished = threading.Event()
@@ -79,7 +99,7 @@ def test_blocked_background_write_does_not_block_event_loop_or_close() -> None:
     thread.start()
     try:
         assert finished.wait(2), "event loop/close waited on the blocked sink"
-        assert handler.lock is None
+        assert handler.lock is not None
     finally:
         sink.release.set()
         thread.join(2)
@@ -91,7 +111,7 @@ def test_blocked_background_write_does_not_block_event_loop_or_close() -> None:
 
 def test_overflow_reserves_diagnostics_and_counts_every_drop() -> None:
     sink = BlockedSink()
-    handler = ServeLogHandler(sink, capacity=8)
+    handler = instrumented_handler(sink, capacity=8)
     handler.handle(record("inflight"))
     assert sink.entered.wait(2)
     try:
@@ -118,7 +138,7 @@ def test_overflow_reserves_diagnostics_and_counts_every_drop() -> None:
 
 def test_exception_formatting_and_drop_summary_are_on_consumer() -> None:
     sink = BlockedSink()
-    handler = ServeLogHandler(sink, capacity=2)
+    handler = instrumented_handler(sink, capacity=2)
     handler.handle(record("first"))
     assert sink.entered.wait(2)
     formatted_on = []
@@ -183,6 +203,7 @@ def test_normal_logs_delivered(logging_state, monkeypatch) -> None:
     sink.release.set()
     monkeypatch.setattr(sys, "stderr", sink)
     handler = configure_serve_logging()
+    instrument_sink(handler, sink)
     try:
         logging.getLogger("fixture").warning("normal %s", "delivery")
         assert sink.delivered.wait(2)
@@ -192,13 +213,27 @@ def test_normal_logs_delivered(logging_state, monkeypatch) -> None:
         handler._worker.join(2)
 
 
-def test_shutdown_does_not_flush_blocked_stderr_wrapper(tmp_path: Path) -> None:
+@pytest.mark.parametrize("exhaust_fds", [False, True])
+def test_shutdown_does_not_flush_blocked_stderr_wrapper(tmp_path: Path, exhaust_fds: bool) -> None:
     # Child fills its undrained stderr pipe. The private fd consumer must not
     # hold TextIOWrapper's lock, or Python's final stderr flush hangs at exit.
     code = """
-import logging, os, threading
+import io, logging, os, resource, sys, threading
+assert isinstance(sys.stderr.buffer, io.BufferedWriter)
 from local_operator.serve_logging import configure_serve_logging
+fillers = []
+if sys.argv[1] == "True":
+    resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+    try:
+        while True:
+            fillers.append(os.open(os.devnull, os.O_RDONLY))
+    except OSError as exc:
+        import errno
+        assert exc.errno == errno.EMFILE
 h = configure_serve_logging()
+assert (h._fd is None) == (sys.argv[1] == "True")
+for fd in fillers:
+    os.close(fd)
 os.set_blocking(2, False)
 try:
     while True:
@@ -212,16 +247,34 @@ def write(fd, data):
     entered.set()
     return original(fd, data)
 os.write = write
+attempted = threading.Event()
+original_write = h._write
+def sink_write(text):
+    try:
+        original_write(text)
+    finally:
+        attempted.set()
+h._write = sink_write
 logging.warning("blocked write")
-assert entered.wait(2)
+if h._fd is None:
+    assert attempted.wait(2)
+else:
+    assert entered.wait(2)
 h.close()
+if h._fd is None:
+    h._worker.join(2)
+    assert not h._worker.is_alive()
+    assert h.sink_errors == h.dropped == 1
 logging.shutdown()
 print("shutdown completed", flush=True)
 """
     process = subprocess.Popen(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", code, str(exhaust_fds)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        # The harness exports PYTHONUNBUFFERED=1, which bypasses the buffered
+        # wrapper lock and would hide the interpreter-finalization regression.
+        env={k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"},
         start_new_session=True,
     )
     try:
@@ -238,6 +291,78 @@ print("shutdown completed", flush=True)
             process.stderr.close()
 
 
+def test_handler_preserves_filter_record_replacement() -> None:
+    sink = BlockedSink()
+    sink.release.set()
+    handler = instrumented_handler(sink)
+    handler.addFilter(
+        lambda incoming: record("replacement") if incoming.msg == "original" else False
+    )
+    try:
+        handler.handle(record("rejected"))
+        handler.handle(record("original"))
+        assert sink.delivered.wait(2)
+        assert "replacement" in sink.getvalue()
+        assert "original" not in sink.getvalue()
+        assert "rejected" not in sink.getvalue()
+    finally:
+        handler.close()
+        handler._worker.join(2)
+
+
+def test_private_fd_delivers_without_using_stream_wrapper(tmp_path: Path, monkeypatch) -> None:
+    delivered = threading.Event()
+    original = os.write
+
+    def write(fd, data):
+        result = original(fd, data)
+        delivered.set()
+        return result
+
+    monkeypatch.setattr(os, "write", write)
+    path = tmp_path / "private-fd.log"
+    with path.open("w") as stream:
+        handler = ServeLogHandler(stream)
+        assert handler._fd is not None
+        try:
+            handler.handle(record("private fd delivery"))
+            assert delivered.wait(2)
+        finally:
+            handler.close()
+            handler._worker.join(2)
+        # The caller's stream is still open and usable after private-fd cleanup.
+        assert not stream.closed
+    assert "private fd delivery" in path.read_text()
+
+
+def test_unavailable_fd_drops_without_touching_wrapper() -> None:
+    class ForbiddenSink(io.StringIO):
+        def write(self, text: str) -> int:
+            pytest.fail("unavailable private fd must not fall back to wrapper I/O")
+
+    sink = ForbiddenSink()
+    handler = ServeLogHandler(sink)
+    attempted = threading.Event()
+    original = handler._write
+
+    def write(text: str) -> None:
+        try:
+            original(text)
+        finally:
+            attempted.set()
+
+    handler._write = write
+    try:
+        handler.handle(record("unavailable fd"))
+        assert attempted.wait(2)
+    finally:
+        handler.close()
+        handler._worker.join(2)
+    assert not handler._worker.is_alive()
+    assert handler.sink_errors == handler.dropped == 1
+    assert not sink.getvalue()
+
+
 def test_queue_retains_only_capacity_payload_graphs() -> None:
     import weakref
 
@@ -245,7 +370,7 @@ def test_queue_retains_only_capacity_payload_graphs() -> None:
         pass
 
     sink = BlockedSink()
-    handler = ServeLogHandler(sink, capacity=8)
+    handler = instrumented_handler(sink, capacity=8)
     handler.handle(record("inflight"))
     assert sink.entered.wait(2)
     payloads = weakref.WeakSet()
@@ -339,7 +464,7 @@ def test_sink_failure_is_counted_and_consumer_recovers() -> None:
             return result
 
     sink = RecoveringSink()
-    handler = ServeLogHandler(sink)
+    handler = instrumented_handler(sink)
     try:
         handler.handle(record("lost"))
         handler.handle(record("recovery"))

@@ -36,6 +36,9 @@ class ServeLogHandler(logging.Handler):
     def __init__(self, stream: TextIO, capacity: int = SERVE_LOG_CAPACITY) -> None:
         if capacity < 2:
             raise ValueError("serve log capacity must be at least two")
+        # Keep Handler's standard producer lock (required by Python 3.14).
+        # It protects only bounded enqueue work: the consumer never acquires it,
+        # and inherited flush() is a no-op, so shutdown cannot wait on sink I/O.
         super().__init__()
         self.capacity = capacity
         self._normal: deque[logging.LogRecord] = deque()
@@ -55,10 +58,6 @@ class ServeLogHandler(logging.Handler):
             self._fd = None
         self._worker = threading.Thread(target=self._consume, name="serve-log-sink", daemon=True)
         self._worker.start()
-
-    def createLock(self) -> None:
-        # Handler.handle and logging.shutdown must not serialize on a sink lock.
-        self.lock = None
 
     @property
     def stopped(self) -> bool:
@@ -86,14 +85,15 @@ class ServeLogHandler(logging.Handler):
 
     def _write(self, text: str) -> None:
         if self._fd is None:
-            self._stream.write(text)
-            self._stream.flush()
-        else:
-            data = text.encode(
-                getattr(self._stream, "encoding", None) or "utf-8", errors="backslashreplace"
-            )
-            while data:
-                data = data[os.write(self._fd, data) :]
+            # EMFILE and streams without fileno must never fall back to the
+            # caller's wrapper: its lock is flushed by interpreter shutdown.
+            # The consumer accounts for the lost record without logging again.
+            raise OSError("private serve logging descriptor unavailable")
+        data = text.encode(
+            getattr(self._stream, "encoding", None) or "utf-8", errors="backslashreplace"
+        )
+        while data:
+            data = data[os.write(self._fd, data) :]
 
     def _consume(self) -> None:
         reported = 0
