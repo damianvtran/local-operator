@@ -410,6 +410,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "not exist there.",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/server/utils/settings_intents.py": (
+        1,
+        "``PEER_INTENTS_DIRNAME`` ('peer-session-intents'): a CONFIG-ROOT sibling of "
+        "sessions/ (<config>/peer-session-intents/<id>/) holding THIS viewing device's "
+        "pending desktop settings picks for a conversation a MESH PEER owns -- never an "
+        "entry of a session directory, so no session copy carries it. It must not travel: "
+        "the picks are this viewer's requests about somebody else's runtime, applied "
+        "through this device's peer bridge, and the directory sits outside sessions/ "
+        "precisely so no reader mistakes the peer's id for a local session (the "
+        "two-writer case mesh-session-mobility.md 3.4 forbids). The module's other "
+        "constant, ``INTENT_FILE``, IS a session entry and is classified in the copy set.",
+    ),
     "local_operator/disk_pressure.py": (
         1,
         "``RECEIPT_DIRNAME`` ('disk-reclaim-receipts'): lives at the DEVICE-level "
