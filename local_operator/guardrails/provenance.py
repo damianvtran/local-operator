@@ -83,6 +83,11 @@ _DB_TIMEOUT_S = 2.0
 #: still held after this is not worth stalling the turn for — the lookup
 #: gives up and the rank stays what it was before the rule existed (m5,
 #: review round 2 of PR #3835: the 2 s wait measured 3.86 s per classify).
+#: This is the busy wait handed to SQLite, not the lookup's wall time: SQLite's
+#: own lock-reporting latency dominates under an EXCLUSIVE lock (QA measured
+#: the lookup at 0.74-0.79 s; a bare stdlib ``connect(timeout=0.25)`` took
+#: ~1.3 s to report "locked" on a loaded box). Still bounded, and well under
+#: the 2 s path.
 _DB_READ_TIMEOUT_S = 0.25
 #: Bound on every git probe. Measured on this machine's worktrees (n=12,
 #: ``git status --porcelain --untracked-files=all`` on local-operator linked

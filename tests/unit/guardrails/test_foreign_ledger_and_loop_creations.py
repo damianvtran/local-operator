@@ -497,26 +497,69 @@ def test_writer_holding_reserved_does_not_stall_or_hide_foreign_rows(home: Path)
     assert elapsed < 1.0, elapsed
 
 
-def test_exclusive_lock_bounds_foreign_lookup_and_keeps_main_rank(home: Path) -> None:
-    """m5: an EXCLUSIVE writer makes the foreign lookup give up fast, rank as main."""
-    import time
+def test_exclusive_lock_bounds_foreign_lookup_and_keeps_main_rank(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m5: under an EXCLUSIVE writer the foreign lookup uses the short busy wait, then ranks as main.
 
+    WHY THIS ASSERTS THE MECHANISM AND NOT A WALL-CLOCK BOUND: the elapsed time
+    is dominated by SQLite's own lock-reporting latency, not by the busy
+    timeout we pass. A bare stdlib ``sqlite3.connect(timeout=0.25)`` against an
+    EXCLUSIVE-locked file took ~1.3 s to report "locked" on a loaded dev box;
+    QA measured the lookup at 0.74-0.79 s. Still bounded, but an absolute bound
+    (``elapsed < _DB_TIMEOUT_S / 2`` measured 1.25-1.43 s and failed) is a bet
+    on machine load (AGENTS.md "Timing, flakes, and how to assert that
+    something is fast"). The facts that cannot flake: the connection is opened
+    with ``_DB_READ_TIMEOUT_S`` (shorter than the 2 s write-path wait), SQLite
+    is handed that value as its busy timeout, the lookup degrades to "no
+    foreign info", and the final verdict is main's rank.
+    """
     (home / "w").mkdir()
     _run(home, "mkdir ~/w/theirs", sid=OTHER)
     db = prov.ledger_path(home / ".local-operator")
+    target = str(home / "w" / "theirs")
+    assert prov._DB_READ_TIMEOUT_S < prov._DB_TIMEOUT_S
+
+    real_connect = sqlite3.connect
+    timeouts: list[float] = []
+
+    def spy(*args, **kwargs):  # records the busy wait handed to SQLite
+        timeouts.append(kwargs.get("timeout", 5.0))
+        return real_connect(*args, **kwargs)
+
+    writer = real_connect(db, isolation_level=None)
     foreign = prov.ForeignCreations(SID, state_root=home / ".local-operator")
-    writer = sqlite3.connect(db, isolation_level=None)
     try:
         writer.execute("BEGIN EXCLUSIVE")
-        start = time.monotonic()
-        hit = foreign.match([str(home / "w" / "theirs")])
-        elapsed = time.monotonic() - start
+        # A scoped patch: ``monkeypatch.undo()`` would also revert the
+        # fixture's HOME/config isolation.
+        with monkeypatch.context() as m:
+            m.setattr(prov.sqlite3, "connect", spy)
+            hit = foreign.match([target])
+            lookup_timeouts = list(timeouts)
+            verdict = _verdict(home, f"rm -rf {target}")
     finally:
         foreign.close()
         writer.execute("ROLLBACK")
         writer.close()
-    assert hit is None
-    assert elapsed < prov._DB_TIMEOUT_S / 2, elapsed
+    assert hit is None  # the lock is held: no foreign info, not a stall
+    assert lookup_timeouts == [prov._DB_READ_TIMEOUT_S]
+    # classify_bash's own ForeignCreations used the short wait too.
+    assert prov._DB_READ_TIMEOUT_S in timeouts[len(lookup_timeouts) :]
+    # n1: with the lookup given up, the rank is exactly main's (no ledger rule).
+    assert verdict.risk is Risk.LOW and verdict.targets[0].reason == "ordinary path"
+
+    # Unlocked, the same lookup's connection carries the short busy timeout
+    # into SQLite itself, and the foreign row is found again.
+    foreign = prov.ForeignCreations(SID, state_root=home / ".local-operator")
+    try:
+        conn = foreign._connection()
+        assert conn is not None
+        busy_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert busy_ms == int(prov._DB_READ_TIMEOUT_S * 1000)
+        assert foreign.match([target]) is not None
+    finally:
+        foreign.close()
 
 
 @pytest.mark.parametrize("rel", ["w/f/\udcff", "w/plain/\udcff"])
