@@ -22,6 +22,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -101,6 +102,10 @@ class _Forge:
     user_repos: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     installation_repos: list[dict[str, Any]] = field(default_factory=list)
     fail_status: int = 0
+    #: Fail only this page of a listing (the walk breaks partway through).
+    fail_page: int = 0
+    #: Answer this many revokes with 500 before honouring one.
+    fail_revokes: int = 0
     gets: list[str] = field(default_factory=list)
     mints: list[dict[str, Any]] = field(default_factory=list)
     revoked: list[str] = field(default_factory=list)
@@ -141,6 +146,10 @@ class _FakeGithubApi:
                     forge.gets.append(self.path)
                 if forge.fail_status:
                     self._json(forge.fail_status, {"message": "forced failure"})
+                    return
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                if forge.fail_page and query.get("page") == [str(forge.fail_page)]:
+                    self._json(500, {"message": "forced page failure"})
                     return
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 path = urllib.parse.urlsplit(self.path).path
@@ -189,8 +198,15 @@ class _FakeGithubApi:
             def do_DELETE(self) -> None:  # noqa: N802
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 with lock:
-                    forge.revoked.append(token)
-                    forge.tokens.discard(token)
+                    failing = forge.fail_revokes > 0
+                    if failing:
+                        forge.fail_revokes -= 1
+                    else:
+                        forge.revoked.append(token)
+                        forge.tokens.discard(token)
+                if failing:
+                    self._json(500, {"message": "forced revoke failure"})
+                    return
                 self._json(204, None)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -390,7 +406,9 @@ def test_a_failed_refresh_keeps_the_last_good_list_and_says_so(
     fact = readiness.github_fact(env.root, env.home)
     assert fact["repositories_origin"] == "last_good"
     clause = readiness._github_scope_clause(fact, "owner-laptop")  # noqa: SLF001
-    assert "last good list" in clause and "refresh failed" in clause, clause
+    assert "the list fetched 6 h ago" in clause, clause
+    assert "could not reach GitHub at its last check" in clause, clause
+    assert "full list: lop network credential github repos on owner-laptop" in clause, clause
 
 
 @pytest.mark.parametrize("status", [401, 503])
@@ -402,8 +420,10 @@ def test_no_last_good_list_refuses_by_name_and_never_widens(
     with _broker(env, api) as broker:
         reply = _refused(broker)
     assert reply["code"] == github_mod.CODE_REPOSITORIES_UNSET, reply
-    assert "could not list the repositories" in reply["message"], reply
-    assert "nothing was lent" in reply["message"], reply
+    # A device-neutral detail: the borrower's catalogue names the owner (QA F1).
+    assert "could not be fetched" in reply["message"], reply
+    assert "this device" not in reply["message"], reply
+    assert "lop network credential github repos --refresh" in reply["message"], reply
 
 
 def test_another_accounts_list_is_never_served_as_last_good(env: _Env, api: _FakeGithubApi) -> None:
@@ -466,7 +486,7 @@ def test_an_app_designation_over_githubs_mint_limit_is_refused_not_cut(
     with _broker(env, api) as broker:
         reply = _refused(broker)
     assert reply["code"] == github_mod.CODE_REPOSITORIES_OVERFLOW, reply
-    assert "exclude" in reply["message"], reply
+    assert reply["message"] == "501 repositories; one share can carry at most 500", reply
     # Only the metadata-read listing token was ever minted, and it was revoked.
     assert [mint.get("permissions") for mint in api.forge.mints] == [{"metadata": "read"}]
 
@@ -545,7 +565,8 @@ def test_readiness_never_calls_github(env: _Env, api: _FakeGithubApi) -> None:
     assert fact["repositories_origin"] == "unavailable"
     assert fact["repositories"] == [] and fact["repositories_count"] == 0
     clause = readiness._github_scope_clause(fact, "owner-laptop")  # noqa: SLF001
-    assert "would refuse rather than widen" in clause, clause
+    assert "no repository listed yet" in clause, clause
+    assert "refused rather than widened" in clause, clause
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +622,8 @@ def test_the_share_receipt_and_readiness_show_the_list_its_origin_and_the_opt_ou
     assert "every repository this device's GitHub login can push to" in receipt, receipt
     assert "minus 1 opted out" in receipt, receipt
     assert "  me/app" in receipt and "  me/site" in receipt, receipt
-    assert "me/secrets" not in receipt and "org/readonly" not in receipt, receipt
+    assert "  me/secrets" not in receipt and "org/readonly" not in receipt, receipt
+    assert "opted out (1): me/secrets — bring one back" in receipt, receipt
     assert "lop network credential github exclude <owner/repo>" in receipt, receipt
     # The share refreshed the list: exactly one walk of /user/repos.
     assert sum(path.startswith("/user/repos") for path in api.forge.gets) == 1
@@ -614,6 +636,7 @@ def test_the_share_receipt_and_readiness_show_the_list_its_origin_and_the_opt_ou
     ready = capsys.readouterr().out
     assert len(api.forge.gets) == gets_before
     assert "me/app and me/site (2 — every repository its login can push to" in ready, ready
+    assert "full list: lop network credential github repos on device-a" in ready, ready
     assert "1 opted out" in ready, ready
     # Evidence for the PR (shown with -rP): the receipt and the readiness row.
     print("=== share receipt ===")
@@ -621,3 +644,280 @@ def test_the_share_receipt_and_readiness_show_the_list_its_origin_and_the_opt_ou
     print("=== readiness (viewer B about owner A) ===")
     print("\n".join(line for line in ready.splitlines() if "github" in line.lower()))
     server_b.stop()
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation (UX U1–U4, N2–N5; review M1, M3, M4, N1; QA F1, F2)
+# ---------------------------------------------------------------------------
+
+
+def _cli_text(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
+    capsys.readouterr()
+    code = _cli(*argv)
+    return code, capsys.readouterr().out
+
+
+def test_u1_opted_out_names_are_shown_and_a_typo_is_warned_then_stored(
+    env: _Env,
+    api: _FakeGithubApi,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """U1: names, not a count; ``exclude`` of a name not in the list says so and
+    stores it anyway (a repo the login gains later arrives opted out)."""
+    _token_arm(env, api, [_repo("me/a"), _repo("me/b")])
+    monkeypatch.setattr(github_mod, "default_minter", api.minter)
+    code, text = _cli_text(capsys, "credential", "github", "exclude", "me/b")
+    assert code == 0
+    assert "me/b is opted out — devices you share with lose push to it the next time" in text
+    assert "within 15 min" in text, text
+    assert "opted out (1): me/b — bring one back: lop network credential github include" in text
+    code, text = _cli_text(capsys, "credential", "github", "exclude", "me/bb")
+    with capsys.disabled():
+        print("=== exclude me/bb (a typo of me/b) ===")
+        print(text)
+    assert code == 0
+    assert (
+        "me/bb isn't in the list this device's GitHub login can push to — check the "
+        "spelling; it's opted out anyway, in case it's added later"
+    ) in text, text
+    assert "opted out (2): me/b, me/bb" in text, text
+    assert github_mod.excluded_repositories(env.root) == ("me/b", "me/bb")
+    code, text = _cli_text(capsys, "credential", "github", "repos")
+    assert "opted out (2): me/b, me/bb — bring one back" in text, text
+    code, text = _cli_text(capsys, "credential", "github", "include", "me/b")
+    with capsys.disabled():
+        print("=== include me/b ===")
+        print(text)
+    assert "me/b is back in — devices you share with can push to it again" in text, text
+    assert "opted out (1): me/bb" in text, text
+    code, text = _cli_text(capsys, "credential", "github", "include", "me/zz")
+    assert "me/zz was not opted out" in text, text
+    code, text = _cli_text(capsys, "credential", "github", "include", "me/bb", "--json")
+    payload = json.loads(text)
+    assert payload["in_list"] is False and payload["changed"] is True
+    assert payload["excluded"] == []
+
+
+def test_u2_repos_lists_every_name_and_the_receipt_keeps_a_short_head(
+    env: _Env,
+    api: _FakeGithubApi,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rows = [_repo(f"octo-org/repo-{n:03d}") for n in range(200)]
+    _token_arm(env, api, rows)
+    _config(env.root, excluded=["octo-org/repo-007", "octo-org/repo-100", "octo-org/repo-199"])
+    monkeypatch.setattr(github_mod, "default_minter", api.minter)
+    code, text = _cli_text(capsys, "credential", "github", "repos", "--refresh")
+    assert code == 0
+    assert "GitHub repositories lent for: 197" in text, text
+    assert sum(line.startswith("  octo-org/repo-") for line in text.splitlines()) == 197
+    assert "more — see them all" not in text, text
+    assert "opted out (3): octo-org/repo-007, octo-org/repo-100, octo-org/repo-199" in text
+    print("=== repos (200 pushable, 3 opted out) ===")
+    print(text)
+    designated, _source = net_cli._github_designation_now(refresh=False)  # noqa: SLF001
+    receipt = net_cli._designation_lines(  # noqa: SLF001
+        designated, github_mod.SOURCE_TOKEN, receipt=True
+    )
+    assert sum(line.startswith("  octo-org/") for line in receipt) == 10
+    assert "  … and 187 more — see them all: lop network credential github repos" in receipt
+
+
+def test_u3_one_age_wording_and_no_config_keys_or_capitals_in_human_text(
+    env: _Env, api: _FakeGithubApi
+) -> None:
+    assert [
+        github_mod.listed_ago(value) for value in (5, 300, 5 * 3600, 30 * 3600, 3 * 86400, None)
+    ] == ["just now", "5 min ago", "5 h ago", "30 h ago", "3 days ago", "at an unknown time"]
+    last_good = github_mod.Designation(
+        repositories=("me/a",),
+        origin=github_mod.ORIGIN_LAST_GOOD,
+        fetched_at=time.time() - 30 * 3600,
+        error="server: forced failure",
+        candidates=1,
+        listed=("me/a",),
+    )
+    explicit_empty = github_mod.Designation(repositories=(), origin=github_mod.ORIGIN_EXPLICIT)
+    all_out = github_mod.Designation(
+        repositories=(),
+        origin=github_mod.ORIGIN_ENUMERATED,
+        excluded=("me/a",),
+        excluded_count=1,
+        candidates=1,
+    )
+    lines = net_cli._designation_lines(last_good, "token", receipt=False)  # noqa: SLF001
+    assert lines[0].startswith("GitHub repositories lent for: 1 — the list fetched 30 h ago"), lines
+    assert "GitHub couldn't be reached just now (server: forced failure)" in lines[0]
+    texts = [
+        *lines,
+        *net_cli._designation_lines(explicit_empty, "token", receipt=False),  # noqa: SLF001
+        *net_cli._designation_lines(all_out, "token", receipt=True),  # noqa: SLF001
+        explicit_empty.refusal(),
+        all_out.refusal(),
+    ]
+    for text in texts:
+        assert "network.credentials" not in text, text
+        assert "LAST GOOD" not in text, text
+        for jargon in ("designat", "minted", "grant"):
+            assert jargon not in text, (jargon, text)
+
+
+def test_u4_refusal_copy_points_at_the_real_fix_and_a_recorded_share_is_not_failed() -> None:
+    all_out = github_mod.Designation(
+        repositories=(),
+        origin=github_mod.ORIGIN_ENUMERATED,
+        excluded=("me/a", "me/b"),
+        excluded_count=2,
+        candidates=2,
+    )
+    assert all_out.refusal() == (
+        "every repository its GitHub login can push to (2) is opted out — bring one back "
+        "with lop network credential github include <owner/repo>"
+    )
+    receipt = net_cli._designation_lines(all_out, "token", receipt=True)  # noqa: SLF001
+    assert receipt[0].startswith(
+        "GitHub repositories: none yet — the share is in place, but every borrow is refused"
+    ), receipt
+    assert "nothing was lent" not in " ".join(receipt)
+
+
+@pytest.mark.parametrize(
+    ("code", "detail", "expected"),
+    [
+        (
+            github_mod.CODE_REPOSITORIES_UNSET,
+            "every repository its GitHub login can push to (2) is opted out — bring one back "
+            "with lop network credential github include <owner/repo>",
+            "owner-laptop has no GitHub repository it can lend access for: every repository "
+            "its GitHub login can push to (2) is opted out — bring one back with lop network "
+            "credential github include <owner/repo>. Fix it on owner-laptop; nothing was lent.",
+        ),
+        (
+            github_mod.CODE_REPOSITORIES_OVERFLOW,
+            "2001 repositories; one share can carry at most 2000",
+            "owner-laptop has more GitHub repositories than one share can carry (2001 "
+            "repositories; one share can carry at most 2000), so nothing was lent. On "
+            "owner-laptop, pick the ones to lend with the GitHub repositories setting (search "
+            "it in /settings), or opt some out with lop network credential github exclude "
+            "<owner/repo>.",
+        ),
+    ],
+)
+def test_f1_the_borrower_sentence_is_rendered_once(code: str, detail: str, expected: str) -> None:
+    """QA F1: the relay leg and the runtime client both render; the second pass
+    must not nest the sentence inside itself."""
+    from local_operator.network.credentials.messages import render_broker_error
+
+    error = cred_types.BrokerError(code=code, message=detail)
+    once = render_broker_error(error, key="github", provider="github", owner_name="owner-laptop")
+    assert once == expected
+    error.message = once
+    twice = render_broker_error(error, key="github", provider="github", owner_name="owner-laptop")
+    assert twice == once
+
+
+def test_n2_n3_usage_shows_json_and_the_example_is_not_a_real_handle(
+    env: _Env, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import argparse
+
+    net_cli._guard_credential_subcommand(argparse.Namespace())  # noqa: SLF001
+    usage = capsys.readouterr().err
+    assert (
+        "lop network credential github repos [--refresh] [--json] | exclude|include "
+        "<owner/repo> [--json]"
+    ) in usage, usage
+    code, text = _cli_text(capsys, "credential", "github", "exclude", "nope", "--json")
+    assert code == 1
+    message = json.loads(text)["message"]
+    assert "octo-org/website" in message and "damianvtran" not in message, message
+
+
+def test_n5_a_slow_listing_prints_one_progress_line_and_a_fast_one_none(
+    env: _Env,
+    api: _FakeGithubApi,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _token_arm(env, api, [_repo("me/a")])
+    monkeypatch.setattr(github_mod, "default_minter", api.minter)
+    capsys.readouterr()
+    net_cli._github_designation_now(refresh=True, progress=True)  # noqa: SLF001
+    assert "listing the repositories" not in capsys.readouterr().err
+    real = github_mod.designation
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(0.3)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(github_mod, "designation", slow)
+    monkeypatch.setattr(net_cli, "_LISTING_PROGRESS_AFTER_S", 0.05)
+    net_cli._github_designation_now(refresh=True, progress=True)  # noqa: SLF001
+    err = capsys.readouterr().err
+    assert err.count("listing the repositories your GitHub login can push to…") == 1, err
+
+
+def test_m1_a_failed_listing_token_revoke_is_retried_once_then_logged(
+    env: _Env, api: _FakeGithubApi, app_keypair: tuple[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    app = github_mod.GithubAppKey(app_id=APP_ID, installation_id="4242", private_key=app_keypair[0])
+    api.forge.installation_repos = [_repo("acme/one")]
+    api.forge.fail_revokes = 1
+    assert api.minter().installation_repositories(app) == ["acme/one"]
+    assert len(api.forge.revoked) == 1  # the retry succeeded
+    api.forge.fail_revokes = 2
+    with caplog.at_level("WARNING", logger="local_operator.network.credentials.github"):
+        assert api.minter().installation_repositories(app) == ["acme/one"]
+    assert len(api.forge.revoked) == 1
+    assert "could not be revoked after one retry" in caplog.text, caplog.text
+
+
+def test_m3_a_listing_that_fails_partway_still_revokes_its_token(
+    env: _Env, api: _FakeGithubApi, app_keypair: tuple[str, str]
+) -> None:
+    _seed_app_key(env.root, app_keypair[0])
+    api.forge.installation_repos = [_repo(f"acme/r{n:03d}") for n in range(150)]
+    api.forge.fail_page = 2
+    with _broker(env, api) as broker:
+        reply = _refused(broker)
+    assert reply["code"] == github_mod.CODE_REPOSITORIES_UNSET, reply
+    assert sum(path.endswith("&page=1") for path in api.forge.gets) == 1
+    assert sum(path.endswith("&page=2") for path in api.forge.gets) == 1
+    assert [mint.get("permissions") for mint in api.forge.mints] == [{"metadata": "read"}]
+    assert len(api.forge.revoked) == 1 and not api.forge.tokens & set(api.forge.revoked)
+
+
+def test_m4_f2_readiness_never_shows_the_previous_accounts_list(
+    env: _Env, api: _FakeGithubApi
+) -> None:
+    _token_arm(env, api, [_repo("acct-one/x1"), _repo("acct-one/x2")])
+    with _broker(env, api) as broker:
+        _granted(broker)
+    fact = readiness.github_fact(env.root, env.home)
+    assert fact["repositories"] == ["acct-one/x1", "acct-one/x2"], fact
+    # Re-login as another account; GitHub then fails (QA's repro).
+    time.sleep(0.01)
+    _seed_secret(env.root, github_mod.TOKEN_SECRET_NAME, OTHER_TOKEN)
+    api.forge.fail_status = 500
+    fact = readiness.github_fact(env.root, env.home)
+    assert fact["repositories"] == [] and fact["repositories_origin"] == "unavailable", fact
+    assert "earlier GitHub login" in fact.get("repositories_error", ""), fact
+    clause = readiness._github_scope_clause(fact, "owner-laptop")  # noqa: SLF001
+    assert "acct-one" not in clause, clause
+    print("=== readiness after an account switch ===")
+    print(clause)
+
+
+def test_review_n1_exactly_the_page_bound_is_listed_and_one_more_is_refused(
+    api: _FakeGithubApi,
+) -> None:
+    bound = github_mod.ENUMERATION_PAGE_SIZE * github_mod.ENUMERATION_MAX_PAGES
+    api.forge.user_repos[TOKEN] = [_repo(f"me/r{n:05d}") for n in range(bound)]
+    assert len(api.minter().pushable_user_repositories(TOKEN)) == bound
+    api.forge.user_repos[TOKEN].append(_repo("me/one-more"))
+    with pytest.raises(github_mod.GithubApiError) as refused:
+        api.minter().pushable_user_repositories(TOKEN)
+    assert f"more than {bound} repositories" in str(refused.value)
+    assert "network.credentials" not in str(refused.value)

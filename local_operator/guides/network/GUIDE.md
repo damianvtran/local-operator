@@ -1015,28 +1015,38 @@ repository the installation covers. It is always an explicit list — shown on
 the share receipt, in readiness, and carried on every grant — never "all
 repositories":
 
-- `lop network credential github repos` prints the list, where it came from
-  (`enumerated`, `explicit`, or `last good` with its age) and how many are opted
-  out; `--refresh` asks GitHub again now; `--json` carries the whole list.
+- `lop network credential github repos` prints every repository a share lends
+  for and says where the list came from — every repository this device's
+  GitHub login can push to (with how long ago it was listed), the list you
+  chose by hand, or, when GitHub can't be reached, the list fetched earlier
+  (with its age) — then the opted-out repositories by name. `--refresh` asks
+  GitHub again now; `--json` carries the same list with an `origin` field
+  (`enumerated`, `explicit`, `last_good`, `unavailable`).
 - **Opt one out:** `lop network credential github exclude <owner/repo>` (back
-  in: `… include <owner/repo>`). It is stored as
-  `network.credentials.github.excluded` on the owner and takes effect at each
-  borrower's NEXT borrow or refresh — the owner re-reads it on every grant and
-  the grant carries the narrowed list, so no cache keeps an opted-out
-  repository pushable past one grant window.
-- **The enumeration is cached for 6 hours** and re-asked at every `credential
-  share github`, on `repos --refresh`, and lazily on the first grant after the
-  6 h bound. A repository the owner gains reaches borrowers within that bound
-  (at once with a refresh); one the owner loses push to is refused by GitHub
-  whatever the list says. If GitHub cannot be asked, the LAST GOOD list keeps
-  serving and readiness and `repos` say so with its age; with no earlier list,
-  a borrow is refused by name. Nothing ever widens to "everything".
-- **A hand-picked list still wins:** set `network.credentials.github.repositories`
-  (search it in `/settings`, `owner/repo` entries) and only those are lent (minus
-  any opt-outs); nothing is enumerated.
-- **Limits:** one grant carries at most 2000 repositories, and an App mint at
+  in: `… include <owner/repo>`). The reply names what changed and every
+  repository still opted out. A name that isn't in the current list is kept
+  anyway, with a "check the spelling" warning, so a repository the login gains
+  later arrives already opted out. It is stored as
+  `network.credentials.github.excluded` on the owner, and devices you share
+  with lose push to it the next time they fetch the credential — within the
+  grant window (`network.credentials.grant_ttl_s`, 15 min by default): the owner
+  re-reads the opt-outs on every grant and the grant carries the narrowed list.
+- **The list is cached for 6 hours** and fetched again at every `credential
+  share github`, on `repos --refresh`, and on the first borrow after the 6 h
+  bound. A repository the owner gains reaches borrowers within that bound (at
+  once with a refresh); one the owner loses push to is refused by GitHub
+  whatever the list says. If GitHub can't be reached, the list fetched earlier
+  keeps serving, and `repos` and readiness say how old it is; with no earlier
+  list, a borrow is refused by name. Nothing ever widens to "everything".
+- **A hand-picked list still wins:** set the GitHub repositories setting
+  (`network.credentials.github.repositories`; search it in `/settings`,
+  `owner/repo` entries) and only those are lent, minus any opt-outs; nothing is
+  fetched from GitHub.
+- **Limits:** one share carries at most 2000 repositories, and an App token at
   most 500 (GitHub's own per-token limit). A larger list is refused by name —
-  opt some out or set an explicit list — never cut to a prefix.
+  pick the ones to lend with the GitHub repositories setting, or opt some out —
+  never cut to a prefix. The share receipt shows the first 10 names and points
+  at `repos` for the rest.
 
 This list is the git helper's allow-list and the enforced bound on every
 route; the App mint is also narrowed to it. The designation travels WITH the

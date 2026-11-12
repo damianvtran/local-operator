@@ -811,7 +811,7 @@ def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
         in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH),
     }
     if source in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
-        _designation_fact(fact, root, source)
+        _designation_fact(fact, root, source, home)
     if source == github_mod.SOURCE_APP:
         fact["permissions"] = dict(github_mod.GITHUB_PERMISSIONS)
         fact["origin"] = _secret_mesh_origin(root, github_mod.APP_SECRET_NAME)
@@ -827,7 +827,9 @@ def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
 READINESS_REPOSITORY_SAMPLE = 50
 
 
-def _designation_fact(fact: dict[str, Any], root: Path, source: str) -> None:
+def _designation_fact(
+    fact: dict[str, Any], root: Path, source: str, home: Path | None = None
+) -> None:
     """The effective GitHub designation, from the owner's CACHE only.
 
     ``allow_fetch=False``: readiness never calls GitHub. ``repositories_origin``
@@ -840,7 +842,7 @@ def _designation_fact(fact: dict[str, Any], root: Path, source: str) -> None:
     from local_operator.network.credentials import github as github_mod
 
     try:
-        designated = github_mod.designation(root, source=source, allow_fetch=False)
+        designated = github_mod.designation(root, source=source, allow_fetch=False, home=home)
     except Exception:  # noqa: BLE001 — an unreadable list is "not stated"
         fact["repositories"] = None
         return
@@ -2894,7 +2896,7 @@ def _ssh_github_clause(facts: Mapping[str, Any], peer_label: str) -> str:
     )
 
 
-def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
+def _github_scope_clause(fact: Mapping[str, Any], peer_label: str, where: str = "") -> str:
     """What a peer-held GitHub credential covers, or an explicit "not knowable".
 
     Scopes are only knowable for the App arm, whose permissions are fixed
@@ -2931,9 +2933,10 @@ def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
         # The token arms are narrowed by lop's git helper alone, to the same
         # designation the App would mint for — so the list IS stated, the scopes
         # are not.
-        return f"{unknown}; lop's git helper serves it for {_designation_phrase(fact)}"
+        phrase = _designation_phrase(fact, where or peer_label)
+        return f"{unknown}; lop's git helper serves it for {phrase}"
     if "repositories_origin" in fact:
-        return f"it mints {stated}, narrowed to {_designation_phrase(fact)}"
+        return f"it mints {stated}, narrowed to {_designation_phrase(fact, where or peer_label)}"
     if "repositories" not in fact:
         return f"it mints {stated}; what that mint is narrowed to is not stated here"
     repositories = fact.get("repositories")
@@ -2951,13 +2954,17 @@ def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
     return f"it mints {stated}, narrowed to {shown}, which is what a push and a PR need"
 
 
-def _designation_phrase(fact: Mapping[str, Any]) -> str:
+def _designation_phrase(fact: Mapping[str, Any], where: str) -> str:
     """The designated list and WHERE it came from, in one phrase.
 
     The source is never left implicit: an enumerated list says it is what the
-    login can push to, a fallback says it is the last good one and how old, and
-    an unavailable list says a borrow would refuse (never "all repositories").
+    login can push to, a fallback says how old it is and why, and an unlisted
+    one says a borrow refuses rather than widens (never "all repositories").
+    Ages come from ``github.listed_ago`` — the receipt's and ``repos``' own
+    wording (UX round 1, U3) — and the full list is one command away (U2).
     """
+    from local_operator.network.credentials import github as github_mod
+
     names = [str(name) for name in (fact.get("repositories") or []) if str(name)]
     try:
         count = int(fact.get("repositories_count") or len(names))
@@ -2969,46 +2976,32 @@ def _designation_phrase(fact: Mapping[str, Any]) -> str:
     except (TypeError, ValueError):
         excluded = 0
     opted = f", {excluded} opted out" if excluded else ""
+    error = str(fact.get("repositories_error") or "")
     if not count:
         if origin == "unavailable":
-            error = str(fact.get("repositories_error") or "")
             why = f" ({error})" if error else ""
             return (
-                f"no repository yet — that device has no list of repositories it can push "
-                f"to{why}, so a borrow would refuse rather than widen"
+                f"no repository listed yet{why} — the next borrow asks GitHub, and is "
+                "refused rather than widened if it cannot"
             )
         return f"no repository{opted} — a borrow would refuse rather than widen"
-    # Five names and a count: the whole list is `lop network credential github
-    # repos` on the owner, and a readiness row is read at a glance.
-    shown = (
-        names
-        if count <= 5 and len(names) == count
-        else [*names[:5], f"{count - min(len(names), 5)} more"]
-    )
+    # Five names and a count: the whole list is `credential github repos` on the
+    # device that lends, and a readiness row is read at a glance.
+    shown = names if count <= 5 and len(names) == count else [*names[:5], f"{count - 5} more"]
     listed = _name_list(shown)
-    age = _age_words(fact.get("repositories_age_s"))
+    ago = github_mod.listed_ago(fact.get("repositories_age_s"))
     if origin == "explicit":
-        source = f"the explicit list set there{opted}"
+        source = f"the list chosen by hand there{opted}"
     elif origin == "last_good":
-        error = str(fact.get("repositories_error") or "")
-        why = f"; the latest refresh failed: {error}" if error else ""
-        source = f"the last good list of what its login can push to, {age} old{opted}{why}"
+        why = f": {error}" if error else ""
+        source = (
+            f"the list fetched {ago}{opted} — that device could not reach GitHub at its "
+            f"last check{why}"
+        )
     else:
-        source = f"every repository its login can push to, listed {age} ago{opted}"
-    return f"{listed} ({count} — {source})"
-
-
-def _age_words(value: Any) -> str:
-    """``40 s`` / ``12 min`` / ``6 h`` from a seconds value; ``an unknown time`` else."""
-    try:
-        seconds = int(value)
-    except (TypeError, ValueError):
-        return "an unknown time"
-    if seconds < 120:
-        return f"{max(seconds, 0)} s"
-    if seconds < 7200:
-        return f"{seconds // 60} min"
-    return f"{seconds // 3600} h"
+        source = f"every repository its login can push to, listed {ago}{opted}"
+    pointer = f"; full list: lop network credential github repos on {where}" if where else ""
+    return f"{listed} ({count} — {source}{pointer})"
 
 
 def _github_observed(fact: Any) -> dict[str, Any]:
@@ -3133,7 +3126,7 @@ def _github_push_clause(
                     "but this device holds no GitHub credential to lend: a push there "
                     f"would be refused until one is set up here — {github_mod.no_source_arms()}"
                 )
-            covered = _github_scope_clause(local or {}, peer_label)
+            covered = _github_scope_clause(local or {}, peer_label, "this device")
         else:
             covered = (
                 f"what that grant covers is decided on {owner_label(placement_owner)}, "

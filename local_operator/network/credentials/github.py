@@ -447,33 +447,106 @@ class Designation:
     candidates: int = 0
     fetched_at: float = 0.0
     error: str = ""
+    #: The candidate NAMES before the opt-outs, so ``exclude`` can tell a typo
+    #: from a real repository (UX round 1, U1).
+    listed: tuple[str, ...] = ()
 
     def age_s(self, now: float | None = None) -> float:
         if not self.fetched_at:
             return 0.0
         return max(0.0, (now if now is not None else time.time()) - self.fetched_at)
 
-    def refusal(self) -> str:
-        """The sentence for an empty designation (callers only ask when empty)."""
+    def reason(self, whose: str = "its") -> str:
+        """Why the list is empty, as a clause with no device subject of its own.
+
+        DEVICE-NEUTRAL ON PURPOSE (QA round 1, F1): the same words travel to the
+        borrower inside the owner's refusal, where "this device" would name the
+        wrong machine. ``whose`` lets the owner's own CLI say "this device's".
+        """
         if self.origin == ORIGIN_EXPLICIT:
             return (
-                "network.credentials.github.repositories is set but names no usable "
-                "owner/repo after opt-outs on this device — nothing was lent (unset it to "
-                "lend for every repository this login can push to, or name some)"
+                "the hand-picked GitHub repositories setting names no repository once "
+                "opt-outs are removed"
             )
         if self.origin == ORIGIN_UNAVAILABLE:
             why = f" ({self.error})" if self.error else ""
             return (
-                "this device could not list the repositories its GitHub source can push "
-                f"to{why} and has no earlier list to fall back on — nothing was lent; retry "
-                "when GitHub is reachable (`lop network credential github repos --refresh`)"
+                f"the list of repositories {whose} GitHub login can push to could not be "
+                f"fetched{why}, and there is no earlier list to fall back on"
             )
         if self.candidates and self.excluded_count >= self.candidates:
             return (
-                f"every repository this device's GitHub source can push to ({self.candidates}) "
-                "is opted out in network.credentials.github.excluded — nothing was lent"
+                f"every repository {whose} GitHub login can push to ({self.candidates}) is "
+                "opted out"
             )
-        return "the GitHub source on this device can push to no repositories — nothing was " "lent"
+        return f"{whose} GitHub login can push to no repositories"
+
+    def remedy(self) -> str:
+        """The one step that repairs an empty list — a command or a setting, never a key."""
+        if self.origin == ORIGIN_EXPLICIT:
+            return (
+                "add repositories to the GitHub repositories setting (search it in "
+                "/settings), or clear it to lend every repository the login can push to"
+            )
+        if self.origin == ORIGIN_UNAVAILABLE:
+            return "retry when GitHub is reachable: lop network credential github repos --refresh"
+        if self.candidates and self.excluded_count >= self.candidates:
+            return "bring one back with lop network credential github include <owner/repo>"
+        return "give that GitHub login push access to a repository"
+
+    def refusal(self) -> str:
+        """The owner's refusal detail: reason, then remedy (callers ask only when empty)."""
+        return f"{self.reason()} — {self.remedy()}"
+
+
+def listed_ago(seconds: float | None) -> str:
+    """``just now`` / ``12 min ago`` / ``5 h ago`` / ``3 days ago``.
+
+    THE ONE AGE WORDING (UX round 1, U3): the share receipt, ``credential github
+    repos`` and readiness all describe the same cached list, so they must not
+    disagree about its age or switch units mid-sentence ("1800 min old").
+    ``None`` (no timestamp) reads as "at an unknown time".
+    """
+    if seconds is None:
+        return "at an unknown time"
+    value = max(0, int(seconds))
+    if value < 60:
+        return "just now"
+    if value < 120 * 60:
+        return f"{value // 60} min ago"
+    if value < 48 * 3600:
+        return f"{value // 3600} h ago"
+    return f"{value // 86400} days ago"
+
+
+def source_hint(source: str, root: Path | None = None, *, home: Path | None = None) -> str:
+    """Which login a cached list was fetched for, from METADATA only (no secret value).
+
+    The serve keys the cache by the token's own hash (:func:`source_identity`),
+    which needs the token in hand. Readiness never reads a token, so it matches
+    on this instead (review M4 / QA F2: after a re-login as another account,
+    readiness showed the previous account's list): the stored secret's record id
+    and update time for the App and token arms, the ``user`` gh's hosts file
+    records for the gh arm. ``""`` when it cannot be read — never a match.
+    """
+    try:
+        if source in (SOURCE_APP, SOURCE_TOKEN):
+            from local_operator.secrets import access
+            from local_operator.secrets.keys import store_path
+
+            if not store_path(root).exists():
+                return ""
+            name = APP_SECRET_NAME if source == SOURCE_APP else TOKEN_SECRET_NAME
+            record = access.open_store(root).describe(name)
+            return f"{source}:{record.record_id}:{record.updated_at}"
+        if source == SOURCE_GH:
+            hosts = _read_gh_hosts(home)
+            entry = hosts.get("github.com") if isinstance(hosts, dict) else None
+            user = entry.get("user") if isinstance(entry, dict) else None
+            return f"gh:{user}" if user else ""
+    except Exception:  # noqa: BLE001 — an unreadable hint is "unknown", never a match
+        return ""
+    return ""
 
 
 def _cache_path(root: Path | None) -> Path:
@@ -549,6 +622,7 @@ def designation(
     refresh: bool = False,
     allow_fetch: bool = True,
     now: float | None = None,
+    home: Path | None = None,
 ) -> Designation:
     """The effective list for ``source``: explicit, or enumerated minus opt-outs.
 
@@ -571,6 +645,7 @@ def designation(
             excluded=excluded,
             excluded_count=removed,
             candidates=len(explicit),
+            listed=tuple(explicit),
         )
     identity = source_identity(source, token=token, app=app)
     cache = read_enumeration_cache(root)
@@ -583,13 +658,20 @@ def designation(
         fetched_at = float(cache.get("fetched_at") or 0.0)
     except (TypeError, ValueError):
         fetched_at = 0.0
-    # A cache is THIS account's only when both the arm and the account match;
-    # readiness (no token in hand) matches on the arm alone.
-    ours = cache.get("arm") == source and (
-        not allow_fetch or str(cache.get("identity") or "") == identity
-    )
+    # A cache is THIS account's only when both the arm and the account match.
+    # The serve matches the token's own hash; readiness (no token in hand) matches
+    # the metadata hint written beside it, so after a re-login as another account
+    # neither path presents the previous account's list (review M4 / QA F2).
+    hint = source_hint(source, root, home=home)
+    if allow_fetch:
+        account_matches = str(cache.get("identity") or "") == identity
+    else:
+        account_matches = bool(hint) and str(cache.get("hint") or "") == hint
+    ours = cache.get("arm") == source and account_matches
     fresh = ours and bool(cached) and 0.0 <= moment - fetched_at < ENUMERATION_MAX_AGE_S
     error = str(cache.get("error") or "") if ours else ""
+    if not ours and not allow_fetch and cache.get("arm") == source and cached:
+        error = "the saved list is for an earlier GitHub login"
     if allow_fetch and (refresh or not fresh):
         try:
             listed = _enumerate(source, token=token, app=app, minter=minter)
@@ -606,6 +688,7 @@ def designation(
                 {
                     "arm": source,
                     "identity": identity,
+                    "hint": hint,
                     "fetched_at": moment,
                     "repositories": listed,
                     "error": "",
@@ -620,6 +703,7 @@ def designation(
                 excluded_count=removed,
                 candidates=len(listed),
                 fetched_at=moment,
+                listed=tuple(listed),
             )
     if ours and cached:
         kept, removed = _apply_exclusions(cached, excluded)
@@ -632,12 +716,13 @@ def designation(
             candidates=len(cached),
             fetched_at=fetched_at,
             error=error,
+            listed=tuple(cached),
         )
     return Designation(
         repositories=(),
         origin=ORIGIN_UNAVAILABLE,
         excluded=excluded,
-        error=error or ("never enumerated on this device" if not allow_fetch else ""),
+        error=error or ("not fetched yet" if not allow_fetch else ""),
     )
 
 
@@ -1310,7 +1395,10 @@ class GithubMinter:
         }
         rows: list[dict[str, Any]] = []
         separator = "&" if "?" in path else "?"
-        for page in range(1, ENUMERATION_MAX_PAGES + 1):
+        # One page PAST the bound is asked only when every page so far was full:
+        # a login with exactly the bound fills the last page, and only a
+        # non-empty page after it means "more than" (review N1).
+        for page in range(1, ENUMERATION_MAX_PAGES + 2):
             url = f"{self.base_url}{path}{separator}per_page={ENUMERATION_PAGE_SIZE}&page={page}"
             try:
                 reply = self._transport.request("GET", url, headers=headers)
@@ -1323,13 +1411,17 @@ class GithubMinter:
             batch = reply.body.get(key) if key else reply.items
             if not isinstance(batch, list):
                 raise GithubApiError("server", "the listing reply had no list", status=200)
+            if page > ENUMERATION_MAX_PAGES:
+                if not batch:
+                    return rows
+                break
             rows.extend(item for item in batch if isinstance(item, dict))
             if len(batch) < ENUMERATION_PAGE_SIZE:
                 return rows
         raise GithubApiError(
             "coverage",
-            f"more than {ENUMERATION_PAGE_SIZE * ENUMERATION_MAX_PAGES} repositories; set "
-            "network.credentials.github.repositories to the ones to lend",
+            f"more than {ENUMERATION_PAGE_SIZE * ENUMERATION_MAX_PAGES} repositories — pick the "
+            "ones to lend with the GitHub repositories setting (search it in /settings)",
         )
 
     def pushable_user_repositories(self, token: str) -> list[str]:
@@ -1375,7 +1467,14 @@ class GithubMinter:
         try:
             rows = self._get_pages("/installation/repositories", token, key="repositories")
         finally:
-            self.revoke(token)
+            # ONE retry, then a warning (review M1): ``revoke`` swallows transport
+            # errors and returns False, and a metadata-read token that silently
+            # survives would live out GitHub's one-hour ceiling with no trace.
+            if not self.revoke(token) and not self.revoke(token):
+                logger.warning(
+                    "github: the metadata-read listing token could not be revoked after "
+                    "one retry; it expires at GitHub within the hour"
+                )
         return _full_names(rows)
 
     def revoke(self, token: str) -> bool:

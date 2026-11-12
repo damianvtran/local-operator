@@ -1786,12 +1786,10 @@ class MeshCredentialBroker:
         if count > limit:
             return BrokerError(
                 code=github_app.CODE_REPOSITORIES_OVERFLOW,
-                message=(
-                    f"this device's GitHub designation lists {count} repositories and one "
-                    f"grant can carry at most {limit} — nothing was lent; opt some out "
-                    "(`lop network credential github exclude <owner/repo>`) or set "
-                    "network.credentials.github.repositories to the ones to lend"
-                ),
+                # A DETAIL, not a sentence: the borrower's catalogue wraps it in the
+                # remedy (messages.py), so it names no device and no remedy itself —
+                # the old self-contained sentence was rendered twice (QA F1).
+                message=f"{count} repositories; one share can carry at most {limit}",
                 **common,
             )
         return None
