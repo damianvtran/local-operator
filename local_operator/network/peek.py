@@ -27,10 +27,13 @@ SECURITY SHAPE (no new authority, no new friction):
   cap, the 16 MiB search depth). Those do NOT bound a peer-supplied regex's
   CPU — one row can backtrack for hours — so the owner runs it through
   ``session.peek.BoundedPeerPattern``: the ``regex`` module's per-call timeout
-  (thread CPU seconds), drawn from what is left of this op's slow-lane deadline. A pattern that runs
-  out is refused by name and its worker returns to the pool. The 256-char cap
-  and the nested-quantifier pre-check stay as cheap early refusals, not the
-  bound.
+  (PROCESS CPU seconds), capped at :data:`PEER_REGEX_BUDGET_S` and never past
+  what is left of this op's slow-lane deadline. A pattern that runs out is
+  refused by name and its worker returns to the pool. The 256-char cap and the
+  nested-quantifier pre-check stay as cheap early refusals, not the bound.
+* At most ONE peer-regex peek per requesting device is in flight
+  (:func:`peer_regex_device`, enforced by the relay before a worker is taken):
+  a burst of bad patterns from one member cannot occupy the shared slow lane.
 * SLOW lane: a deep search can take seconds, and the link reader must keep
   serving other frames meanwhile.
 
@@ -66,16 +69,40 @@ SESSION_PEEK_DEADLINE_S = 20.0
 #: after a late hit (one anchored page, milliseconds) — reaches the viewer
 #: before the relay's generic overdue answer does.
 #:
-#: WHAT THE ``regex`` TIMEOUT MEASURES: the calling thread's CPU time, not wall
-#: time (measured: ``time.thread_time()`` delta = the budget to the millisecond,
-#: n=6, budgets 1 s and 3 s). So the CPU a pattern may burn is hard-bounded and
-#: the worker is always returned, but on a contended machine the WALL time
-#: stretches: at load average ~34, wall overshoot was median 0.16 s / max
-#: 0.27 s for a 0.3 s budget and max 2.75 s for 3 s (n=10 each,
-#: ``(a|a)+$``). 2 s covers an unloaded machine and a moderately loaded one;
-#: under heavier load the relay's own overdue answer arrives first, and the
-#: viewer words that as the owner's search running out of time (QA Q3).
+#: WHAT THE ``regex`` TIMEOUT MEASURES: the PROCESS's CPU time, not the calling
+#: thread's and not wall time (PR #3831 review r2-1 / QA Q7: a ``timeout=2``
+#: search stopped at 2.0 s of process CPU alone, and at ~0.4-0.5 s of its own
+#: thread CPU beside three busy siblings). Two consequences: concurrent peer
+#: regexes, and any other CPU the relay burns, SHARE one budget — which only
+#: ever stops a search earlier, the safe direction — and the WALL time a
+#: search takes stretches on a contended machine (QA r2: 62.8 s wall for 18 s
+#: of CPU at load 45-60 on 14 cores). This reserve covers the reply after the
+#: search; :data:`PEER_REGEX_BUDGET_S` is what keeps the stretched search
+#: itself inside the deadline.
 PEER_REGEX_REPLY_RESERVE_S = 2.0
+
+#: The ceiling on what a peer's regex may spend on this device (PR #3831 QA
+#: Q5/Q6). The budget used to be the whole remaining deadline (~18 s), so four
+#: bad patterns held all four slow workers past the 20 s deadline, and the
+#: requester got the relay's generic overdue sentence instead of the owner's
+#: named ``regex_timeout``.
+#:
+#: MEASURED (2026-11-11, this branch, ``regex`` 2026.11.9, load average ~40 on
+#: 14 cores): seven legitimate MISSING patterns (a miss walks the full depth —
+#: ``INV-\d{4}…``, ``(?i)…\w+``, alternation with ``\b``, ``error.*…``, an
+#: anchored one, a character-class run, a URL shape) over three real operator
+#: journals of 33-57 MB, each walk crossing the whole 16 MiB scan (16,780,308
+#: bytes, ~1,500 searched rows / ~11 MB of row text), 3 runs: n=63. Regex CPU
+#: median 0.011 s / max 0.028 s; process CPU for the whole serve median 0.10 s
+#: / max 0.45 s; WALL median 0.26 s / max 1.46 s (the per-row deadline is a
+#: wall-clock one, so the walk's JSON parsing counts against it too).
+#:
+#: 4 s is ~2.7x the observed wall max for a legitimate walk, so it is not hit by
+#: one, even with siblings sharing the process clock. A catastrophic pattern
+#: burns at most 4 s of process CPU; at QA's observed ~3.5x load stretch that is
+#: ~14 s wall — still a clear gap under ``SESSION_PEEK_DEADLINE_S`` (20 s), so
+#: the owner's named refusal reaches the viewer first.
+PEER_REGEX_BUDGET_S = 4.0
 
 #: Encoded ceiling for one reply. Steps are already clipped by the renderer
 #: (``comms.PEEK_STEP_CHARS``) and capped at ``PEEK_MAX_STEPS``, so a real
@@ -96,7 +123,8 @@ def _owner_record(session_id: str) -> Any:
     """The live registry record for one of THIS device's sessions.
 
     ``None`` when it is not live; :data:`_UNRESOLVED` when the registry could
-    not be read. The same resolver the local tool uses, so the digest's state
+    not be read. Read on EVERY peek, not only a digest, because the header's
+    name needs it too (review r2 n2). The same resolver the local tool uses, so the digest's state
     words and the header's name (the live ``conversation_name`` first, PR #3831
     review m2) match what the owner's own peek prints. Best effort: a registry
     that cannot be read must not fail a READ.
@@ -127,15 +155,48 @@ def _owner_live_state(record: Any) -> str:
 
 
 def _regex_budget_s() -> float:
-    """What a peer's regex may spend: this slow op's remaining deadline, less
-    :data:`PEER_REGEX_REPLY_RESERVE_S`. Outside a slow op (a direct call) the
-    full deadline is the reference."""
+    """What a peer's regex may spend: :data:`PEER_REGEX_BUDGET_S`, or less when
+    this slow op's remaining deadline minus :data:`PEER_REGEX_REPLY_RESERVE_S`
+    is shorter (a frame that queued for a worker). Outside a slow op (a direct
+    call) the full deadline is the reference."""
     from local_operator.network.relay import slow_op_remaining_s
 
     remaining = slow_op_remaining_s()
     if remaining is None:
         remaining = SESSION_PEEK_DEADLINE_S
-    return max(0.0, remaining - PEER_REGEX_REPLY_RESERVE_S)
+    return max(0.0, min(PEER_REGEX_BUDGET_S, remaining - PEER_REGEX_REPLY_RESERVE_S))
+
+
+#: What a member is told when it asks for a second regex peek while its first
+#: is still running here (PR #3831 QA Q5). It names the cause and the remedy;
+#: the generic "already running N long operations" sentence would blame load.
+PEER_REGEX_BUSY_SENTENCE = (
+    "a `regex` search from this device is already running on {owner}; wait for "
+    "it to finish (at most {budget:g} s of search time) before starting another, "
+    "or search literally without `regex`."
+)
+
+
+def peer_regex_device(link: "PeerLink", frame: dict[str, Any]) -> str | None:
+    """The device a ``net_session_peek`` frame's regex is charged to, or ``None``.
+
+    WHY (PR #3831 QA Q5). The slow lane is four workers shared by every peer
+    and every slow op (broker borrows, moves, syncs). The per-search budget
+    bounds how long ONE pattern holds a worker, but five concurrent bad
+    patterns from one member still took all four, and whatever arrived next
+    queued past its deadline. So the relay admits at most one regex peek per
+    requesting device and turns a second one away BEFORE it takes a slot or a
+    worker.
+
+    Keyed on the LINK's authenticated ``device_id``, never on a frame field: a
+    member cannot spread its burst across names it does not hold. ``regex`` is
+    read with the same truthiness ``session.peek.request_from_wire`` uses, so
+    every frame that will compile a peer pattern is counted. A literal peek is
+    not limited: its cost is bounded by the scan depth alone.
+    """
+    if str(frame.get("op") or "") != "net_session_peek" or not frame.get("regex"):
+        return None
+    return str(link.device_id or link.link_id)
 
 
 def serve(root: Path, frame: dict[str, Any], *, own_label: str) -> dict[str, Any]:

@@ -9,6 +9,7 @@ contract edges: authority, wire typing, the old-peer answer and the regex caps.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -199,8 +200,9 @@ def test_a_catastrophic_peer_regex_is_cut_by_the_deadline_and_frees_its_worker(
     budget_s = deadline_s - net_peek.PEER_REGEX_REPLY_RESERVE_S
 
     def _serve(frame: dict[str, Any]) -> tuple[float, str]:
-        # ``regex`` bounds THREAD CPU time (see PEER_REGEX_REPLY_RESERVE_S), so
-        # that is the clock asserted on; wall time on a loaded CI box stretches.
+        # ``regex`` bounds PROCESS CPU time (see PEER_REGEX_REPLY_RESERVE_S);
+        # this thread's CPU can only be at or under that, so it is a safe upper
+        # clock to assert on, and wall time on a loaded CI box stretches.
         cpu = time.thread_time()
         try:
             with relay._slow_deadline(time.monotonic() + deadline_s):
@@ -225,6 +227,181 @@ def test_a_catastrophic_peer_regex_is_cut_by_the_deadline_and_frees_its_worker(
     assert mode == "head"
     # The discriminating rows really did hit the bound (not just happen to be fast).
     assert outcomes.count("regex_timeout") >= 3, outcomes
+
+
+class _PeekLink:
+    """The parts of a ``PeerLink`` ``_dispatch_slow``/``_run_handler`` read."""
+
+    def __init__(self, device_id: str) -> None:
+        self.device_id = device_id
+        self.link_id = f"l_{device_id}"
+        self.network_id = "n_test"
+        self.epoch = 1
+        self.sent: list[dict[str, Any]] = []
+        self.got = threading.Event()
+
+    def send(self, frame: dict[str, Any]) -> bool:
+        self.sent.append(frame)
+        self.got.set()
+        return True
+
+
+def _peek_server(root: Path) -> relay.RelayServer:
+    return relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+
+
+def test_the_regex_budget_is_capped_well_inside_the_deadline() -> None:
+    """QA Q5/Q6: a full slow-lane deadline no longer becomes an ~18 s regex
+    budget. The cap holds a 3.5x load stretch (QA r2 measured 62.8 s wall for
+    18 s CPU) inside the deadline, so the owner's named refusal comes first."""
+    with relay._slow_deadline(time.monotonic() + net_peek.SESSION_PEEK_DEADLINE_S):
+        assert net_peek._regex_budget_s() == net_peek.PEER_REGEX_BUDGET_S
+    # A frame that queued for a worker gets only what is left, minus the reserve.
+    with relay._slow_deadline(time.monotonic() + 3.0):
+        assert net_peek._regex_budget_s() <= 3.0 - net_peek.PEER_REGEX_REPLY_RESERVE_S
+    assert net_peek.PEER_REGEX_BUDGET_S * 3.5 < (
+        net_peek.SESSION_PEEK_DEADLINE_S - net_peek.PEER_REGEX_REPLY_RESERVE_S
+    )
+
+
+def test_a_regex_burst_from_one_device_leaves_the_slow_lane_to_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q5: five concurrent bad peeks from ONE device used to take all four
+    slow workers, and a borrow/move/sync arriving next queued past its
+    deadline. Now the first runs, the other four are refused AT ONCE with the
+    named sentence (no slot, no worker), a different slow op from another
+    device starts immediately, and once the first finishes the device may
+    search again."""
+    directory = _journal(tmp_path)
+    _row(directory, "a" * 80 + "-" * 80 + "!")
+    monkeypatch.setattr(net_peek, "PEER_REGEX_BUDGET_S", 1.5)
+    monkeypatch.setattr(net_peek, "_owner_record", lambda session_id: None)
+    server = _peek_server(tmp_path)
+    monkeypatch.setattr(server, "_own_label", lambda: "device-b")
+    peek_handler = net_peek.make_handler(server)
+    deadline_s = net_peek.SESSION_PEEK_DEADLINE_S
+    member = _PeekLink("device-a")
+    bad = {"op": "net_session_peek", "session_id": SESSION, "query": "(a|a)+$", "regex": True}
+    release = threading.Event()
+    sync_started = threading.Event()
+
+    def held_sync(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        sync_started.set()
+        release.wait(10)
+        return {}
+
+    try:
+        replies = [
+            server._dispatch_slow(  # noqa: SLF001
+                member,  # type: ignore[arg-type]
+                {**bad, "req": n},
+                peek_handler,
+                types.Granted(action="net_session_peek"),
+                deadline_s,
+            )
+            for n in range(5)
+        ]
+        assert replies[0] is None, "the first search is admitted"
+        for reply in replies[1:]:
+            assert reply is not None and reply["op"] == "error", reply
+            assert "search from this device is already running on device-b" in reply["message"]
+        # A literal peek from the same device is not limited (scan-bounded only).
+        literal = {"op": "net_session_peek", "session_id": SESSION, "query": "row"}
+        assert (
+            server._dispatch_slow(  # noqa: SLF001
+                member,  # type: ignore[arg-type]
+                {**literal, "req": 9},
+                peek_handler,
+                types.Granted(action="net_session_peek"),
+                deadline_s,
+            )
+            is None
+        )
+        other = _PeekLink("device-c")
+        assert (
+            server._dispatch_slow(  # noqa: SLF001
+                other,  # type: ignore[arg-type]
+                {"op": "net_sync", "req": 50},
+                held_sync,
+                types.Granted(action="net_sync"),
+                10.0,
+            )
+            is None
+        )
+        # Started while the bad search still holds its worker (budget 1.5 s).
+        assert sync_started.wait(1.0), "the other slow op waited behind the regex burst"
+        # The first search ends with the OWNER's named refusal, and the slot is
+        # given back: the same device may search again.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not any(f.get("req") == 0 for f in member.sent):
+            time.sleep(0.05)
+        first = next(f for f in member.sent if f.get("req") == 0)
+        assert first.get("code") == "regex_timeout", first
+        time.sleep(0.1)  # the worker's ``finally`` releases just after it sends
+        again = server._dispatch_slow(  # noqa: SLF001
+            member,  # type: ignore[arg-type]
+            {**bad, "query": "row \\d+", "req": 7},
+            peek_handler,
+            types.Granted(action="net_session_peek"),
+            deadline_s,
+        )
+        assert again is None
+        # Let that search answer so no worker outlives the test.
+        while time.monotonic() < deadline and not any(f.get("req") == 7 for f in member.sent):
+            time.sleep(0.05)
+        assert any(f.get("req") == 7 and f.get("op") != "error" for f in member.sent)
+    finally:
+        release.set()
+        server.stop()
+
+
+def test_a_timed_out_regex_reaches_the_viewer_as_the_owners_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q6: over the real slow lane, at the shipped 20 s deadline, a bad
+    pattern is answered with the owner's ``regex_timeout`` sentence — not the
+    relay's generic "did not finish within 20 s ... ask for its status". (Before
+    the cap the budget was ~18 s, so this waited out the deadline instead.)
+    The cap is shrunk only to keep the test quick."""
+    directory = _journal(tmp_path)
+    _row(directory, "a" * 80 + "-" * 80 + "!")
+    monkeypatch.setattr(net_peek, "PEER_REGEX_BUDGET_S", 0.5)
+    monkeypatch.setattr(net_peek, "_owner_record", lambda session_id: None)
+    server = _peek_server(tmp_path)
+    monkeypatch.setattr(server, "_own_label", lambda: "device-b")
+    member = _PeekLink("device-a")
+    registered = server.slow_op_deadline("net_session_peek")
+    assert registered is not None and registered == net_peek.SESSION_PEEK_DEADLINE_S
+    deadline_s = registered
+    try:
+        started = time.monotonic()
+        assert (
+            server._dispatch_slow(  # noqa: SLF001
+                member,  # type: ignore[arg-type]
+                {
+                    "op": "net_session_peek",
+                    "req": 1,
+                    "session_id": SESSION,
+                    "query": "(a|a)+$",
+                    "regex": True,
+                },
+                net_peek.make_handler(server),
+                types.Granted(action="net_session_peek"),
+                deadline_s,
+            )
+            is None
+        )
+        assert member.got.wait(deadline_s + 5)
+        reply = member.sent[0]
+        assert reply.get("code") == "regex_timeout", reply
+        assert "ran out of time on device-b" in reply["message"]
+        assert "did not finish within" not in reply["message"]
+        assert time.monotonic() - started < deadline_s
+    finally:
+        server.stop()
 
 
 @pytest.mark.parametrize("session_id", ["../outside", "a/b", "a\\b", ".", "..", "/etc"])

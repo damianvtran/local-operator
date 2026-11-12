@@ -116,8 +116,10 @@ dependencies = [
     # shared relay worker indefinitely (PR #3831 review M1). `regex` takes a
     # per-call `timeout=`, which is the bound. It already arrives through
     # tiktoken, but a direct import belongs in a direct dependency (same reason
-    # as `cryptography` above); the floor matches the dev pin below.
-    "regex>=2024.11.6",
+    # as `cryptography` above); the floor matches the dev pin below and is the
+    # first release with cp314 wheels (the classifiers claim 3.14), so a
+    # constrained resolve never builds from sdist.
+    "regex>=2025.7.29",
     "mcp>=1.2",
     # JSON Schema validation for ``--output-schema`` files (and an SDK caller's
     # raw-schema spelling): ``local_operator/output_contract.py`` imports it
@@ -247,7 +249,7 @@ dev = [
     "pytest-xdist",
     "pytest-textual-snapshot",
     # Capture glyph origins must follow grapheme clusters, not codepoints.
-    "regex>=2024.11.6",
+    "regex>=2025.7.29",
     "pip-audit",
     # Independent decoder used to verify our own PNG encoder's output.
     "pillow",

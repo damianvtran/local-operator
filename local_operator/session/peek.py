@@ -793,10 +793,13 @@ class BoundedPeerPattern:
     left of ONE absolute monotonic deadline, so the whole walk — not each row —
     is bounded, and a timeout raises :class:`PeerRegexTimeout`, which the
     handler turns into a named refusal while the worker returns its slot.
-    ``regex`` counts that timeout in the thread's CPU seconds, not wall time
-    (measured; see ``network.peek.PEER_REGEX_REPLY_RESERVE_S``): the CPU a
-    pattern may take is hard-bounded, while on a contended machine one row's
-    wall time can run past the budget.
+    ``regex`` counts that timeout in the PROCESS's CPU seconds — not the
+    thread's, not wall time (measured; see ``network.peek.
+    PEER_REGEX_REPLY_RESERVE_S``): concurrent searches and any other relay
+    work share the clock, which only ever stops a search sooner, and on a
+    contended machine one row's wall time can run past the budget. The relay
+    caps the budget small (``network.peek.PEER_REGEX_BUDGET_S``) and admits
+    one regex peek per requesting device for exactly those reasons.
     ``concurrent=True`` releases the GIL during the match so the relay's link
     reader and timers keep running beside it.
 
