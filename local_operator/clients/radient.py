@@ -708,10 +708,12 @@ def _no_ambient_credential(request: requests.PreparedRequest) -> requests.Prepar
     (``Session.prepare_request``), and this hook additionally drops a header
     that might have reached the request some other way.
 
-    CONSTRAINTS. Used only where a caller needs the guarantee "this request
-    carries no credential, ever" -- the legacy public-scope probe, whose 200 is
-    read as PROOF that the hub serves a row publicly; a request that could have
-    authenticated proves nothing. It is deliberately NOT ``trust_env=False``:
+    CONSTRAINTS. Used where a caller needs the guarantee "this request carries
+    no credential, ever" -- the legacy public-scope probe, whose 200 is read as
+    PROOF that the hub serves a row publicly (a request that could have
+    authenticated proves nothing), and every hub-sync update check of a PUBLIC
+    team/agent link, which must neither leak a netrc secret to the hub nor
+    record a signed-in answer as the public one. It is deliberately NOT ``trust_env=False``:
     that would also drop ``HTTP(S)_PROXY``/``NO_PROXY`` and ``REQUESTS_CA_BUNDLE``,
     which people behind a corporate proxy rely on, and the probe must reach the
     hub the same way the check does. Every caller of this hook also refuses
@@ -918,6 +920,7 @@ class RadientClient:
         *,
         with_credential: bool = False,
         timeout: Optional[float] = None,
+        credential_free: bool = False,
     ) -> None:
         """
         Download an agent from the Radient Agent Hub.
@@ -934,10 +937,23 @@ class RadientClient:
             dest_path (Path): Path to save the downloaded ZIP file.
             with_credential (bool): Send this client's bearer with the request.
                 Defaults to the anonymous public download.
+            credential_free (bool): Guarantee the request carries NO
+                credential at all -- not even an ambient ``~/.netrc`` entry,
+                which ``requests`` would otherwise attach as Basic auth (see
+                :func:`_no_ambient_credential`) -- and refuse a redirect, whose
+                target ``requests`` would re-authenticate from netrc. The
+                hub-sync check of a PUBLIC agent falls back to this download
+                when its detail read fails or carries no instructions, and that
+                answer must be the public one, never a signed-in one. Off by
+                default, so interactive pulls keep ``requests``' environment
+                behaviour. Refused together with the bearer switch above.
 
         Raises:
             RuntimeError: If the download fails.
+            APIError: When ``credential_free`` refuses a redirect.
         """
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
         url = f"{self.base_url}/agents/{agent_id}/download"
         headers = self._get_headers(content_type=None, require_api_key=with_credential)
         try:
@@ -946,8 +962,13 @@ class RadientClient:
             # runner bounds every hub request (a stalled socket would otherwise
             # hold its tick, lock and lease, and a thread cannot be cancelled).
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            if credential_free:
+                extra["auth"] = _no_ambient_credential
+                extra["allow_redirects"] = False
             response = requests.get(url, headers=headers, stream=True, **extra)
             response.raise_for_status()
+            if credential_free:
+                self._refuse_redirect(response)
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
@@ -999,10 +1020,10 @@ class RadientClient:
                 credential at all -- not even an ambient ``~/.netrc`` entry,
                 which ``requests`` would otherwise attach as Basic auth (see
                 :func:`_no_ambient_credential`). For the public-scope probe,
-                whose answer is read as proof of public visibility. Off by
-                default: ordinary public pulls keep ``requests``' environment
-                behaviour. Refused together with ``with_credential``; implies
-                ``refuse_redirects``.
+                whose answer is read as proof of public visibility, and for
+                hub-sync checks of public links. Off by default, so other
+                callers keep ``requests``' environment behaviour. Refused
+                together with ``with_credential``; implies ``refuse_redirects``.
 
         Returns:
             Optional[Dict[str, Any]]: The agent details as a dictionary if found,
@@ -1662,10 +1683,10 @@ class RadientClient:
 
         ``credential_free`` hardens that ``False`` into "no credential, ever":
         ``requests`` would otherwise attach an ambient ``~/.netrc`` entry for
-        the hub's host as Basic auth (see :func:`_no_ambient_credential`). Only
-        the public-scope probe asks for it -- its 200 is read as PROOF of public
-        visibility -- so ordinary public pulls keep ``requests``' environment
-        behaviour. Refused together with ``with_credential``.
+        the hub's host as Basic auth (see :func:`_no_ambient_credential`). The
+        public-scope probe asks for it -- its 200 is read as PROOF of public
+        visibility -- and so does every hub-sync check of a public link; other
+        callers keep ``requests``' environment behaviour. Refused together with ``with_credential``.
 
         Returns:
             The team document: ``id``, ``tenant_id``, ``name``, ``description``,
@@ -1704,6 +1725,7 @@ class RadientClient:
         timeout: Optional[float] = None,
         with_credential: bool = True,
         if_none_match: Optional[str] = None,
+        credential_free: bool = False,
     ) -> Dict[str, Any]:
         """Pull one skill manifest by id (``GET /v1/skills/:skillid``).
 
@@ -1726,6 +1748,13 @@ class RadientClient:
         on purpose: "what revision do I hold" is link state (the baseline
         record), which a transport client must not be asked to know.
 
+        ``credential_free`` hardens the anonymous arm into "no credential,
+        ever", exactly as on :meth:`get_team`: ``requests`` would otherwise
+        attach an ambient ``~/.netrc`` entry for the hub's host as Basic auth
+        (see :func:`_no_ambient_credential`). The hub-sync check of a PUBLIC
+        skill link asks for it; redirects are already refused on every call.
+        Refused together with the bearer switch.
+
         Returns:
             The skill document: ``id``, ``tenant_id``, ``name``,
             ``description``, ``files`` (path/content pairs), ``version`` and the
@@ -1738,6 +1767,8 @@ class RadientClient:
                 who may not read it).
         """
 
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
         url = f"{self.base_url}/skills/{skill_id}"
         headers = self._get_headers(
             content_type="application/json", require_api_key=with_credential
@@ -1746,6 +1777,8 @@ class RadientClient:
             headers[IF_NONE_MATCH_HEADER] = if_none_match
         try:
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            if credential_free:
+                extra["auth"] = _no_ambient_credential
             response = requests.get(url, headers=headers, allow_redirects=False, **extra)
             response.raise_for_status()
             if response.status_code == HTTP_NOT_MODIFIED and if_none_match:
