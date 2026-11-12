@@ -496,6 +496,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
     {
         "net_session_move",
         "net_sync",
+        "net_file_get",
         "net_broker",
         "net_session_lifecycle",
         "net_session_receipt",
@@ -519,6 +520,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
     {
         "session_move",
         "session_sync",
+        "session_file_pull",
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
@@ -551,6 +553,9 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
 SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.mobility",
     "local_operator.network.sync",
+    # The single-file pull. After ``sync`` because it reuses that module's chunk
+    # framing and containment primitives; it starts no thread of its own.
+    "local_operator.network.files",
     "local_operator.network.credentials",
     "local_operator.network.definitions",
     "local_operator.network.readiness",
@@ -15104,6 +15109,7 @@ def _owning_document(op: str) -> str:
     owners = {
         "net_forward": "mesh-session-mobility.md",
         "net_sync": "mesh-session-mobility.md (R22)",
+        "net_file_get": "mesh-file-transfer.md (S1)",
         "net_broker": "mesh-credentials.md",
         "net_session_lifecycle": "mesh-session-mobility.md",
         "net_session_receipt": "mesh-session-mobility.md",
@@ -15114,6 +15120,7 @@ def _owning_document(op: str) -> str:
         # sentence, not "this relay does not know the action".
         "session_move": "mesh-session-mobility.md",
         "session_sync": "mesh-session-mobility.md (R22)",
+        "session_file_pull": "mesh-file-transfer.md (S1)",
         "session_lifecycle": "mesh-session-mobility.md",
         "session_receipt": "mesh-session-mobility.md",
         "credential_grant": "mesh-credentials.md",
