@@ -758,7 +758,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # -> `cwd`, UX round 1 U6) and pays for the own-session clause in the
     # opening sentence with it. Nothing else moved; the field schema did not
     # change, so `tool_schemas` and `scripts/bench_context_budget.py` stand.
-    "sessions": 867,
+    # RE-MEASURED 2026-11-12 (session park op, PR #3850): 867 -> 889. The
+    # delta is the `park` op's row and field copy in the sessions `tool://`
+    # reference — a new documented op, so the cost is deliberate and opt-in.
+    # Re-measured through this test's own printed table; it is the ONLY entry
+    # that moved, and the rendered doc is 3,133 chars against the 8,192 soft
+    # cap. The schema-side cost of the same op is the context-budget bench's
+    # ledger, not this one.
+    "sessions": 889,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
