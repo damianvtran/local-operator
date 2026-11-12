@@ -706,6 +706,17 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "to decide whether a capture can still be running; never rendered, and a "
         "browser host's value, not a mesh peer's",
     ),
+    # A tab a finished child handed to this session (``browser_bridge.handoff``)
+    # is listed with the child's retain reason. That reason is the child's own
+    # resource record's ``retention``, written only in this process: the browser
+    # tool's ``retain`` action (the agent's own ``text``), "pending site
+    # approval", or the subagent runner's "paused scope" — never a peer's prose.
+    ("local_operator/tools/builtin.py", "_format_bridge_tab", "reason"): (
+        1,
+        "the handed tab's retain reason — the child's own resource record "
+        "retention, written by this process's browser tool or subagent runner, "
+        "never a mesh value",
+    ),
     ("local_operator/tools/builtin.py", "execute_bash", "reason"): (
         2,
         "``AbortSignal.reason``: the abort's own reason, authored in this process by "
