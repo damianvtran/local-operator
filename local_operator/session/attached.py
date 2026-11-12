@@ -3762,6 +3762,16 @@ class AttachedSession:
         no "next keystroke rejoins it" and whose failure means the act was not
         delivered. Everyone else keeps the short foreground default.
         """
+        if deadline is None:
+            # THE DEFAULT CALL SHAPE IS main's, EXACTLY: ``_ensure_bound()``. The TUI
+            # and every desktop route call ``bind_runtime()`` bare, and the viewers
+            # that specialise this seam (the recovering/racing doubles the sidebar
+            # retry and desktop warm suites drive) take the historical signature.
+            # Forwarding ``deadline=None`` made each of those binds raise
+            # ``TypeError`` instantly, so a retry budget burned in 0 s (#3725 gate
+            # 43112570841). Only a caller with its own budget changes the shape.
+            await self._ensure_bound()
+            return
         await self._ensure_bound(deadline=deadline)
 
     async def update_desktop_watch(
@@ -4839,7 +4849,13 @@ class AttachedSession:
                 # ``set_working_directory`` closes by calling this method (agent
                 # review round 1, m4). Best-effort by that method's own contract.
                 self._publish_working_directory(self._cwd)
-            await self._bind_under_lock(foreground=foreground, deadline=deadline)
+            if deadline is None:
+                # main's call shape, exactly (see ``bind_runtime``): the desktop warm
+                # suites park this seam with a ``(*, foreground)`` double, and an
+                # unconditional ``deadline=None`` made every warm raise TypeError.
+                await self._bind_under_lock(foreground=foreground)
+            else:
+                await self._bind_under_lock(foreground=foreground, deadline=deadline)
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
             # socket bind and must remain a visible, retryable pending intent.
