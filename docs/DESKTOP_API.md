@@ -2519,7 +2519,12 @@ routes as a local one:
   before a no-replace publish (409 `session_files_download_mismatch` lands nothing), 409
   `session_files_sensitive_name` for a credential-shaped name.
 - **Cache budget**: `desktop.remote_files_cache_bytes` (LIVE, default 1 GiB; `0` keeps
-  nothing after serving), LRU by last use.
+  nothing after serving and turns precache off), LRU by last use.
+- **Precache**: the catalogue poll prepares the image/audio/video files (each at most
+  32 MiB) of ACTIVE remote sessions — reachable, unarchived, moved within 2 h, plus the last
+  8 opened here; at most 16 per pass, each re-listed at most once a minute and only when it
+  moved. Opening a remote session's files prepares it at once. One precache pull per owner
+  at a time, so an on-screen request is never queued behind it; a pass stops at the budget.
 
 ### Verification
 

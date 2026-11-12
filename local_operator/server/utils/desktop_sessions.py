@@ -8922,6 +8922,25 @@ class DesktopSessions:
             if silent:
                 raise PeerSessionUnresolved(session_id, silent)
             raise KeyError("Unknown session")
+        # OPENING a remote session's Files/canvas prepares its media now (§4), and keeps
+        # it in the opened LRU so later catalogue polls keep it warm whatever its age.
+        from local_operator.remote_files import precache
+
+        try:
+            precache.for_root(self.root).opened_session(
+                session_id,
+                {
+                    "id": session_id,
+                    "mtime": float(getattr(row, "mtime", 0.0) or 0.0),
+                    "locality": "remote",
+                    "reachable": True,
+                    "archived": bool(getattr(row, "archived", False)),
+                    "owner_device": str(getattr(row, "owner_device", "") or ""),
+                    "owner_device_name": str(getattr(row, "owner_device_name", "") or ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 — precache is an optimisation, never the answer
+            logger.debug("precache trigger for %s failed", session_id, exc_info=True)
         return "peer", None
 
     def _draft_for(self, session_id: str) -> _Draft | None:
@@ -9371,7 +9390,15 @@ class DesktopSessions:
                 remote=(remote_session_rows(self.root, pins=pins) if include_peers else []),
             )
 
-        return await asyncio.to_thread(rows)
+        page = await asyncio.to_thread(rows)
+        if page.remote:
+            # THE PRECACHE TRIGGER (remote files parity §4): the catalogue poll already
+            # holds every remote row; active ones that moved get their media prepared
+            # in the background (bounded, one pull per owner, never on this request).
+            from local_operator.remote_files import precache
+
+            precache.for_root(self.root).observe(page.remote)
+        return page
 
     async def search(
         self,
