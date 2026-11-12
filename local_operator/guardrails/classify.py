@@ -1143,7 +1143,9 @@ def _rank(
             )
             for p in target.landings
         ]
-        readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id, globstar, foreign))
+        readings.append(
+            _rank(dataclasses.replace(target, landings=()), prot, session_id, globstar, foreign)
+        )
         return max(readings, key=lambda r: r.risk)
     path = target.path
     notes: list[str] = list(target.empty)

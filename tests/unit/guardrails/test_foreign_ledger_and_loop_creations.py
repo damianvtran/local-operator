@@ -166,9 +166,7 @@ def test_landing_recursion_keeps_foreign_ledger_and_critical_ranks(home: Path) -
     foreign = prov.ForeignCreations(SID)
     # Isolate the recursion's contract: both spellings are ordinary paths
     # without ledger evidence, so dropping `foreign` silently returns LOW.
-    target = Target(
-        path=str(ordinary), op="delete", program="rm", landings=(str(foreign_dir),)
-    )
+    target = Target(path=str(ordinary), op="delete", program="rm", landings=(str(foreign_dir),))
     ranked = _rank(target, prot, SID, foreign)
     assert ranked.risk is Risk.HIGH
     assert f"created by another session ({OTHER}" in ranked.reason
