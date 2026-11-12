@@ -189,6 +189,12 @@ def test_push_converges_without_a_pull_and_does_not_forge_answer_age(
     assert net_fixtures.wait_for(
         lambda: (row := _row(a, c.device_id)) is not None and row.name == "changed-by-push"
     )
+    # Disk visibility is earlier than completion: the reader still has to mark
+    # the pushed table unverified after adopting its rows. An ack on the same
+    # TCP link proves that dispatch finished before checking answer-age truth.
+    reverse = c.server._link_for(a.device_id, network_id=network_id)
+    assert reverse is not None
+    _wire_barrier(c.server, reverse)
     assert link.member_pulled_at == stamp
     report = a.server.refresh_membership()[network_id]
     assert not report.answered

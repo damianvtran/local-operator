@@ -161,6 +161,12 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     assert retry["session_id"] == minted, retry
     assert retry["replayed"] is True, retry
     assert _sessions(owner) == [minted], "a retry with the same key made a second session"
+    assert [f["op"] for f in wire.sent] == [
+        "net_session_create",
+        "net_session_create_lookup",
+        "net_session_create",
+    ]
+    assert [f["create_key"] for f in wire.sent] == [key, key, key]
 
 
 def test_without_a_key_two_creates_are_two_sessions(
