@@ -719,3 +719,92 @@ def test_only_the_last_non_empty_line_is_a_verdict() -> None:
         assert parse_verdict(text)[0] == "INCONCLUSIVE", quoted
     # Trailing blank lines do not hide the real last line.
     assert parse_verdict("B2 holds 42\nVERDICT: PASS\n\n  \n") == ("PASS", "B2 holds 42")
+
+
+# -- round 3 review: a failed job is never a pass (M1) ----------------------
+
+
+class FailingStream(TreeStream):
+    """The reviewer's probe: the provider drops the stream after the scripted
+    deltas, so the loop ends the message with its PARTIAL text
+    (``stop_reason="error"``) and the job settles ``failed``."""
+
+    def fork(self, _name: str) -> "FailingStream":
+        return FailingStream(self.reply, root=self.root)
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        inner = super().__call__(request, signal)
+
+        async def gen():
+            async for event in inner:
+                yield event
+            raise ConnectionError("provider dropped the stream")
+
+        return gen()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "partial",
+    [
+        # The review's repro: a per-requirement bullet on the way to the verdict.
+        "Checks:\n- Verdict: PASS (B2 = 42)\n",
+        # A well-formed verdict line in a message the provider never finished:
+        # only the stop_reason / failed-job rule keeps this out.
+        "B2 holds 42\nVERDICT: PASS\n",
+    ],
+)
+async def test_a_partial_answer_from_a_failed_job_is_never_a_verdict(tmp_path, config_dir, partial):
+    stream = FailingStream(lambda _request: [StreamTextDelta(delta=partial)])
+    parent = make_parent(tmp_path, stream)
+
+    verdict = await parent.verify_completion(
+        request="r", claim="c", limits=VerifierLimits(wall_s=20)
+    )
+
+    job = parent.jobs.get(verdict.job_id)
+    assert job is not None and job.status == "failed", getattr(job, "status", None)
+    assert (verdict.status, verdict.ended_by) == ("INCONCLUSIVE", "failed"), verdict
+    await parent.dispose()
+
+
+def test_a_verdict_line_with_more_after_the_status_is_not_a_verdict() -> None:
+    """M1: the role asks for exactly ``VERDICT: PASS|FAIL``; a note or a
+    qualified status after it is not the verdict."""
+
+    for line in (
+        "- Verdict: PASS (B2 = 42)",
+        "VERDICT: PASS except C3",
+        "VERDICT: PASS, mostly",
+    ):
+        assert parse_verdict(f"B2 holds 42\n{line}")[0] == "INCONCLUSIVE", line
+    # Closing decoration and a full stop are still the verdict.
+    for line in ("VERDICT: PASS.", "**VERDICT: FAIL**", "VERDICT: `PASS` "):
+        assert parse_verdict(f"B2 holds 42\n{line}")[0] in ("PASS", "FAIL"), line
+
+
+@pytest.mark.asyncio
+async def test_a_local_tool_on_the_caps_request_gets_the_answer_now_cue(tmp_path, config_dir):
+    """m1: the cap's own request calls a LOCAL tool (no host tool at all). It is
+    refused with the same cue the host tools give, so the next request is the
+    verdict -- not a second tool request the cap cancels unwarned."""
+
+    def reply(request: ChatRequest) -> list[Any]:
+        results = tool_results(request)
+        if any("give your VERDICT now" in text for text in results):
+            return text_turn("B2 holds 42\nVERDICT: PASS")
+        return tool_turn("glob", {"pattern": f"*.{len(results)}"})
+
+    stream = TreeStream(reply)
+    parent = make_parent(tmp_path, stream)
+    limits = VerifierLimits(max_requests=3, max_commands=1, local_tool_allowance=0, wall_s=30)
+
+    verdict = await parent.verify_completion(request="r", claim="c", limits=limits)
+
+    made = stream.by_job[verdict.job_id]
+    assert (verdict.status, verdict.ended_by) == ("PASS", "verdict"), verdict
+    assert len(made) == 4  # three glob requests, the third refused, then the verdict
+    assert "give your VERDICT now" in tool_results(made[-1])[-1]
+    # Requests under the cap ran their local tool normally.
+    assert not any("give your VERDICT now" in text for text in tool_results(made[2]))
+    await parent.dispose()

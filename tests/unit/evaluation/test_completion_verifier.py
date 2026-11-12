@@ -903,3 +903,8 @@ async def test_guest_reads_are_clipped_to_the_verification_deadline() -> None:
     assert is_error and "give your VERDICT now" in text
     assert [c for c, _ in seen if "cat g" in c] == []  # never reached the guest
     assert await inspector.drain() == 0
+    # N2 (round 3): drain closes the verification, so a later guest call is
+    # not clipped against the round that just ended.
+    text, is_error = await inspector.inspect({"command": "cat h", "timeout_s": 30})
+    assert not is_error, text
+    assert [t for c, t in seen if "cat h" in c] == [30], seen

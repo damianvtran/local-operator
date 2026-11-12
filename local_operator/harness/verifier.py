@@ -131,9 +131,15 @@ REQUEST_BUDGET_REFUSAL = (
 #: "final" (``> **Final VERDICT:** `PASS` ``). Anything else stays
 #: ``INCONCLUSIVE``; tolerance here only ever saves a PASS from becoming a
 #: wasted challenge turn (review M3), it never invents one.
+#: Anchored at the END too: after the status only closing decoration or a
+#: full stop may follow. The role asks for exactly ``VERDICT: PASS|FAIL``;
+#: a line with more after the status is a per-requirement note
+#: (``- Verdict: PASS (B2 = 42)``) or a qualified one (``PASS except C3``),
+#: and taking either as the verdict is how a partial answer became a pass
+#: (review round 3, M1).
 _VERDICT_LINE = re.compile(
     r"^\s*(?:[#>*_`~\-]+\s*)*(?:final\s+)?VERDICT\s*[*_`]*\s*:\s*[*_`\s]*"
-    r"(PASS|FAIL|INCONCLUSIVE)\b",
+    r"(PASS|FAIL|INCONCLUSIVE)[*_`.!\s]*$",
     re.I,
 )
 
@@ -175,8 +181,11 @@ class VerifierLimits:
     calls and asks for the verdict (never cancels); the request cap cancels
     the child once a request PAST it asks for more tools (a request past it
     that answers is the verdict, and is kept); the wall cancels. ``max_requests``
-    counts request-final rows carrying the verifier's job id, so at most one
-    request past the cap is ever made.
+    counts request-final rows carrying the verifier's job id. At most one
+    request past the cap is made when requests end with an assistant message;
+    at most two when they end without one (the backstop in
+    ``Session.verify_completion`` cannot tell the first from a message still
+    in flight).
     """
 
     max_requests: int | None = None

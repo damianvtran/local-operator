@@ -157,8 +157,10 @@ from local_operator.harness.types import (
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
+    TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolResult,
     Usage,
 )
 from local_operator.harness.wip_checkpoint import WipCheckpointer, restore_hint
@@ -1052,13 +1054,23 @@ class ChildSurface:
     result: a cap may cancel the job between the answer message and the
     settle, and the cancelled job's ``result_text`` is then empty (PR #3837
     round 3: a ``VERDICT: PASS`` on the request after the cap was discarded).
-    The tool names say whether the message was an answer or another step.
+    The tool names say whether the message was an answer or another step;
+    ``stop_reason`` says whether it was FINISHED: a provider error mid-answer
+    still ends the message (``stop_reason="error"``) with its partial text,
+    which must never be read as an answer (PR #3837 round 3, M1).
+
+    ``tool_gate`` is asked before every one of the child's OWN tools runs
+    (host tools gate themselves); a string refuses the call with that text as
+    the tool result. A bounded launcher uses it to give the same "answer now"
+    cue on its last request whichever tool the child reaches for, instead of
+    cancelling a child that was never warned (round 3, m1).
     """
 
     ceiling: frozenset[str] | None = None
     host_tools: tuple["AgentTool", ...] = ()
     readonly_shell: bool = False
-    on_assistant_message: Callable[[str, tuple[str, ...]], None] | None = None
+    on_assistant_message: Callable[[str, tuple[str, ...], str | None], None] | None = None
+    tool_gate: Callable[[], str | None] | None = None
 
     @property
     def host_tool_names(self) -> frozenset[str]:
@@ -1182,6 +1194,28 @@ def readonly_shell_floor_names(
     if shell_root is not None and "bash" not in floored:
         floored = (*floored, "bash")
     return floored
+
+
+def _gated_tool(tool: "AgentTool", gate: Callable[[], str | None]) -> "AgentTool":
+    """``tool`` refusing (``is_error``, the gate's text) whenever ``gate()``
+    returns a string; see :attr:`ChildSurface.tool_gate`."""
+
+    inner = tool.execute
+
+    async def execute(  # type: ignore[no-untyped-def]
+        tool_call_id, args, signal=None, on_update=None, context: Any = None
+    ):
+        refusal = gate()
+        if refusal is not None:
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name=tool.name,
+                content=[TextContent(text=refusal)],
+                is_error=True,
+            )
+        return await inner(tool_call_id, args, signal, on_update, context)
+
+    return tool.model_copy(update={"execute": execute})
 
 
 def _with_readonly_shell_floor(
@@ -3224,7 +3258,7 @@ def _make_relay(
     owner_jobs: Any = None,
     comms: Any = None,
     on_tool_end: Callable[[str, str, bool], Awaitable[None]] | None = None,
-    on_assistant_message: Callable[[str, tuple[str, ...]], None] | None = None,
+    on_assistant_message: Callable[[str, tuple[str, ...], str | None], None] | None = None,
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """The child-stream handler: trajectory + throttled parent relay.
 
@@ -3422,6 +3456,7 @@ def _make_relay(
                         on_assistant_message(
                             message.text or "",
                             tuple(call.name for call in message.tool_calls),
+                            message.stop_reason,
                         )
                 _accumulate_usage(job, message.usage)
                 note_usage_changed = getattr(owner_jobs, "note_usage_changed", None)
@@ -4545,6 +4580,14 @@ async def _construct_child_session(
         # below names them so no later inventory write drops them.
         present_names = {tool.name for tool in tools}
         tools = list(tools) + [t for t in surface.host_tools if t.name not in present_names]
+    if surface is not None and surface.tool_gate is not None:
+        # After every addition above, so no own tool escapes the gate; the
+        # host tools are skipped because their wrapper already asks it.
+        host_names = surface.host_tool_names
+        tools = [
+            tool if tool.name in host_names else _gated_tool(tool, surface.tool_gate)
+            for tool in tools
+        ]
 
     parent_provider = getattr(parent_session, "_system_blocks_provider", None)
     repo_guidance = getattr(parent_provider, "repo_guidance", "")

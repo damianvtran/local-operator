@@ -396,19 +396,27 @@ class VerifierInspector:
         settle before it). One still running at the deadline is LEFT running
         and recorded, never cancelled: cancelling it is exactly the poison
         this exists to prevent.
+
+        Closes the verification: the deadline is cleared on the way out, so a
+        later guest call (an ``ensure_mode`` re-probe after a cancelled first
+        probe) is not clipped against a round that already ended (review
+        round 3, N2) -- it gets its own unclipped bound, as the first probe.
         """
 
-        pending = set(self._inflight)
-        if not pending:
-            return 0
-        # Without a ``begin`` (a direct embedder), one call's longest RPC life.
-        timeout = float(INSPECT_MAX_TIMEOUT_S) + RUN_COMMAND_SLACK_S
-        if self._deadline is not None:
-            timeout = max(0.0, self._deadline - time.monotonic())
-        _done, still = await asyncio.wait(pending, timeout=timeout)
-        if still:
-            self._emit({"job_id": self._job_id(), "detached_in_flight": len(still)})
-        return len(pending)
+        try:
+            pending = set(self._inflight)
+            if not pending:
+                return 0
+            # Without a ``begin`` (a direct embedder), one call's longest RPC life.
+            timeout = float(INSPECT_MAX_TIMEOUT_S) + RUN_COMMAND_SLACK_S
+            if self._deadline is not None:
+                timeout = max(0.0, self._deadline - time.monotonic())
+            _done, still = await asyncio.wait(pending, timeout=timeout)
+            if still:
+                self._emit({"job_id": self._job_id(), "detached_in_flight": len(still)})
+            return len(pending)
+        finally:
+            self._deadline = None
 
     async def ensure_mode(self) -> ReadonlyMode:
         """Probe once per episode; a failed probe is ``audit``, never a guess."""

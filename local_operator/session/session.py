@@ -22975,26 +22975,35 @@ class Session:
             if state["requests"] >= cap_requests:
                 hit("requests")
             if state["requests"] > cap_requests + 1:
-                # Backstop for a request that ended without an assistant
-                # message (so ``on_message`` never judged it): never a
-                # second request past the cap.
+                # Backstop for requests that end without an assistant message
+                # (so ``on_message`` never judges them): the first past the
+                # cap cannot be told from one whose message is still on its
+                # way (row and message arrive in either order), so it is the
+                # SECOND past the cap that is cancelled -- at most two past
+                # the cap in this case, one in every other.
                 overshoot.set()
 
-        def on_message(text: str, tool_names: tuple[str, ...]) -> None:
+        def on_message(text: str, tool_names: tuple[str, ...], stop_reason: str | None) -> None:
             # From the child's relay, synchronously, at each finished
             # assistant message (``ChildSurface.on_assistant_message``). Max
             # of both counts: the request row and the message event of one
             # request may arrive in either order.
             state["assistant_messages"] += 1
-            state["answer"] = None if tool_names else text
+            # Only a message the provider FINISHED is an answer: a stream that
+            # errored (or was aborted, or hit its length) still ends the
+            # message with its partial text, whose last line may be a
+            # per-requirement ``Verdict: PASS`` written on the way to the real
+            # one (review round 3, M1: a failed job read as a PASS).
+            state["answer"] = None if tool_names or stop_reason != "stop" else text
             state["local_tools"] += sum(1 for name in tool_names if name not in host_names)
             if tool_names and max(state["assistant_messages"], state["requests"]) > cap_requests:
                 overshoot.set()
 
         def request_budget_spent() -> str | None:
-            # Host calls made by the cap's own request (its row has arrived by
-            # the time they run) are refused with the cue to answer, so the one
-            # request past the cap is spent on the verdict.
+            # Tool calls made by the cap's own request (its row has arrived by
+            # the time they run) -- host or the child's own -- are refused
+            # with the cue to answer, so the one request past the cap is spent
+            # on the verdict.
             return REQUEST_BUDGET_REFUSAL if state["requests"] >= cap_requests else None
 
         try:
@@ -23018,6 +23027,10 @@ class Session:
             host_tools=wrapped,
             readonly_shell=True,
             on_assistant_message=on_message,
+            # The child's own tools (read/grep/bash) get the same cue on the
+            # cap's request as the host tools, so a child is never cancelled
+            # for a request past the cap it was not told to spend answering.
+            tool_gate=request_budget_spent,
         )
         job_id: str | None = None
         settled: asyncio.Event | None = None
@@ -23110,7 +23123,14 @@ class Session:
                 return VerifierVerdict(
                     status=verdict_status, findings=findings, ended_by="verdict", **common
                 )
-            rescued = find_verdict(state["answer"])
+            # Never from a job that FAILED: its last message is whatever the
+            # error left, and a failed check is INCONCLUSIVE, never a pass
+            # (M1). The rescue is for a job a cap cancelled after it answered.
+            rescued = (
+                find_verdict(state["answer"])
+                if status_text not in ("failed", "interrupted")
+                else None
+            )
             if rescued is not None:
                 return VerifierVerdict(
                     status=rescued[0], findings=rescued[1], ended_by="verdict", **common
