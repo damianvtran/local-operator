@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.slash",
+  "history_sha256": "3dc32cadf0594695d2b750009a3f3e03e33dbab68bb45896741b8e2511896f7b",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "4190e3ccb3e995361840fb424c770fdad3b0243f8b8c2416710740a7b3e2d98f",
+      "target_sha256": "a0a9b776811705f033e37d84bd2571e5b2edc52928c0cbe2239fe95845534747",
+      "translator": {
+        "agent": "coder (lopdev, core-temporary-backend, session cf2843d74957)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, session 506f24a144fa; independent of PR authors and translators)",
+        "session": "506f24a144fa",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats (PR #3832 @ b06ad8dc5): 1 added key(s) read against glossary + zh-CN guide; placeholders/plurals/width checked; 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 506f24a144fa, anthropic/claude-opus-5-5, no fallback. Re-validated at eaff8c7a9 by 2d1500d56d0e: en and target bytes identical; new glossary rows checked, no conflict."
+    }
+  ]
+}

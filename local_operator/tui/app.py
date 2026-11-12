@@ -47456,7 +47456,12 @@ class OperatorApp(App[None]):
             logger.warning(
                 "temporary: pending mark not applied to %s (it has messages)", session_id
             )
+            # Said, and the prompt put back (review r2 M-1): the refused-mark
+            # branch below does both, and this refusal is no less one.
+            self._system_notice(temporary_chat.refused_sentence(session_id), "warning")
             self._sync_temporary_flag()
+            if prompt.strip():
+                self._keep_quick_send_draft(prompt.strip())
             return
         ok, sentence = temporary_chat.apply(config_dir(), session_id, True)
         self._system_notice(sentence, "note" if ok else "warning")
@@ -53837,6 +53842,13 @@ class OperatorApp(App[None]):
             picker.set_choices(self._saver_argument_choices(message.command))
             picker.set_notice("")
             return
+        if message.command == "temporary":
+            # Same defect class as `/saver` (U1) and QA round 2's Q6: with no
+            # branch here the list fell through to the `/login` rows, `on`
+            # fuzzy-matched a provider, and Enter ran `/temporary <provider>`.
+            picker.set_choices(self._temporary_argument_choices())
+            picker.set_notice("")
+            return
         if message.command == "aida":
             # THE RESERVED WORDS, not the provider fall-through (UX round 1,
             # U1). The fall-through is the provider vocabulary and is wrong for
@@ -53932,6 +53944,21 @@ class OperatorApp(App[None]):
                 )
             ]
         return [ArgumentChoice(name=word, description=described[word]) for word in words]
+
+    def _temporary_argument_choices(self) -> list[ArgumentChoice]:
+        """The words ``/temporary`` parses, as bare tokens.
+
+        TOKENS ONLY, no description: the words are technical identifiers, and
+        a describing line here would be new copy outside the audited catalogue
+        (the `/saver` rows' English descriptions are not keyed). ``status``
+        sorts first for `/saver`'s reason: a stray Enter on an open list then
+        reports instead of marking a chat for deletion.
+        """
+        return [
+            ArgumentChoice("status", "", aliases=("show",)),
+            ArgumentChoice("on", "", aliases=("yes", "enable")),
+            ArgumentChoice("off", "", aliases=("no", "disable", "keep")),
+        ]
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.

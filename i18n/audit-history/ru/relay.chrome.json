@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "locale": "ru",
+  "namespace": "relay.chrome",
+  "history_sha256": "48673cf6af12fece589e4457b735d6f9548527feffdcf5cf79e61018eea98d40",
+  "entries": [
+    {
+      "locale": "ru",
+      "namespace": "relay.chrome",
+      "source_sha256": "10555fc5b4ec44a909ca3d9ddb7624c5eceedc3350599282428bbeeba5f55982",
+      "target_sha256": "070479279f0df5af37df04e284920d27f49ea5495774fba2d7c3af43c23a66d7",
+      "translator": {
+        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-relayweb, session bbcd725a2ca0); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
+        "session": "2d1500d56d0e",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the ru guide and sidecars; placeholders, plurals, U+202F and maxCells checked. 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
+    }
+  ]
+}

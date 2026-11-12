@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.chrome",
+  "history_sha256": "4d063573d5e15a80a339caaa1d6e989290a84f6a1f7564c973444fb192d39fdf",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.chrome",
+      "source_sha256": "10555fc5b4ec44a909ca3d9ddb7624c5eceedc3350599282428bbeeba5f55982",
+      "target_sha256": "a0923604d290ecfa6797eb55ddec8f79709e5fcde817e550d3e8b907330990a8",
+      "translator": {
+        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-relayweb, session bbcd725a2ca0); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
+        "session": "2d1500d56d0e",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the zh-CN guide and sidecars; placeholders, plurals, U+202F and maxCells checked. Findings: I2-2 NIT operator_hold \"因保留设置而保留\" repeats 保留; deferred, mirror of tui.app. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
+    }
+  ]
+}

@@ -115,8 +115,9 @@ ICON_FAST = "↯"
 #: the sidebar or ``tui/glyphs.py``. The word beside it still carries the
 #: meaning. REJECTED, each for a recorded reason:
 #:
-#: * ``⬚`` U+2B1A (the design study's dashed square): outside U+25xx, and no
-#:   font installed here covers it (``fc-list ':charset=2b1a'`` is empty);
+#: * ``⬚`` U+2B1A (the design study's dashed square): outside U+25xx, so it
+#:   breaks the ``ICON_JOBS`` block rule. (Host font coverage decided nothing:
+#:   ``fc-list`` is empty for ``▯`` U+25AF on this headless host too.)
 #: * ``□`` U+25A1: ``tui/glyphs.py``'s ``sessions`` tool icon, and width A;
 #: * ``▢`` U+25A2 and ``▭`` U+25AD: ``ICON_LAST_RATE`` and its documented
 #:   gauge-like neighbour; ``◌`` U+25CC reads as the in-flight spinner;

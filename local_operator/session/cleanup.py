@@ -4390,8 +4390,9 @@ def run_temporary_pass(
         # user kept is withdrawn, so a later deletion of the KEPT chat is never
         # reported as "this temporary chat was deleted".
         if temp.read_mark(directory, now=clock) is None:
-            if not dry_run:
-                _withdraw_temporary_tombstone(config_dir, session_id, clock)
+            if not dry_run and not _withdraw_temporary_tombstone(config_dir, session_id, clock):
+                # Harmless (the kept chat still opens), but leave a trace.
+                logger.debug("temporary: tombstone for kept %s not withdrawn", session_id)
             continue
         removed = remove_session_dir(
             directory,

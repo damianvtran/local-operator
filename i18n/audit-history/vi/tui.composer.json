@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.composer",
-  "history_sha256": "983171fa1136f54df8a7f457458f2abb084b76bb2c082c9510d373f1051e77d0",
+  "history_sha256": "18c9c6651778f009e63054f55ea8931dcf7d27885e345d96dea1b08ba66706b3",
   "entries": [
     {
       "locale": "vi",
@@ -39,6 +39,32 @@
       },
       "status": "passed",
       "note": "Full independent audit: clean-with-findings (0 blocker, 0 major, 3 minor, 3 nit). target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.composer",
+      "source_sha256": "1164aebe2e66934357cecbda131b79ce7d73064016b8f188c5e835fc0bd98be6",
+      "target_sha256": "7cfdb226cc2122d9dfa2b7db7ea84270d7b2e11753bf0b1b5b921cda4d4026fe",
+      "translator": {
+        "agent": "coder (lopdev, core-temporary-backend, session cf2843d74957)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, session 506f24a144fa; independent of PR authors and translators)",
+        "session": "506f24a144fa",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats (PR #3832 @ b06ad8dc5): 1 added key(s) read against glossary + vi guide; placeholders/plurals/width checked; 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 506f24a144fa, anthropic/claude-opus-5-5, no fallback. Re-validated at eaff8c7a9 by 2d1500d56d0e: en and target bytes identical; new glossary rows checked, no conflict."
     }
   ]
 }

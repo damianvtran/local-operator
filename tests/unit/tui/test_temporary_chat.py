@@ -338,8 +338,11 @@ async def test_a_pending_mark_never_lands_on_a_chat_with_messages(
     app = OperatorApp(lambda: _factory(_HexSession()))
     async with app.run_test(size=(120, 30)) as pilot:
         await _bound(app, pilot)
-        app._apply_pending_temporary(SID, "")
+        app._apply_pending_temporary(SID, "keep this question")
         await pilot.pause()
+        # Review r2 M-1: the backstop said nothing and dropped the prompt.
+        assert app._editor().text == "keep this question"
+        assert any("cannot be made temporary" in text for text in _notices(app))
     assert not temporary.is_marked(tmp_path, SID)
 
 
@@ -487,3 +490,104 @@ def test_temporary_sidebar_rows_show_deletes_in_or_the_hold_never_the_age(
     from rich.cells import cell_len
 
     assert cell_len(narrow) <= (30 - 6) // 2
+
+
+# ---------------------------------------------------------------------------
+# Round 2: the typed path, and the refusals that must keep the prompt
+# ---------------------------------------------------------------------------
+
+
+async def _type_and_enter(pilot, app: OperatorApp, text: str) -> None:  # noqa: ANN001
+    """Type ``text`` key by key and press Enter with the argument list OPEN.
+
+    No Escape first: QA round 2's Q6 repro pressed Enter while the list was
+    showing, which is what completed the highlighted (provider) row in place
+    of the typed word.
+    """
+    app._editor().text = ""
+    await pilot.pause()
+    await pilot.press(*["space" if char == " " else char for char in text])
+    await pilot.pause()
+    await pilot.press("enter")
+    for _ in range(40):
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_typed_temporary_on_then_enter_asks_then_marks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Q6 (QA round 2): `/temporary on` + Enter became `/temporary <provider>`
+    # because the argument list fell through to the `/login` rows.
+    from local_operator.tui.autocomplete import ArgumentChoice
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _store(tmp_path)
+    (directory / "transcript.jsonl").write_text('{"type":"message"}\n')
+    # A provider controller, so the fall-through reaches the `/login` rows as it
+    # does in a real install; one row `on` fuzzy-matches stands in for them.
+    monkeypatch.setattr(
+        OperatorApp,
+        "_login_choices",
+        lambda self: [ArgumentChoice(name="openrouter", description="OpenRouter")],
+    )
+    app = OperatorApp(lambda: _factory(_HexSession()), provider_controller=object())
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _bound(app, pilot)
+        await _type_and_enter(pilot, app, "/temporary on")
+        assert any("again within 30 seconds" in text for text in _notices(app))
+        assert not temporary.is_marked(tmp_path, SID), "a chat with messages is asked first"
+        await _type_and_enter(pilot, app, "/temporary on")
+        assert temporary.is_marked(tmp_path, SID)
+        assert app._status is not None and app._status._temporary
+
+
+def test_apply_refuses_when_the_session_dir_cannot_be_created(tmp_path: Path) -> None:
+    # Q7 (QA round 2): an unwritable store raised PermissionError out of
+    # `apply` and took the TUI down; it is a refusal like any failed write.
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    sessions.chmod(0o555)
+    try:
+        ok, sentence = temporary_chat.apply(tmp_path, SID, True)
+    finally:
+        sessions.chmod(0o755)
+    assert ok is False
+    assert sentence.startswith("this chat cannot be made temporary:")
+    assert not temporary.is_marked(tmp_path, SID)
+
+
+@pytest.mark.asyncio
+async def test_new_temporary_on_an_unwritable_store_refuses_and_keeps_the_prompt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Q7 through the app: `_apply_pending_temporary` is where the traceback
+    # surfaced; the prompt goes back into the composer as on any refusal.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    session = _HexSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _bound(app, pilot)
+        sessions.chmod(0o555)
+        try:
+            app._apply_pending_temporary(SID, "keep this question")
+            await pilot.pause()
+        finally:
+            sessions.chmod(0o755)
+        assert app._editor().text == "keep this question"
+        assert any("cannot be made temporary" in text for text in _notices(app))
+    assert session.prompts == []
+    assert not temporary.is_marked(tmp_path, SID)
+
+
+def test_minutes_left_round_down_and_never_read_zero() -> None:
+    # Q8 / D6: the desktop floors, so the terminal and relay floor too. The
+    # deadline is stamped a fraction after the mark; a fresh chat reads 30.
+    now = 1_800_000_000.0
+    info = {"marked_at": now, "idle_minutes": 30, "deletes_at": now + 1800.4, "hold": None}
+    assert temporary_chat.deletes_in(info, now) == "deletes in 30 min"
+    assert temporary_chat.deletes_in({**info, "deletes_at": now + 200}, now) == "deletes in 3 min"
+    assert temporary_chat.deletes_in({**info, "deletes_at": now + 30}, now) == "deletes in 1 min"
+    assert temporary_chat.deletes_in({**info, "deletes_at": now - 5}, now) == "deletes in 1 min"

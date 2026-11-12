@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "tui.composer",
-  "history_sha256": "724fd6f9c849630dd63cdaac8c0dc9b6c016a769bb7b0dcd8d03b023b914d8c8",
+  "history_sha256": "34a9cd41e3c2ce61a817953a8814a926d45006df13ccfc152b2b0fd4b419641b",
   "entries": [
     {
       "locale": "ru",
@@ -40,6 +40,32 @@
       },
       "status": "passed",
       "note": "Round-1 locale-level verdict was `fail` because of a major in wire.language_receipts (since fixed and delta re-audited clean of blocker/major); no blocker/major was located in this namespace, so this row passes on the round-1 audit. The per-namespace attribution of the major is derived by the coder from the key(s) the manager named, not from the auditor's per-namespace verdict. target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.composer",
+      "source_sha256": "1164aebe2e66934357cecbda131b79ce7d73064016b8f188c5e835fc0bd98be6",
+      "target_sha256": "a791a3172f8e91670b21b51a56bde742926336e986290e56050c8fd75c848f1e",
+      "translator": {
+        "agent": "coder (lopdev, core-temporary-backend, session cf2843d74957)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, session 506f24a144fa; independent of PR authors and translators)",
+        "session": "506f24a144fa",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats (PR #3832 @ b06ad8dc5): 1 added key(s) read against glossary + ru guide; placeholders/plurals/width checked; 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 506f24a144fa, anthropic/claude-opus-5-5, no fallback. Re-validated at eaff8c7a9 by 2d1500d56d0e: en and target bytes identical; new glossary rows checked, no conflict."
     }
   ]
 }

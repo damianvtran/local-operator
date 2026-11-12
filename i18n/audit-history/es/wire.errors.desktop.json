@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.errors.desktop",
-  "history_sha256": "377b80dc26c7096e4726f5e1d1dbd35c6466e9096953ee7e82be8c3d040a9e13",
+  "history_sha256": "f6181eded54a7f55dc50a7b7cafa14f650fb51309353e1afacd099885793dc5c",
   "entries": [
     {
       "locale": "es",
@@ -27,6 +27,32 @@
         "fallback": "Translations authored before quota fallback to openai/gpt-6.1-sol; fallback only used for later product corrections and receipt assembly."
       },
       "note": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 1 added key(s) read, 0 findings; 88 unchanged keys byte-identical to the passed row at base. Target 0d3918ccf54b2df43c364684cbc90e7e5a1b6c041c5d1573ebe3cd7a01f84dc5. Evidence: i18n/audits/evidence/es/wire.errors.desktop/settings-1b1866b4f2ed/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "89b985aeb9162091001a659257fa589dca2d8650836b32dc129bca62e6d279b1",
+      "target_sha256": "bfb27ae4d4ea7ddf95379795350be6cda45573bfa2459d6c698c38291f255dca",
+      "translator": {
+        "agent": "coder (lopdev, core-temporary-backend, session cf2843d74957)",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, session 506f24a144fa; independent of PR authors and translators)",
+        "session": "506f24a144fa",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats (PR #3832 @ b06ad8dc5): 7 added key(s) read against glossary + es guide; placeholders/plurals/width checked; 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 506f24a144fa, anthropic/claude-opus-5-5, no fallback. Re-validated at eaff8c7a9 by 2d1500d56d0e: en and target bytes identical; new glossary rows checked, no conflict."
     }
   ]
 }

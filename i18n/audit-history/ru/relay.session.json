@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "relay.session",
-  "history_sha256": "0fad50a02faf664b93dea83a49ce2c8261788044d2993afa126cb594fe252c93",
+  "history_sha256": "3d9ece9a864a7db1aed7706b55e67480cfc85b6fa0f4719c36de1b49b540c670",
   "entries": [
     {
       "locale": "ru",
@@ -51,6 +51,32 @@
       },
       "status": "passed",
       "note": "R2 2026-11-09 reviewer 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 2 keys read; 0 findings; 17 unchanged keys byte-identical to passed base row. Evidence: i18n/audits/evidence/ru/relay.session/settings-r2-1b1866b4f2ed/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.session",
+      "source_sha256": "90e29dc8182a6b910f47ff18c8695495d865e060d002facbe57dc958ba72c5fc",
+      "target_sha256": "cc2e3dbdcb904291d51c5bf1d10a34310a8ed3896200e20d049d0a67ea2eedd5",
+      "translator": {
+        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-relayweb, session bbcd725a2ca0); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
+        "session": "2d1500d56d0e",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 1,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the ru guide and sidecars; placeholders, plurals, U+202F and maxCells checked. Findings: I2-1 MINOR temporary_subtitle \"Временный\" still agrees with the old noun чат; deferred. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
     }
   ]
 }

@@ -85,10 +85,13 @@ export function temporaryGroupOpen(
 }
 
 /** Whole minutes until deletion, never below one while the clock still runs:
-    "deletes in 0 min" would read as already gone. `null` while held. */
+    "deletes in 0 min" would read as already gone. `null` while held.
+    Rounded DOWN, the desktop's and the terminal's rule (QA r2 Q8): `deletes_at`
+    is stamped a fraction after the mark, so a ceiling read a fresh 30-minute
+    chat as 31, and the three surfaces disagreed at the same moment. */
 export function minutesUntilDeletion(info: TemporaryInfo, nowMs: number): number | null {
 	if (info.hold || info.deletes_at === null) return null;
-	return Math.max(1, Math.ceil((info.deletes_at * 1000 - nowMs) / 60000));
+	return Math.max(1, Math.floor((info.deletes_at * 1000 - nowMs) / 60000));
 }
 
 /** The final stretch the countdown is emphasised in (recommendation: last 5 min). */

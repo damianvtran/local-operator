@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "tui.app",
-  "history_sha256": "fb1e4cd5540a038c64af51d8f262996f4e8ef5dd3c15584e9747719aa63591ca",
+  "history_sha256": "78fce24e34cb2f577f159a69426fc7c6a40ae642e2f805084f89303d2b78a229",
   "entries": [
     {
       "locale": "fr",
@@ -23,6 +23,32 @@
       },
       "status": "passed",
       "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.app",
+      "source_sha256": "3ffea9a3761c7d4d4f384819700bafbbe0c9aefb223fccee8d5336843a73bf2e",
+      "target_sha256": "b1b7124fd7c7b05cd939c8e94f1c7d25485b4b2b76bde4f3f113c186be21f97f",
+      "translator": {
+        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-backend, session cf2843d74957); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
+        "session": "2d1500d56d0e",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 2
+      },
+      "status": "passed",
+      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the fr guide and sidecars; placeholders, plurals, U+202F and maxCells checked. Findings: carried NITs: unsaved_files 34>32, deletes_in 21>20 cells, accepted in round 1. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
     }
   ]
 }

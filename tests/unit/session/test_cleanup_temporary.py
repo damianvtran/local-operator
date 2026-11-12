@@ -10,6 +10,7 @@ opt-in.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -484,6 +485,26 @@ def test_a_keep_landing_after_the_tombstone_still_wins_and_withdraws_it(
     assert result.expired == []
     assert (root / "sessions" / A).is_dir()
     assert all(entry["id"] != A for entry in temp.read_tombstones(root, now=NOW))
+
+
+def test_a_failed_tombstone_withdraw_leaves_a_debug_trace(
+    root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review r2 N-1: the withdraw's False was ignored, so a failure left no trace.
+    _session(root, A, idle_s=WINDOW_S + 60, mark_age_s=WINDOW_S + 60)
+    real = cleanup._append_temporary_tombstone
+
+    def tombstone_then_keep(config_dir: Path, session_id: str, now: float) -> bool:
+        landed = real(config_dir, session_id, now)
+        assert temp.write_mark(root, session_id, False, by="desktop").ok
+        return landed
+
+    monkeypatch.setattr(cleanup, "_append_temporary_tombstone", tombstone_then_keep)
+    monkeypatch.setattr(cleanup, "_withdraw_temporary_tombstone", lambda *_a: False)
+    with caplog.at_level(logging.DEBUG, logger=cleanup.__name__):
+        result = _run(root)
+    assert result.expired == []
+    assert f"tombstone for kept {A} not withdrawn" in caplog.text
 
 
 def test_an_open_ask_outranks_the_wake_it_armed(

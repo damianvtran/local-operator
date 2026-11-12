@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "tui.notices",
-  "history_sha256": "107b47db11a83ea2a224011270cd31ba0e9a2c363dccb26f17e3e8ea021445d1",
+  "history_sha256": "ba9d222bf209156273d5d59641d5dc574965cc390ff7b5d7f06e42ca1fd2ba9b",
   "entries": [
     {
       "locale": "vi",
@@ -51,6 +51,32 @@
       },
       "status": "passed",
       "note": "R2 2026-11-09 reviewer 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 2 keys read; I7 minor, see record; 30 unchanged keys byte-identical to passed base row. Evidence: i18n/audits/evidence/vi/tui.notices/settings-r2-1b1866b4f2ed/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.notices",
+      "source_sha256": "72bd05be48678c23a0fc38e357cdee6fd10d6e4c0aedba1b76ee84b092c1a549",
+      "target_sha256": "61a8c6cb4daf64cc711a52bce32dce76ddc95aba37fb54c619cda0da730c5bb7",
+      "translator": {
+        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-backend, session cf2843d74957); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
+        "session": "2d1500d56d0e",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the vi guide and sidecars; placeholders, plurals, U+202F and maxCells checked. 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
     }
   ]
 }

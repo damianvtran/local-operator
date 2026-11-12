@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tui.app",
-  "history_sha256": "dfff5186164f158154b139999f8ffc84591c1412fd7a3e4cd21e488bd79e3f6e",
+  "history_sha256": "df94ac07dd919cbbe4cf4329428f69e989e36bfcd4e9b6a8434f9c780a24dfeb",
   "entries": [
     {
       "locale": "ur",
@@ -24,6 +24,32 @@
       "status": "passed",
       "note": "Round 2 audit (PR #3753 head 90fdf91871d) of the compaction_idle_* settings keys / tui.app.compaction idle receipt keys; round-1 (4e8cae30341) hi/ur/vi majors resolved; translator and auditor are separate agents on the same model (not model-independent). Round-1 audit task i18n-audit-idle-r1 failed hi/ur/vi. Evidence: i18n/audits/evidence/ur/tui.app/idle-r2/record.json",
       "evidence": "i18n/audits/evidence/ur/tui.app/idle-r2/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.app",
+      "source_sha256": "3ffea9a3761c7d4d4f384819700bafbbe0c9aefb223fccee8d5336843a73bf2e",
+      "target_sha256": "b3443422eecaa3d86e538bb95a59d7c0ec0b25dc7c726995cbbe97dc54d2d284",
+      "translator": {
+        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-backend, session cf2843d74957); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
+        "session": "2d1500d56d0e",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the ur guide and sidecars; placeholders, plurals, U+202F and maxCells checked. 0 findings. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
     }
   ]
 }

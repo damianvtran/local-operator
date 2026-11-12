@@ -8,6 +8,7 @@ turns its answers into the terminal's keyed sentences.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ from local_operator.i18n.keys import tui_app as _ta
 from local_operator.i18n.keys import tui_notices as _tn
 from local_operator.i18n.text import tr
 from local_operator.session import temporary
+
+logger = logging.getLogger(__name__)
 
 #: How long ``/temporary on`` waits for its repeat on a chat that has messages.
 CONFIRM_WINDOW_S = 30.0
@@ -60,7 +63,10 @@ def deletes_in(info: dict[str, Any] | None, now: float | None = None) -> str:
     if not isinstance(deletes_at, (int, float)):
         return ""
     clock = time.time() if now is None else now
-    minutes = max(1, int((deletes_at - clock + 59) // 60))
+    # DOWN, the desktop's rule (QA r2 Q8 / design D6): the mark's deadline is
+    # stamped a fraction after the mark, so a ceiling read a fresh 30-minute
+    # chat as 31. The 1 floor keeps the last minute from reading "0 min".
+    minutes = max(1, int((deletes_at - clock) // 60))
     return str(tr("tui.app")(_ta.temporary_deletes_in(minutes=minutes)))
 
 
@@ -126,7 +132,13 @@ def apply(root: Path, session_id: str, on: bool) -> tuple[bool, str]:
     """
     _t = tr("tui.notices")
     if on:
-        (Path(root) / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+        try:
+            (Path(root) / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # An unwritable store or a full disk (QA r2 Q7) is a mark that did
+            # not stick: refused like any failed write, never a traceback.
+            logger.debug("temporary: session dir for %s not created", session_id, exc_info=True)
+            return False, refused_sentence(session_id)
     result = temporary.write_mark(root, session_id, on, by="tui")
     if result.ok:
         if on:
@@ -137,10 +149,15 @@ def apply(root: Path, session_id: str, on: bool) -> tuple[bool, str]:
         return False, str(_t(_tn.temporary_refused_pinned()))
     if result.code == temporary.CODE_IN_PROJECT:
         return False, str(_t(_tn.temporary_refused_project()))
+    return False, refused_sentence(session_id, result.code)
+
+
+def refused_sentence(session_id: str, code: str = temporary.CODE_MARK_FAILED) -> str:
+    """``this chat cannot be made temporary: <reason>`` for a refusal ``code``."""
     from local_operator.server.utils.desktop_sessions import TemporaryRefusal
 
-    reason = TemporaryRefusal(result.code, session_id).envelope().get("text") or result.code
-    return False, str(_t(_tn.temporary_refused(reason=reason)))
+    reason = TemporaryRefusal(code, session_id).envelope().get("text") or code
+    return str(tr("tui.notices")(_tn.temporary_refused(reason=reason)))
 
 
 def pin_refusal_sentence(root: Path, session_id: str) -> str:

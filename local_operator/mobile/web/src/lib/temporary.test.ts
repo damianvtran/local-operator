@@ -102,9 +102,12 @@ describe("temporaryGroupOpen", () => {
 });
 
 describe("countdown and holds", () => {
-	it("rounds up and never shows zero minutes", () => {
+	it("rounds down like the desktop and the terminal, and never shows zero minutes", () => {
 		expect(minutesUntilDeletion(mark(), NOW_MS)).toBe(12);
-		expect(minutesUntilDeletion(mark({ deletes_at: NOW_MS / 1000 + 61 }), NOW_MS)).toBe(2);
+		// A fresh 30-minute mark, stamped a fraction late, still reads 30 (Q8).
+		expect(minutesUntilDeletion(mark({ deletes_at: NOW_MS / 1000 + 30 * 60 + 0.4 }), NOW_MS)).toBe(30);
+		expect(minutesUntilDeletion(mark({ deletes_at: NOW_MS / 1000 + 119 }), NOW_MS)).toBe(1);
+		expect(minutesUntilDeletion(mark({ deletes_at: NOW_MS / 1000 + 30 }), NOW_MS)).toBe(1);
 		expect(minutesUntilDeletion(mark({ deletes_at: NOW_MS / 1000 - 30 }), NOW_MS)).toBe(1);
 		expect(minutesUntilDeletion(mark({ hold: "running", deletes_at: null }), NOW_MS)).toBeNull();
 	});

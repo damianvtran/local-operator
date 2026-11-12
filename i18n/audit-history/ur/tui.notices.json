@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ur",
   "namespace": "tui.notices",
-  "history_sha256": "12f4e7286ce2652640eb5ce5931d52580cc33683a74a0d6e80ca4a73226d739e",
+  "history_sha256": "6b651e4569c627be66f9ae4923a9c47b2f94e11834de0fb5a492d245e73cfd21",
   "entries": [
     {
       "locale": "ur",
@@ -51,6 +51,32 @@
       },
       "status": "passed",
       "note": "R2 2026-11-09 reviewer 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 2 keys read; 0 findings; 30 unchanged keys byte-identical to passed base row. Evidence: i18n/audits/evidence/ur/tui.notices/settings-r2-1b1866b4f2ed/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.notices",
+      "source_sha256": "72bd05be48678c23a0fc38e357cdee6fd10d6e4c0aedba1b76ee84b092c1a549",
+      "target_sha256": "d63b518da201296e967845de863266fc795f5826bc8905f3fcd146286154d0c9",
+      "translator": {
+        "agent": "coder (lopdev, remediate-core-r1, session 1c07b39051ed) over coder (lopdev, core-temporary-backend, session cf2843d74957); applied round-1 auditor 506f24a144fa replacements verbatim where the English did not change",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed",
+        "date": "2026-11-12"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev reviewer role, task i18n-audit-r2, session 2d1500d56d0e; independent of PR authors, translators and the round-1 auditor)",
+        "session": "2d1500d56d0e",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-12",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 1
+      },
+      "status": "passed",
+      "note": "Temporary chats round 2 (PR #3832 @ eaff8c7a9): every key changed since b06ad8dc5 read against glossary a576d5a4b271 (incl. the new temporary chat/keep rows), the ur guide and sidecars; placeholders, plurals, U+202F and maxCells checked. Findings: I2-3 NIT temporary_off opens \"محفوظ:\" (saved) vs glossary keep رکھیں; deferred. Other keys byte-identical to the passed base row (ad1aa4162). Auditor 2d1500d56d0e, anthropic/claude-opus-5-5, no fallback."
     }
   ]
 }
