@@ -3312,7 +3312,89 @@ def _cmd_credential_refresh(args: argparse.Namespace) -> int:
         )
     # A grant contains access material. Emit a new allowlisted receipt, never
     # the broker detail or a redacted copy whose future fields could leak.
-    return _emit(args, {"ok": True, "credential_name": key}, [key])
+    payload: dict[str, Any] = {"ok": True, "credential_name": key}
+    lines = [key]
+    from local_operator.network.credentials.github import is_github_key
+
+    if is_github_key(key):
+        delivery = _apply_refreshed_narrowing(detail)
+        payload["narrowing"] = delivery
+        lines.extend(_narrowing_lines(delivery))
+    return _emit(args, payload, lines)
+
+
+def _apply_refreshed_narrowing(detail: dict[str, Any]) -> dict[str, Any]:
+    """Apply a refreshed github grant's narrowing here and say what it did.
+
+    THE FIELD FINDING THIS EXISTS FOR: refresh re-minted on the owner and then
+    dropped the grant, so a widened designation never reached this device's
+    allow-list and a push to the new repo still died at ``could not read
+    Username``. The receipt carries only the LIST and its bookkeeping — never
+    the grant — and says whether anything changed.
+
+    ``applies`` is when the change governs git: ``now`` for every arm here,
+    because the force-refresh just re-minted (App: the token is narrowed
+    server-side to the list it was minted for) or re-read (PAT/gh) at the owner,
+    and the helper reads the list at use time. ``not_delivered`` is an owner
+    that sent no designation (never set, or a build older than the field): this
+    device's standing list is untouched. ``after_next_mint`` is a delivery
+    older than one already applied here — nothing was written.
+    """
+    from local_operator.network.credentials import github as github_app
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    try:
+        client = MeshCredentialClient.for_this_device(None)
+    except Exception:  # noqa: BLE001 — attribution only; the delivery still applies
+        client = None
+    result = github_app.apply_grant_narrowing(detail, client=client, root=None)
+    if not result:
+        return {
+            "delivered": False,
+            "applies": "not_delivered",
+            "repositories": list(github_app.repositories_for(None)),
+            "changed": False,
+        }
+    if result.get("error"):
+        # A REFUSED delivery: report the list this device actually holds, not the
+        # rejected one the result carries (QA Q-1 — a digest mismatch printed the
+        # delivered list as "still" in force).
+        applies = "not_applied"
+        repositories = list(github_app.repositories_for(None))
+    else:
+        applies = "after_next_mint" if result.get("stale") else "now"
+        repositories = list(result.get("repositories") or [])
+    receipt: dict[str, Any] = {
+        "delivered": True,
+        "repositories": repositories,
+        "changed": bool(result.get("changed")),
+        "applies": applies,
+    }
+    for field in ("previous", "digest", "generation", "error", "owner_unknown"):
+        if result.get(field) not in (None, ""):
+            receipt[field] = result[field]
+    return receipt
+
+
+def _narrowing_lines(delivery: dict[str, Any]) -> list[str]:
+    repositories = (
+        ", ".join(delivery.get("repositories") or []) or "none (refuses every repository)"
+    )
+    if not delivery.get("delivered"):
+        return [f"repositories: {repositories} (the owner sent no designation; unchanged here)"]
+    if delivery.get("error"):
+        return [f"repositories: not applied ({delivery['error']}); still {repositories}"]
+    if delivery.get("applies") == "after_next_mint":
+        # Matches the JSON's ``after_next_mint`` (review R1-5). On refresh this is
+        # reachable only when the owner's generation went backwards.
+        return [
+            f"repositories: {repositories} (not applied: this delivery is older than "
+            "the one already here; applies after the next mint)"
+        ]
+    state = "changed" if delivery.get("changed") else "unchanged"
+    if delivery.get("owner_unknown"):
+        state += "; the owner was not named, so delivery order was not recorded"
+    return [f"repositories: {repositories} ({state})"]
 
 
 #: The CLI's wait for the share push: one dial plus the holder's 10 s answer budget
