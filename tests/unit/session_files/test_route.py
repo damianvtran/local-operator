@@ -596,7 +596,7 @@ async def test_warm_no_roster_route_does_not_parse_journal_and_self_skips_discov
     real = scan._row
     monkeypatch.setattr(scan, "_row", lambda raw: parses.append(1) or real(raw))
     monkeypatch.setattr(
-        "local_operator.server.utils.desktop_sessions.read_latest_custom_entry",
+        "local_operator.session_files.family.read_latest_custom_entry",
         lambda *a, **kw: pytest.fail("unbounded journal fallback"),
     )
     for _ in range(3):
@@ -604,8 +604,7 @@ async def test_warm_no_roster_route_does_not_parse_journal_and_self_skips_discov
         assert response.status_code == 200 and response.json()["result"]["total"] == 0
     assert parses == [], "warm no-roster requests do no journal JSON parsing"
     monkeypatch.setattr(
-        desktop_session_files,
-        "contained_descendants",
+        "local_operator.session_files.family.contained_descendants",
         lambda *a, **kw: pytest.fail("scope=self discovered family"),
     )
     assert (await client.get(URL + "?scope=self")).status_code == 200
@@ -671,7 +670,7 @@ async def test_legacy_roster_is_indexed_once_and_refreshes_on_append(api, monkey
         ],
     )
     monkeypatch.setattr(
-        "local_operator.server.utils.desktop_sessions.read_latest_custom_entry",
+        "local_operator.session_files.family.read_latest_custom_entry",
         lambda *a, **kw: pytest.fail("unbounded roster fallback"),
     )
     for _ in range(2):

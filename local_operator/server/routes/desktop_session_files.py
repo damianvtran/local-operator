@@ -59,9 +59,9 @@ from local_operator.server.models.desktop_session_files import (
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import errors, host, reply
-from local_operator.server.utils.desktop_sessions import contained_descendants
 from local_operator.session import compression, user_attachments
 from local_operator.session_files import ledger, service
+from local_operator.session_files.family import family_for
 
 logger = logging.getLogger(__name__)
 
@@ -101,41 +101,8 @@ async def _family(
     scope: str = "family",
     budget_s: float | None = None,
 ) -> tuple[service.Family, ledger.Snapshot | None]:
-    if scope == "self":
-        return service.Family(session_id, directory), None
-
-    # Roster absence is indexed during the SAME resumable pass as files. A sidecar still
-    # wins; the indexed fallback cannot reparse a huge no-roster journal before the budget.
-    def refresh_parent() -> ledger.Snapshot | None:
-        # to_thread arguments are evaluated ON the event loop. Keep the real cwd/registry,
-        # HOME and denylist filesystem readers inside the worker, not in its argument list.
-        return ledger.refresh(
-            config_dir,
-            session_id,
-            directory,
-            cwd=service.session_cwd(config_dir, session_id, directory),
-            home=str(Path.home()),
-            deny=service.make_deny(config_dir),
-            budget_s=budget_s,
-        )
-
-    snapshot = await asyncio.to_thread(refresh_parent)
-    children, skipped = await asyncio.to_thread(
-        contained_descendants,
-        config_dir,
-        session_id,
-        indexed_roster=snapshot.scan.roster if snapshot else None,
-        indexed=True,
-    )
-    return (
-        service.Family(
-            session_id=session_id,
-            session_dir=directory,
-            children=tuple(children),
-            skipped=skipped,
-        ),
-        snapshot,
-    )
+    # ONE definition, shared with the relay's ``net_session_files`` (remote files C3).
+    return await family_for(config_dir, session_id, directory, scope=scope, budget_s=budget_s)
 
 
 def _kick(config_dir: Path, session_id: str, scope: str, family: service.Family) -> None:
