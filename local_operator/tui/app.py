@@ -47434,7 +47434,8 @@ class OperatorApp(App[None]):
             from local_operator.i18n.text import tr
 
             word = str(tr("tui.status")(_ts.temporary())) if flag else ""
-            self._status.update(temporary=word)
+            if self._status is not None:
+                self._status.update(temporary=word)
         except Exception:  # noqa: BLE001 — before the band mounts
             logger.debug("temporary band segment not painted", exc_info=True)
         try:

@@ -65,14 +65,15 @@ TEMPORARY_MEMORY_REFUSAL = (
 )
 
 
-def _refuse_durable_write_in_temporary(context: ToolContext | None, scope: str) -> None:
+def _refuse_durable_write_in_temporary(context: ToolContext | None, scope: str | None) -> None:
     """Refuse a memory write that would outlive a TEMPORARY chat.
 
     A temporary chat is deleted when idle; session memory goes with it, but a
     global/team/agent fact would carry its content past the deletion the user
     asked for. Only ``session`` scope is written here; reads are unaffected.
     """
-    if scope == "session" or context is None or not context.session_dir:
+    # An unscoped path is not a durable write; the writer refuses it on its own.
+    if not scope or scope == "session" or context is None or not context.session_dir:
         return
     from local_operator.session.temporary import is_marked_path
 

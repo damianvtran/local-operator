@@ -241,8 +241,20 @@ def test_reads_create_nothing(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(15, 15), (30, 30), (1, 15), (16, 30), (31, 120), (121, 1440), (99999, 1440),
-     ("30", 30), ("junk", 30), (None, 30), (True, 30), (29.5, 30)],
+    [
+        (15, 15),
+        (30, 30),
+        (1, 15),
+        (16, 30),
+        (31, 120),
+        (121, 1440),
+        (99999, 1440),
+        ("30", 30),
+        ("junk", 30),
+        (None, 30),
+        (True, 30),
+        (29.5, 30),
+    ],
 )
 def test_the_window_clamps_up(value: object, expected: int) -> None:
     assert clamp_idle_minutes(value) == expected
@@ -258,7 +270,11 @@ def test_row_info_without_a_hold(tmp_path: Path) -> None:
 def test_row_info_with_a_fresh_hold_and_a_stale_one(tmp_path: Path) -> None:
     directory = _session(tmp_path)
     write_mark(tmp_path, SID, True, by="cli", now=1000.0)
-    state = {"v": 1, "evaluated_at": 1050.0, "sessions": {SID: {"held_at": 1050.0, "hold": "running"}}}
+    state = {
+        "v": 1,
+        "evaluated_at": 1050.0,
+        "sessions": {SID: {"held_at": 1050.0, "hold": "running"}},
+    }
     held = row_info(directory, idle_minutes=30, state=state, now=1100.0, activity=900.0)
     assert held is not None and held["hold"] == "running" and held["deletes_at"] is None
     stale = row_info(directory, idle_minutes=30, state=state, now=1050.0 + 200, activity=900.0)

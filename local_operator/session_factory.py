@@ -5137,9 +5137,7 @@ async def _prepare(
         if fresh_directory and getattr(args, "temporary", False):
             from local_operator.session.temporary import write_mark
 
-            marked = write_mark(
-                transcript_dir.parent.parent, transcript_dir.name, True, by="exec"
-            )
+            marked = write_mark(transcript_dir.parent.parent, transcript_dir.name, True, by="exec")
             if not marked.ok:
                 from local_operator.i18n.keys import wire_errors_desktop as _wd
                 from local_operator.i18n.text import tr

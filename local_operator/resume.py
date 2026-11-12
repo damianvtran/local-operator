@@ -2221,7 +2221,7 @@ def _scan_sessions(
         else:
             revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
-    rows: list[tuple[str, float, str, bool]] = []
+    rows: list[tuple[str, float, str, bool, bool]] = []
     # THE ARCHIVE INDEX, READ LAZILY AND MEMOISED, on the first candidate that
     # reaches the archive decision below. Not read up front, and that is a
     # syscall budget rather than a style choice: the poll's per-directory cost

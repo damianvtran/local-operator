@@ -155,9 +155,7 @@ def test_only_expired_marked_unguarded_ids_go_in_a_disabled_store(
         else:
             _session(root, sid, idle_s=10 * WINDOW_S)  # unmarked
     guarded = "000000000005"
-    monkeypatch.setattr(
-        cleanup, "_has_armed_wake", lambda _root, session: session == guarded
-    )
+    monkeypatch.setattr(cleanup, "_has_armed_wake", lambda _root, session: session == guarded)
     result = _run(root)
     assert set(result.expired) == expired - {guarded}
     remaining = {p.name for p in (root / "sessions").iterdir() if p.is_dir()}
@@ -318,11 +316,15 @@ def test_state_prunes_ids_no_longer_marked(root: Path) -> None:
 # -- the idle keep-alive resident ------------------------------------------------------
 
 
-def _resident(monkeypatch: pytest.MonkeyPatch, *, leaves: bool, on_leave=None):  # type: ignore[no-untyped-def]
+def _resident(  # type: ignore[no-untyped-def]
+    monkeypatch: pytest.MonkeyPatch, *, leaves: bool, on_leave=None
+):
     """A claim held only by an idle keep-alive runtime, via the real call sites."""
     state = {"gone": False, "asked": 0, "withdrawn": 0}
 
-    def guard(directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False):  # type: ignore[no-untyped-def]
+    def guard(  # type: ignore[no-untyped-def]
+        directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
+    ):
         if live_owner_gone or state["gone"]:
             return None
         return "claimed by a live process"

@@ -86,7 +86,7 @@ def apply(root: Path, session_id: str, on: bool) -> tuple[bool, str]:
     if result.ok:
         if on:
             minutes = temporary.configured_idle_minutes(root)
-            return True, str(_t(_tn.temporary_on(minutes=minutes)))
+            return True, str(_t(_tn.temporary_on(minutes=str(minutes))))
         return True, str(_t(_tn.temporary_off()))
     if result.code == temporary.CODE_PINNED:
         return False, str(_t(_tn.temporary_refused_pinned()))

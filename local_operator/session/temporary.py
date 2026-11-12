@@ -191,7 +191,9 @@ def read_mark(session_dir: Path, *, now: float | None = None) -> Mark | None:
     if marked_at > clock + FUTURE_SKEW_S:
         return None
     by = payload.get("by")
-    return Mark(session_id=session_dir.name, marked_at=marked_at, by=by if isinstance(by, str) else "")
+    return Mark(
+        session_id=session_dir.name, marked_at=marked_at, by=by if isinstance(by, str) else ""
+    )
 
 
 def is_marked_path(session_dir: str | os.PathLike[str]) -> bool:
@@ -241,7 +243,11 @@ def admission_refusal(config_dir: Path, session_id: str) -> str:
     Every check that cannot be EVALUATED refuses too: marking is the step that
     makes a conversation deletable, so "could not tell" must mean "not marked".
     """
-    from local_operator.resume import ORIGIN_FORK, is_user_session_origin, session_origin
+    from local_operator.resume import (
+        ORIGIN_FORK,
+        is_user_session_origin,
+        session_origin,
+    )
 
     if not _plain_id(session_id):
         return CODE_NOT_FOUND

@@ -58,9 +58,6 @@ def _consumer_defaults() -> dict[str, object]:
     # The registry carries a literal because settings_io stays off that
     # module's import path; THIS is what turns a drift into a red test.
     from local_operator.agent_profiles import AUTO_UPDATE_SEEDS_DEFAULT
-    from local_operator.session.temporary import (
-        DEFAULT_IDLE_MINUTES as _TEMPORARY_DEFAULT_IDLE_MINUTES,
-    )
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
     from local_operator.guardrails.check import (
@@ -167,6 +164,9 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_KEEP_ALIVE_SECONDS,
     )
     from local_operator.session.runtime.serving import DEFAULT_UNATTENDED_GATE_TIMEOUT_H
+    from local_operator.session.temporary import (
+        DEFAULT_IDLE_MINUTES as _TEMPORARY_DEFAULT_IDLE_MINUTES,
+    )
     from local_operator.spawn.policy import (
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,

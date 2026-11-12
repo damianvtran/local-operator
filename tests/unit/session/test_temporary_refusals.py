@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -56,8 +56,10 @@ def test_desktop_and_relay_map_the_refusal_to_409_session_temporary() -> None:
 
     desktop = desktop_projects._refusal(TemporarySessionError(TEMP), "alpha")
     assert desktop.status_code == 409
-    assert desktop.detail["code"] == "session_temporary"
-    assert TEMP in desktop.detail["text"]
+    assert isinstance(desktop.detail, dict)
+    detail = cast("dict[str, Any]", desktop.detail)
+    assert detail["code"] == "session_temporary"
+    assert TEMP in detail["text"]
     relay = relay_projects._refusal(TemporarySessionError(TEMP))
     assert (relay.status, relay.code) == (409, "session_temporary")
 
@@ -96,7 +98,10 @@ def _memory_context(root: Path, session_id: str) -> ToolContext:
 async def test_a_global_fact_is_refused_in_a_temporary_chat_and_session_scope_is_not(
     tmp_path: Path,
 ) -> None:
-    from local_operator.tools.memory_tools import TEMPORARY_MEMORY_REFUSAL, execute_fact_memory
+    from local_operator.tools.memory_tools import (
+        TEMPORARY_MEMORY_REFUSAL,
+        execute_fact_memory,
+    )
 
     _store(tmp_path)
     refused = await execute_fact_memory(
@@ -105,26 +110,29 @@ async def test_a_global_fact_is_refused_in_a_temporary_chat_and_session_scope_is
         context=_memory_context(tmp_path, TEMP),
     )
     assert refused.is_error
-    assert TEMPORARY_MEMORY_REFUSAL in refused.content[0].text
+    assert TEMPORARY_MEMORY_REFUSAL in refused.text
     session_scoped = await execute_fact_memory(
         "b",
         {"op": "store", "scope": "session", "text": "prefers tea over coffee"},
         context=_memory_context(tmp_path, TEMP),
     )
-    assert not session_scoped.is_error, session_scoped.content[0].text
+    assert not session_scoped.is_error, session_scoped.text
     ordinary = await execute_fact_memory(
         "c",
         {"op": "store", "scope": "global", "text": "prefers tea over coffee"},
         context=_memory_context(tmp_path, PLAIN),
     )
-    assert not ordinary.is_error, ordinary.content[0].text
+    assert not ordinary.is_error, ordinary.text
 
 
 @pytest.mark.asyncio
 async def test_a_path_based_global_write_is_refused_too(tmp_path: Path) -> None:
     import json
 
-    from local_operator.tools.memory_tools import TEMPORARY_MEMORY_REFUSAL, execute_memory
+    from local_operator.tools.memory_tools import (
+        TEMPORARY_MEMORY_REFUSAL,
+        execute_memory,
+    )
 
     _store(tmp_path)
     refused = await execute_memory(
@@ -134,7 +142,7 @@ async def test_a_path_based_global_write_is_refused_too(tmp_path: Path) -> None:
         _memory_context(tmp_path, TEMP),
     )
     assert refused.is_error
-    assert TEMPORARY_MEMORY_REFUSAL in refused.content[0].text
+    assert TEMPORARY_MEMORY_REFUSAL in refused.text
 
 
 def test_auto_capture_skips_a_temporary_chat_only(tmp_path: Path) -> None:

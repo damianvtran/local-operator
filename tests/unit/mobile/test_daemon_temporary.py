@@ -190,9 +190,7 @@ def test_start_with_temporary_marks_the_new_session(relay, monkeypatch) -> None:
         return 4242
 
     monkeypatch.setattr(daemon, "spawn_session", fake_spawn)
-    response = client.post(
-        "/api/sessions/start", json={"cwd": str(cfg), "temporary": True}
-    )
+    response = client.post("/api/sessions/start", json={"cwd": str(cfg), "temporary": True})
     assert response.status_code == 200, response.text
     assert temporary.is_marked(cfg, response.json()["session_id"])
     plain = client.post("/api/sessions/start", json={"cwd": str(cfg)})

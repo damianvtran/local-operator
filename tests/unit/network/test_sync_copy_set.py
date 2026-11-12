@@ -83,13 +83,13 @@ def _entry_owners() -> dict[str, str]:
         TRANSCRIPT_FILENAME,
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
-    from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session.runtime.journal import EXIT_RECORD_NAME, RUN_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
+    from local_operator.session.temporary import MARK_NAME as TEMPORARY_MARK_NAME
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
     from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME

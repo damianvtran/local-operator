@@ -57,7 +57,6 @@ from local_operator.server.models.desktop_sessions import (
     AdmissionStatus,
     AnswerReceipt,
     ArchiveState,
-    TemporaryState,
     AttentionState,
     CheckpointManifest,
     CheckpointWarmReceipt,
@@ -83,6 +82,7 @@ from local_operator.server.models.desktop_sessions import (
     SessionSnapshot,
     StoredFile,
     SupplementReceipt,
+    TemporaryState,
     WarmReceipt,
     WatchReceipt,
 )
@@ -106,11 +106,11 @@ from local_operator.server.utils.desktop_sessions import (
     PeerAttachmentUnavailable,
     PeerSessionUnreachable,
     SessionDeletionRefused,
-    TemporaryRefusal,
-    temporary_deleted_refusal,
     SubagentChildUnavailable,
+    TemporaryRefusal,
     move_session,
     resolve_working_directory,
+    temporary_deleted_refusal,
 )
 from local_operator.server.utils.store_failures import (
     STORE_BUSY,
@@ -3099,9 +3099,7 @@ async def create_session(body: CreateSession, request: Request):
     """
     if body.peer and body.temporary:
         # Before any receipt or peer dial: a refusal leaves the store untouched.
-        raise HTTPException(
-            422, TemporaryRefusal("temporary_peer_unsupported").envelope()
-        )
+        raise HTTPException(422, TemporaryRefusal("temporary_peer_unsupported").envelope())
 
     async def create():
         if body.peer:

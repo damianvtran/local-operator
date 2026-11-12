@@ -4800,7 +4800,11 @@ def test_the_temporary_pass_removes_nothing_from_an_unmarked_store(tmp_path: Pat
 
 def test_the_temporary_pass_removes_only_expired_marked_unguarded_ids(tmp_path: Path) -> None:
     from local_operator.session import temporary
-    from local_operator.session.cleanup import CleanupPolicy, run_temporary_pass, set_hold
+    from local_operator.session.cleanup import (
+        CleanupPolicy,
+        run_temporary_pass,
+        set_hold,
+    )
 
     root, now = _temporary_store(tmp_path)
     marked = [f"{index:012x}" for index in (1, 2, 3)]

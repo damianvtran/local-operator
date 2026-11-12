@@ -87,7 +87,6 @@ from local_operator.session import (
 # ``set_pin`` is aliased only because this adapter's own method of that name is
 # the caller's entry point; the store function stays the single writer.
 from local_operator.session.archived import set_archived as set_session_archived
-from local_operator.session.temporary import RowProjector as _TemporaryRows
 from local_operator.session.attached import (
     DESKTOP_CONTROL_ATTACH_S,
     READ_ATTACH_BUDGET_S,
@@ -155,6 +154,7 @@ from local_operator.session.retention import (
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
+from local_operator.session.temporary import RowProjector as _TemporaryRows
 from local_operator.session.transcript import (
     custom_type_proven_absent,
     read_entry_by_id,
@@ -8103,7 +8103,9 @@ class DesktopSessions:
 
         return await asyncio.to_thread(apply)
 
-    async def set_temporary(self, session_id: str, on: bool, *, by: str = "desktop") -> dict[str, Any]:
+    async def set_temporary(
+        self, session_id: str, on: bool, *, by: str = "desktop"
+    ) -> dict[str, Any]:
         """Mark (``on``) or keep (``not on``) a conversation as temporary.
 
         Desired state, like pin and archive: a retry lands on the same state.

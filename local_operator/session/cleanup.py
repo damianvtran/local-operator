@@ -559,7 +559,10 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
 
 def _temporary_idle_minutes(getter: Callable[..., Any]) -> int:
     """``session.cleanup.temporary.idle_minutes``, clamped UP to a preset."""
-    from local_operator.session.temporary import DEFAULT_IDLE_MINUTES, clamp_idle_minutes
+    from local_operator.session.temporary import (
+        DEFAULT_IDLE_MINUTES,
+        clamp_idle_minutes,
+    )
 
     try:
         value = getter(CLEANUP_PATH + ("temporary", "idle_minutes"), DEFAULT_IDLE_MINUTES)
@@ -4130,9 +4133,7 @@ def _append_temporary_tombstone(config_dir: Path, session_id: str, now: float) -
         read_tombstones,
     )
 
-    entries = [
-        entry for entry in read_tombstones(config_dir, now=now) if entry["id"] != session_id
-    ]
+    entries = [entry for entry in read_tombstones(config_dir, now=now) if entry["id"] != session_id]
     entries.insert(0, {"id": session_id, "deleted_at": now})
     return _write_record(
         Path(config_dir) / SESSIONS_DIRNAME / TOMBSTONES_NAME, entries[:TOMBSTONE_CAP]
@@ -4258,7 +4259,10 @@ def run_temporary_pass(
     attention_failed = False
     if marked:
         try:
-            from local_operator.session.attention import AttentionStore, conversation_identity
+            from local_operator.session.attention import (
+                AttentionStore,
+                conversation_identity,
+            )
 
             attention = AttentionStore(config_dir / "attention.db").state_many(
                 [conversation_identity(directory) for directory in marked]
@@ -4278,7 +4282,8 @@ def run_temporary_pass(
             break
         session_id = directory.name
         unvisited.discard(session_id)
-        prior = previous.get(session_id) if isinstance(previous.get(session_id), dict) else {}
+        recorded = previous.get(session_id)
+        prior: dict[str, Any] = recorded if isinstance(recorded, dict) else {}
         held_at = temp._finite(prior.get("held_at"))
         mark = temp.read_mark(directory, now=clock)
         if mark is None or not is_user_session(directory):

@@ -72,9 +72,7 @@ def _rows(response: Any) -> list[dict[str, Any]]:
 
 
 async def _toggle(client: AsyncClient, session_id: str, on: bool):
-    return await client.post(
-        f"/v1/desktop/sessions/{session_id}/temporary", json={"temporary": on}
-    )
+    return await client.post(f"/v1/desktop/sessions/{session_id}/temporary", json={"temporary": on})
 
 
 @pytest.mark.asyncio
@@ -111,7 +109,9 @@ async def test_temporary_with_peer_is_a_422_with_its_code(api) -> None:
 @pytest.mark.asyncio
 async def test_a_non_bool_temporary_is_refused(api) -> None:
     client, root = api
-    response = await client.post("/v1/desktop/sessions", json={"cwd": str(root), "temporary": 1, "request_id": _rid()})
+    response = await client.post(
+        "/v1/desktop/sessions", json={"cwd": str(root), "temporary": 1, "request_id": _rid()}
+    )
     assert response.status_code == 422
 
 

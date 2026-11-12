@@ -2729,9 +2729,7 @@ class SessionSidebar(Widget, can_focus=True):
                 from local_operator.i18n.text import tr
 
                 count = sum(
-                    1
-                    for _kind, row in rows
-                    if row is not None and self._section_of(row) == -1
+                    1 for _kind, row in rows if row is not None and self._section_of(row) == -1
                 )
                 result.append(
                     truncate_cells(

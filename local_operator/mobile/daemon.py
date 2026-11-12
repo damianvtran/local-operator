@@ -1091,9 +1091,7 @@ class SessionTable:
                 # (``_list_frame(include_temporary=…)``): this durable half is
                 # ONE cache shared by every listing on the daemon, so it carries
                 # the rows and each frame decides whether its client asked.
-                for row in recent_session_rows(
-                    directory, 100, strict=True, include_temporary=True
-                )
+                for row in recent_session_rows(directory, 100, strict=True, include_temporary=True)
             }
             dates = {}
             for session_id in live_ids - rows.keys():
@@ -2167,9 +2165,7 @@ def _temporary_refusal(code: str, session_id: str, **extra: Any) -> "JSONRespons
 
     refusal = TemporaryRefusal(code, session_id, **extra)
     body = refusal.envelope()
-    return JSONResponse(
-        {"error": body.get("text") or code, **body}, status_code=refusal.status
-    )
+    return JSONResponse({"error": body.get("text") or code, **body}, status_code=refusal.status)
 
 
 def _temporary_deleted_response(session_id: str) -> "JSONResponse | None":
@@ -7062,9 +7058,7 @@ def build_app(daemon: MobileDaemon):
             revision = daemon.table.list_revision
             event = _sse(
                 "sessions",
-                await _list_frame(
-                    include_peers=include_peers, include_temporary=include_temporary
-                ),
+                await _list_frame(include_peers=include_peers, include_temporary=include_temporary),
             )
             newest = list_events.get(flags)
             if newest is None or newest[0] <= revision:
@@ -11405,9 +11399,7 @@ def build_app(daemon: MobileDaemon):
         # verdict buckets out, a no-op batch still 2xx.
         Route("/api/attention/seen", api_attention_seen_many, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/pin", api_session_pin, methods=["POST"]),
-        Route(
-            "/api/sessions/{session_id:str}/temporary", api_session_temporary, methods=["POST"]
-        ),
+        Route("/api/sessions/{session_id:str}/temporary", api_session_temporary, methods=["POST"]),
         # Read-only catalogue + per-conversation desired-state assignment; see
         # the handlers for why creation/rename does not exist on this surface.
         Route("/api/tags", api_tags),

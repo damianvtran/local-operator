@@ -43,8 +43,14 @@ def _store(root: Path, session_id: str = SID) -> Path:
 
 @pytest.mark.parametrize(
     ("arg", "expected"),
-    [("", "toggle"), ("on", "on"), ("OFF", "off"), ("keep", "off"), ("status", "status"),
-     ("maybe", None)],
+    [
+        ("", "toggle"),
+        ("on", "on"),
+        ("OFF", "off"),
+        ("keep", "off"),
+        ("status", "status"),
+        ("maybe", None),
+    ],
 )
 def test_parse(arg: str, expected: str | None) -> None:
     assert temporary_chat.parse(arg) == expected
@@ -161,12 +167,12 @@ async def test_temporary_on_asks_first_then_marks_and_off_keeps(
         await pilot.pause()
         assert temporary.is_marked(tmp_path, SID)
         assert app._temporary_flag is True
-        assert app._status._temporary
+        assert app._status is not None and app._status._temporary
         app._cmd_temporary("status", lambda *_a, **_k: None)
         app._cmd_temporary("off", lambda *_a, **_k: None)
         await pilot.pause()
         assert not temporary.is_marked(tmp_path, SID)
-        assert app._status._temporary == ""
+        assert app._status is not None and app._status._temporary == ""
 
 
 @pytest.mark.asyncio
