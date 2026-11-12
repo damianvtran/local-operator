@@ -920,6 +920,7 @@ class RadientClient:
         *,
         with_credential: bool = False,
         timeout: Optional[float] = None,
+        credential_free: bool = False,
     ) -> None:
         """
         Download an agent from the Radient Agent Hub.
@@ -936,10 +937,23 @@ class RadientClient:
             dest_path (Path): Path to save the downloaded ZIP file.
             with_credential (bool): Send this client's bearer with the request.
                 Defaults to the anonymous public download.
+            credential_free (bool): Guarantee the request carries NO
+                credential at all -- not even an ambient ``~/.netrc`` entry,
+                which ``requests`` would otherwise attach as Basic auth (see
+                :func:`_no_ambient_credential`) -- and refuse a redirect, whose
+                target ``requests`` would re-authenticate from netrc. The
+                hub-sync check of a PUBLIC agent falls back to this download
+                when its detail read fails or carries no instructions, and that
+                answer must be the public one, never a signed-in one. Off by
+                default, so interactive pulls keep ``requests``' environment
+                behaviour. Refused together with the bearer switch above.
 
         Raises:
             RuntimeError: If the download fails.
+            APIError: When ``credential_free`` refuses a redirect.
         """
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
         url = f"{self.base_url}/agents/{agent_id}/download"
         headers = self._get_headers(content_type=None, require_api_key=with_credential)
         try:
@@ -948,8 +962,13 @@ class RadientClient:
             # runner bounds every hub request (a stalled socket would otherwise
             # hold its tick, lock and lease, and a thread cannot be cancelled).
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            if credential_free:
+                extra["auth"] = _no_ambient_credential
+                extra["allow_redirects"] = False
             response = requests.get(url, headers=headers, stream=True, **extra)
             response.raise_for_status()
+            if credential_free:
+                self._refuse_redirect(response)
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
@@ -1706,6 +1725,7 @@ class RadientClient:
         timeout: Optional[float] = None,
         with_credential: bool = True,
         if_none_match: Optional[str] = None,
+        credential_free: bool = False,
     ) -> Dict[str, Any]:
         """Pull one skill manifest by id (``GET /v1/skills/:skillid``).
 
@@ -1728,6 +1748,13 @@ class RadientClient:
         on purpose: "what revision do I hold" is link state (the baseline
         record), which a transport client must not be asked to know.
 
+        ``credential_free`` hardens the anonymous arm into "no credential,
+        ever", exactly as on :meth:`get_team`: ``requests`` would otherwise
+        attach an ambient ``~/.netrc`` entry for the hub's host as Basic auth
+        (see :func:`_no_ambient_credential`). The hub-sync check of a PUBLIC
+        skill link asks for it; redirects are already refused on every call.
+        Refused together with the bearer switch.
+
         Returns:
             The skill document: ``id``, ``tenant_id``, ``name``,
             ``description``, ``files`` (path/content pairs), ``version`` and the
@@ -1740,6 +1767,8 @@ class RadientClient:
                 who may not read it).
         """
 
+        if credential_free and with_credential:
+            raise ValueError("credential_free excludes with_credential")
         url = f"{self.base_url}/skills/{skill_id}"
         headers = self._get_headers(
             content_type="application/json", require_api_key=with_credential
@@ -1748,6 +1777,8 @@ class RadientClient:
             headers[IF_NONE_MATCH_HEADER] = if_none_match
         try:
             extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            if credential_free:
+                extra["auth"] = _no_ambient_credential
             response = requests.get(url, headers=headers, allow_redirects=False, **extra)
             response.raise_for_status()
             if response.status_code == HTTP_NOT_MODIFIED and if_none_match:

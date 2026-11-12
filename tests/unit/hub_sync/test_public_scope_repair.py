@@ -685,3 +685,113 @@ def test_org_reads_still_send_their_bearer(tmp_path, hub, monkeypatch):
     chk.check_hub_agents(linked.registry, client_for_tenant=linked.ctx.client_for_tenant)
     assert hub.seen[0] == (f"/v1/agents/{AGENT_HUB}", True), hub.seen
     assert hub.auth[0] == "Bearer org-bearer", hub.auth
+
+
+# --- Round-1 R1/Q-m1: the agent ZIP FALLBACK and SKILL reads are public reads too --
+#
+# WHY. A public agent check falls back to the zip download whenever its detail
+# read fails (5xx, timeout, a refused 3xx) or carries no ``instructions``. That
+# download used to be ambient -- netrc's Basic attached, redirects followed with
+# netrc re-read for the target -- so a degraded hub moved the leak instead of
+# closing it, and a 200 there would record a signed-in answer as the public one.
+# The public skill check had the same exposure. Every zip route below answers a
+# 302 to a URL that WOULD answer 200: a followed redirect shows up in ``seen``.
+
+AGENT_DETAIL = f"/v1/agents/{AGENT_HUB}"
+AGENT_ZIP = f"/v1/agents/{AGENT_HUB}/download"
+
+
+def _zip_redirects(hub: FakeHub) -> None:
+    hub.routes[AGENT_ZIP] = (302, {}, {"Location": f"{hub.base}/elsewhere-zip"})
+    hub.routes["/v1/elsewhere-zip"] = (200, {}, {})
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        pytest.param((500, {"msg": "boom"}, {}), id="detail-500"),
+        pytest.param((302, {}, {"Location": "/v1/elsewhere-agent"}), id="detail-302"),
+        pytest.param((200, {"result": {"id": AGENT_HUB}}, {}), id="detail-no-instructions"),
+    ],
+)
+def test_public_agent_zip_fallback_sends_no_netrc_credential(tmp_path, hub, monkeypatch, detail):
+    _home_netrc(tmp_path, monkeypatch)
+    hub.team()
+    _netrc_control(hub)
+    linked = _agent_ctx(tmp_path, hub, tenant=None)
+    hub.routes[AGENT_DETAIL] = detail
+    hub.routes["/v1/elsewhere-agent"] = (
+        200,
+        {"result": {"id": AGENT_HUB, "instructions": "x"}},
+        {},
+    )
+    _zip_redirects(hub)
+
+    (check,) = chk.check_hub_agents(linked.registry, client_for_tenant=linked.ctx.client_for_tenant)
+
+    # Detail read, then the zip fallback -- both bare, neither redirect followed.
+    assert hub.seen == [(AGENT_DETAIL, False), (AGENT_ZIP, False)], hub.seen
+    assert hub.auth == [None, None], hub.auth
+    # A refused redirect is an ordinary failed check, never a crash.
+    assert check.verdict == "unavailable", check
+
+
+def test_post_repair_agent_reread_sends_no_netrc_credential(tmp_path, hub, monkeypatch):
+    """The agent twin of the team re-read, through the zip fallback.
+
+    The detail payload carries no ``instructions`` -- the shape that falls to
+    the zip download -- so the re-read's second GET is the fallback itself.
+    """
+
+    import dataclasses
+
+    _home_netrc(tmp_path, monkeypatch)
+    hub.team()
+    _netrc_control(hub)
+    linked = _agent_ctx(tmp_path, hub, tenant=PUBLISHER)  # the legacy shape: tenant, no identity
+    ctx = dataclasses.replace(linked.ctx, agent_registry=linked.registry)
+    hub.routes[AGENT_DETAIL] = (200, {"result": {"id": AGENT_HUB}}, {})
+    _zip_redirects(hub)
+    check = ItemCheck("agent", AGENT_LOCAL, "a", AGENT_HUB, PUBLISHER, "up-to-date")
+
+    again = svc.repair_proven_public_scope(
+        ctx, check, source=prov.canonical_hub_source(ctx.config_manager)
+    )
+
+    assert again is not None and again.tenant_id is None, again
+    # probe, re-read detail, re-read zip fallback: all bare, no redirect followed.
+    assert hub.seen == [(AGENT_DETAIL, False), (AGENT_DETAIL, False), (AGENT_ZIP, False)], hub.seen
+    assert hub.auth == [None, None, None], hub.auth
+
+
+def test_public_skill_update_check_sends_no_netrc_credential(tmp_path, monkeypatch):
+    """A PUBLIC skill link (tenant-free baseline, the production signed-out factory)."""
+
+    from .test_skill_conditional_check import StubHub, _profile
+    from .test_skill_storage import _input
+
+    _home_netrc(tmp_path, monkeypatch)
+    with StubHub(_input()[1]) as stub:
+        import requests
+
+        requests.get(f"{stub.base_url}/skills/sk-1", timeout=5)  # NEGATIVE CONTROL
+        assert str(stub.requests[0].get("Authorization", "")).startswith("Basic "), stub.requests
+        stub.requests.clear()
+        _identity, root, _ctx_ = _profile(tmp_path, stub)
+        public, _ = svc._clients(stub.base_url, None)
+
+        (check,) = chk.check_hub_skills(config_dir=root, client_for_tenant=public)
+
+    assert check.tenant_id is None and check.verdict == "up-to-date", check
+    assert len(stub.requests) == 1 and "Authorization" not in stub.requests[0], stub.requests
+
+
+def test_credential_free_download_and_skill_refuse_a_bearer_request():
+    client = RadientClient(api_key=None, base_url="http://127.0.0.1:9/v1")
+    bearer = {"with_" + "credential": True}
+    with pytest.raises(ValueError):
+        client.download_agent_from_marketplace(
+            AGENT_HUB, Path("unused.zip"), credential_free=True, **bearer
+        )
+    with pytest.raises(ValueError):
+        client.get_skill(AGENT_HUB, credential_free=True, **bearer)

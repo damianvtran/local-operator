@@ -1154,11 +1154,12 @@ def repair_proven_public_scope(
     # Re-read this one row under its repaired (tenant-free) scope so the fold
     # records what the public client is now served, not the stale org-scoped
     # answer -- often ``no-credential`` when nobody is signed in. One more
-    # GET, once per repaired row, never on later checks. It is the ORDINARY
-    # public check, and every ordinary public read is ``credential_free``
-    # (``check._detail_read_auth``): a public read must never carry a
-    # credential, not even an ambient ``~/.netrc`` entry ``requests`` would
-    # attach as Basic auth -- otherwise this fold could record a signed-in
+    # GET (two for an agent whose detail read falls to the zip download), once
+    # per repaired row, never on later checks. It is the ORDINARY public check:
+    # its team/agent detail read (``check._detail_read_auth``) and the agent's
+    # public zip fallback are both ``credential_free`` -- no credential, not
+    # even an ambient ``~/.netrc`` entry ``requests`` would attach as Basic
+    # auth, and no redirect -- otherwise this fold could record a signed-in
     # answer as what the public is served, and leak the netrc secret to the hub.
     try:
         if c.kind == "team":

@@ -152,12 +152,15 @@ def _detail_read_auth(tenant: str | None) -> dict[str, bool]:
     then a signed-in answer mistaken for what the public is served -- the same
     hazard the legacy public-scope probe closed in #3813. ``credential_free``
     removes that header and refuses redirects (a followed redirect re-reads
-    netrc for the target); a refused redirect surfaces as an ordinary
-    ``unavailable`` row, the way ``get_team`` always reported one.
+    netrc for the target). A refused redirect on a team surfaces as an ordinary
+    ``unavailable`` row; on an agent it is a failed detail read, which falls to
+    the zip download -- and the public arm of that fallback is credential-free
+    and redirect-refusing too (``check_hub_agents``). Public SKILL reads get
+    the same guarantee from ``_fetch_skill``.
 
     One helper for both kinds and for the re-read after a scope repair (which
-    runs these same checks on the now tenant-free row), so no public read can
-    drift back to the leaky shape.
+    runs these same checks on the now tenant-free row), so no public detail
+    read can drift back to the leaky shape.
     """
 
     if tenant:
@@ -512,7 +515,15 @@ def check_hub_agents(
                         client, hub_id, with_credential=True, timeout=REQUEST_TIMEOUT_S
                     )
                 else:
-                    text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
+                    # The public arm of the zip fallback is held to the same
+                    # rule as the detail read (``_detail_read_auth``): no
+                    # credential, not even netrc's, and no redirect. It runs
+                    # exactly when that read failed or lacked instructions --
+                    # a refused 3xx included -- so leaving it ambient would
+                    # move the leak here rather than close it.
+                    text, desc = fetcher(
+                        client, hub_id, timeout=REQUEST_TIMEOUT_S, credential_free=True
+                    )
             except Exception as error:  # noqa: BLE001 - classified below
                 reason, detail = _failure_reason(error, kind="agent", hub_id=hub_id)
                 reason, subclass = _split_reason(reason)
@@ -1256,11 +1267,25 @@ def _fetch_skill(
     revision). The client turns a match into ``NotModified`` -- HTTP 304, no
     body -- and this seam passes that through untouched: translating it here
     would hide the one fact the caller needs, that the row did not move.
+
+    The anonymous client is the one ``client_for_tenant`` returns for a PUBLIC
+    link, and its read is ``credential_free`` -- no ambient ``~/.netrc`` Basic
+    auth either -- for the reason ``_detail_read_auth`` gives for teams and
+    agents. Keyed on the client (not a tenant) so this seam keeps its
+    signature for injected fetchers.
     """
 
     send_bearer = bool(getattr(client, "api_key", None))
+    if send_bearer:
+        return client.get_skill(
+            skill_id, timeout=timeout, if_none_match=if_none_match, with_credential=True
+        )
     return client.get_skill(
-        skill_id, timeout=timeout, if_none_match=if_none_match, **{"with_credential": send_bearer}
+        skill_id,
+        timeout=timeout,
+        if_none_match=if_none_match,
+        with_credential=False,
+        credential_free=True,
     )
 
 
