@@ -51,6 +51,7 @@ a parent cleaning up after its subagents needs no lineage lookup at read time.
 from __future__ import annotations
 
 import fnmatch
+import functools
 import glob as _glob
 import itertools
 import json
@@ -543,16 +544,32 @@ def owned_record(
     return best
 
 
+@functools.lru_cache(maxsize=1)
 def _path_max() -> int:
+    r"""Longest path a ledger row can hold (``_foreign_query``'s M3 bound).
+
+    ``os.pathconf`` is POSIX-only and simply absent on Windows, where this
+    module still has to import (CI ``xplat-probe-windows`` caught an
+    ``AttributeError: module 'os' has no attribute 'pathconf'`` at import
+    time), so it is looked up, never called unguarded. Without it each
+    platform keeps its own ceiling: an NTFS extended-length (``\\?\``) path
+    runs to 32767 characters and a realpath'd ledger row can legitimately
+    reach that, so a smaller Windows bound would silently drop ancestors;
+    1024 is the conservative floor everywhere else.
+
+    Cached and lazy on purpose: importing the module must not probe the
+    filesystem or be able to fail, and the answer cannot change in a process.
+    """
+    pathconf = getattr(os, "pathconf", None)
+    if pathconf is None:
+        return 32767 if os.name == "nt" else 1024
     try:
-        value = os.pathconf("/", "PC_PATH_MAX")
+        value = pathconf("/", "PC_PATH_MAX")
     except (OSError, ValueError):
         return 1024
     return value if value > 0 else 1024
 
 
-#: Longest path a ledger row can hold (``_foreign_query``'s M3 bound).
-_PATH_MAX = _path_max()
 #: Most ancestors bound per target; see ``_foreign_query``.
 _MAX_ANCESTORS = 512
 
@@ -591,10 +608,11 @@ def _foreign_query(paths: Iterable[str]) -> tuple[str, list[str]]:
     """
     ancestors: dict[str, None] = {}
     ranges: list[str] = []
+    path_max = _path_max()
     for real in paths:
         ends = [1] if real.startswith("/") else []  # "/" itself
-        ends += [i for i, ch in enumerate(real) if ch == "/" and 0 < i <= _PATH_MAX]
-        if len(real) <= _PATH_MAX:
+        ends += [i for i, ch in enumerate(real) if ch == "/" and 0 < i <= path_max]
+        if len(real) <= path_max:
             ends.append(len(real))
         kept = 0
         for end in dict.fromkeys(ends):

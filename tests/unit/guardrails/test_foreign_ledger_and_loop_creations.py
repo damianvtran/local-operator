@@ -22,6 +22,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -359,17 +360,61 @@ def test_foreign_query_memory_is_bounded_for_a_very_deep_path(home: Path) -> Non
     finally:
         tracemalloc.stop()
     assert peak < 5 * 1024 * 1024, peak
-    assert all(len(p) <= prov._PATH_MAX for p in params)
+    assert all(len(p) <= prov._path_max() for p in params)
     assert str(home) + "/w/f" in params and str(home) in params  # shallow ones kept
     assert len(params) <= prov._MAX_ANCESTORS + 2
 
 
 def test_foreign_query_caps_ancestor_count(monkeypatch: pytest.MonkeyPatch) -> None:
     """M3: even under a huge PATH_MAX only the shallowest ancestors are bound."""
-    monkeypatch.setattr(prov, "_PATH_MAX", 10**9)
+    monkeypatch.setattr(prov, "_path_max", lambda: 10**9)
     _sql, params = prov._foreign_query(["/a" * 5_000])
     assert len(params) == prov._MAX_ANCESTORS
     assert params[:3] == ["/", "/a", "/a/a"]  # shallowest first; the deep range is dropped
+
+
+def test_path_max_falls_back_when_os_pathconf_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows has no ``os.pathconf``; importing and calling must still work.
+
+    CI ``xplat-probe-windows`` failed with ``AttributeError: module 'os' has no
+    attribute 'pathconf'`` from this module's import. The callable is looked up
+    rather than called unguarded, so the module imports and the helper returns
+    a ceiling: 32767 (an extended-length NT path) on Windows, 1024 elsewhere.
+    """
+    expected = 32767 if os.name == "nt" else 1024
+    monkeypatch.delattr(os, "pathconf", raising=False)
+    prov._path_max.cache_clear()
+    try:
+        assert prov._path_max() == expected
+        # The fallback bound reaches the query: shallow ancestors still bind
+        # and the ancestor list stays capped.
+        _sql, params = prov._foreign_query(["/a" * 2_000])
+        assert params[:3] == ["/", "/a", "/a/a"]
+        assert len(params) <= prov._MAX_ANCESTORS + 2
+    finally:
+        prov._path_max.cache_clear()  # do not cache the fallback for other tests
+
+    # Cold interpreter with no ``os.pathconf`` at all: the import itself was
+    # the CI failure, so it is exercised through a real import, not a reload.
+    root = Path(__file__).resolve().parents[3]
+    code = (
+        "import os\n"
+        "if hasattr(os, 'pathconf'):\n"
+        "    del os.pathconf\n"
+        "from local_operator.guardrails import provenance as p\n"
+        "print(p._path_max())\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(root)},
+        check=True,
+    )
+    assert proc.stdout.strip() == str(expected), proc.stdout + proc.stderr
 
 
 def test_very_deep_target_classifies_bounded_and_keeps_other_targets_high(home: Path) -> None:
