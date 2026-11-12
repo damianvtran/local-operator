@@ -66,7 +66,7 @@ def _armed(tmp_path: Path, verdicts: list[VerifierVerdict], *, rounds: int = 1, 
 
     bridge.verifier = verifier
     bridge.verifier_rounds = rounds
-    bridge.verifier_envelope_s = 235.0  # verifier_envelope_s(180): 45 + 180 + 10
+    bridge.verifier_envelope_s = 240.0  # verifier_envelope_s(180): 50 + 180 + 10
     bridge.record_event = lambda kind, payload: events.append((kind, payload))
     return bridge, actions, events, seen
 
@@ -190,7 +190,7 @@ async def test_skipped_when_the_step_budget_cannot_hold_the_exchange(tmp_path: P
 @pytest.mark.asyncio
 async def test_skipped_when_the_wall_cannot_hold_the_verifier(tmp_path: Path) -> None:
     bridge, actions, events, seen = _armed(tmp_path, [_verdict("PASS")])
-    bridge.wall_remaining = lambda: 60.0  # < verifier_envelope_s 235
+    bridge.wall_remaining = lambda: 60.0  # < verifier_envelope_s 240
     reply = await bridge.call(DONE)
     assert seen == [] and events[0][1]["reason"] == "wall"
     # Today's path: the self-check challenge fires as it always did.
@@ -691,8 +691,10 @@ async def test_skipped_when_the_wall_holds_the_cap_but_not_the_envelope(tmp_path
         verifier_envelope_s,
     )
 
-    assert verifier_envelope_s(180.0) == 235.0
+    # probe (30 s read + 20 s RPC slack) + wall + 10 s cancel join.
+    assert verifier_envelope_s(180.0) == 240.0
     # The largest allowed wall still leaves the delivery margin in 300 s.
+    assert MAX_VERIFIER_WALL_S == 190.0
     assert verifier_envelope_s(MAX_VERIFIER_WALL_S) + FINISH_DELIVERY_MARGIN_S <= (
         MCP_FINISH_DEADLINE_S
     )
@@ -804,7 +806,7 @@ async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.chdir(tmp_path)
-    # A 1 s wall keeps the test fast; the real 15 s RPC slack would leave a
+    # A 1 s wall keeps the test fast; the real 20 s RPC slack would leave a
     # 1 s verification no room for any read (the deadline clip), so it is
     # zeroed here -- the clip itself is pinned by the next test.
     monkeypatch.setattr(cv, "RUN_COMMAND_SLACK_S", 0.0)

@@ -83,8 +83,15 @@ INSPECT_DEFAULT_TIMEOUT_S = 15
 MCP_FINISH_DEADLINE_S = 300.0
 #: The adapter's per-command slack: ``session_arm._make_run_command`` gives
 #: each guest command an RPC deadline of ``timeout_s +`` this, which is how
-#: long a command may still be settling after its own timeout.
-RUN_COMMAND_SLACK_S = 15.0
+#: long a command may still be settling after its own timeout. THE single
+#: source for that margin: the verifier's guest reads ride the same RPC path,
+#: so a second constant would let its budget drift from the real deadline.
+#: 20 s, not 15 (#3826): the OSWorld adapter waits ``timeout_s + 10`` for a
+#: reply and then takes one liveness probe (worst case ~4 s) to answer a lost
+#: reply instead of poisoning the session; at 15 that answer landed within
+#: ~1 s of the RPC deadline. Raising it shrinks MAX_VERIFIER_WALL_S by the
+#: same 5 s (195 -> 190) so the finish-call budget below still closes.
+RUN_COMMAND_SLACK_S = 20.0
 #: The probe's own timeout plus the adapter's per-command slack.
 PROBE_ENVELOPE_S = float(INSPECT_MAX_TIMEOUT_S) + RUN_COMMAND_SLACK_S
 FINISH_DELIVERY_MARGIN_S = 50.0
@@ -426,8 +433,11 @@ class VerifierInspector:
             probe_output: str | None = None
             try:
                 result = await self._guest(SANDBOX_PROBE, float(INSPECT_MAX_TIMEOUT_S))
-                probe_output = (result.stdout or "").strip()
-                ok = result.exit_code == 0 and SANDBOX_TOKEN in probe_output
+                # ``result`` is untyped (the guest seam returns Any), so a
+                # declared ``str | None`` would not narrow; bind a plain str.
+                stdout = str(result.stdout or "").strip()
+                probe_output = stdout
+                ok = result.exit_code == 0 and SANDBOX_TOKEN in stdout
                 row["exit_code"] = result.exit_code
             except Exception as error:  # noqa: BLE001 -- an unreachable probe is no sandbox
                 ok = False

@@ -131,7 +131,12 @@ from local_operator.evaluation.lifecycle import (
     CleanupPlan,
     aggregate_cleanup,
 )
-from local_operator.evaluation.protocol import ActionBatch, AskUserAction, Observation
+from local_operator.evaluation.protocol import (
+    ActionBatch,
+    AskUserAction,
+    FinishAction,
+    Observation,
+)
 from local_operator.evaluation.receipts import BudgetAuthorization
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
