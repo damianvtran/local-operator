@@ -144,9 +144,7 @@ def test_emit_refusals_carry_the_status_and_never_retry_in_the_transport(
     assert not transport.disarmed
 
 
-def test_a_404_disarms_and_sends_nothing_more(
-    login: int, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_a_404_disarms_and_sends_nothing_more(login: int, caplog: pytest.LogCaptureFixture) -> None:
     cloud = Cloud(httpx.Response(404, json={"error": "tunnel_not_found"}))
     transport = _transport(login, cloud)
     assert transport.emit({"v": 1}, idempotency_key="k") == EmitRefused(404)
@@ -365,9 +363,7 @@ def _register_one(config: Path) -> None:
     )
 
 
-def test_register_rows_never_waits_on_an_in_flight_heartbeat(
-    login: int, tmp_path: Path
-) -> None:
+def test_register_rows_never_waits_on_an_in_flight_heartbeat(login: int, tmp_path: Path) -> None:
     """R1 + R4 (review round 1 on #3875): the heartbeat's HTTP call is outside
     ``PushLane.lock``, and a second beat skips instead of queueing.
 
