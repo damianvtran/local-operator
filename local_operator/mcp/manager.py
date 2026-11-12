@@ -1366,9 +1366,29 @@ async def _stdio_transport(
     from mcp.client.stdio import get_default_environment
     from mcp.shared.message import SessionMessage
 
-    argv = build_stdio_argv(cfg.command, list(cfg.args))
+    from local_operator.mcp.uv_tool_exec import (
+        is_uvx_candidate,
+        resolve_uv_tool_command,
+    )
+
     env = get_default_environment() | CHILD_QUIET_ENV | dict(cfg.env or {})
     cwd = cfg.cwd or None
+    command, args = cfg.command, list(cfg.args)
+    # A bare `uvx <tool>` whose tool is installed is launched as the tool's own
+    # console script: `uvx` would otherwise stay alive as the server's parent
+    # holding ~/.cache/uv/.lock for the session's lifetime, and one holder per
+    # session blocks `uv cache prune` forever (see uv_tool_exec's docstring for
+    # the measurement and every fallback rule). Same args, env and cwd. Off the
+    # event loop because the first lookup runs `uv tool dir` (bounded, cached);
+    # the pure-string pre-check keeps every non-uvx spawn free of a thread hop.
+    direct = None
+    if is_uvx_candidate(command, args):
+        direct = await anyio.to_thread.run_sync(
+            lambda: resolve_uv_tool_command(command, args, env=env, server_env=cfg.env)
+        )
+    if direct is not None:
+        command, args = direct
+    argv = build_stdio_argv(command, args)
 
     # stderr on a PIPE, never inherited. `stderr=None` handed the child the
     # parent's own fd 2, so a server's startup banner landed on top of the
