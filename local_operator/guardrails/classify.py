@@ -1098,7 +1098,9 @@ def _rank(
         # (review R2-1, QA Q2-1 on PR #3811). ``raw_path`` is the landing too,
         # so ``_kernel_reason`` judges it, not the check-time lookup.
         readings = [
-            _rank(dataclasses.replace(target, path=p, raw_path=p, landings=()), prot, session_id, globstar)
+            _rank(
+                dataclasses.replace(target, path=p, raw_path=p, landings=()), prot, session_id, globstar
+            )
             for p in target.landings
         ]
         readings.append(_rank(dataclasses.replace(target, landings=()), prot, session_id, globstar))
@@ -1269,7 +1271,9 @@ def _rank(
             worktree_note = f"linked worktree state: {state}; {facts}"
             notes.append(worktree_note)
     if not target.worktree_remove and target.op == "delete" and not target.selected:
-        reached = _reached_worktrees(target, path, prot, session_id, globstar=globstar)
+        reached = _reached_worktrees(
+            target, path, prot, session_id, globstar=globstar, through_link=link is None
+        )
         if reached is not None:
             return reached
     # Every spelling is ranked, not just the first with a reason: the verdict
@@ -1297,8 +1301,10 @@ def _rank(
             # predicate would destroy.
             return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
         owned = _owned_by_session(target, path, prot, session_id)
-        # An own linked worktree reached here already passed
-        # ``_reached_worktrees`` (clean, idle, no open PR).
+        # An own linked worktree reached here, literally, by glob, by an
+        # ancestor or through a link (``link/``, resolved in
+        # ``_reached_worktrees``), already passed its bar (clean, idle, no
+        # open PR); a bare ``rm link`` removes only the entry.
         if owned is not None:
             reason, matches = owned
             shown = ""
@@ -1386,7 +1392,13 @@ def _bounded_lookups(jobs: dict[str, Any], deadline: float) -> dict[str, Any]:
 
 
 def _reached_worktrees(
-    target: Target, path: str, prot: _Protected, session_id: str, *, globstar: bool = False
+    target: Target,
+    path: str,
+    prot: _Protected,
+    session_id: str,
+    *,
+    globstar: bool = False,
+    through_link: bool = False,
 ) -> RankedTarget | None:
     """Rank a delete by the linked worktrees it reaches, or ``None`` if it reaches none.
 
@@ -1434,7 +1446,19 @@ def _reached_worktrees(
         ]
         roots = prov.linked_worktrees_reached(candidates, resolved=True)
     else:
-        roots = prov.linked_worktrees_reached([path])
+        scan = path
+        if through_link and os.path.islink(path):
+            # MAJOR-1 (restack of #3802): ``path`` is slash-stripped, so for
+            # ``rm -rf link/`` it names the LINK, which
+            # ``linked_worktrees_reached`` skips ("removes the link, not what
+            # it points at") — yet ``link_entry`` returned None precisely
+            # because this delete goes THROUGH the link (on macOS ``rm -rf
+            # l/`` deletes the pointee). Scan the pointee, or an own dirty
+            # or unrecorded tree behind the link fell to the ledger LOW
+            # where #3800 ranks it HIGH. A bare ``rm link`` has a
+            # ``link_entry`` and never gets here (only the entry goes).
+            scan = os.path.realpath(path)
+        roots = prov.linked_worktrees_reached([scan])
     if roots is None:
         return RankedTarget(target, Risk.HIGH, REACH_TOO_WIDE)
     if not roots:

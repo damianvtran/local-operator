@@ -1261,9 +1261,10 @@ def linked_worktrees_reached(paths: Iterable[str], *, resolved: bool = False) ->
     ranking.
 
     A symlink named without a trailing slash is skipped: ``rm -rf link``
-    removes the link, not what it points at. (Targets arrive normalised, so
-    ``link/`` is skipped too — the documented non-goal of removing through a
-    symlink, review MINOR-2 of PR #3802, deferred.)
+    removes the link, not what it points at. Targets arrive normalised, so a
+    ``link/`` delete (which DOES reach the pointee) would be skipped too; the
+    caller resolves it first (``classify._reached_worktrees``, MAJOR-1 of the
+    #3802 restack).
     """
     deleted: set[tuple[int, int]] = set()
     commons: set[str] = set()

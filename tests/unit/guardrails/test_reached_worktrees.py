@@ -42,6 +42,7 @@ from tests.unit.guardrails.test_own_worktree_removal import (
     _env,
     _git,
     _Judge,
+    _own_link,
     _record,
 )
 
@@ -146,6 +147,57 @@ def test_rm_of_a_symlink_to_a_worktree_removes_only_the_link(home: Path, mobile:
     assert "linked worktree" not in _rank(home, f"rm -f {link}", S2).targets[0].reason
     # With a trailing slash rm descends into the pointee: a worktree delete.
     assert _rank(home, f"rm -rf {link}/", S2).risk is Risk.HIGH
+
+
+def _link_to(home: Path, wt: Path) -> Path:
+    """A link this session created (``ln -s``, ledger-recorded), as in #3793."""
+    link = home / "wt-link"
+    _own_link(home, link, wt)
+    return link
+
+
+def test_own_link_slash_to_a_dirty_own_worktree_is_high(home: Path, mobile: Path) -> None:
+    """MAJOR-1 (restack of #3802): ``rm -rf link/`` deletes the POINTEE.
+
+    The literal reach scan got the slash-stripped path, which
+    ``linked_worktrees_reached`` skips as a symlink, so the session's own
+    DIRTY tree fell through to the ledger LOW. #3800 (bf6d209) ranks it HIGH.
+    """
+    wt = mobile / ".worktrees" / "markdown-tables"
+    (wt / "wip.txt").write_text("unfinished")
+    _record(home, wt)
+    link = _link_to(home, wt)
+    v = _rank(home, f"rm -rf {link}/", S)
+    assert v.risk is Risk.HIGH, v.targets[0].reason
+    assert "dirty" in v.targets[0].reason and "wip.txt" in v.targets[0].reason
+
+
+def test_own_link_slash_to_a_dirty_unrecorded_worktree_is_high(home: Path, mobile: Path) -> None:
+    wt = mobile / ".worktrees" / "native-history-continuity"
+    (wt / "wip.txt").write_text("unfinished")
+    link = _link_to(home, wt)
+    v = _rank(home, f"rm -rf {link}/", S)
+    assert v.risk is Risk.HIGH, v.targets[0].reason
+    assert "dirty" in v.targets[0].reason and "wip.txt" in v.targets[0].reason
+
+
+def test_bare_rm_of_a_link_to_a_dirty_own_worktree_removes_only_the_link(
+    home: Path, mobile: Path
+) -> None:
+    wt = mobile / ".worktrees" / "markdown-tables"
+    (wt / "wip.txt").write_text("unfinished")
+    _record(home, wt)
+    link = _link_to(home, wt)
+    v = _rank(home, f"rm -rf {link}", S)
+    assert v.risk is Risk.LOW, v.targets[0].reason
+    assert "only the link is removed" in v.targets[0].reason
+
+
+def test_own_link_slash_to_a_clean_own_worktree_matches_3800(home: Path, mobile: Path) -> None:
+    """Clean, idle and own: the ledger LOW, as bf6d209 gives it."""
+    link = _link_to(home, mobile / ".worktrees" / "markdown-tables")
+    v = _rank(home, f"rm -rf {link}/", S)
+    assert v.risk is Risk.LOW, v.targets[0].reason
 
 
 def test_critical_class_is_unchanged(home: Path, mobile: Path) -> None:
