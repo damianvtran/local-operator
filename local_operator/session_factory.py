@@ -4573,6 +4573,11 @@ def reset_store_maintenance_for_tests() -> None:
     release it before reset. The daemon flag is the final process-exit boundary,
     while this event prevents a not-yet-started test pass from entering a later
     test's temporary store.
+
+    ``_start_store_maintenance`` also starts the process-wide temporary-chat
+    sweeper, so it is stopped here too: left running, it keeps sweeping an
+    earlier test's store every cadence and its idempotence guard makes a later
+    ``start_temporary_sweeper`` in the same worker report False.
     """
     global _STORE_MAINTENANCE_THREAD, _STORE_MAINTENANCE_STOP, _STORE_MAINTENANCE_DONE
     stop_event = _STORE_MAINTENANCE_STOP
@@ -4581,6 +4586,9 @@ def reset_store_maintenance_for_tests() -> None:
     _STORE_MAINTENANCE_THREAD = None
     _STORE_MAINTENANCE_STOP = None
     _STORE_MAINTENANCE_DONE = None
+    from local_operator.session.cleanup import stop_temporary_sweeper
+
+    stop_temporary_sweeper()
 
 
 async def await_store_maintenance_for_tests() -> None:

@@ -466,6 +466,26 @@ def test_start_is_idempotent(tmp_path: Path) -> None:
         cleanup.stop_temporary_sweeper()
 
 
+def test_the_per_test_store_maintenance_reset_stops_the_sweeper(tmp_path: Path) -> None:
+    # Session runtimes start the sweeper from `_start_store_maintenance`; the
+    # autouse reset must stop it, or it leaks into later tests in the worker
+    # (CI gw2: test_start_is_idempotent saw False after a session-factory test).
+    from local_operator.session_factory import reset_store_maintenance_for_tests
+
+    class Manager:
+        def get_nested_value(self, _path: object, default: object) -> object:
+            return default
+
+    try:
+        assert cleanup.start_temporary_sweeper(Manager(), tmp_path)
+        thread = cleanup._TEMPORARY_SWEEPER["thread"]
+        reset_store_maintenance_for_tests()
+        assert not thread.is_alive()
+        assert cleanup._TEMPORARY_SWEEPER == {}
+    finally:
+        cleanup.stop_temporary_sweeper()
+
+
 def test_a_keep_landing_after_the_tombstone_still_wins_and_withdraws_it(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
