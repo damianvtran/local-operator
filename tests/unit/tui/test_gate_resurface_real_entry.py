@@ -129,6 +129,29 @@ from tests.unit.tui.test_gate_resurface_on_switch import (
 #: loaded runner cannot turn a pass into a failure. A COUNT, not a clock.
 _RESURFACE_TURNS = 400
 
+#: Hang backstop for :func:`_wait_until`, in wall seconds. Never the assertion:
+#: the success path returns the moment the condition holds, and this only turns
+#: a genuinely wedged case into a red one instead of a job-timeout (the suite has
+#: no pytest-timeout; see AGENTS.md, "Two things this section cannot do for you").
+_CORRECTION_DEADLINE_S = 60.0
+
+
+async def _wait_until(pilot, predicate, *, deadline_s: float) -> bool:
+    """Pump until ``predicate`` holds, bounded by a wall-clock DEADLINE, not a count.
+
+    For a condition that a spy LATCHES (it stays true once set), so the loop
+    cannot miss a state that lived for less than one ``pilot.pause()``. A turn
+    count is the wrong unit here: one ``pause()`` waits for the process to go
+    idle (Textual's ``wait_for_idle``) and can span up to a second on a loaded
+    runner, so 400 turns is anywhere from 8 s to minutes of wall time.
+    """
+    deadline = time.monotonic() + deadline_s
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return predicate()
+        await pilot.pause()
+    return True
+
 
 async def _never_take_over() -> Any:
     raise AssertionError("a viewer must not take over during this test")
@@ -1124,8 +1147,9 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
     while the viewer can still bind (the question is open, and the operator should
     be able to answer it once the session is back), and refused one level down by
     the ladder's G6 on ``can_ever_bind`` for a session whose owner is gone
-    (``test_a_source_that_can_never_bind_is_offered_no_gate_card``). HERE NO SECOND
-    CARD IS OFFERED, and the rig no longer pretends G6 is what refuses it: owner
+    (``test_a_source_that_can_never_bind_is_offered_no_gate_card``). USUALLY NO
+    SECOND CARD IS OFFERED HERE (and when one is, see the last paragraph), and the
+    rig no longer pretends G6 is what refuses it: owner
     recovery is ``can_ever_bind``'s FIRST disjunct by design (a facade with a
     recovery loop running is on its way back), so G6 passes and the ladder would
     start a bridge — the live state reads ``can_ever_bind = True`` with
@@ -1134,8 +1158,9 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
     ``_format(probe.calls)`` records for the whole case belong to the FIRST card
     — one that started its bridge, and one dropped by G2b because that bridge was
     still running — and the ladder is re-armed by navigation edges and frontend
-    deltas, of which this session has neither while the row below is on screen, its
-    owner being gone.
+    deltas, of which this session USUALLY has neither while the row below is on
+    screen, its owner being gone — a late delta is not ruled out, and twice on CI
+    one arrived (the last paragraph).
     THE OWNER GOES WITH THE SOCKET (``_Rig.close_owner``), because that is what a
     dead socket MEANS for the answer under test — it missed the owner because the
     owner is not there — and because it is what makes that row a STATE rather
@@ -1153,6 +1178,28 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
     reply that reached nobody, and a sentence reporting a link that is not there.
     The receipt, the sentence and the unanswered gate are what must hold, and
     those are what this asserts.
+
+    OBSERVED ON THE CORRECTION'S OWN FRAME, because the row can be retired by
+    the very next frontend delta, and that is condition K's rule rather than a
+    defect: the ladder is level-triggered (``_reconcile_gate_surface``) and
+    ``can_ever_bind`` is True during recovery, so ANY delta for this source
+    re-offers the still-open gate, and an answerable card retires the row in
+    the same pass (``_show_sidebar_connection``). CI hit it twice — PR #3790
+    (run 43082470360, shard 3.13-1) and PR #3681 (run 43131490884, shard
+    3.12-1, the one failure of 11,844) — and both end states read
+    ``_gate_task`` running, ``G2b``, a card mounted and ``retained notices =
+    []``: a re-offer, not a slow notice. Injecting ONE
+    ``_source_frontend_changed`` beside the notice reproduces that state field
+    for field, every run: the row is written and
+    retired ~60 ms apart, inside one ``pilot.pause()``, so the old poll after
+    each turn never saw it and then spent 400 turns waiting for a state that
+    had already been undone. The fix is where the case looks, not how long:
+    the sentence, the lifted receipt and ``recovering`` are latched by a spy
+    in the call that writes the row, and the 30 turns after it check the one
+    retirement rule that still applies here — every retirement had an
+    answerable card. Latching ``recovering`` also removes the second clock
+    the old ordering raced: ``COLD_FALLBACK_S`` (8 s) ends recovery on the
+    wall clock, and 30 turns of 0.3 s each outlived it.
     """
     rig = await _rig(tmp_path / "config", monkeypatch, "alpha")
     app = _app(rig, "alpha")
@@ -1233,15 +1280,49 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                             if isinstance(b, NoticeBlock) and "Answer not delivered" in b.text()
                         ]
 
+                    # THE CORRECTION IS LATCHED ON ITS OWN FRAME, not sampled after a
+                    # pump turn (see the docstring's last paragraph for the CI run
+                    # this answers). The spy forwards unchanged and records the
+                    # transcript and the recovery flag in the same synchronous call
+                    # that wrote the sentence — after the receipt was lifted (the
+                    # notice's caller lifts it first) and before any later delta can
+                    # re-offer the card and retire the row.
+                    corrections: list[dict[str, Any]] = []
+                    write_notice = app._system_notice_block
+
+                    def latch_correction(body: str, *args: Any, **kwargs: Any) -> Any:
+                        block = write_notice(body, *args, **kwargs)
+                        if "Answer not delivered" in body:
+                            corrections.append(
+                                {
+                                    "blocks": app._transcript_view().blocks(),
+                                    "recovering": alpha.recovering,
+                                }
+                            )
+                        return block
+
+                    monkeypatch.setattr(app, "_system_notice_block", latch_correction)
+                    #: Whether an answerable card was on screen at each retirement of
+                    #: THIS source's undelivered row: the one end the row has here.
+                    retirements: list[bool] = []
+                    retire = app._retire_gate_reply_notice
+
+                    def spy_retire(retiring: SessionInteraction) -> None:
+                        if retiring is source and any(
+                            token == source.token for token, _row in app._gate_reply_notices
+                        ):
+                            retirements.append(app._gate_card_is_answerable(source))
+                        retire(retiring)
+
+                    monkeypatch.setattr(app, "_retire_gate_reply_notice", spy_retire)
+
                     await pilot.press("y")
-                    # AWAITED ON THE NOTICE, not on a turn budget. The post happens
-                    # one await after the settle and the notice is scheduled with
-                    # `call_later`, so the correction lands on a later turn than the
-                    # keypress — and how many turns that takes is the runner's
-                    # business rather than this case's, which is the count-not-clock
-                    # rule `_RESURFACE_TURNS` already states.
-                    assert await _pump_until(
-                        pilot, lambda: bool(undelivered_blocks()), tries=_RESURFACE_TURNS
+                    # AWAITED ON THE CORRECTION ITSELF, with a wall-clock deadline
+                    # that is only a hang backstop: the success path ends the moment
+                    # the sentence is written, however long the runner takes to get
+                    # there.
+                    assert await _wait_until(
+                        pilot, lambda: bool(corrections), deadline_s=_CORRECTION_DEADLINE_S
                     ), (
                         "no undelivered notice was written for an answer the owner never "
                         "received, so this case has nothing to measure"
@@ -1249,19 +1330,25 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                         + f"\n  retained notices = {app._gate_reply_notices!r}"
                         + f"\n  posts attempted = {len(posted)!r}"
                     )
-                    # Turns under the written row, so a retirement that only fires
-                    # once the band refreshes has somewhere to happen (it must not,
-                    # here — the card is refused while this socket is down).
+                    # Turns under the written row, so a retirement that fires once
+                    # the band refreshes has somewhere to happen. One MAY happen —
+                    # a frontend delta re-offers the still-open gate and an
+                    # answerable card retires the row (condition K) — so what is
+                    # asserted below is that every retirement had that card.
                     await _pump(pilot, 30)
 
-                    blocks = app._transcript_view().blocks()
+                    frame = corrections[0]
+                    blocks = frame["blocks"]
                     receipts = [b for b in blocks if isinstance(b, ApprovalBlock)]
                     notices = [b.text() for b in blocks if isinstance(b, NoticeBlock) and b.text()]
                     undelivered = [text for text in notices if "Answer not delivered" in text]
                     diagnosis = (
                         _state(app, alpha, source, probe)
-                        + f"\n  transcript notices = {notices!r}"
-                        + f"\n  approval receipts on the transcript = {len(receipts)!r}"
+                        + f"\n  transcript notices at the correction = {notices!r}"
+                        + f"\n  approval receipts at the correction = {len(receipts)!r}"
+                        + f"\n  recovering at the correction = {frame['recovering']!r}"
+                        + f"\n  undelivered sentences written = {len(corrections)!r}"
+                        + f"\n  retirements (answerable card at each) = {retirements!r}"
                         + f"\n  posts attempted = {len(posted)!r}"
                         + f"\n  owner gate done = {gate_task.done()!r}"
                         + f"\n  app.focused = {app.focused!r}"
@@ -1275,7 +1362,7 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                     # left unset — the difference between the mid-recovery facade the
                     # product does reach here and the unreachable G6 refusal this case
                     # used to hinge on.
-                    assert alpha.recovering, (
+                    assert frame["recovering"], (
                         "the facade is not in owner recovery, so the transport did not "
                         "go down the way a dead socket takes it down and this case is "
                         "not measuring the state it claims to" + diagnosis
@@ -1305,6 +1392,16 @@ async def test_an_answer_that_never_reached_the_owner_writes_no_receipt(
                     assert "not connected" in undelivered[0] or "was stopped" in undelivered[0], (
                         "the notice does not name the outcome, so the operator is told "
                         "nothing about what happened to the answer they gave" + diagnosis
+                    )
+                    # "Exactly once" across the whole leg, not only at the frame: a
+                    # second write for the same failed answer is a second sentence.
+                    assert len(corrections) == 1, (
+                        "one undelivered answer was reported more than once" + diagnosis
+                    )
+                    assert all(retirements), (
+                        "the undelivered row was retired with no answerable card on screen "
+                        "for this session: the sentence ended while nothing had shown the "
+                        "question could be answered again (UX round 2, U5)" + diagnosis
                     )
                 finally:
                     gate_task.cancel()
