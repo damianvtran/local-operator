@@ -156,6 +156,10 @@ class ExecArgs:
     #: ``agent-workstream``; outside one nothing is stamped and the flag is a
     #: no-op, so the run is an ordinary session either way.
     workstream: bool = False
+    #: ``lop exec --temporary``: mark the fresh session a temporary chat
+    #: (``session/temporary.py``). Refused with ``--resume``/``--workstream``
+    #: and from an agent's shell, before any directory exists (``cli``).
+    temporary: bool = False
     goal: str | None = None
     clear_goal: bool = False
     loop: int | None = None
@@ -924,6 +928,9 @@ def _make_default_session_factory(exec_args: ExecArgs, team: Any | None = None) 
             # narrow namespaces (here and the detached worker's) because the
             # factory receives this namespace and nothing wider.
             workstream=exec_args.workstream,
+            # Read by ``session_factory._prepare`` on the FRESH path only: the
+            # temporary mark, written and verified before the first turn.
+            temporary=exec_args.temporary,
             # The team-launch model suggestion (§4.4), or None for every run
             # without a team. ``session_factory.resolve_hosting_model_with_source``
             # reads it on the fresh path, below agent/flag and above config;

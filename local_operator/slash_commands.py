@@ -1653,6 +1653,16 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.WORD,
         desktop_destination="session.fast",
     ),
+    # A TEMPORARY CHAT (``session/temporary.py``): bare toggles, ``on`` asks
+    # before marking a chat that has messages, ``off`` keeps it. A WORD like
+    # `/fast`: one token is the command, so a sentence stays a message. No
+    # desktop destination: the desktop has its own pill and menu verbs.
+    SlashCommand(
+        "temporary",
+        **_desc(wire_slash.temporary()),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.WORD,
+    ),
     # NOT an echo, same rule as `/approvals`: the argument is a setting, and
     # the receipt names the theme that ended up in force — strictly more than
     # the typed word, which may have been an abbreviation the matcher resolved.

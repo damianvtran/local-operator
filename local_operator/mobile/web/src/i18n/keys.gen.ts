@@ -1889,6 +1889,7 @@ export type MessageParams = {
   "wire.slash.skills": undefined;
   "wire.slash.stop": undefined;
   "wire.slash.team": undefined;
+  "wire.slash.temporary": undefined;
   "wire.slash.theme": undefined;
   "wire.slash.unarchive": undefined;
   "wire.slash.update": undefined;

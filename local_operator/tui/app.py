@@ -5132,8 +5132,18 @@ class OperatorApp(App[None]):
         resume_factory: Callable[[str | None], Awaitable[SessionProtocol]] | None = None,
         on_config_changed: Callable[[], None] | None = None,
         warm_session_imports: bool = True,
+        start_temporary: bool = False,
     ) -> None:
         super().__init__()
+        # TEMPORARY CHATS (``tui/temporary_chat.py``). ``_temporary_pending``
+        # holds the first prompt for the NEXT session bound (``lop --temporary``
+        # and ``/new temporary [prompt]``): the mark needs the session's id,
+        # which only exists once the viewer binds. ``_temporary_confirm_at``
+        # is the 30 s window ``/temporary on`` waits for its repeat, and
+        # ``_temporary_flag`` is the bound chat's state for the band/composer.
+        self._temporary_pending: tuple[str] | None = ("",) if start_temporary else None
+        self._temporary_confirm_at = 0.0
+        self._temporary_flag = False
         self._interaction = SessionInteraction(None)
         self._interactions: dict[int, SessionInteraction] = {}
         self._event_sources: dict[EventController, SessionInteraction] = {}
@@ -11975,8 +11985,16 @@ class OperatorApp(App[None]):
             try:
                 from local_operator.paths import config_dir
                 from local_operator.tui.sidebar_pins import read_pins, toggle_pin
+                from local_operator.tui.temporary_chat import pin_refusal_sentence
 
                 root = config_dir()
+                # A pin is a promise to keep; a temporary chat cannot hold one
+                # until it is kept. (A temporary chat is never pinned, so this
+                # can only ever refuse the PIN direction of the toggle.)
+                refused = await asyncio.to_thread(pin_refusal_sentence, root, target)
+                if refused:
+                    self._system_notice(refused, "warning")
+                    return
                 # `toggle_pin` writes a file, so it is worker-thread work — the
                 # same shape `_switch_session_cold` uses. The UI thread must
                 # not do I/O.
@@ -14733,6 +14751,19 @@ class OperatorApp(App[None]):
             sentence = self._rehome_stranded_session(queued)
             if sentence:
                 self._notice(sentence, "note")
+        # A PENDING TEMPORARY MARK lands on the first session bound after it was
+        # asked for, here at the one writer of ``self._session`` — after the
+        # refresh, so the notice and any first prompt follow the rebuilt ledger.
+        # Every other bind re-reads the bound chat's mark for the band.
+        if session is not None:
+            pending = getattr(self, "_temporary_pending", None)
+            if pending is not None:
+                self._temporary_pending = None
+                self.call_after_refresh(
+                    self._apply_pending_temporary, session.session_id, pending[0]
+                )
+            else:
+                self.call_after_refresh(self._sync_temporary_flag)
 
     def _restore_search_spend(self, session: Any) -> None:
         """Seed a RESUMED conversation's search spend into the search ledger.
@@ -20309,6 +20340,13 @@ class OperatorApp(App[None]):
             pieces = tail.split(maxsplit=1)
             if pieces[0].casefold() == "remote":
                 self._cmd_new_remote(pieces[1] if len(pieces) > 1 else "", notice)
+                return
+            # ``/new temporary [prompt]`` — a fresh TEMPORARY chat. The word is
+            # reserved in the single-word form, like ``remote``; the mark and the
+            # optional first prompt land once the new session binds.
+            if pieces[0].casefold() == "temporary":
+                self._temporary_pending = (pieces[1] if len(pieces) > 1 else "",)
+                self._start_new_local_session(notice)
                 return
         self._start_new_local_session(notice)
 
@@ -29445,6 +29483,11 @@ class OperatorApp(App[None]):
             # on the light one, under the 4.5:1 a call to action needs.
             return SETUP_PLACEHOLDER
         del connection  # see the docstring: one resting string across connection states
+        if getattr(self, "_temporary_flag", False):
+            from local_operator.i18n.keys import tui_composer as _tc
+            from local_operator.i18n.text import tr
+
+            return str(tr("tui.composer")(_tc.temporary_placeholder()))
         return editor.resting_placeholder
 
     def _drawable_questions(self, row: AskRow) -> list[Any] | None:
@@ -44898,6 +44941,8 @@ class OperatorApp(App[None]):
             self._cmd_effort(arg, notice)
         elif command == "/fast":
             self._cmd_fast(arg, notice)
+        elif command == "/temporary":
+            self._cmd_temporary(arg, notice)
         elif command in {"/saver", "/radient"}:
             if command == "/radient":
                 word, _, rest = arg.partition(" ")
@@ -47356,6 +47401,98 @@ class OperatorApp(App[None]):
         # already the receipt, so skip the repaint rather than raise.
         if self._status is not None:
             self._status.update(saver=_saver_label(self._session))
+
+    def _apply_pending_temporary(self, session_id: str, prompt: str) -> None:
+        """Mark the just-bound session temporary, then send its first prompt."""
+        from local_operator.paths import config_dir
+        from local_operator.tui import temporary_chat
+
+        ok, sentence = temporary_chat.apply(config_dir(), session_id, True)
+        self._system_notice(sentence, "note" if ok else "warning")
+        self._sync_temporary_flag()
+        if ok and prompt.strip():
+            self._submit_prompt(prompt.strip())
+
+    def _sync_temporary_flag(self) -> None:
+        """Re-read the bound chat's mark; repaint the band word and the placeholder."""
+        from local_operator.paths import config_dir
+        from local_operator.tui import temporary_chat
+
+        session = self._session
+        flag = bool(session) and temporary_chat.is_temporary(
+            config_dir(), getattr(session, "session_id", "")
+        )
+        self._temporary_flag = flag
+        try:
+            from local_operator.i18n.keys import tui_status as _ts
+            from local_operator.i18n.text import tr
+
+            word = str(tr("tui.status")(_ts.temporary())) if flag else ""
+            self._status.update(temporary=word)
+        except Exception:  # noqa: BLE001 — before the band mounts
+            logger.debug("temporary band segment not painted", exc_info=True)
+        try:
+            editor = self.query_one(Editor)
+            editor.placeholder = self._composer_placeholder_for(editor)
+        except Exception:  # noqa: BLE001 — before the composer mounts
+            pass
+
+    def _cmd_temporary(self, arg: str, notice: NoticeFn) -> None:
+        """``/temporary`` — toggle; ``/temporary on|off|status`` — set or report it.
+
+        ``/fast``'s grammar. ``off`` (Keep) takes effect at once. ``on`` on a
+        chat that already has messages first prints what is deleted and what
+        is kept and waits for ``/temporary on`` again within 30 s — the
+        terminal's form of the desktop's "Make temporary…" dialog.
+        """
+        del notice  # receipts go through the system notice, like `/fast`
+        from local_operator.paths import config_dir
+        from local_operator.tui import temporary_chat
+
+        session = self._session
+        if session is None:
+            self._system_notice("session is still starting…", "warning")
+            return
+        root = config_dir()
+        session_id = session.session_id
+        wanted = temporary_chat.parse(arg)
+        if wanted is None:
+            self._system_notice(temporary_chat.usage_hint(), "warning")
+            return
+        if wanted == "status":
+            self._system_notice(temporary_chat.status_sentence(root, session_id))
+            return
+        current = temporary_chat.is_temporary(root, session_id)
+        target = (not current) if wanted == "toggle" else wanted == "on"
+        if target == current:
+            self._system_notice(temporary_chat.status_sentence(root, session_id))
+            return
+        if target and self._has_conversation_rows():
+            now = time.monotonic()
+            if now - self._temporary_confirm_at > temporary_chat.CONFIRM_WINDOW_S:
+                from local_operator.i18n.keys import tui_notices as _tn
+                from local_operator.i18n.text import tr
+
+                self._temporary_confirm_at = now
+                self._system_notice(str(tr("tui.notices")(_tn.temporary_confirm())), "warning")
+                return
+        self._temporary_confirm_at = 0.0
+        ok, sentence = temporary_chat.apply(root, session_id, target)
+        self._system_notice(sentence, "note" if ok else "warning")
+        self._sync_temporary_flag()
+
+    def _has_conversation_rows(self) -> bool:
+        """Whether the bound conversation already has messages on disk."""
+        session = self._session
+        if session is None:
+            return False
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.session.retention import session_activity
+
+            return session_activity(config_dir() / "sessions" / session.session_id) is not None
+        except Exception:  # noqa: BLE001 — unknown: ask, the careful direction
+            return True
 
     def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
         """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.

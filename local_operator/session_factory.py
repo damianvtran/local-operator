@@ -5128,6 +5128,30 @@ async def _prepare(
             delegated_workstream=bool(getattr(args, "workstream", False)),
         )
 
+        # A TEMPORARY CHAT (`lop exec --temporary`), marked HERE for the same
+        # reason the stamp above is: this is where the directory is born. Only
+        # on a fresh directory — never adopting an existing conversation — and
+        # VERIFIED: the user asked for deletion, so a mark that did not read
+        # back fails the run before its first turn rather than silently
+        # retaining the chat.
+        if fresh_directory and getattr(args, "temporary", False):
+            from local_operator.session.temporary import write_mark
+
+            marked = write_mark(
+                transcript_dir.parent.parent, transcript_dir.name, True, by="exec"
+            )
+            if not marked.ok:
+                from local_operator.i18n.keys import wire_errors_desktop as _wd
+                from local_operator.i18n.text import tr
+
+                raise RuntimeError(
+                    str(
+                        tr("wire.errors.desktop")(
+                            _wd.temporary_mark_failed(session_id=transcript_dir.name)
+                        )
+                    )
+                )
+
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the
         # one place the harness knows it is writing into its own store —

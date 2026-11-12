@@ -33,5 +33,11 @@
     "note": "A standing alarm, not a reading: remote access is off until the user acts. Rendered with a danger-coloured glyph while the words stay foreground ink (tinting the words would read as 'the words are wrong'). Un-sheddable by the drop ladder for the same reason — only the fit itself can take it off the row.",
     "role": "status band alarm",
     "tone": "plain, states the fact"
+  },
+  "tui.status.temporary": {
+    "role": "status band segment word",
+    "tone": "single word",
+    "maxCells": 12,
+    "note": "Shown after a dashed-square glyph (⬚) in the status band while the chat is temporary (not kept, deleted when idle). Keep it short."
   }
 }

@@ -3249,6 +3249,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
     #:   paints them, so comparing them would repaint on a change no pixel
     #:   reflects. THE DAY A TUI SURFACE RENDERS THEM, they move into
     #:   `_SIGNATURE_FIELDS` — the rule `degraded`'s entry above states.
+    #: * `temporary` is the scan's temporary-chat verdict. The resume picker
+    #:   never asks for temporary rows (``include_temporary`` defaults off), so
+    #:   every row it holds carries ``False`` and the field cannot differ
+    #:   between two ticks of this screen.
     _SIGNATURE_EXCLUDED = (
         "mtime",
         "created_at",
@@ -3258,6 +3262,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "opened_by",
         "team",
         "agent",
+        "temporary",
     )
 
     # BIDIRECTIONAL, and that is the whole point of it. The previous form

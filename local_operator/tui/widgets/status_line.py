@@ -105,6 +105,11 @@ ICON_EFFORT = "▴"
 #: is ``›``, and ``high › » fast`` read as two separators in a row (design
 #: D1).
 ICON_FAST = "↯"
+#: A TEMPORARY chat (``session/temporary.py``): a dashed square, the terminal's
+#: twin of the desktop's dashed bubble. U+2B1A, OUTSIDE Geometric Shapes, so the
+#: tofu rule above applies: a real-terminal check is a QA acceptance row, and
+#: the word beside it carries the meaning if the glyph does not render.
+ICON_TEMPORARY = "⬚"
 #: Saver's compression mark: one cell, distinct from the speed lightning.
 #:
 #: NOT ``≡`` (design round 2, D3): that is ``PLAIN_TOOL_ICONS["read"]``, the
@@ -617,6 +622,11 @@ _DROP_LADDER: tuple[str, ...] = (
     # scroll — a saved `tool_approval_mode: auto` is adopted at boot with no
     # notice at all (see ``_adopt_saved_approvals``), so this is the only
     # standing indication that no tool will ask before it runs.
+    # A TEMPORARY CHAT: kept almost to the end because it is a standing
+    # statement that this conversation will be DELETED, which nothing else on
+    # screen says once the notice has scrolled away. Just before `approvals`,
+    # whose single-glyph alarm keeps last place by that rung's own argument.
+    "temporary",
     "approvals",
 )
 
@@ -1299,6 +1309,8 @@ class StatusLine:
         #: band never reaches into the session, so the source of truth stays the
         #: session's own spec and the app pushes the reading through ``update``.
         self._fast: str = ""
+        #: The temporary-chat word, or "" for an ordinary chat. Pushed by the app.
+        self._temporary: str = ""
         # The localized word, or "" when this session is not occupying Saver.
         # Off paints NOTHING (design round 1, D1): the reserved-five-cells
         # version this replaced painted a dim glyph with an empty value in every
@@ -1693,6 +1705,7 @@ class StatusLine:
         effort: str | None = None,
         fast: str | None = None,
         saver: str | None = None,
+        temporary: str | None = None,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1737,6 +1750,8 @@ class StatusLine:
             self._fast = fast
         if saver is not None:
             self._saver = saver
+        if temporary is not None:
+            self._temporary = temporary
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -2526,6 +2541,18 @@ class StatusLine:
                     ICON_SAVER,
                     self._saver,
                     Style(color=theme_mod.semantic_color("label")),
+                    None,
+                )
+            )
+        # Value-gated like the dials above. NOT suppressed under a subagent
+        # overlay: whether the conversation is kept is a fact about the page,
+        # not about the request being made.
+        if self._temporary and "temporary" not in dropped:
+            parts.append(
+                (
+                    ICON_TEMPORARY,
+                    self._temporary,
+                    Style(color=theme_mod.semantic_color("warning")),
                     None,
                 )
             )
