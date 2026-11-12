@@ -219,6 +219,30 @@ TEAM_CARRIED_FIELDS: tuple[str, ...] = (
     "project",
 )
 
+#: THE OPERATOR'S CUSTOM INSTRUCTIONS (``<config>/system_prompt.md``) as one
+#: singleton row. WHY IT TRAVELS: that file is where the operator's standing rules
+#: live — the review gate, the release rules, who may be added as a reviewer — and
+#: the prompt builder reads it PER DEVICE (``prompts_api`` tags it
+#: ``<user_instructions>``). A session started on, or moved to, a mesh node ran
+#: without any of it, so a team brief that says "the operator's standing rules bind
+#: every member" pointed at rules the node had never seen. It is configuration of
+#: exactly the kind this module already carries, so it rides the same bundle, the
+#: same credential scan (:func:`_row_texts`) and the same author-owns-the-row
+#: policy — with ONE difference stated where it is applied: a conflict on this row
+#: never fails a push or a create (see :func:`_apply_operator_instructions_locked`).
+#: No ``created_date`` and no id: the row is the file's text and nothing else, so
+#: two devices holding the same bytes agree on its digest.
+OPERATOR_INSTRUCTIONS_KIND = "operator_instructions"
+OPERATOR_INSTRUCTIONS_CARRIED_FIELDS: tuple[str, ...] = ("name", "text")
+#: The provenance index keys for the singleton: the mirror record (origin + the
+#: digest that was installed — the same record an agent or team row gets), and
+#: the LAST conflict this device refused, kept so ``lop network definitions state``
+#: on the node can say "the head's copy was not installed, and why" without a peer
+#: being up, and so the sender stops re-sending 64k a tick to a device that already
+#: said no to that exact revision.
+OPERATOR_INSTRUCTIONS_INDEX_KEY = "operator_instructions"
+OPERATOR_INSTRUCTIONS_CONFLICT_KEY = "operator_instructions_conflict"
+
 #: Bounds, all of them the ones the product already applies locally where one
 #: exists: a definition rides in front of a session's prompt on every turn, so an
 #: unbounded body is an unbounded per-turn bill, and an unbounded ROW COUNT is an
@@ -553,6 +577,10 @@ def _row_texts(row: Mapping[str, Any]) -> list[str]:
     the top level — see :func:`_agent_row_from_bundle`/:func:`_team_row_from_bundle`.
     """
     out: list[str] = []
+    if str(row.get("kind") or "") == OPERATOR_INSTRUCTIONS_KIND:
+        for name in OPERATOR_INSTRUCTIONS_CARRIED_FIELDS:
+            out.extend(_flatten_text(row.get(name)))
+        return out
     if str(row.get("kind") or "") == "team":
         for name in TEAM_CARRIED_FIELDS:
             out.extend(_flatten_text(row.get(name)))
@@ -641,6 +669,80 @@ def _read_teams(root: Path) -> list[dict[str, Any]]:
             continue
         rows.append(_team_row_from_bundle(_team_row_from_team(team)))
     return rows
+
+
+def _max_operator_instructions() -> int:
+    # The loader's own budget (``aida.profile.MAX_FILE_CHARS``, 64k): text past it
+    # is truncated at read time anyway, so a mirror never needs to hold more than the
+    # authoring device would actually put in front of a session.
+    from local_operator.aida.profile import MAX_FILE_CHARS
+
+    return int(MAX_FILE_CHARS)
+
+
+def _operator_instructions_path(root: Path) -> Path:
+    # The ONE spelling of the file's location, shared with the session loader and
+    # the Settings endpoint, so the mirror lands where the node's prompt reads it.
+    from local_operator.aida.profile import instruction_file
+
+    return instruction_file(root)
+
+
+def _operator_instructions_row(text: Any) -> dict[str, Any]:
+    """The singleton row for ``text``, normalised the same way on both ends."""
+    return {
+        "kind": OPERATOR_INSTRUCTIONS_KIND,
+        "name": OPERATOR_INSTRUCTIONS_KIND,
+        "text": _bounded_text(text, _max_operator_instructions()),
+    }
+
+
+def _read_operator_instructions(root: Path) -> dict[str, Any] | None:
+    """This device's custom instructions as a row, or ``None`` when it has none.
+
+    A BLANK FILE IS \"NONE\": it puts nothing in front of a session, so there is
+    nothing of the operator's for a mirror to overwrite and nothing worth sending.
+    An unreadable file is also ``None`` here, but the receiver never takes that as
+    permission to write (see :func:`_apply_operator_instructions_locked`).
+    """
+    path = _operator_instructions_path(root)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.strip():
+        return None
+    return _operator_instructions_row(text)
+
+
+def operator_instructions_state(root: Path) -> dict[str, Any]:
+    """What this device holds for the singleton, for the peer's state reply and the CLI.
+
+    ``status`` is one of ``absent`` (no file, or a blank one), ``authored`` (the
+    operator's own \u2014 never mirrored here), ``mirror`` (installed from ``origin`` and
+    untouched since) or ``edited`` (a mirror the operator changed, which makes it
+    theirs). ``conflict`` is the last revision this device REFUSED, if any.
+    """
+    index = read_index(root)
+    row = _read_operator_instructions(root)
+    recorded = index.get(OPERATOR_INSTRUCTIONS_INDEX_KEY)
+    recorded = recorded if isinstance(recorded, Mapping) else None
+    conflict = index.get(OPERATOR_INSTRUCTIONS_CONFLICT_KEY)
+    digest = digest_of(row) if row is not None else ""
+    if row is None:
+        status = "absent"
+    elif recorded is None:
+        status = "authored"
+    elif str(recorded.get("digest") or "") == digest:
+        status = "mirror"
+    else:
+        status = "edited"
+    return {
+        "digest": digest,
+        "status": status,
+        "origin": str(recorded.get("origin") or "") if recorded is not None else "",
+        "conflict": dict(conflict) if isinstance(conflict, Mapping) else None,
+    }
 
 
 def expand_named_teams(root: Path, names: Mapping[str, Iterable[str]]) -> tuple[set[str], set[str]]:
@@ -769,6 +871,25 @@ def local_bundle(
                 )
                 continue
             bundle["agents" if kind == "agents" else "teams"].append(row)
+    # THE OPERATOR'S INSTRUCTIONS RIDE EVERY BUNDLE, NAMED OR NOT: a create that
+    # names one agent still runs under the operator's standing rules, so narrowing
+    # by ``names`` does not apply to the singleton. Bandwidth stays bounded because
+    # ``push_to_peer`` sends it only when the peer's state digest differs. A mirror
+    # is never re-sent (the ``include_mirrors`` rule), so a node that received the
+    # head's copy cannot hand it to a third device as its own.
+    instructions = _read_operator_instructions(root)
+    if instructions is not None and (
+        include_mirrors or operator_instructions_state(root)["status"] in ("authored", "edited")
+    ):
+        label = _withheld(instructions)
+        if label:
+            # Reported under its OWN key, not ``withheld``: ``create_refusal`` aborts
+            # a create on any withheld row, and a credential pasted into the
+            # operator's instructions must cost the peer those instructions, not
+            # every create the operator makes.
+            bundle["operator_instructions_withheld"] = label
+        else:
+            bundle[OPERATOR_INSTRUCTIONS_KIND] = instructions
     payload = canonical(bundle).encode("utf-8")
     if len(payload) > MAX_BUNDLE_BYTES:
         raise DefinitionsRefused(
@@ -993,9 +1114,134 @@ def _apply_bundle_locked(
             bucket.append({"kind": row["kind"], "name": name, **outcome.get("extra", {})})
             if outcome["outcome"] in ("installed", "updated", "unchanged"):
                 summary["digests"][kind][name] = digest_of(row)
-    if any(summary[key] for key in ("installed", "updated")):
+    index_dirty = any(summary[key] for key in ("installed", "updated"))
+    raw_instructions = bundle.get(OPERATOR_INSTRUCTIONS_KIND)
+    if isinstance(raw_instructions, Mapping):
+        # Its OWN summary key, never ``conflicts``/``refused``: those abort a create
+        # (``create_refusal``), and a node whose operator wrote their own
+        # instructions is a legitimate state to report, not a reason to refuse work.
+        instructions = _operator_instructions_row(raw_instructions.get("text"))
+        label = _withheld(instructions)
+        if label:
+            # The receiver's half of the credential assertion, as for every row.
+            summary[OPERATOR_INSTRUCTIONS_KIND] = {
+                "outcome": "refused",
+                "reason": (
+                    f"its text is shaped like a credential ({label}), which is never installed"
+                ),
+            }
+        else:
+            try:
+                result = _apply_operator_instructions_locked(root, instructions, origin, index)
+            except Exception as exc:  # noqa: BLE001 — the rows above already landed
+                logger.debug("definitions: could not apply operator instructions", exc_info=True)
+                result = {"outcome": "refused", "reason": str(exc)}
+            index_dirty = index_dirty or bool(result.pop("index_dirty", False))
+            summary[OPERATOR_INSTRUCTIONS_KIND] = result
+    if index_dirty:
         write_index(root, index)
     return summary
+
+
+def _write_instructions_file(path: Path, text: str) -> None:
+    """Staged write + ``os.replace``, so a session booting never reads a torn file.
+
+    The package's own staging discipline (:func:`write_index`), at the private mode
+    ``mkstemp`` gives — the same mode the file's other writer (``aida.profile``)
+    produces, so a mirrored file is no more readable than an authored one.
+    """
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def _apply_operator_instructions_locked(
+    root: Path, row: Mapping[str, Any], origin: str, index: dict[str, Any]
+) -> dict[str, Any]:
+    """Install the sender's custom instructions here, unless they are the operator's own.
+
+    The agent/team policy, applied to one file: install when the file is ABSENT
+    (or blank) or is an untouched mirror from the SAME origin; otherwise keep the
+    file and record the conflict. The caller holds the definition lock.
+
+    WHY A CONFLICT IS RECORDED HERE AND NOT FAILED UPSTREAM: a node whose operator
+    wrote their own ``system_prompt.md`` is a normal, durable state, and making it
+    fail the push would make every create to that node fail and the cadence back
+    off its agent/team sync too. The fact is kept in the index instead, where
+    ``lop network definitions state`` on the node reads it.
+
+    A SYMLINK IS NEVER WRITTEN THROUGH: a linked instructions file is something the
+    operator wired up deliberately (an ecosystem file, a dotfiles repo), and
+    ``os.replace`` would either clobber the link or write outside the config root.
+    """
+    path = _operator_instructions_path(root)
+    incoming = digest_of(row)
+    recorded_in = index.get(OPERATOR_INSTRUCTIONS_INDEX_KEY)
+    recorded = recorded_in if isinstance(recorded_in, Mapping) else None
+    recorded_digest = str(recorded.get("digest") or "") if recorded is not None else ""
+
+    def conflict(reason: str) -> dict[str, Any]:
+        previous = index.get(OPERATOR_INSTRUCTIONS_CONFLICT_KEY)
+        record = {"origin": origin, "offered": incoming, "reason": reason}
+        changed = not (
+            isinstance(previous, Mapping)
+            and all(previous.get(key) == value for key, value in record.items())
+        )
+        if changed:
+            index[OPERATOR_INSTRUCTIONS_CONFLICT_KEY] = {**record, "at": time.time()}
+        return {"outcome": "conflict", "reason": reason, "index_dirty": changed}
+
+    if path.is_symlink():
+        return conflict(
+            "the custom instructions here are a link to another file, so they were not "
+            "overwritten"
+        )
+    exists = path.exists()
+    current = _read_operator_instructions(root)
+    if exists and current is None and path.stat().st_size and path.is_file():
+        # Non-blank but unreadable (permissions, bad encoding): not "absent".
+        return conflict("the custom instructions here could not be read, so they were not replaced")
+    if current is not None:
+        current_digest = digest_of(current)
+        if recorded is None:
+            return conflict(
+                "this device has its own custom instructions, so they were not overwritten"
+            )
+        if str(recorded.get("origin") or "") != origin:
+            return conflict(
+                f"the custom instructions here are a copy of {recorded.get('origin')}'s, so "
+                f"{origin or 'the sender'}'s were not installed"
+            )
+        if current_digest != recorded_digest:
+            return conflict(
+                "the copy of the custom instructions here has local edits, so it was not "
+                "overwritten"
+            )
+        if current_digest == incoming:
+            return {"outcome": "unchanged"}
+    # Absent/blank, a deleted mirror (re-installed: nothing of the operator's is
+    # lost — the team rule), or an untouched mirror from this origin.
+    _write_instructions_file(path, str(row.get("text") or ""))
+    index[OPERATOR_INSTRUCTIONS_INDEX_KEY] = {
+        "origin": origin,
+        "digest": incoming,
+        "at": time.time(),
+    }
+    index.pop(OPERATOR_INSTRUCTIONS_CONFLICT_KEY, None)
+    return {
+        "outcome": "updated" if current is not None else "installed",
+        "index_dirty": True,
+    }
 
 
 def _recorded(index: Mapping[str, Any], kind: str, name: str) -> Mapping[str, Any] | None:
@@ -1416,7 +1662,15 @@ def definition_state(
         wanted_agents, wanted_teams = expand_named_teams(root, names)
         agents = {name: value for name, value in agents.items() if name.casefold() in wanted_agents}
         teams = {name: value for name, value in teams.items() if name.casefold() in wanted_teams}
-    return {"agents": agents, "teams": teams}
+    # Always present, whatever ``names`` says: its PRESENCE is also how a sender
+    # knows this build understands the singleton (an older peer's reply lacks the
+    # key, and the sender then never sends it \u2014 no 64k re-send every tick to a
+    # device that would drop it unread).
+    return {
+        "agents": agents,
+        "teams": teams,
+        OPERATOR_INSTRUCTIONS_KIND: operator_instructions_state(root),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1507,7 +1761,8 @@ def push_to_peer(
     missing_teams = [
         row for row in bundle["teams"] if remote_teams.get(str(row["name"])) != digest_of(row)
     ]
-    if not missing_agents and not missing_teams:
+    instructions_out, instructions_report = _instructions_to_send(bundle, remote)
+    if not missing_agents and not missing_teams and instructions_out is None:
         return {
             "ok": True,
             "code": "in_sync",
@@ -1517,6 +1772,7 @@ def push_to_peer(
             "agents": {str(row["name"]): digest_of(row) for row in bundle["agents"]},
             "teams": {str(row["name"]): digest_of(row) for row in bundle["teams"]},
             "withheld": bundle.get("withheld") or [],
+            OPERATOR_INSTRUCTIONS_KIND: instructions_report,
         }
     outbound = {
         "kind": BUNDLE_KIND,
@@ -1525,6 +1781,8 @@ def push_to_peer(
         "agents": missing_agents,
         "teams": missing_teams,
     }
+    if instructions_out is not None:
+        outbound[OPERATOR_INSTRUCTIONS_KIND] = instructions_out
     try:
         reply = link.request(
             {
@@ -1550,6 +1808,19 @@ def push_to_peer(
     summary: dict[str, Any] = summary_in if isinstance(summary_in, dict) else {}
     conflicts = list(summary.get("conflicts") or [])
     refused = list(summary.get("refused") or [])
+    # The singleton's outcome never enters ``ok``: see
+    # ``_apply_operator_instructions_locked`` for why a node's own instructions are
+    # a state to report rather than a failed push.
+    if instructions_out is not None:
+        answered = summary.get(OPERATOR_INSTRUCTIONS_KIND)
+        instructions_report = (
+            {
+                "outcome": str(answered.get("outcome") or ""),
+                **({"reason": str(answered["reason"])} if answered.get("reason") else {}),
+            }
+            if isinstance(answered, Mapping)
+            else {"outcome": "no_answer"}
+        )
     ok = not conflicts and not refused
     return {
         "ok": ok,
@@ -1576,7 +1847,46 @@ def push_to_peer(
         # requester did not reconcile.
         "agents": {str(row["name"]): digest_of(row) for row in bundle["agents"]},
         "teams": {str(row["name"]): digest_of(row) for row in bundle["teams"]},
+        OPERATOR_INSTRUCTIONS_KIND: instructions_report,
     }
+
+
+def _instructions_to_send(
+    bundle: Mapping[str, Any], remote: Mapping[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """``(row to send or None, report)`` for the operator-instructions singleton.
+
+    Sent only when it would change something: the peer understands the row (its
+    state reply carries the key — an older build's does not, and gets nothing), its
+    digest differs from ours, and it has not already refused THIS revision while it
+    still holds its own copy. That last rule is what keeps the cadence from shipping
+    up to 64k every tick to a node whose operator wrote their own instructions.
+    """
+    remote_in = remote.get(OPERATOR_INSTRUCTIONS_KIND)
+    if not isinstance(remote_in, Mapping):
+        return None, {"outcome": "unsupported"}
+    withheld = str(bundle.get("operator_instructions_withheld") or "")
+    if withheld:
+        return None, {
+            "outcome": "withheld",
+            "reason": f"they are shaped like a credential ({withheld}), so they were not sent",
+        }
+    ours = bundle.get(OPERATOR_INSTRUCTIONS_KIND)
+    if not isinstance(ours, Mapping):
+        return None, {"outcome": "none"}
+    digest = digest_of(ours)
+    if str(remote_in.get("digest") or "") == digest:
+        return None, {"outcome": "in_sync"}
+    prior = remote_in.get("conflict")
+    if (
+        isinstance(prior, Mapping)
+        and str(prior.get("offered") or "") == digest
+        # A node whose file is now ABSENT gets it again: the refusal it recorded
+        # was about a file that no longer exists.
+        and str(remote_in.get("status") or "") != "absent"
+    ):
+        return None, {"outcome": "conflict", "reason": str(prior.get("reason") or "")}
+    return dict(ours), {"outcome": "sent"}
 
 
 def self_sentence(server: "RelayServer") -> str:
@@ -1980,6 +2290,10 @@ def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[
                             "refused": [
                                 str(row.get("name") or "") for row in summary.get("refused") or []
                             ],
+                            # The singleton's OUTCOME only, never its text.
+                            OPERATOR_INSTRUCTIONS_KIND: str(
+                                (summary.get(OPERATOR_INSTRUCTIONS_KIND) or {}).get("outcome") or ""
+                            ),
                         },
                     )
                 )

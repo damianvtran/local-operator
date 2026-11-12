@@ -14073,6 +14073,23 @@ class RelayServer:
         push_reason = ""
         expect: dict[str, Any] = {}
         reconciliation: dict[str, Any] = {}
+        if not named:
+            # AN UNNAMED SESSION STILL RUNS UNDER THE OPERATOR'S CUSTOM INSTRUCTIONS,
+            # so the push that a named create does below happens here too, narrowed
+            # to no agents and no teams: what it carries is the operator-instructions
+            # singleton (``definitions.local_bundle``), and only when the peer's copy
+            # differs. Best effort: the cadence carries it anyway, and a create must
+            # not fail on a refresh the user never asked for.
+            from local_operator.network import definitions
+
+            try:
+                definitions.push_to_peer(
+                    self, self._resolve_peer(peer), names={"agents": [], "teams": []}
+                )
+            except Exception:  # noqa: BLE001 — see above
+                logger.debug(
+                    "relay: instructions push before an unnamed create failed", exc_info=True
+                )
         if named:
             from local_operator.network import definitions
 

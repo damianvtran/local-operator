@@ -482,6 +482,11 @@ class MoveCarryBlock(TypedDict, total=False):
     #: there. Additive inside an already-optional block, so a move that carried
     #: nothing new parses exactly as before.
     cwd: dict[str, str]
+    #: Present only when the source could NOT refresh the session's team/agent
+    #: definitions and the operator's custom instructions on the destination before
+    #: the move (``_push_move_definitions``): names what may be stale there. The
+    #: move itself still completed — a brief refresh never gates a move.
+    definitions_notice: str
 
 
 class SessionMoveResult(TypedDict):
@@ -6143,6 +6148,17 @@ def _offload(
     )
     if blocked is not None:
         return blocked
+    # THE DESTINATION GETS THIS DEVICE'S DEFINITIONS BEFORE IT PULLS, so the moved
+    # session restores against the CURRENT team/agent brief and the operator's custom
+    # instructions rather than whatever mirror the cadence last left there (a team
+    # edited a minute ago, or a node paired since the last tick). It runs before the
+    # invite, and therefore before any commit. NON-FATAL by design: the move's own
+    # contract is the transcript, and refusing a move because a brief could not be
+    # refreshed would strand the session on a device the operator is moving it off.
+    # The failure is not silent — it names the copy that may be stale on the receipt.
+    definitions_notice = _push_move_definitions(
+        server, session_id, target_device, target_name or target_device
+    )
     transport = LinkTransport(server, link, session_id)
     # THE CARRY IS READ FROM THIS DEVICE'S OWN STAMP OR ITS SAVED MODE, and it has
     # to be: the source holds the session, so the source is the only device that can
@@ -6287,6 +6303,8 @@ def _offload(
         # commit). Either half may be absent (an older peer sends none; no monitors),
         # and the key is absent when both are, so an unchanged move parses unchanged.
         carry_block = progress.carry(session_id) or {}
+        if definitions_notice:
+            carry_block["definitions_notice"] = definitions_notice
         if monitors_here > 0:
             carry_block.setdefault("monitors", monitors_here)
             carry_block["monitors_notice"] = carry.monitors_notice(monitors_here)
@@ -6374,6 +6392,58 @@ def _offload(
         ),
         phase_reached=reached,
         changed=bool(reached and reached != "prepared"),
+    )
+
+
+def _push_move_definitions(
+    server: "RelayServer", session_id: str, target_device: str, target_label: str
+) -> str:
+    """Reconcile the moving session's team/agent (and the operator's instructions)
+    onto the destination; return the receipt's notice, or ``""`` when it landed.
+
+    The names come from the session's own ``attachment.json`` (what ``/team`` and
+    ``/agent`` put on it); ``definitions.push_to_peer`` expands a team to its roster
+    and always carries the operator-instructions singleton, so a session with no
+    attachment still gets the operator's standing rules. Never raises: see the call
+    site for why this cannot fail a move.
+    """
+    from local_operator.network import definitions
+    from local_operator.resume import read_session_attachment
+
+    team = agent = ""
+    try:
+        attachment = read_session_attachment(Path(server.root) / "sessions" / session_id)
+    except Exception:  # noqa: BLE001 — an unreadable sidecar still moves
+        attachment = None
+    if attachment is not None:
+        team, agent = attachment.team, attachment.agent
+    names = {"agents": [agent] if agent else [], "teams": [team] if team else []}
+    try:
+        pushed = definitions.push_to_peer(server, target_device, names=names)
+    except Exception as exc:  # noqa: BLE001 — non-fatal, see the call site
+        logger.warning(
+            "mobility: definitions push before moving %s failed", session_id, exc_info=True
+        )
+        pushed = {"ok": False, "message": str(exc)}
+    if pushed.get("ok"):
+        return ""
+    named = ", ".join(
+        part
+        for part in (f"team {team!r}" if team else "", f"agent {agent!r}" if agent else "")
+        if part
+    )
+    subject = f"{named} and the custom instructions" if named else "the custom instructions"
+    reason = str(pushed.get("message") or pushed.get("code") or "no answer")
+    logger.warning(
+        "mobility: %s on %s may be stale after moving %s: %s",
+        subject,
+        target_label,
+        session_id,
+        reason,
+    )
+    return (
+        f"{subject} on {target_label} may be an older copy — they could not be refreshed "
+        f"before the move ({reason})"
     )
 
 
