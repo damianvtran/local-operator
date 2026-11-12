@@ -4406,6 +4406,44 @@ def _provider_rows(app) -> list[tuple[str, str]]:
     return rows
 
 
+async def _settle_argument_push(pilot, what: str) -> None:
+    """Return once the app has HANDED the picker this command's list.
+
+    Call it straight after ``_set_editor_line`` put the buffer into a
+    ``/<command> …`` argument state. The rows are not set by that keystroke:
+    the editor clears them synchronously (``set_choices([])``) and posts
+    ``ArgumentQueryOpened``, which bubbles Editor -> ... -> App before
+    ``on_argument_query_opened`` pushes the real list. Every bubble hop is
+    queued behind ``pilot.pause()``'s markers, so one pause joins none of it and
+    only its CPU-idle heuristic stood in for the chain — on a loaded shard that
+    returned first and the test read the cleared list (#3880; QA round 1, Q1).
+
+    Settles on the PUSH itself, not on the rows looking right, because several
+    tests here assert an empty list (`/logout` with nothing stored, or a store
+    it cannot read): "rows are []" is already true of the editor's clear, so a
+    rows predicate would pass before the app had answered at all (review round
+    1, M1). The recorder goes on AFTER the line is set, which is what keeps the
+    editor's own synchronous clear out of it: anything it records is the app's
+    answer, empty or not. The assertions that follow stay exactly as they were.
+    """
+    picker = pilot.app.query_one(Editor).picker
+    pushes: list[list[ArgumentChoice]] = []
+    push = picker.set_choices
+
+    def recording(choices, *args, **kwargs):
+        pushes.append(list(choices))
+        return push(choices, *args, **kwargs)
+
+    # An instance attribute shadows the method only for this picker and only
+    # until the ``finally`` drops it again, so a later push in the same test
+    # behaves exactly as the app wrote it.
+    picker.set_choices = recording
+    try:
+        await settle(pilot, lambda: bool(pushes), what=f"{what}: app pushed the list")
+    finally:
+        del picker.set_choices
+
+
 @pytest.mark.asyncio
 async def test_login_list_reports_all_three_credential_states() -> None:
     """`/login ` offers every loginable provider with where the user stands.
@@ -4425,7 +4463,7 @@ async def test_login_list_reports_all_three_credential_states() -> None:
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/login ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/login")
         # Catalogue order (``providers.login_catalog``): subscription sign-ins
         # before API keys (registry order within a group), so the fake's
         # `xai-oauth` leads its two key rows.
@@ -4445,7 +4483,7 @@ async def test_a_search_alias_reaches_the_provider_it_names() -> None:
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/login grok")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/login grok")
         assert [name for name, _ in _provider_rows(app)] == ["xai-oauth"]
 
 
@@ -4464,7 +4502,7 @@ async def test_logout_rows_name_the_credential_they_will_remove() -> None:
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         assert _provider_rows(app) == [("openrouter", "remove api key")]
 
 
@@ -4491,7 +4529,7 @@ async def test_logout_with_nothing_stored_says_so_where_the_list_would_have_been
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         picker = app.query_one(Editor).picker
         assert not picker.is_open(), "a sentence is not a suggestion"
         assert picker.display is True, "and it is on screen anyway"
@@ -4532,7 +4570,7 @@ async def test_re_entering_an_empty_argument_state_leaves_the_transcript_alone()
             _set_editor_line(editor, "/logout")
             await pilot.pause()
             _set_editor_line(editor, "/logout ")
-            await pilot.pause()
+            await _settle_argument_push(pilot, "/logout")
             await pilot.pause()
             assert transcript.blocks() == []
         assert "log out of" in editor.picker.render_text(60).plain
@@ -4557,7 +4595,7 @@ async def test_an_unreadable_credential_store_says_that_instead() -> None:
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         rendered = app.query_one(Editor).picker.render_text(80).plain
         assert "unreadable" in rendered
         assert "no stored credentials" not in rendered
@@ -4579,7 +4617,7 @@ async def test_choosing_a_row_runs_the_existing_logout_path() -> None:
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         assert len(app.query_one(Editor).picker.suggestions()) == 1, "premise: one match"
         await pilot.press("enter")
         await pilot.pause()
@@ -4624,7 +4662,7 @@ async def test_login_still_lists_every_provider_when_the_store_cannot_be_read() 
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/login ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/login")
         assert app.is_running, "a locked credential store must not take the app down"
         assert _provider_rows(app) == [
             ("xai-oauth", ""),
@@ -4644,7 +4682,7 @@ async def test_logout_says_the_store_is_unreadable_rather_than_claiming_it_is_em
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         assert app.is_running
         assert _provider_rows(app) == []
         picker = app.query_one(Editor).picker
@@ -4708,7 +4746,7 @@ async def test_logout_rows_name_the_stored_account_when_there_is_exactly_one() -
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         assert _provider_rows(app) == [("openrouter", "remove api key · me@example.com")]
 
 
@@ -4734,7 +4772,7 @@ async def test_multi_account_logout_rows_keep_the_kind_and_add_no_label() -> Non
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         assert _provider_rows(app) == [("openrouter", "remove 2 credentials")]
 
 
@@ -4761,7 +4799,7 @@ async def test_two_logins_of_one_kind_report_the_count_not_the_bare_kind() -> No
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         assert _provider_rows(app) == [("openrouter", "remove 2 oauth logins")]
 
 
@@ -4794,7 +4832,7 @@ async def test_a_long_identity_is_clipped_so_the_detail_column_survives() -> Non
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/logout ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/logout")
         assert _provider_rows(app) == [
             ("openrouter", "remove api key · damian.tran@gominerva.c…")
         ], "24 cells of identity, ellipsis at the tail, kind still first"
@@ -4861,7 +4899,7 @@ async def test_mcp_verb_rows_are_the_backend_table_row_for_row() -> None:
         _set_editor_line(editor, "/mcp")
         await pilot.pause()
         _set_editor_line(editor, "/mcp ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/mcp")
         rows = []
         for _name, choice in editor.picker.suggestions():
             # The picker holds commands and argument rows in one list; this slot
@@ -4892,7 +4930,7 @@ async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> No
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/login ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/login")
         described = {
             name: choice.description for name, choice in app.query_one(Editor).picker.suggestions()
         }
@@ -4923,7 +4961,7 @@ async def test_the_login_picker_paints_human_labels_and_nothing_ellipsizes() -> 
         app.query_one(Editor).focus()
         await pilot.pause()
         _set_editor_line(app.query_one(Editor), "/login ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/login")
         picker = app.query_one(Editor).picker
         choices = dict(picker.suggestions())
         # ``render_rows`` is the picker's own painter, so this measures what the
@@ -6409,7 +6447,7 @@ async def test_provider_and_the_login_list_report_credentials_in_the_same_words(
             if "deepseek" in line or "xai-oauth" in line
         ]
         _set_editor_line(app.query_one(Editor), "/login ")
-        await pilot.pause()
+        await _settle_argument_push(pilot, "/login")
         states = dict(_provider_rows(app))
 
     assert listed, "premise: /provider rendered its listing"
