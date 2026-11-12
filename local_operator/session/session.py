@@ -11066,7 +11066,7 @@ class Session:
                     # not abort the receive; absent beats guessed.
                     account_display = ""
             from local_operator.harness.message_types import (
-                BRIDGE_CONFIG_REQUEST_RULE,
+                BRIDGE_RECEIVER_RULES,
                 BRIDGE_UNTRUSTED_CLAUSE,
             )
 
@@ -11078,8 +11078,9 @@ class Session:
                 # wrap, ahead of the body, so the model reads the content as
                 # data — never as instructions from a colleague's agent.
                 f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
-                # B5: a teammate's config suggestion is relayed, never applied.
-                f"{BRIDGE_CONFIG_REQUEST_RULE}\n"
+                # B5 + peer default: coordinate as peers; a teammate's config
+                # suggestion is relayed, never applied.
+                f"{BRIDGE_RECEIVER_RULES}\n"
                 f"{Session._neutralize_bridge_tag(text)}\n"
                 "</team-bridge-message>"
             )
