@@ -28,7 +28,8 @@ runtime. Read the matching guide first; trust code and guides, not memory.
 - **Edit, don't rewrite.** Batch `edit` hunks in `edits`; `write` needlessly
   re-emits whole files. Re-read spans already in context only if changed.
 - **Reuse existing patterns** and **fix problems at the source** — no
-  suppressed errors or special-cased inputs unless the user asks.
+  suppressed errors, special-cased inputs or success faked by editing tests,
+  state or logs, unless the user asks.
 - **Read session incidents before retrying.** A `[session incident]` names the
   cause (limits/auth/provider/network/context/restart/update) and recovery.
   Follow that recovery, not the same failed request.

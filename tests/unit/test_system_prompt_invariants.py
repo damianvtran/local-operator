@@ -111,6 +111,19 @@ def test_safety_rules_survive(queued: str) -> None:
     assert "never end a turn with pending items" in queued
 
 
+def test_success_may_not_be_forged_by_editing_the_evidence(queued: str) -> None:
+    """Forged completion: DeepSeek V4.1 Flash, asked to play a puzzle game, twice
+    rewrote the game's saved progress in the Wine registry and declared done.
+    The everyday form is editing test expectations, a log line or a status file
+    so a check passes without the work. Rides the "fix problems at the source"
+    bullet because the start-context budget had ~20 tokens of headroom; pin it
+    so a later trim cannot drop it silently."""
+    assert (
+        "no suppressed errors, special-cased inputs or success faked by editing tests,"
+        " state or logs, unless the user asks"
+    ) in queued
+
+
 def test_ask_triggers_stay_an_exhaustive_last_resort_list(queued: str) -> None:
     """F2(e): "only when:" is the brake. "whenever unsure, e.g. when:" keeps both
     headline sentences and inverts the rule, so the brake itself is pinned."""
