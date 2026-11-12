@@ -159,6 +159,25 @@ def _assert_inside_root(path: Path, root: Path) -> None:
         )
 
 
+def _assert_not_sessions(path: Path, root: Path) -> None:
+    """Refuse a skill write that resolves into the session store.
+
+    WHY ON TOP OF ``_assert_inside_root``: that check only bounds a write to the
+    config root, and ``sessions/`` is inside it. An operator may legitimately
+    symlink ``skills/`` elsewhere (a dotfiles repo), so a link is not refused —
+    but if it ever resolves into ``sessions/``, a pushed skill named like a
+    session id (ids such as ``c3ec803c72a8`` are valid kebab-case skill names)
+    would make the swap's ``os.replace`` move a live session directory. Session
+    data is only ever removed by the cleanup path
+    (``tests/unit/session/test_no_session_deletion.py``), so this is refused.
+    """
+    resolved = Path(path).resolve()
+    for sessions in {Path(root) / "sessions", Path(root).resolve() / "sessions"}:
+        guarded = sessions.resolve()
+        if resolved == guarded or guarded in resolved.parents:
+            raise MeshRefusal("bad_request", "a skill write resolved into the session store")
+
+
 # ---------------------------------------------------------------------------
 # Measuring this device's skills
 # ---------------------------------------------------------------------------
@@ -737,6 +756,7 @@ def _apply_locked(root: Path, name: str, ref: Any, data: bytes, origin: str) -> 
 
     dest = skills_root(root) / name
     _assert_inside_root(dest, root)
+    _assert_not_sessions(dest, root)
     index = definitions.read_index(root)
     recorded = _recorded(index, name)
     bucket, reason = _decide(recorded, _current_tree(dest), ref.tree_hash, origin)
@@ -749,6 +769,7 @@ def _apply_locked(root: Path, name: str, ref: Any, data: bytes, origin: str) -> 
         return {"outcome": bucket, "name": name, **({"reason": reason} if reason else {})}
     stage = _stage_root(root) / uuid.uuid4().hex
     _assert_inside_root(stage, root)
+    _assert_not_sessions(stage, root)
     try:
         stage.mkdir(parents=True, mode=0o700)
         archive = stage / "archive.zip"
@@ -1260,6 +1281,7 @@ def _sweep_stage(root: Path, *, now: float | None = None) -> int:
         if base.is_symlink() or base.parent.is_symlink():
             return 0
         _assert_inside_root(base, root)
+        _assert_not_sessions(base, root)
     except (OSError, MeshRefusal):
         return 0
     cutoff = (time.time() if now is None else now) - STAGE_STALE_S

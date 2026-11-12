@@ -546,6 +546,34 @@ def test_the_sweep_never_follows_a_symlinked_stage(tmp_path: Path) -> None:
     assert victim.exists(), "the sweep followed a symlinked stage into its target"
 
 
+@pytest.mark.parametrize("session_exists", [True, False])
+def test_an_apply_never_writes_through_a_skills_link_into_sessions(
+    tmp_path: Path, session_exists: bool
+) -> None:
+    """A ``skills/`` link resolving into ``sessions/`` passes the config-root check,
+    and a session id is a valid kebab-case skill name — so without the sessions
+    guard the swap's ``os.replace`` would move (or create) a session directory."""
+    receiver = tmp_path / "r"
+    session = receiver / "sessions" / "c3ec803c72a8"
+    (receiver / "sessions").mkdir(parents=True)
+    if session_exists:
+        session.mkdir()
+        (session / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+    os.symlink(receiver / "sessions", receiver / "skills")
+    sender = tmp_path / "s"
+    folder = _write_skill(sender, "c3ec803c72a8")
+
+    with pytest.raises(skillsync.MeshRefusal):
+        skillsync.apply_skill(
+            receiver, _payload_from(folder, "c3ec803c72a8"), origin_device="dev-a"
+        )
+    if session_exists:
+        assert (session / "transcript.jsonl").read_text(encoding="utf-8") == "{}\n"
+        assert not (session / "SKILL.md").exists()
+    else:
+        assert not session.exists()
+
+
 def _own_skill_at(root: Path, folder: str, name: str | None, body: str) -> Path:
     """An own skill at ``root/skills/<folder>``; ``name=None`` omits the ``name:`` line."""
     return _own_skill_in(root / "skills", folder, name, body)
