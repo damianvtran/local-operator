@@ -20,6 +20,14 @@ from collections.abc import Awaitable, Callable, Collection, Iterable
 from textual.message import Message
 from textual.worker import Worker, WorkerCancelled, WorkerFailed, WorkerState
 
+#: The one hang guard for an edge a TUI test awaits: ``settle``'s and
+#: ``MessageWaiter.wait_for``'s default bound, and the ceiling for a bare
+#: ``asyncio.wait_for`` on an app event. Named so those waits share it instead
+#: of each betting on its own small literal: a ceiling costs nothing on a pass
+#: (the wait returns on the edge), while a 2 s literal failed on a loaded CI
+#: shard (test_goal_judge_lifecycle, gate run 43188636453).
+SETTLE_DEADLINE_S = 30.0
+
 
 class MessageWaiter:
     """Recheck observable state on messages, with a hang guard, not a time bet."""
@@ -39,7 +47,7 @@ class MessageWaiter:
         predicate: Callable[[], bool],
         *,
         description: str,
-        timeout: float = 30.0,
+        timeout: float = SETTLE_DEADLINE_S,
     ) -> None:
         """Return on readiness, including readiness published before this wait.
 
@@ -206,7 +214,7 @@ async def settle(
     joins: Iterable[Awaitable[object]] = (),
     refresh: bool = True,
     max_turns: int | None = None,
-    deadline_s: float = 30.0,
+    deadline_s: float = SETTLE_DEADLINE_S,
 ) -> None:
     """Join messages, named workers, ``joins`` and refresh; return once ``until()``.
 

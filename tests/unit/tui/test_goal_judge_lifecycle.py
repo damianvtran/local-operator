@@ -39,6 +39,7 @@ from local_operator.tui.events import TurnEnded, UserMessageStart
 from local_operator.tui.widgets.transcript import NoticeBlock
 
 from .test_app_pilot import GoalSession, _factory
+from .waiting import SETTLE_DEADLINE_S, settle
 
 GOAL = "land the OAuth refresh fix"
 CONTINUE = "VERDICT: CONTINUE\nmore to do"
@@ -145,9 +146,20 @@ async def test_a_loop_taking_over_a_held_tui_answer_yields_to_waiting(monkeypatc
     monkeypatch.setattr(session, "complete_aside", held)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
-        await _settle(pilot, 2)
+        # Join the boot worker rather than count pauses: `pilot.pause()` reads a
+        # thread hop (the boot's `warm_session_imports`) as idle, and a
+        # `TurnEnded` posted before the session is adopted is declined by the
+        # hook (`session is None`), so `started` could never be set at ANY
+        # deadline. The ceiling below covers the other half: a loaded worker
+        # that is merely slow to reach `complete_aside`.
+        await settle(
+            pilot,
+            lambda: app._session is session,
+            what="boot session adopted",
+            workers=("session",),
+        )
         app.post_message(TurnEnded(aborted=False, error=None))
-        await asyncio.wait_for(started.wait(), 2)
+        await asyncio.wait_for(started.wait(), SETTLE_DEADLINE_S)
         app._loop_running = True
         try:
             release.set()
