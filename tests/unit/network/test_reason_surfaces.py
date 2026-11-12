@@ -309,12 +309,35 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
     ("local_operator/network/cli.py", "_cmd_sessions", "detail"): (
-        5,
+        6,
         "the relay's own sentence — the 4th read is the model receipt's detail, which "
         "says why a requested model was not applied; the 5th is the first turn's CAUSE, "
         "the owner runtime's own error sentence (the provider's reason, e.g. a rate "
         "limit or an expired login), carried verbatim on purpose: it is the one fact "
-        "that tells the reader whether to retry, re-auth or pick another model",
+        "that tells the reader whether to retry, re-auth or pick another model; the "
+        "6th is the create-idempotency sentence (``create_unconfirmed``/``replayed``) "
+        "the relay composes in ``_settle_lost_create``/``_create_replay_reply``",
+    ),
+    # The create-idempotency sentence (PR #3827) on the agent tool's mesh spawn: the
+    # relay's OWN prose — ``RelayServer._create_replay_reply`` on the owner, or the
+    # requesting relay's ``_settle_lost_create`` — saying the first prompt's
+    # admission was not observed by this call. NOT GLOSSED because the gloss would
+    # break it: ``peer_reason_words`` reads the ``(CLI: `lop …`)`` colon as a stage
+    # prefix and keeps only the tail. Same class as ``_cmd_sessions`` above.
+    ("local_operator/tools/builtin.py", "_sessions_spawn_mesh", "detail"): (
+        1,
+        "the relay's own create-idempotency sentence (replayed / reply lost), shown "
+        "verbatim because the gloss would cut it at its `CLI:` colon",
+    ),
+    # The owner runtime's own reply sentence for a ``--send --mailbox`` delivery,
+    # stored as the receipt's ``receipt`` and printed as ``<peer>: <sentence>``. Kept
+    # raw because an EMPTY reply must stay empty (``mailbox_receipt_lines`` prints
+    # nothing then) and ``peer_reason_words`` never returns empty — it would print
+    # "it did not answer" under a message that was delivered.
+    ("local_operator/network/cli.py", "_pilot_mailbox", "detail"): (
+        1,
+        "the owner's own mailbox-delivery sentence, attributed to the peer; empty "
+        "stays empty, which the never-empty gloss cannot express",
     ),
     # ``_op_session_create`` hands the owner's first-turn cause to the requesting
     # device (``_prompt_on``'s ``detail``). DELIBERATELY RAW, and the counter-example
