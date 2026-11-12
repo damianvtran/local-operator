@@ -1350,6 +1350,8 @@ async def _stdio_transport(
     cfg: MCPStdioServerConfig,
     on_close: Callable[[], None],
     stderr_log: McpServerStderr,
+    *,
+    start_new_session: bool | None = None,
 ) -> AsyncIterator[TransportStreams]:
     """Spawn an MCP stdio server and pump newline-delimited JSON-RPC.
 
@@ -1386,7 +1388,9 @@ async def _stdio_transport(
         # yet bypassed straight to node.
         target = win32_process_target(argv)
     else:
-        kwargs["start_new_session"] = stdio_start_new_session()
+        kwargs["start_new_session"] = (
+            stdio_start_new_session() if start_new_session is None else start_new_session
+        )
         target = argv
 
     process = await anyio.open_process(target, **kwargs)
@@ -1882,8 +1886,17 @@ class McpManager:
         secret_base: os.PathLike[str] | None = None,
         register_secret: Callable[[str], object] | None = None,
         boundary: Path | None = None,
+        detach_stdio: bool | None = None,
     ) -> None:
         self.cwd = str(cwd)
+        # ``None`` keeps the platform rule (:func:`stdio_start_new_session`).
+        # ``False`` is for a manager whose OWNER is reaped by process group:
+        # the wake supervisor's parked-monitor probe is killed with ``killpg``,
+        # and on Linux the default ``setsid`` would carry every stdio server it
+        # spawned out of that group, so a timed-out probe would orphan them.
+        # The probe has no controlling terminal, so the job-control hazard the
+        # default guards against cannot arise there.
+        self._detach_stdio = detach_stdio
         self.secret_base = secret_base
         self._register_secret = register_secret
         # The world boundary a bounded session validated, or ``None`` for the
@@ -3210,7 +3223,12 @@ class McpManager:
         )
 
         if isinstance(cfg, MCPStdioServerConfig):
-            streams_cm = _stdio_transport(cfg, lambda: conn.closed_event.set(), stderr_log)
+            streams_cm = _stdio_transport(
+                cfg,
+                lambda: conn.closed_event.set(),
+                stderr_log,
+                start_new_session=getattr(self, "_detach_stdio", None),
+            )
         elif isinstance(cfg, MCPHttpServerConfig):
             from mcp.client.streamable_http import (
                 create_mcp_http_client,

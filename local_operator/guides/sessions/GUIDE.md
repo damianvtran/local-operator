@@ -84,7 +84,7 @@ never a cut turn). They differ in what happens to the session's schedules:
 | --- | --- | --- |
 | runtime process | ends | ends |
 | wakes | DORMANT (`stopped_at`) — will not fire until someone reopens it | ARMED (`parked_at`) — the wake supervisor fires them and reopens the session |
-| monitors | DORMANT | ARMED — the supervisor runs read-only checks (`bash` allow-listed commands, `read`, `grep`) itself and reopens the session only when one changes; other tools (MCP, web) reopen it on every due tick |
+| monitors | DORMANT | ARMED — the supervisor runs read-only checks (`bash` allow-listed commands, `read`, `grep`, `glob`, `web_fetch`, `code_requests`, read-only MCP tools) itself and reopens the session only when one changes, or when an unreachable MCP server's stall or give-up notice is due; `web_search` monitors reopen it on every due tick |
 | use it when | the session's work is over | you only want the memory back |
 
 The stop receipt says how many wakes and monitors it made dormant and names
@@ -95,8 +95,12 @@ work. Reopening the session (any engage) clears either stamp.
 the session back, it is an ordinary session again: when it later goes idle and
 its runtime exits on its own, nothing is stamped, and its monitors go back to
 reopening it on every due tick (the cold-session behaviour). Park it again if
-you want the memory back for longer. A session watched by MCP or web monitors
-is reopened on every due tick even while parked, so parking it saves little.
+you want the memory back for longer. A `web_search` monitor reopens a parked
+session on every due tick, and so does an MCP monitor whose server needs a
+credential only a session can use (a passphrase-locked secret store, or a
+sign-in borrowed from another device); parking such a session saves little.
+An MCP server that is down or needs re-authentication does not reopen it: the
+supervisor records the retry and reopens it only to tell you, after 30 minutes.
 
 **Self-park.** `sessions(op='park')` with no address parks the calling session
 once the current turn ends: a detached helper waits for the owner's idle latch
@@ -111,8 +115,9 @@ sessions — oldest-idle first, never a busy one, one a viewer is attached to,
 the chief of staff (Aida) or an engine duty session — before it would end a
 build. It also leaves alone a runtime inside its keep-alive window (just
 opened, reopened by a wake or monitor, warmed for a viewer, or just left by
-one; at least 5 minutes) and a session with an armed MCP or web monitor, which
-parking would only reopen every tick. Each park logs one `pressure park:` line
+one; at least 5 minutes) and a session with an armed monitor the supervisor
+cannot check itself (the cases above), which parking would only reopen every
+tick. Each park logs one `pressure park:` line
 in the supervisor log, and so does each monitor-based skip.
 
 ## Resume — the canonical flow
