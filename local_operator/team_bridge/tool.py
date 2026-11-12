@@ -1675,8 +1675,9 @@ def _post_receipt(
     result as a receipt that does NOT latch the session. The ``members`` list
     (``_directory``) and ``skipped`` (reply guard) are read the same way. An op
     that returns teammate-written text must never reuse those shapes, or it
-    would stop latching; ``tests/unit/harness/test_bridge_egress.py`` runs every
-    op through the real predicate to catch a drift.
+    would stop latching;
+    ``tests/unit/team_bridge/test_bridge_taint_op_shapes.py`` runs every op
+    through the real predicate to catch a drift.
     """
 
     message_id, seq = _posted_message(result)
