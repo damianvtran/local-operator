@@ -435,6 +435,11 @@ class Setting:
     #: a desktop row with the rules that own it. Never authored twice — an
     #: empty string means "not a hotkey row".
     hotkey_scope: str = ""
+    #: Whether this HOTKEY row may be CLEARED to ``"none"`` (keymap.UNBOUND),
+    #: DERIVED from ``keymap.KeyAction.clearable`` like ``hotkey_scope`` —
+    #: never authored twice. Projected on the wire so the desktop app can
+    #: offer the Clear affordance only on rows that accept the sentinel.
+    clearable: bool = False
     #: SEARCH VOCABULARY for this row, never rendered: a query may match these
     #: words, but no surface ever draws them as a sentence — the settings page
     #: paints the row and, when it explains a match, names the word that hit.
@@ -1655,6 +1660,17 @@ def _validate_github_repositories(value: object) -> object:
     """
     if not isinstance(value, (list, tuple)):
         raise ValueError("GitHub repositories must be a list of owner/repo entries.")
+    # The SAME ceiling the mesh boundary carries (GitHub's App mint maximum): a
+    # longer designation could neither be minted nor delivered whole, so it is
+    # refused here, where a person can fix it, rather than truncated downstream.
+    # Lazy import: this module loads on every CLI start; the validator runs on write.
+    from local_operator.network.credentials.types import MAX_NARROWING_LIST_ENTRIES
+
+    if len(value) > MAX_NARROWING_LIST_ENTRIES:
+        raise ValueError(
+            f"at most {MAX_NARROWING_LIST_ENTRIES} GitHub repositories can be designated "
+            f"(GitHub's limit for one App token); got {len(value)}"
+        )
     for entry in value:
         text = str(entry).strip()
         owner, sep, repo = text.partition("/")
@@ -3258,6 +3274,7 @@ SETTINGS: tuple[Setting, ...] = (
             default=action.default,
             help=_keymap_copy(action, "help"),
             hotkey_scope=action.scope,
+            clearable=action.clearable,
             synonyms=_HOTKEY_SYNONYMS,
         )
         for action in _keymap.KEY_ACTIONS
@@ -4469,6 +4486,43 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.compaction_mid_turn_enabled_choice_true_description()),
             _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
         ),
+    ),
+    # Idle / pre-wake compaction (``compaction/idle.py``). Defaults are literals
+    # mirroring ``compaction.thresholds.DEFAULT_IDLE_*`` (importing that module
+    # here would pull the pass engine into every settings read); the consumer
+    # map in ``tests/unit/test_settings_io.py`` pins each pair.
+    Setting(
+        key="compaction.idle_enabled",
+        path=("compaction", "idle_enabled"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.compaction_idle_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_idle_enabled_choice_true_description()),
+            _t(_ws.compaction_idle_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="compaction.idle_threshold_tokens",
+        path=("compaction", "idle_threshold_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_threshold_tokens_label()),
+        kind=Kind.INT,
+        default=200_000,
+        help=_t(_ws.compaction_idle_threshold_tokens_help()),
+        minimum=0,
+    ),
+    Setting(
+        key="compaction.idle_min_growth_tokens",
+        path=("compaction", "idle_min_growth_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_min_growth_tokens_label()),
+        kind=Kind.INT,
+        default=60_000,
+        help=_t(_ws.compaction_idle_min_growth_tokens_help()),
+        minimum=1,
     ),
     # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
     # ``compaction/thresholds.py``. The help text must keep saying that earlier

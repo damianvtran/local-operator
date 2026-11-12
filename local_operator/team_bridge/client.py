@@ -104,6 +104,7 @@ from local_operator.team_bridge.consent_versions import (  # noqa: F401
     CONSENT_VERSION_V3,
     DEFAULT_ON_CONSENT_VERSIONS,
 )
+from local_operator.team_bridge.http_pool import hub_http_client
 from local_operator.team_bridge.settings import (
     DEFAULT_ENROLLMENT_DONE,
     TeamBridgeSettings,
@@ -2089,16 +2090,15 @@ class TeamBridgeClient:
         # Before the AsyncClient exists: no credentialed base reaches httpx,
         # whichever caller minted the token (S-2).
         self._refuse_credentialed_base()
-        # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
-        # single small JSON round trip and nothing here runs on a loop. The
-        # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
-        # lifetime — an injected-socket seam lands with it, deliberately not
-        # half-built here (the architect's finding 5; tracked on the PR).
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            transport=self._transport,
-            follow_redirects=False,
-        ) as http:
+        # POOLED where the loop has an owner (``lop serve`` binds one in its
+        # lifespan), per request elsewhere — see ``team_bridge/http_pool.py``.
+        # A new TLS handshake per hub read cost 41-124 ms on every desktop
+        # bridge read (bridge-instant-load). Sharing the client is safe only
+        # because nothing credentialed lives on it: the bearer below is set on
+        # THIS request's headers, the client has no default headers and a
+        # cookie jar that refuses every cookie, and ``timeout`` is passed per
+        # call so one operation's deadline never leaks into another's.
+        async with hub_http_client(self._base_url, self._transport) as http:
             headers = {"Accept": "application/json"}
             # Caller-supplied headers FIRST, so the pinned bearer below always
             # wins: merged the other way round this seam replaced the credential
@@ -2147,6 +2147,7 @@ class TeamBridgeClient:
                     # All body forms share the bounded path, just as they do
                     # the ordinary request path below.
                     json=body,
+                    timeout=timeout,
                 ) as streamed:
                     # Avatar reads need a hard allocation bound as well as a
                     # decoded-size bound. Refuse an ignored identity request
@@ -2197,6 +2198,7 @@ class TeamBridgeClient:
                     self._base_url + path,
                     params=params,
                     files=files,
+                    timeout=timeout,
                     headers=headers,
                 )
             if content is not None:
@@ -2205,7 +2207,12 @@ class TeamBridgeClient:
                 # this is a fixed opaque label, never a caller-chosen one.
                 headers["Content-Type"] = "application/octet-stream"
                 return await http.request(
-                    method, self._base_url + path, params=params, content=content, headers=headers
+                    method,
+                    self._base_url + path,
+                    params=params,
+                    content=content,
+                    headers=headers,
+                    timeout=timeout,
                 )
             return await http.request(
                 method,
@@ -2213,6 +2220,7 @@ class TeamBridgeClient:
                 params=params,
                 json=body,
                 headers=headers,
+                timeout=timeout,
             )
 
     async def _send(

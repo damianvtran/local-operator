@@ -93,13 +93,17 @@ class MessageWaiter:
 #   * No sleeps and no widened timeouts. ``deadline_s`` is the only default
 #     bound: it turns a missing edge into a loud diagnostic, and every join runs
 #     under ``asyncio.timeout(remaining)`` so one wedged join cannot outlive it.
-#     ``max_turns`` defaults to None (no cap). A turn is NOT a unit of time: under
-#     a starved pause one turn costs ~1 ms (QA measured 300 turns in 0.20-0.49 s
-#     on PR #3732), so a turn cap fires in well under a second on exactly the
-#     loaded box this helper exists for, failing a cascade that was still
-#     making progress. That is a flake source, not a bound. The parameter stays
-#     for the helper's own contract tests, where ``max_turns=1`` proves a join
-#     is exact (one turn suffices) rather than won by repeated polling.
+#     ``max_turns`` defaults to None (no cap). A turn is NOT a unit of time. A
+#     real ``Pilot.pause()`` (Textual 8.2.8) is ``wait_for_idle(0)``: at least
+#     one ``sleep(1/50)``, looping up to 1 s while the process looks busy, so a
+#     turn costs >= ~20 ms (21.5-43.6 ms measured at idle) and up to ~1 s under
+#     load: a 240-turn cap is ~5 s on an idle box and ~240 s on a loaded one.
+#     The ~1 ms/turn figure (QA: 300 turns in 0.20-0.49 s on PR #3732) is the
+#     ``StarvedPilot`` (``sleep(0)``) in ``test_settle.py``, not a real pilot.
+#     Either way a count bounds nothing stable, so a wall deadline is the
+#     default bound. The parameter stays for the helper's own contract tests,
+#     where ``max_turns=1`` proves a join is exact (one turn suffices) rather
+#     than won by repeated polling.
 #   * Wait for every state the predicate reads, not just the paint. The first
 #     migration compared the sidebar's painted state with its live state while
 #     the boot session's adoption (``current_id`` '' -> 'sess') could land after
@@ -116,6 +120,25 @@ class MessageWaiter:
 #     assertion afterwards so a wrong value still fails with its own message. An
 #     always-true predicate degrades to one join turn; pair every migration with
 #     an injected negative control (see the PR that introduced this helper).
+#
+# Convention (the ONE settle for TUI tests; the shared ``_settle.py`` turn-count
+# poller was folded into this, and new and migrated waits use ``settle``. Some
+# per-file pollers remain, e.g. ``_settle`` in ``test_agent_class_slash.py``,
+# ``test_app_pilot.py`` (plus its ``_settle_loop``), ``test_approvals_ux.py``,
+# ``test_ask_dismiss_open.py`` and ``test_ask_fleet.py``; they migrate here as
+# they are touched):
+#   * Import ``settle`` from ``tests.unit.tui.waiting``; no new local pollers.
+#   * Name in ``workers=`` the product worker group(s) that write the state the
+#     predicate reads (e.g. ``"harness-import"``), and only those. State a
+#     message handler or a synchronous transition sets needs no group: the
+#     per-turn message and refresh joins cover it.
+#   * ``track_threads`` only for a raw ``asyncio.to_thread`` outside a worker.
+#   * The predicate is the product precondition, never the assertion; keep the
+#     exact assert afterwards.
+#   * Never pass ``max_turns`` outside this helper's own tests.
+#   * Every migration PR shows an injected negative control (predicate held
+#     false -> "never settled: <what>"; a named worker raising -> "worker
+#     <group>/<name> failed").
 #
 # Usage::
 #

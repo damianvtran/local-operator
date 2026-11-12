@@ -44,5 +44,8 @@
   "tui.app.providers.stale_all": "stale list: all providers",
   "tui.app.providers.stale_named": "stale list: {names}",
   "tui.app.providers.stale_all_error": "stale list: all providers — {error}",
-  "tui.app.providers.no_live_list": "no live list: {names}"
+  "tui.app.providers.no_live_list": "no live list: {names}",
+  "tui.app.compaction.idle_receipt": "context compacted while idle · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "context compacted while idle",
+  "tui.app.compaction.idle_skipped": "idle compaction skipped · nothing changed"
 }

@@ -1001,3 +1001,54 @@ describe("AskCard", () => {
 		expect(screen.getByRole("status")).toBeTruthy();
 	});
 });
+
+describe("a long question stays bounded", () => {
+	/* The operator's screenshot: a proposal ask carrying a whole team brief
+	   filled the card and pushed its options off screen. The question text is
+	   its own capped scroller, and the answer controls are NOT inside it, so
+	   they stay directly under a visible excerpt whatever the length. */
+	it("caps the question text in column units and keeps options outside the scroller", () => {
+		const long = Array.from({ length: 400 }, (_, i) => `line ${i}: brief text`).join("\n");
+		renderCard(ask({ questions: [question({ question: long })] }));
+		const text = screen.getByTestId("ask-question-text");
+		expect(text.style.maxHeight).toBe("calc(var(--lo-vvh, 100dvh) * 0.3)");
+		expect(text.className).toContain("overflow-y-auto");
+		expect(text.className).toContain("whitespace-pre-line");
+		const yes = screen.getByRole("button", { name: /yes/ });
+		expect(text.contains(yes)).toBe(false);
+	});
+});
+
+describe("a multi-question card stays bounded as a whole", () => {
+	/* PR #3777 code review M2: each question was capped, the stack was not, so
+	   three long questions pushed the shared send/decline row off screen. The
+	   stack is one capped scroller and the answer row renders outside it. */
+	it("caps the question list and keeps send and decline outside it", () => {
+		const long = (n: number) =>
+			Array.from({ length: 300 }, (_, i) => `q${n} line ${i}: brief text`).join("\n");
+		renderCard(
+			ask({
+				questions: [1, 2, 3].map((n) =>
+					question({ id: `q${n}`, question: long(n) }),
+				),
+			}),
+		);
+		const list = screen.getByTestId("ask-question-list");
+		expect(list.style.maxHeight).toBe("calc(var(--lo-vvh, 100dvh) * 0.5)");
+		expect(list.className).toContain("overflow-y-auto");
+		// R2-5: the focusable scroller is a named region.
+		expect(screen.getByRole("region", { name: "3 questions waiting" })).toBe(list);
+		const texts = screen.getAllByTestId("ask-question-text");
+		expect(texts).toHaveLength(3);
+		for (const text of texts) expect(list.contains(text)).toBe(true);
+		const decline = screen.getByRole("button", { name: /decline/i });
+		expect(list.contains(decline)).toBe(false);
+		const send = screen.getByRole("button", { name: /send answers/ });
+		expect(list.contains(send)).toBe(false);
+	});
+
+	it("leaves a single question unwrapped so its options sit under the excerpt", () => {
+		renderCard(ask({ questions: [question({ question: "short" })] }));
+		expect(screen.queryByTestId("ask-question-list")).toBeNull();
+	});
+});

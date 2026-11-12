@@ -42,6 +42,7 @@ from local_operator.tui.widgets.editor import (
 )
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory, _renderable_plain
+from tests.unit.tui.waiting import settle
 
 
 class AsideSession(FakeSession):
@@ -136,14 +137,41 @@ async def _settle_boot(pilot, app: OperatorApp, session: FakeSession) -> None:
 
 
 async def _open_with_question(pilot, app: OperatorApp, question: str) -> AsidePanel:
-    """Type ``/btw <question>`` the way a user does, and settle the answer."""
+    """Type ``/btw <question>`` the way a user does, and settle the answer.
+
+    Two product workers stand between the keystroke and the state every caller
+    reads, and a fixed number of ``pause()`` calls was a bet on both (CI lost it:
+    ``aside_calls == []`` on #3720, ``forked == []`` on #3732; a 0.4 s delay
+    injected at the boot or the aside boundary reproduces the first exactly,
+    while the second needs the delay at the ``aside-fork`` boundary instead):
+
+    * the BOOT worker (group ``session``) must have adopted the session, or
+      ``_ask_aside`` answers "the session is still starting…" on the card and
+      never calls ``complete_aside`` — and ``^f`` later has nothing to fork;
+    * the ASIDE worker (group ``aside:<interaction token>``, exclusive) runs
+      ``complete_aside`` and settles the turn out of ``running``.
+
+    Each predicate is the precondition the product checks, not a caller's
+    assertion, so a wrong value still fails at the caller's own ``assert``.
+    """
+    await settle(
+        pilot,
+        lambda: app._session is not None and app._source_commands_ready(),
+        what="the boot session was adopted and accepts commands",
+        workers=("session",),
+    )
     app.query_one(Editor).focus()
     await pilot.pause()
     app.query_one(Editor).load_text(f"/btw {question}")
     await pilot.press("enter")
-    await pilot.pause()
-    await pilot.pause()
-    return app.query_one(AsidePanel)
+    panel = app.query_one(AsidePanel)
+    await settle(
+        pilot,
+        lambda: bool(panel.turns) and panel.turns[-1].state != "running",
+        what="the aside worker settled the question's turn",
+        workers=(app._interaction.worker_group("aside"),),
+    )
+    return panel
 
 
 # -- opening ---------------------------------------------------------------
@@ -786,8 +814,19 @@ async def test_forking_mid_turn_queues_the_aside_and_mounts_nothing_yet() -> Non
         users_before = len([b for b in transcript.blocks() if isinstance(b, UserBlock)])
 
         await pilot.press("ctrl+f")
-        for _ in range(5):
-            await pilot.pause()
+        # ^f only schedules the `aside-fork` worker; `adopt_aside` runs in it.
+        # Join that group, and wait on the session having been handed the pair
+        # (`adopt_aside` ran), so a worker that starts and finishes inside one
+        # pause is still covered. Five pauses lost this race on CI. Not
+        # `not app._aside_can_fork()`: that gate includes `not panel.is_open`,
+        # so a card left open would time out here instead of failing the
+        # `is_open` assertion below at its own line (#3783 R1-m1).
+        await settle(
+            pilot,
+            lambda: bool(session.forked),
+            what="the ^f fork worker handed the pair to the session",
+            workers=("aside-fork",),
+        )
 
         assert [(m.role, m.text) for m in session.forked] == [
             ("user", "what are you doing?"),

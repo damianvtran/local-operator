@@ -44,5 +44,8 @@
   "tui.app.providers.stale_all": "liste périmée : tous les fournisseurs",
   "tui.app.providers.stale_named": "liste périmée : {names}",
   "tui.app.providers.stale_all_error": "liste périmée : tous les fournisseurs — {error}",
-  "tui.app.providers.no_live_list": "aucune liste à jour : {names}"
+  "tui.app.providers.no_live_list": "aucune liste à jour : {names}",
+  "tui.app.compaction.idle_receipt": "contexte compacté en veille · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "contexte compacté en veille",
+  "tui.app.compaction.idle_skipped": "compactage en veille ignoré · rien n’a changé"
 }

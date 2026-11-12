@@ -30,7 +30,11 @@ def context(registry: TeamRegistry) -> ToolContext:
 
 
 async def call(context: ToolContext, **args: Any) -> str:
-    result = await execute_team("tc", args, None, None, context)
+    # Whole-field rewrites here model an agent that read the full ``show``
+    # (``_acked``); lossless editing itself is ``test_profile_autonomy``.
+    from tests.unit.session.test_account_profile_consent import _acked
+
+    result = await execute_team("tc", _acked("team", args, context), None, None, context)
     return result.text
 
 

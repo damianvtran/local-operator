@@ -44,5 +44,8 @@
   "tui.app.providers.stale_all": "پرانی فہرست: تمام فراہم کنندگان",
   "tui.app.providers.stale_named": "پرانی فہرست: {names}",
   "tui.app.providers.stale_all_error": "پرانی فہرست: تمام فراہم کنندگان — {error}",
-  "tui.app.providers.no_live_list": "کوئی لائیو فہرست نہیں: {names}"
+  "tui.app.providers.no_live_list": "کوئی لائیو فہرست نہیں: {names}",
+  "tui.app.compaction.idle_receipt": "فارغ سیشن میں سیاق و سباق کمپریس ہوا · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "فارغ سیشن میں سیاق و سباق کمپریس ہوا",
+  "tui.app.compaction.idle_skipped": "فارغ سیشن کمپریشن چھوڑ دی گئی · کچھ نہیں بدلا"
 }

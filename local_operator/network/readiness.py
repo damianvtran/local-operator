@@ -44,7 +44,16 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple, Protocol, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    NamedTuple,
+    Protocol,
+    Sequence,
+)
 
 from local_operator.network import wire
 
@@ -94,6 +103,13 @@ CAPABILITY_SERVE_DAEMON = "serve_daemon"
 #: operator met that refusal on lop-remote-node-2 with ``ready`` reporting the
 #: peer fine: the report names the owner's decision before anyone hits it.
 CAPABILITY_MODEL_SWITCH = "model_switch"
+#: (k) the operator's custom instructions: did this peer keep its own copy over
+#: another device's (``definitions._apply_operator_instructions_locked``)? Added
+#: 2026-11-11 (PR #3829 review round 1, R1-2): that refusal used to show only in
+#: ``lop network definitions state`` ON the node, while the operator reads this
+#: report — so a node silently ran without the head's review and release rules.
+#: Emitted only when there is a refusal to name; never in ``PEER_SIDE_CHECKS``.
+CAPABILITY_CUSTOM_INSTRUCTIONS = "custom_instructions"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -140,6 +156,10 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # Turns on the borrowed model still run; only switching is refused, and
         # widening the share is the owner's access decision, never a gate here.
         CAPABILITY_MODEL_SWITCH,
+        # A node that keeps its own custom instructions is a deliberate state (the
+        # operator wrote them there); the row names it with the remedy and never
+        # holds the verdict, as the create and the move never refuse on it.
+        CAPABILITY_CUSTOM_INSTRUCTIONS,
     }
 )
 
@@ -1683,7 +1703,79 @@ def collect_peer_facts(
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
         # viewer reading a peer built before it renders ``unknown`` — never ok.
         "serve_daemons": serve_daemons_fact(root),
+        # ADDITIVE ON THE WIRE: an older viewer ignores it, and an older peer's
+        # answer lacks it, which this build reads as "nothing to report" (no row).
+        "custom_instructions": custom_instructions_fact(root),
     }
+
+
+def custom_instructions_fact(root: Path) -> dict[str, Any] | None:
+    """Whose custom instructions this device holds, and the last revision it refused.
+
+    Status, origin device and the recorded refusal's ``code``/``reason`` only —
+    never the text or a digest of it. ``None`` when the state cannot be read: a
+    readiness answer never fails on it.
+    """
+    try:
+        from local_operator.network import definitions
+
+        state = definitions.operator_instructions_state(root)
+    except Exception:  # noqa: BLE001 — a readiness answer must not fail on this
+        return None
+    conflict = state.get("conflict")
+    return {
+        "status": str(state.get("status") or ""),
+        "origin": str(state.get("origin") or ""),
+        "conflict": (
+            {
+                key: str(conflict.get(key) or "")
+                for key in ("origin", "code", "reason")
+                if conflict.get(key)
+            }
+            if isinstance(conflict, Mapping)
+            else None
+        ),
+    }
+
+
+def custom_instructions_row(
+    member: Any, facts: Mapping[str, Any], *, peer_label: str, origin_label: Callable[[str], str]
+) -> dict[str, Any] | None:
+    """(k) Did this peer keep its own custom instructions over another device's?
+
+    ``None`` (no row) when there is nothing to name: an older peer without the
+    fact, a peer holding a mirror or none, or a refusal about a file that is gone
+    (its status is then ``absent`` and the next sync installs). A refusal it still
+    stands by reads as a non-gating ``warn`` row carrying the shared sentence and
+    remedy (:func:`definitions.instructions_conflict_notice`).
+    """
+    fact = facts.get("custom_instructions")
+    if not isinstance(fact, Mapping):
+        return None
+    conflict = fact.get("conflict")
+    if not isinstance(conflict, Mapping) or str(fact.get("status") or "") not in (
+        "authored",
+        "edited",
+        "unreadable",
+    ):
+        return None
+    from local_operator.network import definitions
+
+    origin = str(conflict.get("origin") or "")
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_CUSTOM_INSTRUCTIONS,
+        ok=False,
+        code="kept_own",
+        detail=definitions.instructions_conflict_notice(
+            conflict,
+            peer_label=peer_label,
+            sender_label=(origin_label(origin) or origin) if origin else "",
+        ),
+        source=SOURCE_PEER,
+        observed={"status": str(fact.get("status") or ""), "origin": origin},
+    )
 
 
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
@@ -5629,6 +5721,18 @@ def _peer_checks(
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
     rows.append(resilience_row(member, facts, peer_label=peer_label))
+    instructions_row = custom_instructions_row(
+        member,
+        facts,
+        peer_label=peer_label,
+        origin_label=lambda device_id: (
+            _self_label(server)
+            if device_id == str(getattr(getattr(server, "identity", None), "device_id", "") or "")
+            else str(server._member_name(device_id) or "")  # noqa: SLF001 — the mesh's own name
+        ),
+    )
+    if instructions_row is not None:
+        rows.append(instructions_row)
     rows.append(serve_daemon_row(member, facts, peer_label=peer_label))
     rows.extend(
         mcp_credential_rows(

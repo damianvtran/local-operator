@@ -121,6 +121,9 @@ SENTINELS: dict[str, Any] = {
     # executor, a scout's bash would run UNWRAPPED on the host -- reads, writes
     # and network all open -- while its approval tier still said "read".
     "shell_write_root": "/tmp/sentinel-shell-write",
+    # Team Bridge taint (S-38 slice 1): a child spawned from a latched parent
+    # must carry the inheritance into every per-turn context.
+    "inherited_bridge_taint": True,
 }
 
 #: ToolContext fields the Session takes under a DIFFERENT name. Kept tiny and

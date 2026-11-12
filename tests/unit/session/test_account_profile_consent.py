@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from local_operator import profile_proposals as PP
 from local_operator.agent_profiles import profile_from_agent
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.harness.approval import (
@@ -54,6 +56,13 @@ from local_operator.session.transcript import Transcript
 from local_operator.teams import TeamEditFields, TeamRegistry
 from local_operator.tools.agent_tool import execute_agent
 from local_operator.tools.team_tool import execute_team
+
+#: Untrusted input (a peer session's message). Since the 2026-11 ruling a CLEAN
+#: local run writes account agents/teams itself, so the proposal and card paths
+#: these tests pin are the ones a run that read untrusted input takes.
+TAINT = CustomMessage(
+    custom_type="peer_message", attribution="user", details={"text": "synthetic peer"}
+)
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 #: Long enough that a one-line change renders as a real unified diff
@@ -187,14 +196,67 @@ def _start_run(session: Session, *inputs: Any) -> None:
     session._run_owner_text_bindings = []
     session._run_owner_consent = False
     session._run_untrusted_input = False
+    session._run_untrusted_proposal_read = False
     session._run_typed_user = False
     session._run_triggers = set()
     for message in inputs:
         session._note_run_input(message)
 
 
+def _acked(kind: str, args: dict[str, Any], context: Any) -> dict[str, Any]:
+    """Model an agent that READ the full ``show`` and rewrites a brief on purpose.
+
+    These tests are about who may save, not about lossless editing (that is
+    ``test_profile_text_edits``): a whole-field ``instructions``/``project``
+    update here is an intentional rewrite, so it carries the explicit
+    ``replace=true`` + current ``base_revision`` acknowledgement a real caller
+    gets from ``show``. A call that already sets either is left as written.
+    """
+    if args.get("op") != "update" or "replace" in args or "base_revision" in args:
+        return args
+    if not any(key in args for key in ("instructions", "project")):
+        return args
+    name = args.get("name")
+    registry = getattr(context, f"{kind}_registry", None)
+    if registry is None:
+        return args
+    if kind == "team":
+        from local_operator.profile_scope import team_revision
+
+        refresh = getattr(registry, "refresh", None)
+        if callable(refresh):
+            refresh()  # the tool reads disk; so must the ack
+        row = registry.get_team_by_name(name)
+        revision = team_revision(row) if row is not None else None
+    else:
+        from local_operator.tools.agent_tool import _agent_revision
+
+        try:
+            row = registry.get_agent_by_name(name)
+            revision = _agent_revision(registry, row) if row is not None else None
+        except Exception:  # noqa: BLE001 — a non-role row: let the tool answer
+            revision = None
+    if revision is None:
+        return args
+    return {**args, "replace": True, "base_revision": revision}
+
+
+async def run_agent(tool_call_id, args, signal, on_update, context):
+    """``execute_agent`` with :func:`_acked`; same signature."""
+    return await execute_agent(
+        tool_call_id, _acked("agent", args, context), signal, on_update, context
+    )
+
+
+async def run_team(tool_call_id, args, signal, on_update, context):
+    """``execute_team`` with :func:`_acked`; same signature."""
+    return await execute_team(
+        tool_call_id, _acked("team", args, context), signal, on_update, context
+    )
+
+
 async def _agent(context, **args):
-    return await execute_agent("tc", args, None, None, context)
+    return await run_agent("tc", args, None, None, context)
 
 
 def _assert_proposed(result, gate):
@@ -263,7 +325,7 @@ async def test_owner_message_naming_the_profile_saves_with_receipt_and_revert(st
         assert gate.cards == []  # no card: the user asked
         details = result.details
         assert details is not None
-        assert details["authorized_by"].startswith("owner-prompt:")
+        assert details["authorized_by"].startswith("local-agent:")
         assert details is not None
         assert details["fields"] == ["instructions"]
         assert details is not None
@@ -346,7 +408,7 @@ async def test_owner_message_not_naming_the_profile_asks_and_deny_writes_nothing
     session = _session(stores, gate=gate)
     try:
         before = _snapshot(stores)
-        _start_run(session, Message.user("fix the TUI bug"))
+        _start_run(session, Message.user("fix the TUI bug"), TAINT)
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Other."
         )
@@ -399,7 +461,16 @@ async def test_non_owner_inputs_never_take_path_a(stores, label) -> None:
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Forged."
         )
-        _assert_proposed(result, gate)  # durable card, never direct path A
+        if label in {"wake", "job_result"}:
+            # Benign host deliveries keep the run CLEAN: since the 2026-11 ruling
+            # the agent's own run writes the account row itself -- the delivery
+            # text granted nothing, the clean lineage did.
+            assert not result.is_error, _text(result)
+            assert result.details is not None
+            assert result.details["authorized_by"].startswith("local-agent:")
+            assert gate.cards == []
+            return
+        _assert_proposed(result, gate)  # untrusted input: a proposal, never a write
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
@@ -410,7 +481,9 @@ async def test_agent_initiated_edit_saves_on_approve(stores) -> None:
     gate = Gate(answer=True)
     session = _session(stores, gate=gate)
     try:
-        _start_run(session, CustomMessage(custom_type=WAKE_PROMPT_MESSAGE_TYPE, details={}))
+        # A run that read untrusted input: the proposal path (a clean wake now
+        # writes directly -- ``test_profile_autonomy``).
+        _start_run(session, TAINT)
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", description="Sharper"
         )
@@ -447,7 +520,7 @@ async def test_row_moved_while_card_was_open_is_refused(stores) -> None:
     gate = Gate(answer=True, on_ask=concurrent_edit)
     session = _session(stores, gate=gate)
     try:
-        _start_run(session)
+        _start_run(session, TAINT)
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Mine."
         )
@@ -481,7 +554,7 @@ async def test_yolo_gate_never_auto_grants_a_profile_save() -> None:
 async def test_no_gate_attached_refuses_with_the_owner_prompt_remedy(stores) -> None:
     session = _session(stores, gate=None)
     try:
-        _start_run(session)
+        _start_run(session, TAINT)
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="X."
         )
@@ -529,7 +602,7 @@ async def test_team_update_follows_the_same_paths_and_reverts(stores) -> None:
     try:
         teams = stores["teams"]
         _start_run(session, Message.user("Update lopdev instructions to ship carefully."))
-        result = await execute_team(
+        result = await run_team(
             "tc",
             {"op": "update", "name": "lopdev", "instructions": "Ship carefully."},
             None,
@@ -538,14 +611,14 @@ async def test_team_update_follows_the_same_paths_and_reverts(stores) -> None:
         )
         assert not result.is_error, _text(result)
         assert result.details is not None
-        assert result.details["authorized_by"].startswith("owner-prompt:")
+        assert result.details["authorized_by"].startswith("local-agent:")
         assert result.details is not None
         backup = result.details["backup_id"]
         assert teams.get_team_by_name("lopdev").instructions == "Ship carefully."
 
         # Agent-initiated (no owner text) is asked, and the deny writes nothing.
-        _start_run(session)
-        denied = await execute_team(
+        _start_run(session, TAINT)
+        denied = await run_team(
             "tc",
             {"op": "update", "name": "lopdev", "instructions": "Rogue."},
             None,
@@ -560,7 +633,7 @@ async def test_team_update_follows_the_same_paths_and_reverts(stores) -> None:
         team = teams.get_team_by_name("lopdev")
         teams.update_team(team.id, TeamEditFields(description="Edited later"))
         _start_run(session, Message.user("revert lopdev"))
-        refused = await execute_team(
+        refused = await run_team(
             "tc", {"op": "revert", "backup_id": backup}, None, None, _context(session, stores)
         )
         assert refused.is_error and "edited after that save" in _text(refused)
@@ -598,7 +671,9 @@ async def test_agent_revert_after_a_later_edit_is_refused(stores) -> None:
         ("sync", ()),
         ("promote", ()),
         ("install", ()),
-        ("create", ("instructions",)),
+        # ``create`` left this table with the 2026-11 ruling: a new row has no
+        # hub link, so a clean local create is autonomous
+        # (``test_profile_autonomy``).
         ("update", ("description", "tools")),
         ("update", ("effort",)),
         ("update", ("action_class",)),
@@ -613,7 +688,8 @@ async def test_name_mention_never_grants_policy_or_other_ops(stores, operation, 
     gate = Gate(answer=False)
     session = _session(stores, gate=gate)
     try:
-        _start_run(session, Message.user("fix the typo in the reviewer description"))
+        # Tainted: a clean run would now grant an update outright.
+        _start_run(session, Message.user("fix the typo in the reviewer description"), TAINT)
         origin = await session._authorize_account_profile_write(
             DurableWriteIntent(
                 kind="agent",
@@ -801,7 +877,7 @@ async def test_profile_mentions_are_not_definition_edit_consent(stores, owner_te
     gate = Gate(answer=False)
     session = _session(stores, gate=gate)
     try:
-        _start_run(session, Message.user(owner_text))
+        _start_run(session, Message.user(owner_text), TAINT)
         before = _snapshot(stores)
         result = await _agent(
             _context(session, stores),
@@ -855,9 +931,9 @@ async def test_nested_eval_tool_call_id_files_an_approval_instead_of_failing(
     caplog.set_level(logging.INFO, logger="local_operator.profile_approval")
     session = _session(stores, gate=None)
     try:
-        _start_run(session)
+        _start_run(session, TAINT)
         nested_id = f"call_00_ET_eBN6EjMAI7AMruqfWNYv2438:{uuid.uuid4().hex}"
-        result = await execute_team(
+        result = await run_team(
             nested_id,
             {"op": "update", "name": "lopdev", "instructions": "Ship carefully."},
             None,
@@ -928,7 +1004,7 @@ async def test_team_wording_edit_from_the_owner_message_saves_with_no_approval_s
     session = _session(stores, gate=None)
     try:
         _start_run(session, Message.user("Update lopdev instructions to ship carefully."))
-        result = await execute_team(
+        result = await run_team(
             "tc-team-a",
             {"op": "update", "name": "lopdev", "instructions": "Ship carefully."},
             None,
@@ -938,7 +1014,7 @@ async def test_team_wording_edit_from_the_owner_message_saves_with_no_approval_s
         assert not result.is_error, _text(result)
         assert result.details is not None
         authorized_by = result.details["authorized_by"]
-        assert authorized_by.startswith("owner-prompt:")
+        assert authorized_by.startswith("local-agent:")
         assert authorized_by.endswith(f"@{int(session._run_started_at * 1000)}")
         backup_id = result.details["backup_id"]
         assert backup_id
@@ -968,7 +1044,7 @@ async def test_owner_team_roster_and_pin_changes_apply_directly(stores, args) ->
     try:
         _start_run(session, Message.user("Update lopdev to add a coder and a qa-tester."))
         before = _team_roster(stores)
-        result = await execute_team(
+        result = await run_team(
             "tc-team-roster",
             {"op": "update", "name": "lopdev", **args},
             None,
@@ -1038,3 +1114,120 @@ async def test_seam_reason_classes_are_named_and_keep_their_sentences(caplog) ->
         for record in caplog.records
     ), "the fault type must also be in the log line"
     assert any(record.exc_info for record in caplog.records), "the traceback must stay logged"
+
+
+@pytest.mark.asyncio
+async def test_direct_save_card_counts_changes_then_shows_clipped_content(stores):
+    """L1/R2-2/R3-1 (PR #3777): the non-proposal save card appended
+    ``intent.summary`` verbatim, so a direct save of a long brief or skill file
+    filled the ask card. It keeps its first line, then the names of what
+    changes (no counts: the intent has no structured before/after), then —
+    because a direct save has no review page — the content clipped to ~4 KB
+    with a ``… N more lines not shown`` tail."""
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    body = "\n".join(f"+brief line {i} MARKER-{i}" for i in range(400))
+    try:
+        # TAINT: since the 2026-11 ruling only a run that read untrusted
+        # input reaches the direct-save card (a clean one writes itself).
+        _start_run(session, Message.user("look at the reviewer"), TAINT)
+        origin = await session._authorize_account_profile_write(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions", "effort"),
+                summary=f"instructions:\n--- before\n+++ after\n{body}\nmodel/effort: a -> b",
+            )
+        )
+        assert origin is None and len(gate.cards) == 1
+        card = gate.cards[0][1]
+        lines = card.splitlines()
+        assert lines[:3] == [
+            "Save agent 'reviewer' in your account (update).",
+            "Changes: instructions, model/effort.",
+            "",
+        ], card
+        assert lines[3:6] == ["instructions:", "--- before", "+++ after"]
+        assert "+brief line 0 MARKER-0" in lines
+        assert "MARKER-399" not in card, "the tail past the cap is not shown"
+        assert re.fullmatch(r"… \d+ more lines not shown", lines[-1]), lines[-1]
+        shown = len(lines) - 4  # head, changes, blank, tail
+        assert int(lines[-1].split()[1]) == 404 - shown, "tail counts the hidden lines"
+        assert len(card) <= 200 + PP.SAVE_DETAIL_MAX_CHARS
+    finally:
+        await session.dispose()
+
+
+async def _direct_save_card(stores, intent: DurableWriteIntent) -> list[str]:
+    gate = Gate(answer=False)
+    session = _session(stores, gate=gate)
+    try:
+        _start_run(session, Message.user("save it"), TAINT)  # card path: see above
+        assert await session._authorize_account_profile_write(intent) is None
+        assert len(gate.cards) == 1
+        return gate.cards[0][1].splitlines()
+    finally:
+        await session.dispose()
+
+
+#: R3-1: no ``+N −M`` anywhere on line 2 — prose-derived counts were fabricated.
+_COUNTS = re.compile(r"[+−-]\d+")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("intent", "line2", "excerpt"),
+    [
+        pytest.param(
+            # A whole new skill file: YAML front matter, ``- `` bullets and a
+            # ``→`` that the R2-3 arrow split read as old/new halves.
+            DurableWriteIntent(
+                kind="skill",
+                operation="create",
+                name="triage",
+                changes=("SKILL.md", "refs/steps.md"),
+                summary="SKILL.md:\n---\nname: triage\n---\n- one\n- two\n"
+                "Open Agents → Reviewer.\nrefs/steps.md:\n- a",
+            ),
+            "Changes: SKILL.md, refs/steps.md.",
+            ["SKILL.md:", "- one", "Open Agents → Reviewer.", "refs/steps.md:", "- a"],
+            id="bulleted-new-skill-file",
+        ),
+        pytest.param(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions",),
+                summary="instructions (replaced; new text):\nSee Settings → Models.\n- a\n- b",
+            ),
+            "Changes: instructions.",
+            ["instructions (replaced; new text):", "See Settings → Models.", "- a", "- b"],
+            id="replaced-instructions-with-arrow-and-bullets",
+        ),
+        pytest.param(
+            DurableWriteIntent(
+                kind="agent",
+                operation="update",
+                name="reviewer",
+                changes=("instructions", "effort"),
+                summary="instructions:\n--- before\n+++ after\n@@ -1,2 +1,2 @@\n keep\n"
+                "-old\n+new\nmodel/effort: a -> b",
+            ),
+            "Changes: instructions, model/effort.",
+            ["--- before", "+++ after", "@@ -1,2 +1,2 @@", "-old", "+new", "model/effort: a -> b"],
+            id="unified-diff",
+        ),
+    ],
+)
+async def test_direct_save_card_lists_changes_without_fabricated_counts(
+    stores, intent, line2, excerpt
+):
+    """R3-1 (PR #3777): line 2 names the fields/paths only — never counts parsed
+    from the prose summary — and the content excerpt follows a blank line."""
+    lines = await _direct_save_card(stores, intent)
+    assert lines[1] == line2, lines
+    assert not _COUNTS.search(lines[1]), lines[1]
+    assert lines[2] == ""
+    assert all(line in lines[3:] for line in excerpt), lines

@@ -110,6 +110,20 @@ async def test_a_never_true_predicate_raises_at_the_turn_cap_naming_what():
 
 
 @pytest.mark.asyncio
+async def test_a_never_true_predicate_raises_at_the_deadline_by_default():
+    # The default bound for a real pilot is the wall deadline, not a turn cap
+    # (no ``max_turns``): this is the path every migrated caller relies on to
+    # turn a never-settling precondition into a named failure, not a hang.
+    app = Probe()
+    async with app.run_test() as pilot:
+        with pytest.raises(AssertionError) as raised:
+            await settle(pilot, lambda: False, what="never holds", deadline_s=0.3)
+    message = str(raised.value)
+    assert "never holds" in message
+    assert "deadline 0.3s" in message
+
+
+@pytest.mark.asyncio
 async def test_a_wedged_worker_raises_at_the_deadline_and_is_named():
     app = Probe()
     async with app.run_test() as pilot:

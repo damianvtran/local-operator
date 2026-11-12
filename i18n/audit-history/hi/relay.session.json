@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "relay.session",
+  "history_sha256": "004b4437dfcbb82367510a2e01665af6f94da66427f32ee9830cc02681e5d62a",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "relay.session",
+      "source_sha256": "a118c820060685e6b4f83601b9f6d7d2195bb8f7c40b6a9187c8c10195f5af54",
+      "translator": {
+        "agent": "coder-settings-lane",
+        "session": "769ec448c35a",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translator)",
+        "session": "1b1866b4f2ed",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Delta audit 2026-11-09 by reviewer session 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 1 added key(s) read, 0 findings; 17 unchanged keys byte-identical to the passed row at base. Target 317b981cded5c3e7a3aba195f892e87a269933ceede76172c8d172d184cc1e1d. Evidence: i18n/audits/evidence/hi/relay.session/settings-1b1866b4f2ed/record.json Translator provenance: all 21 added translations authored in the resumed run on anthropic/claude-opus-5-5, no fallback during translation; initial implementation had an openai/gpt-6.1-sol handoff fallback only."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.session",
+      "source_sha256": "ec7a6967e1796478e88438cbd1951beda51e80c921940511b1347302f7393917",
+      "translator": {
+        "agent": "remediate-settings-lane (coder, lopdev) for the round-2 changed/added keys; coder-settings-lane (session 769ec448c35a) for carried model_switch_refused",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none (per manager brief 2026-11-09)",
+        "date": "2026-11-09"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev reviewer role, session 1b1866b4f2ed; independent of PR author and translators)",
+        "session": "1b1866b4f2ed",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none observed in this session",
+        "date": "2026-11-09",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "minor": 0,
+        "nit": 0
+      },
+      "status": "passed",
+      "note": "R2 2026-11-09 reviewer 1b1866b4f2ed (anthropic/claude-opus-5-5, no fallback): 2 keys read; 0 findings; 17 unchanged keys byte-identical to passed base row. Evidence: i18n/audits/evidence/hi/relay.session/settings-r2-1b1866b4f2ed/record.json"
+    }
+  ]
+}

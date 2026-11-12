@@ -136,37 +136,32 @@ describe("the older-history cursor", () => {
 		expect(calls[0]).toBe("tail-0");
 	});
 
-	it("keeps the idle hairline and the in-flight bar the same height", async () => {
-		/* The two top-indicator states differ by their HEIGHT (2px bar, 1px
-		   hairline), and that pixel is not cosmetic: every swap moved the rows
-		   below it, the anchor-hold wrote `scrollTop` to compensate, and the
-		   write re-entered `onScroll` and fetched again. On the S6 deep cell 23
-		   of 27 transitions in one open were that oscillation against a rig
-		   scrolling once every 300 ms. */
+	it("keeps every top-slot state the same height, so a swap never moves the rows", async () => {
+		/* The top indicator's states used to differ by their HEIGHT (a 2px bar that
+		   measured 0px in a scroll column, a 1px hairline), and that pixel is not
+		   cosmetic: every swap moved the rows below it, the anchor-hold wrote
+		   `scrollTop` to compensate, and the write re-entered `onScroll` and fetched
+		   again. On the S6 deep cell 23 of 27 transitions in one open were that
+		   oscillation. The slot is ONE fixed box (`h-11 shrink-0`) in every state. */
 		let release!: () => void;
 		inFlight = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const { container } = render(<Transcript pid="s1" entries={window()} />);
-		const scroller = container.querySelector(".lo-scroll") as HTMLElement;
-		Object.defineProperty(scroller, "scrollTop", { value: 0, writable: true });
-		fireEvent.scroll(scroller);
-
-		const box = () =>
-			Array.from(container.querySelectorAll('[aria-hidden="true"]')).find((el) =>
-				el.className.includes("h-0.5"),
-			) ?? null;
-		await waitFor(() => expect(box()).not.toBeNull());
-		const loadingBox = box() as Element;
+		const capped = [{ ...row("opener"), kind: "user" as const }, ...Array.from({ length: 79 }, (_, i) => row(`tail-${i}`))];
+		const { container } = render(<Transcript pid="s1" entries={capped} headPinned />);
+		const slot = () => container.querySelector("[data-history-slot]") as HTMLElement | null;
+		await waitFor(() => expect(slot()?.getAttribute("data-history-slot")).toBe("loading"));
+		const loading = slot()!.className;
 
 		release();
 		inFlight = null;
-		await waitFor(() => expect(calls.length).toBe(1));
-		await waitFor(() => expect(box()).not.toBeNull());
-		const idleBox = box() as Element;
+		// The mock's page for this cursor says `has_more: false`: the slot ends on the start row.
+		await waitFor(() => expect(slot()?.getAttribute("data-history-slot")).toBe("start"));
+		const start = slot()!.className;
 
-		// Same box, same height — the hairline is 1px INSIDE a 2px row.
-		expect(loadingBox.className).toContain("h-0.5");
-		expect(idleBox.className).toContain("h-0.5");
+		for (const className of [loading, start]) {
+			expect(className).toContain("h-11");
+			expect(className).toContain("shrink-0");
+		}
 	});
 });

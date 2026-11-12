@@ -499,13 +499,46 @@ def _b1(ev: Evidence, anchor: str, env: Mapping[str, str]) -> bool:
     except Exception:  # noqa: BLE001
         return False
     for created in res.created:
-        if created.path is None:
+        if created.path is None or created.kind == "symlink":
+            # A link creation vouches for the link entry only (``_made_link``);
+            # its realpath is a pointee this call did not make.
             continue
         real = os.path.realpath(created.path)
         # The created directory is ``anchor`` or one of its ancestors.
         if anchor == real or anchor.startswith(real.rstrip("/") + "/"):
             return True
     return False
+
+
+def _made_link(ev: Evidence, link: str, env: Mapping[str, str]) -> bool:
+    """Did ``ev`` (``ln -s[f] SRC LINK``) make the symlink entry at ``link``?
+
+    Resolver-pinned like B1: the call re-resolves to a ``symlink`` creation
+    of exactly this canonical link path, and the link entry's own birth
+    (lstat, not the pointee's) falls in the call's window — so an older
+    link, or one re-made by someone else since, does not verify.
+    """
+    if ev.tool != "bash":
+        return False
+    from local_operator.guardrails.provenance import link_path
+    from local_operator.guardrails.resolve import resolve_command
+
+    try:
+        st = os.lstat(link)
+    except OSError:
+        return False
+    birth = getattr(st, "st_birthtime", None)
+    if not _in_window(float(birth) if birth is not None else float(st.st_ctime), ev):
+        return False
+    home = env.get("HOME") or os.path.expanduser("~")
+    try:
+        res = resolve_command(ev.command, cwd=None, env=env, home=home)
+    except Exception:  # noqa: BLE001
+        return False
+    return any(
+        c.kind == "symlink" and c.path is not None and link_path(c.path) == link
+        for c in res.created
+    )
 
 
 def _vouches_for_clone(ev: Evidence, repo: str, env: Mapping[str, str]) -> bool:
@@ -594,6 +627,11 @@ def _coverage(
         return ""
     if ev.tool == "bash" and _read_only(ev.command):
         return ""
+    if os.path.islink(target):
+        # Only a link-ENTRY removal reaches here as a symlink path
+        # (``check._delete_case`` passes every other target as its realpath,
+        # which is never a link): the call must have made that exact link.
+        return "link" if _made_link(ev, target, env) else ""
     texts: list[str] | None = None
     for anchor in _anchors(target, stop):
         if os.path.isdir(os.path.join(anchor, ".git")):
@@ -648,7 +686,9 @@ def covers_alone(
       lists one as untracked, ``_holds_git`` scans the rest).
     """
     kind = _coverage(ev, target, writes=writes, env=env, stop=stop)
-    if kind == "clone":
+    if kind in ("clone", "link"):
+        # ``link``: removing the link entry leaves its pointee untouched, so
+        # no walk below it is needed.
         return True
     return kind == "b1" and not _git_below(os.path.realpath(target))
 

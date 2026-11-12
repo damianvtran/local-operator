@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.101.45"
+version = "0.102.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -549,7 +549,14 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
 # code, and CI cannot catch the omission — it never builds a wheel before
 # type-checking — so the cost lands entirely on local runs of the gate command,
 # where `rm -rf build/` is folklore the next person re-derives from scratch.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build", "i18n/audits/evidence"]
+# `scripts/repro` contains the historical diagnostic tools relocated out of
+# `docs/evidence` during repository cleanup. Keep their previous docs exclusion:
+# these opt-in rigs target historical APIs and may need live providers/native
+# setup; moving them must not turn them into maintained runtime/type fixtures.
+# This is discovery exclusion, not ignored diagnostics: ordinary scripts, tests
+# and shipped source retain the same checks. test_pyright_scope.py exercises
+# both sides with real analyzer errors so a broader exclusion cannot hide them.
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "scripts/repro", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build", "i18n/audits/evidence"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.

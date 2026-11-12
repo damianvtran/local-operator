@@ -6,7 +6,7 @@ lane's ruling of 2026-10-01 adding the third type** — the coalesced catch-up,
 which the freeze had left unstated and which was settled as a VISIBLE alert
 rather than the silent attention form). S3 is the
 FREEZE: this module is the one place the core spells the payloads and the keys,
-and ``fixtures/push/`` carries the same shapes as data, so the mobile app
+and ``tests/fixtures/push/`` carries the same shapes as data, so the mobile app
 and the cloud build against one written contract instead of against prose.
 
 Three decisions shape this module, and each avoids a named trap:
@@ -47,7 +47,7 @@ What this module deliberately does NOT build is the APNs/FCM envelope
 object, and stops: the cloud delivers that text verbatim (it never renders,
 edits or rewords it for any type) and wraps it in the envelope its fan-out owns.
 The machine also never sends a badge — ``aps.badge`` is rejected by §1.5 — and
-``fixtures/push/payload-forbidden-fields.json`` names it as forbidden so a later edit
+``tests/fixtures/push/payload-forbidden-fields.json`` names it as forbidden so a later edit
 cannot add it here without failing a test.
 
 **The alert text is composed HERE, from the house constants, and that is a
@@ -184,7 +184,7 @@ def completion_emit_key(completion_token: str, anchor_id: str, kind: str) -> str
     ``‖`` is read as plain CONCATENATION — the three parts in that order, no
     separator and no salt — which is what the recipe notation means. The reading
     is recorded with worked digests in
-    ``fixtures/push/emit-idempotency-keys.json``, because the cloud must
+    ``tests/fixtures/push/emit-idempotency-keys.json``, because the cloud must
     derive byte-identical keys and a separator invented on one side is the one
     way this contract can split without either side noticing.
 
@@ -211,7 +211,7 @@ def digest_emit_key(emit_id: str, computer: str) -> str:
     ``‖`` is concatenation again — the literal, then the id the machine minted
     when the coalescing window closed, then the computer handle, with no
     separator and no salt — and the reading is recorded with a worked digest in
-    ``fixtures/push/emit-idempotency-keys.json`` so both sides derive it the same
+    ``tests/fixtures/push/emit-idempotency-keys.json`` so both sides derive it the same
     way.
 
     THE ID IS THE IDENTITY, which is why the recipe uses it rather than the

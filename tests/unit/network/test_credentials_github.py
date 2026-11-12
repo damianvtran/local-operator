@@ -1739,7 +1739,11 @@ def test_a_grant_carries_the_owner_s_narrowing(owner: Any, github_api: _FakeGith
     """
     detail = _ask_grant(owner, BORROWER_DEVICE)
     assert detail["kind"] == "grant", detail
-    assert detail["narrowing"] == {"repositories": [SCRATCH]}
+    narrowing = detail["narrowing"]
+    assert narrowing["repositories"] == [SCRATCH]
+    # Authoritative and ordered: the digest names the list, the generation orders it.
+    assert narrowing["digest"] == github_mod.designation_digest([SCRATCH])
+    assert int(narrowing["generation"]) > 0
 
 
 def test_the_delivered_narrowing_lands_in_an_empty_config_and_the_helper_serves(
@@ -1972,4 +1976,8 @@ def test_a_write_failure_is_recorded_and_never_fatal(
 def test_an_owner_with_no_list_sends_no_narrowing() -> None:
     """Absence, not an empty list: a borrower's standing backstop is never wiped."""
     assert github_mod.grant_narrowing([]) == {}
-    assert github_mod.grant_narrowing([SCRATCH]) == {"repositories": [SCRATCH]}
+    assert github_mod.grant_narrowing([SCRATCH], generation_ms=7) == {
+        "repositories": [SCRATCH],
+        "digest": github_mod.designation_digest([SCRATCH]),
+        "generation": "7",
+    }

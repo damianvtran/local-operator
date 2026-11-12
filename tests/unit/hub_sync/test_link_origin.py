@@ -174,6 +174,21 @@ def test_the_repair_leaves_a_row_the_hub_no_longer_serves_unresolved(tmp_path: P
     assert _rows(snapshot, "unresolved")["team-1"]["reason"] == "source-unresolved"
 
 
+def test_an_unresolved_row_names_why_its_source_is_unconfirmed(tmp_path: Path) -> None:
+    """Operator report 2026-11-11: two teams sat behind a bare "?". The row now
+    says WHICH dead end it is, so a client can word the deliberate refusal."""
+
+    ctx = _ctx(tmp_path)
+    prov.record_team_pull(ctx.config_dir, _team("team-1"), {"id": "hub-1"}, tenant_id=TENANT)
+    prov.record_team_pull(ctx.config_dir, _team("team-2"), {"id": "hub-2"}, tenant_id="")
+
+    rows = _rows(svc.links_snapshot(ctx), "unresolved")
+
+    assert rows["team-1"]["reason"] == "source-unresolved"  # the existing contract
+    assert rows["team-1"]["detail"] == "legacy-scope-ambiguous"
+    assert rows["team-2"]["detail"] == "no-origin"
+
+
 def test_the_repair_refuses_a_row_another_base_served(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     prov.record_team_pull(ctx.config_dir, _team("team-1"), {"id": "hub-1"}, tenant_id=TENANT)
