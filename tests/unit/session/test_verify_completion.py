@@ -690,10 +690,13 @@ async def test_a_verdict_already_given_survives_a_wall_cancel(tmp_path, config_d
 
     real_finish = subagent_module._finish_child_browser
 
-    async def slow_settle(child, comms, job_id, status):  # type: ignore[no-untyped-def]
+    async def slow_settle(  # type: ignore[no-untyped-def]
+        child, comms, job_id, status, *, parent_session=None
+    ):
         if status == "completed":
             await asyncio.sleep(30)
-        return await real_finish(child, comms, job_id, status)
+        # Keep the real settlement context: only its completion is delayed here.
+        return await real_finish(child, comms, job_id, status, parent_session=parent_session)
 
     monkeypatch.setattr(subagent_module, "_finish_child_browser", slow_settle)
     stream = TreeStream(lambda request: text_turn("B2 holds 42\nVERDICT: FAIL"))
