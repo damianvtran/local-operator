@@ -2976,7 +2976,9 @@ async def test_r13_routine_real_path_remains_masked_warning(
     text = _result_text(result)
     assert not result.is_error and "[secret sink] ran:" in text and "[redacted]" in text, text
     assert _SYNTHETIC not in text, text
-    visible = [line for line in text.splitlines() if "[secret sink]" in line or "[redacted]" in line]
+    visible = [
+        line for line in text.splitlines() if "[secret sink]" in line or "[redacted]" in line
+    ]
     print(f"R13 control {command}: is_error={result.is_error}; output={visible!r}")
 
 
