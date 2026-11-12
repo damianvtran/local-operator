@@ -50,7 +50,13 @@ def _mode(config_dir: Path) -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("argument", ["default auto", "default yolo", "default  off"])
+@pytest.mark.parametrize(
+    "argument",
+    # Bare ``default`` (security r1 S-1 on #3849): both owner hosts refuse it
+    # with the same latched receipt -- the TUI owner resolves it to its current
+    # mode, which a suspended pre-latch session auto keeps at auto.
+    ["default auto", "default yolo", "default  off", "default", "DEFAULT"],
+)
 async def test_routed_default_auto_is_refused_while_latched_and_writes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argument: str
 ) -> None:
@@ -96,10 +102,22 @@ async def test_unlatched_routed_default_auto_is_unchanged(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(watcher.config_dir))
     setattr(session, "bridge_latched", False)
 
+    # The runtime's bare ``default`` stays the unknown-word notice when clean.
+    bare = handle._approvals_slash(session, "default", SlashResult)
+    assert "unknown approval default" in bare.text and _mode(watcher.config_dir) == "ask"
+
     receipt = handle._approvals_slash(session, "default auto", SlashResult)
 
     assert receipt.data.get("ok") is True and _mode(watcher.config_dir) == "auto"
     await handle.dispose()
+
+
+@pytest.mark.parametrize("args", ["default", "default auto"])
+def test_a_tui_hosted_owner_leaves_an_unlatched_default_to_the_app(args: str) -> None:
+    """Negative control for S-1 (#3849): the bare-form refusal is the latch's alone."""
+    owner = SimpleNamespace(_session=lambda: SimpleNamespace(bridge_latched=False))
+    refusal = TuiSessionHandle._bridge_ack_refusal
+    assert refusal(owner, "approvals", args, False) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -110,6 +128,12 @@ async def test_unlatched_routed_default_auto_is_unchanged(
         ("auto", False, True),
         ("default auto", True, False),
         ("default ask", False, False),
+        # S-1 (#3849): judged by what the form resolves to, not by its words.
+        ("default", False, True),
+        ("  DEFAULT  ", False, True),
+        ("default", True, False),
+        ("default on", False, False),
+        ("default auto now", False, False),  # unknown: the app writes nothing
     ],
 )
 def test_a_tui_hosted_owner_refuses_unacked_default_auto_while_latched(

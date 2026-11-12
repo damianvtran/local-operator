@@ -59727,15 +59727,15 @@ class OperatorApp(App[None]):
             # connection cannot authorise: `may_loosen` is the seam's answer,
             # and writing the machine default to `auto` from here would hand a
             # read-only viewer the loosening it was refused.
-            if mode in ("ask", "on", "prompt"):
-                wanted_default = False
-            elif mode in ("auto", "off", "yolo"):
-                wanted_default = True
-            elif not mode:
-                # Bare `default` keeps the mode this session is in, the app's
-                # own reading of the same frame (`_cmd_approvals`).
-                wanted_default = self._approve_all
-            else:
+            from local_operator.harness.approval import approvals_default_target
+
+            # Bare `default` keeps the mode this session is in, the app's own
+            # reading of the same frame (`_cmd_approvals`). The table is shared
+            # with the owner's latched refusal (`TuiSessionHandle.
+            # _bridge_ack_refusal`), which must refuse every form this resolves
+            # to auto (security r1 S-1 on #3849).
+            wanted_default = approvals_default_target(mode, current_auto=self._approve_all)
+            if wanted_default is None:
                 return SlashResult(
                     kind="notice",
                     text=f"unknown approval default {mode!r} — use /approvals default "

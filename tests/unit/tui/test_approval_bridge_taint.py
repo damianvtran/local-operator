@@ -406,3 +406,59 @@ async def test_r7_lead_a_viewer_card_parked_before_the_latch_is_redrawn_from_the
         assert not parked.done(), "G answered the parked card"
         await pilot.press("y")
         assert await parked is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("argument", ["default", "default   ", "DEFAULT"])
+async def test_s1_a_routed_bare_default_cannot_launder_a_suspended_session_auto(
+    config_dir: Path, argument: str
+) -> None:
+    """Security r1 S-1 on #3849: a bare routed ``approvals default`` on a TUI-hosted owner.
+
+    The app reads a bare ``default`` as "keep the mode I am in", and a
+    pre-latch session auto keeps ``_approve_all`` true (suspended, not
+    revoked), so without the refusal the frame wrote ``tool_approval_mode:
+    auto``, cleared the conversation's override and moved the scope to global
+    -- global auto covers latched cards, so the next egress ran unasked. Driven
+    on the same path ``TuiSessionHandle.run_slash_authoritative`` takes: the
+    owner's ack refusal first, the app's routed handler only if it passes.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.config import ConfigManager
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from local_operator.session.frontend_state import SlashResult
+
+    session = _LatchingSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._set_approve_all(False)
+        gate = _gate(session)
+
+        # Clean: the operator grants a session auto from the card.
+        first = asyncio.ensure_future(gate("bash", "ls"))
+        await _wait_prompt(pilot, app)
+        await pilot.press("A")
+        assert await first is True
+        assert app._approve_all is True
+        scope_before = app._interaction.draft.approve_scope
+        override_before = app._explicit_approvals_mode
+        mode_before = ConfigManager(config_dir).get_config_value("tool_approval_mode")
+
+        session.bridge_taint_latch.mark()
+        assert session.bridge_latched is True
+        records_before = _approvals_records(config_dir)
+
+        owner = SimpleNamespace(_session=lambda: session)
+        refuse = TuiSessionHandle._bridge_ack_refusal
+        refusal = refuse(owner, "approvals", argument, False)  # type: ignore[arg-type]
+        if refusal is None:  # what run_slash_authoritative does next
+            app._approvals_slash_result(argument, SlashResult, may_loosen=True)
+        assert ConfigManager(config_dir).get_config_value("tool_approval_mode") == mode_before
+        assert _approvals_records(config_dir) == records_before
+        assert app._explicit_approvals_mode == override_before
+        assert app._interaction.draft.approve_scope == scope_before
+        assert refusal is not None, "a bare routed default passed the latched owner"
+        assert refusal["data"] == {"ok": False, "approval_reason": "bridge_latched"}
+        await _latched_egress_still_asks(pilot, app, gate)

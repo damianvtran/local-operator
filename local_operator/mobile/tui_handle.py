@@ -1185,9 +1185,21 @@ class TuiSessionHandle(SessionHandle):
         # latch -- whose ``G`` routes exactly ``approvals default auto`` with no
         # ack -- would otherwise loosen the gate this owner holds. Same receipt,
         # nothing written.
+        #
+        # The ``default`` form is judged by what it RESOLVES to, not by the words
+        # typed (security r1 S-1 on #3849): a bare ``default`` makes the app keep
+        # its current mode, and a pre-latch session auto keeps that mode auto
+        # while suspended, so the bare form wrote global auto, cleared this
+        # conversation's override and moved its scope to global.
+        from local_operator.harness.approval import (
+            APPROVALS_LOOSENING_WORDS,
+            approvals_default_may_loosen,
+        )
+
         if words[:1] == ["default"]:
-            words = words[1:]
-        if words not in (["auto"], ["off"], ["yolo"]):
+            if not approvals_default_may_loosen(" ".join(words[1:])):
+                return None
+        elif len(words) != 1 or words[0] not in APPROVALS_LOOSENING_WORDS:
             return None
         try:
             latched = bool(getattr(self._session(), "bridge_latched", False))

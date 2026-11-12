@@ -144,7 +144,11 @@ receipt that says to type `/approvals auto` in the terminal, so an older
 desktop's "Set auto" escape cannot re-loosen a latched session. The `default`
 form is covered because global auto covers a latched session's cards (the
 accepted auto/yolo risk), so a stale card's `G` would otherwise loosen the gate
-in one press. Today that includes the phone composer's typed `/approvals
+in one press. A `default` form is judged by what it resolves to, not by its
+words (`approvals_default_may_loosen` in `harness/approval.py`): a bare
+`approvals default` keeps a TUI owner's current mode, and a suspended pre-latch
+session auto keeps that mode auto, so the bare form is refused while latched on
+both owner hosts. Name `default ask` to tighten. Today that includes the phone composer's typed `/approvals
 auto`: the phone has no `bridge_ack` path yet, so a latched session can be
 loosened only from the terminal (fail closed).
 

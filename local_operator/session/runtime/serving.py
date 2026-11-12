@@ -11459,7 +11459,12 @@ class ServingSessionHandle(SessionHandle):
             # about. Same refusal as the session ``auto`` arm below, and it is
             # checked here, before the facade write, so a refusal writes nothing.
             # A typed command (the TUI marks it) or an acked desktop frame passes.
-            if argument.split()[1:2] in (["auto"], ["off"], ["yolo"]) and not bridge_ack:
+            # Judged by what the form RESOLVES to through the table the TUI owner
+            # shares (security r1 S-1 on #3849), so both owner hosts refuse the
+            # same set; the bare form also lands in the unknown-word arm below.
+            from local_operator.harness.approval import approvals_default_may_loosen
+
+            if approvals_default_may_loosen(argument[len("default") :]) and not bridge_ack:
                 refusal = self._bridge_ack_refusal(SlashResult)
                 if refusal is not None:
                     return refusal
@@ -11756,10 +11761,11 @@ class ServingSessionHandle(SessionHandle):
         # depends on server state — it reads a bare ``default`` as ordinary. Rather
         # than let an unclassifiable frame reach a loosening sink, the mode is
         # named; the seam stays exact and the receipt teaches the two spellings.
-        if word in ("ask", "on", "prompt"):
-            mode = "ask"
-        elif word in ("auto", "off", "yolo"):
-            mode = "auto"
+        from local_operator.harness.approval import approvals_default_target
+
+        target = approvals_default_target(word, current_auto=None)
+        if target is not None:
+            mode = "auto" if target else "ask"
         else:
             return SlashResult(
                 kind="notice",
