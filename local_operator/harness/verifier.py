@@ -84,11 +84,21 @@ artifacts (files, cells, settings, documents) with the tools you have.
 3. Change nothing. Read only; never write, move, delete, save or open an
    editor on the artifacts.
 
-Be brief. End with exactly one final line:
-VERDICT: PASS     -- every requirement is MET.
-VERDICT: FAIL     -- at least one requirement is UNMET; the lines above name it.
-VERDICT: INCONCLUSIVE -- you could not check something that matters.
+Be brief. Your verdict is one of:
+- PASS: every requirement is MET.
+- FAIL: at least one requirement is UNMET; the lines above name it.
+- INCONCLUSIVE: you could not check something that matters.
+End with exactly one of these as your final line, with nothing after it:
+VERDICT: PASS
+VERDICT: FAIL
+VERDICT: INCONCLUSIVE
 """
+# The example lines above are bare on purpose: a verifier copies them, and
+# each must be exactly a line ``_VERDICT_LINE`` accepts (review round 4,
+# R4-M1: the old ``VERDICT: PASS     -- every requirement is MET.`` legend
+# was rejected by the end anchor, so a correct task got a wasted challenge).
+# ``test_every_verdict_line_in_the_role_text_parses_to_its_own_status`` pins
+# the two together.
 
 #: How much of each prompt field rides along. The request and claim are short in
 #: practice; the observation text (an accessibility tree) is not, and the
@@ -137,9 +147,16 @@ REQUEST_BUDGET_REFUSAL = (
 #: (``- Verdict: PASS (B2 = 42)``) or a qualified one (``PASS except C3``),
 #: and taking either as the verdict is how a partial answer became a pass
 #: (review round 3, M1).
+#: Two exceptions to "nothing after the status" (review round 4): a
+#: `` -- <explanation>`` suffix, the old role text's own legend form that a
+#: verifier may still copy (the qualified forms the anchor rejects never use a
+#: spaced ``--``); and the non-ASCII endings models add -- a full-width colon
+#: ``：``, CJK ``。``/``！`` and affirming check marks (``✅``, ``✔️``,
+#: ``☑``). A contradicting mark such as ``❌`` is deliberately NOT closing
+#: decoration: ``PASS ❌`` must never read as a pass.
 _VERDICT_LINE = re.compile(
-    r"^\s*(?:[#>*_`~\-]+\s*)*(?:final\s+)?VERDICT\s*[*_`]*\s*:\s*[*_`\s]*"
-    r"(PASS|FAIL|INCONCLUSIVE)[*_`.!\s]*$",
+    r"^\s*(?:[#>*_`~\-]+\s*)*(?:final\s+)?VERDICT\s*[*_`]*\s*[:：]\s*[*_`\s]*"
+    r"(PASS|FAIL|INCONCLUSIVE)[*_`.!\s。！✅✔☑\ufe0f]*(?:\s--\s.*)?$",
     re.I,
 )
 

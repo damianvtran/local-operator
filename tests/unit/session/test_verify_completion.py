@@ -36,6 +36,7 @@ from local_operator.harness.types import (
 )
 from local_operator.harness.verifier import (
     VERDICT_REQUEST_RESERVE,
+    VERIFIER_INSTRUCTIONS,
     VERIFIER_ROLE,
     VerifierLimits,
     build_verifier_prompt,
@@ -781,6 +782,40 @@ def test_a_verdict_line_with_more_after_the_status_is_not_a_verdict() -> None:
     # Closing decoration and a full stop are still the verdict.
     for line in ("VERDICT: PASS.", "**VERDICT: FAIL**", "VERDICT: `PASS` "):
         assert parse_verdict(f"B2 holds 42\n{line}")[0] in ("PASS", "FAIL"), line
+
+
+def test_every_verdict_line_in_the_role_text_parses_to_its_own_status() -> None:
+    """R4-M1: the role text's example lines are what a verifier copies, so the
+    parser must accept each of them as exactly the status it shows. Keeps the
+    prompt and the parser in sync whenever either changes."""
+
+    examples = [line for line in VERIFIER_INSTRUCTIONS.splitlines() if "VERDICT:" in line]
+    shown = {line.split("VERDICT:", 1)[1].split()[0] for line in examples}
+    assert shown == {"PASS", "FAIL", "INCONCLUSIVE"}, examples
+    for line in examples:
+        own = line.split("VERDICT:", 1)[1].split()[0]
+        assert parse_verdict(f"B2 holds 42\n{line}") == (own, "B2 holds 42"), line
+
+
+def test_an_explained_verdict_and_non_ascii_endings_are_the_verdict() -> None:
+    """R4-M1 and its minor: the old template's `` -- <why>`` suffix (a
+    verifier trained on it may still write it) and the CJK/emoji endings
+    models add are the verdict, not a wasted challenge on a pass."""
+
+    for line, status in (
+        ("VERDICT: PASS     -- every requirement is MET.", "PASS"),
+        ("VERDICT: FAIL -- C3 is UNMET", "FAIL"),
+        ("**VERDICT: INCONCLUSIVE** -- could not open the file", "INCONCLUSIVE"),
+        ("VERDICT: PASS ✅", "PASS"),
+        ("VERDICT: PASS。", "PASS"),
+        ("VERDICT：PASS", "PASS"),
+        ("VERDICT: PASS ✔️", "PASS"),
+    ):
+        assert parse_verdict(f"B2 holds 42\n{line}") == (status, "B2 holds 42"), line
+    # The suffix needs the separator: qualified forms stay INCONCLUSIVE, and a
+    # contradicting mark is never read as a pass.
+    for line in ("VERDICT: PASS-ish", "VERDICT: PASS - mostly", "VERDICT: PASS ❌"):
+        assert parse_verdict(f"B2 holds 42\n{line}")[0] == "INCONCLUSIVE", line
 
 
 @pytest.mark.asyncio
