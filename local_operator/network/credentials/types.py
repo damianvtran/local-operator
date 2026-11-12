@@ -368,6 +368,14 @@ def peer_affinity(value: Any) -> tuple[int, int] | None:
     return (account_id, created_at)
 
 
+#: The largest list one ``Grant.narrowing`` entry may carry across the peer
+#: boundary. Equal to ``github.MAX_DESIGNATED_REPOSITORIES`` (a unit test pins
+#: them equal): the owner refuses a longer designation, so an honest owner never
+#: reaches this bound. 2000 entries of at most 200 characters stay far inside the
+#: 8 MiB record ceiling.
+MAX_NARROWING_LIST_ENTRIES = 2000
+
+
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
     """A ``Grant.narrowing`` map a peer sent, bounded to shapes this build reads.
 
@@ -387,8 +395,15 @@ def _bounded_narrowing(value: Any) -> dict[str, Any]:
         if isinstance(item, str):
             out[name] = item[:200]
         elif isinstance(item, (list, tuple)):
+            # NEVER CUT A LIST: a truncated allow-list is a DIFFERENT designation
+            # (it silently drops repos, and a digest delivered beside it cannot
+            # verify). Over the bound the entry is dropped whole, which reads as
+            # "nothing delivered": the borrower keeps its standing list, the
+            # fail-closed direction. This replaced a silent ``[:64]``.
+            if len(item) > MAX_NARROWING_LIST_ENTRIES:
+                continue
             entries = [entry[:200] for entry in item if isinstance(entry, str) and entry]
-            out[name] = entries[:64]
+            out[name] = entries
     return out
 
 
@@ -526,6 +541,10 @@ BROKER_ERROR_TTL_MS: dict[str, int] = {
     "device_scope_required": 60_000,
     "github_app_unusable": 300_000,
     "github_repositories_unset": 300_000,
+    # A designation larger than one grant can carry (the App mint's 500, the
+    # wire's MAX_NARROWING_LIST_ENTRIES): refused rather than cut, and repaired
+    # by the operator on the owner (an opt-out or an explicit list).
+    "github_repositories_overflow": 300_000,
     "github_repo_refused": 0,
     # The forge ladder's token arms (mesh-consent-provisioning §3.2): a source
     # that RESOLVED but could not be read refuses by arm rather than falling

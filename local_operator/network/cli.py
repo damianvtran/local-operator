@@ -1071,6 +1071,34 @@ def add_parser(
         "--network", default="", help="Network name or id (default: the only one)"
     )
     cred_mark.add_argument("--json", action="store_true")
+    # The GitHub designation's own surface (operator decision 2026-11-12): with no
+    # explicit list, a share lends for every repo this device's GitHub login can
+    # push to MINUS these opt-outs. ONE leaf with an action positional, like
+    # ``mark``'s choice, so ``--json`` sits on the verb the agent path drives.
+    cred_github = credential_actions.add_parser(
+        "github",
+        help=(
+            "Show the GitHub repositories a share lends for, or opt one out of "
+            "(or back into) that list"
+        ),
+    )
+    cred_github.add_argument(
+        "action",
+        choices=("repos", "exclude", "include"),
+        help=(
+            "'repos' lists the effective repositories and where the list came from; "
+            "'exclude'/'include' opt one repository out of / back into it"
+        ),
+    )
+    cred_github.add_argument(
+        "repository", nargs="?", default="", help="owner/repo (for exclude/include)"
+    )
+    cred_github.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Ask GitHub again now instead of using the cached list ('repos' only)",
+    )
+    cred_github.add_argument("--json", action="store_true")
 
     install = actions.add_parser("install", help="Install the relay's restart-on-boot service")
     install.add_argument("--json", action="store_true")
@@ -3369,6 +3397,154 @@ def _delivery_lines(delivery: dict[str, Any], name: str, *, other_owner: str = "
     return ["usable there: not yet — it arrives on that device's next sync"]
 
 
+#: How many repository names the human receipt prints before "and N more"; the
+#: ``--json`` payload always carries the whole list.
+_DESIGNATION_SHOWN = 50
+
+
+def _github_designation_now(*, refresh: bool) -> Any:
+    """THIS device's effective GitHub designation, enumerating when it may.
+
+    The arm's credential is read the way the owner's serve reads it (the stored
+    App key, the stored token, or gh's login), and the list is computed by the
+    one function the serve uses, so the receipt cannot describe a different list
+    than a borrow would get. A credential that cannot be read here still answers
+    from the cache (``allow_fetch=False``) instead of failing the command.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    root = _config_dir()
+    source = github_mod.resolve_source(root)
+    token = ""
+    app = None
+    try:
+        if source == github_mod.SOURCE_APP:
+            app = github_mod.read_app_key(root)
+        elif source == github_mod.SOURCE_TOKEN:
+            token = github_mod.read_token_secret(root)
+        elif source == github_mod.SOURCE_GH:
+            token = github_mod.read_gh_token()
+    except (
+        github_mod.GithubAppKeyError,
+        github_mod.GithubTokenError,
+        github_mod.GithubGhError,
+    ):
+        return github_mod.designation(root, source=source, allow_fetch=False)
+    if source not in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        return github_mod.designation(root, source=source, allow_fetch=False)
+    return github_mod.designation(root, source=source, token=token, app=app, refresh=refresh)
+
+
+def _designation_payload(designated: Any) -> dict[str, Any]:
+    """The machine shape of a designation: the whole list, its origin and age."""
+    return {
+        "repositories": list(designated.repositories),
+        "count": len(designated.repositories),
+        "origin": designated.origin,
+        "fetched_at": designated.fetched_at or None,
+        "age_s": int(designated.age_s()) if designated.fetched_at else None,
+        "excluded": list(designated.excluded),
+        "excluded_count": designated.excluded_count,
+        "error": designated.error,
+    }
+
+
+def _designation_lines(designated: Any) -> list[str]:
+    """The human lines: the repositories, where they came from, how to opt out."""
+    from local_operator.network.credentials import github as github_mod
+
+    names = list(designated.repositories)
+    if not names:
+        return [f"GitHub repositories: none — {designated.refusal()}"]
+    origin = designated.origin
+    age = int(designated.age_s())
+    if origin == github_mod.ORIGIN_EXPLICIT:
+        source = "the explicit list in network.credentials.github.repositories"
+    elif origin == github_mod.ORIGIN_LAST_GOOD:
+        why = f" (refreshing failed: {designated.error})" if designated.error else ""
+        source = f"the LAST GOOD list of what this login can push to, {age // 60} min old{why}"
+    else:
+        source = "every repository this device's GitHub login can push to, listed just now"
+        if age >= 120:
+            source = (
+                "every repository this device's GitHub login can push to, listed "
+                f"{age // 60} min ago"
+            )
+    opted = f", minus {designated.excluded_count} opted out" if designated.excluded_count else ""
+    lines = [f"GitHub repositories lent for: {len(names)} — {source}{opted}"]
+    lines.extend(f"  {name}" for name in names[:_DESIGNATION_SHOWN])
+    if len(names) > _DESIGNATION_SHOWN:
+        lines.append(
+            f"  … and {len(names) - _DESIGNATION_SHOWN} more "
+            "(`lop network credential github repos --json` lists all)"
+        )
+    lines.append(
+        "opt a repository out: `lop network credential github exclude <owner/repo>` "
+        "(back in: `… include <owner/repo>`); borrowers lose it at their next borrow"
+    )
+    return lines
+
+
+def _cmd_credential_github(args: argparse.Namespace) -> int:
+    """``credential github repos [--refresh] | exclude|include <owner/repo>``.
+
+    LOCAL: the designation is this device's own (it is the owner that lends), so
+    nothing crosses the mesh. ``exclude`` takes effect at each borrower's next
+    borrow or refresh — the owner re-reads the opt-outs on every serve and the
+    grant carries the narrowed list — which is the security direction: no cache
+    can keep an opted-out repository pushable past one grant window.
+    """
+    from local_operator.network.credentials import github as github_mod
+    from local_operator.network.types import MeshRefusal
+
+    action = str(args.action)
+    root = _config_dir()
+    if action == "repos":
+        if args.repository:
+            raise MeshRefusal("bad_request", "'repos' takes no repository")
+        designated = _github_designation_now(refresh=bool(args.refresh))
+        payload = {"action": "repos", **_designation_payload(designated)}
+        return _emit(args, payload, _designation_lines(designated))
+    if args.refresh:
+        raise MeshRefusal("bad_request", "--refresh applies to 'repos' only")
+    entry = github_mod.normalise_repository(args.repository)
+    if not entry:
+        raise MeshRefusal(
+            "bad_request", f"{args.action} needs one owner/repo, e.g. damianvtran/local-operator"
+        )
+    current = list(github_mod.excluded_repositories(root))
+    lowered = [name.lower() for name in current]
+    if action == "exclude":
+        changed = entry.lower() not in lowered
+        updated = current + [entry] if changed else current
+    else:
+        changed = entry.lower() in lowered
+        updated = [name for name in current if name.lower() != entry.lower()]
+    if changed:
+        github_mod.write_excluded(root, updated)
+    if action == "exclude":
+        line = (
+            f"{entry} is opted out: borrowers stop being able to push to it at their next "
+            "borrow or refresh"
+            if changed
+            else f"{entry} was already opted out"
+        )
+    else:
+        line = (
+            f"{entry} is back in: it is lent for again if this device's GitHub login can "
+            "push to it"
+            if changed
+            else f"{entry} was not opted out"
+        )
+    payload = {
+        "action": action,
+        "repository": entry,
+        "changed": changed,
+        "excluded": updated,
+    }
+    return _emit(args, payload, [line, f"opted out now: {len(updated)}"])
+
+
 def _cmd_credential(args: argparse.Namespace) -> int:
     """``credential share|revoke <key> --with/--from <dev>``: the owner's own verb.
 
@@ -3630,6 +3806,13 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         # narrowed server-side, and the share receipt must not promise narrowing
         # a token arm cannot deliver.
         lines.append(_github_share_disclosure(name, github_mod.resolve_source(_config_dir())))
+        # THE LIST IS SHOWN WHERE THE OPERATOR SHARES (operator decision
+        # 2026-11-12): the share is a moment the operator is looking, so the list
+        # is refreshed here and every repository it lends for is on the receipt,
+        # with how to opt one out.
+        designated = _github_designation_now(refresh=True)
+        payload["repositories"] = _designation_payload(designated)
+        lines.extend(_designation_lines(designated))
     if verb == "revoke":
         # THE TRUE REVOCATION LATENCY, said where the operator acts (QA round 1, Q5;
         # design §3.7). A revoke stops NEW grants at once, but no provider offers a
@@ -10055,6 +10238,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         return _cmd_credential_refresh(args)
     if verb == "inherit":
         return _cmd_credential_inherit(args)
+    if verb == "github":
+        return _cmd_credential_github(args)
     if verb in ("share", "revoke", "mark"):
         return _cmd_credential(args)
     print(
@@ -10065,6 +10250,7 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credential refresh <provider> [--json]\n"
+        "       lop network credential github repos [--refresh] | exclude|include <owner/repo>\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,
     )

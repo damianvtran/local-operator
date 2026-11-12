@@ -810,18 +810,50 @@ def github_fact(root: Path, home: Path | None = None) -> dict[str, Any]:
         "has_local": source
         in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH),
     }
+    if source in (github_mod.SOURCE_APP, github_mod.SOURCE_TOKEN, github_mod.SOURCE_GH):
+        _designation_fact(fact, root, source)
     if source == github_mod.SOURCE_APP:
         fact["permissions"] = dict(github_mod.GITHUB_PERMISSIONS)
-        try:
-            fact["repositories"] = [
-                _safe_text(name, limit=200) for name in github_mod.repositories_for(root)
-            ]
-        except Exception:  # noqa: BLE001 — an unreadable list is "not stated"
-            fact["repositories"] = None
         fact["origin"] = _secret_mesh_origin(root, github_mod.APP_SECRET_NAME)
     elif source == github_mod.SOURCE_TOKEN:
         fact["origin"] = _secret_mesh_origin(root, github_mod.TOKEN_SECRET_NAME)
     return fact
+
+
+#: How many designated names a readiness fact carries. The COUNT is always
+#: exact (``repositories_count``); the names are a sample so an enumerated list
+#: of hundreds does not bloat every readiness reply. ``lop network credential
+#: github repos`` on the owner prints the whole list.
+READINESS_REPOSITORY_SAMPLE = 50
+
+
+def _designation_fact(fact: dict[str, Any], root: Path, source: str) -> None:
+    """The effective GitHub designation, from the owner's CACHE only.
+
+    ``allow_fetch=False``: readiness never calls GitHub. ``repositories_origin``
+    is ``explicit`` / ``enumerated`` / ``last_good`` / ``unavailable`` (the
+    vocabulary ``credentials.github`` owns) and ``repositories_age_s`` the age of
+    an enumerated list, so a viewer can say "the last good list, 9 h old" rather
+    than presenting a stale list as current. ``repositories: null`` keeps its
+    meaning — the designation could not be read at all.
+    """
+    from local_operator.network.credentials import github as github_mod
+
+    try:
+        designated = github_mod.designation(root, source=source, allow_fetch=False)
+    except Exception:  # noqa: BLE001 — an unreadable list is "not stated"
+        fact["repositories"] = None
+        return
+    names = list(designated.repositories)
+    fact["repositories"] = [
+        _safe_text(name, limit=200) for name in names[:READINESS_REPOSITORY_SAMPLE]
+    ]
+    fact["repositories_count"] = len(names)
+    fact["repositories_origin"] = _safe_text(designated.origin, limit=40)
+    fact["repositories_age_s"] = int(designated.age_s()) if designated.fetched_at else None
+    fact["excluded_count"] = int(designated.excluded_count)
+    if designated.error:
+        fact["repositories_error"] = _safe_text(designated.error, limit=200)
 
 
 def _transport_of(raw: Mapping[str, Any]) -> str:
@@ -2890,10 +2922,18 @@ def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
         )
     )
     if str(fact.get("source") or "") != "app":
-        return (
+        unknown = (
             "this report cannot read the scopes that credential carries, so whether "
             "it covers a push is not knowable from here"
         )
+        if "repositories_origin" not in fact:
+            return unknown
+        # The token arms are narrowed by lop's git helper alone, to the same
+        # designation the App would mint for — so the list IS stated, the scopes
+        # are not.
+        return f"{unknown}; lop's git helper serves it for {_designation_phrase(fact)}"
+    if "repositories_origin" in fact:
+        return f"it mints {stated}, narrowed to {_designation_phrase(fact)}"
     if "repositories" not in fact:
         return f"it mints {stated}; what that mint is narrowed to is not stated here"
     repositories = fact.get("repositories")
@@ -2909,6 +2949,66 @@ def _github_scope_clause(fact: Mapping[str, Any], peer_label: str) -> str:
         )
     shown = _name_list([str(name) for name in repositories])
     return f"it mints {stated}, narrowed to {shown}, which is what a push and a PR need"
+
+
+def _designation_phrase(fact: Mapping[str, Any]) -> str:
+    """The designated list and WHERE it came from, in one phrase.
+
+    The source is never left implicit: an enumerated list says it is what the
+    login can push to, a fallback says it is the last good one and how old, and
+    an unavailable list says a borrow would refuse (never "all repositories").
+    """
+    names = [str(name) for name in (fact.get("repositories") or []) if str(name)]
+    try:
+        count = int(fact.get("repositories_count") or len(names))
+    except (TypeError, ValueError):
+        count = len(names)
+    origin = str(fact.get("repositories_origin") or "")
+    try:
+        excluded = int(fact.get("excluded_count") or 0)
+    except (TypeError, ValueError):
+        excluded = 0
+    opted = f", {excluded} opted out" if excluded else ""
+    if not count:
+        if origin == "unavailable":
+            error = str(fact.get("repositories_error") or "")
+            why = f" ({error})" if error else ""
+            return (
+                f"no repository yet — that device has no list of repositories it can push "
+                f"to{why}, so a borrow would refuse rather than widen"
+            )
+        return f"no repository{opted} — a borrow would refuse rather than widen"
+    # Five names and a count: the whole list is `lop network credential github
+    # repos` on the owner, and a readiness row is read at a glance.
+    shown = (
+        names
+        if count <= 5 and len(names) == count
+        else [*names[:5], f"{count - min(len(names), 5)} more"]
+    )
+    listed = _name_list(shown)
+    age = _age_words(fact.get("repositories_age_s"))
+    if origin == "explicit":
+        source = f"the explicit list set there{opted}"
+    elif origin == "last_good":
+        error = str(fact.get("repositories_error") or "")
+        why = f"; the latest refresh failed: {error}" if error else ""
+        source = f"the last good list of what its login can push to, {age} old{opted}{why}"
+    else:
+        source = f"every repository its login can push to, listed {age} ago{opted}"
+    return f"{listed} ({count} — {source})"
+
+
+def _age_words(value: Any) -> str:
+    """``40 s`` / ``12 min`` / ``6 h`` from a seconds value; ``an unknown time`` else."""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return "an unknown time"
+    if seconds < 120:
+        return f"{max(seconds, 0)} s"
+    if seconds < 7200:
+        return f"{seconds // 60} min"
+    return f"{seconds // 3600} h"
 
 
 def _github_observed(fact: Any) -> dict[str, Any]:

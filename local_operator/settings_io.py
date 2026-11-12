@@ -5571,11 +5571,12 @@ SETTINGS: tuple[Setting, ...] = (
         help=(_t(_ws.network_credentials_grant_ttl_s_help())),
         synonyms=("auth", "expiry"),
     ),
-    # The github adapter's allow-list (github.py's ``REPOSITORIES_PATH``; the same
-    # key is read by the owner — the mint narrows to it and REFUSES when empty —
-    # and by the borrower's git helper as its use-time backstop). Empty is a
-    # refusal at mint time, never "no narrowing": a mint without ``repositories``
-    # would cover everything the App installation was granted.
+    # The github adapter's EXPLICIT allow-list (github.py's ``REPOSITORIES_PATH``;
+    # read by the owner as a hand-picked override and by the borrower's git
+    # helper as its use-time backstop). UNSET on an owner now means the
+    # enumerated default — every repository its login can push to, minus
+    # ``network.credentials.github.excluded`` (``github.designation``) — still an
+    # explicit list on the wire and the mint, never "no narrowing".
     Setting(
         key="network.credentials.github.repositories",
         path=("network", "credentials", "github", "repositories"),

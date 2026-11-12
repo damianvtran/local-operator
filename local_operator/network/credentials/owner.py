@@ -68,6 +68,7 @@ requirement exists to prevent. So a report may, at most:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import secrets
@@ -77,7 +78,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
@@ -1472,7 +1473,7 @@ class MeshCredentialBroker:
         if self._github_lender is None:
             minter = self._github_minter
             if minter is None:
-                minter = github_app.GithubMinter()
+                minter = github_app.default_minter()
             self._github_lender = github_app.GithubLender(minter=minter)
             self._github_lender.attach_loop(self._loop.loop())
             self._github_lender.attach_audit(self._github_audit_sink)
@@ -1621,13 +1622,37 @@ class MeshCredentialBroker:
                     else github_app.CODE_GH_UNUSABLE
                 )
                 return BrokerError(code=code, message=str(exc), **common)
+            # The token arms are narrowed by the borrower's helper ALONE (§3.4),
+            # so the list it enforces must be a real one: the explicit
+            # designation, or what THIS login can push to minus opt-outs. An
+            # unavailable list refuses here instead of lending a token whose
+            # helper would then refuse every push without saying why.
+            designated = await asyncio.get_running_loop().run_in_executor(
+                None,
+                functools.partial(
+                    github_app.designation,
+                    self.root,
+                    source=source,
+                    token=token,
+                    minter=self._lender().minter,
+                ),
+            )
+            refusal = self._github_designation_refusal(
+                designated, limit=github_app.MAX_DESIGNATED_REPOSITORIES, common=common
+            )
+            if refusal is not None:
+                return refusal
             # Extraction already in flight cannot be undone, but a newly
             # persisted reduction must prevent constructing/emitting its grant.
             scope_refusal = self._github_scope_refusal(key, by)
             if scope_refusal is not None:
                 return scope_refusal
             return self._grant_from_owner_token(
-                token=token, key=key, provider=provider, common=common
+                token=token,
+                key=key,
+                provider=provider,
+                common=common,
+                repositories=designated.repositories,
             )
         return BrokerError(
             code="no_local_credential", message=github_app.no_source_message(), **common
@@ -1659,17 +1684,27 @@ class MeshCredentialBroker:
                     **common,
                 )
             return BrokerError(code=github_app.CODE_APP_UNUSABLE, message=str(exc), **common)
-        repositories = github_app.repositories_for(self.root)
-        if not repositories:
-            return BrokerError(
-                code=github_app.CODE_REPOSITORIES_UNSET,
-                message=(
-                    "no repositories are designated for GitHub brokering on this device; "
-                    "set network.credentials.github.repositories (see the network "
-                    "guide) — nothing was lent"
-                ),
-                **common,
-            )
+        lender = self._lender()
+        # THE DESIGNATION IS ENUMERATED WHEN UNSET (operator decision 2026-11-12):
+        # every repository the installation covers, minus the operator's opt-outs,
+        # as an explicit list. It may walk GitHub's API, so it runs off this loop
+        # like the mint. The App mint below is narrowed to exactly this list.
+        designated = await asyncio.get_running_loop().run_in_executor(
+            None,
+            functools.partial(
+                github_app.designation,
+                self.root,
+                source=github_app.SOURCE_APP,
+                app=app,
+                minter=lender.minter,
+            ),
+        )
+        refusal = self._github_designation_refusal(
+            designated, limit=github_app.APP_MINT_MAX_REPOSITORIES, common=common
+        )
+        if refusal is not None:
+            return refusal
+        repositories = designated.repositories
         # Recheck after local configuration reads, immediately before external
         # work. A revoke racing an already-started mint cannot retract that
         # request; registration still arranges cleanup and final grant() denial
@@ -1677,7 +1712,6 @@ class MeshCredentialBroker:
         scope_refusal = self._github_scope_refusal(key, by)
         if scope_refusal is not None:
             return scope_refusal
-        lender = self._lender()
         try:
             minted = await asyncio.get_running_loop().run_in_executor(
                 None, lender.mint, app, repositories
@@ -1731,8 +1765,45 @@ class MeshCredentialBroker:
         )
         return grant
 
+    def _github_designation_refusal(
+        self, designated: Any, *, limit: int, common: dict[str, Any]
+    ) -> Any:
+        """The refusal for a designation that cannot be lent, or ``None``.
+
+        Empty is refused with the designation's own reason (never "no
+        narrowing"). Over ``limit`` is refused rather than cut: the App mint
+        takes at most :data:`github.APP_MINT_MAX_REPOSITORIES`, the wire carries
+        at most :data:`github.MAX_DESIGNATED_REPOSITORIES`, and a truncated list
+        would lend for a different set than the one the operator was shown.
+        """
+        if not designated.repositories:
+            return BrokerError(
+                code=github_app.CODE_REPOSITORIES_UNSET,
+                message=designated.refusal(),
+                **common,
+            )
+        count = len(designated.repositories)
+        if count > limit:
+            return BrokerError(
+                code=github_app.CODE_REPOSITORIES_OVERFLOW,
+                message=(
+                    f"this device's GitHub designation lists {count} repositories and one "
+                    f"grant can carry at most {limit} — nothing was lent; opt some out "
+                    "(`lop network credential github exclude <owner/repo>`) or set "
+                    "network.credentials.github.repositories to the ones to lend"
+                ),
+                **common,
+            )
+        return None
+
     def _grant_from_owner_token(
-        self, *, token: str, key: str, provider: str, common: dict[str, Any]
+        self,
+        *,
+        token: str,
+        key: str,
+        provider: str,
+        common: dict[str, Any],
+        repositories: Sequence[str],
     ) -> Any:
         """The Grant arms 2/3 serve: NO registration and no server-side revoke.
 
@@ -1769,7 +1840,7 @@ class MeshCredentialBroker:
             # §3.4's bound for the token arms is the helper's allow-list ALONE,
             # so it must reach the helper's device too (see _serve_github_app's
             # note on the delivery; read fresh per serve, like the token).
-            narrowing=github_app.grant_narrowing(github_app.repositories_for(self.root)),
+            narrowing=github_app.grant_narrowing(repositories),
             grant_id=f"g_{os.urandom(8).hex()}",
         )
 

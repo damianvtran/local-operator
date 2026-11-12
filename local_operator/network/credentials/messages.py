@@ -177,10 +177,20 @@ def render_broker_error(
             "network guide has the App section). Nothing was lent."
         )
     if error.code == "github_repositories_unset":
+        # The owner names its own cause (an opt-out of everything, an explicit
+        # list that names nothing usable, or no list it could enumerate), so the
+        # sentence carries it rather than guessing one remedy for all three.
+        detail = f": {error.message}" if error.message else ""
         return (
-            f"{owner} has no repositories designated for GitHub brokering, so nothing "
-            f"was minted: set network.credentials.github.repositories on {owner} (the "
-            "network guide's checklist). Nothing was lent."
+            f"{owner} has no repository it can lend GitHub access for{detail}. "
+            f"Check `lop network credential github repos` on {owner}; nothing was lent."
+        )
+    if error.code == "github_repositories_overflow":
+        detail = f" ({error.message})" if error.message else ""
+        return (
+            f"{owner} designates more GitHub repositories than one grant can carry"
+            f"{detail}. Opt some out on {owner} (`lop network credential github "
+            "exclude <owner/repo>`); nothing was lent."
         )
     if error.code == "github_repo_refused":
         detail = f" ({error.message})" if error.message else ""

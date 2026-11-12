@@ -1007,15 +1007,41 @@ command, so a re-login or a token rotation needs no gesture on the node):
    keychain — wherever that install keeps it); the owner is the trusted side,
    and the borrowing device never reads it.
 
-**Designate the repositories on the owner**:
-`network.credentials.github.repositories` (search it in `/settings`),
-`owner/repo` entries, e.g. `damianvtran/scratch`. This list is the git helper's
-allow-list, and it is the enforced bound on every route: empty is a refusal,
-never "everything" — an empty list reads like a bug but is the contract
-working: every push is refused until the owner designates at least one
-repository. The designation travels WITH the grant — the borrowing
-device writes the owner's list into its own config before the git child runs —
-so a node does not maintain one by hand.
+**Which repositories a share lends for — by default, every one the owner's
+login can push to.** With no list set, the owner ENUMERATES: for a token or a
+`gh` login, every repository that login can push to (`GET /user/repos`, owned,
+collaborator and organization-member, keeping push access); for an App, every
+repository the installation covers. It is always an explicit list — shown on
+the share receipt, in readiness, and carried on every grant — never "all
+repositories":
+
+- `lop network credential github repos` prints the list, where it came from
+  (`enumerated`, `explicit`, or `last good` with its age) and how many are opted
+  out; `--refresh` asks GitHub again now; `--json` carries the whole list.
+- **Opt one out:** `lop network credential github exclude <owner/repo>` (back
+  in: `… include <owner/repo>`). It is stored as
+  `network.credentials.github.excluded` on the owner and takes effect at each
+  borrower's NEXT borrow or refresh — the owner re-reads it on every grant and
+  the grant carries the narrowed list, so no cache keeps an opted-out
+  repository pushable past one grant window.
+- **The enumeration is cached for 6 hours** and re-asked at every `credential
+  share github`, on `repos --refresh`, and lazily on the first grant after the
+  6 h bound. A repository the owner gains reaches borrowers within that bound
+  (at once with a refresh); one the owner loses push to is refused by GitHub
+  whatever the list says. If GitHub cannot be asked, the LAST GOOD list keeps
+  serving and readiness and `repos` say so with its age; with no earlier list,
+  a borrow is refused by name. Nothing ever widens to "everything".
+- **A hand-picked list still wins:** set `network.credentials.github.repositories`
+  (search it in `/settings`, `owner/repo` entries) and only those are lent (minus
+  any opt-outs); nothing is enumerated.
+- **Limits:** one grant carries at most 2000 repositories, and an App mint at
+  most 500 (GitHub's own per-token limit). A larger list is refused by name —
+  opt some out or set an explicit list — never cut to a prefix.
+
+This list is the git helper's allow-list and the enforced bound on every
+route; the App mint is also narrowed to it. The designation travels WITH the
+grant — the borrowing device writes the owner's list into its own config
+before the git child runs — so a node does not maintain one by hand.
 
 Once any source resolves, the flow is: `lop network credential share github
 --with <device>` (device scope; session scope for this key is refused by name),

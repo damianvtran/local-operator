@@ -43,9 +43,19 @@ because its own config had none. The owner now attaches its CURRENT designation
 to every github grant (:func:`grant_narrowing` → ``Grant.narrowing``), and the
 borrower writes it into its own config before the child runs
 (:func:`remember_delivered_repositories` — idempotent, receipted, never fatal).
-An owner with no designation sends nothing, and a device with no list still
-refuses: the fail-closed backstop is unchanged, it is just no longer a manual
-step on every node.
+A device with no list still refuses: the fail-closed backstop is unchanged, it
+is just no longer a manual step on every node.
+
+THE DEFAULT DESIGNATION IS ENUMERATED, NEVER A WILDCARD (operator decision,
+2026-11-12). An owner that sets no ``repositories`` lends for every repository
+its serving arm can PUSH to, minus ``network.credentials.github.excluded``:
+:func:`designation` asks GitHub for that list (``GET /user/repos`` keeping
+``permissions.push`` for a token or gh login, ``GET /installation/repositories``
+for the App), caches it with its timestamp, and the result is an explicit,
+enumerated list — on the share receipt, in readiness, on the wire, and as the
+App mint's ``repositories``. Nothing anywhere becomes "all repositories"; a
+failed enumeration falls back to the last good list and SAYS so, and with no
+last good list the serve is refused by name.
 
 DEVICE-SCOPED BY CONSTRUCTION (design F3). The borrower side has no
 rail-authenticated session identity — a same-uid process can claim any
@@ -140,10 +150,55 @@ APP_SECRET_NAME = "GITHUB_APP"
 #: use-time backstop.
 REPOSITORIES_PATH: tuple[str, ...] = ("network", "credentials", "github", "repositories")
 
-#: The default: none. An empty list is a REFUSAL at mint time, never "no
-#: narrowing" — ``repositories`` absent on the wire would grant the token access
-#: to everything the installation covers.
+#: The default: no EXPLICIT list. An unset designation is no longer a refusal: the
+#: owner enumerates what its arm can push to (:func:`designation`). An empty list
+#: still never means "no narrowing" anywhere — ``repositories`` absent on the
+#: wire would grant the token access to everything the installation covers, so
+#: the mint and the helper both refuse an empty one.
 DEFAULT_REPOSITORIES: tuple[str, ...] = ()
+
+#: The operator's per-repository opt-outs from the enumerated default. Read on
+#: EVERY serve (never cached), because removal is the security direction: a repo
+#: excluded here stops being pushable on borrowers at their next borrow/refresh.
+EXCLUDED_PATH: tuple[str, ...] = ("network", "credentials", "github", "excluded")
+
+#: How long an enumerated list is reused before the next serve re-asks GitHub.
+#: Six hours: a repo the owner GAINS reaches borrowers within that bound (or at
+#: once through ``credential github repos --refresh`` and every share), and a
+#: repo the owner LOSES push to is refused by GitHub itself whatever the list
+#: says, so staleness here can only delay a widening, never cause one. Shorter
+#: would put a paginated API walk on the serve path several times an hour.
+ENUMERATION_MAX_AGE_S = 6 * 3600.0
+
+#: ``per_page`` is GitHub's maximum; the page bound keeps one walk finite (3000
+#: repositories). A login past it is refused by name rather than listed partly:
+#: a truncated enumeration would silently drop repos the operator expects.
+ENUMERATION_PAGE_SIZE = 100
+ENUMERATION_MAX_PAGES = 30
+
+#: The largest designation that may travel on a grant. It equals the peer
+#: boundary's own bound (``credentials.types.MAX_NARROWING_LIST_ENTRIES``, pinned
+#: equal by a unit test) and the owner REFUSES a larger list instead of sending
+#: it, because a boundary that truncated it would deliver a different list than
+#: the owner designated — the digest check that rides with #3841 fails on exactly
+#: that, and a silent cut would drop repos from the borrower's backstop.
+MAX_DESIGNATED_REPOSITORIES = 2000
+
+#: GitHub's own limit on ``repositories`` in one installation-token request. One
+#: bearer cannot be chunked across mints, so an App designation over it is
+#: refused with the remedy (opt some out, or set an explicit list).
+APP_MINT_MAX_REPOSITORIES = 500
+
+#: The enumeration cache, under the network root: ``{arm, identity, fetched_at,
+#: repositories, error, error_at}``. Not a secret (repository names), written
+#: 0600 through the package's one private-JSON writer anyway.
+ENUMERATION_CACHE_NAME = "github-pushable.json"
+
+#: Where a designation came from — the word readiness and the receipt print.
+ORIGIN_EXPLICIT = "explicit"
+ORIGIN_ENUMERATED = "enumerated"
+ORIGIN_LAST_GOOD = "last_good"
+ORIGIN_UNAVAILABLE = "unavailable"
 
 #: The API surface. ``2022-11-28`` is the version the shipped endpoint shapes
 #: were verified against (mint: ``repositories`` + ``permissions``; revoke:
@@ -200,6 +255,7 @@ CODE_STORE_UNREADABLE = "github_store_unreadable"
 CODE_DEVICE_SCOPE = "device_scope_required"
 CODE_APP_UNUSABLE = "github_app_unusable"
 CODE_REPOSITORIES_UNSET = "github_repositories_unset"
+CODE_REPOSITORIES_OVERFLOW = "github_repositories_overflow"
 CODE_REPO_REFUSED = "github_repo_refused"
 
 #: How long a fetch may block on one HTTP round trip. Sequential and bounded: a
@@ -311,6 +367,316 @@ def mint_repository_names(repositories: Sequence[str]) -> list[str]:
         if len(parts) == 2 and parts[1] and parts[1] not in names:
             names.append(parts[1])
     return names
+
+
+# ---------------------------------------------------------------------------
+# The effective designation: explicit, or enumerated minus opt-outs
+# ---------------------------------------------------------------------------
+
+_UNSET: Any = object()
+
+
+def explicit_repositories(root: Path | None = None) -> tuple[str, ...] | None:
+    """The hand-picked list, or ``None`` when the operator never set one.
+
+    ``None`` is the enumerated default; a set list (even one that normalises to
+    nothing) is the operator's override and is never widened by enumeration.
+    """
+    from local_operator.network import store
+
+    raw = store.read_config(REPOSITORIES_PATH, _UNSET, root)
+    if raw is _UNSET or raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(entry for entry in (normalise_repository(item) for item in raw) if entry)
+
+
+def excluded_repositories(root: Path | None = None) -> tuple[str, ...]:
+    """The operator's opt-outs, normalised. Re-read per call (see ``EXCLUDED_PATH``)."""
+    from local_operator.network import store
+
+    raw = store.read_config(EXCLUDED_PATH, [], root)
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: list[str] = []
+    for item in raw:
+        entry = normalise_repository(item)
+        if entry and entry.lower() not in {seen.lower() for seen in out}:
+            out.append(entry)
+    return tuple(out)
+
+
+def write_excluded(root: Path | None, entries: Sequence[str]) -> None:
+    """Persist the opt-out list through ``settings_io._store`` (reload, lock, write).
+
+    The same writer ``team_bridge/privacy_pass.py`` uses for operator state that
+    has a CLI rather than a ``/settings`` row: it merges into the
+    ``network.credentials.github`` sub-mapping under the config write lock, so a
+    concurrent write to a sibling (``repositories``) is never reverted. An empty
+    list is written as ``[]``, which reads exactly like "never set".
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    directory = Path(root) if root is not None else config_dir()
+    settings_io._store(  # noqa: SLF001 — the shared nested writer (see docstring)
+        ConfigManager(directory), EXCLUDED_PATH, [str(entry) for entry in entries]
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class Designation:
+    """The list a grant is narrowed to, and where it came from.
+
+    ``repositories`` is ALWAYS an enumerated list of ``owner/repo`` — never a
+    wildcard. Empty means refuse; :meth:`refusal` names why.
+    """
+
+    repositories: tuple[str, ...]
+    origin: str
+    excluded: tuple[str, ...] = ()
+    #: How many entries the opt-outs removed from the candidate list.
+    excluded_count: int = 0
+    #: How many the candidate list held before the opt-outs.
+    candidates: int = 0
+    fetched_at: float = 0.0
+    error: str = ""
+
+    def age_s(self, now: float | None = None) -> float:
+        if not self.fetched_at:
+            return 0.0
+        return max(0.0, (now if now is not None else time.time()) - self.fetched_at)
+
+    def refusal(self) -> str:
+        """The sentence for an empty designation (callers only ask when empty)."""
+        if self.origin == ORIGIN_EXPLICIT:
+            return (
+                "network.credentials.github.repositories is set but names no usable "
+                "owner/repo after opt-outs on this device — nothing was lent (unset it to "
+                "lend for every repository this login can push to, or name some)"
+            )
+        if self.origin == ORIGIN_UNAVAILABLE:
+            why = f" ({self.error})" if self.error else ""
+            return (
+                "this device could not list the repositories its GitHub source can push "
+                f"to{why} and has no earlier list to fall back on — nothing was lent; retry "
+                "when GitHub is reachable (`lop network credential github repos --refresh`)"
+            )
+        if self.candidates and self.excluded_count >= self.candidates:
+            return (
+                f"every repository this device's GitHub source can push to ({self.candidates}) "
+                "is opted out in network.credentials.github.excluded — nothing was lent"
+            )
+        return "the GitHub source on this device can push to no repositories — nothing was " "lent"
+
+
+def _cache_path(root: Path | None) -> Path:
+    from local_operator.network.identity import network_root
+
+    return network_root(root) / ENUMERATION_CACHE_NAME
+
+
+def read_enumeration_cache(root: Path | None = None) -> dict[str, Any]:
+    """The cache record, or ``{}``. A corrupt record reads as empty (re-enumerate)."""
+    try:
+        data = json.loads(_cache_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_enumeration_cache(root: Path | None, record: dict[str, Any]) -> None:
+    from local_operator.network import store
+    from local_operator.network.identity import ensure_network_root
+
+    ensure_network_root(root)
+    store._write_private_json(_cache_path(root), record)  # noqa: SLF001 — the ONE writer
+
+
+def source_identity(source: str, *, token: str = "", app: "GithubAppKey | None" = None) -> str:
+    """Which account a cached list belongs to: an App installation, or a token's hash.
+
+    A list enumerated for one login must never be served for another (a gh
+    re-login as a different user, a rotated PAT for another account), even as a
+    "last good" fallback. The token is reduced to 16 hex of its sha256 — enough
+    to tell two logins apart, nothing a reader could use.
+    """
+    import hashlib
+
+    if source == SOURCE_APP and app is not None:
+        return f"app:{app.app_id}:{app.installation_id}"
+    if token:
+        return f"{source}:{hashlib.sha256(token.encode('utf-8')).hexdigest()[:16]}"
+    return source
+
+
+def _apply_exclusions(
+    candidates: Sequence[str], excluded: Sequence[str]
+) -> tuple[tuple[str, ...], int]:
+    """``candidates`` minus ``excluded``, compared case-insensitively.
+
+    GitHub treats owner/repo case-insensitively, and an opt-out is the security
+    direction: ``Owner/Repo`` typed by hand must remove ``owner/repo``.
+    """
+    dropped = {entry.lower() for entry in excluded}
+    kept: list[str] = []
+    seen: set[str] = set()
+    removed = 0
+    for entry in candidates:
+        folded = entry.lower()
+        if folded in dropped:
+            removed += 1
+            continue
+        if folded not in seen:
+            seen.add(folded)
+            kept.append(entry)
+    return tuple(kept), removed
+
+
+def designation(
+    root: Path | None = None,
+    *,
+    source: str,
+    token: str = "",
+    app: "GithubAppKey | None" = None,
+    minter: "GithubMinter | None" = None,
+    refresh: bool = False,
+    allow_fetch: bool = True,
+    now: float | None = None,
+) -> Designation:
+    """The effective list for ``source``: explicit, or enumerated minus opt-outs.
+
+    BLOCKING (it may walk GitHub's API): owners call it off their loop.
+    ``allow_fetch=False`` is the read-only form readiness uses — the cache as it
+    stands, any age, never a network call.
+
+    Fallback order on an enumeration failure: the last good list for the SAME
+    arm and account (said so through ``origin=last_good`` and ``error``), else
+    nothing (``origin=unavailable``) — never "all repositories".
+    """
+    moment = now if now is not None else time.time()
+    excluded = excluded_repositories(root)
+    explicit = explicit_repositories(root)
+    if explicit is not None:
+        kept, removed = _apply_exclusions(explicit, excluded)
+        return Designation(
+            repositories=kept,
+            origin=ORIGIN_EXPLICIT,
+            excluded=excluded,
+            excluded_count=removed,
+            candidates=len(explicit),
+        )
+    identity = source_identity(source, token=token, app=app)
+    cache = read_enumeration_cache(root)
+    cached = [
+        entry
+        for entry in (normalise_repository(item) for item in cache.get("repositories") or [])
+        if entry
+    ]
+    try:
+        fetched_at = float(cache.get("fetched_at") or 0.0)
+    except (TypeError, ValueError):
+        fetched_at = 0.0
+    # A cache is THIS account's only when both the arm and the account match;
+    # readiness (no token in hand) matches on the arm alone.
+    ours = cache.get("arm") == source and (
+        not allow_fetch or str(cache.get("identity") or "") == identity
+    )
+    fresh = ours and bool(cached) and 0.0 <= moment - fetched_at < ENUMERATION_MAX_AGE_S
+    error = str(cache.get("error") or "") if ours else ""
+    if allow_fetch and (refresh or not fresh):
+        try:
+            listed = _enumerate(source, token=token, app=app, minter=minter)
+        except GithubApiError as exc:
+            error = f"{exc.kind}: {exc}"
+            logger.warning("github: enumerating pushable repositories failed: %s", error)
+            if ours:
+                record = dict(cache)
+                record.update({"error": error, "error_at": moment})
+                _safe_write_cache(root, record)
+        else:
+            _safe_write_cache(
+                root,
+                {
+                    "arm": source,
+                    "identity": identity,
+                    "fetched_at": moment,
+                    "repositories": listed,
+                    "error": "",
+                    "error_at": 0,
+                },
+            )
+            kept, removed = _apply_exclusions(listed, excluded)
+            return Designation(
+                repositories=kept,
+                origin=ORIGIN_ENUMERATED,
+                excluded=excluded,
+                excluded_count=removed,
+                candidates=len(listed),
+                fetched_at=moment,
+            )
+    if ours and cached:
+        kept, removed = _apply_exclusions(cached, excluded)
+        stale = not fresh or bool(allow_fetch and refresh)
+        return Designation(
+            repositories=kept,
+            origin=ORIGIN_LAST_GOOD if stale or error else ORIGIN_ENUMERATED,
+            excluded=excluded,
+            excluded_count=removed,
+            candidates=len(cached),
+            fetched_at=fetched_at,
+            error=error,
+        )
+    return Designation(
+        repositories=(),
+        origin=ORIGIN_UNAVAILABLE,
+        excluded=excluded,
+        error=error or ("never enumerated on this device" if not allow_fetch else ""),
+    )
+
+
+def default_minter() -> "GithubMinter":
+    """The API client a caller without a broker uses (the CLI's receipt, ``repos``).
+
+    One factory rather than ``GithubMinter()`` at each site, so the test suite's
+    network guard (``tests/unit/network/conftest.py``) can route every
+    un-stubbed enumeration to an offline transport: no unit test may reach
+    api.github.com.
+    """
+    return GithubMinter()
+
+
+def _safe_write_cache(root: Path | None, record: dict[str, Any]) -> None:
+    try:
+        _write_enumeration_cache(root, record)
+    except Exception:  # noqa: BLE001 — a cache that cannot be written costs a re-walk
+        logger.warning("github: the enumeration cache could not be written", exc_info=True)
+
+
+def _enumerate(
+    source: str,
+    *,
+    token: str = "",
+    app: "GithubAppKey | None" = None,
+    minter: "GithubMinter | None" = None,
+) -> list[str]:
+    """Ask GitHub what ``source`` can push to. Raises :class:`GithubApiError`."""
+    client = minter if minter is not None else default_minter()
+    if source == SOURCE_APP:
+        if app is None:
+            raise GithubApiError("auth", "no App key to enumerate with")
+        return client.installation_repositories(app)
+    if source in (SOURCE_TOKEN, SOURCE_GH):
+        if not token:
+            raise GithubApiError("auth", "no token to enumerate with")
+        return client.pushable_user_repositories(token)
+    raise GithubApiError("auth", f"the {source or 'unknown'} source cannot be enumerated")
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +1158,8 @@ class MintedToken:
 class _Reply:
     status: int
     body: dict[str, Any]
+    #: A JSON ARRAY reply (``GET /user/repos``); ``body`` stays the object form.
+    items: list[Any] = dataclasses.field(default_factory=list)
 
 
 class _HttpxTransport:
@@ -816,13 +1184,28 @@ class _HttpxTransport:
         with httpx.Client(timeout=HTTP_TIMEOUT_S, follow_redirects=False) as client:
             response = client.request(method, url, headers=headers, json=json_body)
         body: dict[str, Any] = {}
+        items: list[Any] = []
         try:
             decoded = response.json()
             if isinstance(decoded, dict):
                 body = decoded
+            elif isinstance(decoded, list):
+                items = decoded
         except Exception:  # noqa: BLE001 — a non-JSON body is empty; the status is the answer
             body = {}
-        return _Reply(status=response.status_code, body=body)
+        return _Reply(status=response.status_code, body=body, items=items)
+
+
+def _full_names(rows: Iterable[dict[str, Any]]) -> list[str]:
+    """``full_name`` of each listed repo, normalised and de-duplicated, in order."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        entry = normalise_repository(row.get("full_name"))
+        if entry and entry.lower() not in seen:
+            seen.add(entry.lower())
+            names.append(entry)
+    return names
 
 
 def _app_jwt(app: GithubAppKey, now: float | None = None) -> str:
@@ -914,6 +1297,87 @@ class GithubMinter:
             raise GithubApiError("coverage", message, status=reply.status)
         raise GithubApiError("server", message, status=reply.status)
 
+    def _get_pages(self, path: str, token: str, *, key: str = "") -> list[dict[str, Any]]:
+        """Every page of one listing, ``per_page=100``, until a short page.
+
+        Page-number pagination rather than ``Link`` headers: both endpoints
+        document ``page``/``per_page``, and a short page is an unambiguous end.
+        """
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        }
+        rows: list[dict[str, Any]] = []
+        separator = "&" if "?" in path else "?"
+        for page in range(1, ENUMERATION_MAX_PAGES + 1):
+            url = f"{self.base_url}{path}{separator}per_page={ENUMERATION_PAGE_SIZE}&page={page}"
+            try:
+                reply = self._transport.request("GET", url, headers=headers)
+            except Exception as exc:  # noqa: BLE001 — any transport failure is "offline"
+                raise GithubApiError("offline", f"{exc.__class__.__name__}") from exc
+            if reply.status != 200:
+                message = str(reply.body.get("message") or f"HTTP {reply.status}")
+                kind = "auth" if reply.status in (401, 403, 404) else "server"
+                raise GithubApiError(kind, message, status=reply.status)
+            batch = reply.body.get(key) if key else reply.items
+            if not isinstance(batch, list):
+                raise GithubApiError("server", "the listing reply had no list", status=200)
+            rows.extend(item for item in batch if isinstance(item, dict))
+            if len(batch) < ENUMERATION_PAGE_SIZE:
+                return rows
+        raise GithubApiError(
+            "coverage",
+            f"more than {ENUMERATION_PAGE_SIZE * ENUMERATION_MAX_PAGES} repositories; set "
+            "network.credentials.github.repositories to the ones to lend",
+        )
+
+    def pushable_user_repositories(self, token: str) -> list[str]:
+        """``GET /user/repos``: every repo this login can PUSH to, as ``owner/repo``.
+
+        All three affiliations (owned, collaborator, organisation member), then
+        ``permissions.push`` — the listing also returns repos the login can only
+        read, and lending for those would put repos on the list that a push
+        refuses anyway.
+        """
+        rows = self._get_pages(
+            "/user/repos?affiliation=owner,collaborator,organization_member", token
+        )
+        return _full_names(row for row in rows if (row.get("permissions") or {}).get("push"))
+
+    def installation_repositories(self, app: GithubAppKey) -> list[str]:
+        """``GET /installation/repositories`` for the App's installation.
+
+        The listing needs an installation token. It is minted with
+        ``metadata: read`` ONLY — the narrowest permission the endpoint accepts —
+        used for this walk, and revoked before returning, so the one
+        installation-wide token this design ever creates can read repository
+        names and nothing else, and does not outlive the call.
+        """
+        now = time.time()
+        url = f"{self.base_url}/app/installations/{app.installation_id}/access_tokens"
+        headers = {
+            "Authorization": f"Bearer {_app_jwt(app, now)}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        }
+        try:
+            reply = self._transport.request(
+                "POST", url, headers=headers, json_body={"permissions": {"metadata": "read"}}
+            )
+        except Exception as exc:  # noqa: BLE001 — any transport failure is "offline"
+            raise GithubApiError("offline", f"{exc.__class__.__name__}") from exc
+        token = str(reply.body.get("token") or "") if reply.status == 201 else ""
+        if not token:
+            message = str(reply.body.get("message") or f"HTTP {reply.status}")
+            kind = "auth" if reply.status in (401, 403, 404) else "server"
+            raise GithubApiError(kind, message, status=reply.status)
+        try:
+            rows = self._get_pages("/installation/repositories", token, key="repositories")
+        finally:
+            self.revoke(token)
+        return _full_names(rows)
+
     def revoke(self, token: str) -> bool:
         """``DELETE /installation/token``. Idempotent: "already dead" is success.
 
@@ -974,7 +1438,7 @@ class GithubLender:
         clock: Callable[[], float] = time.time,
         retry_s: float = REVOKE_RETRY_S,
     ) -> None:
-        self._minter = minter if minter is not None else GithubMinter()
+        self._minter = minter if minter is not None else default_minter()
         self._clock = clock
         self._retry_s = retry_s
         self._lock = threading.Lock()
@@ -1005,6 +1469,11 @@ class GithubLender:
     def mint(self, app: GithubAppKey, repositories: Sequence[str]) -> MintedToken:
         """Pass-through to the minter; kept on the lender so tests inject ONE seam."""
         return self._minter.mint(app, repositories)
+
+    @property
+    def minter(self) -> GithubMinter:
+        """The same seam, for the owner's enumeration (one base URL, one transport)."""
+        return self._minter
 
     # -- registry -----------------------------------------------------------
 
