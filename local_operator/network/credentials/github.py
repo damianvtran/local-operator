@@ -43,9 +43,13 @@ because its own config had none. The owner now attaches its CURRENT designation
 to every github grant (:func:`grant_narrowing` → ``Grant.narrowing``), and the
 borrower writes it into its own config before the child runs
 (:func:`remember_delivered_repositories` — idempotent, receipted, never fatal).
-An owner with no designation sends nothing, and a device with no list still
-refuses: the fail-closed backstop is unchanged, it is just no longer a manual
-step on every node.
+An owner that never set a designation sends nothing, and a device with no list
+still refuses: the fail-closed backstop is unchanged, it is just no longer a
+manual step on every node. Each delivery carries ``{digest, generation}``: it
+REPLACES the borrower's list (an operator-cleared ``[]`` arrives as an explicit
+refuse-all), and an older delivery — a grant another session cached before the
+owner's change — never overwrites a newer one (the live finding was a node whose
+list flapped between the old and new designation).
 
 DEVICE-SCOPED BY CONSTRUCTION (design F3). The borrower side has no
 rail-authenticated session identity — a same-uid process can claim any
@@ -99,6 +103,7 @@ reach the wire.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -109,7 +114,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 logger = logging.getLogger("local_operator.network.credentials.github")
 
@@ -270,6 +275,10 @@ def repositories_for(root: Path | None = None) -> tuple[str, ...]:
     from local_operator.network import store
 
     raw = store.read_config(REPOSITORIES_PATH, DEFAULT_REPOSITORIES, root)
+    return _normalised_designation(raw)
+
+
+def _normalised_designation(raw: Any) -> tuple[str, ...]:
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
@@ -278,19 +287,80 @@ def repositories_for(root: Path | None = None) -> tuple[str, ...]:
     return tuple(entry for entry in normalised if entry)
 
 
-def grant_narrowing(repositories: Sequence[str]) -> dict[str, Any]:
+#: "Never set" for :func:`designation_for`. A private sentinel, because every
+#: real config value (including ``[]`` and ``None``) is a legitimate reading.
+_UNSET: Any = object()
+
+
+def designation_for(root: Path | None = None) -> tuple[tuple[str, ...], bool]:
+    """``(repositories, explicit)`` — the designation AND whether it was set at all.
+
+    WHY THE SECOND HALF EXISTS: an operator who CLEARS the list (``[]``) has said
+    "lend for nothing", which every borrower must learn (refuse-all); a device that
+    never set the key has said nothing, and a borrower's hand-set backstop must
+    survive that silence. :func:`repositories_for` reads both as ``()``, which is
+    right for the mint (both refuse) but loses the distinction the delivery needs.
+    """
+    from local_operator.network import store
+
+    raw = store.read_config(REPOSITORIES_PATH, _UNSET, root)
+    if raw is _UNSET:
+        return DEFAULT_REPOSITORIES, False
+    return _normalised_designation(raw), True
+
+
+def designation_digest(repositories: Sequence[str]) -> str:
+    """A short, order-sensitive digest of a normalised allow-list.
+
+    Order-sensitive on purpose: the borrower's idempotence check compares lists
+    in order, and two digests for one list would make the "did it change" answer
+    disagree with the write. 128 bits is an identity check against a stale or
+    garbled delivery, not a security boundary — the list itself is not secret.
+    """
+    import hashlib
+
+    body = "\n".join(str(entry) for entry in repositories)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:32]
+
+
+def grant_narrowing(
+    repositories: Sequence[str],
+    *,
+    explicit: bool | None = None,
+    generation_ms: int | None = None,
+) -> dict[str, Any]:
     """The narrowing metadata a github grant carries (design §3.4: the enforced
     bound is the helper's allow-list).
 
-    NON-EMPTY LISTS ONLY: a cleared or never-set designation is delivered as
-    "nothing", and the borrower leaves its own standing list alone — absence on
-    the wire cannot be told apart from "this owner build predates the field",
-    and wiping a working backstop from an ambiguous signal is the wrong
-    direction for a fail-closed check. The borrower's half is
+    ``{repositories, digest, generation}``. The DIGEST marks the delivery as
+    AUTHORITATIVE: a borrower replaces its list with exactly this one, including
+    an empty list (refuse-all), and only a delivery with a digest may do that.
+    The GENERATION (the owner's wall clock at serve time, ms, as a string so the
+    peer boundary's ``_bounded_narrowing`` carries it unchanged) orders deliveries
+    from one owner: a borrower never lets an older one overwrite a newer one —
+    the live finding was a node whose list flapped between the old and new
+    designation, because sessions holding grants cached before the change kept
+    re-applying the list those grants carried.
+
+    ABSENT IS NOT EMPTY: a NEVER-SET designation (``explicit`` false) is still
+    delivered as "nothing", and the borrower leaves its standing list alone — an
+    older owner build sends no field at all, and wiping a working backstop from
+    that ambiguous signal is the wrong direction for a fail-closed check. A
+    non-empty list is always explicit. The borrower's half is
     :func:`remember_delivered_repositories`.
     """
-    entries = [str(entry) for entry in repositories if str(entry)]
-    return {"repositories": entries} if entries else {}
+    # De-duplicated in order, as the borrower normalises: the digest is checked
+    # against the borrower's own normalisation, so both must agree on the list.
+    entries = list(dict.fromkeys(str(entry) for entry in repositories if str(entry)))
+    if not entries and not explicit:
+        return {}
+    if generation_ms is None:
+        generation_ms = time.time_ns() // 1_000_000
+    return {
+        "repositories": entries,
+        "digest": designation_digest(entries),
+        "generation": str(int(generation_ms)),
+    }
 
 
 def mint_repository_names(repositories: Sequence[str]) -> list[str]:
@@ -1304,6 +1374,8 @@ def remember_delivered_repositories(
     self_device: str = "",
     owner_device: str = "",
     network_id: str = "",
+    digest: str = "",
+    generation: Any = 0,
 ) -> dict[str, Any]:
     """Materialise a delivered narrowing into THIS device's config (borrower side).
 
@@ -1317,10 +1389,24 @@ def remember_delivered_repositories(
     where the trail is writable), because the borrow that carried the value must
     not fail over its own receipt.
 
-    ``repositories`` is whatever the wire carried. Only a list/tuple with at
-    least one USABLE ``owner/repo`` entry writes: a shape that normalises to
-    nothing is a wire anomaly — recorded and ignored, never a silent clearing of
-    a list an operator set here by hand.
+    TWO DELIVERY SHAPES, told apart by ``digest`` (see :func:`grant_narrowing`):
+
+    * AUTHORITATIVE (``digest`` present): the list REPLACES this device's list,
+      widening and narrowing alike, and an empty list writes ``[]`` — refuse-all,
+      never allow-all. The digest must match the list it arrived with (a mismatch
+      is refused, recorded). ``generation`` orders deliveries per owner: one OLDER
+      than the last one applied from that owner is skipped (``stale``) and writes
+      nothing, so a grant cached in another process before the owner's change can
+      never put the old list back. The order record is
+      :func:`_narrowing_state_path`, read-compare-written under a cross-process
+      lock because every session process on this device delivers independently.
+    * LEGACY (no digest, an owner build that predates it): only a list/tuple with
+      at least one USABLE ``owner/repo`` entry writes; a shape that normalises to
+      nothing is a wire anomaly — recorded and ignored, never a silent clearing of
+      a list an operator set here by hand.
+
+    The result is ``{changed, repositories, error}``; the authoritative shape adds
+    ``digest``, ``generation``, ``stale`` and ``previous`` (the list it replaced).
     """
     result: dict[str, Any] = {"changed": False, "repositories": [], "error": ""}
     normalised: list[str] = []
@@ -1330,6 +1416,19 @@ def remember_delivered_repositories(
             if cleaned and cleaned not in normalised:
                 normalised.append(cleaned)
     result["repositories"] = normalised
+    digest = str(digest or "")
+    if digest:
+        return _remember_authoritative(
+            repositories,
+            normalised,
+            result,
+            root=root,
+            self_device=self_device,
+            owner_device=owner_device,
+            network_id=network_id,
+            digest=digest,
+            generation=_generation_int(generation),
+        )
     if not normalised:
         reason = (
             "unreadable" if not isinstance(repositories, (list, tuple)) else "no_usable_entries"
@@ -1373,6 +1472,144 @@ def remember_delivered_repositories(
     return result
 
 
+def _generation_int(value: Any) -> int:
+    """A peer-carried generation as a non-negative int; garbage reads as 0 (oldest)."""
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return number if 0 <= number < 10**16 else 0
+
+
+def _remember_authoritative(
+    raw: Any,
+    normalised: list[str],
+    result: dict[str, Any],
+    *,
+    root: Path | None,
+    self_device: str,
+    owner_device: str,
+    network_id: str,
+    digest: str,
+    generation: int,
+) -> dict[str, Any]:
+    """The digest-carrying half of :func:`remember_delivered_repositories`."""
+    result.update({"digest": digest, "generation": generation, "stale": False, "previous": []})
+
+    def refuse(reason: str) -> dict[str, Any]:
+        result["error"] = reason
+        _record_narrowing(root, self_device, owner_device, network_id, applied=False, reason=reason)
+        return result
+
+    if not isinstance(raw, (list, tuple)):
+        return refuse("unreadable")
+    # The digest is over the OWNER's normalised list; a borrower that normalises
+    # to something else (an entry this build reads as junk) must not apply a
+    # list the owner never designated — refuse rather than guess.
+    if designation_digest(normalised) != digest:
+        return refuse("digest_mismatch")
+    try:
+        with _narrowing_state_lock(root):
+            state = _read_narrowing_state(root)
+            owners = state.setdefault("owners", {})
+            prior = owners.get(owner_device) if isinstance(owners, dict) else None
+            prior_generation = (
+                _generation_int(prior.get("generation")) if isinstance(prior, dict) else 0
+            )
+            if generation < prior_generation:
+                result["repositories"] = list(repositories_for(root))
+                if isinstance(prior, dict) and str(prior.get("digest") or "") == digest:
+                    # An older grant for the SAME designation is not stale in
+                    # any way that matters; calling it stale would make two
+                    # processes force re-mints at each other on every command.
+                    return result
+                # Not a refusal and not receipted: a stale cached grant in another
+                # process re-delivers on every command, and one audit row per
+                # spawn would bury the rows that matter.
+                result["stale"] = True
+                return result
+            current = list(repositories_for(root))
+            result["previous"] = current
+            if normalised != current:
+                _write_repositories(root, normalised)
+                result["changed"] = True
+            owners[owner_device] = {"generation": generation, "digest": digest}
+            _write_narrowing_state(root, state)
+    except Exception as exc:  # noqa: BLE001 — recorded, never fatal; see the docstring
+        logger.warning("github narrowing: the delivered repositories were not written: %s", exc)
+        return refuse(exc.__class__.__name__)
+    if result["changed"]:
+        _record_narrowing(
+            root,
+            self_device,
+            owner_device,
+            network_id,
+            applied=True,
+            repositories=normalised,
+            digest=digest,
+            generation=generation,
+        )
+    return result
+
+
+#: The borrower's per-owner delivery order record (see
+#: :func:`remember_delivered_repositories`). Beside the network plane, not in
+#: ``config.yml``: it is bookkeeping, not a setting anyone edits.
+NARROWING_STATE_NAME = "github-narrowing.json"
+
+
+def _narrowing_state_path(root: Path | None) -> Path:
+    from local_operator.network.identity import network_root
+
+    return network_root(root) / NARROWING_STATE_NAME
+
+
+def _read_narrowing_state(root: Path | None) -> dict[str, Any]:
+    """The order record, or ``{}``. A corrupt record reads as empty: the worst case
+    is one stale delivery applied, which the next fresh one corrects."""
+    try:
+        data = json.loads(_narrowing_state_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_narrowing_state(root: Path | None, state: dict[str, Any]) -> None:
+    from local_operator.network import store
+
+    store._write_private_json(_narrowing_state_path(root), state)  # noqa: SLF001 — the ONE writer
+
+
+def designation_delivered(root: Path | None, owner_device: str) -> dict[str, Any]:
+    """What this device last applied from ``owner_device``: ``{generation, digest}`` or ``{}``."""
+    owners = _read_narrowing_state(root).get("owners")
+    entry = owners.get(owner_device) if isinstance(owners, dict) else None
+    return dict(entry) if isinstance(entry, dict) else {}
+
+
+@contextlib.contextmanager
+def _narrowing_state_lock(root: Path | None) -> Iterator[None]:
+    """Serialise the read-compare-write ACROSS PROCESSES (every session delivers).
+
+    ``fcntl`` is imported here, not at module scope, for the reason
+    ``rollouts.record_lock`` gives: a POSIX-only import at module scope would
+    make this module unloadable where it is absent. Without it the caller's
+    ``except`` records the refusal — never an unordered write.
+    """
+    import fcntl
+
+    from local_operator.network.identity import ensure_network_root
+
+    ensure_network_root(root)
+    path = _narrowing_state_path(root).with_suffix(".lock")
+    handle = open(path, "a+", encoding="utf-8")  # noqa: SIM115 — held for the block
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
 def _write_repositories(root: Path | None, repositories: list[str]) -> None:
     """Write the allow-list through the settings registry — the ONE writer.
 
@@ -1407,6 +1644,8 @@ def _record_narrowing(
     applied: bool,
     repositories: Sequence[str] = (),
     reason: str = "",
+    digest: str = "",
+    generation: int = 0,
 ) -> None:
     """One audit row for a narrowing that landed — or one that was refused.
 
@@ -1425,6 +1664,10 @@ def _record_narrowing(
         }
         if applied:
             detail["repositories"] = list(repositories)
+            if digest:
+                # Which designation landed, so a reader can line rows up in order.
+                detail["digest"] = digest
+                detail["generation"] = int(generation)
             event = "credential.narrowing_applied"
         else:
             detail["reason"] = reason
@@ -1443,6 +1686,38 @@ def _record_narrowing(
         log.close()
     except Exception:  # noqa: BLE001 — a receipt is never worth a lost env
         pass
+
+
+def apply_grant_narrowing(outcome: Any, *, client: Any, root: Path | None = None) -> dict[str, Any]:
+    """Apply the narrowing a served github grant carries; ``{}`` when it carries none.
+
+    The ONE place a grant's narrowing becomes this device's allow-list, shared
+    by the bash spawn path (:func:`borrowed_git_env`) and ``lop network
+    credential refresh`` — the refresh used to re-mint on the owner and then
+    discard the delivery, so a changed designation never reached the node.
+    Never raises (``remember_delivered_repositories``'s contract).
+    """
+    narrowing = getattr(outcome, "narrowing", None)
+    if isinstance(outcome, dict):
+        narrowing = outcome.get("narrowing")
+    if not isinstance(narrowing, dict):
+        return {}
+    delivered = narrowing.get("repositories")
+    if not isinstance(delivered, list):
+        return {}
+    try:
+        owner_of = getattr(client, "owner_of", None)
+        return remember_delivered_repositories(
+            delivered,
+            root=root,
+            self_device=str(getattr(client, "self_device", "") or ""),
+            owner_device=str(owner_of(GITHUB_KEY) or "") if callable(owner_of) else "",
+            network_id=str(getattr(client, "network_id", "") or ""),
+            digest=str(narrowing.get("digest") or ""),
+            generation=narrowing.get("generation") or 0,
+        )
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        return {"changed": False, "repositories": [], "error": exc.__class__.__name__}
 
 
 def borrowed_git_env(
@@ -1483,17 +1758,28 @@ def borrowed_git_env(
     # received no narrowing keeps whatever its own config holds (no list still
     # refuses).
     try:
-        narrowing = getattr(outcome, "narrowing", None)
-        delivered = narrowing.get("repositories") if isinstance(narrowing, dict) else None
-        if isinstance(delivered, list):
-            owner_of = getattr(client, "owner_of", None)
-            remember_delivered_repositories(
-                delivered,
-                root=root,
-                self_device=str(getattr(client, "self_device", "") or ""),
-                owner_device=str(owner_of(GITHUB_KEY) or "") if callable(owner_of) else "",
-                network_id=str(getattr(client, "network_id", "") or ""),
+        applied = apply_grant_narrowing(outcome, client=client, root=root)
+        if applied.get("stale"):
+            # A GRANT CACHED BEFORE THE OWNER'S DESIGNATION MOVED (another process
+            # on this device already applied a newer one). Its list is not
+            # applied, and its token is not used either: an App token is narrowed
+            # SERVER-SIDE to the old list, so it cannot reach a newly added repo
+            # until it is re-minted. The cached grant is DROPPED and the owner
+            # asked again, which re-mints (App) or re-delivers (PAT/gh) — not
+            # ``force_refresh``, which the owner grants to admin devices only and
+            # which a github serve does not need (every serve reads the list
+            # fresh). If the re-ask fails the stale token is still the best bearer
+            # this device has, so it is kept rather than dropping the env.
+            grants = getattr(client, "grants", None)
+            if grants is not None:
+                grants.drop(GITHUB_KEY)
+            fresh = client.request_grant_sync(
+                GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY
             )
+            fresh_token = str(getattr(fresh, "access_token", "") or "")
+            if fresh_token:
+                outcome, token = fresh, fresh_token
+                apply_grant_narrowing(outcome, client=client, root=root)
     except Exception:  # noqa: BLE001 — a delivery receipt is never worth a lost env
         pass
     grant_exp_ms = int(getattr(outcome, "grant_expires_at_ms", 0) or 0)
