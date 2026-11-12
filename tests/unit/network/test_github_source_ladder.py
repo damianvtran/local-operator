@@ -427,6 +427,70 @@ def test_the_token_arm_serves_the_stored_token_without_minting(
         assert github_api.mint_requests == []
 
 
+def test_clearing_the_list_through_the_settings_seam_reaches_token_arm_borrowers(
+    env: _Env, github_api: _FakeGithub, tmp_path: Path
+) -> None:
+    """PR #3841 R1-1 / mesh M1: the REAL clear gesture deletes the key
+    (``empty_unsets``), and the token arm must still send an explicit ``[]``.
+
+    Before the fix the owner read the deleted key as "never set", sent no
+    narrowing, and a PAT/gh borrower kept the wider list with the bearer still
+    served. Cleared here through ``settings_control.apply`` (the agent seam; the
+    TUI, CLI and route share its ``reset_setting`` arm), never a hand-written YAML.
+    """
+    from local_operator import settings_control, settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.network.credentials.types import Grant
+
+    setting = next(
+        row
+        for row in settings_io.settings_for("network")
+        if row.key == "network.credentials.github.repositories"
+    )
+    assert setting.empty_unsets, "the row this test exists for"
+    node = tmp_path / "node"
+    node.mkdir()
+    client = type(
+        "Client",
+        (),
+        {"self_device": BORROWER_DEVICE, "network_id": "n_gh", "owner_of": None},
+    )()
+    with _owner_for(env, github_api, github_mod.SOURCE_TOKEN) as rig:
+        settings_control.apply(ConfigManager(env.root), setting, [SCRATCH])
+        lent = _ask(rig)
+        github_mod.apply_grant_narrowing(Grant.from_detail(lent), client=client, root=node)
+        assert github_mod.repositories_for(node) == (SCRATCH,)
+
+        settings_control.apply(ConfigManager(env.root), setting, "")
+        # The key really is GONE (the gesture under test), not stored as [].
+        assert github_mod.designation_for(env.root) == ((), False)
+        cleared = _ask(rig)
+        assert cleared["access_token"] == PAT, "the token arm still serves the bearer"
+        assert cleared["narrowing"]["repositories"] == []
+        assert cleared["narrowing"]["digest"] == github_mod.designation_digest([])
+        outcome = github_mod.apply_grant_narrowing(
+            Grant.from_detail(cleared), client=client, root=node
+        )
+    assert outcome["changed"] is True and outcome["error"] == "", outcome
+    assert github_mod.repositories_for(node) == ()
+    reply = github_mod.git_helper_reply(
+        "get",
+        ["protocol=https", "host=github.com", f"path={SCRATCH}.git", ""],
+        token=PAT,
+        repositories=github_mod.repositories_for(node),
+    )
+    assert "password=" not in reply, "a cleared designation must refuse every repository"
+
+
+def test_an_owner_that_never_lent_a_list_still_sends_nothing(env: _Env) -> None:
+    """The marker is set only by a NON-EMPTY delivery: a device that never lent a
+    designation keeps saying nothing, so a borrower's hand-set backstop survives."""
+    (env.root / "config.yml").write_text(yaml.safe_dump({"values": {}}), encoding="utf-8")
+    assert owner_mod._token_arm_narrowing(env.root) == {}  # noqa: SLF001
+    github_mod.mark_designation_delivered(env.root)
+    assert owner_mod._token_arm_narrowing(env.root)["repositories"] == []  # noqa: SLF001
+
+
 def test_the_gh_arm_serves_the_login_the_cli_already_holds(
     env: _Env, github_api: _FakeGithub, monkeypatch: pytest.MonkeyPatch
 ) -> None:

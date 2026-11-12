@@ -309,6 +309,60 @@ def designation_for(root: Path | None = None) -> tuple[tuple[str, ...], bool]:
     return _normalised_designation(raw), True
 
 
+#: The OWNER's "I have lent a designation" marker (see :func:`owner_designation`).
+#: Beside the network plane, not in ``config.yml``: bookkeeping nobody edits.
+OWNER_DESIGNATION_MARKER = "github-designation-delivered.json"
+
+
+def _owner_marker_path(root: Path | None) -> Path:
+    from local_operator.network.identity import network_root
+
+    return network_root(root) / OWNER_DESIGNATION_MARKER
+
+
+def mark_designation_delivered(root: Path | None = None) -> None:
+    """Record (once) that this owner has served a non-empty designation.
+
+    Never raises: a marker that cannot be written costs only the clear-reaches-
+    borrowers guarantee for a later clear, never the serve that is happening now.
+    """
+    try:
+        path = _owner_marker_path(root)
+        if path.exists():
+            return
+        from local_operator.network import store
+
+        store._write_private_json(path, {"delivered": True})  # noqa: SLF001 — the ONE writer
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        logger.warning("github designation: the delivered marker was not written: %s", exc)
+
+
+def owner_designation(root: Path | None = None) -> tuple[tuple[str, ...], bool]:
+    """The designation the OWNER delivers: :func:`designation_for`, plus the clear.
+
+    WHY A MARKER AND NOT THE CONFIG KEY: the settings row is ``empty_unsets`` — the
+    TUI, ``lop config set ... ""``, PATCH /v1/settings and the agent seam all clear
+    it by DELETING the key, which :func:`designation_for` reads as "never set" and
+    the owner then delivers nothing, so PAT/gh borrowers kept the wider list after
+    an operator cleared it (PR #3841 review R1-1). The row's ``empty_unsets`` is
+    left alone because the page, ``config get`` and reset surfaces read "unset" from
+    it. Instead: an owner that has EVER delivered a non-empty list treats a missing
+    key as an explicit clear and sends ``[]`` with a digest (borrowers refuse all).
+    A device that never lent a list still sends nothing, so a borrower's hand-set
+    backstop survives an owner that has said nothing.
+    """
+    repositories, explicit = designation_for(root)
+    if explicit and repositories:
+        mark_designation_delivered(root)
+        return repositories, True
+    if not explicit:
+        try:
+            explicit = _owner_marker_path(root).exists()
+        except OSError:
+            explicit = False
+    return repositories, explicit
+
+
 def designation_digest(repositories: Sequence[str]) -> str:
     """A short, order-sensitive digest of a normalised allow-list.
 
@@ -1472,6 +1526,32 @@ def remember_delivered_repositories(
     return result
 
 
+def _owner_key(outcome: Any, client: Any) -> str:
+    """The device that SERVED this grant — the key its delivery is ordered under.
+
+    The grant's own ``credential_ref.owner_device`` first (then ``served_by``): a
+    grant cached from a previous owner and applied after ownership moved must be
+    compared with that owner's deliveries, not the new one's (review R1-4). The
+    client's current ``owner_of`` is only the fallback for a grant that names
+    nobody. ``""`` means unknown, which the caller must never use as a key (R1-3).
+    """
+    if isinstance(outcome, dict):
+        ref = outcome.get("credential_ref")
+        owner = str(ref.get("owner_device") or "") if isinstance(ref, dict) else ""
+        served_by = str(outcome.get("served_by") or "")
+    else:
+        ref = getattr(outcome, "credential_ref", None)
+        owner = str(getattr(ref, "owner_device", "") or "")
+        served_by = str(getattr(outcome, "served_by", "") or "")
+    if owner or served_by:
+        return owner or served_by
+    owner_of = getattr(client, "owner_of", None)
+    try:
+        return str(owner_of(GITHUB_KEY) or "") if callable(owner_of) else ""
+    except Exception:  # noqa: BLE001 — attribution only
+        return ""
+
+
 def _generation_int(value: Any) -> int:
     """A peer-carried generation as a non-negative int; garbage reads as 0 (oldest)."""
     try:
@@ -1507,7 +1587,43 @@ def _remember_authoritative(
     # to something else (an entry this build reads as junk) must not apply a
     # list the owner never designated — refuse rather than guess.
     if designation_digest(normalised) != digest:
+        from local_operator.network.credentials.types import MAX_NARROWING_LIST_ENTRIES
+
+        # A list AT the peer boundary's ceiling that fails its digest was cut
+        # there (an owner list longer than the validator allows, hand-edited):
+        # name that, rather than a garbled-looking mismatch. Applied it never is.
+        if len(raw) >= MAX_NARROWING_LIST_ENTRIES:
+            return refuse("too_many_entries")
         return refuse("digest_mismatch")
+    if not owner_device:
+        # UNKNOWN OWNER (review R1-3): filing this under ``owners[""]`` would let
+        # it be compared against a different owner's generations and re-open the
+        # flap this record exists to stop. The digest-verified list still applies
+        # (a clear must land), but the order record is neither read nor advanced,
+        # and the result says so for the receipt.
+        result["owner_unknown"] = True
+        try:
+            current = list(repositories_for(root))
+            result["previous"] = current
+            if normalised != current:
+                _write_repositories(root, normalised)
+                result["changed"] = True
+        except Exception as exc:  # noqa: BLE001 — recorded, never fatal
+            logger.warning("github narrowing: the delivered repositories were not written: %s", exc)
+            return refuse(exc.__class__.__name__)
+        logger.warning("github narrowing: applied a delivery with no owner; order not recorded")
+        if result["changed"]:
+            _record_narrowing(
+                root,
+                self_device,
+                owner_device,
+                network_id,
+                applied=True,
+                repositories=normalised,
+                digest=digest,
+                generation=generation,
+            )
+        return result
     try:
         with _narrowing_state_lock(root):
             state = _read_narrowing_state(root)
@@ -1602,7 +1718,10 @@ def _narrowing_state_lock(root: Path | None) -> Iterator[None]:
 
     ensure_network_root(root)
     path = _narrowing_state_path(root).with_suffix(".lock")
-    handle = open(path, "a+", encoding="utf-8")  # noqa: SIM115 — held for the block
+    # 0600 like every other file in the network plane (QA NIT): it holds nothing,
+    # but a uniform mode keeps permission audits of the directory simple.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+    handle = os.fdopen(fd, "a+", encoding="utf-8")  # noqa: SIM115 — held for the block
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         yield
@@ -1663,11 +1782,14 @@ def _record_narrowing(
             "sub": owner_device,
         }
         if applied:
-            detail["repositories"] = list(repositories)
             if digest:
                 # Which designation landed, so a reader can line rows up in order.
+                # BEFORE the list: the audit writer truncates an oversize detail
+                # by dropping trailing keys, and a designation of up to
+                # MAX_DESIGNATION_ENTRIES overflows it — the identity must survive.
                 detail["digest"] = digest
                 detail["generation"] = int(generation)
+            detail["repositories"] = list(repositories)
             event = "credential.narrowing_applied"
         else:
             detail["reason"] = reason
@@ -1706,12 +1828,11 @@ def apply_grant_narrowing(outcome: Any, *, client: Any, root: Path | None = None
     if not isinstance(delivered, list):
         return {}
     try:
-        owner_of = getattr(client, "owner_of", None)
         return remember_delivered_repositories(
             delivered,
             root=root,
             self_device=str(getattr(client, "self_device", "") or ""),
-            owner_device=str(owner_of(GITHUB_KEY) or "") if callable(owner_of) else "",
+            owner_device=_owner_key(outcome, client),
             network_id=str(getattr(client, "network_id", "") or ""),
             digest=str(narrowing.get("digest") or ""),
             generation=narrowing.get("generation") or 0,
@@ -1770,21 +1891,61 @@ def borrowed_git_env(
             # which a github serve does not need (every serve reads the list
             # fresh). If the re-ask fails the stale token is still the best bearer
             # this device has, so it is kept rather than dropping the env.
-            grants = getattr(client, "grants", None)
-            if grants is not None:
-                grants.drop(GITHUB_KEY)
-            fresh = client.request_grant_sync(
-                GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY
-            )
-            fresh_token = str(getattr(fresh, "access_token", "") or "")
-            if fresh_token:
-                outcome, token = fresh, fresh_token
-                apply_grant_narrowing(outcome, client=client, root=root)
+            # A grant in _STALE_ACCEPTED was ALREADY the answer to a re-ask and
+            # came back stale too (review R1-2): use it, never re-ask for it again.
+            grant_id = str(getattr(outcome, "grant_id", "") or "")
+            if not (grant_id and grant_id in _STALE_ACCEPTED):
+                grants = getattr(client, "grants", None)
+                if grants is not None:
+                    grants.drop(GITHUB_KEY)
+                fresh = client.request_grant_sync(
+                    GITHUB_KEY, session_id=session_id, provider=GITHUB_KEY
+                )
+                fresh_token = str(getattr(fresh, "access_token", "") or "")
+                if fresh_token:
+                    outcome, token = fresh, fresh_token
+                    again = apply_grant_narrowing(outcome, client=client, root=root)
+                    if again.get("stale"):
+                        _accept_stale(outcome, client=client, root=root)
     except Exception:  # noqa: BLE001 — a delivery receipt is never worth a lost env
         pass
     grant_exp_ms = int(getattr(outcome, "grant_expires_at_ms", 0) or 0)
     _schedule_self_revoke(token, grant_exp_ms)
     return git_env_for_token(token), token
+
+
+#: Grant ids whose FRESH re-ask came back stale too (see :func:`_accept_stale`).
+#: Per process, bounded: ids are unique per serve, so the set only has to outlive
+#: one grant's cache lifetime, and the oldest are dropped first.
+_STALE_ACCEPTED: dict[str, None] = {}
+_STALE_ACCEPTED_MAX = 64
+
+
+def _accept_stale(outcome: Any, *, client: Any, root: Path | None) -> None:
+    """Stop re-asking for a grant the owner keeps serving "stale" (review R1-2).
+
+    A fresh grant that is ALSO older than the order record means the owner's
+    generation went backwards (clock stepped back, or a recorded generation far in
+    the future) — every later spawn would see the cached grant as stale, drop it,
+    re-ask and, on the App arm, re-mint, once per git command in every session.
+    Remember its id so the next spawn uses it, and receipt the anomaly ONCE
+    (``generation_regressed``) so the operator can find it; the recovery for a
+    clock that ran ahead is deleting ``network/github-narrowing.json``.
+    """
+    grant_id = str(getattr(outcome, "grant_id", "") or "")
+    if not grant_id:
+        return
+    _STALE_ACCEPTED[grant_id] = None
+    while len(_STALE_ACCEPTED) > _STALE_ACCEPTED_MAX:
+        _STALE_ACCEPTED.pop(next(iter(_STALE_ACCEPTED)))
+    _record_narrowing(
+        root,
+        str(getattr(client, "self_device", "") or ""),
+        _owner_key(outcome, client),
+        str(getattr(client, "network_id", "") or ""),
+        applied=False,
+        reason="generation_regressed",
+    )
 
 
 # ---------------------------------------------------------------------------

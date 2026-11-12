@@ -3293,13 +3293,22 @@ def _apply_refreshed_narrowing(detail: dict[str, Any]) -> dict[str, Any]:
             "repositories": list(github_app.repositories_for(None)),
             "changed": False,
         }
+    if result.get("error"):
+        # A REFUSED delivery: report the list this device actually holds, not the
+        # rejected one the result carries (QA Q-1 — a digest mismatch printed the
+        # delivered list as "still" in force).
+        applies = "not_applied"
+        repositories = list(github_app.repositories_for(None))
+    else:
+        applies = "after_next_mint" if result.get("stale") else "now"
+        repositories = list(result.get("repositories") or [])
     receipt: dict[str, Any] = {
         "delivered": True,
-        "repositories": list(result.get("repositories") or []),
+        "repositories": repositories,
         "changed": bool(result.get("changed")),
-        "applies": "after_next_mint" if result.get("stale") else "now",
+        "applies": applies,
     }
-    for field in ("previous", "digest", "generation", "error"):
+    for field in ("previous", "digest", "generation", "error", "owner_unknown"):
         if result.get(field) not in (None, ""):
             receipt[field] = result[field]
     return receipt
@@ -3314,8 +3323,15 @@ def _narrowing_lines(delivery: dict[str, Any]) -> list[str]:
     if delivery.get("error"):
         return [f"repositories: not applied ({delivery['error']}); still {repositories}"]
     if delivery.get("applies") == "after_next_mint":
-        return [f"repositories: {repositories} (a newer designation is already here)"]
+        # Matches the JSON's ``after_next_mint`` (review R1-5). On refresh this is
+        # reachable only when the owner's generation went backwards.
+        return [
+            f"repositories: {repositories} (not applied: this delivery is older than "
+            "the one already here; applies after the next mint)"
+        ]
     state = "changed" if delivery.get("changed") else "unchanged"
+    if delivery.get("owner_unknown"):
+        state += "; the owner was not named, so delivery order was not recorded"
     return [f"repositories: {repositories} ({state})"]
 
 

@@ -423,3 +423,196 @@ def test_the_human_receipt_names_the_list_and_whether_it_changed() -> None:
         "repositories: none (refuses every repository) (changed)"
     ]
     assert "sent no designation" in lines({"delivered": False, "repositories": [SCRATCH]})[0]
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation (PR #3841): cap, stale storm, owner key, receipt text
+# ---------------------------------------------------------------------------
+
+
+def _repos(count: int) -> list[str]:
+    return [f"acme/repo-{index:03d}" for index in range(count)]
+
+
+@pytest.mark.parametrize("count", [65, 500])
+def test_a_long_designation_crosses_the_peer_boundary_whole(tmp_path: Path, count: int) -> None:
+    """Mesh m2: a list over 64 was cut at the boundary and then failed its digest
+    forever. Up to the App mint maximum (500) it now arrives whole and applies,
+    and the settings validator accepts exactly that many."""
+    from local_operator.settings_io import _validate_github_repositories
+
+    repositories = _repos(count)
+    assert _validate_github_repositories(repositories) == repositories
+    narrowing = github_mod.grant_narrowing(repositories, generation_ms=7)
+    carried = Grant.from_detail({"access_token": "t", "narrowing": narrowing}).narrowing
+    assert carried["repositories"] == repositories
+    node = _node(tmp_path, [SCRATCH])
+    outcome = _deliver(node, carried)
+    assert outcome["error"] == "" and outcome["changed"] is True, outcome["error"]
+    assert github_mod.repositories_for(node) == tuple(repositories)
+
+
+def test_a_designation_over_the_cap_is_refused_never_truncated(tmp_path: Path) -> None:
+    """Over 500: the validator refuses it where a person types it, and a
+    hand-edited owner list that the boundary cuts is REFUSED on the borrower with
+    a named reason — never applied as a partial list."""
+    from local_operator.settings_io import _validate_github_repositories
+
+    too_many = _repos(501)
+    with pytest.raises(ValueError, match="at most 500"):
+        _validate_github_repositories(too_many)
+    narrowing = github_mod.grant_narrowing(too_many, generation_ms=7)
+    carried = Grant.from_detail({"access_token": "t", "narrowing": narrowing}).narrowing
+    assert len(carried["repositories"]) == 500
+    node = _node(tmp_path, [SCRATCH])
+    outcome = _deliver(node, carried)
+    assert outcome["error"] == "too_many_entries" and outcome["changed"] is False
+    assert github_mod.repositories_for(node) == (SCRATCH,)
+
+
+def _grant(
+    token: str, narrowing: dict[str, Any], *, grant_id: str = "", served_by: str = ""
+) -> Grant:
+    detail: dict[str, Any] = {
+        "access_token": token,
+        "grant_expires_at_ms": 0,
+        "narrowing": narrowing,
+        "grant_id": grant_id,
+    }
+    if served_by:
+        detail["credential_ref"] = {"owner_device": served_by}
+    return Grant.from_detail(detail)
+
+
+def test_a_re_ask_that_is_stale_too_is_not_re_asked_again(tmp_path: Path) -> None:
+    """R1-2: an owner whose generation went backwards answers every re-ask with a
+    grant that is stale too. One re-ask, one ``generation_regressed`` receipt, and
+    later spawns use that grant instead of dropping and re-minting per command."""
+    from local_operator.network.audit import AuditLog
+
+    node = _node(tmp_path, None)
+    _deliver(node, github_mod.grant_narrowing([SCRATCH, SECOND], generation_ms=5_000))
+    regressed = _grant(
+        "regressed",
+        github_mod.grant_narrowing([SCRATCH], generation_ms=1_000),
+        grant_id="g_r1",
+    )
+    asks: list[int] = []
+    cached: list[Grant] = [
+        _grant(
+            "old",
+            github_mod.grant_narrowing([SCRATCH], generation_ms=900),
+            grant_id="g_o",
+        )
+    ]
+
+    class Grants:
+        def drop(self, key: str) -> None:
+            cached.clear()
+
+    class Client:
+        self_device = BORROWER_DEVICE
+        network_id = NET
+        grants = Grants()
+
+        def owner_of(self, key: str) -> str:
+            return OWNER_DEVICE
+
+        def should_borrow(self, key: str) -> bool:
+            return True
+
+        def request_grant_sync(self, key: str, **kwargs: Any) -> Grant:
+            asks.append(1)
+            if not cached:
+                cached.append(regressed)  # the owner's answer, cached like the client does
+            return cached[0]
+
+    client = Client()
+    _, first = github_mod.borrowed_git_env(root=node, client=client)
+    assert first == "regressed" and len(asks) == 2
+    for _ in range(3):
+        _, token = github_mod.borrowed_git_env(root=node, client=client)
+        assert token == "regressed"
+    assert len(asks) == 5, "each later spawn is ONE ask (the cache), never a drop + re-ask"
+    refused = [
+        row
+        for row in AuditLog(node).tail(200, network_id=NET)
+        if row.get("event") == "credential.narrowing_refused"
+    ]
+    assert [row["detail"]["reason"] for row in refused] == ["generation_regressed"]
+    assert github_mod.repositories_for(node) == (SCRATCH, SECOND), "never the older list"
+
+
+def test_an_unknown_owner_never_records_under_an_empty_key(tmp_path: Path) -> None:
+    """R1-3: no owner anywhere -> the verified list applies, the order record is
+    neither read nor advanced, and the result says so."""
+    node = _node(tmp_path, [SCRATCH])
+    client = SimpleNamespace(self_device=BORROWER_DEVICE, network_id=NET, owner_of=lambda k: "")
+    outcome = github_mod.apply_grant_narrowing(
+        _grant("t", github_mod.grant_narrowing([SECOND], generation_ms=9)),
+        client=client,
+        root=node,
+    )
+    assert outcome["owner_unknown"] is True and outcome["changed"] is True, outcome
+    assert github_mod.repositories_for(node) == (SECOND,)
+    assert github_mod._read_narrowing_state(node) == {}  # noqa: SLF001
+
+
+def test_the_order_record_is_keyed_by_the_device_that_served_the_grant(
+    tmp_path: Path,
+) -> None:
+    """R1-4: a grant cached from the PREVIOUS owner, applied after ownership moved,
+    is ordered against that owner's deliveries, not the current owner's."""
+    node = _node(tmp_path, None)
+    client = SimpleNamespace(
+        self_device=BORROWER_DEVICE, network_id=NET, owner_of=lambda k: "d_new_owner"
+    )
+    github_mod.apply_grant_narrowing(
+        _grant(
+            "t",
+            github_mod.grant_narrowing([SCRATCH], generation_ms=10),
+            served_by="d_old_owner",
+        ),
+        client=client,
+        root=node,
+    )
+    assert github_mod.designation_delivered(node, "d_old_owner")["generation"] == 10
+    assert github_mod.designation_delivered(node, "d_new_owner") == {}
+
+
+def test_the_refresh_receipt_matches_its_json_on_stale_and_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5 + QA Q-1: ``after_next_mint`` says so in words, and a REFUSED delivery
+    reports the list this device actually holds, with ``applies: not_applied``."""
+    from local_operator.network import cli as network_cli
+    from local_operator.network.credentials import client as client_mod
+
+    node = _node(tmp_path, [SCRATCH])
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(node))
+    monkeypatch.setattr(
+        client_mod.MeshCredentialClient,
+        "for_this_device",
+        classmethod(lambda cls, r: None),
+    )
+    forged = {"repositories": [SCRATCH, SECOND], "digest": "0" * 32, "generation": "5"}
+    receipt = network_cli._apply_refreshed_narrowing(  # noqa: SLF001
+        {"narrowing": forged, "credential_ref": {"owner_device": OWNER_DEVICE}}
+    )
+    assert receipt["applies"] == "not_applied" and receipt["error"] == "digest_mismatch"
+    assert receipt["repositories"] == [SCRATCH], "the held list, not the rejected one"
+    assert network_cli._narrowing_lines(receipt) == [  # noqa: SLF001
+        f"repositories: not applied (digest_mismatch); still {SCRATCH}"
+    ]
+    stale_line = network_cli._narrowing_lines(  # noqa: SLF001
+        {"delivered": True, "repositories": [SCRATCH], "applies": "after_next_mint"}
+    )[0]
+    assert "not applied" in stale_line and "applies after the next mint" in stale_line
+
+
+def test_the_narrowing_lock_file_is_private(tmp_path: Path) -> None:
+    """QA NIT: the lock beside the order record is 0600 like its neighbours."""
+    node = _node(tmp_path, None)
+    _deliver(node, github_mod.grant_narrowing([SCRATCH], generation_ms=3))
+    lock = github_mod._narrowing_state_path(node).with_suffix(".lock")  # noqa: SLF001
+    assert lock.stat().st_mode & 0o777 == 0o600
