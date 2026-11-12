@@ -1087,7 +1087,13 @@ class SessionTable:
             # cost 24.6% of the picker's open on a 151-session store.
             rows = {
                 row.id: row._replace(created_at=session_created_at(directory / "sessions" / row.id))
-                for row in recent_session_rows(directory, 100, strict=True)
+                # TEMPORARY CHATS ARE READ HERE AND FILTERED PER REQUEST
+                # (``_list_frame(include_temporary=…)``): this durable half is
+                # ONE cache shared by every listing on the daemon, so it carries
+                # the rows and each frame decides whether its client asked.
+                for row in recent_session_rows(
+                    directory, 100, strict=True, include_temporary=True
+                )
             }
             dates = {}
             for session_id in live_ids - rows.keys():
@@ -1543,6 +1549,13 @@ class SessionTable:
                 active[session_id] = entry
         out: list[dict[str, Any]] = []
         ranks: dict[str, tuple[tuple[int, int, float, str], bool]] = {}
+        from local_operator.paths import config_dir as _config_dir
+        from local_operator.session.temporary import RowProjector
+
+        # The ``temporary`` object per row (``null`` for every ordinary one):
+        # a durable row already carries the scan's verdict, so only a live-only
+        # row pays a stat for its mark.
+        temporary_rows = RowProjector(_config_dir())
         for session_id in set(durable) | set(active):
             entry = active.get(session_id)
             # THE SESSION-HEALTH RECEIPTS (mobile UX batch 2, U7). The phone used
@@ -1627,6 +1640,9 @@ class SessionTable:
                     # in two different lists depending on where you looked.
                     "section": "active" if is_active else "previous",
                     "pinned": session_id in self.pins,
+                    "temporary": temporary_rows.info(
+                        session_id, bool(row.temporary) if row else None
+                    ),
                     # Tag decoration, from the same registry snapshot for every
                     # row in this listing. Always present (see the docstring).
                     **_tag_fields(tags, session_id),
@@ -2136,6 +2152,35 @@ def _notification_row_session_id(row: Any) -> str:
     if isinstance(facts, dict) and facts.get("id"):
         return str(facts.get("id") or "")
     return str(row.get("session_id") or "")
+
+
+def _temporary_refusal(code: str, session_id: str, **extra: Any) -> "JSONResponse":
+    """A temporary-chat refusal in the relay's ``{"error", "code"}`` shape.
+
+    The sentence is the desktop plane's catalogued one
+    (``server.utils.desktop_sessions.TemporaryRefusal``), so the phone and the
+    desktop say the same thing in the operator's language.
+    """
+    from starlette.responses import JSONResponse
+
+    from local_operator.server.utils.desktop_sessions import TemporaryRefusal
+
+    refusal = TemporaryRefusal(code, session_id, **extra)
+    body = refusal.envelope()
+    return JSONResponse(
+        {"error": body.get("text") or code, **body}, status_code=refusal.status
+    )
+
+
+def _temporary_deleted_response(session_id: str) -> "JSONResponse | None":
+    """404 ``session_temporary_deleted`` (with ``deleted_at``) for a deleted temporary chat."""
+    from local_operator.paths import config_dir
+    from local_operator.session.temporary import CODE_DELETED, deleted_at
+
+    stamp = deleted_at(config_dir(), session_id)
+    if stamp is None:
+        return None
+    return _temporary_refusal(CODE_DELETED, session_id, deleted_at=stamp)
 
 
 def _durable_user_session_dir(session_id: str) -> Path | None:
@@ -6396,7 +6441,9 @@ def build_app(daemon: MobileDaemon):
         response.headers["Cache-Control"] = "no-store"  # the SPA shell; assets are hashed
         return response
 
-    async def _list_frame(include_peers: bool = False) -> dict[str, Any]:
+    async def _list_frame(
+        include_peers: bool = False, include_temporary: bool = False
+    ) -> dict[str, Any]:
         """The session-list payload, in ONE place because it goes out two ways.
 
         ``/api/sessions`` and the ``sessions`` event frame are the same answer
@@ -6455,6 +6502,12 @@ def build_app(daemon: MobileDaemon):
         # A copy: ``summaries()`` hands out the cache, and the appends below are
         # this request's answer, not the table's state.
         sessions = list(await daemon.table.summaries())
+        # TEMPORARY CHATS only for a client that asked (``include_temporary``,
+        # gated on ``features.temporary_chats``): both transports take the flag,
+        # for the reason ``include_peers`` does — the home screen reads the SSE
+        # stream, and a flag honoured only by the GET would empty its group.
+        if not include_temporary:
+            sessions = [row for row in sessions if row.get("temporary") is None]
         if include_peers:
             peers = await asyncio.to_thread(
                 mobile_mesh.remote_session_rows,
@@ -6580,7 +6633,12 @@ def build_app(daemon: MobileDaemon):
         denied = gate(request)
         if denied is not None:
             return denied
-        return JSONResponse(await _list_frame(include_peers=_query_flag(request, "include_peers")))
+        return JSONResponse(
+            await _list_frame(
+                include_peers=_query_flag(request, "include_peers"),
+                include_temporary=_query_flag(request, "include_temporary"),
+            )
+        )
 
     async def api_agent_avatar(request: Request) -> Response:
         """``GET /v1/agents/{agent_id}/avatar`` -- an agent's picture, on the relay.
@@ -6722,6 +6780,12 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         session_id = str(request.path_params["session_id"])
+        # A DELETED TEMPORARY CHAT closes the stream with its own 404, so the
+        # phone shows the tombstone screen instead of an endless reconnect.
+        if _entry_for_session(daemon, session_id) is None:
+            gone = await asyncio.to_thread(_temporary_deleted_response, session_id)
+            if gone is not None:
+                return gone
 
         # A response whose headers fail to send never began viewing. Own the
         # queue only inside the iterator — registration happens on the first
@@ -6747,6 +6811,24 @@ def build_app(daemon: MobileDaemon):
                 # and generation prune run only if no stream for this
                 # conversation opens meanwhile.
                 daemon.leave_phone_view(session_id)
+
+        temporary_memo: list[Any] = [None, -1.0]
+
+        def stamp_temporary(frame: dict[str, Any]) -> dict[str, Any]:
+            """The frame plus this chat's ``temporary`` object (``null`` if none).
+
+            A COPY, since a broadcast frame is shared by every subscriber. The
+            read (one ``stat`` for an ordinary chat) is memoised for a few
+            seconds: frames are rate-capped, but a countdown needs no fresher.
+            """
+            from local_operator.paths import config_dir
+            from local_operator.session.temporary import RowProjector
+
+            now = time.monotonic()
+            if now - temporary_memo[1] > 5.0:
+                temporary_memo[0] = RowProjector(config_dir()).info(session_id)
+                temporary_memo[1] = now
+            return {**frame, "temporary": temporary_memo[0]}
 
         async def stream():
             subscribers = daemon.table.session_subscribers.setdefault(session_id, set())
@@ -6791,7 +6873,7 @@ def build_app(daemon: MobileDaemon):
                 loop = asyncio.get_running_loop()
                 sent_at: float | None = None
                 if projection is not None:
-                    yield _sse("projection", _projection_frame(projection))
+                    yield _sse("projection", stamp_temporary(_projection_frame(projection)))
                     sent_at = loop.time()
                 while True:
                     try:
@@ -6808,7 +6890,9 @@ def build_app(daemon: MobileDaemon):
                         wait = PROJECTION_FRAME_INTERVAL_S - (loop.time() - sent_at)
                         if wait > 0:
                             await asyncio.sleep(wait)
-                    yield _sse("projection", _latest_projection_frame(queue, frame))
+                    yield _sse(
+                        "projection", stamp_temporary(_latest_projection_frame(queue, frame))
+                    )
                     sent_at = loop.time()
             finally:
                 await _cleanup_stream(release)
@@ -6945,10 +7029,16 @@ def build_app(daemon: MobileDaemon):
 
     #: The newest serialized list event per ``include_peers`` flag, with the
     #: ring revision observed BEFORE its build began: ``(revision, event)``.
-    list_events: dict[bool, tuple[int, str]] = {}
-    list_event_locks = {False: asyncio.Lock(), True: asyncio.Lock()}
+    # Keyed by the subscriber's flags ``(include_peers, include_temporary)``:
+    # each combination is its own serialized answer.
+    list_events: dict[tuple[bool, bool], tuple[int, str]] = {}
+    list_event_locks = {
+        (peers, temp): asyncio.Lock() for peers in (False, True) for temp in (False, True)
+    }
 
-    async def _shared_list_event(include_peers: bool, needed: int | None) -> str:
+    async def _shared_list_event(
+        include_peers: bool, needed: int | None, include_temporary: bool = False
+    ) -> str:
         """One serialized ``sessions`` event that reflects ring ``needed``.
 
         A cached build is reusable iff its build began at or after that ring
@@ -6964,15 +7054,21 @@ def build_app(daemon: MobileDaemon):
         aged out of the summaries TTL), so a reopened stream must not be seeded
         from a build made before it existed.
         """
-        async with list_event_locks[include_peers]:
-            cached = list_events.get(include_peers)
+        flags = (include_peers, include_temporary)
+        async with list_event_locks[flags]:
+            cached = list_events.get(flags)
             if needed is not None and cached is not None and cached[0] >= needed:
                 return cached[1]
             revision = daemon.table.list_revision
-            event = _sse("sessions", await _list_frame(include_peers=include_peers))
-            newest = list_events.get(include_peers)
+            event = _sse(
+                "sessions",
+                await _list_frame(
+                    include_peers=include_peers, include_temporary=include_temporary
+                ),
+            )
+            newest = list_events.get(flags)
             if newest is None or newest[0] <= revision:
-                list_events[include_peers] = (revision, event)
+                list_events[flags] = (revision, event)
             return event
 
     async def api_list_events(request: Request) -> Response:
@@ -6989,6 +7085,8 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         include_peers = _query_flag(request, "include_peers")
+        # Read once at open, like ``include_peers`` and for the same reason.
+        include_temporary = _query_flag(request, "include_temporary")
         queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
 
         def release() -> None:
@@ -6999,7 +7097,7 @@ def build_app(daemon: MobileDaemon):
             daemon.table.list_subscribers.add(queue)
             try:
                 loop = asyncio.get_running_loop()
-                last = await _shared_list_event(include_peers, None)
+                last = await _shared_list_event(include_peers, None, include_temporary)
                 yield last
                 sent_at = wrote_at = loop.time()
                 while True:
@@ -7024,7 +7122,9 @@ def build_app(daemon: MobileDaemon):
                         await asyncio.sleep(wait)
                     while not queue.empty():
                         queue.get_nowait()
-                    event = await _shared_list_event(include_peers, daemon.table.list_revision)
+                    event = await _shared_list_event(
+                        include_peers, daemon.table.list_revision, include_temporary
+                    )
                     sent_at = loop.time()
                     if event == last:
                         # A ring is "something MAY have changed"; most rings
@@ -7089,7 +7189,9 @@ def build_app(daemon: MobileDaemon):
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
         if entry is None and _durable_user_session_dir(session_id) is None:
-            return JSONResponse({"error": "unknown session"}, status_code=404)
+            return _temporary_deleted_response(session_id) or JSONResponse(
+                {"error": "unknown session"}, status_code=404
+            )
         from local_operator.session.attention import (
             SUPERSEDED_TOKEN_CODE,
             AttentionStore,
@@ -7338,7 +7440,9 @@ def build_app(daemon: MobileDaemon):
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
         if entry is None and _durable_user_session_dir(session_id) is None:
-            return JSONResponse({"error": "unknown session"}, status_code=404)
+            return _temporary_deleted_response(session_id) or JSONResponse(
+                {"error": "unknown session"}, status_code=404
+            )
         try:
             body = await request.json()
         except (ValueError, UnicodeDecodeError):
@@ -7368,6 +7472,14 @@ def build_app(daemon: MobileDaemon):
         # none (design round 5, D13). What is left names the reason and the
         # remedy in one sentence, from either surface: the list's long-press has
         # no composer in reach, so the advice is what to send, not where.
+        if pinned:
+            # A pin is a promise to keep; a temporary chat is one to delete.
+            from local_operator.paths import config_dir
+            from local_operator.session.temporary import pin_refusal
+
+            code = await asyncio.to_thread(pin_refusal, config_dir(), session_id)
+            if code:
+                return _temporary_refusal(code, session_id)
         if pinned and not await asyncio.to_thread(_session_folder_exists, session_id):
             daemon.table.notify_list_changed()
             return JSONResponse(
@@ -7383,6 +7495,50 @@ def build_app(daemon: MobileDaemon):
         # The caller gets the state the list will show (the read-back), so a retry
         # is idempotent and the answer cannot claim a pin the reader pruned.
         return JSONResponse({"ok": True, "pinned": state})
+
+    async def api_session_temporary(request: Request) -> Response:
+        """Make a conversation temporary or keep it: ``{"temporary": bool}``.
+
+        The relay twin of ``POST /v1/desktop/sessions/{id}/temporary``, with the
+        same desired-state body, reply ``{"session_id", "temporary"}`` and
+        refusals (409 ``session_pinned``/``session_in_project``/
+        ``session_not_user``; 404 ``session_not_found``/``session_temporary_deleted``).
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+        from local_operator.session import temporary as temp
+
+        session_id = str(request.path_params["session_id"])
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = None
+        wanted = body.get("temporary") if isinstance(body, dict) else None
+        if not isinstance(body, dict) or set(body) != {"temporary"} or not isinstance(wanted, bool):
+            return JSONResponse({"error": "temporary (a boolean) is required"}, status_code=422)
+
+        def apply() -> JSONResponse | dict[str, Any]:
+            root = config_dir()
+            if session_id in ("", ".", "..") or Path(session_id).name != session_id:
+                return _temporary_refusal(temp.CODE_NOT_FOUND, session_id)
+            if not (root / "sessions" / session_id).is_dir():
+                return _temporary_deleted_response(session_id) or _temporary_refusal(
+                    temp.CODE_NOT_FOUND, session_id
+                )
+            result = temp.write_mark(root, session_id, wanted, by="relay")
+            if not result.ok:
+                return _temporary_refusal(result.code, session_id)
+            daemon.table.invalidate_summaries_cache()
+            return {"session_id": session_id, "temporary": temp.RowProjector(root).info(session_id)}
+
+        answer = await asyncio.to_thread(apply)
+        if isinstance(answer, JSONResponse):
+            return answer
+        # The row moves between the ordinary list and the Temporary group.
+        daemon.table.notify_list_changed()
+        return JSONResponse(answer)
 
     async def api_tags(request: Request) -> Response:
         """``GET /api/tags`` -- the shared catalogue, READ-ONLY on the phone.
@@ -7764,7 +7920,9 @@ def build_app(daemon: MobileDaemon):
         # Live sessions retain the existing eligibility path; durable-only
         # routes must prove they are user sessions before any filesystem read.
         if entry is None and _durable_user_session_dir(session_id) is None:
-            return JSONResponse({"error": "unknown session"}, status_code=404)
+            return _temporary_deleted_response(session_id) or JSONResponse(
+                {"error": "unknown session"}, status_code=404
+            )
         before = request.query_params.get("before")
         try:
             limit = max(1, min(int(request.query_params.get("limit", "80")), 200))
@@ -7812,7 +7970,9 @@ def build_app(daemon: MobileDaemon):
         session_id = str(request.path_params["session_id"])
         entry = _entry_for_session(daemon, session_id)
         if entry is None and _durable_user_session_dir(session_id) is None:
-            return JSONResponse({"error": "unknown session"}, status_code=404)
+            return _temporary_deleted_response(session_id) or JSONResponse(
+                {"error": "unknown session"}, status_code=404
+            )
         from local_operator.mobile.checkpoints import manifest_payload
         from local_operator.paths import config_dir
 
@@ -9378,6 +9538,33 @@ def build_app(daemon: MobileDaemon):
         rows = await asyncio.to_thread(_skill_rows, daemon, session_id)
         return JSONResponse({"skills": rows})
 
+    async def _mark_started_temporary(session_id: str) -> Response | None:
+        """Mark a just-started session temporary; a refusal response, or ``None``.
+
+        The runtime has registered by now, so its directory exists or is about
+        to; it is created here if not (the child materialises into it). A mark
+        that does not read back answers 500 ``temporary_mark_failed`` naming
+        the session: it was started, and the phone must not believe it is
+        temporary when it is not.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.temporary import write_mark
+
+        def mark() -> str:
+            if not session_id or Path(session_id).name != session_id:
+                return "temporary_mark_failed"
+            (config_dir() / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+            result = write_mark(config_dir(), session_id, True, by="relay")
+            return "" if result.ok else (result.code or "temporary_mark_failed")
+
+        code = await asyncio.to_thread(mark)
+        if not code:
+            return None
+        return JSONResponse(
+            {"error": code, "code": code, "session_id": session_id},
+            status_code=500 if code == "temporary_mark_failed" else 409,
+        )
+
     async def api_start_session(request: Request) -> Response:
         """Start a daemon-owned session in ``cwd`` and register it through
         the normal record+socket path, so it is indistinguishable from a
@@ -9441,6 +9628,8 @@ def build_app(daemon: MobileDaemon):
                     # exactly as before the field existed.
                     if intent.get("effort"):
                         chosen["effort"] = intent["effort"]
+                    if intent.get("temporary"):
+                        chosen["temporary"] = "1"
                     return chosen
 
                 async def spawn_start(chosen: dict[str, str], sid: str) -> int:
@@ -9465,6 +9654,11 @@ def build_app(daemon: MobileDaemon):
                     {"error": "invalid_start_selection", "code": "invalid_start_selection"},
                     status_code=400,
                 )
+            if intent.get("temporary") and isinstance(answer, dict):
+                # Idempotent, so a replayed receipt re-asserts the same mark.
+                refused = await _mark_started_temporary(str(answer.get("session_id") or ""))
+                if refused is not None:
+                    return refused
             return JSONResponse(answer)
         # Checked before the directory read below so a bad level costs nothing;
         # the same validator the keyed path applies inside ``canonical_request``.
@@ -9512,6 +9706,10 @@ def build_app(daemon: MobileDaemon):
         except Exception as exc:  # noqa: BLE001
             logger.warning("mobile session spawn failed", exc_info=True)
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+        if body.get("temporary") is True:
+            refused = await _mark_started_temporary(session_id)
+            if refused is not None:
+                return refused
         return JSONResponse({"ok": True, "pid": pid, "session_id": session_id})
 
     async def api_resume_session(request: Request) -> Response:
@@ -9544,7 +9742,9 @@ def build_app(daemon: MobileDaemon):
         try:
             resume_dir(config_dir(), session_id)
         except ResumeNotFound:
-            return JSONResponse({"error": f"no such past session: {session_id}"}, status_code=404)
+            return _temporary_deleted_response(session_id) or JSONResponse(
+                {"error": f"no such past session: {session_id}"}, status_code=404
+            )
         # spawn_session coalesces concurrent resume requests until the verified
         # owner is ready, and later retries reattach that same live owner.
         # The transcript dir does not reliably record a cwd, so resume in the
@@ -11205,6 +11405,9 @@ def build_app(daemon: MobileDaemon):
         # verdict buckets out, a no-op batch still 2xx.
         Route("/api/attention/seen", api_attention_seen_many, methods=["POST"]),
         Route("/api/sessions/{session_id:str}/pin", api_session_pin, methods=["POST"]),
+        Route(
+            "/api/sessions/{session_id:str}/temporary", api_session_temporary, methods=["POST"]
+        ),
         # Read-only catalogue + per-conversation desired-state assignment; see
         # the handlers for why creation/rename does not exist on this surface.
         Route("/api/tags", api_tags),
