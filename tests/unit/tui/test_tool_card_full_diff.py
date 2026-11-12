@@ -96,7 +96,8 @@ def test_complete_inline_diff_past_the_preview_opens_whole_without_io() -> None:
     assert card.toggle_expanded() is True
     rows = _diff_rows(card)
     assert len(rows) == EXPAND_MAX_LINES + 1
-    assert rows[-1] == f"… {121 - EXPAND_MAX_LINES} more diff lines"
+    # The marker offers the next level with the header's own hint (U2).
+    assert rows[-1] == f"… {121 - EXPAND_MAX_LINES} more diff lines {EXPAND_HINT}"
     assert card._full_diff_offered()
     # Second press: every row, no marker, still expanded.
     assert card.toggle_expanded() is True
@@ -168,7 +169,7 @@ async def test_parent_card_pages_the_complete_archived_diff_in_git_colours(tmp_p
         assert len(preview) == EXPAND_MAX_LINES + 1
         # The marker counts the rows the inline record omitted, not only the
         # ones the preview skipped: 500 added lines + one hunk header.
-        assert preview[-1] == f"… {501 - EXPAND_MAX_LINES} more diff lines"
+        assert preview[-1] == f"… {501 - EXPAND_MAX_LINES} more diff lines {EXPAND_HINT}"
         card._hovered = True
         assert EXPAND_HINT in card._build_content(100).plain.split("\n")[0]
         await pilot.press("enter")
@@ -266,9 +267,230 @@ async def test_subagent_page_card_pages_the_childs_archived_diff(tmp_path) -> No
         assert card._diff_archive_directory() == child_dir
         card.activate()
         await pilot.pause()
-        assert _diff_rows(card)[-1] == f"… {501 - EXPAND_MAX_LINES} more diff lines"
+        assert _diff_rows(card)[-1] == f"… {501 - EXPAND_MAX_LINES} more diff lines {EXPAND_HINT}"
         card.activate()
         await _settle_full(pilot, card)
         rows = _diff_rows(card)
         assert len(rows) == 501 and rows[-1] == "+FINAL_SENTINEL = 3"
         assert _ink_of(card, "+MIDDLE_SENTINEL") == _expect("success")
+
+
+# -- review round 1 remediation ---------------------------------------------------
+
+
+async def _mounted_card(app: OperatorApp, pilot: Any, details: dict[str, Any]) -> ToolCard:
+    workers = [w for w in app.workers if w.group == "session"]
+    if workers:
+        await app.workers.wait_for_complete(workers)
+    card = ToolCard("w-big", "write", {"path": "big.py"})
+    card.mark_done("Wrote big.py", details)
+    app._append_block(card)
+    await pilot.pause()
+    return card
+
+
+def _marker_line(card: ToolCard) -> int:
+    lines = card._build_content(card.size.width or 100).plain.split("\n")
+    return next(i for i, line in enumerate(lines) if line.strip().startswith("… "))
+
+
+def test_load_all_rows_proves_once_and_enforces_the_row_bound(tmp_path, monkeypatch) -> None:
+    """One journal walk per read, not one per 200-row page; the docstring's bound holds."""
+    rows = ["--- ", "+++ ", "@@ -0,0 +1,700 @@", *(f"+r{n}" for n in range(700))]
+    desc = diff_archive.write_archive(rows, session_id=SESSION_ID, call_id="b", tool_name="write")
+    session_dir = tmp_path / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True)
+    payload = {
+        "role": "tool",
+        "tool_call_id": "b",
+        "tool_name": "write",
+        "provider_payload": {"details": {"diff_full": desc, DIFF_TRUNCATED_ROWS_KEY: 500}},
+    }
+    (session_dir / "transcript.jsonl").write_text(
+        json.dumps({"id": "m-b", "ts": 0, "type": "message", "payload": payload}) + "\n"
+    )
+    walks: list[str] = []
+    real = diff_archive.find_tool_details
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        walks.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(diff_archive, "find_tool_details", counting)
+    assert diff_archive.load_all_rows(session_dir, SESSION_ID, "b") == rows
+    assert walks == ["b"], "the membership proof runs once per read"
+    # An artifact claiming more rows than the writer can produce is refused.
+    monkeypatch.setattr(diff_archive, "ARCHIVE_MAX_ROWS", len(rows) - 1)
+    assert diff_archive.load_all_rows(session_dir, SESSION_ID, "b") is None
+
+
+@pytest.mark.asyncio
+async def test_opening_the_whole_diff_keeps_the_marker_row_in_place(tmp_path) -> None:
+    """U1: Enter at the end of a preview grows the card where the reader looks."""
+    details = await _archived_write(tmp_path)
+    app = OperatorApp(_async_factory(_ParentSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        card = await _mounted_card(app, pilot, details)
+        view = card.parent
+        card.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        view.scroll_end(animate=False, immediate=True)  # type: ignore[union-attr]
+        await pilot.pause()
+        marker = _marker_line(card)
+        before = card.virtual_region.y + marker - round(view.scroll_y)  # type: ignore[union-attr]
+        assert 0 <= before < view.scrollable_content_region.height  # type: ignore[union-attr]
+        await pilot.press("enter")
+        await _settle_full(pilot, card)
+        for _ in range(3):
+            await pilot.pause()
+        after = card.virtual_region.y + marker - round(view.scroll_y)  # type: ignore[union-attr]
+        assert after == before, "the first new row lands on the marker's screen row"
+        line = card._build_content(card.size.width).plain.split("\n")[marker].strip()
+        assert line == details["diff"][2:][EXPAND_MAX_LINES].strip()
+
+
+@pytest.mark.asyncio
+async def test_marker_row_offers_the_next_level_and_a_click_on_it_opens_it(tmp_path) -> None:
+    """U2: the existing hint sits on the marker; clicking that row activates the card."""
+    details = await _archived_write(tmp_path)
+    app = OperatorApp(_async_factory(_ParentSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        card = await _mounted_card(app, pilot, details)
+        card.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert _diff_rows(card)[-1].endswith(EXPAND_HINT)
+        card.parent.scroll_end(animate=False, immediate=True)  # type: ignore[union-attr]
+        await pilot.pause()
+        await pilot.click(card, offset=(6, _marker_line(card)))
+        await _settle_full(pilot, card)
+        rows = _diff_rows(card)
+        assert len(rows) == 501 and not any(EXPAND_HINT in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_press_while_the_read_is_in_flight_collapses(tmp_path, monkeypatch) -> None:
+    """The second press used to be swallowed; the hint now says what it does."""
+    import threading
+
+    details = await _archived_write(tmp_path)
+    gate = threading.Event()
+    real = diff_archive.load_all_rows
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        gate.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(diff_archive, "load_all_rows", slow)
+    app = OperatorApp(_async_factory(_ParentSession()))
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            card = await _mounted_card(app, pilot, details)
+            card.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("enter")  # the read starts and blocks
+            await pilot.pause()
+            assert card._full_diff_loading
+            # Honest hint: the next press collapses, so the header offers that.
+            header = card._build_content(100).plain.split("\n")[0]
+            assert COLLAPSE_HINT in header and EXPAND_HINT not in header
+            await pilot.press("enter")
+            await pilot.pause()
+            assert card.expanded is False, "a press during the read collapses the card"
+            gate.set()
+            for _ in range(200):
+                await pilot.pause()
+                if not card._full_diff_loading:
+                    break
+            await pilot.pause()
+            assert card.expanded is False and not card._full_diff_shown
+            # The rows landed in the cache: reopening needs no second read.
+            assert card._full_diff_rows is not None
+    finally:
+        gate.set()
+
+
+@pytest.mark.asyncio
+async def test_a_paint_fault_after_the_read_does_not_close_the_tui(tmp_path, monkeypatch) -> None:
+    details = await _archived_write(tmp_path)
+
+    def broken(self: ToolCard) -> None:
+        raise RuntimeError("paint fault")
+
+    app = OperatorApp(_async_factory(_ParentSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        card = await _mounted_card(app, pilot, details)
+        card.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        monkeypatch.setattr(ToolCard, "_show_full_diff", broken)
+        await pilot.press("enter")
+        for _ in range(200):
+            await pilot.pause()
+            if not card._full_diff_loading:
+                break
+        for _ in range(3):
+            await pilot.pause()
+        assert app.return_code is None and app.is_running
+
+
+@pytest.mark.asyncio
+async def test_a_header_refresh_on_the_whole_diff_does_not_repaint_the_body(monkeypatch) -> None:
+    """Q1: hovering an 8 000-row whole diff re-renders the rows on screen, not all of them.
+
+    Measured on the base: every hover re-rendered all 8 002 rows (0.35-0.95 s
+    of a frozen loop on this host). Pinned two ways: the rows the card renders
+    for one header refresh are bounded by the viewport, and that refresh costs
+    less than ONE full render of the same card on the same machine.
+    """
+    import time
+
+    from textual.content import Content
+    from textual.visual import Visual
+
+    total = 8000
+    rows = ["--- ", "+++ ", f"@@ -0,0 +1,{total} @@", *(f"+v_{n} = {n}" for n in range(total))]
+    app = OperatorApp(_async_factory(FakeSession()))
+    async with app.run_test(size=(110, 40)) as pilot:
+        card = ToolCard("huge", "write", {"path": "x"})
+        card.mark_done(
+            "Wrote x",
+            {"path": "x", "added": total, "removed": 0, "diff": rows[:203],
+             DIFF_TRUNCATED_ROWS_KEY: total - 200},
+        )
+        app._append_block(card)
+        await pilot.pause()
+        card._full_diff_rows = rows  # the read's result, without the I/O
+        card.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(5):
+            await pilot.pause()
+        assert card.size.height == total + 2
+        card._focused = False  # a hover repaints only an unfocused card
+        painted: list[int] = []
+        real = Visual.to_strips.__func__  # type: ignore[attr-defined]
+
+        def counting(cls: Any, widget: Any, *args: Any, **kwargs: Any) -> Any:
+            strips = real(cls, widget, *args, **kwargs)
+            if widget is card:
+                painted.append(len(strips))
+            return strips
+
+        monkeypatch.setattr(Visual, "to_strips", classmethod(counting))
+        started = time.perf_counter()
+        card._set_hovered(True)
+        for _ in range(3):
+            await pilot.pause()
+        hover = time.perf_counter() - started
+        assert EXPAND_HINT not in card._build_content(110).plain.split("\n")[0]
+        assert 0 < sum(painted) <= 40, f"rendered {sum(painted)} rows for one hint"
+        monkeypatch.setattr(Visual, "to_strips", classmethod(real))
+        started = time.perf_counter()
+        whole = Content.from_rich_text(card._build_content(card.size.width))
+        Visual.to_strips(card, whole, card.size.width, None, card.visual_style)
+        full_render = time.perf_counter() - started
+        assert hover < full_render, (hover, full_render)

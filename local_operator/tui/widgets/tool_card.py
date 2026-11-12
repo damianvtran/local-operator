@@ -86,11 +86,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
 import textwrap
 import time
+from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -98,9 +100,12 @@ from typing import Any
 
 from rich.cells import cell_len
 from rich.style import Style
-from rich.text import Text
+from rich.text import Span, Text
+from textual.content import Content
 from textual.message import Message
+from textual.strip import Strip
 from textual.timer import Timer
+from textual.visual import Visual
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.peer_cycles import current_peer_communication_succeeded
@@ -217,6 +222,8 @@ _RESET_LABEL = "session reset"
 _STOP_PENDING_LABEL = "stop unconfirmed"
 #: Expansion affordance trailing the summary. Both spellings are the same
 #: click target; only the label flips so the row always says what a click does.
+_LOG = logging.getLogger(__name__)
+
 EXPAND_HINT = "⟨expand⟩"
 COLLAPSE_HINT = "⟨collapse⟩"
 
@@ -1547,6 +1554,85 @@ class _UnknownStart:
 START_UNKNOWN = _UnknownStart()
 
 
+class _LazyRows:
+    """A card's content split into rows, each rendered only when asked for.
+
+    Textual's ``Static`` renders its WHOLE visual on every repaint, so a card
+    showing an 8 000-row diff re-rendered all of it whenever its header hint
+    changed -- 0.35-0.75 s of a frozen terminal per hover (QA round 1, Q1).
+    Here a row is cut out of the ``Text`` and rendered on demand: the
+    compositor asks only for the rows on screen. Spans are bucketed per row
+    once, so cutting a row costs its own spans, not the whole card's.
+    """
+
+    __slots__ = ("_text", "_lines", "_starts", "_spans", "_strips", "_key", "_content")
+
+    def __init__(self, text: Text) -> None:
+        self._text = text
+        self._lines = text.plain.split("\n")
+        starts: list[int] = []
+        at = 0
+        for line in self._lines:
+            starts.append(at)
+            at += len(line) + 1
+        self._starts = starts
+        buckets: list[list[Span]] = [[] for _ in self._lines]
+        for span in text.spans:
+            if span.end <= span.start:
+                continue
+            first = bisect_right(starts, span.start) - 1
+            last = bisect_right(starts, span.end - 1) - 1
+            for index in range(max(0, first), last + 1):
+                begin = starts[index]
+                lo = max(span.start, begin) - begin
+                hi = min(span.end, begin + len(self._lines[index])) - begin
+                if hi > lo:
+                    buckets[index].append(Span(lo, hi, span.style))
+        self._spans = buckets
+        self._strips: dict[int, Strip] = {}
+        self._key: tuple[Any, ...] | None = None
+        self._content: Content | None = None
+
+    def __len__(self) -> int:
+        return len(self._lines)
+
+    def forget(self) -> None:
+        """Drop the rendered rows (a repaint was asked for); the cut rows stay."""
+        self._strips.clear()
+
+    def content(self) -> Content:
+        """The whole card as one visual, converted once, for whole-card readers."""
+        if self._content is None:
+            self._content = Content.from_rich_text(self._text)
+        return self._content
+
+    def strip(self, widget: Any, y: int, width: int, style: Any) -> Strip:
+        key = (width, style)
+        if key != self._key:
+            self._key = key
+            self._strips.clear()
+        cached = self._strips.get(y)
+        if cached is not None:
+            return cached
+        if not 0 <= y < len(self._lines):
+            painted = Strip.blank(width, style.rich_style)
+        else:
+            text = self._text
+            line = Text(
+                self._lines[y],
+                style=text.style,
+                justify=text.justify,
+                overflow=text.overflow,
+                no_wrap=text.no_wrap,
+                end="",
+                spans=self._spans[y],
+            )
+            strips = Visual.to_strips(widget, Content.from_rich_text(line), width, 1, style)
+            painted = strips[0] if strips else Strip.blank(width, style.rich_style)
+        self._strips[y] = painted
+        return painted
+
+
 class ToolCard(ExpandableActionBlock):
     """A tool execution: ONE row, on a state-tinted elevation step.
 
@@ -1865,6 +1951,23 @@ class ToolCard(ExpandableActionBlock):
         self._full_diff_rows: list[str] | None = None
         self._full_diff_shown = False
         self._full_diff_loading = False
+        #: Whether the in-flight read should open the whole diff when it lands:
+        #: a collapse during the read cancels the intent (review round 1).
+        self._full_diff_wanted = False
+        #: The preview's ``… N more diff lines`` row, as a line index of the
+        #: card's content (``None`` when the body painted none). The preview ->
+        #: whole transition holds the reader's eye on it (UX round 1, U1).
+        self._diff_marker_row: int | None = None
+        #: The diff body as last built, reused while its inputs are unchanged:
+        #: a header refresh (hover, focus, hint) re-assembles the card, and
+        #: rebuilding thousands of rows for a one-row change was the bulk of
+        #: the whole-diff level's per-refresh cost (QA round 1, Q1).
+        self._diff_body_cache: (
+            tuple[tuple[Any, ...], Sequence[str], Text, int | None] | None
+        ) = None
+        #: Line-at-a-time painter for a card showing its whole diff (Q1): only
+        #: the rows on screen are rendered, never the thousands above/below.
+        self._lazy_rows: _LazyRows | None = None
         #: The id the archive is proved against. The parent's cards carry their
         #: ``tool_call_id``; a subagent page builds its cards with an empty id
         #: (its rows are keyed by the fold) and binds the child's call id here.
@@ -3372,7 +3475,14 @@ class ToolCard(ExpandableActionBlock):
         the whole diff instead of collapsing, so the reader reaches it with the
         gesture they already used (Enter/Space/click), not a new binding.
         """
-        if not self._expanded or self._full_diff_shown or self._state != "success":
+        if (
+            not self._expanded
+            or self._full_diff_shown
+            or self._full_diff_loading
+            or self._state != "success"
+        ):
+            # While the read is in flight the next press collapses (below), so
+            # the hint says so: nothing deeper is on offer until rows land.
             return False
         diff = self._diff or []
         if not diff:
@@ -3387,15 +3497,17 @@ class ToolCard(ExpandableActionBlock):
 
         Every other card keeps the base's two-state toggle unchanged.
         """
-        if self._full_diff_loading:
-            return self._expanded  # one read in flight; a repeat press waits on it
         if self._full_diff_offered():
             self._open_full_diff()
             return self._expanded
         if self._expanded:
             # Collapsing returns the card to its first level; the rows already
             # read stay cached, so reopening the whole diff costs no second read.
+            # A press while the read is in flight collapses too (it used to be
+            # swallowed, so the card looked dead): the read finishes into the
+            # cache and opens nothing the reader has since closed.
             self._full_diff_shown = False
+            self._full_diff_wanted = False
         return super().toggle_expanded()
 
     def _archived(self) -> bool:
@@ -3413,8 +3525,16 @@ class ToolCard(ExpandableActionBlock):
             directory = self._diff_archive_directory()
             if directory is not None:
                 self._full_diff_loading = True
+                self._full_diff_wanted = True
+                # The header hint turns to the collapse the next press now does.
+                self._refresh_row()
+                # `exit_on_error=False`: a fault after the read (the paint
+                # below) must cost this card, never the whole TUI (review R).
                 self.run_worker(
-                    self._load_full_diff(directory), group="tool-card-full-diff", exclusive=True
+                    self._load_full_diff(directory),
+                    group="tool-card-full-diff",
+                    exclusive=True,
+                    exit_on_error=False,
                 )
                 return
         self._show_full_diff()
@@ -3438,16 +3558,38 @@ class ToolCard(ExpandableActionBlock):
         finally:
             self._full_diff_loading = False
         self._full_diff_rows = rows
-        if self._expanded:
-            self._show_full_diff()
+        wanted, self._full_diff_wanted = self._full_diff_wanted, False
+        try:
+            if self._expanded and wanted:
+                self._show_full_diff()
+            elif self._expanded:
+                self._refresh_row()  # the hint offers the next level again
+        except Exception:  # noqa: BLE001 - a paint fault must not close the TUI
+            _LOG.exception("tool card: painting the whole diff failed")
 
     def _show_full_diff(self) -> None:
+        """Paint the whole diff, holding the preview's marker row in place.
+
+        The first newly shown row lands on the screen row the ``… N more``
+        marker occupied, so the reader sees the new rows appear exactly where
+        they asked for them (UX round 1, U1). The card's top used to be
+        revealed instead, which at the end of a preview is always above the
+        viewport: the press scrolled the reader back to rows already read. A
+        marker that is not on screen keeps the old reveal.
+        """
+        parent = self.parent
+        held: int | None = None
+        marker = self._diff_marker_row
+        if isinstance(parent, TranscriptView) and marker is not None:
+            held = parent.block_row_on_screen(self, marker)
         self._full_diff_shown = True
         self._refresh_row()
-        parent = self.parent
         if isinstance(parent, TranscriptView):
             parent.refresh_gap_after(self)
-            parent.call_after_refresh(lambda: parent.reveal_block(self))
+            if held is not None and marker is not None:
+                parent.hold_block_row(self, marker, held)
+            else:
+                parent.call_after_refresh(lambda: parent.reveal_block(self))
 
     def _diff_archive_directory(self) -> Path | None:
         """The session directory whose transcript this card's row lives in.
@@ -3617,6 +3759,45 @@ class ToolCard(ExpandableActionBlock):
         row's own `Resize` is the notification that cannot be relied on.
         """
         self._refresh_row(width)
+
+    def set_content(self, renderable: Any, *, layout: bool = True) -> None:
+        """Apply the card; a whole-diff card is painted row by row (Q1).
+
+        Only the level that can hold thousands of rows takes the lazy path,
+        so every other card keeps the base's exact rendering.
+        """
+        if self._finalized:
+            return
+        if isinstance(renderable, Text) and self._expanded and self._full_diff_shown:
+            self._content = renderable
+            self.invalidate_row_measurements()
+            self._lazy_rows = _LazyRows(renderable)
+            self.refresh(layout=layout)
+            return
+        self._lazy_rows = None
+        super().set_content(renderable, layout=layout)
+
+    def render(self) -> Any:
+        lazy = self._lazy_rows
+        if lazy is not None:
+            return lazy.content()
+        return super().render()
+
+    def render_line(self, y: int) -> Strip:
+        """One row of the card; a whole-diff card renders only that row.
+
+        A text selection paints through the base (its offsets span the whole
+        visual); everything else asks :class:`_LazyRows` for the one row.
+        """
+        lazy = self._lazy_rows
+        if lazy is None or self.text_selection is not None:
+            return super().render_line(y)
+        if self._dirty_regions:
+            # The base would re-render every row here; the rows are rebuilt
+            # lazily instead, and only the ones the compositor asks for.
+            self._dirty_regions.clear()
+            lazy.forget()
+        return lazy.strip(self, y, self.size.width, self.visual_style)
 
     def _refresh_row(self, width: int | None = None) -> None:
         """Rebuild the card at its OWN width (D3).
@@ -4935,6 +5116,44 @@ class ToolCard(ExpandableActionBlock):
         source = self._diff or []
         if self._full_diff_shown and self._full_diff_rows is not None:
             source = self._full_diff_rows
+        offered = self._full_diff_offered()
+        offer_ink = bindings.style("tool.row.slot_offer")
+        key = (
+            width,
+            len(source),
+            self._full_diff_shown,
+            self._full_diff_rows is not None,
+            self._diff_omitted,
+            offered,
+            success,
+            danger,
+            muted,
+            dim,
+            offer_ink,
+        )
+        cached = self._diff_body_cache
+        if cached is not None and cached[0] == key and cached[1] is source:
+            body, marker_at = cached[2], cached[3]
+        else:
+            body, marker_at = self._diff_body(
+                source, line_width, indent, offered, (success, danger, muted, dim, offer_ink)
+            )
+            self._diff_body_cache = (key, source, body, marker_at)
+        before = row.plain.count("\n")
+        self._diff_marker_row = None if marker_at is None else before + marker_at
+        row.append_text(body)
+
+    def _diff_body(
+        self,
+        source: Sequence[str],
+        line_width: int,
+        indent: str,
+        offered: bool,
+        inks: tuple[Style, Style, Style, Style, Style],
+    ) -> tuple[Text, int | None]:
+        """The diff rows as one ``Text``, and the marker's line within it (1-based)."""
+        success, danger, muted, dim, offer_ink = inks
+        body = Text()
         diff = list(source)
         if len(diff) >= 2 and diff[0].rstrip() == "---" and diff[1].rstrip() == "+++":
             diff = diff[2:]
@@ -4950,18 +5169,27 @@ class ToolCard(ExpandableActionBlock):
                 ink = danger
             else:
                 ink = dim
-            row.append("\n" + indent, style=dim)
-            row.append(truncate_cells(line, line_width), style=ink)
+            body.append("\n" + indent, style=dim)
+            body.append(truncate_cells(line, line_width), style=ink)
         # The inline record's own omissions count too: the marker used to say
         # "158 more" over a 500-row change because it counted only the 200
         # rows it held. Zero once the archive's complete rows are painted.
         hidden = len(diff) - len(shown)
         if self._full_diff_rows is None or not self._full_diff_shown:
             hidden += self._diff_omitted
-        if hidden > 0:
-            marker = f"… {hidden} more diff line{'s' if hidden != 1 else ''}"
-            row.append("\n" + indent, style=dim)
-            row.append(truncate_cells(marker, line_width), style=dim)
+        if hidden <= 0:
+            return body, None
+        marker = f"… {hidden} more diff line{'s' if hidden != 1 else ''}"
+        body.append("\n" + indent, style=dim)
+        painted = truncate_cells(marker, line_width)
+        body.append(painted, style=dim)
+        # The action at the point of need (UX round 1, U2): the header's own
+        # hint, repeated on the marker while a deeper level exists. Dropped
+        # rather than clipped when the row cannot hold it whole.
+        if offered and cell_len(painted) + 1 + cell_len(EXPAND_HINT) <= line_width:
+            body.append(" ")
+            body.append(EXPAND_HINT, style=offer_ink)
+        return body, len(shown) + 1
 
     def _name_col(self, width: int) -> int:
         """The ledger's shared name column, in cells.
