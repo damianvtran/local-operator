@@ -11117,7 +11117,9 @@ def _cmd_skills(args: argparse.Namespace) -> int:
         rows = [item for item in (detail.get("peers") or []) if isinstance(item, dict)]
         lines = [str(detail.get("message") or "")] if detail.get("message") else []
         for item in rows:
-            label = str(item.get("device_id") or "?")
+            # The member's NAME where the mesh knows one (QA round 1, Q-5): a raw
+            # ``d_…`` id is not what the operator typed or can recognise.
+            label = str(item.get("name") or item.get("device_id") or "?")
             lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
             for outcome in ("installed", "updated"):
                 for row in item.get(outcome) or []:
@@ -11140,7 +11142,8 @@ def _cmd_skills(args: argparse.Namespace) -> int:
     for row in rows:
         origin = str(row.get("origin") or "")
         if origin:
-            line = f"skill: {row.get('name')} (mirrored from {origin}" + (
+            source = _device_name_anywhere(origin) or origin
+            line = f"skill: {row.get('name')} (mirrored from {source}" + (
                 ", edited here)" if row.get("edited") else ")"
             )
         else:
@@ -11152,8 +11155,10 @@ def _cmd_skills(args: argparse.Namespace) -> int:
         lines = ["no user skills on this device"]
     for device_id, receipt in sorted(receipts.items()):
         if isinstance(receipt, dict):
+            target = str(receipt.get("name") or "") or _device_name_anywhere(device_id)
             lines.append(
-                f"last push to {device_id}: {receipt.get('message') or receipt.get('code') or '?'}"
+                f"last push to {target or device_id}: "
+                f"{receipt.get('message') or receipt.get('code') or '?'}"
             )
     return _emit(args, {"ok": True, "skills": rows, "pushes": receipts}, lines)
 

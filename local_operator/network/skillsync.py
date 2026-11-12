@@ -203,23 +203,83 @@ def _fingerprint(path: Path) -> tuple[Any, ...]:
     return tuple(rows)
 
 
-def _skill_dirs(root: Path) -> list[tuple[str, Path]]:
+def _skill_dirs(root: Path, *, with_links: bool = False) -> list[tuple[str, Path, bool]]:
+    """``(name, path, is_symlink)`` per top-level entry discovery could read.
+
+    A SYMLINKED skill directory is never followed by the sync (shipping a link's
+    target would let a skill reach any file the link points at), but discovery
+    DOES follow it (``skills/discovery.py``), so ``skill://x`` resolves here and
+    not on a peer. ``with_links=True`` returns those entries flagged, so the
+    SENDER can name them as "not synced (symlink)" instead of dropping them
+    silently (QA round 1, Q-1); the receiver's ``state`` still lists real
+    directories only.
+    """
     base = skills_root(root)
     try:
         entries = sorted(os.scandir(base), key=lambda entry: entry.name)
     except OSError:
         return []
-    found: list[tuple[str, Path]] = []
+    found: list[tuple[str, Path, bool]] = []
     for entry in entries:
         if entry.name.startswith("."):
             continue  # discovery skips dot-entries; so does the sync
         try:
-            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+            if entry.is_symlink():
+                if with_links and entry.is_dir(follow_symlinks=True):
+                    found.append((entry.name, Path(entry.path), True))
+                continue
+            if not entry.is_dir(follow_symlinks=False):
                 continue
         except OSError:
             continue
-        found.append((entry.name, Path(entry.path)))
+        found.append((entry.name, Path(entry.path), False))
     return found
+
+
+def _frontmatter_name(skill_md: Path) -> str:
+    """The ``name`` a SKILL.md declares, or ``""`` when it cannot be read."""
+    from local_operator.hub_sync.skill_bundle import MAX_SKILL_MD_BYTES
+    from local_operator.skills.discovery import parse_frontmatter
+
+    try:
+        with open(skill_md, "rb") as stream:
+            text = stream.read(MAX_SKILL_MD_BYTES).decode("utf-8", errors="replace")
+        return str(parse_frontmatter(text).get("name") or "").strip()
+    except Exception:  # noqa: BLE001 — a label lookup; the folder name stands in
+        return ""
+
+
+def _grouped_rows(group: str, path: Path) -> list[LocalSkill]:
+    """Name the skills inside a grouping folder, by the names discovery gives them.
+
+    Discovery walks ``<root>/<group>/<skill>/SKILL.md`` (bounded depth), so a
+    grouped skill resolves here as ``skill://<skill>``. The sync ships one
+    top-level directory per skill and does not carry groups yet; before this the
+    only signal was the FOLDER with the bundle builder's "exactly one root
+    SKILL.md" error, which names nothing the operator asked for (QA round 1,
+    Q-2). Uses discovery's own walk so the set named is the set that resolves.
+    """
+    from local_operator.skills.discovery import _walk_skill_dirs, skill_max_depth
+
+    rows: list[LocalSkill] = []
+    try:
+        nested = [Path(found[0]) for found in _walk_skill_dirs(path, skill_max_depth() - 1)]
+    except Exception:  # noqa: BLE001 — unreadable group: fall back to naming the folder
+        nested = []
+    for skill_dir in sorted(nested):
+        name = _frontmatter_name(skill_dir / "SKILL.md") or skill_dir.name
+        rows.append(
+            LocalSkill(
+                name=name,
+                tree_hash="",
+                status="refused",
+                reason=(
+                    f"it sits in the grouping folder '{group}', and nested skill folders "
+                    f"don't sync yet; move it to ~/.local-operator/skills/{name} to sync it"
+                ),
+            )
+        )
+    return rows
 
 
 def _measure(name: str, path: Path) -> LocalSkill:
@@ -243,6 +303,22 @@ def _measure(name: str, path: Path) -> LocalSkill:
     except skill_bundle.SkillBundleError as exc:
         status = "too_large" if exc.code == "bundle-too-large" else "refused"
         return LocalSkill(name=name, tree_hash="", status=status, reason=str(exc))
+    if built.name != name:
+        # DISCOVERY KEYS A SKILL BY ITS FRONTMATTER ``name``, not its folder
+        # (``skills/discovery.py``), and the receiver installs by folder. A
+        # mismatched skill would land under one name and register under another,
+        # shadowing a skill the peer authored by that name without the conflict
+        # policy ever being asked (review round 1, M1). The receiver refuses it
+        # too (``expected_name``); naming it here says why before a frame is spent.
+        return LocalSkill(
+            name=name,
+            tree_hash=built.tree_hash,
+            status="refused",
+            reason=(
+                f"its SKILL.md names it '{built.name}', not its directory name; "
+                "rename one so they match"
+            ),
+        )
     if built.size > MAX_SKILL_ARCHIVE_BYTES:
         return LocalSkill(
             name=name,
@@ -268,7 +344,25 @@ def _measure(name: str, path: Path) -> LocalSkill:
 def local_skills(root: Path) -> list[LocalSkill]:
     """Every skill directory under ``<config>/skills``, measured (cached by stat)."""
     out: list[LocalSkill] = []
-    for name, path in _skill_dirs(root):
+    for name, path, is_link in _skill_dirs(root, with_links=True):
+        if is_link:
+            out.append(
+                LocalSkill(
+                    name=name,
+                    tree_hash="",
+                    status="refused",
+                    reason=(
+                        "not synced (symlink): the sync never follows a link; copy the "
+                        "skill into ~/.local-operator/skills to sync it"
+                    ),
+                )
+            )
+            continue
+        if not os.path.lexists(path / "SKILL.md"):
+            grouped = _grouped_rows(name, path)
+            if grouped:
+                out.extend(grouped)
+                continue
         key = (str(root), name)
         fingerprint = _fingerprint(path)
         with _CACHE_GUARD:
@@ -339,7 +433,7 @@ def skill_state(root: Path) -> dict[str, Any]:
     """
     index = definitions.read_index(root)
     rows: dict[str, Any] = {}
-    for name, path in _skill_dirs(root):
+    for name, path, _is_link in _skill_dirs(root):
         current = _tree_hash(path)
         recorded = _recorded(index, name)
         origin = str(recorded.get("origin") or "") if recorded is not None else ""
@@ -455,7 +549,12 @@ def _apply_locked(root: Path, name: str, ref: Any, data: bytes, origin: str) -> 
             # The hub's own validator + extractor, unmodified: traversal paths,
             # symlinks, exec/setuid bits in entry modes, collisions and size lies
             # are refused here by name, before anything reaches ``skills/``.
-            landed = skill_bundle.extract_archive(archive, stage / "tree", expected=ref)
+            # ``expected_name``: the archive's SKILL.md must declare the name it
+            # installs under, or discovery would register it as another skill
+            # and shadow this device's own one (review round 1, M1).
+            landed = skill_bundle.extract_archive(
+                archive, stage / "tree", expected=ref, expected_name=name
+            )
         except skill_bundle.SkillBundleError as exc:
             return _refused(name, str(exc))
         # THE SWAP HOLDS THE CONFIG-ROOT LOCK that ``managed_skill_read`` takes
@@ -525,6 +624,7 @@ def _record_receipt(root: Path, device_id: str, result: Mapping[str, Any]) -> No
                 **{
                     key: result.get(key)
                     for key in (
+                        "name",
                         "ok",
                         "code",
                         "message",
@@ -569,10 +669,28 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
 
 
 def _push_locked(server: "RelayServer", device_id: str) -> dict[str, Any]:
-    label = server._member_name(device_id) or device_id  # noqa: SLF001 — the mesh's own name
+    name = server._member_name(device_id)  # noqa: SLF001 — the mesh's own name
+    label = name or device_id
     skills = authored_skills(server.root)
     skipped = _skipped_rows(skills)
-    base: dict[str, Any] = {"device_id": device_id, "skipped": skipped}
+    # ``name`` rides the result and the receipt so the CLI can say "device-b",
+    # not the raw id, wherever the mesh knows a name (QA round 1, Q-5).
+    base: dict[str, Any] = {"device_id": device_id, "name": name, "skipped": skipped}
+    blocked = definitions.unholdable_capability(server, device_id, "net_skills")
+    if blocked:
+        # ASKED LOCALLY FIRST, the tick step's rule: the peer would refuse and
+        # relay ITS sentence ("… may not do that on this device"), which reads
+        # as a statement about THIS device when printed here (QA round 1, Q-3).
+        return {
+            **base,
+            "ok": False,
+            "code": f"no_{blocked}",
+            "message": (
+                f"this device does not hold the '{blocked}' capability on {label}, so its "
+                f"skills were not sent; on {label}, run `lop network member grant "
+                f"<network> {server.identity.device_id} {blocked}`"
+            ),
+        }
     link = server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
     if link is None:
         return {
@@ -696,10 +814,17 @@ def _push_locked(server: "RelayServer", device_id: str) -> dict[str, Any]:
     sent = len(outcome["installed"]) + len(outcome["updated"])
     problems = outcome["refused"]
     parts = []
+    sendable = sum(1 for skill in skills if skill.status == "ready")
     if sent:
         parts.append(f"sent {sent} {'skill' if sent == 1 else 'skills'} to {label}")
     elif not problems:
-        parts.append(f"{label} holds this device's skills")
+        # THE READY ROW'S SENTENCE, so push and ``lop network ready`` agree: a
+        # skill kept as the peer's own is not "held" (QA round 1, Q-5).
+        parts.append(
+            f"{label} holds {in_sync} of this device's {sendable} sendable skills"
+            if sendable
+            else f"none of this device's skills can travel to {label}"
+        )
     if outcome["kept"]:
         parts.append(f"{len(outcome['kept'])} kept as {label}'s own: " + _names(outcome["kept"]))
     if skipped:
@@ -732,14 +857,24 @@ def push_for_create(server: "RelayServer", device_id: str) -> dict[str, Any]:
     the per-peer lock, so the cadence cannot double-send) and the receipt says the
     skills are arriving in the background — never a silent "done".
     """
-    if not any(skill.status == "ready" for skill in authored_skills(server.root)):
-        # Nothing of ours can travel, so asking would only add a dial to the
-        # create's latency (the tick step's rule). Names nothing: no receipt line.
-        return {}
     box: dict[str, Any] = {}
 
     def _run() -> None:
         try:
+            # BOTH PRE-CHECKS RUN HERE, INSIDE THE BUDGET (review round 1, m1):
+            # ``authored_skills`` re-deflates every skill on a cold cache
+            # (measured 2.72 s cold vs 0.023 s warm on the head's 30 skills), so
+            # outside the ``join`` it could push a create past the 10 s bound.
+            if definitions.unholdable_capability(server, device_id, "net_skills"):
+                # The tick step's capability rule (m2 / Q-3): the peer would
+                # refuse, so a create spends no dial and prints no line.
+                box["result"] = {}
+                return
+            if not any(skill.status == "ready" for skill in authored_skills(server.root)):
+                # Nothing of ours can travel, so asking would only add a dial
+                # (the tick step's rule). Names nothing: no receipt line.
+                box["result"] = {}
+                return
             box["result"] = push_to_peer(server, device_id)
         except Exception as exc:  # noqa: BLE001 — a create must not fail on this
             box["result"] = {"ok": False, "code": "failed", "message": str(exc)}
@@ -861,8 +996,46 @@ def mesh_tick_step(step_server: "RelayServer", device_id: str) -> str:
     return str(push_to_peer(step_server, device_id).get("code") or "")
 
 
+#: A stage entry older than this is a crash leftover, never a live apply: one
+#: apply is bounded by :data:`SKILLS_OP_DEADLINE_S` (60 s), so an hour is far
+#: past any apply that could still be writing into it.
+STAGE_STALE_S = 3600.0
+
+
+def _sweep_stage(root: Path, *, now: float | None = None) -> int:
+    """Remove crash-leftover extracted trees from ``network/skill-stage``.
+
+    WHY: an apply removes its stage in ``finally``, but a relay killed between
+    extract and that ``finally`` leaves a full 0600 tree behind that nothing else
+    would ever delete (review round 1, m4). Run once when the slice installs.
+    AGE-GATED rather than \"everything\": a relay object can be constructed on a
+    root whose serving relay is mid-apply, and a fresh stage is that apply's.
+    Best effort: a sweep failure must never stop the relay installing the op.
+    """
+    base = _stage_root(root)
+    cutoff = (time.time() if now is None else now) - STAGE_STALE_S
+    removed = 0
+    try:
+        entries = list(os.scandir(base))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.stat(follow_symlinks=False).st_mtime > cutoff:
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)  # never follows a link inside the tree
+            else:
+                os.unlink(entry.path)  # a file or a link itself, never its target
+            removed += 1
+        except OSError:
+            logger.debug("skillsync: could not sweep %s", entry.path, exc_info=True)
+    return removed
+
+
 def install(server: "RelayServer") -> None:
     """Register ``net_skills`` / ``skills_sync`` and the cadence step."""
+    _sweep_stage(server.root)
     definitions.add_tick_step(mesh_tick_step)
     server.register_ops(
         {"net_skills": make_handler(server)},

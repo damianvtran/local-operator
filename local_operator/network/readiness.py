@@ -1733,6 +1733,10 @@ def skills_row(
             ok=False,
             code=CODE_UNKNOWN,
             detail="the peer's answer did not carry its skills (it may predate skill sync)",
+            # The remedy push/tick/state already give for an old peer, so this
+            # row is not the one surface that leaves the operator guessing
+            # (QA round 1, Q-4).
+            remedies=[f"run `lop-update` on {peer_label}, then re-check"],
             source=SOURCE_UNKNOWN,
         )
     current: list[str] = []

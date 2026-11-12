@@ -353,3 +353,189 @@ def test_the_builder_ships_exec_bits_as_data_only_when_asked(tmp_path: Path) -> 
     os.chmod(folder / "scripts" / "x.sh", 0o4755)
     with pytest.raises(skill_bundle.SkillBundleError):
         skill_bundle.build_bundle(folder, executable_as_data=True)
+
+
+# ---------------------------------------------------------------------------
+# Round-1 remediation (review M1/m1/m2/m4/n1, QA Q-1..Q-5)
+# ---------------------------------------------------------------------------
+
+
+def _payload_from(folder: Path, name: str) -> dict[str, Any]:
+    """An honest sender's frame for ``folder`` installed as ``name``."""
+    built = skill_bundle.build_bundle(folder, executable_as_data=True)
+    return {
+        "kind": skillsync.BUNDLE_KIND,
+        "version": skillsync.BUNDLE_VERSION,
+        "name": name,
+        "bundle": built.bundle.to_json(),
+        "data": base64.b64encode(built.data).decode("ascii"),
+    }
+
+
+def test_a_peer_skill_cannot_shadow_the_receivers_own_by_its_frontmatter_name(
+    tmp_path: Path,
+) -> None:
+    """M1, QA's repro: folder ``aaa`` whose SKILL.md says ``name: zzz-own``.
+
+    Before the fix the receiver installed it as ``aaa`` and discovery then
+    registered ``zzz-own`` with the PEER's description, shadowing the node's own.
+    """
+    receiver = tmp_path / "r"
+    _write_skill(receiver, "zzz-own", body="the node's own")
+    sender = tmp_path / "s"
+    folder = sender / "skills" / "aaa"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: zzz-own\ndescription: the peer's impostor\n---\nhi\n", encoding="utf-8"
+    )
+
+    answer = skillsync.apply_skill(receiver, _payload_from(folder, "aaa"), origin_device="dev-a")
+    assert answer["outcome"] == "refused", answer
+    assert not (receiver / "skills" / "aaa").exists()
+    found, _warnings = discover_skills([receiver / "skills"], config_dir=receiver)
+    own = {skill.name: skill for skill in found}["zzz-own"]
+    assert own.description == "zzz-own for tests"
+
+    # The sender names it as "will not travel" instead of spending a frame.
+    (row,) = [skill for skill in skillsync.local_skills(sender) if skill.name == "aaa"]
+    assert row.status == "refused" and "zzz-own" in row.reason, row
+    assert skillsync.state_rows(sender)[0]["status"] == "refused"
+
+
+def test_a_symlinked_or_grouped_skill_is_named_never_dropped(tmp_path: Path) -> None:
+    """Q-1 / Q-2: both resolve locally through discovery, so both must be named."""
+    root = tmp_path / "head"
+    library = tmp_path / "library" / "linked-skill"
+    library.mkdir(parents=True)
+    (library / "SKILL.md").write_text(
+        "---\nname: linked-skill\ndescription: d\n---\nx\n", encoding="utf-8"
+    )
+    (root / "skills").mkdir(parents=True)
+    os.symlink(library, root / "skills" / "linked-skill")
+    group = root / "skills" / "my-group" / "inner-dir"
+    group.mkdir(parents=True)
+    (group / "SKILL.md").write_text(
+        "---\nname: grouped-skill\ndescription: d\n---\nx\n", encoding="utf-8"
+    )
+
+    rows = {skill.name: skill for skill in skillsync.local_skills(root)}
+    assert rows["linked-skill"].status == "refused"
+    assert "not synced (symlink)" in rows["linked-skill"].reason
+    assert "my-group" not in rows, "the grouping folder was named instead of its skill"
+    assert rows["grouped-skill"].status == "refused"
+    assert "my-group" in rows["grouped-skill"].reason
+    # Named on every surface the sender reads; never followed into the state.
+    assert {row["name"] for row in skillsync.state_rows(root)} >= {"linked-skill", "grouped-skill"}
+    assert "linked-skill" not in skillsync.skill_state(root)["skills"]
+    assert all(skill.data is None for skill in rows.values())
+
+
+def test_the_old_peer_ready_row_carries_the_lop_update_remedy() -> None:
+    """Q-4: the row had ``remedies: []`` while push/tick/state named ``lop-update``."""
+    member = type("Member", (), {"device_id": "d_" + "b" * 32})()
+    row = readiness.skills_row(member, {}, peer_label="device-b", local=[], own_device_id="d_a")
+    assert any("lop-update" in remedy and "device-b" in remedy for remedy in row["remedies"]), row
+
+
+def test_a_non_admin_member_neither_dials_on_create_nor_relays_the_peers_sentence(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m2 / Q-3 (and n1's real path): device-b joined as ``drive``, not ``admin``."""
+    server_a, server_b = _linked(request, monkeypatch)
+    calls: list[int] = []
+    original = server_a._handlers["net_skills"]  # noqa: SLF001
+    server_a._handlers["net_skills"] = lambda link, frame: (  # noqa: SLF001
+        calls.append(1),
+        original(link, frame),
+    )[1]
+    _write_skill(server_b.root, "from-b")
+    a_id = server_a.identity.device_id
+
+    assert skillsync.push_for_create(server_b, a_id) == {}, "a create printed a skills line"
+    pushed = skillsync.push_to_peer(server_b, a_id)
+    assert pushed["code"] == "no_admin", pushed
+    assert "may not do that on this device" not in pushed["message"]
+    assert "member grant" in pushed["message"]
+    assert calls == [], "a non-admin member dialled the peer for a refusal"
+    assert not (server_a.root / "skills" / "from-b").exists()
+    server_b.stop()
+
+
+def test_the_create_budget_covers_the_cold_precheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1: a slow ``authored_skills`` (cold cache) runs INSIDE the bounded join."""
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    release = threading.Event()
+
+    def slow_authored(_root: Path) -> list[Any]:
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(skillsync, "authored_skills", slow_authored)
+    monkeypatch.setattr(skillsync, "CREATE_PUSH_BUDGET_S", 0.2)
+    server = SimpleNamespace(root=tmp_path, _member_name=lambda _d: "device-b")
+    started = time.monotonic()
+    answer = skillsync.push_for_create(server, "d_b")  # type: ignore[arg-type]
+    elapsed = time.monotonic() - started
+    release.set()
+    assert elapsed < 2.0, elapsed
+    assert answer.get("background") is True, answer
+
+
+def test_push_text_agrees_with_ready_and_names_the_member(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Q-5: everything kept used to read "device-b holds this device's skills"."""
+    server_a, server_b = _linked(request, monkeypatch)
+    _write_skill(server_a.root, "both-own", body="head")
+    _write_skill(server_b.root, "both-own", body="node")
+    rc, payload = _run_json(capsys, "push", "--peer", server_b.identity.name)
+    assert rc == 0, payload
+    row = payload["peers"][0]
+    assert row["name"], row
+    assert "holds 0 of this device's 1 sendable skills" in row["message"], row
+    capsys.readouterr()
+    net_cli.main(_parser().parse_args(["network", "skills", "state"]))
+    text = capsys.readouterr().out
+    assert f"last push to {row['name']}:" in text, text
+    assert server_b.identity.device_id not in text, text
+    server_b.stop()
+
+
+def test_a_crash_leftover_stage_is_swept_but_a_live_one_is_not(tmp_path: Path) -> None:
+    """m4: an apply killed before its ``finally`` left a 0600 tree forever."""
+    stage = tmp_path / "network" / "skill-stage"
+    stale = stage / "deadbeef" / "tree"
+    stale.mkdir(parents=True)
+    (stale / "SKILL.md").write_text("x", encoding="utf-8")
+    fresh = stage / "live"
+    fresh.mkdir()
+    old = 1_000_000.0
+    os.utime(stage / "deadbeef", (old, old))
+    sweep = skillsync._sweep_stage  # noqa: SLF001 — the crash-recovery seam under test
+    removed = sweep(tmp_path, now=old + skillsync.STAGE_STALE_S + 1)
+    assert removed == 1
+    assert not (stage / "deadbeef").exists()
+    assert fresh.exists(), "a stage younger than the cutoff belongs to a live apply"
+
+
+def test_net_skills_needs_admin_at_the_authoriser() -> None:
+    """n1: a ``drive`` member is refused ``net_skills``; an ``admin`` one passes."""
+    from local_operator.network import types as net_types
+    from tests.unit.network.test_authorizer import link, make
+
+    authorizer, _audit = make()
+    drive = link(capabilities={"list", "view", "prompt", "steer", "stop", "slash"})
+    with pytest.raises(net_types.Refusal) as excinfo:
+        authorizer.check(drive, {"op": "net_skills", "req": 1, "phase": "state"})
+    assert excinfo.value.code == "not_authorised"
+    admin = link(capabilities={"list", "view", "admin"})
+    assert authorizer.check(admin, {"op": "net_skills", "req": 2, "phase": "state"}).action == (
+        "net_skills"
+    )
