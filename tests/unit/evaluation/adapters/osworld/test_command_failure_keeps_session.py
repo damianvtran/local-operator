@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,7 @@ class _Worker:
         *,
         http_get: Any = None,
         execute_error: BaseException | None = None,
+        clock: Any = None,
     ) -> None:
         self.bodies = bodies
         self.score = score
@@ -57,6 +59,10 @@ class _Worker:
         # reads it: a status code, or an exception for a guest that is gone.
         self.http_get = http_get or (lambda url, timeout: 200)
         self.execute_error = execute_error
+        # The provider's budget clock and sleep (``AwsProvider.__init__`` wires
+        # both); a ``_FakeClock`` drives the lost-reply probe window without
+        # spending real seconds.
+        self.clock = clock
 
     async def terminate(self) -> None:
         self.terminated = True
@@ -82,6 +88,11 @@ class _Worker:
         def http_post_json(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
             del url, payload, timeout
             body = self.bodies.pop(0)
+            if isinstance(body, _Drop):
+                # Inside the provider's timed call, so the drop's elapsed time
+                # is charged against the command's own deadline.
+                self.clock.now += body.after_s
+                raise body.error
             if isinstance(body, BaseException):
                 raise body
             return body
@@ -94,6 +105,8 @@ class _Worker:
             http_get=self.http_get,
             http_post_json=http_post_json,
         )
+        provider._monotonic = self.clock.monotonic if self.clock else time.monotonic
+        provider._sleep = self.clock.sleep if self.clock else time.sleep
         return await provider.run_command(params)
 
 
@@ -293,7 +306,9 @@ def test_a_lost_reply_from_a_dead_guest_still_poisons(tmp_path: Path) -> None:
     def http_get(url: str, timeout: float) -> int:
         raise requests.ConnectTimeout("guest gone")
 
-    worker = _Worker([original], _score(tmp_path), http_get=http_get)
+    # A fake clock: this loss is "early" (zero elapsed), so the probe window
+    # runs to the command's 15 s deadline and would otherwise sleep it out.
+    worker = _Worker([original], _score(tmp_path), http_get=http_get, clock=_FakeClock())
     session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
 
     async def run() -> None:
@@ -345,6 +360,8 @@ def test_a_reply_that_outruns_the_wall_clock_deadline_is_a_lost_reply(
                 http_get=lambda url, timeout: 200,
                 http_post_json=http_post_json,
             )
+            provider._monotonic = time.monotonic
+            provider._sleep = time.sleep
             return await provider.run_command(params)
 
     worker = _Stalled([], _score(tmp_path))
@@ -362,6 +379,191 @@ def test_a_reply_that_outruns_the_wall_clock_deadline_is_a_lost_reply(
     lost = asyncio.run(run())
     assert lost.error is not None and "TimeoutError" in lost.error
     assert not session._poisoned
+
+
+# --------------------------------------------------------------------------
+# A DROPPED connection: the server closed the socket with no answer.
+#
+# Sealed run ``t32v-t054-20261112-050615`` (episode ``ep-1116a4914a71``): the
+# model's ``kill -9 ...; sleep 1; ps ...`` failed after 5.4 s with
+# ``ConnectionError(ProtocolError('Connection aborted.', RemoteDisconnected(...)))``
+# -- the action server closed the socket (systemd restarts it after
+# ``RestartSec=1``) -- and the ONE probe taken that instant fell inside the
+# restart, so the session was poisoned and the episode lost ``score``. The guest
+# had ~25 s of the command's own deadline left to come back in.
+# --------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """``monotonic``/``sleep`` for the provider: sleeping advances time."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _sealed_remote_disconnect() -> BaseException:
+    """The sealed failure's exact chain, built the way ``requests`` builds it."""
+
+    from http.client import RemoteDisconnected
+
+    import requests
+    from urllib3.exceptions import ProtocolError
+
+    cause = RemoteDisconnected("Remote end closed connection without response")
+    protocol = ProtocolError("Connection aborted.", cause)
+    protocol.__cause__ = cause
+    error = requests.ConnectionError(protocol)
+    error.__cause__ = protocol
+    return error
+
+
+def _restarting_guest(clock: _FakeClock, *, back_at_s: float) -> tuple[Any, list[float]]:
+    """``/platform`` refused until ``back_at_s`` on ``clock``, then 200."""
+
+    import requests
+
+    asked: list[float] = []
+
+    def http_get(url: str, timeout: float) -> int:
+        asked.append(clock.now)
+        if clock.now < back_at_s:
+            raise requests.ConnectionError(ConnectionRefusedError(61, "Connection refused"))
+        return 200
+
+    return http_get, asked
+
+
+class _Drop:
+    """A ``/execute`` that fails ``after_s`` into the call, on the fake clock."""
+
+    def __init__(self, error: BaseException, *, after_s: float) -> None:
+        self.error = error
+        self.after_s = after_s
+
+
+def test_a_dropped_connection_waits_out_a_server_restart_and_the_episode_continues(
+    tmp_path: Path,
+) -> None:
+    """RED on 8459804f: one probe at the drop instant, refused, poisoned."""
+
+    from lop_osworld_v2_adapter.remote_command import UNKNOWN_OUTCOME_CAUTION
+
+    verifier = HostVerifier("task", EPISODE, tmp_path)
+    verifier.accept_initial(observation("task", EPISODE, 0))
+    clock = _FakeClock()
+    # Dropped 1.4 s in; the restarted server listens again ~3 s after the drop.
+    http_get, asked = _restarting_guest(clock, back_at_s=4.5)
+    worker = _Worker(
+        [_Drop(_sealed_remote_disconnect(), after_s=1.4), _answer(json.dumps(_GOOD))],
+        _score(tmp_path),
+        http_get=http_get,
+        clock=clock,
+    )
+    session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
+    params = _params("command_001", "kill -9 4674 4605; sleep 1; ps").model_copy(
+        update={"timeout_s": 25.0}
+    )
+
+    async def run() -> None:
+        lost = await session.run_command(params, timeout=45)
+        assert (lost.exit_code, lost.stdout) == (None, "")
+        assert lost.error is not None
+        assert "reply to this command was lost" in lost.error
+        assert lost.error.endswith(UNKNOWN_OUTCOME_CAUTION)
+        assert _GUEST_IP not in lost.error
+
+        after = await session.run_command(_params("command_002", "echo after"), timeout=5)
+        assert (after.stdout, after.error) == ("after\n", None)
+        scored = await session.score(
+            ScoreParams(operation_id="score", episode_id=EPISODE), timeout=5
+        )
+        assert scored.score.binary == 1
+
+    asyncio.run(run())
+    assert not session._poisoned and not worker.terminated
+    # Re-asked on the recovery cadence until the restarted server answered,
+    # and every probe stayed inside the command's own deadline (25 + 10 s).
+    assert len(asked) > 1 and asked[0] == 1.4 and asked[-1] >= 4.5
+    assert max(asked) <= 25.0 + 10.0
+
+
+def test_a_dropped_connection_to_a_guest_that_never_returns_still_poisons(
+    tmp_path: Path,
+) -> None:
+    """The negative control: a target dead for the whole window is poisoned.
+
+    The window is bounded by the command's own deadline, so a dead guest costs
+    no more wall-clock than the command was already allowed (plus one probe).
+    """
+
+    verifier = HostVerifier("task", EPISODE, tmp_path)
+    verifier.accept_initial(observation("task", EPISODE, 0))
+    clock = _FakeClock()
+    original = _sealed_remote_disconnect()
+    http_get, asked = _restarting_guest(clock, back_at_s=float("inf"))
+    worker = _Worker(
+        [_Drop(original, after_s=1.4)],
+        _score(tmp_path),
+        http_get=http_get,
+        clock=clock,
+    )
+    session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
+    params = _params("command_001", "kill -9 1").model_copy(update={"timeout_s": 25.0})
+
+    async def run() -> None:
+        import pytest
+        import requests
+
+        with pytest.raises(requests.ConnectionError) as raised:
+            await session.run_command(params, timeout=45)
+        # The ORIGINAL drop escapes, not a probe's failure.
+        assert raised.value is original
+
+    asyncio.run(run())
+    assert session._poisoned and worker.terminated
+    # Every probe started inside the window: min(drop + 15 s cap, 25 + 10 s).
+    assert asked and max(asked) < 1.4 + 15.0
+    assert clock.now <= 1.4 + 15.0
+
+
+def test_a_reply_lost_at_its_deadline_keeps_a_single_probe_window(tmp_path: Path) -> None:
+    """A loss that already spent the deadline does not grow the RPC envelope.
+
+    #3826 budgeted ``timeout_s + 10`` plus one probe (2 x 2 s) under the
+    harness's ``timeout_s + 20``; the early-drop window must not stretch that.
+    """
+
+    import requests
+
+    verifier = HostVerifier("task", EPISODE, tmp_path)
+    verifier.accept_initial(observation("task", EPISODE, 0))
+    clock = _FakeClock()
+    http_get, asked = _restarting_guest(clock, back_at_s=float("inf"))
+    worker = _Worker(
+        [_Drop(requests.ConnectionError("Read timed out."), after_s=15.0)],
+        _score(tmp_path),
+        http_get=http_get,
+        clock=clock,
+    )
+    session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
+    params = _params("command_001", "sleep 99").model_copy(update={"timeout_s": 5.0})
+
+    async def run() -> None:
+        import pytest
+
+        with pytest.raises(requests.ConnectionError):
+            await session.run_command(params, timeout=25)
+
+    asyncio.run(run())
+    assert session._poisoned
+    # Probes start no later than one probe timeout past the deadline (5 + 10).
+    assert asked and asked[0] == 15.0 and max(asked) < 15.0 + 2.0
 
 
 def test_a_gui_batch_transport_failure_still_poisons(tmp_path: Path) -> None:

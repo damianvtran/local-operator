@@ -176,6 +176,25 @@ _COMMAND_SOCKET_SLACK_S = 10.0
 # to connect and read separately, so the probe's worst case is ~4 s. Kept short
 # because it runs inside the same RPC deadline as the command.
 _COMMAND_REPLY_LOST_PROBE_TIMEOUT_S = 2.0
+# How long a lost command reply may keep asking that question, at most. A reply
+# can be lost two ways: the wait ran out (the call already spent its whole
+# ``timeout_s + _COMMAND_SOCKET_SLACK_S``), or the connection DROPPED early --
+# ``RemoteDisconnected`` / reset / aborted, the server closing the socket with
+# no answer. A drop is what a dying or RESTARTING action server looks like from
+# here (systemd ``Restart=always``, ``RestartSec=1``: ``guest_supervisor``), and
+# a single probe taken the same instant lands inside that restart window. Sealed
+# run ``t32v-t054-20261112-050615`` lost its episode, score included, exactly so:
+# a command's connection dropped 1-2 s in, the one probe right after failed, and
+# the session was poisoned with ~30 s of the command's own deadline unspent.
+# So the probe now repeats on the recovery cadence until the guest answers or
+# the COMMAND'S OWN wall-clock deadline is reached -- time the call was already
+# allowed -- and never past this cap, the same 15 s as the pre-action recovery
+# budget (``_PRE_ACTION_RECOVERY_BUDGET_S``, defined below: ~7x the observed
+# ~2 s to regain reachability after a blip). A reply lost at the deadline still gets exactly
+# one probe window (``_COMMAND_REPLY_LOST_PROBE_TIMEOUT_S``), so the call's worst
+# case stays ``deadline + 2 x probe timeout``, the envelope the harness's RPC
+# deadline (``session_arm._make_run_command``) already covers.
+_COMMAND_REPLY_LOST_PROBE_CAP_S = 15.0
 
 # Waiting for the action server while the supervisor's receipt is unreadable.
 #
@@ -1516,10 +1535,12 @@ class AwsProvider:
         A LOST REPLY (connection refused or reset, a read that timed out, the
         whole call outrunning its wall-clock deadline) is never retried -- a
         command that may already have run must not be replayed -- but it is
-        followed by ONE cheap liveness probe (``_command_reply_lost``). A guest
-        that answers gets an unknown-outcome RESULT and the session lives; a
-        guest that does not answer gets the original error re-raised, which
-        poisons exactly as before. A redirect, or a non-2xx body that is not the
+        followed by a bounded window of cheap liveness probes
+        (``_command_reply_lost``), which runs to the command's own deadline so
+        a connection dropped by a restarting server can wait the restart out.
+        A guest that answers gets an unknown-outcome RESULT and the session
+        lives; a guest silent for the whole window gets the original error
+        re-raised, which poisons exactly as before. A redirect, or a non-2xx body that is not the
         guest's protocol answer, still escapes unprobed: the guest did not
         speak, and there is nothing a liveness check could add.
 
@@ -1547,6 +1568,9 @@ class AwsProvider:
         # mean the transport answered something unreadable.
         payload = payload_for(params)
         deadline = params.timeout_s + _COMMAND_SOCKET_SLACK_S
+        # Taken before the request, so a reply lost EARLY (a dropped connection)
+        # knows how much of its own deadline it may still spend on the probe.
+        started = self._monotonic()
         try:
             # ``wait_for`` makes ``deadline`` a WALL-CLOCK bound. ``requests``
             # applies its timeout per socket read, so on its own it is not one:
@@ -1597,14 +1621,21 @@ class AwsProvider:
             return unreadable_answer(error)
         except (requests.ConnectionError, requests.Timeout, TimeoutError) as error:
             # ``requests.ConnectionError`` covers refused/reset connects, a
-            # ConnectTimeout, and the body-read stall the sealed runs hit;
-            # ``requests.Timeout`` the header-read ``ReadTimeout``;
-            # ``TimeoutError`` the wall-clock bound above. None of them says
-            # whether the command ran.
-            return await self._command_reply_lost(error, deadline)
+            # ConnectTimeout, the body-read stall the sealed runs hit, and a
+            # server that closed the socket unanswered (``RemoteDisconnected``
+            # wrapped in ``ProtocolError``, sealed run t32v-t054); ``requests.
+            # Timeout`` the header-read ``ReadTimeout``; ``TimeoutError`` the
+            # wall-clock bound above. None of them says whether the command
+            # ran. A bare builtin ``ConnectionError`` is deliberately NOT here:
+            # ``requests`` wraps every socket drop, so an unwrapped one is not
+            # a transport loss this client produces and keeps the unclassified
+            # poison (``test_an_unclassified_command_failure_still_poisons``).
+            return await self._command_reply_lost(error, deadline, started)
         return decode_result(body, params)
 
-    async def _command_reply_lost(self, error: BaseException, deadline: float) -> RunCommandResult:
+    async def _command_reply_lost(
+        self, error: BaseException, deadline: float, started: float
+    ) -> RunCommandResult:
         """Answer a lost command reply if the guest is alive; else re-raise it.
 
         Reuses the mid-episode liveness probe (``_probe_control_server_outcome``,
@@ -1618,22 +1649,69 @@ class AwsProvider:
 
         from lop_osworld_v2_adapter.remote_command import reply_lost_answer
 
-        answered, record = await asyncio.to_thread(
-            self._probe_control_server_outcome, _COMMAND_REPLY_LOST_PROBE_TIMEOUT_S
+        answered, probes = await asyncio.to_thread(
+            self._await_guest_after_lost_reply, started + deadline
         )
         # Type name only: a ``requests`` message embeds the guest's address.
         kind = type(error).__name__
         logger.warning(
-            "command reply lost (%s, deadline %.1f s); liveness probe: %s",
+            "command reply lost (%s; decided %.1f s after send, deadline %.1f s); "
+            "liveness probes: %s",
             kind,
+            self._monotonic() - started,
             deadline,
-            record,
+            probes,
         )
         if not answered:
             # A guest that does not answer is the dead-environment case the
             # poison exists for: the ORIGINAL error escapes, unchanged.
             raise error
         return reply_lost_answer(kind, deadline)
+
+    def _await_guest_after_lost_reply(
+        self, command_deadline: float
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        """Probe until the guest answers, inside the command's own time.
+
+        ``command_deadline`` is the ``_monotonic`` instant the command's
+        wall-clock wait would have ended. The window runs to it (capped at
+        ``_COMMAND_REPLY_LOST_PROBE_CAP_S``) and is never shorter than one probe
+        timeout, so a loss AT the deadline keeps #3826's single probe while a
+        connection dropped early can wait out an action-server restart. Only a
+        guest silent for the whole window is reported dead -- the caller then
+        re-raises the original error, which poisons the session.
+
+        The cadence is ``_RECOVERY_PROBE_DELAYS_S`` (0.5, 0.5, 1, 1, 2 ...), the
+        pre-action recovery's, so a refused port during a restart is re-asked
+        quickly. Each probe is a GET of ``/platform``: repeating it can never
+        replay the command. The per-probe records are returned as evidence.
+        """
+
+        now = self._monotonic()
+        window_end = max(
+            now + _COMMAND_REPLY_LOST_PROBE_TIMEOUT_S,
+            min(now + _COMMAND_REPLY_LOST_PROBE_CAP_S, command_deadline),
+        )
+        probes: list[dict[str, Any]] = []
+        while True:
+            remaining = window_end - self._monotonic()
+            if remaining <= 0:
+                break
+            # Clamped like ``_recover_guest_supervisor``'s probes: a probe is
+            # never started with more time than the window has left.
+            timeout = min(_COMMAND_REPLY_LOST_PROBE_TIMEOUT_S, remaining)
+            at_s = round(self._monotonic() - now, 3)
+            answered, record = self._probe_control_server_outcome(timeout)
+            probes.append({"probe": len(probes) + 1, "at_s": at_s, **record})
+            if answered:
+                return True, probes
+            delay = _RECOVERY_PROBE_DELAYS_S[
+                min(len(probes) - 1, len(_RECOVERY_PROBE_DELAYS_S) - 1)
+            ]
+            if self._monotonic() + delay > window_end:
+                break
+            self._sleep(delay)
+        return False, probes
 
     def _run_guest_command(
         self, command: Sequence[str], timeout: float
