@@ -619,10 +619,14 @@ def test_m1_a_notifier_that_started_nothing_gives_the_claim_back(
     # Gated (rig guard / switch off): refused BEFORE the claim.
     monkeypatch.setattr(delivery, "gates_refuse", lambda: "notifications disabled")
     _REAL_DONE_BANNER(root, **kwargs, notify=lambda *a, **k: True, background=False)
-    assert NotificationStore(root).get(item["id"])["delivered_rev"] == 0
+    stored = NotificationStore(root).get(item["id"])
+    assert stored is not None
+    assert stored["delivered_rev"] == 0
     monkeypatch.setattr(delivery, "gates_refuse", lambda: "")
     _REAL_DONE_BANNER(root, **kwargs, notify=lambda *a, **k: False, background=False)
-    assert NotificationStore(root).get(item["id"])["delivered_rev"] == 0
+    stored = NotificationStore(root).get(item["id"])
+    assert stored is not None
+    assert stored["delivered_rev"] == 0
     # A read row is never bannered (the store's claim refuses it).
     NotificationStore(root).apply("read", ids=[(item["id"], item["revision"])])
     sent: list[str] = []

@@ -460,6 +460,10 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # Change pushes gate a receiving mode on the existing membership op;
         # advertising them promises that its handler understands bound snapshots.
         wire.MEMBER_LIST_PUSH_V1: "net_member_list",
+        # Remote attention adds no op: it gates origin-only ``attention``/``notices``
+        # fields on the existing catalogue answer (``RelayServer._rows_for_viewer``),
+        # so advertising it promises an owner whose ``net_catalog`` handler stamps them.
+        wire.REMOTE_ATTENTION_V1: "net_catalog",
     }
     pure_features = {
         # Reserved pool feature: no compute-pool op or dispatch contract exists yet.
