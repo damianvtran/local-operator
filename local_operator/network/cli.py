@@ -469,6 +469,16 @@ def add_parser(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
     )
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
+    # IDEMPOTENCY FOR A RETRY (``network/create_keys.py``). Every create carries a
+    # key the relay mints; this flag lets a retry of a create whose reply was LOST
+    # send the key it was told, so the owner answers with the session it already
+    # made instead of creating a second one.
+    net_sessions.add_argument(
+        "--create-key",
+        default="",
+        metavar="KEY",
+        help="with --create: retry a create whose reply was lost, without duplicating it",
+    )
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
     # THE THREE LIFECYCLE ACTS RUN ON THE OWNER (design §8). They are flags on this
@@ -7979,6 +7989,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
                 agent_id=agent_id,
                 team=team,
                 effort=effort,
+                # ONE KEY FOR BOTH ATTEMPTS when the caller named one: the yolo
+                # fallback's first attempt was refused above the owner's mint,
+                # which reserves nothing, so the key is still free for the second.
+                create_key=str(getattr(args, "create_key", "") or ""),
                 timeout=120.0,  # a spawn plus its first turn's admission
             )
 
@@ -8017,6 +8031,13 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # moment ago and have already scrolled past. The machine-readable
         # ``admitted`` key is unchanged — a ``--json`` consumer branches on it.
         lines = [f"session: {minted or '-'}", f"created on {peer}"]
+        if (detail.get("create_unconfirmed") or detail.get("replayed")) and not prompt:
+            # THE CREATE'S OWN REPLY WAS NOT THE ANSWER: either it was lost and the
+            # owner confirmed the id by key, or this was a retry the owner matched
+            # to the session it had already made. Either way the first turn's fate
+            # is not something this receipt saw, and the sentence says so. (With a
+            # prompt, the prompt branch below prints this same sentence.)
+            lines.append(str(detail.get("detail") or ""))
         if unattended_notice:
             # THE FALLBACK IS SAID OUT LOUD. The same sentence rides the payload
             # (``**detail`` below carries ``unattended_notice``), so a ``--json``

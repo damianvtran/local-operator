@@ -2030,11 +2030,13 @@ def test_a_pilot_receipt_renders_the_owners_outcome_not_a_code_message() -> None
 def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``running`` send is the owner's honest NON-completion: the CLI exits 1
-    for it, and the tool must render the receipt (outcome + resume hint) rather
-    than collapse it to ``code: message`` — while still reporting is_error, so a
-    delivery is never read as a completion. The finished arm is the contrast:
-    success, with the reply visible."""
+    """A ``running`` send is the owner ADMITTING the turn: the CLI exits 1 for it
+    (a script must not read it as a reply), and the tool renders the receipt
+    (outcome + resume hint) rather than collapse it to ``code: message``. It is
+    NOT an error result (2026-11-11): the message was delivered and the work is
+    happening, exactly what a local ``send`` reports on admission — flagging it
+    invited a duplicate send. ``failed`` is the contrast that stays an error;
+    the finished arm carries the reply."""
     receipt = {
         "session_id": "s_1",
         "peer": "cloud-node-1",
@@ -2052,11 +2054,21 @@ def test_a_non_completing_send_keeps_its_receipt_and_marks_the_call(
 
     monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
     result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
-    assert result.is_error
+    assert not result.is_error
     text = _text(result)
     assert "still running it" in text
     assert "lop --resume s_1" in text
     assert _payload(result)["outcome"] == "running"
+
+    failed = dict(receipt, outcome="failed", code="turn_failed", error="boom")
+
+    async def fake_failed(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        return 1, json.dumps(failed), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_failed)
+    result = _call("sessions", peer="cloud-node-1", send="s_1", text="hello there")
+    assert result.is_error
+    assert _text(result).endswith("boom")
 
     done = dict(receipt, ok=True, outcome="finished", reply="on it")
 

@@ -1569,6 +1569,13 @@ async def execute_network(
             # receipt keeps them; the error result still marks the non-completion.
             body = "\n".join(_render(params.action, scrubbed, show_removed=params.all))
             text, spill = spill_truncate(body, _TOOL, context)
+            if scrubbed.get("verb") == "send" and scrubbed.get("outcome") == "running":
+                # ADMITTED IS DELIVERED (2026-11-11): the owner took the turn and is
+                # still running it; the CLI's exit 1 only means "no reply yet" to a
+                # script. A tool result flagged as an error here told the agent its
+                # message failed while the work was happening — the same rule
+                # ``tools.builtin._mesh_send_failed`` applies to ``send peer=``.
+                return _text(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
             return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
         # before ``error`` (which only the install/uninstall diagnostics still

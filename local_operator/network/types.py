@@ -360,6 +360,10 @@ NET_OPS: tuple[str, ...] = (
     "net_session_receipt",
     "net_session_move",
     "net_session_create",
+    # The create's idempotency read (``network/create_keys.py``): a requester that
+    # lost a create's reply asks whether its own key made a session. Peer-scope,
+    # names no session id, and answers only keys the ASKING device sent.
+    "net_session_create_lookup",
     "net_session_engage",
     "net_session_stop",
     # THE OWNER'S OWN STORED JOURNAL, read over the relay (mesh-cold-read-
@@ -669,6 +673,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # (it admits one), warming a cold one is a read, and the kill switch is its
     # own capability.
     "net_session_create": "prompt",
+    # ``prompt``, the create's own row: only a member that may create may ask what
+    # its create made, and the answer is scoped to keys that member sent.
+    "net_session_create_lookup": "prompt",
     "net_session_engage": "view",
     "net_session_stop": "stop",
     # ``view``, and the conservative end of the choice for the same reason the

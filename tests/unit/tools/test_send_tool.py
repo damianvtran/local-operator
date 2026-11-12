@@ -1443,11 +1443,15 @@ async def test_peer_send_refuses_a_pid_a_double_address_and_a_missing_one() -> N
 
 
 @pytest.mark.asyncio
-async def test_a_non_completing_peer_send_keeps_the_resume_hint(
+async def test_an_admitted_peer_send_still_running_is_a_delivery_not_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`running` is the owner's honest non-completion (the CLI exits 1 for it):
-    the result is an error AND carries the outcome plus the resume hint."""
+    """`running` means the owner ADMITTED the turn and was still on it when the CLI
+    stopped waiting (the CLI exits 1 so a script never reads it as a reply). For
+    the tool it is a delivery — what a local `send` returns on admission — so the
+    result is NOT an error (2026-11-11: a busy lop-remote-node-2 session came back
+    is_error=true and invited a duplicate send). It still carries the outcome and
+    the resume hint."""
     _fake_mesh(
         monkeypatch,
         {
@@ -1463,9 +1467,33 @@ async def test_a_non_completing_peer_send_keeps_the_resume_hint(
     result = await execute_send(
         "t", {"peer": PEER, "target": "alpha", "message": "go"}, None, None, _context()
     )
-    assert result.is_error
+    assert not result.is_error, result.text
     assert "still running it" in result.text and "lop --resume s1" in result.text
     assert (result.details or {})["outcome"] == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["queued", "failed", "lost"])
+async def test_a_peer_send_that_did_not_run_or_failed_stays_an_error(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """The contrast to `running`: no turn ran, it failed, or nobody knows."""
+    _fake_mesh(
+        monkeypatch,
+        {
+            "session_id": "s1",
+            "peer": PEER,
+            "verb": "send",
+            "ok": False,
+            "outcome": outcome,
+        },
+        rc=1,
+    )
+    result = await execute_send(
+        "t", {"peer": PEER, "target": "alpha", "message": "go"}, None, None, _context()
+    )
+    assert result.is_error
+    assert (result.details or {})["outcome"] == outcome
 
 
 @pytest.mark.asyncio

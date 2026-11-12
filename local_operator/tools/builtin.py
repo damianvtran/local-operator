@@ -16551,12 +16551,29 @@ async def _execute_send_peer(
     for key in ("code", "error", "peer_named"):
         if payload.get(key):
             details[key] = payload[key]
-    if payload.get("ok") is False:
-        # ``running``/``queued``/``failed``/``lost`` are the owner's honest
-        # NON-completions — the same states the CLI exits non-zero for, so a
-        # delivery is never read as a completion.
+    if _mesh_send_failed(payload):
+        # ``queued``/``failed``/``lost`` are the owner's honest NON-completions:
+        # no turn ran, it failed, or nobody knows. ``running`` is NOT among them —
+        # see ``_mesh_send_failed``.
         return _error(tool_call_id, "send", text, details=details)
     return _text(tool_call_id, "send", text, details=details)
+
+
+def _mesh_send_failed(payload: Mapping[str, Any]) -> bool:
+    """Is a pilot ``send`` receipt a failure the TOOL result must flag?
+
+    ``running`` is the owner ADMITTING the turn and still working on it when the
+    CLI stopped waiting (``PILOT_TURN_TIMEOUT_S``). For a tool call that is a
+    delivered message — exactly what a LOCAL ``send`` returns on admission — so it
+    is success with ``details.outcome == "running"``. Flagging it as an error
+    (2026-11-11, a busy lop-remote-node-2 session) told the calling agent its
+    message had failed while the work was happening, inviting a duplicate send.
+    The CLI keeps its non-zero exit for ``running``: a shell script waiting for a
+    reply still must not read admission as completion.
+    """
+    if payload.get("ok") is not False:
+        return False
+    return str(payload.get("outcome") or "") != "running"
 
 
 # A pathological attention turn must not retain every unique payload forever.
@@ -20707,7 +20724,13 @@ async def _sessions_spawn_mesh(
     if minted:
         head += f" (session {identifier_text(context, minted)})"
     lines = [head]
-    if str(params.prompt or ""):
+    if payload.get("create_unconfirmed") or payload.get("replayed"):
+        # The create's own reply was lost (confirmed by key) or this was a retry
+        # the owner matched to the session it already made: the first prompt's
+        # admission was not observed by THIS call, so "not admitted" would be a
+        # claim nobody saw. The owner/relay sentence says what is known.
+        lines.append(str(payload.get("detail") or ""))
+    elif str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
         lines.append("the prompt was admitted there" if admitted else "the prompt was not admitted")
     notice = str(payload.get("unattended_notice") or "")
@@ -20766,7 +20789,9 @@ async def _sessions_resume_mesh(
         reply = str(payload.get("reply") or "")
         if reply:
             details["reply"] = reply
-        if payload.get("ok") is False:
+        # The same pilot-send receipt as ``send peer=``, so the same rule: an
+        # admitted turn still running there is a delivery, not a failure.
+        if _mesh_send_failed(payload):
             return _error(tool_call_id, "sessions", text, details=details)
         return _text(tool_call_id, "sessions", text, details=details)
 

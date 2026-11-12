@@ -3551,3 +3551,63 @@ async def test_stop_puts_the_outcome_above_the_wait_lines(
     lines = result.text.splitlines()
     assert lines[0] == 'stopped "stoppable"'
     assert "waiting up to" in lines[1]
+
+
+@pytest.mark.asyncio
+async def test_a_remote_resume_still_running_is_delivered_and_a_lost_create_names_its_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two remote-control honesty rules (2026-11-11, lop-remote-node-2).
+
+    * ``resume peer= prompt=`` whose turn the owner ADMITTED and is still running
+      is a delivery, not an error — the same rule as ``send peer=``.
+    * ``spawn peer=`` whose create reply was lost but whose session the owner
+      confirmed by key reports the id and says the first prompt's admission is
+      unknown, never "the prompt was not admitted".
+    """
+
+    async def fake(
+        argv: list[str], timeout: float, context: object | None = None
+    ) -> tuple[int, dict[str, Any], str]:
+        if "--send" in argv:
+            return (
+                1,
+                {
+                    "session_id": "s1",
+                    "peer": PEER,
+                    "verb": "send",
+                    "ok": False,
+                    "outcome": "running",
+                    "code": "turn_running",
+                },
+                "",
+            )
+        return (
+            0,
+            {
+                "ok": True,
+                "session_id": "s_new",
+                "admitted": False,
+                "create_unconfirmed": True,
+                "create_key": "a" * 32,
+                "detail": "node created s_new, but its reply to the create was lost",
+            },
+            "",
+        )
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    resumed = await execute_sessions(
+        "t",
+        {"op": "resume", "peer": PEER, "session": "s1", "prompt": "go"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not resumed.is_error, resumed.text
+    assert (resumed.details or {})["outcome"] == "running"
+    spawned = await execute_sessions(
+        "t", {"op": "spawn", "peer": PEER, "prompt": "go"}, None, None, _context(root)
+    )
+    assert not spawned.is_error, spawned.text
+    assert "s_new" in spawned.text and "reply to the create was lost" in spawned.text
+    assert "the prompt was not admitted" not in spawned.text
