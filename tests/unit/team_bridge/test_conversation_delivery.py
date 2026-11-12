@@ -1789,7 +1789,7 @@ def test_the_config_request_rule_reaches_the_model_once_per_hop() -> None:
 
     peer = BRIDGE_PEER_COORDINATION_RULE
     assert "\n" not in peer and len(peer) <= 220
-    assert "set no terms on their own work" in peer
-    assert "escalate only real conflicts or new risk" in peer
+    assert "no terms on their own work" in peer
+    assert "tell your operator of real conflicts or new risk, nothing else" in peer
     assert wrapped.count(peer) == 1
     assert wrapped.index(BRIDGE_UNTRUSTED_CLAUSE) < wrapped.index(peer) < wrapped.index(rule)

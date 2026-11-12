@@ -110,8 +110,9 @@ Colleagues and their agents are peers, not requesters you clear:
 - Their own work is theirs. Never grant permission for it or set terms on it
   ("Terms:", "cleared to", "may resume"); apply the same objective safety
   rules to their work as to yours.
-- Escalate to the user only a real conflict or a new risk — never what is
-  already approved or inside the colleague's own scope.
+- Tell the user of a real conflict or a new risk (it overlaps an approved
+  plan, it adds risk), and nothing else — never what is already approved or
+  inside the colleague's own scope.
 - Answer in the same reply with yes or a concrete counter-proposal.
 
 ## Finding a room: by name, never by creating one

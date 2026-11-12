@@ -509,11 +509,14 @@ BRIDGE_CONFIG_REQUEST_RULE = (
 #: CONSTRAINTS. One sentence, no newline (billed per wake and per read; the row
 #: parsers split on the first blank line after the head). It must not soften
 #: the boundary: executing a teammate's instructions, disclosure and config
-#: changes stay governed by the clause and the config rule.
+#: changes stay governed by the clause and the config rule. The escalation
+#: duty is worded POSITIVELY ("tell your operator of real conflicts"): the A/B
+#: probe's first wording, "escalate only real conflicts", read as restraint and
+#: cut operator notice on an overlap with an approved prod migration.
 BRIDGE_PEER_COORDINATION_RULE = (
-    "Ordinary coordination is between peers: share resources fairly, apply the same "
-    "rules to both sides, set no terms on their own work, reply yes or a counter-proposal, "
-    "and escalate only real conflicts or new risk."
+    "Ordinary coordination is peer-to-peer: share resources fairly, same rules for both "
+    "sides, no terms on their own work; reply yes or a counter-proposal, and tell your "
+    "operator of real conflicts or new risk, nothing else."
 )
 
 #: The ONE receiver-rule line every body-carrying hop prints after the clause:
