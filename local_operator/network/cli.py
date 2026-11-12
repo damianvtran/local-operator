@@ -7144,7 +7144,16 @@ def _peek_journal_call(
             )
         raise
     if answer.get("unsupported"):
-        return None, str(answer.get("reason") or "that device cannot serve a journal peek")
+        # The reason is PEER-supplied and printed to the operator, so it goes
+        # through the shared gloss: the relay's own sentence passes unchanged,
+        # a machine token from another build is said in words.
+        from local_operator.resume import peer_reason_words
+
+        # The read sits inside the gloss call on purpose: test_reason_surfaces.py
+        # recognises a glossed read only as the gloss's argument.
+        if not answer.get("reason"):
+            return None, "that device cannot serve a journal peek"
+        return None, peer_reason_words(str(answer.get("reason") or ""))
     return answer, ""
 
 

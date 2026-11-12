@@ -469,3 +469,32 @@ def test_a_quick_transport_failure_stays_unreachable() -> None:
     with pytest.raises(MeshRefusal) as caught:
         handler({"peer": "d_raw", "session_id": SESSION, "head": 1})
     assert caught.value.code == "peer_unreachable"
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        # The relay's own sentence reaches the operator unchanged.
+        (
+            "device-b runs a build without the remote peek (session_peek/1); "
+            "update it there to read its journal",
+            "device-b runs a build without the remote peek (session_peek/1); "
+            "update it there to read its journal",
+        ),
+        # A machine token from another build is said in words, never printed raw.
+        ("connect_failed:ConnectionRefusedError", "it did not answer"),
+        # A missing reason still gets this project's fallback sentence.
+        ("", "that device cannot serve a journal peek"),
+    ],
+)
+def test_an_unsupported_answers_reason_is_glossed_before_the_cli_prints_it(
+    monkeypatch: pytest.MonkeyPatch, reason: str, expected: str
+) -> None:
+    """PR #3831 CI fix: the peer-supplied ``reason`` goes through
+    ``resume.peer_reason_words`` (test_reason_surfaces.py's guard)."""
+    from local_operator.network import cli as net_cli
+
+    monkeypatch.setattr(
+        net_cli, "_relay_answer", lambda *a, **k: {"unsupported": True, "reason": reason}
+    )
+    assert net_cli._peek_journal_call("device-b", "s-1", {}) == (None, expected)

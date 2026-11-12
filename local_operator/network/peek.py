@@ -132,12 +132,19 @@ def _owner_record(session_id: str) -> Any:
     try:
         from local_operator.mobile import peer_send
 
+        # An EXACT session-id selector with no ``target``, so the team-role
+        # vocabulary cannot change the answer (it only gates ``target``); loading
+        # the team registry on every peek would be pure cost inside the 4 s peek
+        # budget. Named explicitly, and allowlisted in test_peer_send.py like
+        # ``request_update._deliver``, so the "every caller passes role_words"
+        # source-scan invariant holds.
         record, _candidates, _error = peer_send.resolve_peer_target(
             target=None,
             pid=None,
             session=session_id,
             include_wedged=True,
             require_started=False,
+            role_words=(),
         )
     except Exception:  # noqa: BLE001 — see the docstring: a read never fails on this
         return _UNRESOLVED
