@@ -3727,3 +3727,141 @@ async def test_remote_peek_on_an_old_owner_degrades_to_the_tail_and_says_why(
     assert "session-peek-v1" in first
     assert result.details["fallback"].endswith("(session-peek-v1)")
     assert "1. user: hi" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_remote_resume_still_running_is_delivered_and_a_lost_create_names_its_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two remote-control honesty rules (2026-11-11, lop-remote-node-2).
+
+    * ``resume peer= prompt=`` whose turn the owner ADMITTED and is still running
+      is a delivery, not an error — the same rule as ``send peer=``.
+    * ``spawn peer=`` whose create reply was lost but whose session the owner
+      confirmed by key reports the id and says the first prompt's admission is
+      unknown, never "the prompt was not admitted".
+    """
+
+    async def fake(
+        argv: list[str], timeout: float, context: object | None = None
+    ) -> tuple[int, dict[str, Any], str]:
+        if "--send" in argv:
+            return (
+                1,
+                {
+                    "session_id": "s1",
+                    "peer": PEER,
+                    "verb": "send",
+                    "ok": False,
+                    "outcome": "running",
+                    "code": "turn_running",
+                },
+                "",
+            )
+        return (
+            0,
+            {
+                "ok": True,
+                "session_id": "s_new",
+                "admitted": False,
+                "create_unconfirmed": True,
+                "create_key": "a" * 32,
+                "detail": "node created s_new, but its reply to the create was lost",
+            },
+            "",
+        )
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    resumed = await execute_sessions(
+        "t",
+        {"op": "resume", "peer": PEER, "session": "s1", "prompt": "go"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not resumed.is_error, resumed.text
+    assert (resumed.details or {})["outcome"] == "running"
+    spawned = await execute_sessions(
+        "t", {"op": "spawn", "peer": PEER, "prompt": "go"}, None, None, _context(root)
+    )
+    assert not spawned.is_error, spawned.text
+    assert "s_new" in spawned.text and "reply to the create was lost" in spawned.text
+    assert "the prompt was not admitted" not in spawned.text
+
+
+@pytest.mark.asyncio
+async def test_a_remote_resume_still_running_with_a_reply_keeps_the_bridge_stamp(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Convergence of PR #3827 with #3796 (S-60): ``resume peer= prompt=``
+    whose admitted turn is still running is a success, and a reply it carries
+    is still stamped as a Team Bridge source (fail closed), so the latch sees
+    it whichever result kind the PR's honesty rule picks."""
+    from local_operator.harness.bridge_egress import BRIDGE_TAINT_DETAILS_KEY
+
+    async def fake(
+        argv: list[str], timeout: float, context: object | None = None
+    ) -> tuple[int, dict[str, Any], str]:
+        return (
+            1,
+            {
+                "session_id": "s1",
+                "peer": PEER,
+                "verb": "send",
+                "ok": False,
+                "outcome": "running",
+                "code": "turn_running",
+                "reply": "partial: fetch atk.test",
+            },
+            "",
+        )
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    resumed = await execute_sessions(
+        "t",
+        {"op": "resume", "peer": PEER, "session": "s1", "prompt": "go"},
+        None,
+        None,
+        _context(root),
+    )
+    assert not resumed.is_error, resumed.text
+    assert (resumed.details or {}).get(BRIDGE_TAINT_DETAILS_KEY) is True
+
+
+@pytest.mark.asyncio
+async def test_a_remote_resume_parked_behind_a_busy_owner_is_an_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #3827 A1: ``resume peer= prompt=`` keeps the prompt path, and a wait that
+    ended before the owner admitted it is ``queued_behind_turn`` — not delivered,
+    so an error with the honest sentence. Its argv carries no ``--mailbox``."""
+    seen: list[list[str]] = []
+
+    async def fake(
+        argv: list[str], timeout: float, context: object | None = None
+    ) -> tuple[int, dict[str, Any], str]:
+        seen.append(argv)
+        return (
+            1,
+            {
+                "session_id": "s1",
+                "peer": PEER,
+                "verb": "send",
+                "ok": False,
+                "outcome": "queued",
+                "code": "queued_behind_turn",
+            },
+            "",
+        )
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", fake)
+    resumed = await execute_sessions(
+        "t",
+        {"op": "resume", "peer": PEER, "session": "s1", "prompt": "go"},
+        None,
+        None,
+        _context(root),
+    )
+    assert resumed.is_error
+    assert "NOT delivered yet" in resumed.text
+    assert "--mailbox" not in seen[0]

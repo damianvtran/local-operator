@@ -25,6 +25,19 @@ from local_operator.session.transcript_index import MessageDoc
 
 SID = "aabbccddee02"
 
+#: The first-paint wait for a COLD ``find_view`` whose cell asserts ``ready``.
+#: ``find_view``'s default (``FIRST_PAINT_WAIT_S`` = 0.2 s) is a UI paint budget:
+#: past it the ladder answers ``building`` BY DESIGN, so a cell that asserts
+#: ``ready`` under the default also asserts that a worker-thread ``refresh_index``
+#: finishes inside 200 ms of wall time -- true on an idle box, false on a loaded
+#: CI shard (runs 42999336419 and an earlier job 129582824094: ``'building' ==
+#: 'ready'``). The wait returns the moment the build lands, so a large value
+#: costs nothing when the host is fast and only bounds a genuine hang; what the
+#: cells pin is the find decision over the READY index, not host speed.
+#: ``test_a_slow_cold_build_is_building_by_default_and_ready_under_the_cold_wait``
+#: pins that contract itself under an injected slow build.
+COLD_BUILD_WAIT_S = 5
+
 
 @pytest.fixture(autouse=True)
 def _clean_module_state():
@@ -362,7 +375,7 @@ async def test_find_view_ready_then_resident_reuse(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_find_view_building_serves_the_previous_scan_as_partial(tmp_path, monkeypatch):
     write_rows(tmp_path, [user("u1", 1.0, "deploy now")])
-    first = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    first = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=COLD_BUILD_WAIT_S)
     assert first["state"] == "ready"
 
     # Grow the journal so the cache is stale, and hold the rescan so the ask
@@ -414,7 +427,7 @@ async def test_find_view_error_state(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_find_view_missing_journal_is_ready_empty(tmp_path):
-    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=COLD_BUILD_WAIT_S)
     assert view == {
         "query": "deploy",
         "state": "ready",
@@ -441,7 +454,7 @@ async def test_a_peer_message_row_is_findable_end_to_end(tmp_path):
             peer_message("p1", 1.1, "peer says the deploy is green"),
         ],
     )
-    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=COLD_BUILD_WAIT_S)
     assert view["state"] == "ready"
     assert [h["id"] for h in view["hits"]] == ["u1", "p1"]  # genuine first: D3
     peer = view["hits"][1]
@@ -507,7 +520,7 @@ async def test_hidden_cross_session_drops_peer_docs_and_keeps_the_rest(
             inject("i1", 1.2, "hub_message", "deploy hub note"),
         ],
     )
-    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=COLD_BUILD_WAIT_S)
     assert view["state"] == "ready"
     assert [h["id"] for h in view["hits"]] == ["u1", "p1", "i1"]  # genuine, then injected
 
@@ -542,7 +555,7 @@ async def test_hidden_peer_docs_are_dropped_from_the_building_partial_too(
             peer_message("p1", 1.1, "peer says the deploy is green"),
         ],
     )
-    first = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    first = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=COLD_BUILD_WAIT_S)
     assert first["state"] == "ready"
 
     hide_cross_session(True)
@@ -577,3 +590,46 @@ async def test_hidden_peer_docs_are_dropped_from_the_building_partial_too(
     # And the refilled scan stays filtered: the re-derived doc carries
     # custom_type, so the gate covers it by the same field.
     assert [h["id"] for h in view["hits"]] == ["u1"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_cold_build_is_building_by_default_and_ready_under_the_cold_wait(
+    tmp_path, monkeypatch
+):
+    """The convention the cold cells above rely on, pinned under an injected slow build.
+
+    A worker-thread ``refresh_index`` that takes longer than the 0.2 s first-paint
+    budget is what a loaded CI shard does to every cold cell. Holding the build
+    for 0.6 s ON PURPOSE makes that deterministic instead of a wager on host
+    speed: under the default the ladder answers ``building`` (partial, no hits --
+    by design, it is a paint budget), and under ``COLD_BUILD_WAIT_S`` the same cold
+    ask comes back ``ready`` with the index's hits. If the ladder ever stops
+    honouring ``wait_s`` the cold cells would go back to flaking under load, and
+    this is the cell that says so without needing a load.
+    """
+    # Two stores, because only the ask that STARTS a build owes the first-paint wait
+    # (a joiner answers ``building`` at once): the default ask must not be the one
+    # that started the build the waited ask is meant to outlast.
+    default_root, waited_root = tmp_path / "default", tmp_path / "waited"
+    for root in (default_root, waited_root):
+        write_rows(root, [user("u1", 1.0, "deploy the staging target")])
+    real = ti.refresh_index
+    delay_s = 0.6
+
+    def slow(config_dir, session_id, *args, **kwargs):
+        threading.Event().wait(delay_s)
+        return real(config_dir, session_id, *args, **kwargs)
+
+    monkeypatch.setattr(ti, "refresh_index", slow)
+    assert delay_s > tf.FIRST_PAINT_WAIT_S
+    early = await tf.find_view(default_root, SID, query="deploy", limit=10)
+    assert early["state"] == "building"
+    assert early["hits"] == []
+
+    view = await tf.find_view(waited_root, SID, query="deploy", limit=10, wait_s=COLD_BUILD_WAIT_S)
+    assert view["state"] == "ready"
+    assert [h["id"] for h in view["hits"]] == ["u1"]
+
+    # Drain the build the default ask left running so no worker thread outlives the cell.
+    task, _started = ti.start_refresh(default_root, SID)
+    await task

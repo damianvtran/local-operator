@@ -121,12 +121,17 @@ class MessageWaiter:
 #     always-true predicate degrades to one join turn; pair every migration with
 #     an injected negative control (see the PR that introduced this helper).
 #
-# Convention (the ONE settle for TUI tests; the ``_settle.py`` turn-count poller
-# and per-file ``_settle`` copies were folded into this):
-#   * Import ``settle`` from ``tests.unit.tui.waiting``; no local pollers.
+# Convention (the ONE settle for TUI tests; the shared ``_settle.py`` turn-count
+# poller was folded into this, and new and migrated waits use ``settle``. Some
+# per-file pollers remain, e.g. ``_settle`` in ``test_agent_class_slash.py``,
+# ``test_app_pilot.py`` (plus its ``_settle_loop``), ``test_approvals_ux.py``,
+# ``test_ask_dismiss_open.py`` and ``test_ask_fleet.py``; they migrate here as
+# they are touched):
+#   * Import ``settle`` from ``tests.unit.tui.waiting``; no new local pollers.
 #   * Name in ``workers=`` the product worker group(s) that write the state the
-#     predicate reads (e.g. ``"harness-import"``). State a message handler sets
-#     needs no group: the per-turn message and refresh joins cover it.
+#     predicate reads (e.g. ``"harness-import"``), and only those. State a
+#     message handler or a synchronous transition sets needs no group: the
+#     per-turn message and refresh joins cover it.
 #   * ``track_threads`` only for a raw ``asyncio.to_thread`` outside a worker.
 #   * The predicate is the product precondition, never the assertion; keep the
 #     exact assert afterwards.

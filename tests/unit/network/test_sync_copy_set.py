@@ -972,6 +972,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/create_keys.py": (
+        1,
+        "``INDEX_FILENAME`` (``create-keys.json``): the OWNER device's per-device "
+        "create-idempotency index under ``<config>/network`` -- it binds a requesting "
+        "device's create_key to the session THIS device created, so it describes this "
+        "device's mesh state, never an entry of a session directory, and must not "
+        "travel with a session",
+    ),
     "local_operator/network/relay.py": (
         1,
         "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
@@ -1058,11 +1066,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/``, never an entry a session directory holds",
     ),
     "local_operator/network/credentials/github.py": (
-        2,
+        4,
         "``APP_SECRET_NAME`` and ``TOKEN_SECRET_NAME``: the secret-store NAMES the "
         "owner's ladder arms live under (the GitHub App key; the GITHUB_TOKEN-class "
         "token) — the identifier-not-a-path case this file's docstring names (the "
-        "reply-channel/action-tool precedent), never a file in a session directory",
+        "reply-channel/action-tool precedent), never a file in a session directory; "
+        "``NARROWING_STATE_NAME`` and ``OWNER_DESIGNATION_MARKER``: per-device files "
+        "under the config root's ``network/`` directory (this device's repository "
+        "narrowing; the marker that a designation, including a cleared one, was "
+        "delivered) — device state that must stay on the device, never a file in a "
+        "session directory, so it never travels with a session",
     ),
     "local_operator/network/credentials/gitlab.py": (
         1,

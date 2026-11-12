@@ -284,6 +284,29 @@ ASK_ATTACHMENTS_UNSUPPORTED = (
 #: dedupe on it, and a sender that believed otherwise would duplicate.
 PEER_MESSAGE_ID_CAPABILITY = "peer-message-id-v1"
 
+#: Additive attach capability: this owner takes a ``peer_message`` op from a
+#: RELAYED (mesh) viewer and stamps the AUTHENTICATED sending device onto the
+#: delivered card (``server._stamp_peer_sender``), so ``send peer=`` lands in
+#: the mailbox exactly like a local ``send`` instead of as a ``prompt``.
+#:
+#: WHY THE MESH SEND NEEDS ITS OWN LICENCE (2026-11-11, PR #3827 A1). Before
+#: this, a mesh ``send`` rode ``prompt``: a busy owner parks that in its
+#: in-memory prompt queue and acks only when the running turn ends, so the
+#: sender could neither be told "delivered" nor tell parked from lost. An older
+#: owner would ACCEPT a ``peer_message`` from the relay too, but it would show
+#: whatever device the frame claimed (or none) — the receiver could not reply
+#: with ``send peer=`` and could be lied to about who wrote. So the requester
+#: sends ``peer_message`` only to an owner advertising this string and falls
+#: back to the old prompt path, with an honest receipt, otherwise.
+MESH_PEER_MESSAGE_CAPABILITY = "mesh-peer-message-v1"
+
+#: The sender-dict keys only the OWNER may write: the device a relayed
+#: ``peer_message`` came from, taken from the relay's link (the auth frame's
+#: ``peer`` block), never from the frame. ``_stamp_peer_sender`` strips any
+#: frame-supplied value and writes these for a remote connection only.
+MESH_SENDER_DEVICE_ID_KEY = "mesh_device_id"
+MESH_SENDER_DEVICE_NAME_KEY = "mesh_device_name"
+
 #: The owner DRAINS ITS INBOX WHILE LIVE, not only at boot and once at its first
 #: turn (``process._watch_live_inbox``). This string is a sender's licence to
 #: answer "queued" for a message it could not hand over the socket: a row

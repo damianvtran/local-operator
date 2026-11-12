@@ -797,6 +797,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
         "<config>/run after a failed write or replace",
     ),
+    # The owner-side create-key index (`network/create_keys.py`): ONE fixed-name
+    # FILE, `<config>/network/create-keys.json`, rewritten atomically from a
+    # mkstemp sidecar in the same directory. A sibling of `sessions/`, never a
+    # parent of it, and never a directory.
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.replace",
+        "Atomic replacement of the fixed config-root FILE <config>/network/create-keys.json "
+        "from this call's own mkstemp sidecar; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/create_keys.py::CreateKeyIndex._save",
+        "os.unlink",
+        "Removes only this call's own `.create-keys.*.tmp` mkstemp FILE in "
+        "<config>/network after a failed write or replace",
+    ),
     (
         "local_operator/network/relay.py::clear_deliberate_stop",
         "<path>.unlink",
@@ -1699,6 +1715,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/network/definitions.py::write_index",
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "os.replace",
+        "mkstemp-created temp FILE -> <config>/system_prompt.md (the only caller "
+        "passes aida.profile.instruction_file(root)); os.replace rejects a "
+        "directory target",
+    ),
+    (
+        "local_operator/network/definitions.py::_write_instructions_file",
+        "<path>.unlink",
+        "only the mkstemp temp FILE this write created, on a failed write",
     ),
     # The move route's own rollback. It removes `<sessions>/<id>/desktop.json`:
     # the marker FILE beside the transcript, whose name is the fixed

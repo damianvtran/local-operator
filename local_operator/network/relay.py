@@ -88,6 +88,8 @@ from local_operator.network import dial as session_dial
 from local_operator.network import projection, redial, store, wire
 from local_operator.network.audit import CAUSES, AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
+from local_operator.network.create_keys import CreateKeyIndex
+from local_operator.network.create_keys import normalize_key as normalize_create_key
 from local_operator.network.credentials.repair import repair_checks
 from local_operator.network.credentials.sync import sync_checks
 from local_operator.network.handshake import (
@@ -5536,6 +5538,21 @@ def warm_open_frame_strip_now() -> None:
         logger.debug("open-frame strip warm failed", exc_info=True)
 
 
+#: How long a requester waits for ``net_session_create_lookup`` after a create's
+#: reply was lost. A read of one in-memory/JSON index on the owner; the bound is
+#: the link round trip, not work — and the device just failed to answer once.
+CREATE_LOOKUP_TIMEOUT_S = 10.0
+
+
+class _PeerNoReply(MeshRefusal):
+    """A peer op whose request was sent and whose reply never arrived.
+
+    Same ``peer_unreachable`` code as before for every existing reader; its own
+    type so a caller whose op may have ACTED on the far side (a create) can tell
+    "no answer" from "never asked".
+    """
+
+
 class RelayServer:
     """The listener, the links, the dispatch, and the loopback control surface."""
 
@@ -5708,6 +5725,9 @@ class RelayServer:
             "net_forward": self._op_forward,
             "net_stream": self._op_stream,
             "net_session_create": self._op_session_create,
+            # The read-only half of create idempotency: "did my key make a
+            # session?", asked once by a requester that lost the create's reply.
+            "net_session_create_lookup": self._op_session_create_lookup,
             "net_session_engage": self._op_session_engage,
             "net_session_stop": self._op_session_stop,
             # The stored-journal read beside them: same session plane, same
@@ -5756,6 +5776,9 @@ class RelayServer:
         #: out on its next timer (the definitions syncer's first-contact nudge).
         self._slice_link_up_hooks: list[tuple[str, Callable[[PeerLink], Any]]] = []
         self._slow_lock = threading.Lock()
+        #: ``(requester, create_key) -> session id`` for creates made HERE at a
+        #: peer's request; see ``network/create_keys.py`` for why.
+        self._create_keys = CreateKeyIndex(self.root)
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
         #: Devices with a peer-regex peek in flight here (``network.peek.
@@ -9598,6 +9621,50 @@ class RelayServer:
             }
         return {"op": "ack", "req": outer_req, "detail": {"frame": reply}}
 
+    def _create_replay_reply(self, session_id: str, create_key: str) -> dict[str, Any]:
+        """The answer to a create whose key already made ``session_id`` here.
+
+        Deliberately NOT the original reply: that one carried the first turn's
+        admission, which this side does not re-run (re-running it is the duplicate
+        this exists to prevent). ``replayed`` says so; ``admitted`` is False because
+        THIS request admitted nothing — the session's own record says how far its
+        first turn got.
+        """
+        return {
+            "session_id": session_id,
+            "admitted": False,
+            "duplicate": False,
+            "replayed": True,
+            "create_key": create_key,
+            "detail": (
+                f"this request already created {session_id} here; nothing new was created "
+                "and its first prompt was not sent again"
+            ),
+            "record": self._row_for(session_id),
+        }
+
+    def _op_session_create_lookup(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Did the requester's ``create_key`` make a session here? Read-only.
+
+        Its own op rather than a flag on ``net_session_create`` for the one reason
+        that matters: an owner older than this build IGNORES unknown fields, so a
+        "lookup only" flag on a create frame would be read by that owner as a
+        create — the exact duplicate this guards against. An unknown OP is refused
+        by name instead, which the requester reads as "cannot tell".
+        """
+        create_key = normalize_create_key(frame.get("create_key"))
+        if not create_key:
+            raise MeshRefusal("bad_request", "a create lookup names a well-formed create_key")
+        state, session_id = self._create_keys.lookup(link.device_id, create_key)
+        if state == "created" and not (self.root / "sessions" / session_id).is_dir():
+            state, session_id = "unknown", ""
+        return {
+            "create_key": create_key,
+            "state": state,
+            "session_id": session_id,
+            "record": self._row_for(session_id) if session_id else None,
+        }
+
     def _op_session_create(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
         """Create a session ON this device, at another device's request (R8, §5.3).
 
@@ -9744,68 +9811,112 @@ class RelayServer:
                 },
             }
 
-        session_id = new_session_id()
-        session_dir = self.root / "sessions" / session_id
-        # THE WORKING DIRECTORY IS VALIDATED HERE, BY THE DEVICE THAT CAN SEE IT (QA
-        # round 1, Q9). The field names a path on THIS device's disk — that is what
-        # makes it answerable at all, and this device is the only party that can stat
-        # it. It used to be dropped entirely: the desktop's hint promised "Must exist
-        # on <peer>", the create answered 200, and the conversation started in the
-        # peer's HOME directory instead — for an agent that runs commands, the wrong
-        # place, and nothing said so. Refused BEFORE anything is written (the id is
-        # minted but no directory exists yet), so a refused create leaves nothing here
-        # to clean up.
-        cwd = _resolve_peer_cwd(str(frame.get("cwd") or ""), owner=self._own_label())
-        stamp = MeshStamp(
-            session_id=session_id,
-            network_id=link.network_id,
-            home_device=self.identity.device_id,
-            placement=SessionPlacement(
-                # `peer` rather than `local`: this device runs it, but it is here
-                # because ANOTHER device asked for it, and the placement field's
-                # job is to say how the session came to be where it is (§5.1).
-                mode="peer",
+        # ONE REQUEST, AT MOST ONE SESSION (``network/create_keys.py``). A requester
+        # that lost this create's reply may send the SAME frame again; the key it
+        # minted turns that replay into "here is the session you already have"
+        # instead of a second session running the same first prompt. Checked AFTER
+        # every refusal above (so a refused create reserves nothing) and BEFORE the
+        # mint (so a replay mints nothing). Namespaced by the sending device: a key
+        # is never a way to read another member's sessions.
+        if frame.get("images") and not str(frame.get("prompt") or ""):
+            # Images with no text are not a turn. Refused rather than silently
+            # dropped, because a create that discarded them would look like it had
+            # started something. HERE, above the reservation and the mint (review
+            # round 1, R1-m4): it depends on the frame alone, and raised after the
+            # bind it left the key pointing at a session the requester was told
+            # was refused — a keyed retry then answered ``replayed`` for it.
+            raise MeshRefusal("protocol_error", "a create frame carried images but no prompt text")
+        create_key = normalize_create_key(frame.get("create_key"))
+        if create_key:
+            reserved, existing = self._create_keys.reserve(link.device_id, create_key)
+            if reserved == "existing":
+                if existing and (self.root / "sessions" / existing).is_dir():
+                    return self._create_replay_reply(existing, create_key)
+                raise MeshRefusal(
+                    "create_replayed",
+                    f"this create request already made {existing or 'a session'} here, and "
+                    "it no longer exists; send the create again as a new request",
+                )
+            if reserved == "pending":
+                raise MeshRefusal(
+                    "create_in_progress",
+                    "this create request is still being carried out here; nothing new was "
+                    "created — that device's session list shows it once it lands",
+                )
+        try:
+            session_id = new_session_id()
+            session_dir = self.root / "sessions" / session_id
+            # THE WORKING DIRECTORY IS VALIDATED HERE, BY THE DEVICE THAT CAN SEE IT (QA
+            # round 1, Q9). The field names a path on THIS device's disk — that is what
+            # makes it answerable at all, and this device is the only party that can stat
+            # it. It used to be dropped entirely: the desktop's hint promised "Must exist
+            # on <peer>", the create answered 200, and the conversation started in the
+            # peer's HOME directory instead — for an agent that runs commands, the wrong
+            # place, and nothing said so. Refused BEFORE anything is written (the id is
+            # minted but no directory exists yet), so a refused create leaves nothing here
+            # to clean up.
+            cwd = _resolve_peer_cwd(str(frame.get("cwd") or ""), owner=self._own_label())
+            stamp = MeshStamp(
+                session_id=session_id,
                 network_id=link.network_id,
                 home_device=self.identity.device_id,
-                policy="pinned",
-                stamp_revision=1,
-            ),
-            origin={
-                "kind": str(frame.get("origin") or "user"),
-                "source_device": link.device_id,
-                "source_session_id": "",
-            },
-            # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
-            # THE SESSION, so the runtime this create engages — and every runtime a
-            # later move engages — applies full-auto at construction. The field is
-            # the CARRY, never the authority: the runtime re-checks this device's
-            # grant at every engage (``serving._carried_auto_authority``), which is
-            # what makes a revocation effective at the next engage.
-            unattended=unattended,
-        )
-        try:
-            # CLAIM BEFORE mkdir, then RELEASE — and the release is not an
-            # afterthought. ``claim_session`` writes the CLAIMING process's pid
-            # into ``.session.pid``, which is the transcript lease: in
-            # ``fork_session`` the claimer and the owner are the same process, so
-            # the marker is superseded by the spawned runtime's own claim a moment
-            # later. Here the claimer is the RELAY, which owns no session at all
-            # (R1) — and a lease naming the relay's live pid is exactly the state
-            # ``launch`` reads as "somebody is constructing this right now", so the
-            # runtime we then spawn waits out the whole engage deadline and the
-            # create fails on a claim its own relay wrote. The claim exists for the
-            # mkdir window (so a retention sweep never sees an unclaimed
-            # directory); the ownership statement is the stamp, and the lease
-            # belongs to whoever runs the session.
-            claim_session(session_dir)
-            session_dir.mkdir(parents=True, exist_ok=True)
-            ensure_session_created_at(session_dir, time.time())
-            write_stamp(self.root, stamp)
-            release_session(session_dir)
-        except OSError as exc:
-            raise MeshRefusal(
-                "session_create_failed", f"the session directory could not be created: {exc}"
-            ) from exc
+                placement=SessionPlacement(
+                    # `peer` rather than `local`: this device runs it, but it is here
+                    # because ANOTHER device asked for it, and the placement field's
+                    # job is to say how the session came to be where it is (§5.1).
+                    mode="peer",
+                    network_id=link.network_id,
+                    home_device=self.identity.device_id,
+                    policy="pinned",
+                    stamp_revision=1,
+                ),
+                origin={
+                    "kind": str(frame.get("origin") or "user"),
+                    "source_device": link.device_id,
+                    "source_session_id": "",
+                },
+                # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
+                # THE SESSION, so the runtime this create engages — and every runtime a
+                # later move engages — applies full-auto at construction. The field is
+                # the CARRY, never the authority: the runtime re-checks this device's
+                # grant at every engage (``serving._carried_auto_authority``), which is
+                # what makes a revocation effective at the next engage.
+                unattended=unattended,
+            )
+            try:
+                # CLAIM BEFORE mkdir, then RELEASE — and the release is not an
+                # afterthought. ``claim_session`` writes the CLAIMING process's pid
+                # into ``.session.pid``, which is the transcript lease: in
+                # ``fork_session`` the claimer and the owner are the same process, so
+                # the marker is superseded by the spawned runtime's own claim a moment
+                # later. Here the claimer is the RELAY, which owns no session at all
+                # (R1) — and a lease naming the relay's live pid is exactly the state
+                # ``launch`` reads as "somebody is constructing this right now", so the
+                # runtime we then spawn waits out the whole engage deadline and the
+                # create fails on a claim its own relay wrote. The claim exists for the
+                # mkdir window (so a retention sweep never sees an unclaimed
+                # directory); the ownership statement is the stamp, and the lease
+                # belongs to whoever runs the session.
+                claim_session(session_dir)
+                session_dir.mkdir(parents=True, exist_ok=True)
+                ensure_session_created_at(session_dir, time.time())
+                write_stamp(self.root, stamp)
+                release_session(session_dir)
+            except OSError as exc:
+                raise MeshRefusal(
+                    "session_create_failed", f"the session directory could not be created: {exc}"
+                ) from exc
+        except BaseException:
+            # Nothing reached the disk (every raise above is before or AT the mkdir),
+            # so the key is free again: a corrected retry may use it.
+            if create_key:
+                self._create_keys.release(link.device_id, create_key)
+            raise
+        if create_key:
+            # BOUND THE MOMENT THE DIRECTORY EXISTS, before the engage and the first
+            # turn — those are the slow steps whose reply is the one that gets lost,
+            # and a lookup during them must already find this id.
+            self._create_keys.bind(link.device_id, create_key, session_id)
 
         name = str(frame.get("name") or "")
         # THE ATTACHMENT IS HOW A PROFILE REACHES THE RUNNING SESSION, and it is the
@@ -9918,13 +10029,7 @@ class RelayServer:
             ),
         }
         if not prompt:
-            if frame.get("images"):
-                # Images with no text are not a turn. Refused rather than silently
-                # dropped, because a create that discarded them would look like it had
-                # started something.
-                raise MeshRefusal(
-                    "protocol_error", "a create frame carried images but no prompt text"
-                )
+            # (Images without a prompt were refused above the reservation.)
             # ANSWER THE CREATE, THEN WARM IT (QA round 1, Q4b). A warm-up is a spawned
             # runtime plus its discovery record, measured at 15.9-22.1 s on LOOPBACK on
             # a loaded host, while the desktop's own window for this call is 20 s: the
@@ -14097,7 +14202,12 @@ class RelayServer:
             timeout=(engage_hop_bound_s(self.settings.op_wait_s) if timeout is None else timeout),
         )
         if reply is None:
-            raise MeshRefusal(
+            # A SUBCLASS, SAME CODE: every caller that only knew ``peer_unreachable``
+            # still reads it, while the one caller for whom "the request went out
+            # and no answer came back" means something different from "it was
+            # never asked" (a create: the far side may have ACTED) can tell them
+            # apart. See ``_ctl_peer_create``.
+            raise _PeerNoReply(
                 "peer_unreachable",
                 f"{peer} stopped answering before it replied",
             )
@@ -14108,6 +14218,84 @@ class RelayServer:
             )
         detail = reply.get("detail")
         return detail if isinstance(detail, dict) else {"value": detail}
+
+    def _settle_lost_create(self, peer: str, create_key: str) -> dict[str, Any]:
+        """A create's request went out and its reply never came back: find out.
+
+        The owner may have created the session (observed live 2026-11-11, where
+        "stopped answering before it replied" was printed for a session that
+        existed), so "unreachable" is the one answer this must never give. Asks
+        the owner ONCE, by the key the create carried, on a short read-sized
+        bound: a device that just failed to answer is not given another full
+        create budget.
+
+        Returns the detail of a confirmed create (the id, marked
+        ``create_unconfirmed`` because the create's own reply — and with it the
+        first turn's admission — was lost). Raises ``create_unconfirmed`` in every
+        case where the owner cannot be shown to hold the session, with a sentence
+        that says it MAY exist and how to check, and how to retry without making
+        a second one.
+        """
+        label = self._peer_label(peer)
+        # BOTH REAL SPELLINGS (review round 1, R1-n1 / QA Q2): this sentence
+        # reaches an agent through the ``sessions`` tool and a person through the
+        # CLI, and the earlier ``sessions list peer=`` was neither one's syntax.
+        listing = f"`sessions op=list peer={peer}` (CLI: `lop network sessions --peer {peer}`)"
+        check = f"check {listing} before creating again"
+        retry = (
+            f"a retry that sends create key {create_key} — "
+            f"`lop network sessions --peer {peer} --create --create-key {create_key}` with "
+            "the same options — returns that session instead of making a second one"
+        )
+        try:
+            found = self._local_peer_call(
+                "net_session_create_lookup",
+                peer,
+                timeout=CREATE_LOOKUP_TIMEOUT_S,
+                create_key=create_key,
+            )
+        except MeshRefusal as refusal:
+            # An older owner answers ``unknown_op`` (and ignored the key, so a
+            # retry WOULD duplicate there); a dead link answers nothing. Either
+            # way nothing is known, and the sentence says exactly that.
+            logging.getLogger(__name__).info(
+                "create lookup on %s failed: %s %s",
+                peer,
+                refusal.code,
+                refusal.sentence,
+            )
+            raise MeshRefusal(
+                "create_unconfirmed",
+                f"{label} stopped answering before it replied to the create, and could "
+                f"not be asked whether it made the session — it may have been created; {check}",
+            ) from None
+        state = str(found.get("state") or "")
+        session_id = str(found.get("session_id") or "")
+        if state == "created" and session_id:
+            return {
+                "session_id": session_id,
+                "admitted": False,
+                "duplicate": False,
+                "create_unconfirmed": True,
+                "create_key": create_key,
+                "detail": (
+                    f"{label} created {session_id}, but its reply to the create was lost, so "
+                    "whether the first prompt was admitted is unknown — "
+                    f"{listing} shows how far it got"
+                ),
+                "record": found.get("record"),
+            }
+        if state == "pending":
+            raise MeshRefusal(
+                "create_unconfirmed",
+                f"{label} is still creating the session (its reply was lost) — it may "
+                f"appear shortly; {check}. {retry}",
+            )
+        raise MeshRefusal(
+            "create_unconfirmed",
+            f"{label} stopped answering before it replied to the create and holds no "
+            f"session for it yet — it may still have been created; {check}. {retry}",
+        )
 
     def _ctl_peer_create(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Create a session on a peer, CARRYING WHO THE SESSION IS.
@@ -14210,6 +14398,30 @@ class RelayServer:
         push_reason = ""
         expect: dict[str, Any] = {}
         reconciliation: dict[str, Any] = {}
+        # A PEER THAT KEPT ITS OWN CUSTOM INSTRUCTIONS IS SAID ON THE RECEIPT (review
+        # round 1, R1-2), with the remedy, because the session about to run there
+        # will not carry this device's standing rules. Informational only: it never
+        # refuses the create (a node's own instructions are a legitimate state).
+        instructions_notice = ""
+        if not named:
+            # AN UNNAMED SESSION STILL RUNS UNDER THE OPERATOR'S CUSTOM INSTRUCTIONS,
+            # so the push that a named create does below happens here too, narrowed
+            # to no agents and no teams: what it carries is the operator-instructions
+            # singleton (``definitions.local_bundle``), and only when the peer's copy
+            # differs. Best effort: the cadence carries it anyway, and a create must
+            # not fail on a refresh the user never asked for.
+            from local_operator.network import definitions
+
+            try:
+                instructions_notice = _instructions_notice_of(
+                    definitions.push_to_peer(
+                        self, self._resolve_peer(peer), names={"agents": [], "teams": []}
+                    )
+                )
+            except Exception:  # noqa: BLE001 — see above
+                logger.debug(
+                    "relay: instructions push before an unnamed create failed", exc_info=True
+                )
         if named:
             from local_operator.network import definitions
 
@@ -14237,6 +14449,7 @@ class RelayServer:
                 target,
                 names={"agents": wanted, "teams": [team] if team else []},
             )
+            instructions_notice = _instructions_notice_of(pushed)
             unreconciled = definitions.create_refusal(pushed, peer_label=self._peer_label(target))
             if unreconciled:
                 # THE DIVERGENT COPY LIVES ON THAT DEVICE, and the sentence says so:
@@ -14307,8 +14520,17 @@ class RelayServer:
                 fields[key] = value
         if expect:
             fields["expect"] = expect
+        # THE CREATE KEY (``network/create_keys.py``): minted here unless the caller
+        # brought one (a retry of a create whose reply was lost brings the key it
+        # was told), so the owner can answer a replay with the session it already
+        # made, and this side can ask about a lost reply instead of guessing.
+        create_key = normalize_create_key(frame.get("create_key")) or uuid.uuid4().hex
+        fields["create_key"] = create_key
         try:
-            detail = self._local_peer_call("net_session_create", peer, **fields)
+            try:
+                detail = self._local_peer_call("net_session_create", peer, **fields)
+            except _PeerNoReply:
+                detail = self._settle_lost_create(peer, create_key)
         except MeshRefusal as refusal:
             if push_reason:
                 # APPENDED ON ``push_reason`` ALONE, and it used to be gated on the
@@ -14322,6 +14544,8 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        if instructions_notice:
+            detail = {**detail, "custom_instructions_notice": instructions_notice}
         if reconciliation:
             return {**detail, "definitions": reconciliation}
         return detail
@@ -15220,6 +15444,14 @@ class RelayServer:
         )
 
     # -- pair phase, listener-side helpers ---------------------------------
+
+
+def _instructions_notice_of(pushed: Any) -> str:
+    """The push's kept-own-instructions sentence (``definitions.push_to_peer``), or ``""``."""
+    if not isinstance(pushed, Mapping):
+        return ""
+    report = pushed.get("operator_instructions")
+    return str(report.get("notice") or "") if isinstance(report, Mapping) else ""
 
 
 def _has_terminal() -> bool:

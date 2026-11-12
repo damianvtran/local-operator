@@ -127,6 +127,9 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     INPUT_MODE_CAPABILITY,
     LIVE_INBOX_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
+    MESH_SENDER_DEVICE_ID_KEY,
+    MESH_SENDER_DEVICE_NAME_KEY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
@@ -2084,6 +2087,40 @@ class _ConnectionAuthority:
 
     locality: ClientLocality = "local"
     capabilities: frozenset[str] = frozenset()
+    #: ``{"device_id", "name"}`` of the device a RELAYED connection speaks for,
+    #: from the auth frame the owner's own relay wrote off its authenticated link
+    #: (``relay._peer_block``) — empty for a local dial. ``peer_message`` stamps it
+    #: onto the card (``_stamp_peer_sender``) so the receiver knows which device
+    #: wrote and can answer with ``send peer=``.
+    peer: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
+    """The sender dict a ``peer_message`` card carries, device stamped by the OWNER.
+
+    The frame's sender is ADVISORY (a session id and name the sending side read
+    off its own registry): it is display only. The device is a different kind of
+    fact — it decides where a reply goes — so it comes from the connection, never
+    the frame. Any frame-supplied device key is dropped first, for a local dial
+    too (a local caller must not be able to dress a note up as a mesh peer's),
+    and a remote connection then gets the link's identity plus the
+    ``remote_origin`` stamp a relayed ``prompt`` already carries. ``pid`` and
+    ``cwd`` of a remote sender name things on ANOTHER machine, which nothing
+    here can act on, so they are dropped rather than shown as if local.
+    """
+    sender = dict(raw) if isinstance(raw, Mapping) else {}
+    sender.pop(MESH_SENDER_DEVICE_ID_KEY, None)
+    sender.pop(MESH_SENDER_DEVICE_NAME_KEY, None)
+    if authority.locality == "local":
+        return sender
+    sender.pop("pid", None)
+    sender.pop("cwd", None)
+    sender["remote_origin"] = True
+    device_id = str(authority.peer.get("device_id") or "")
+    if device_id:
+        sender[MESH_SENDER_DEVICE_ID_KEY] = device_id
+        sender[MESH_SENDER_DEVICE_NAME_KEY] = str(authority.peer.get("name") or "")
+    return sender
 
 
 #: What a dispatch under no connection at all is treated as: the pre-existing
@@ -2919,6 +2956,15 @@ class RuntimeServer:
                 # drop the id cannot dedupe that retry -- so an owner that does
                 # not take the keyword must not advertise it.
                 + ([PEER_MESSAGE_ID_CAPABILITY] if receives_message_id(handle) else [])
+                # A MESH ``send`` MAY USE THE MAILBOX, gated on the handle that
+                # can receive one at all: the dispatch below stamps the relayed
+                # device on every remote ``peer_message``. See
+                # ``MESH_PEER_MESSAGE_CAPABILITY`` for why the sender gates on it.
+                + (
+                    [MESH_PEER_MESSAGE_CAPABILITY]
+                    if callable(getattr(handle, "receive_peer_message", None))
+                    else []
+                )
                 # THE LIVE INBOX DRAIN, gated on the flag the runtime child sets
                 # when it starts the watcher (``process._watch_live_inbox``): a
                 # sender that sees it may queue a message to ``inbox.jsonl``
@@ -8622,7 +8668,9 @@ class RuntimeServer:
         """
         kwargs: dict[str, Any] = {}
         if _accepts_kw(self._dispatch, "authority"):
-            kwargs["authority"] = _ConnectionAuthority(conn.locality, conn.capabilities)
+            kwargs["authority"] = _ConnectionAuthority(
+                conn.locality, conn.capabilities, dict(conn.peer)
+            )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
         return await self._dispatch(op, frame, **kwargs)
@@ -9167,7 +9215,9 @@ class RuntimeServer:
                 "text": frame["text"],
                 "mode": str(frame.get("mode", "mailbox")),
                 "wake": bool(frame.get("wake", False)),
-                "sender": frame.get("sender") or {},
+                # THE DEVICE COMES FROM THE LINK, not the frame — see
+                # ``_stamp_peer_sender`` (PR #3827 A1: mesh ``send`` lands here).
+                "sender": _stamp_peer_sender(frame.get("sender"), authority),
             }
             # SENDER-MINTED MESSAGE IDENTITY, probed exactly like ``command_id``
             # above: a handle from before the carriage never receives a keyword
