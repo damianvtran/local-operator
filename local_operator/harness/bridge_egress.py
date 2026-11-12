@@ -975,6 +975,14 @@ def _classify(
     """The tainted-session tier for one call. May raise; the caller fails closed."""
     if tool_name == "web_fetch":
         return "write", None
+    if tool_name == "inspect_command":
+        # The completion verifier's guest read (evaluation/completion_verifier.py):
+        # a shell command on the task machine. In its ``audit`` mode (no working
+        # bwrap) nothing unshares the network, so ``curl`` can carry context to
+        # any host -- treat it as egress while latched. Only evaluation verifier
+        # children register it, and those never latch, so this costs nothing
+        # off the latch.
+        return "write", None
     if tool_name == "read":
         if read_target_is_egress(arguments.get("path")):
             return "write", None
