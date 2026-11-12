@@ -1,6 +1,6 @@
 ---
 name: app-files
-description: "Write or edit an application's own file format (project, office XML, image-editor file) so it opens as if the app made it: app ids, object types, round-trip."
+description: "Hand-write an application's native format (media timeline, office XML, image-editor layers) so it loads as if the app made it: app ids, object types, round-trip."
 ---
 
 # Application file formats
@@ -10,9 +10,9 @@ audio project, a slide deck or document's XML, an image-editor document, a
 game save or app config — by writing its format yourself instead of through the
 app's own UI.
 
-Why: whatever reads the file next (the app, the user, a colleague's script, a
-grader) expects what the app's own operation produces — its identifiers,
-object types, names and structure. A look-alike that renders the same can
+Why: whatever reads the file next (the app, the user, a colleague's script)
+expects what the app's own operation produces — its identifiers, object types,
+names and structure. A look-alike that renders the same can
 still be wrong: a generic backend filter where the app has a named one, one
 merged clip where the user asked for several cuts, a text box where a
 placeholder was. These are silent defects; a screenshot will not show them.

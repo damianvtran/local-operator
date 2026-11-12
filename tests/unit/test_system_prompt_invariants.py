@@ -183,8 +183,15 @@ def test_a_file_the_user_asked_to_change_is_edited_in_place(queued: str) -> None
     (DeepSeek V4.1 Flash sample, 2026-11-12) — the deliverable was missing."""
     assert "Treat unknown files as the user's work" in queued
     assert "A file the user asks you to edit, fill or fix is the deliverable" in queued
-    assert "change it in place (backup elsewhere if needed)" in queued
-    assert "new files only when asked or the original isn't theirs" in queued
+    # An edit that cannot be undone (lossy re-encode, flattening, a file with
+    # no other copy) leaves the only copy unprotected, so the backup is
+    # required there, not optional.
+    assert "first back it up elsewhere if the edit can't be undone" in queued
+    # The only escape is an explicit request for a copy. A looser "or the
+    # original isn't theirs" covered a downloaded blank form — the very case
+    # that produced the sibling files (PR #3857 review R2).
+    assert "new files only when asked for a copy." in queued
+    assert "isn't theirs" not in queued
 
 
 def test_verifying_the_end_state_demands_complete_computed_evidence(queued: str) -> None:
@@ -193,11 +200,17 @@ def test_verifying_the_end_state_demands_complete_computed_evidence(queued: str)
     "match B" judged on looks while links/metadata differed, and an item left
     untested on a false "can't resize" after one route."""
     assert "check paths, names and counts by command, not by eye" in queued
-    assert '"Every X" needs per-element output, not a sample' in queued
+    # A check over every element that reports the failures, not a dump of
+    # every element: printing 10k rows floods context (review R4).
+    assert '"Every X" needs a check over every element (count the failures)' in queued
+    assert "per-element output" not in queued
     assert '"match B" a property diff against B (links, metadata, types)' in queued
-    assert '"can\'t test" two tried routes, else unmet' in queued
+    # "Safe": a second route to test an external effect must not be the
+    # irreversible action itself (send, pay, publish) — review R5.
+    assert '"can\'t test" two tried safe routes, else unmet' in queued
     assert "Claim success only when observable" in queued
 
 
 def test_hand_written_app_files_point_at_their_guide(queued: str) -> None:
-    assert "Hand-writing an app's file format? Read `guide://app-files` first." in queued
+    # Bold lead-in like every neighbouring Working-principles bullet.
+    assert "- **Hand-writing an app's file format?** Read `guide://app-files` first." in queued

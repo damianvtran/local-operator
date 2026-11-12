@@ -182,11 +182,16 @@ def test_guide_listing_never_contains_guide_body() -> None:
         # negative control, because a guide that matches everything routes nothing.
         ("never let me force-push main", "guardrails"),
         ("warn me before deleting data", "guardrails"),
-        # The app-files row: the vocabulary this router can see is the
-        # description's own ("file format", "project", "image-editor"). The
-        # system prompt also points at the guide by name, so routing is the
-        # second route in, not the only one.
-        ("write an application's project file format directly", "app-files"),
+        # The app-files rows are phrased unlike the description (a row that
+        # repeats it proves only string overlap) and use the shapes this router
+        # can see: an app's own object vocabulary ("clips", "layers", "office
+        # XML"). The system prompt also points at the guide by name, so routing
+        # is the second route in, not the only one.
+        # `test_ordinary_file_and_project_turns_do_not_route_to_app_files` is
+        # their negative control.
+        ("add three clips to my video editor timeline", "app-files"),
+        ("build an image-editor document with two layers", "app-files"),
+        ("hand-write the slide deck's office XML", "app-files"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -219,6 +224,37 @@ async def test_an_unrelated_task_does_not_route_to_guardrails(tmp_path: Path) ->
     selected = await index.select("summarise this spreadsheet into a table")
 
     assert "guardrails" not in {g.name for g in selected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "update the project status to active",
+        "create a new project for the website redesign",
+        "show my projects and their milestones",
+        "write a json file with these settings",
+    ],
+)
+async def test_ordinary_file_and_project_turns_do_not_route_to_app_files(
+    tmp_path: Path, query: str
+) -> None:
+    """The negative control for the app-files routing rows.
+
+    Lop *project* turns (status, milestones) are among the most frequent in
+    team sessions, and writing a plain data file is routine. An earlier
+    description naming "project" and "file format" routed all four of these
+    (PR #3857 review round 1), spending a listing line and inviting a needless
+    guide read on ordinary turns. The guide is for an application's native
+    format only, so none of these may surface it.
+    """
+    guides = discover_guides()
+    index = SkillIndex(cast(Any, guides), LocalEmbedder(), cache_dir=tmp_path / "cache")
+    await index.build()
+
+    selected = await index.select(query)
+
+    assert "app-files" not in {g.name for g in selected}
 
 
 def test_guardrails_guide_rule_example_is_loadable(tmp_path: Path) -> None:
@@ -1318,3 +1354,5 @@ def test_app_files_guide_states_the_native_shape_rules() -> None:
     assert "Edit the named file in place" in prose
     assert "Round-trip it through the app" in prose
     assert "Check mechanical properties with a command" in prose
+    # The guide is general harness guidance, not benchmark advice.
+    assert "grader" not in prose
