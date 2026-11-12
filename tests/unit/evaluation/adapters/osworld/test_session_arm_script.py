@@ -399,6 +399,12 @@ def test_a_prose_reply_to_every_continuation_runs_to_the_step_budget(
     budget (6). Each prose message is one attempted output group and each
     continuation one step, so the sixth group spends the clock and the chain
     ends with no further exchange.
+
+    The ending is NAMED (QA round 1, Q-1): the budget sink's cancel ends that
+    sixth turn ``aborted`` on the real session, which used to skip the
+    continuation entirely -- no row for the last message, and the label fell
+    to a causeless ``agent_stop`` / ``aborted``. It is now ``truncated`` /
+    ``max-steps`` with an undelivered ``max-steps`` row.
     """
 
     root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
@@ -406,15 +412,18 @@ def test_a_prose_reply_to_every_continuation_runs_to_the_step_budget(
         root, adapter_wheel, spawn_interpreter, ending="prose-claim", challenge_reply="prose"
     )
 
-    outcome = _outcome(completed, expect_status="agent_stop")
+    outcome = _outcome(completed, expect_status="truncated")
+    assert outcome["terminal_reason"] == "max-steps"
     # One wait plus four delivered continuations.
     assert outcome["steps"] == 5
     assert outcome["attempted_groups"] == 6
     kinds = _record_kinds(run_root)
     assert "action_completion_challenged" not in kinds
     assert "action_finish" not in kinds
+    assert "budget_stop" in kinds
     continued = _record_payloads(run_root, "action_text_only_continuation")
-    assert [row["delivered"] for row in continued if row["delivered"]] == [True] * 4
+    assert [row["delivered"] for row in continued] == [True] * 4 + [False]
+    assert continued[-1]["stopped"] == "max-steps"
     # Six model calls: the opening wait and five prose turns. A seventh would
     # mean a continuation spent past the budget.
     events = _log_events(log)

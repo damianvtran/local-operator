@@ -546,7 +546,9 @@ _PROSE_SUB_STEP_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: The prose arm's assertion shapes (see :func:`prose_claims_completion`). A
+#: The completion-claim label's assertion shapes (see
+#: :func:`prose_claims_completion`, which now only NAMES an ``agent_stop`` ending
+#: -- the text-only continuation no longer depends on it). A
 #: POSITIVE list on purpose: a terminal message that matches nothing is left
 #: alone, and the shapes below are the ones the sealed session-arm corpus
 #: actually exhibits. Each pattern is pinned by a unit test against the real
@@ -619,6 +621,31 @@ OSWORLD_DEFAULT_USER_RESPONSE = (
 #: and ``FinishAction.reason`` share this field bound (``protocol.py``), so the
 #: terminal prose is cut to it rather than to a second invented one.
 _PROSE_CLAIM_MAX_CHARS = 10_000
+
+#: The question put to the user simulator for a text-only turn with NO text
+#: (an empty or image-only reply). Upstream calls ``respond("")`` there
+#: (``lib_run_single.py`` L747-749: ``response if response else ""``), but
+#: the wire cannot carry an empty question: ``AskUserAction.question``
+#: (``protocol.py``, ``min_length=1`` and a non-blank pattern) and
+#: ``AskUserExchangeParams.prompt`` (``adapters/api.py``, ``min_length=1``)
+#: both refuse it, and relaxing a digest-bound protocol field for one edge
+#: would ripple into every adapter build. So the simulator IS consulted, as
+#: upstream's is, with this stand-in for the empty string -- the one
+#: deliberate deviation, and the record keeps the real (empty) question.
+EMPTY_REPLY_QUESTION = "(no text)"
+
+#: Said between the continuation's answer and the re-shown screen. The screen
+#: is the one the model last saw, so its ``Step:`` line still carries THAT
+#: observation's sequence number, while the restated budget line already
+#: counts the step this reply took (QA round 1, Q-2: ``Step: 1`` beside
+#: ``Step budget: 2 of 8 steps used`` reads as a contradiction). The render is
+#: shared with every other turn, so it is explained here rather than changed
+#: there, where it would move the bytes of every observation on both arms.
+CONTINUATION_SCREEN_NOTE = (
+    'The screen below is unchanged since your last action. Its "Step:" line '
+    "numbers that screen; the step budget line counts steps used, including "
+    "this reply."
+)
 
 
 def prose_claims_completion(text: str) -> bool:
@@ -1229,7 +1256,8 @@ class ActionBridge:
         #: challenge itself charges a step after the screen was rendered.
         self._initial_shown: tuple[str, list[Any], StepPosition | None] | None = None
         self._last_shown: tuple[str, list[Any], StepPosition | None] | None = None
-        #: The terminal assistant message the prose arm reads. Updated by
+        #: The terminal assistant message the text-only continuation and the
+        #: ``agent_stop`` label read. Updated by
         #: ``fold`` on every ``MessageEndEvent``, so once the turn ends this is
         #: the message the run ended on -- a prose "Done" never reaches
         #: ``call``, so the event stream is the only place the bridge can see
@@ -1544,7 +1572,7 @@ class ActionBridge:
     def last_assistant_message(self) -> Message | None:
         """The last assistant message the stream ended on.
 
-        ``fold`` keeps it for the prose arm; the driver reads it back here so
+        ``fold`` keeps it for the text-only continuation; the driver reads it back here so
         an ``agent_stop``'s ``terminal_reason`` can name the message the turn
         ended on without re-reading the record's ``events.jsonl``.
         """
@@ -1555,10 +1583,9 @@ class ActionBridge:
     def completion_challenges_fired(self) -> int:
         """How many completion-gate challenges this episode delivered.
 
-        One counter for BOTH arms -- the finish-call challenge and the prose
-        claim's -- exactly as the budget is one, so a reader of an
-        ``agent_stop`` can tell an ending that survived the gate from one the
-        gate never saw.
+        The finish-call challenge is the gate's only trigger now (a text-only
+        turn is continued, never challenged), so a reader of an ``agent_stop``
+        can tell an ending that survived the gate from one the gate never saw.
         """
 
         return self._completion_fired
@@ -1589,9 +1616,9 @@ class ActionBridge:
 
         Folding is the DRIVER's job (as in the loop-driven design): the
         engine does not know the token exists, so the arming happens on
-        ``TurnEndEvent`` and the next call reads the result. The prose arm of
-        the completion gate reads the stream from the same seam: the terminal
-        assistant message is the only copy of a prose "Done" the bridge can
+        ``TurnEndEvent`` and the next call reads the result. The text-only
+        continuation reads the stream from the same seam: the terminal
+        assistant message is the only copy of a text-only reply the bridge can
         see, because a message without a tool call never reaches ``call``.
         """
 
@@ -1600,7 +1627,7 @@ class ActionBridge:
         if isinstance(event, MessageEndEvent):
             message = event.message
             # ``AgentMessage`` is a union (``Message | CustomMessage``); the
-            # prose arm only ever reads a real assistant ``Message``, and the
+            # continuation only ever reads a real assistant ``Message``, and the
             # isinstance check is what tells the type checker so.
             if isinstance(message, Message) and message.role == "assistant":
                 self._last_assistant_message = message
@@ -1616,19 +1643,27 @@ class ActionBridge:
         if isinstance(event, (TurnEndEvent, AgentEndEvent)):
             self._finalize_output_group()
 
-    async def text_only_continuation(self) -> list[Any] | None:
+    async def text_only_continuation(
+        self, *, halted: Callable[[], str | None] | None = None
+    ) -> list[Any] | None:
         """See :meth:`_text_only_continuation`; serialised with :meth:`call`.
 
         The bridge's ONE mutation lane: the step clocks, the progress window
         and the ask seam are the state ``call`` mutates under ``_lock``, so the
         continuation takes the same lock rather than relying on the turn
         having ended.
+
+        ``halted`` is the driver's kill-switch probe (the episode wall), read
+        AFTER the answer is obtained: see the method below for why the check
+        at the driver's loop head is not enough.
         """
 
         async with self._lock:
-            return await self._text_only_continuation()
+            return await self._text_only_continuation(halted=halted)
 
-    async def _text_only_continuation(self) -> list[Any] | None:
+    async def _text_only_continuation(
+        self, *, halted: Callable[[], str | None] | None = None
+    ) -> list[Any] | None:
         """The protocol's continuation for a turn that ended with NO tool call.
 
         WHY (arm main29, local-operator ``ad1aa4162a6e``, ``t29a-t003``). A
@@ -1678,9 +1713,28 @@ class ActionBridge:
         failed simulator exchange is recorded and ENDS the continuation
         (``None``): substituting the default for a task that has a simulator
         would invent an answer the protocol would not give. An empty-text
-        message has no question to put to a simulator, so it gets the default.
+        message is still put to the simulator, as upstream's ``respond("")``
+        is, with :data:`EMPTY_REPLY_QUESTION` standing in for the empty string
+        the wire refuses. A simulator answering ``None`` gets the default: the
+        model must be handed text, and upstream would pass ``None`` on into its
+        message list -- a value no model input here can carry. Both are
+        deliberate deviations from ``lib_run_single.py`` L747-749.
+
+        THE WALL CAN FIRE DURING THE ANSWER (review round 1, R1-1). Obtaining
+        it is an adapter RPC -- with a simulator, a model call bounded only by
+        ``step_timeout``. The driver's wall timer aborts the session, but
+        between turns there is no turn to abort, and the next ``prompt``
+        clears the sticky flag ("a fresh user prompt supersedes any earlier
+        interrupt request", ``Session.prompt``), so a continuation delivered
+        then would run a whole turn past the kill switch. ``halted`` is
+        therefore re-read once the answer is in hand, and a reason it returns
+        ends the continuation undelivered under that reason. Nothing awaits
+        between this check and the driver's ``prompt``.
+
         Every outcome writes one ``text_only_continuation`` row, delivered or
-        not, so the record says why the episode went on or stopped.
+        not, so the record says why the episode went on or stopped -- the
+        budget sink's cancel included (the driver calls in for that ending
+        too; see ``run_session_episode``).
 
         RETURNS the content to deliver as one harness-injected user turn (the
         answer text, then the screen the model was last shown with its budget
@@ -1710,7 +1764,14 @@ class ActionBridge:
             # No step left to spend on an answer (the prose message itself may
             # have taken the last attempted group): nothing is charged, the
             # budget stop the driver's sink already raised ends the episode,
-            # and the row says why it did not go on.
+            # and the row says why it did not go on. The ending is NAMED as
+            # the budget here, as the post-charge branch below names it: the
+            # attempted clock can be spent while the official one is not
+            # (refused groups charge only the attempted clock), and without
+            # this the driver read the ending as the model's own
+            # ``agent_stop`` while this row said ``max-steps`` (R1-2).
+            token.mark_terminal()
+            self.end_requested = "max-steps"
             self._continued_message_ids.add(message.id)
             if self.record is not None:
                 self.record(
@@ -1754,7 +1815,7 @@ class ActionBridge:
                 AskUserAction(
                     observation_id=observation.observation_id,
                     request_id=f"text-only-{self._steps}-{uuid.uuid4().hex[:8]}",
-                    question=question or "(no text)",
+                    question=question or EMPTY_REPLY_QUESTION,
                 ),
             ),
         )
@@ -1767,9 +1828,9 @@ class ActionBridge:
         # ``ask_exchange`` says what the seam did, so a reader can tell "the
         # task has no simulator / it declined" (the adapter answers both as a
         # clean decline) from "no exchange was attempted" (no adapter-owned
-        # seam, or an empty message with nothing to ask).
+        # seam). An empty message is asked too (see EMPTY_REPLY_QUESTION).
         row["ask_exchange"] = "none"
-        if self.ask is not None and question:
+        if self.ask is not None:
             try:
                 delivery = await self.ask(batch)
             except Exception as error:  # noqa: BLE001 - recorded, and the episode ends legibly
@@ -1787,8 +1848,17 @@ class ActionBridge:
             answer = OSWORLD_DEFAULT_USER_RESPONSE
             row["answer_source"] = "default-user-response"
         row["answer"] = answer
+        halt_reason = halted() if halted is not None else None
+        if halt_reason is not None:
+            # The kill switch fired while the answer was being obtained: the
+            # step stays charged (it was spent, as upstream's ``step_idx``
+            # is), the answer is recorded, and nothing is delivered.
+            self._record_continuation(row, delivered=False, stopped=halt_reason)
+            return None
         self._record_continuation(row, delivered=True, stopped=None)
-        return [TextContent(text=answer), *self._shown_blocks(observation)]
+        shown = self._shown_blocks(observation)
+        note = [TextContent(text=CONTINUATION_SCREEN_NOTE)] if shown else []
+        return [TextContent(text=answer), *note, *shown]
 
     def _record_continuation(
         self, row: dict[str, Any], *, delivered: bool, stopped: str | None
@@ -3238,6 +3308,26 @@ def _turn_ended_cleanly(end: AgentEndEvent | None) -> bool:
     return not (end.error or end.aborted or end.cut_off_cause)
 
 
+def _budget_cancelled_the_turn(end: AgentEndEvent | None, budget_stop_sent: bool) -> bool:
+    """Whether the turn's abort is the driver's own step-budget cancel.
+
+    The budget sink asks for a graceful cancel at the message that spends the
+    last attempted group, and the session then ends that turn ``aborted``
+    even when the message was a completed text-only reply. Read as unclean,
+    the bridge never saw it: no ``text_only_continuation`` row, and the label
+    fell through to a causeless ``aborted`` although a ``budget_stop`` row was
+    written (QA round 1, Q-1, measured on the real session with progress
+    guards off). Letting this one abort through lets the bridge record the
+    undelivered continuation and end the episode ``max-steps``; it cannot
+    deliver one, since the budget it checks first is the one already spent.
+    A provider error or a stamped cut-off cause is never this.
+    """
+
+    if end is None or not budget_stop_sent:
+        return False
+    return bool(end.aborted) and not (end.error or end.cut_off_cause)
+
+
 def _agent_stop_terminal_reason(
     *,
     wall_fired: bool,
@@ -3258,7 +3348,7 @@ def _agent_stop_terminal_reason(
     THE INPUTS ARE THE SHARED FACTS, never adapter state: the final
     ``AgentEndEvent`` (``aborted`` / ``error`` / ``cut_off_cause`` -- the frame
     the TUI, the phone and ``exec --json`` all read), the terminal assistant
-    message the bridge folds for the prose arm, and the driver's own wall
+    message the bridge folds for the text-only continuation, and the driver's own wall
     bound, whose abort reason never rides the event. Nothing here changes when
     a turn ends, what it scored, or which status it lands in: the same episode
     ends the same way, and the label only names which way that was.
@@ -3876,9 +3966,20 @@ async def run_session_episode(
                 # (a kill switch -- a re-prompt after it would spend past it)
                 # and when the turn did not end cleanly: an error, abort or
                 # cut-off is the harness's or provider's ending, not the
-                # model's text-only reply, and keeps its own label.
-                while not wall_fired and _turn_ended_cleanly(last_turn_end):
-                    continuation = await bridge.text_only_continuation()
+                # model's text-only reply, and keeps its own label. The ONE
+                # abort let through is this driver's own budget cancel
+                # (``_budget_cancelled_the_turn``): the bridge then writes the
+                # row and names the ending ``max-steps`` instead of the
+                # nameless ``aborted`` (QA round 1, Q-1). The wall is read
+                # again AFTER the answer (``halted``), because obtaining it
+                # can outlast the wall (review round 1, R1-1).
+                while not wall_fired and (
+                    _turn_ended_cleanly(last_turn_end)
+                    or _budget_cancelled_the_turn(last_turn_end, budget_stop_sent)
+                ):
+                    continuation = await bridge.text_only_continuation(
+                        halted=lambda: "wall-bound" if wall_fired else None
+                    )
                     if continuation is None:
                         break
                     continuation_text, continuation_images = split_prompt_content(continuation)

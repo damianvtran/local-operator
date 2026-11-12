@@ -509,6 +509,12 @@ async with open_session(spec, roots=roots) as session:
   ``ask-loop`` guard bounds a chain (policy off: the step budget and wall,
   upstream's own bound); one continuation per message; one
   ``text_only_continuation`` record row per continuation, delivered or not.
+  The wall is re-read once the answer is in hand (an adapter/simulator call
+  can outlast it, and the next ``prompt`` would clear the abort), so a wall
+  that fires mid-exchange ends ``wall-bound`` undelivered; the budget sink's
+  own cancel still reaches the bridge, which writes the row and names the
+  ending ``max-steps``; an empty reply is put to the simulator too (upstream's
+  ``respond("")``) with a non-empty stand-in, since the ask wire refuses "".
   ``prose_claims_completion`` survives only as the ``agent_stop`` label. A
   model that then calls finish meets the finish-call gate, whose done-challenge
   now asks for verification at the source (requirements re-read in their exact
