@@ -5931,13 +5931,6 @@ class Session:
             or not self._model.supports_images_stated
         ):
             raise ValueError("required image evidence cannot be served by the current model")
-        if required_images:
-            from local_operator.harness.verifier_evidence import validate_required_image
-
-            for message in rendered:
-                for block in message.content:
-                    if isinstance(block, ImageContent):
-                        validate_required_image(block)
         rendered, missing_media = _without_unresolvable_frames(rendered)
         if required_images and missing_media:
             raise ValueError("required image evidence is missing or corrupt")
@@ -5967,6 +5960,15 @@ class Session:
             self._announce_text_only_omission_once(rendered)
             return _without_images(rendered, model_incapable=True)
         rendered = _rebound_history_images(rendered)
+        if required_images:
+            from local_operator.harness.verifier_evidence import validate_required_image
+
+            # Let the existing oversize repair bound the pixels first. Only
+            # then demand positively decodable media instead of opaque bytes.
+            for message in rendered:
+                for block in message.content:
+                    if isinstance(block, ImageContent):
+                        validate_required_image(block)
         # LAST, so it measures what will actually be sent: the rebound pass
         # above can shrink a block, and resizing or shedding a frame that
         # would have fit is content lost for nothing. This is the transport

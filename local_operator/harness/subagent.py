@@ -2586,15 +2586,19 @@ def _make_runner(
                 # The raw launch task and the role-expanded child prompt are two
                 # views of one turn. Persist the job-derived correlation id so
                 # projections render that durable row once without text matching.
-                await child.prompt(
-                    effective_resume + effective_prompt,
-                    message_id=f"subagent-launch:{job_id}",
-                    **(
-                        {"images": list(surface.initial_images)}
-                        if surface and surface.initial_images
-                        else {}
-                    ),
-                )
+                if surface is not None and surface.initial_images:
+                    await child.prompt(
+                        effective_resume + effective_prompt,
+                        message_id=f"subagent-launch:{job_id}",
+                        images=list(surface.initial_images),
+                    )
+                else:
+                    # Keep ordinary child launches byte-for-byte compatible:
+                    # no optional media argument and no decode on that path.
+                    await child.prompt(
+                        effective_resume + effective_prompt,
+                        message_id=f"subagent-launch:{job_id}",
+                    )
             finally:
                 bridge.cancel()
                 with contextlib.suppress(BaseException):
