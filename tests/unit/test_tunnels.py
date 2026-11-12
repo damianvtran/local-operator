@@ -4254,3 +4254,154 @@ async def test_a_lease_ending_under_backpressure_still_completes_the_response(
     # The chunked terminator is the clean end-of-stream: present only when the
     # response COMPLETED rather than being abandoned mid-body.
     assert received.endswith(b"0\r\n\r\n")
+
+
+# -- 2026-11-11: honest status for local causes ---------------------------------
+#
+# A loaded machine (load ~50) showed `Connector: not serving — control plane
+# unreachable` while the API answered every request. Two local causes reached the
+# UNREACHABLE arm: httpx timeouts (a `TransportError` subclass) and the credential
+# store's bootstrap lock timing out under contention from other `lop` processes.
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        httpx.ReadTimeout(""),
+        httpx.WriteTimeout(""),
+        httpx.PoolTimeout(""),
+        TimeoutError(),
+    ],
+    ids=["read", "write", "pool", "builtin"],
+)
+def test_a_timeout_reads_as_a_timeout_not_an_unreachable_control_plane(failure):
+    from local_operator.tunnels import gateway, service
+
+    assert service.authorization_failure_reason(failure) == gateway.CONTROL_PLANE_TIMEOUT
+    # Wrapped the way `RadientTunnels.request` wraps a refresh failure.
+    wrapped = ValueError("The tunnel's Radient login could not be refreshed.")
+    wrapped.__cause__ = failure
+    assert service.authorization_failure_reason(wrapped) == gateway.CONTROL_PLANE_TIMEOUT
+    verdict = service.classify_failure(wrapped)
+    assert verdict.kind == "transient"
+    assert verdict.reason == gateway.CONTROL_PLANE_TIMEOUT
+    # The retrying-exit line names the state even when the timeout's text is empty.
+    assert (
+        service._retry_detail(verdict, failure)
+        == gateway.TERMINAL_DETAIL[gateway.CONTROL_PLANE_TIMEOUT]
+    )
+    assert gateway.REASON_LABEL[gateway.CONTROL_PLANE_TIMEOUT] == "request to Radient timed out"
+
+
+def test_a_real_connection_failure_still_reads_as_unreachable():
+    from local_operator.tunnels import service
+
+    for failure in (httpx.ConnectError("refused"), httpx.ConnectTimeout("")):
+        # A connect timeout made no connection at all: that IS unreachable.
+        assert service.authorization_failure_reason(failure) == UNREACHABLE
+        assert service.classify_failure(failure).reason == UNREACHABLE
+
+
+def test_a_busy_credential_store_reads_as_local_not_as_radient():
+    from local_operator.providers.auth_store import AuthStoreBusyError
+    from local_operator.tunnels import gateway, service
+
+    wrapped = ValueError("This computer's credential store was busy.")
+    wrapped.__cause__ = AuthStoreBusyError("Timed out acquiring AuthStore bootstrap process guard")
+    assert service.authorization_failure_reason(wrapped) == gateway.CREDENTIAL_STORE_BUSY
+    verdict = service.classify_failure(wrapped)
+    assert verdict.kind == "transient", "it clears by itself, so it must never park"
+    assert verdict.reason == gateway.CREDENTIAL_STORE_BUSY
+    assert gateway.REASON_LABEL[gateway.CREDENTIAL_STORE_BUSY] == "local credential store busy"
+    for code in (gateway.CREDENTIAL_STORE_BUSY, gateway.CONTROL_PLANE_TIMEOUT):
+        # Every surface can render it: phone body, terminal sentence, check command.
+        assert code in gateway.RELAY_DETAIL and code in gateway.TERMINAL_DETAIL
+        assert gateway.TERMINAL_REMEDY[code] == "lop tunnel status"
+        for sentence in (gateway.RELAY_DETAIL[code], gateway.TERMINAL_DETAIL[code]):
+            assert "unreachable" not in sentence
+            assert "lop " not in sentence and "/login" not in sentence
+
+
+@pytest.mark.asyncio
+async def test_a_busy_store_is_retried_briefly_then_reported_as_a_value_error(monkeypatch):
+    """The 16:58 outage: one lock timeout at /connect crashed the unit with a
+    traceback (a bare AuthStoreError escaped `main`'s ValueError arm, and the
+    poller's), costing a supervisor restart. Now it is retried, and if it
+    persists it arrives as the ValueError every caller already handles."""
+    from local_operator.providers.auth_store import AuthStoreBusyError
+    from local_operator.tunnels import api
+
+    monkeypatch.setattr(api, "STORE_BUSY_RETRY_DELAYS", (0.0, 0.0))
+    opened: list[int] = []
+    sentinel = object()
+
+    def busy_then(times: int):
+        def make():
+            opened.append(1)
+            if len(opened) <= times:
+                raise AuthStoreBusyError("Timed out acquiring AuthStore bootstrap process guard")
+            return sentinel
+
+        return make
+
+    monkeypatch.setattr(api, "AuthStore", busy_then(2))
+    assert await api._open_store() is sentinel
+    assert len(opened) == 3
+
+    opened.clear()
+    monkeypatch.setattr(api, "AuthStore", busy_then(99))
+    with pytest.raises(ValueError) as failure:
+        await api._open_store()
+    assert len(opened) == 3, "bounded: the delays plus one final attempt"
+    assert isinstance(failure.value.__cause__, AuthStoreBusyError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "label"),
+    [
+        ("credential_store_busy", "local credential store busy"),
+        ("control_plane_timeout", "request to Radient timed out"),
+    ],
+)
+async def test_tunnel_status_names_a_local_cause_instead_of_an_unreachable_control_plane(
+    tmp_path, monkeypatch, connection, code, label
+):
+    """`lop tunnel status`, end to end from the gateway's health answer."""
+    from local_operator.tunnels import cli, report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection))
+    api = AsyncMock()
+    api.request.return_value = connection["tunnel"]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs): ...
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, **kwargs):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": False,
+                    "connected": True,
+                    "reason": code,
+                    "detail": RELAY_DETAIL[code],
+                },
+            )
+
+    fake = SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
+    monkeypatch.setattr(cli, "httpx", fake)
+    monkeypatch.setattr(report, "httpx", fake)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+    assert f"Connector: not serving — {label}" in receipt
+    assert TERMINAL_DETAIL[code] in receipt
+    assert "unreachable" not in receipt
