@@ -707,6 +707,10 @@ def test_the_session_move_contract_is_frozen() -> None:
         # Clause 4: the cwd the destination mapped onto this host, when the
         # recorded one did not exist here. Additive inside the optional block.
         "cwd",
+        # remote-session-parity Gap B: the source could not refresh the session's
+        # team/agent and custom instructions on the destination before the move;
+        # names the copy that may be stale. Absent when the refresh landed.
+        "definitions_notice",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every
