@@ -1343,6 +1343,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``repair_inbox.item_key``): a primary key inside SQLite, never a path on disk "
         "and never a session directory entry, so there is nothing for the copy to carry",
     ),
+    "local_operator/notifications/remote_attention.py": (
+        3,
+        "``remote-done`` and ``remote-notice`` (``DONE_PREFIX``/``NOTICE_PREFIX``) prefix "
+        "a forwarded completion's/notice's row KEY in ``notifications.db``: primary "
+        "keys inside SQLite, never paths on disk. "
+        "``ORIGINS_FILE`` ('remote-attention-origins.json') lives ONLY at the config "
+        "root (``_origins_path(root)``, root = the relay's config dir): a per-device "
+        "record of which mesh viewers collect this node's forwarded items. It is never "
+        "an entry of a session directory and must not travel with one -- a moved "
+        "session would carry another device's viewer list to a node those viewers "
+        "never collected from",
+    ),
     "local_operator/notifications/remote_park.py": (
         1,
         "``remote-gate`` prefixes a notification row's KEY in ``notifications.db`` "
