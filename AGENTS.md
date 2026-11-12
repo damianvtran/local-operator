@@ -2279,6 +2279,42 @@ then either hand it to the window's release owner or become that owner. It
 does not bump the version on its own branch, and it does not release
 one PR alone while other merged work is sitting on `main` unreleased.
 
+### When the release owner runs on a mesh peer
+
+A lopdev session on a mesh node (for example a headless worker) finishes build
+→ review → merge → release the same way a local one does, with two
+machine-bound exceptions.
+
+**The install tail belongs to the operator's primary (head) device.**
+`lop-update`, `readlink ~/.local/share/lop/current` and the `lop` smoke all act
+on the machine they run on, so run on a node they update and report the NODE,
+not the device the operator uses. A release owner on a peer therefore:
+
+1. Does the window, bump PR, tag → GitHub Release and `publish.yml`/PyPI watch
+   exactly as above — none of that is machine-bound.
+2. Hands step 5 (install, generation record, smoke) to a session on the head
+   device: `sessions op=spawn peer=<head>` with a brief naming the tag, the
+   bump SHA and the verification commands, or `send peer=<head>` to an existing
+   head lopdev session.
+3. Records the head's installed generation (`readlink
+   ~/.local/share/lop/current`) and `lop --version` **from that session's
+   reply**, and posts those in step 5's refs. Never post the node's own values
+   as the release's installed build.
+
+Fleet nodes, the owner's own included, need no manual install: the head's
+update opens a rollout (`rollouts.open_after_update`), the relay driver
+re-asks parked members every `CADENCE_S` (300 s), and on the generation layout
+a busy runtime keeps its build and is retired once idle (`buildwatch`
+convergence) — no drain.
+
+**Visual evidence on a headless node has no browser tool.** Electron capture
+still works there under Xvfb through `capturePage()` (local-operator-ui #1875 is
+a working example), and a designer may review from those committed frames.
+What Xvfb cannot show is real translucency (macOS vibrancy): proof of that needs
+a capture on a macOS device. Delegate that capture to a session on a macOS peer
+(`sessions op=spawn peer=<mac>`), or state the limitation plainly in the PR —
+never present a Linux frame as vibrancy proof.
+
 ## Releasing the browser extension to the Chrome Web Store
 
 The extension and the runtime release on separate tracks. The runtime uses the
