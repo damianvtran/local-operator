@@ -10700,10 +10700,10 @@ def build_app(daemon: MobileDaemon):
             body,
             credential_expires_at=presented_cookie_expiry(request),
         )
-        _forward_registration(body, response)
+        await _forward_registration(body, response)
         return response
 
-    def _forward_registration(body: object, response: Response) -> None:
+    async def _forward_registration(body: object, response: Response) -> None:
         """S7's register forward (ADR §3.2 literal 1), scheduled, never awaited.
 
         Only after the LOCAL register succeeded — a refused or malformed body
@@ -10729,8 +10729,13 @@ def build_app(daemon: MobileDaemon):
             "push_token": body.get("token"),
             "registered_at": local.get("registered_at"),
         }
+        # Off the loop (review round 1 on #3875, R1): ``register_rows`` takes
+        # ``PushLane.lock`` and re-reads the registry file, and this route runs
+        # on the daemon's event loop — a lock wait here would stall every
+        # mobile stream, not just this register. The heartbeat no longer holds
+        # that lock across its HTTP call either, so the wait is a local read.
         try:
-            rows = lane.register_rows()
+            rows = await asyncio.to_thread(lane.register_rows)
         except Exception:  # noqa: BLE001 — a report fault must not cost the forward
             logger.warning("push register: credential block unavailable", exc_info=True)
             rows = []

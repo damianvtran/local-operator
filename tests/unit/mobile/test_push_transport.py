@@ -144,7 +144,7 @@ def test_emit_refusals_carry_the_status_and_never_retry_in_the_transport(
     assert not transport.disarmed
 
 
-def test_a_404_disarms_until_restart_and_sends_nothing_more(
+def test_a_404_disarms_and_sends_nothing_more(
     login: int, caplog: pytest.LogCaptureFixture
 ) -> None:
     cloud = Cloud(httpx.Response(404, json={"error": "tunnel_not_found"}))
@@ -247,7 +247,9 @@ def test_no_tunnel_no_lane(tmp_path: Path) -> None:
         ({"credential_id": 3}, False),
     ],
 )
-def test_the_lane_arms_only_on_a_live_tunnel(tmp_path: Path, value: dict[str, Any], armed: bool) -> None:
+def test_the_lane_arms_only_on_a_live_tunnel(
+    tmp_path: Path, value: dict[str, Any], armed: bool
+) -> None:
     tunnel_config.save(value)
     lane = build_push_lane(tmp_path)
     assert (lane is not None) is armed
@@ -348,3 +350,175 @@ def test_a_refused_register_is_not_forwarded(login: int) -> None:
         assert answer.status_code >= 400
     assert cloud.seen == []
     assert lane.worker is not None
+
+
+def _register_one(config: Path) -> None:
+    push_devices.register(
+        config,
+        {
+            "platform": "ios",
+            "token": "ab" * 32,
+            "environment": "production",
+            "app_version": "1.0.0 (449)",
+            "install_id": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+        },
+    )
+
+
+def test_register_rows_never_waits_on_an_in_flight_heartbeat(
+    login: int, tmp_path: Path
+) -> None:
+    """R1 + R4 (review round 1 on #3875): the heartbeat's HTTP call is outside
+    ``PushLane.lock``, and a second beat skips instead of queueing.
+
+    The stub cloud parks the heartbeat request on an event, standing in for a
+    slow or blackholed network. While it is parked, ``register_rows`` (the
+    register route's read) must return promptly and a second ``heartbeat`` must
+    return without a request; once released, the beat commits the block it
+    actually sent.
+    """
+    import threading
+
+    in_flight = threading.Event()
+    release = threading.Event()
+
+    def cloud(request: httpx.Request) -> httpx.Response:
+        in_flight.set()
+        assert release.wait(10), "test never released the parked heartbeat"
+        return httpx.Response(200, json={"updated": 1})
+
+    seen: list[httpx.Request] = []
+
+    def factory() -> httpx.AsyncClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return cloud(request)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    _register_one(tmp_path)
+    lane = PushLane(
+        RadientPushTransport(tunnel_id=TUNNEL, credential_id=login, client_factory=factory),
+        tmp_path,
+    )
+    result: dict[str, Any] = {}
+    beat = threading.Thread(target=lambda: result.update(sent=lane.heartbeat(now=1000.0)))
+    beat.start()
+    try:
+        assert in_flight.wait(10), "heartbeat never reached the cloud"
+        rows: list[Any] = []
+        reader = threading.Thread(target=lambda: rows.append(lane.register_rows()))
+        reader.start()
+        reader.join(2)
+        assert not reader.is_alive(), "register_rows waited on the heartbeat's network call"
+        # The beat has not committed, so the device is still unreported and
+        # rides the register carrier: the read completed, with real facts.
+        ((row,),) = rows
+        assert row["device_id"] and "credential_live" in row
+        assert lane.heartbeat(now=1000.0) is None  # R4: skipped, not queued
+        assert len(seen) == 1
+    finally:
+        release.set()
+        beat.join(10)
+    assert not beat.is_alive()
+    assert result["sent"] is not None and json.loads(seen[0].content) == result["sent"]
+
+
+def test_a_heartbeat_overtaken_by_a_change_does_not_commit(login: int, tmp_path: Path) -> None:
+    """The commit half of R1's split: a block the registry moved past while it
+    was on the wire is not recorded as reported, so the next beat re-sends."""
+    _register_one(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # A second device registers while the beat is on the wire.
+        push_devices.register(
+            tmp_path,
+            {
+                "platform": "ios",
+                "token": "cd" * 32,
+                "environment": "production",
+                "app_version": "1.0.0 (449)",
+                "install_id": "1f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+            },
+        )
+        return httpx.Response(200, json={"updated": 1})
+
+    lane = PushLane(
+        RadientPushTransport(
+            tunnel_id=TUNNEL,
+            credential_id=login,
+            client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        ),
+        tmp_path,
+    )
+    sent = lane.heartbeat(now=1000.0)
+    assert sent is not None and len(sent["devices"]) == 1  # one device went out...
+    assert lane.report.heartbeat_due(now=1001.0)  # ...but the moved report stays due
+
+
+@pytest.mark.parametrize("carrier", ["emit", "heartbeat", "register"])
+def test_a_409_tunnel_revoked_disarms(login: int, carrier: str) -> None:
+    """R3: agent-server's only push 409 is ``tunnel_revoked`` — terminal."""
+    cloud = Cloud(httpx.Response(409, json={"error": "tunnel_revoked"}))
+    transport = _transport(login, cloud)
+    if carrier == "emit":
+        assert transport.emit({"v": 1}, idempotency_key="k") == EmitRefused(409)
+    elif carrier == "heartbeat":
+        with pytest.raises(ValueError, match="HTTP 409"):
+            transport.credentials({"computer": TUNNEL, "devices": []}, carrier=CARRIER_HEARTBEAT)
+    else:
+        asyncio.run(transport.register_forward({"device_id": "d"}, []))
+    assert transport.disarmed
+    assert len(cloud.seen) == 1  # no retry spent on a certainty
+    assert transport.emit({"v": 1}, idempotency_key="k") == EmitRefused(0)
+    assert len(cloud.seen) == 1
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.mark.parametrize(
+    ("key_after", "advance", "rearmed", "credential"),
+    [
+        # Same live config: stays dark until the 1 h backoff, then one probe.
+        ((TUNNEL, 1), 600.0, False, 1),
+        ((TUNNEL, 1), 3600.0, True, 1),
+        # A re-login rewrote the tunnel's credential: re-arms on the next check.
+        ((TUNNEL, 2), 600.0, True, 2),
+        # Revoked/absent, or a different tunnel: never re-armed in place.
+        (None, 7200.0, False, 1),
+        (("other-tunnel", 2), 7200.0, False, 1),
+    ],
+)
+def test_a_disarmed_lane_re_arms_on_a_config_change_or_backoff(
+    login: int,
+    key_after: tuple[str, int] | None,
+    advance: float,
+    rearmed: bool,
+    credential: int,
+) -> None:
+    """R2: the disarm is no longer until-restart."""
+    from local_operator.mobile.push_transport import REARM_AFTER_S
+
+    assert REARM_AFTER_S == 3600.0
+    clock = _Clock()
+    key: list[tuple[str, int] | None] = [(TUNNEL, 1)]
+    cloud = Cloud(httpx.Response(404, json={"error": "tunnel_not_found"}))
+    transport = RadientPushTransport(
+        tunnel_id=TUNNEL,
+        credential_id=1,
+        client_factory=cloud.factory,
+        tunnel_key=lambda: key[0],
+        clock=clock,
+    )
+    transport._disarm(RuntimeError("x"))
+    assert transport.disarmed
+    key[0] = key_after
+    clock.now += advance
+    assert transport.disarmed is (not rearmed)
+    assert transport.credential_id == credential

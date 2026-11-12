@@ -465,12 +465,12 @@ def test_no_registry_fixture_is_silently_unguarded(name: str) -> None:
 
 
 def test_the_cloud_routes_and_accept_envelope_are_pinned() -> None:
-    """S7's cloud literals (agent-server docs/SESSION-PUSH.md §1, §0 item 2).
+    """S7's cloud literals (agent-server docs/SESSION-PUSH.md §1).
 
-    The three routes the transport posts to, and the 202's API envelope: core's
-    Radient client accepts an emit only when the body carries ``result``, so a
-    cloud answering the bare ``{emit_id, accepted_at}`` would read as a refusal
-    and burn the worker's three tries on every push.
+    The three routes the transport posts to. The 202's ``{msg, result}``
+    envelope is asserted through the real transport in
+    ``test_push_transport.py`` (an accept with it, a refusal without it), not
+    restated here as a literal the test builds itself (review round 1, R5).
     """
     from local_operator.mobile.push_credentials import (
         REPORT_EMIT_ROUTE,
@@ -485,6 +485,3 @@ def test_the_cloud_routes_and_accept_envelope_are_pinned() -> None:
     assert IDEMPOTENCY_HEADER == "Idempotency-Key"
     for name in ("emit-completion.json", "emit-attention.json", "emit-digest.json"):
         assert _fixture(name)["route"] == EMIT_ROUTE
-    accepted = {"msg": "Push event accepted", "result": {"emit_id": "e", "accepted_at": 1}}
-    assert set(accepted) == {"msg", "result"}
-    assert set(accepted["result"]) == {"emit_id", "accepted_at"}

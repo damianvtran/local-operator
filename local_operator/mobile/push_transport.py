@@ -28,12 +28,26 @@ WHAT IT MUST NEVER DO.
   ``MobileDaemon._scan_once``); each call runs its own short event loop on that
   thread. ``register_forward`` is a coroutine scheduled on the daemon's loop.
 
-DISARM. ``LoginRequired`` (no usable login) and ``RecordNotFound`` (404: this
-login does not own the tunnel — or the cloud predates the push routes) disarm
-the transport until the daemon restarts, with ONE log line: neither heals on a
-retry, and a lane that kept knocking would spend the worker's retries and the
-log on a certainty. This is also what makes a core release safe against a cloud
-that has not shipped the routes yet (SESSION-PUSH §5, "inert … 404 → disarm").
+DISARM. ``LoginRequired`` (no usable login), ``RecordNotFound`` (404: this
+login does not own the tunnel — or the cloud predates the push routes) and a
+409 (``tunnel_revoked``, the only 409 agent-server's push handler writes) disarm
+the transport with ONE log line: none heals on an immediate retry, and a lane
+that kept knocking would spend the worker's retries and the log on a certainty.
+This is also what makes a core release safe against a cloud that has not
+shipped the routes yet (SESSION-PUSH §5, "inert … 404 → disarm").
+
+RE-ARM. A disarm is not forever, because its causes are not all permanent: a
+``lop login radient`` heals a lost login, a cloud rollback that dropped the
+routes gets rolled forward, and ``lop tunnel`` may rewrite the record. A lane
+that stayed dark until a daemon restart would lose every push in between with
+nothing but one WARNING line to show for it (review round 1 on #3875, R2). So
+a disarmed transport re-checks, at most once per ``EMIT_RETRY_INTERVAL_S``,
+and re-arms when the tunnel config for ITS tunnel changed (new credential id,
+revocation cleared) or :data:`REARM_AFTER_S` has passed with the config still
+live. A config naming a different tunnel, or none, never re-arms it: the
+lane's ``computer`` handle is the old tunnel id, so only a restart can bind
+the new one. The cost of a wrong re-arm is one more refused call and one more
+disarm line per hour, which is the bound.
 """
 
 from __future__ import annotations
@@ -81,6 +95,50 @@ _TUNNELS_PREFIX = "/v1/tunnels"
 #: connection error, disarmed lane). ``EmitRefused`` documents 0 as "no status".
 NO_STATUS = 0
 
+#: agent-server answers a revoked tunnel with 409 ``tunnel_revoked``
+#: (``internal/sessionpush/handler.go``, the handler's only 409 at #378
+#: b5493cfb). Terminal for this tunnel, so it disarms like a 404.
+REVOKED_STATUS = 409
+
+#: How long a disarm stands with an unchanged, still-live tunnel config before
+#: one probe re-arms the lane. One hour: long enough that a permanent refusal
+#: costs one call and one log line per hour, short enough that a re-login or a
+#: cloud roll-forward is picked up the same session. A config change re-arms
+#: sooner (see the module docstring, RE-ARM).
+REARM_AFTER_S = 3600.0
+
+
+def _tunnel_key() -> tuple[str, int] | None:
+    """``(tunnel_id, credential_id)`` of the live tunnel config, or ``None``.
+
+    The same acceptance rule as :func:`build_push_lane`: a revoked, absent or
+    malformed record is no tunnel.
+    """
+    from local_operator.tunnels import config as tunnel_config
+
+    try:
+        value = tunnel_config.load()
+    except (ValueError, OSError):
+        return None
+    tunnel_id = value.get("tunnel_id")
+    credential_id = value.get("credential_id")
+    record = value.get("record")
+    if not isinstance(tunnel_id, str) or not tunnel_id:
+        return None
+    if not isinstance(credential_id, int) or isinstance(credential_id, bool):
+        return None
+    if isinstance(record, dict) and record.get("revoked_at"):
+        return None
+    return tunnel_id, credential_id
+
+
+class _Composed(Exception):
+    """Internal: aborts ``CredentialReport._flush`` before its bookkeeping.
+
+    ``PushLane.heartbeat`` uses ``_flush``'s raise-leaves-state-untouched
+    contract to compose a block without committing it.
+    """
+
 
 class PushTransportDisarmed(RuntimeError):
     """Raised by ``credentials`` once the lane is disarmed.
@@ -110,8 +168,10 @@ class RadientPushTransport:
         client_factory: Callable[[], httpx.AsyncClient] = _default_client,
         sleep: Callable[[float], Any] = asyncio.sleep,
         retry_interval_s: float = EMIT_RETRY_INTERVAL_S,
+        tunnel_key: Callable[[], tuple[str, int] | None] = _tunnel_key,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """``client_factory`` and ``sleep`` are injected for tests only.
+        """``client_factory``, ``sleep``, ``tunnel_key`` and ``clock`` are injected for tests only.
 
         The factory is how a test (and the loopback evidence rig) substitutes an
         ``httpx.MockTransport`` or a local stub: the HOST is never configurable
@@ -122,8 +182,15 @@ class RadientPushTransport:
         self._client_factory = client_factory
         self._sleep = sleep
         self._retry_interval_s = retry_interval_s
+        self._tunnel_key = tunnel_key
+        self._clock = clock
         self._disarmed = False
         self._disarm_lock = threading.Lock()
+        #: When the disarm happened, the config key it happened under, and the
+        #: last re-arm check — the RE-ARM rule's whole state.
+        self._disarmed_at = 0.0
+        self._disarm_key: tuple[str, int] | None = None
+        self._rearm_checked_at = 0.0
         #: Strong references to in-flight register forwards: the event loop
         #: holds tasks weakly, and a forward collected mid-retry would vanish
         #: without its log line.
@@ -136,20 +203,56 @@ class RadientPushTransport:
 
     @property
     def disarmed(self) -> bool:
+        """Whether calls are refused locally; a disarmed lane may re-arm here."""
+        if self._disarmed:
+            self._maybe_rearm()
         return self._disarmed
 
+    def _maybe_rearm(self) -> None:
+        now = self._clock()
+        with self._disarm_lock:
+            # Spaced like the heartbeat's own retries so a disarmed lane reads
+            # the tunnel config at most once per interval, not on every 2 s scan.
+            if not self._disarmed or now - self._rearm_checked_at < self._retry_interval_s:
+                return
+            self._rearm_checked_at = now
+        key = self._tunnel_key()
+        if key is None or key[0] != self.tunnel_id:
+            return
+        changed = key != self._disarm_key
+        if not changed and now - self._disarmed_at < REARM_AFTER_S:
+            return
+        with self._disarm_lock:
+            if not self._disarmed:
+                return
+            self.credential_id = key[1]
+            self._disarmed = False
+        logger.info(
+            "mobile push re-armed for tunnel %s (%s)",
+            self.tunnel_id,
+            "tunnel config changed" if changed else "backoff elapsed",
+        )
+
     def _disarm(self, failure: Exception) -> None:
+        key = self._tunnel_key()
+        now = self._clock()
         with self._disarm_lock:
             if self._disarmed:
                 return
             self._disarmed = True
-        # The class name only: the sentences are fixed literals already, but
-        # nothing about the login or the response body belongs in this log.
+            self._disarmed_at = now
+            self._rearm_checked_at = now
+            self._disarm_key = key
+        # The class name (and status) only: the sentences are fixed literals
+        # already, but nothing about the login or the body belongs in this log.
         logger.warning(
-            "mobile push disarmed until restart (%s): the tunnel's Radient login "
-            "cannot reach the push routes for tunnel %s",
+            "mobile push disarmed (%s%s): the tunnel's Radient login cannot reach "
+            "the push routes for tunnel %s; re-arms on a tunnel config change or "
+            "after %d s",
             type(failure).__name__,
+            f" {failure.status}" if isinstance(failure, RequestFailed) else "",
             self.tunnel_id,
+            int(REARM_AFTER_S),
         )
 
     async def _call(
@@ -176,7 +279,7 @@ class RadientPushTransport:
         fall back to the body's own ``emit_id`` and the local clock when a 2xx
         answer omits them, because the accept is the status, not the fields.
         """
-        if self._disarmed:
+        if self.disarmed:
             return EmitRefused(NO_STATUS)
         route = EMIT_ROUTE.format(tunnel_id=quote(self.tunnel_id, safe=""))
         try:
@@ -191,6 +294,8 @@ class RadientPushTransport:
             self._disarm(failure)
             return EmitRefused(404 if isinstance(failure, RecordNotFound) else NO_STATUS)
         except RequestFailed as failure:
+            if failure.status == REVOKED_STATUS:
+                self._disarm(failure)
             return EmitRefused(failure.status)
         except (httpx.HTTPError, ValueError, OSError):
             # Timeout, connection refused, an invalid envelope, a refresh that
@@ -222,12 +327,16 @@ class RadientPushTransport:
         """
         if carrier != CARRIER_HEARTBEAT:
             return
-        if self._disarmed:
-            raise PushTransportDisarmed("mobile push is disarmed until restart")
+        if self.disarmed:
+            raise PushTransportDisarmed("mobile push is disarmed")
         try:
             asyncio.run(self._call(api_path=REPORT_HEARTBEAT_ROUTE, body=dict(block)))
         except (LoginRequired, RecordNotFound) as failure:
             self._disarm(failure)
+            raise
+        except RequestFailed as failure:
+            if failure.status == REVOKED_STATUS:
+                self._disarm(failure)
             raise
 
     # -- the registration forward ----------------------------------------------
@@ -241,7 +350,7 @@ class RadientPushTransport:
         §4.5): a slow or absent cloud would otherwise turn every app launch into
         a 30 s spinner. Returns the task for tests; ``None`` when disarmed.
         """
-        if self._disarmed:
+        if self.disarmed:
             return None
         task = asyncio.get_running_loop().create_task(self.register_forward(device, devices))
         self._forwards.add(task)
@@ -276,6 +385,9 @@ class RadientPushTransport:
                 return
             except RequestFailed as failure:
                 status = failure.status
+                if status == REVOKED_STATUS:
+                    self._disarm(failure)
+                    return
                 if 400 <= status < 500 and status != 429:
                     break
             except (httpx.HTTPError, ValueError, OSError):
@@ -294,16 +406,29 @@ class PushLane:
 
     ``CredentialReport`` is a single-threaded state machine, and three callers
     reach it from different threads — the worker's emit composition and the
-    heartbeat (both on the scan's ``to_thread``) and the register route (on the
-    event loop). One lock serialises them; every hold is a local registry read
-    plus, for the heartbeat only, one bounded HTTP call.
+    heartbeat (both on the scan's ``to_thread``) and the register route (via
+    ``to_thread`` from the event loop). One lock serialises them, and every hold
+    is a local registry read and nothing else: the heartbeat's HTTP call runs
+    OUTSIDE it (review round 1 on #3875, R1), so a register never waits on the
+    network. See :meth:`heartbeat` for how the report's bookkeeping stays honest
+    with the send split out of its critical section.
     """
 
     def __init__(self, transport: RadientPushTransport, config_dir: Path) -> None:
         self.transport = transport
         self.lock = threading.Lock()
+        #: Held for a whole heartbeat, network included, and only ever taken
+        #: non-blocking: a beat that outlives the scan's ``wait_for`` bound is
+        #: still running on its abandoned thread, and the next scan must skip
+        #: rather than park a second executor thread behind it (R4).
+        self._beat_in_flight = threading.Lock()
+        #: The heartbeat's two-phase state, read by :meth:`_report_send` and
+        #: only ever set while ``lock`` is held: ``None`` forwards to the
+        #: transport (the emit/register carriers, which send nothing there).
+        self._stage: str | None = None
+        self._staged: dict[str, Any] | None = None
         self.report = CredentialReport(
-            transport.credentials,
+            self._report_send,
             loader=registry_loader(config_dir),
             computer=transport.computer,
         )
@@ -335,8 +460,49 @@ class PushLane:
             block = self.report.piggyback(CARRIER_REGISTER)
         return block_devices(block) if block is not None else []
 
+    def _report_send(self, block: dict[str, Any], *, carrier: str) -> None:
+        """The report's transport, with the heartbeat's two phases spliced in.
+
+        ``compose``: record the block and raise, so ``_flush`` composes it and
+        then — by its documented raise contract — commits nothing. ``commit``:
+        accept only the block that was actually sent; anything else raises and
+        is again left uncommitted.
+        """
+        if self._stage == "compose":
+            self._staged = block
+            raise _Composed
+        if self._stage == "commit":
+            if block != self._staged:
+                raise _Composed
+            return
+        self.transport.credentials(block, carrier=carrier)
+
+    def _heartbeat_phase(self, stage: str, stamp: float) -> dict[str, Any] | None:
+        with self.lock:
+            self._stage = stage
+            if stage == "compose":
+                self._staged = None
+            try:
+                return self.report.heartbeat(now=stamp)
+            except _Composed:
+                return None
+            finally:
+                self._stage = None
+
     def heartbeat(self, *, now: float | None = None) -> dict[str, Any] | None:
-        """One heartbeat when due; failures are logged and spaced, never raised."""
+        """One heartbeat when due; failures are logged and spaced, never raised.
+
+        Returns the block that was sent, or ``None`` when nothing went out.
+
+        Three steps so ``lock`` is never held across the network (R1): compose
+        the block under the lock without committing, send it with the lock
+        released, then commit under the lock by re-composing at the SAME
+        ``stamp`` and accepting only if it equals what went out. If a register
+        or emit moved the report in between, the re-composed block differs, the
+        commit is refused, the report stays due, and the next scan re-sends the
+        current facts — a duplicate call at worst, never a report that claims
+        facts it did not send.
+        """
         stamp = time.time() if now is None else now
         if self.transport.disarmed:
             return None
@@ -345,11 +511,29 @@ class PushLane:
             and stamp - self._heartbeat_failed_at < EMIT_RETRY_INTERVAL_S
         ):
             return None
+        if not self._beat_in_flight.acquire(blocking=False):
+            return None
         try:
-            with self.lock:
-                if not self.report.heartbeat_due(now=stamp):
-                    return None
-                sent = self.report.heartbeat(now=stamp)
+            return self._beat(stamp)
+        finally:
+            self._beat_in_flight.release()
+
+    def _beat(self, stamp: float) -> dict[str, Any] | None:
+        # ``_staged`` is only touched by the thread holding ``_beat_in_flight``
+        # (and read by ``_report_send`` under ``lock`` in that same thread), so
+        # it needs no further guard.
+        try:
+            # Not due, or no devices: ``_flush`` returns before the transport
+            # and ``_staged`` stays None.
+            self._heartbeat_phase("compose", stamp)
+            block = self._staged
+            if block is None:
+                return None
+            self.transport.credentials(block, carrier=CARRIER_HEARTBEAT)
+            # The return value is what went OUT; whether the report accepted the
+            # commit is its own bookkeeping (refused when a register or emit
+            # moved it meanwhile, which also leaves it honestly due or not).
+            self._heartbeat_phase("commit", stamp)
         except (RequestFailed, LoginRequired, RecordNotFound, PushTransportDisarmed) as failure:
             self._heartbeat_failed_at = stamp
             logger.info(
@@ -360,8 +544,10 @@ class PushLane:
             self._heartbeat_failed_at = stamp
             logger.info("mobile push heartbeat failed (%s)", type(failure).__name__)
             return None
+        finally:
+            self._staged = None
         self._heartbeat_failed_at = None
-        return sent
+        return block
 
 
 def build_push_lane(config_dir: Path) -> PushLane | None:
@@ -374,21 +560,10 @@ def build_push_lane(config_dir: Path) -> PushLane | None:
     the revoked case too; a record still carrying ``revoked_at`` is refused for
     the same reason.
     """
-    from local_operator.tunnels import config as tunnel_config
-
-    try:
-        value = tunnel_config.load()
-    except (ValueError, OSError):
+    key = _tunnel_key()
+    if key is None:
         return None
-    tunnel_id = value.get("tunnel_id")
-    credential_id = value.get("credential_id")
-    record = value.get("record")
-    if not isinstance(tunnel_id, str) or not tunnel_id:
-        return None
-    if not isinstance(credential_id, int) or isinstance(credential_id, bool):
-        return None
-    if isinstance(record, dict) and record.get("revoked_at"):
-        return None
+    tunnel_id, credential_id = key
     return PushLane(
         RadientPushTransport(tunnel_id=tunnel_id, credential_id=credential_id), config_dir
     )
