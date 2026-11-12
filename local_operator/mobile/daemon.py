@@ -11590,6 +11590,7 @@ def build_app(daemon: MobileDaemon):
         sweeper = False
         try:
             from local_operator.config import ConfigManager
+            from local_operator.paths import config_dir
             from local_operator.session.cleanup import start_temporary_sweeper
 
             root = config_dir()

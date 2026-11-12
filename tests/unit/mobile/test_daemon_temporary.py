@@ -210,3 +210,21 @@ def test_a_keyed_start_carries_temporary_in_its_intent() -> None:
     assert json.loads(temp)["temporary"] == "1"
     with pytest.raises(StartRefusal):
         canonical_request({"create_request_id": key, "temporary": "yes"})
+
+
+def test_the_daemon_hosts_the_temporary_sweeper(tmp_path, monkeypatch) -> None:
+    """The lifespan really starts it (a swallowed NameError once made it a no-op)."""
+    from local_operator.session import cleanup
+
+    started: list[tuple[Path, str]] = []
+    stopped: list[bool] = []
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        cleanup,
+        "start_temporary_sweeper",
+        lambda _manager, root, *, actor: started.append((root, actor)) or True,
+    )
+    monkeypatch.setattr(cleanup, "stop_temporary_sweeper", lambda: stopped.append(True))
+    with TestClient(build_app(MobileDaemon(port=0, password=PASSWORD))):
+        assert started == [(tmp_path, "phone-daemon")]
+    assert stopped == [True]
