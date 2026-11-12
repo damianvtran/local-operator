@@ -352,3 +352,49 @@ async def download(config_dir: Path, session_id: str, file_id: str) -> dict[str,
             ),
         ) from None
     return {**receipt, "origin_device": device}
+
+
+async def library_content(
+    config_dir: Path, asset_id: str, *, range_header: str | None, download: bool
+) -> Any:
+    """A Library asset held only by a peer session, fetched on this explicit open.
+
+    A digest asset goes through the transcript attachments' lookup + pull; a remote
+    PATH asset (``r:`` key, ``path`` NULL) through the owner's Files-index row id.
+    Never reached by a list, detail or thumbnail read (§5, I5-2).
+    """
+    from urllib.parse import quote
+
+    from local_operator.library import service as library_service
+    from local_operator.server.utils import byte_range
+    from local_operator.server.utils.desktop_sessions import peer_blob
+
+    config_dir = Path(config_dir)
+    occurrence = await asyncio.to_thread(library_service.remote_occurrence, config_dir, asset_id)
+    asset = await asyncio.to_thread(library_service._catalog_asset, config_dir, asset_id)
+    if occurrence is None:
+        raise HTTPException(
+            404, _wd.library_content_missing().envelope(code="library_content_missing")
+        )
+    session_id = str(occurrence["session_id"])
+    member_id = str(occurrence.get("child_id") or "") or session_id
+    if asset.digest:
+        row = await asyncio.to_thread(_row_for, config_dir, session_id)
+        blob = await peer_blob(config_dir, session_id, row, asset.digest, member_id=member_id)
+    else:
+        blob, _file_row, _row = await _resolve(
+            config_dir, session_id, str(occurrence.get("remote_file_id") or "")
+        )
+    handle = await asyncio.to_thread(_open, blob)
+    name = asset.derived_name or asset.id
+    disposition = "attachment" if download else "inline"
+    return byte_range.handle_response(
+        handle,
+        media_type=asset.content_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(name, safe='')}",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=60",
+        },
+        range_header=range_header,
+    )

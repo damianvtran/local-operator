@@ -192,6 +192,9 @@ class Asset:
     occurrences: list[Occurrence] = field(default_factory=list)
     origins: list[str] = field(default_factory=list)
     highlighted: bool = False
+    #: ``{device_id, device_name}`` when every occurrence is a PEER session's
+    #: (remote files parity §5), else ``None``.
+    remote: dict[str, str] | None = None
 
     @property
     def origin(self) -> str:

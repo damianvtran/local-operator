@@ -73,6 +73,10 @@ MAX_COALESCE_S: Final = 2.0
 #: timer shorter than the idle value is the spin this module exists to avoid.
 RECONCILE_BACKFILL_S: Final = 60.0
 RECONCILE_IDLE_S: Final = 6 * 3600.0
+#: How often the Library's remote feeder re-reads the peer catalogue when this device
+#: is in a network (remote files parity §5). Per pass it costs one catalogue read and
+#: one owner listing per remote session whose ``mtime`` moved.
+REMOTE_FEED_S: Final = 300.0
 #: How often a READER-ONLY process retries the writer lock. One ``flock`` per
 #: bound: cheap enough to be frequent, slow enough not to spin.
 WRITER_RETRY_S: Final = 30.0
@@ -599,7 +603,17 @@ class LibraryIndexer:
             done = self.store.state().get(STATE_BACKFILL_DONE, "0") == "1"
         except Exception:  # noqa: BLE001 - an unreadable state means "still building"
             done = False
-        return RECONCILE_IDLE_S if done else RECONCILE_BACKFILL_S
+        timeout = RECONCILE_IDLE_S if done else RECONCILE_BACKFILL_S
+        try:
+            from local_operator.network.store import list_networks
+
+            if list_networks(self.config_dir):
+                # Peers' sessions change without a local journal event to wake on, so
+                # the remote feed (run by reconcile) needs its own cadence.
+                return min(timeout, REMOTE_FEED_S)
+        except Exception:  # noqa: BLE001 — no readable network store means no peers
+            pass
+        return timeout
 
     def _start_observer(self) -> None:
         root = self.config_dir / "sessions"
@@ -957,7 +971,9 @@ class LibraryIndexer:
         visible = library_index._visible_sessions(self.config_dir)
         live = {row[0] for row in visible}
         known = self.store.sessions()
-        vanished = set(known) - live
+        # A PEER session's rows are the remote feeder's (``library/remote.py``): it has
+        # no directory here by definition, so "not visible" must not forget it.
+        vanished = {sid for sid, row in known.items() if not row.get("origin_device")} - live
         for session_id in vanished:
             self._forget(session_id)
             self._cwd_cache.pop(session_id, None)
@@ -985,6 +1001,12 @@ class LibraryIndexer:
         # scanning leaves ``backfill_done`` at 0 with every row already served
         # (QA Q-R4-1). The finish check needs the denominator this call just set.
         self._maybe_finish_backfill()
+        try:
+            from local_operator.library import remote as remote_feed
+
+            remote_feed.feed(self)
+        except Exception:  # noqa: BLE001 — the remote feed never fails a local reconcile
+            logger.warning("library: remote feed failed", exc_info=True)
         logger.debug(
             "library: reconciled %d visible sessions (%d dirty, %d removed)",
             len(visible),

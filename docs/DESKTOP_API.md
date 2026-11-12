@@ -2520,6 +2520,14 @@ routes as a local one:
   `session_files_sensitive_name` for a credential-shaped name.
 - **Cache budget**: `desktop.remote_files_cache_bytes` (LIVE, default 1 GiB; `0` keeps
   nothing after serving and turns precache off), LRU by last use.
+- **Library**: peer sessions' files enter the same index (metadata only, refreshed every
+  5 min while this device is in a network, per session only when its catalogue `mtime`
+  moved). A row whose every occurrence is a peer's carries `remote: {device_id,
+  device_name}` and `ref.path: null` (a peer's path never resolves on this disk); a digest
+  this device also holds is ONE local asset. List, detail and thumbnail never contact the
+  owner (no bytes yet → the designed thumbnail 404); only `…/content` fetches, with the
+  statuses above. A session gone from two answered catalogue reads is dropped; an
+  unreachable device's rows are kept.
 - **Precache**: the catalogue poll prepares the image/audio/video files (each at most
   32 MiB) of ACTIVE remote sessions — reachable, unarchived, moved within 2 h, plus the last
   8 opened here; at most 16 per pass, each re-listed at most once a minute and only when it

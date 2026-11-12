@@ -380,6 +380,20 @@ async def library_content(
     except service.AssetNotFound:
         raise _asset_not_found() from None
     except service.ContentUnavailable as error:
+        if error.code == "content_remote":
+            # Remote files parity §5: ONLY this explicit open (lightbox, player,
+            # download) of a peer-held asset fetches, through §1's fetch-on-miss,
+            # with §1's statuses (504 retryable, 409 permanent).
+            from local_operator.server.routes.desktop_sessions import errors
+            from local_operator.server.utils import remote_session_files
+
+            async with errors(request):
+                return await remote_session_files.library_content(
+                    config,
+                    asset_id,
+                    range_header=request.headers.get("range"),
+                    download=download,
+                )
         message = (
             _wd.library_content_denied()
             if error.code == "content_denied"
