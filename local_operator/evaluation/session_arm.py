@@ -1400,11 +1400,20 @@ class ActionBridge:
         #: worker's turn is parked and nothing else drives the guest.
         self._verifier_fired = 0
         self._verifying: int | None = None
-        #: Requirements the last verifier challenge named UNMET. The challenge
-        #: tells the worker a re-finish that skips them is reported not done;
-        #: the accepting ``finish`` row honours that as ``not_done``. Cleared
-        #: by a later PASS (the check itself agreed they were addressed).
+        #: Requirements a verifier challenge named UNMET that no later check
+        #: has passed. The accepting ``finish`` row carries them as
+        #: ``unverified_unmet`` -- 'a check named these and nothing re-verified
+        #: them', NOT 'not done': the worker may well have fixed them in a
+        #: round the verifier never got to see. REPLACED only by a later
+        #: verdict that names its own ``UNMET:`` lines (a FAIL that narrows the
+        #: list narrows it); a capped or line-less INCONCLUSIVE keeps it (QA
+        #: Q1: main33 had 18 of 19 verdicts hit a cap, and wiping the list there
+        #: made an unchecked re-finish look clean). CLEARED only by a PASS.
         self._verifier_unmet: list[str] = []
+        #: Why the most recent ``done`` claim got no verdict, written next to
+        #: ``unverified_unmet`` so a reader can tell 'rounds spent' from a
+        #: check skipped for budget, wall, error or refusal.
+        self._verifier_not_run: str | None = None
         #: Non-terminal batches dispatched to the adapter -- the runner's
         #: ``_steps_taken`` analogue (see the increment for why at dispatch).
         #: ``_steps`` cannot serve: it counts admitted output epochs, which a
@@ -1581,9 +1590,13 @@ class ActionBridge:
         through the lock-free ``inspect_command`` instead of ``call_command``.
         """
 
-        if self.verifier is None or claim.status != "done":
+        if self.verifier is None:
+            return None
+        if claim.status != "done":
+            self._verifier_not_run = f"claim-{claim.status}"
             return None
         if self._verifier_fired >= self.verifier_rounds:
+            self._verifier_not_run = "rounds-spent"
             return None
         round_ = self._verifier_fired + 1
         reason: str | None = None
@@ -1594,6 +1607,7 @@ class ActionBridge:
             if remaining is not None and remaining <= self.verifier_envelope_s:
                 reason = "wall"
         if reason is not None:
+            self._verifier_not_run = reason
             self._record_verifier(
                 "verifier_skipped",
                 {
@@ -1611,6 +1625,7 @@ class ActionBridge:
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 -- a broken check must not cost the finish
+            self._verifier_not_run = "error"
             self._record_verifier(
                 "verifier_skipped",
                 {"round": round_, "reason": "error", "detail": f"{type(error).__name__}: {error}"},
@@ -1619,6 +1634,7 @@ class ActionBridge:
         finally:
             self._verifying = None
         if verdict.ended_by == "refused":
+            self._verifier_not_run = "refused"
             self._record_verifier(
                 "verifier_skipped",
                 {"round": round_, "reason": "refused", "detail": verdict.findings},
@@ -1632,6 +1648,10 @@ class ActionBridge:
                 "disposition": verdict_disposition(verdict.status),
             },
         )
+        self._verifier_not_run = None
+        if verdict.status == "PASS":
+            # The only thing that clears the list: an independent read agreed.
+            self._verifier_unmet = []
         return verdict
 
     def _verifier_challenge(
@@ -1662,11 +1682,14 @@ class ActionBridge:
         )
 
         # The verdict's own section is the generic builder's (it lists each
-        # UNMET requirement and says a re-finish that skips them is reported
-        # not done); remembering the list is what makes that sentence true --
-        # the accepting ``finish`` row carries it as ``not_done`` unless a
-        # later verification passes.
-        self._verifier_unmet = unmet_requirements(verdict.findings)
+        # UNMET requirement and says an unchanged re-finish is recorded with
+        # them as unverified-unmet unless a later check passes); remembering
+        # the list is what makes that sentence true. Replace, never wipe: a
+        # verdict naming no lines (a cap, a bare INCONCLUSIVE) says nothing
+        # about the earlier ones (QA Q1).
+        named = unmet_requirements(verdict.findings)
+        if named:
+            self._verifier_unmet = named
         challenge = f"{build_verdict_challenge(verdict.status, verdict.findings)}\n\n{challenge}"
         if self.record is not None:
             self.record(
@@ -2806,10 +2829,14 @@ class ActionBridge:
                             # so an arm without one writes today's row.
                             **({"verified": check.status} if check is not None else {}),
                             # The verdict binds: requirements a challenge named
-                            # UNMET and no later check passed are reported not
-                            # done, whatever the worker's status says.
+                            # UNMET and no later check passed, whatever the
+                            # worker's status says, plus why this claim got no
+                            # verdict. A PASS clears the list in ``_maybe_verify``.
                             **(
-                                {"not_done": list(self._verifier_unmet)}
+                                {
+                                    "unverified_unmet": list(self._verifier_unmet),
+                                    "unverified_reason": self._verifier_not_run,
+                                }
                                 if self._verifier_unmet
                                 and (check is None or check.status != "PASS")
                                 else {}
