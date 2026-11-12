@@ -5400,11 +5400,16 @@ class TestSessionAccounting:
         assert payload["accounting"]["verifier_requests"] is None
 
     def test_missing_run_counters_are_unknown_not_zero(self) -> None:
-        from local_operator.evaluation.session_arm import SessionArmOutcome, _outcome_json
+        from local_operator.evaluation.session_arm import (
+            SessionArmOutcome,
+            _outcome_json,
+        )
 
         payload = _outcome_json(
             SessionArmOutcome(
-                status="failed_pre_bundle", episode_id="synthetic", record_root=None,
+                status="failed_pre_bundle",
+                episode_id="synthetic",
+                record_root=None,
             )
         )
         assert all(value is None for value in payload["accounting"].values())
@@ -5540,8 +5545,11 @@ class TestTheStreamCompletedStopBoundary:
         config = build_config(short_scratch, observation_retry_delay=0.0, max_steps=max_steps)
         adapter = _AskOwnerAdapter(short_scratch, spec.episode_id)
         if commands:
+            original_call = adapter._call_raw
 
-            async def run_command(params: Any, **kwargs: Any) -> Any:
+            async def call_raw(method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+                if method != "run_command":
+                    return await original_call(method, params, result_type, **kwargs)
                 # A durable target-side effect distinguishes execution from a
                 # merely requested/refused N+1 command; no shell or VM needed.
                 marker = world / "commands.jsonl"
@@ -5549,7 +5557,7 @@ class TestTheStreamCompletedStopBoundary:
                     sink.write(json.dumps(params.command) + "\n")
                 return _command_result()
 
-            monkeypatch.setattr(adapter, "run_command", run_command, raising=False)
+            monkeypatch.setattr(adapter, "_call_raw", call_raw)
         session_spec = SessionSpec(
             hosting="test",
             model="mock",
@@ -5675,15 +5683,27 @@ class TestTheStreamCompletedStopBoundary:
         wire, outcome, text = await self._run(
             real_arm_scratch, monkeypatch, script=script, max_steps=3, commands=True
         )
-        assert outcome.status == "truncated", (outcome, text)
+        print(
+            json.dumps(
+                {
+                    "status": outcome.status,
+                    "terminal_reason": outcome.terminal_reason,
+                    "diagnostic": outcome.diagnostic,
+                    "accounting": outcome.accounting.to_json(),
+                }
+            )
+        )
+        # The existing command-only close-out labels graceful budget stops as
+        # agent_stop/aborted (unlike screen-epoch exhaustion). Reporting must
+        # neither change that legacy status nor mistake it for lost enforcement.
+        assert outcome.status == "agent_stop", (outcome, text)
+        assert outcome.terminal_reason == "aborted"
         assert len(wire) == 3
         assert outcome.steps == 0  # commands never claimed a screen epoch
         assert outcome.attempted_groups == 3
         effects = (real_arm_scratch / "world" / "commands.jsonl").read_text().splitlines()
         assert [json.loads(row) for row in effects] == [
-            f"group-{group}-call-{call}"
-            for group in range(3)
-            for call in range(calls_per_group)
+            f"group-{group}-call-{call}" for group in range(3) for call in range(calls_per_group)
         ]
         accounting = _outcome_json(outcome)["accounting"]
         assert accounting == {
