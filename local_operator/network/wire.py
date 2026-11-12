@@ -189,6 +189,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # Change-only member tables permit a long anti-entropy interval, without
     # sending optional fields to builds that still rely on the 30-second pull.
     "member-list-push-v1",
+    # The single-file pull (``files.py``'s ``net_file_get``); see MESH_FILE_V1.
+    "mesh-file-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: The complete peer-source stored-read capability (``relay.py``'s source
@@ -235,6 +237,13 @@ MESH_UPDATE_V1 = "mesh-update-v1"
 #: feature: a peer that can install builds but predates this op must get a clear
 #: local-remedy refusal, never an unknown-op hang or a restart it cannot report.
 MESH_RESTART_V1 = "mesh-restart-v1"
+#: The single-file pull (``network/files.py``; mesh-file-transfer.md S1). Advertised
+#: by every build that serves ``net_file_get``; the puller checks it BEFORE its first
+#: request, so a peer that predates file transfer is answered with an update hint
+#: here rather than asked an op it would refuse as unknown — and never silently
+#: answered by some other route (the base64-through-the-model path this replaces is
+#: what corrupted bytes).
+MESH_FILE_V1 = "mesh-file-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it

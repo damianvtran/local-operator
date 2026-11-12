@@ -436,6 +436,9 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # Trusted-peer memory sync (network/memory.py): a bounded batch apply into the
             # SQLite store, 60 s like the other whole-bundle appliers.
             "net_memory",
+            # The single-file pull (network/files.py; mesh-file-transfer.md S1): a
+            # ``stat`` hashes up to 256 MiB, so it must not run on a link's reader.
+            "net_file_get",
             # The one CORE op on the lane (relay.py, not a slice): a create holds its
             # first turn for up to ``FIRST_TURN_WAIT_S``, which inline stalled the
             # whole link (#3547 review MAJOR-1/2).

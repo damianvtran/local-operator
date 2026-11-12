@@ -43,7 +43,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Mapping
 
 from local_operator.definition_transaction import (
     _durable_json,
@@ -176,6 +176,7 @@ def file(
     trigger: str = "user",
     legacy_approval_id: str | None = None,
     created_at: float | None = None,
+    lineage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """File (or re-confirm) a pending proposal; changes no profile.
 
@@ -231,6 +232,11 @@ def file(
                 "trust": trust,
                 "trigger": trigger,
                 "legacy_approval_id": legacy_approval_id,
+                # Host-stamped filing lineage (source local/child, clean). An
+                # ADDITIVE key: readers that predate it ignore it, and a record
+                # without it is "legacy" to the apply ladder
+                # (``Session.decide_profile_proposal``), never assumed clean.
+                **({"lineage": dict(lineage)} if lineage is not None else {}),
             },
             "state": STATE_PENDING,
             "created_at": now,

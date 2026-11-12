@@ -177,6 +177,34 @@ async def test_foreign_link_stays_judged_and_unverifiable_citation_refuses(home:
     assert "only the link is removed" in outcome.text
 
 
+def test_link_spellings_never_include_the_pointee(home: Path) -> None:
+    # #3793's flake: re-casing the link entry opened it, so the pointee's
+    # path became a "spelling" and ``_rank`` returned whichever reason the
+    # set yielded first ("another session's files" on some hash seeds).
+    from local_operator.guardrails.classify import _link_spellings
+
+    os.symlink(_pad(home, OTHER), home / "q1029")
+    link = prov.link_path(str(home / "q1029"))
+    spelled = _link_spellings(str(home / "q1029"), link)
+    real_pointee = os.path.realpath(_pad(home, OTHER))
+    pointees = (real_pointee, _pad(home, OTHER))
+    assert not any(s.startswith(pointees) for s in spelled)
+    assert link in spelled
+
+
+def test_spelling_order_is_stable_and_lexical_first() -> None:
+    from local_operator.guardrails.classify import _spelling_order
+
+    spelled = {"/z/real", "/a/Cased", "/m/typed"}
+    # Python's set order varies with PYTHONHASHSEED; the order must not.
+    assert _spelling_order("/m/typed", spelled) == ["/m/typed", "/a/Cased", "/z/real"]
+    assert _spelling_order("/m/typed", set(reversed(sorted(spelled)))) == [
+        "/m/typed",
+        "/a/Cased",
+        "/z/real",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_trailing_slash_ranks_and_verifies_the_pointee(home: Path) -> None:
     time.sleep(2.1)

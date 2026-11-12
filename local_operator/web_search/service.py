@@ -175,6 +175,12 @@ def reset_round_robin_for_tests() -> None:
 TavilyOAuthSearch = Callable[[str, int], Awaitable[SearchResponse]]
 
 
+def _tainted_refusal() -> str:
+    from local_operator.harness.bridge_egress import SEARCH_PROVIDER_REFUSAL
+
+    return SEARCH_PROVIDER_REFUSAL
+
+
 class WebSearchService:
     """Resolve this install's provider chain and execute one search with fallback.
 
@@ -195,8 +201,17 @@ class WebSearchService:
         transport: httpx.AsyncBaseTransport | None = None,
         tavily_oauth_search: TavilyOAuthSearch | None = None,
         io: WebReadIO | None = None,
+        restrict_to: frozenset[str] | None = None,
     ) -> None:
         self.settings = settings
+        #: Tighten-only provider allowlist, set while the session holds Team
+        #: Bridge content (``harness/bridge_egress.py``, S-43/S-53). ``None``
+        #: means unrestricted. When set, :meth:`candidates` removes every other
+        #: provider (never adds or reorders) and REFUSES rather than falling
+        #: back to an excluded one: an answer engine can dereference an
+        #: attacker URL, so exhausting the index-only chain is an answer, not a
+        #: reason to widen it. No approval lifts this.
+        self.restrict_to = restrict_to
         #: The config root the store-first key readers resolve under. A bare path
         #: rather than the deleted ``CredentialManager``: the readers only ever
         #: read ``config_dir`` off it (PR2b).
@@ -235,7 +250,21 @@ class WebSearchService:
                     f"Search provider "
                     f"{provider_refusal(forced_provider, self.settings, self.config_dir)}"
                 )
+            if self.restrict_to is not None and forced_provider not in self.restrict_to:
+                raise RuntimeError(_tainted_refusal())
             return [forced_provider]
+        if self.restrict_to is not None:
+            allowed = self.restrict_to
+            restricted: list[SearchProviderId] = [
+                p for p in self._unrestricted_candidates() if str(p) in allowed
+            ]
+            if not restricted:
+                raise RuntimeError(_tainted_refusal())
+            return restricted
+        return self._unrestricted_candidates()
+
+    def _unrestricted_candidates(self) -> list[SearchProviderId]:
+        bands = resolve_provider_bands(self.settings, self.config_dir)
         # ONE rotating free pool: the listed free legs in their listed order, then
         # the auto-joined free band. Rotating only the auto band pinned the first
         # attempt to providers[0] on every install (round-1 M1/Q1/D2/U1).
