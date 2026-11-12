@@ -1400,6 +1400,11 @@ class ActionBridge:
         #: worker's turn is parked and nothing else drives the guest.
         self._verifier_fired = 0
         self._verifying: int | None = None
+        #: Requirements the last verifier challenge named UNMET. The challenge
+        #: tells the worker a re-finish that skips them is reported not done;
+        #: the accepting ``finish`` row honours that as ``not_done``. Cleared
+        #: by a later PASS (the check itself agreed they were addressed).
+        self._verifier_unmet: list[str] = []
         #: Non-terminal batches dispatched to the adapter -- the runner's
         #: ``_steps_taken`` analogue (see the increment for why at dispatch).
         #: ``_steps`` cannot serve: it counts admitted output epochs, which a
@@ -1651,11 +1656,18 @@ class ActionBridge:
             observation=pending,
             reply_guidance=self.reply_guidance,
         )
-        findings = verdict.findings.strip() or "(no findings text)"
-        challenge = (
-            f"An independent check of your deliverable reported ({verdict.status}):\n"
-            f"{findings}\n\n{challenge}"
+        from local_operator.harness.verifier import (
+            build_verdict_challenge,
+            unmet_requirements,
         )
+
+        # The verdict's own section is the generic builder's (it lists each
+        # UNMET requirement and says a re-finish that skips them is reported
+        # not done); remembering the list is what makes that sentence true --
+        # the accepting ``finish`` row carries it as ``not_done`` unless a
+        # later verification passes.
+        self._verifier_unmet = unmet_requirements(verdict.findings)
+        challenge = f"{build_verdict_challenge(verdict.status, verdict.findings)}\n\n{challenge}"
         if self.record is not None:
             self.record(
                 "completion_challenged",
@@ -2793,6 +2805,15 @@ class ActionBridge:
                             # Present only when a verifier passed this claim,
                             # so an arm without one writes today's row.
                             **({"verified": check.status} if check is not None else {}),
+                            # The verdict binds: requirements a challenge named
+                            # UNMET and no later check passed are reported not
+                            # done, whatever the worker's status says.
+                            **(
+                                {"not_done": list(self._verifier_unmet)}
+                                if self._verifier_unmet
+                                and (check is None or check.status != "PASS")
+                                else {}
+                            ),
                         },
                     )
                 return {

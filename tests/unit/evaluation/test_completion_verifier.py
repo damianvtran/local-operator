@@ -963,3 +963,53 @@ async def test_guest_reads_are_clipped_to_the_verification_deadline() -> None:
     text, is_error = await inspector.inspect({"command": "cat h", "timeout_s": 30})
     assert not is_error, text
     assert [t for c, t in seen if "cat h" in c] == [30], seen
+
+
+# -- verdicts bind (main33: 11 unchanged re-finishes after a challenge) ---------
+
+
+@pytest.mark.asyncio
+async def test_a_challenge_lists_each_unmet_requirement_and_binds_the_next_finish(
+    tmp_path: Path,
+) -> None:
+    bridge, _actions, _events, _seen = _armed(
+        tmp_path, [_verdict("FAIL", "UNMET: Q5 is the decoy paper\nQ2: MET")]
+    )
+    reply = await bridge.call(DONE)
+    text = reply["content"][0].text
+    assert text.startswith("An independent check of your deliverable reported (FAIL):")
+    assert "1. Q5 is the decoy paper" in text
+    assert "reported as not done" in " ".join(text.split())
+    # The shared self-check challenge still follows.
+    assert "That declaration is a CLAIM" in text
+
+
+@pytest.mark.asyncio
+async def test_a_refinish_over_unaddressed_requirements_is_reported_not_done(
+    tmp_path: Path,
+) -> None:
+    """The last round still accepts (bounded), but the finish row reports the
+    challenged requirements as not done -- the challenge's words are true."""
+
+    bridge, actions, _events, _seen = _armed(
+        tmp_path, [_verdict("FAIL", "UNMET: Q5 is the decoy paper")], rounds=1
+    )
+    await bridge.call(DONE)
+    second = await bridge.call(DONE)
+    assert second["details"]["terminal"] == "finish"
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["not_done"] == ["Q5 is the decoy paper"]
+
+
+@pytest.mark.asyncio
+async def test_a_later_pass_clears_the_not_done_report(tmp_path: Path) -> None:
+    bridge, actions, _events, _seen = _armed(
+        tmp_path,
+        [_verdict("FAIL", "UNMET: Q5 is the decoy paper"), _verdict("PASS", "all met")],
+        rounds=2,
+        max_steps=10,
+    )
+    await bridge.call(DONE)
+    assert (await bridge.call(DONE))["details"]["terminal"] == "finish"
+    [finish] = [p for k, p in actions if k == "finish"]
+    assert finish["verified"] == "PASS" and "not_done" not in finish
