@@ -14169,6 +14169,30 @@ class RelayServer:
         push_reason = ""
         expect: dict[str, Any] = {}
         reconciliation: dict[str, Any] = {}
+        # A PEER THAT KEPT ITS OWN CUSTOM INSTRUCTIONS IS SAID ON THE RECEIPT (review
+        # round 1, R1-2), with the remedy, because the session about to run there
+        # will not carry this device's standing rules. Informational only: it never
+        # refuses the create (a node's own instructions are a legitimate state).
+        instructions_notice = ""
+        if not named:
+            # AN UNNAMED SESSION STILL RUNS UNDER THE OPERATOR'S CUSTOM INSTRUCTIONS,
+            # so the push that a named create does below happens here too, narrowed
+            # to no agents and no teams: what it carries is the operator-instructions
+            # singleton (``definitions.local_bundle``), and only when the peer's copy
+            # differs. Best effort: the cadence carries it anyway, and a create must
+            # not fail on a refresh the user never asked for.
+            from local_operator.network import definitions
+
+            try:
+                instructions_notice = _instructions_notice_of(
+                    definitions.push_to_peer(
+                        self, self._resolve_peer(peer), names={"agents": [], "teams": []}
+                    )
+                )
+            except Exception:  # noqa: BLE001 — see above
+                logger.debug(
+                    "relay: instructions push before an unnamed create failed", exc_info=True
+                )
         if named:
             from local_operator.network import definitions
 
@@ -14196,6 +14220,7 @@ class RelayServer:
                 target,
                 names={"agents": wanted, "teams": [team] if team else []},
             )
+            instructions_notice = _instructions_notice_of(pushed)
             unreconciled = definitions.create_refusal(pushed, peer_label=self._peer_label(target))
             if unreconciled:
                 # THE DIVERGENT COPY LIVES ON THAT DEVICE, and the sentence says so:
@@ -14281,6 +14306,8 @@ class RelayServer:
                 # half); ``message`` is the wire frame's name for it, not the exception's.
                 raise MeshRefusal(refusal.code, f"{refusal.sentence} ({push_reason})") from None
             raise
+        if instructions_notice:
+            detail = {**detail, "custom_instructions_notice": instructions_notice}
         if reconciliation:
             return {**detail, "definitions": reconciliation}
         return detail
@@ -15179,6 +15206,14 @@ class RelayServer:
         )
 
     # -- pair phase, listener-side helpers ---------------------------------
+
+
+def _instructions_notice_of(pushed: Any) -> str:
+    """The push's kept-own-instructions sentence (``definitions.push_to_peer``), or ``""``."""
+    if not isinstance(pushed, Mapping):
+        return ""
+    report = pushed.get("operator_instructions")
+    return str(report.get("notice") or "") if isinstance(report, Mapping) else ""
 
 
 def _has_terminal() -> bool:

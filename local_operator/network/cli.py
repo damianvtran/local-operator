@@ -8123,6 +8123,10 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # worked" report this slice exists to make impossible. The reconciliation block
         # is the relay's (it is the half that saw the push) and is printed whenever it is
         # not clean; ``--json`` carries the whole block either way (``**detail``).
+        # The peer kept its own custom instructions (R1-2): informational, the
+        # session was created, but it runs without this device's standing rules.
+        if detail.get("custom_instructions_notice"):
+            lines.append(str(detail["custom_instructions_notice"]))
         notes = detail.get("definitions")
         if isinstance(notes, dict) and not notes.get("ok"):
             lines.append(
@@ -11191,6 +11195,28 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                         f"  {conflict.get('kind') or 'row'} {conflict.get('name')!r}: "
                         f"{conflict.get('reason') or 'refused'}"
                     )
+            # The operator's custom instructions report on their own line: their
+            # outcome never fails the push (a node's own instructions are a state, not
+            # an error), so it would otherwise be invisible exactly when it matters.
+            instructions = item.get(definitions.OPERATOR_INSTRUCTIONS_KIND)
+            if isinstance(instructions, dict) and instructions.get("outcome") in (
+                "installed",
+                "updated",
+                "conflict",
+                "refused",
+                "withheld",
+            ):
+                # A kept-own-copy conflict reads in the push's own peer-naming
+                # sentence with its remedy (Q-2): the receiver's reason says "this
+                # device", which on the head reads as the head.
+                notice = str(instructions.get("notice") or "")
+                why = str(instructions.get("reason") or "")
+                lines.append(
+                    f"  custom instructions: {notice}"
+                    if notice
+                    else f"  custom instructions: {instructions.get('outcome')}"
+                    + (f" ({why})" if why else "")
+                )
         return _emit(
             args, {"ok": bool(detail.get("ok")), "peers": rows}, lines or ["nothing to do"]
         )
@@ -11213,6 +11239,35 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             lines.append(
                 f"{kind[:-1]}: {name}" + (f" (mirrored from {origin})" if origin else " (yours)")
             )
+    # The operator's custom instructions (``system_prompt.md``): whose they are, and
+    # the last revision a peer offered that this device kept its own copy against.
+    # Local and relay-free like the rest of ``state``, so a node answers "why is the
+    # head's review gate not in my prompt" without the head being up.
+    instructions = state.get(definitions.OPERATOR_INSTRUCTIONS_KIND) or {}
+    status = str(instructions.get("status") or "absent")
+    if status == "mirror":
+        lines.append(f"custom instructions: mirrored from {instructions.get('origin') or '?'}")
+    elif status == "edited":
+        lines.append(
+            "custom instructions: yours (edited after being mirrored from "
+            f"{instructions.get('origin') or '?'})"
+        )
+    elif status == "authored":
+        lines.append("custom instructions: yours")
+    elif status == "unreadable":
+        lines.append("custom instructions: present but could not be read")
+    conflict = instructions.get("conflict")
+    if isinstance(conflict, dict):
+        reason = str(conflict.get("reason") or "this device kept its own copy")
+        lines.append(
+            f"custom instructions from {conflict.get('origin') or '?'} not installed: {reason}"
+            # The remedy, on the device where it is run (R1-2).
+            + (
+                "; delete or blank them here to receive those"
+                if status in ("authored", "edited", "unreadable")
+                else ""
+            )
+        )
     if not lines:
         lines = ["no agent or team definitions on this device"]
     return _emit(
@@ -11222,6 +11277,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "agents": state.get("agents") or {},
             "teams": state.get("teams") or {},
             "mirrored": mirrored,
+            definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
         },
         lines,
     )
