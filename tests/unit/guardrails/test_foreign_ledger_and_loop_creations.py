@@ -232,3 +232,108 @@ async def test_check_tool_call_refuses_and_names_the_owner(home: Path) -> None:
     assert outcome is not None and outcome.blocked
     assert len(judge.prompts) == 1 and OTHER in judge.prompts[0]
     assert OTHER in outcome.text
+
+
+# -- Review round 1 (PR #3835): live identity, nearest owner, case, cost ---------------
+
+FRESH = "dddddddddddd"
+
+
+def _rows(home: Path) -> list[tuple[str, str]]:
+    conn = sqlite3.connect(prov.ledger_path(home / ".local-operator"))
+    try:
+        rows = conn.execute("SELECT owner, path FROM created ORDER BY owner, path").fetchall()
+    finally:
+        conn.close()
+    return [(o, p.replace(str(home), "~")) for o, p in rows]
+
+
+def test_dead_generation_owner_neither_excuses_nor_names(home: Path) -> None:
+    """M1: SID's row for a removed ``~/w/runs`` must not stand in for OTHER's live one.
+
+    Rows used to be grouped by path alone, so the dead row made the path look
+    like SID's own (LOW) and an unrelated session's reason named SID.
+    """
+    (home / "w").mkdir()
+    (home / ".local-operator" / "sessions" / FRESH / "scratchpad").mkdir(parents=True)
+    _run(home, "mkdir ~/w/runs", sid=SID)
+    subprocess.run(["rm", "-rf", str(home / "w" / "runs")], check=True)
+    _run(home, "mkdir ~/w/runs && echo x > ~/w/runs/r.json", sid=OTHER)
+    assert _rows(home) == [(SID, "~/w/runs"), (OTHER, "~/w/runs")]
+    for sid in (SID, CHILD, FRESH):
+        verdict = _verdict(home, "rm -rf ~/w/runs", sid=sid)
+        assert verdict.risk is Risk.HIGH, sid
+        assert f"created by another session ({OTHER}, mkdir" in verdict.targets[0].reason
+        assert SID not in verdict.targets[0].reason
+
+
+def _shared(home: Path) -> None:
+    # Under ~/w, so no "direct child of $HOME" HIGH masks the ledger rule.
+    (home / "w").mkdir()
+    # ``mkdir -p`` records the topmost NEW component: OTHER, first in, owns ~/w/shared.
+    _run(home, "mkdir -p ~/w/shared/qa-other", sid=OTHER)
+    _run(home, "mkdir -p ~/w/shared/mine/sub", sid=SID)
+    assert _rows(home) == [(SID, "~/w/shared/mine"), (OTHER, "~/w/shared")]
+
+
+@pytest.mark.parametrize("rel", ["mine", "mine/sub"])
+def test_own_dir_inside_a_foreign_dir_stays_low(home: Path, rel: str) -> None:
+    """M2: the DEEPEST live row covering the target decides, and here it is SID's."""
+    _shared(home)
+    verdict = _verdict(home, f"rm -rf ~/w/shared/{rel}")
+    assert verdict.risk is Risk.LOW, verdict.targets[0].reason
+
+
+@pytest.mark.parametrize("rel", ["", "qa-other"])
+def test_foreign_dir_itself_or_its_other_children_stay_high(home: Path, rel: str) -> None:
+    """M2, other direction: ~/w/shared and OTHER's own child of it are still OTHER's."""
+    _shared(home)
+    verdict = _verdict(home, f"rm -rf ~/w/shared/{rel}".rstrip("/"))
+    assert verdict.risk is Risk.HIGH
+    assert f"created by another session ({OTHER}, mkdir" in verdict.targets[0].reason
+
+
+def test_own_dir_holding_a_foreign_dir_ranks_high(home: Path) -> None:
+    """Removing your own directory destroys another session's live one inside it."""
+    (home / "w").mkdir()
+    _run(home, "mkdir ~/w/mine", sid=SID)
+    _run(home, "mkdir ~/w/mine/theirs", sid=OTHER)
+    verdict = _verdict(home, "rm -rf ~/w/mine")
+    assert verdict.risk is Risk.HIGH
+    assert f"holds {home}/w/mine/theirs, created by another session ({OTHER}" in (
+        verdict.targets[0].reason
+    )
+
+
+def _case_insensitive(path: Path) -> bool:
+    probe = path / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (path / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+def test_case_variant_spelling_still_matches(home: Path) -> None:
+    """m2: on case-insensitive APFS ``~/Worktrees`` IS ``~/worktrees``."""
+    if not _case_insensitive(home):
+        pytest.skip("case-sensitive filesystem: the variant names another path")
+    _osworld(home)
+    verdict = _verdict(home, "rm -rf ~/WORKTREES/Osworld/osworld-21/runs")
+    assert verdict.risk is Risk.HIGH
+    assert f"created by another session ({OTHER}, mkdir" in verdict.targets[0].reason
+
+
+def test_ledger_has_a_path_index_and_reads_only_related_rows(home: Path) -> None:
+    """m3: the foreign read is an indexed lookup, not a full-table scan."""
+    _osworld(home)
+    conn = sqlite3.connect(prov.ledger_path(home / ".local-operator"))
+    try:
+        indexed = {r[1] for r in conn.execute("PRAGMA index_list(created)")}
+        cols = [[c[2] for c in conn.execute(f"PRAGMA index_info({name})")] for name in indexed]
+        assert ["path"] in cols
+        sql, params = prov._foreign_query([str(home / "plain" / "x"), str(home / "w")])
+        plan = " | ".join(r[-1] for r in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params))
+    finally:
+        conn.close()
+    assert "SCAN created" not in plan and "USING INDEX" in plan, plan

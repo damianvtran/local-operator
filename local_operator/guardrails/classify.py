@@ -1621,19 +1621,18 @@ def _foreign_reason(target: Target, path: str, foreign: ForeignCreations | None)
             matches = []
         if 0 < len(matches) <= _FOREIGN_GLOB_MATCHES:
             candidates = matches
-    hit = foreign.match(candidates)
+    # m2 (review of PR #3835): on case-insensitive APFS ``~/WORKTREES/x`` IS
+    # ``~/worktrees/x``, but ``realpath`` keeps the caller's case; ledger rows
+    # hold the on-disk spelling, so match that too.
+    reals = [os.path.realpath(c) for c in candidates]
+    cased = [c for c in map(_on_disk_case, reals) if c is not None]
+    hit = foreign.match([*reals, *cased])
     if hit is None:
         return None
-    owner, rec = hit
+    rec = hit.record
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.created_at))
-    real = {os.path.realpath(c) for c in candidates}
-    if rec.path in real:
-        where = ""
-    elif any(_under(r, rec.path) for r in real):
-        where = f"inside {rec.path}, "
-    else:
-        where = f"holds {rec.path}, "
-    return f"{where}created by another session ({owner}, {rec.kind}, {when})"
+    where = {"at": "", "inside": f"inside {rec.path}, ", "holds": f"holds {rec.path}, "}
+    return f"{where[hit.relation]}created by another session ({hit.owner}, {rec.kind}, {when})"
 
 
 def _owned_by_session(
@@ -1787,10 +1786,13 @@ def classify_targets(
     prot = prot or _protected(env, scratchpad, session_id)
     from local_operator.guardrails.provenance import ForeignCreations
 
-    # One lazy ledger read shared by every target of this call (read only if
-    # some target reaches the LOW fallbacks in ``_rank``).
+    # One lazy ledger connection shared by every target of this call (opened
+    # only if some target reaches the LOW fallbacks in ``_rank``).
     foreign = ForeignCreations(session_id)
-    ranked = [_rank(t, prot, session_id, globstar, foreign) for t in targets]
+    try:
+        ranked = [_rank(t, prot, session_id, globstar, foreign) for t in targets]
+    finally:
+        foreign.close()
     # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
     # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
     # row for it would invent a target (review M1 on PR #3816).

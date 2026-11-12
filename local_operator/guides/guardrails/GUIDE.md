@@ -38,7 +38,9 @@ into HIGH — a judge decision, never a pass. Rules only ADD restriction.
   child of `$HOME`, a repo root, `git clean` of untracked work, a directory another
   session created (its creation-ledger row at, under or above the target, still the
   same inode, from a session outside your subagent tree — the reason names that
-  session), every linked
+  session; for a target inside recorded directories the deepest one decides, so
+  your own directory inside another session's stays yours; on Linux, where the
+  inode stamp is ctime, a row stops counting once its directory changes), every linked
   worktree a delete reaches that this session's ledger does not record — by its
   path, a glob match (`rm -rf <repo>/.worktrees/*`, or a loop over one) or an
   ancestor (`rm -rf <repo>/.worktrees`), however it is spelled (matched by
