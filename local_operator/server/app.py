@@ -6,6 +6,7 @@ through HTTP requests instead of CLI.
 """
 
 import asyncio
+import logging
 import secrets
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
@@ -29,12 +30,9 @@ from local_operator.console import VerbosityLevel
 from local_operator.env import get_env_config
 from local_operator.helpers import setup_cross_platform_environment
 from local_operator.jobs import JobManager
-from local_operator.logger import (
-    configure_console_logging,
-    get_logger,
-    quiet_wire_clients,
-)
+from local_operator.logger import get_logger, quiet_wire_clients
 from local_operator.scheduler_service import SchedulerService
+from local_operator.serve_logging import ServeLogHandler, configure_serve_logging
 from local_operator.server import early_paint_hold
 from local_operator.server import loop_watchdog as serve_loop_watchdog
 from local_operator.server import registry as serve_registry
@@ -108,7 +106,7 @@ from local_operator.server.utils.static_roots import (
 from local_operator.session.runtime import registry as session_registry
 from local_operator.types import OperatorType
 
-# NO logging configuration at import. `configure_console_logging` REPLACES the
+# NO logging configuration at import. Logging configuration REPLACES the
 # root logger's handlers, so calling it here made merely importing this module
 # — which `generate_openapi`, the test suite's collection phase and any
 # tooling that wants `app.openapi()` all do — reconfigure logging for the whole
@@ -122,6 +120,22 @@ logger = get_logger("local_operator.server")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # CLI serve already owns the sink; embedded/reloader starts own one here.
+    # Repeat routing after uvicorn config has installed its named handlers.
+    existing = any(
+        isinstance(h, ServeLogHandler) and not h.stopped for h in logging.getLogger().handlers
+    )
+    handler = configure_serve_logging()
+    try:
+        async with _lifespan(app):
+            yield
+    finally:
+        if not existing:
+            handler.close()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize and clean up application state.
 
     This function is called when the application starts up and shuts down.
@@ -130,12 +144,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Args:
         app: The FastAPI application instance
     """
-    # Console logging for the server process, at the same level (LOG_LEVEL,
-    # default WARNING) and format the old import-time call used. uvicorn has
-    # already configured its own named loggers by the time startup runs, and
-    # this only touches the root logger, so the two do not fight.
-    configure_console_logging()
-    # AFTER the console call, which resets the wire clients to the root level.
+    # Preserve the wire-client policy independently of the asynchronous sink.
     # At LOG_LEVEL=INFO httpx otherwise logs one ``HTTP Request: <full url>``
     # line per outbound call, and this process builds TeamBridgeClient and the
     # provider clients (security round 2 on #3587, S-r2-1). Every other entry
