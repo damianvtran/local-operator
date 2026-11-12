@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import relay, types
+from local_operator.network import definitions, relay, types
 from local_operator.network.create_keys import CreateKeyIndex
 
 REQUESTER_DEVICE = "d_" + "b" * 32
@@ -68,7 +68,11 @@ class _Wire:
         op = frame["op"]
         if op == "net_session_create_lookup" and self.lookup == "unknown_op":
             return {"op": "error", "code": "unknown_op", "message": "not an operation"}
+        # A create MUST reconcile definitions first, even with no named profile.
+        # Exercise that real preflight rather than letting the fake raise KeyError
+        # and the production caller report state_failed before the create proceeds.
         handler = {
+            "net_definitions": definitions.make_handler(self.owner),
             "net_session_create": self.owner._op_session_create,  # noqa: SLF001
             "net_session_create_lookup": self.owner._op_session_create_lookup,  # noqa: SLF001
         }[op]
@@ -79,7 +83,7 @@ class _Wire:
         if op == "net_session_create" and self.drop > 0:
             self.drop -= 1
             return None
-        return {"op": "reply", "detail": detail}
+        return {"op": "ack" if op == "net_definitions" else "reply", "detail": detail}
 
 
 @pytest.fixture
@@ -111,11 +115,16 @@ def test_a_dropped_create_reply_reports_the_id_and_a_retry_returns_the_same_one(
     assert _sessions(owner) == [minted]
     assert "lost" in first["detail"] and minted in first["detail"], first
     key = first["create_key"]
+    # The mandatory preflight predates this cell (24b6de4c86). The original
+    # assertion in 6ccc448f63 omitted it; 18318597a only edits later cells/copy.
     assert [f["op"] for f in wire.sent] == [
+        "net_definitions",
         "net_session_create",
         "net_session_create_lookup",
     ]
-    assert wire.sent[0]["create_key"] == key and wire.sent[1]["create_key"] == key
+    assert wire.sent[0]["phase"] == "state"
+    create_frames = [f for f in wire.sent if f["op"].startswith("net_session_create")]
+    assert [f["create_key"] for f in create_frames] == [key, key]
 
     retry = requester._ctl_peer_create({"peer": "node-2", "create_key": key})  # noqa: SLF001
     assert retry["session_id"] == minted, retry
