@@ -35,6 +35,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.harness.verifier import (
+    VERDICT_REQUEST_RESERVE,
     VERIFIER_ROLE,
     VerifierLimits,
     build_verifier_prompt,
@@ -265,7 +266,7 @@ async def test_request_cap_cancels_the_child(tmp_path, config_dir):
     # A verifier that never answers: every turn is another read.
     stream = TreeStream(lambda request: tool_turn("glob", {"pattern": "*.nothing"}))
     parent = make_parent(tmp_path, stream)
-    limits = VerifierLimits(max_requests=3, max_commands=10, wall_s=30)
+    limits = VerifierLimits(max_requests=3, max_commands=1, wall_s=30)
 
     verdict = await parent.verify_completion(request="r", claim="c", limits=limits)
 
@@ -280,18 +281,30 @@ async def test_request_cap_cancels_the_child(tmp_path, config_dir):
 
 
 @pytest.mark.asyncio
-async def test_command_cap_refuses_and_cancels(tmp_path, config_dir):
+async def test_command_cap_refuses_and_asks_for_the_verdict(tmp_path, config_dir):
+    """The command budget is enforced by REFUSAL (the third command never
+    reaches the host), and the refusal is the cue to answer -- so the child is
+    not cancelled for spending it: its next request is the verdict."""
+
     calls: list[dict[str, Any]] = []
-    stream = TreeStream(lambda request: tool_turn("inspect_command", {"command": "ls"}))
+
+    def reply(request: ChatRequest) -> list[Any]:
+        results = tool_results(request)
+        if results and "give your VERDICT now" in results[-1]:
+            return text_turn("B2 holds 42\nVERDICT: FAIL")
+        return tool_turn("inspect_command", {"command": "ls"})
+
+    stream = TreeStream(reply)
     parent = make_parent(tmp_path, stream)
-    limits = VerifierLimits(max_requests=50, max_commands=2, wall_s=30)
+    limits = VerifierLimits(max_commands=2, wall_s=30)
 
     verdict = await parent.verify_completion(
         request="r", claim="c", host_tools=[inspect_tool(calls)], limits=limits
     )
 
-    assert verdict.ended_by == "commands"
     assert len(calls) == 2  # the third never reached the host
+    assert (verdict.status, verdict.ended_by) == ("FAIL", "verdict"), verdict
+    assert verdict.caps_hit == ("commands",) and verdict.commands == 2
     await parent.dispose()
 
 
@@ -513,7 +526,7 @@ async def test_cancelling_the_caller_cancels_the_verifier_job(tmp_path, config_d
 async def test_a_verdict_on_the_capped_request_is_kept(tmp_path, config_dir):
     """Q2: the answer given ON request ``max_requests`` wins over the cap."""
 
-    limits = VerifierLimits(max_requests=3, max_commands=10, wall_s=30)
+    limits = VerifierLimits(max_requests=3, max_commands=1, wall_s=30)
 
     def reply(request: ChatRequest) -> list[Any]:
         done = sum(1 for m in request.messages if m.role in ("tool", "toolResult"))
@@ -566,3 +579,143 @@ async def test_recorded_tools_are_what_the_child_was_given(tmp_path, config_dir,
     assert "bash" not in verdict.tools and "bash" not in started[0]["tools"]
     assert set(verdict.tools) == given, (verdict.tools, given)
     await parent.dispose()
+
+
+# -- round 3: the live t31v episode (PR #3837) ---------------------------------
+#
+# ``osworld-21/runs/t31v-t001-20261111-214934``: a verifier spent one request
+# on two local ``bash`` reads, ten on ``inspect_command``, one more on an
+# eleventh (refused) command, and answered ``VERDICT: PASS`` on request 13 --
+# which the 12-request cap, firing on request 12 and cancelling on request
+# 13's final row, threw away as ``INCONCLUSIVE``/``requests``.
+
+
+def tool_turns(*calls: tuple[str, dict[str, Any]]) -> list[Any]:
+    """One assistant message carrying several tool calls (a batched turn)."""
+
+    events: list[Any] = []
+    for index, (name, args) in enumerate(calls):
+        call_id = f"call-{next(_call_ids)}"
+        events += [
+            StreamToolCallDelta(index=index, id=call_id, name=name),
+            StreamToolCallDelta(index=index, argument_delta=json.dumps(args)),
+        ]
+    return [*events, StreamEndEvent(stop_reason="toolUse")]
+
+
+def tool_results(request: ChatRequest) -> list[str]:
+    return [m.text or "" for m in request.messages if m.role in ("tool", "toolResult")]
+
+
+LIVE_VERDICT = (
+    "| Requirement | Status | Evidence |\n|---|---|---|\n"
+    "| every defense attended | MET | 7 rows read |\n\nVERDICT: PASS"
+)
+
+
+def live_shape(request: ChatRequest) -> list[Any]:
+    done = len(tool_results(request))
+    if done == 0:
+        return tool_turns(("glob", {"pattern": "*.a"}), ("glob", {"pattern": "*.b"}))
+    if done <= 12:  # ten commands, then the eleventh the budget refuses
+        return tool_turn("inspect_command", {"command": f"cat f{done}"})
+    return text_turn(LIVE_VERDICT)
+
+
+@pytest.mark.asyncio
+async def test_live_t31v_shape_keeps_the_verdict_on_request_cap_plus_one(tmp_path, config_dir):
+    """The exact live limits (12 requests, 10 commands) and shape: the verdict
+    on request 13 wins over the cap that fired on request 12."""
+
+    calls: list[dict[str, Any]] = []
+    stream = TreeStream(live_shape)
+    parent = make_parent(tmp_path, stream)
+    limits = VerifierLimits(max_requests=12, max_commands=10, wall_s=30)
+
+    verdict = await parent.verify_completion(
+        request="r", claim="c", host_tools=[inspect_tool(calls)], limits=limits
+    )
+
+    made = stream.by_job[verdict.job_id]
+    assert len(made) == 13 and len(calls) == 10
+    assert (verdict.status, verdict.ended_by) == ("PASS", "verdict"), verdict
+    assert verdict.requests == 13 and verdict.commands == 10
+    # The cap that fired is still on the record, beside the verdict that won.
+    assert "commands" in verdict.caps_hit and "requests" in verdict.caps_hit
+    assert verdict.local_tools == 2
+    # The refusal told the child what to do with its last request.
+    assert "give your VERDICT now" in tool_results(made[-1])[-1]
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_default_budget_holds_the_live_shape_without_any_cap(tmp_path, config_dir):
+    """The derived default: ten commands, the local allowance, the refused
+    attempt and the verdict all fit, so the same episode never reaches a cap."""
+
+    calls: list[dict[str, Any]] = []
+    stream = TreeStream(live_shape)
+    parent = make_parent(tmp_path, stream)
+
+    verdict = await parent.verify_completion(
+        request="r", claim="c", host_tools=[inspect_tool(calls)]
+    )
+
+    assert (verdict.status, verdict.ended_by) == ("PASS", "verdict"), verdict
+    assert verdict.caps_hit == ("commands",)  # the budget refusal, never the request cap
+    await parent.dispose()
+
+
+def test_request_budget_is_derived_from_the_command_budget() -> None:
+    limits = VerifierLimits()
+    assert limits.max_requests == (
+        limits.max_commands + limits.local_tool_allowance + VERDICT_REQUEST_RESERVE
+    )
+    assert VerifierLimits(max_commands=3, local_tool_allowance=1).max_requests == 6
+    # An explicit cap that cannot hold every command plus the verdict is refused.
+    with pytest.raises(ValueError):
+        VerifierLimits(max_requests=11, max_commands=10)
+    assert limits.as_record()["max_requests"] == limits.max_requests
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_already_given_survives_a_wall_cancel(tmp_path, config_dir, monkeypatch):
+    """The answer message exists but the job has not settled when the wall
+    fires: the cancelled job's last assistant text is still the verdict."""
+
+    from local_operator.harness import subagent as subagent_module
+
+    real_finish = subagent_module._finish_child_browser
+
+    async def slow_settle(child, comms, job_id, status):  # type: ignore[no-untyped-def]
+        if status == "completed":
+            await asyncio.sleep(30)
+        return await real_finish(child, comms, job_id, status)
+
+    monkeypatch.setattr(subagent_module, "_finish_child_browser", slow_settle)
+    stream = TreeStream(lambda request: text_turn("B2 holds 42\nVERDICT: FAIL"))
+    parent = make_parent(tmp_path, stream)
+
+    verdict = await parent.verify_completion(
+        request="r", claim="c", limits=VerifierLimits(wall_s=1.5)
+    )
+
+    job = parent.jobs.get(verdict.job_id)
+    assert job is not None and job.status == "cancelled", getattr(job, "status", None)
+    assert (verdict.status, verdict.findings, verdict.ended_by) == (
+        "FAIL",
+        "B2 holds 42",
+        "verdict",
+    ), verdict
+    assert verdict.caps_hit == ("wall",)
+    await parent.dispose()
+
+
+def test_only_the_last_non_empty_line_is_a_verdict() -> None:
+    """m1: a QUOTED verdict above trailing prose is not the verifier's verdict."""
+
+    for quoted in ("> VERDICT: PASS", "- VERDICT: PASS", "VERDICT: PASS"):
+        text = f"The format is:\n{quoted}\nbut I could not open the file."
+        assert parse_verdict(text)[0] == "INCONCLUSIVE", quoted
+    # Trailing blank lines do not hide the real last line.
+    assert parse_verdict("B2 holds 42\nVERDICT: PASS\n\n  \n") == ("PASS", "B2 holds 42")

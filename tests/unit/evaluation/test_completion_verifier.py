@@ -112,10 +112,52 @@ async def test_fail_becomes_the_challenge_with_findings(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_inconclusive_also_challenges(tmp_path: Path) -> None:
-    bridge, *_ = _armed(tmp_path, [_verdict("INCONCLUSIVE", "could not open the file")])
+    bridge, _actions, events, _seen = _armed(
+        tmp_path, [_verdict("INCONCLUSIVE", "could not open the file")]
+    )
     reply = await bridge.call(DONE)
     assert reply["details"]["terminal"] == "completion-challenged"
     assert "(INCONCLUSIVE)" in reply["content"][0].text
+    # Round 3: the record says which way INCONCLUSIVE went, so an ablation
+    # never has to infer it from ``status``.
+    [(kind, row)] = events
+    assert kind == "verifier_verdict" and row["disposition"] == "challenged"
+
+
+@pytest.mark.asyncio
+async def test_verdict_rows_record_the_disposition(tmp_path: Path) -> None:
+    for status, disposition in (("PASS", "accepted"), ("FAIL", "challenged")):
+        (tmp_path / status).mkdir()
+        bridge, _actions, events, _seen = _armed(tmp_path / status, [_verdict(status)])
+        await bridge.call(DONE)
+        assert [row["disposition"] for kind, row in events if kind == "verifier_verdict"] == [
+            disposition
+        ], status
+
+
+def test_a_workers_own_verifier_task_is_not_the_verifier_share() -> None:
+    """m3: rows of a worker's ``task(agent="verifier")`` carry the role name
+    but not a recorded verifier job id, so they never enter the share -- and
+    with the verifier off the record keeps no ``verifier`` key at all."""
+
+    from local_operator.harness.types import Usage
+
+    worker_child = _row("r2", actor_role="verifier", job_id="worker-task")
+    rows = [_row("r1", actor_role=None, job_id=None), worker_child]
+    usages = [Usage.model_validate(r["usage"]) for r in rows]
+    written: list[tuple[str, dict[str, Any]]] = []
+    sink = SimpleNamespace(write=lambda k, p: written.append((k, p)))
+    off = SimpleNamespace(request_rows=rows, request_usages=usages, verifier_job_ids=set())
+    _flush_request_observation(sink, off)  # type: ignore[arg-type]
+    assert "verifier" not in written[-1][1]
+    on = SimpleNamespace(
+        request_rows=[*rows, _row("r3", actor_role="verifier", job_id="vjob")],
+        request_usages=usages,
+        verifier_job_ids={"vjob"},
+    )
+    _flush_request_observation(sink, on)  # type: ignore[arg-type]
+    assert written[-1][1]["verifier"]["job_ids"] == ["vjob"]
+    assert written[-1][1]["verifier"]["count"] == 1
 
 
 @pytest.mark.asyncio
@@ -329,7 +371,9 @@ def test_verifier_rows_enter_the_request_summary() -> None:
     written: list[tuple[str, dict[str, Any]]] = []
     record = SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
     handle = SimpleNamespace(
-        request_rows=rows, request_usages=[Usage.model_validate(r["usage"]) for r in rows]
+        request_rows=rows,
+        request_usages=[Usage.model_validate(r["usage"]) for r in rows],
+        verifier_job_ids={"vjob"},
     )
     _flush_request_observation(record, handle)  # type: ignore[arg-type]
     [(kind, payload)] = written
@@ -368,15 +412,19 @@ def test_config_refuses_out_of_range() -> None:
         {"rounds": 3},
         {"rounds": True},
         {"wall_s": MAX_VERIFIER_WALL_S + 1},
-        {"max_requests": 0},
+        {"max_commands": 0},
+        {"local_tool_allowance": -1},
     ]
     for bad in bad_values:
         with pytest.raises(ValueError):
             CompletionVerifierConfig(**bad)
+    # The request cap is derived, never an independent constant: 10 commands
+    # + 4 local reads + the refused call + the verdict.
     assert CompletionVerifierConfig(rounds=1).stamp() == {
         "rounds": 1,
-        "max_requests": 12,
+        "max_requests": 16,
         "max_commands": 10,
+        "local_tool_allowance": 4,
         "wall_s": 180.0,
     }
 
@@ -449,9 +497,10 @@ async def test_end_to_end_fail_fix_pass_through_the_real_session(
     bridge.run_command = run_command
     written: list[tuple[str, dict[str, Any]]] = []
     record = SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
+    handle = SimpleNamespace(session=parent, verifier_job_ids=set())
     state = _arm_completion_verifier(
         bridge=bridge,
-        handle=SimpleNamespace(session=parent),  # type: ignore[arg-type]
+        handle=handle,  # type: ignore[arg-type]
         record=record,  # type: ignore[arg-type]
         config=CompletionVerifierConfig(rounds=2),
         wall_remaining=None,
@@ -651,3 +700,206 @@ async def test_skipped_when_the_wall_holds_the_cap_but_not_the_envelope(tmp_path
     bridge.wall_remaining = lambda: 200.0
     await bridge.call(DONE)
     assert seen == [] and events[0][1]["reason"] == "wall"
+
+
+# -- round 3: a cancelled verifier never poisons the adapter session ------------
+#
+# Live ``t31v-t003``: the verifier was cancelled while an ``inspect_command``
+# was mid-RPC. ``run_command`` is the supervisor's ``_mutating_call``, which
+# poisons on a ``CancelledError``; the worker's very next command failed
+# "adapter session is poisoned" and the episode ended with no score.
+
+
+def _score(root: Path) -> Any:
+    """A scored result whose details artifact exists under ``root`` (the shape
+    ``test_command_failure_keeps_session._score`` builds; that module needs
+    the OSWorld adapter package, which this one must not)."""
+
+    import hashlib
+
+    from local_operator.evaluation.adapters.api import ScoreResult
+    from local_operator.evaluation.evidence.models import (
+        EvidenceArtifactRef,
+        ScoreArtifact,
+    )
+
+    data = b'{"detail":true}'
+    digest = hashlib.sha256(data).hexdigest()
+    (root / digest).write_bytes(data)
+    return ScoreResult(
+        score=ScoreArtifact(
+            status="scored",
+            binary=1,
+            details=EvidenceArtifactRef(
+                sha256=digest, media_type="application/json", byte_count=len(data)
+            ),
+        )
+    )
+
+
+class _GuestWorker:
+    """The raw-supervisor seam under the REAL ``VerifiedAdapterSession``: the
+    probe answers at once, ``slow`` commands answer only when ``release`` is
+    set (a guest read still running when the verifier is cut)."""
+
+    def __init__(self, score: Any) -> None:
+        from local_operator.evaluation.action_surface import LEGACY_ACTION_SURFACE
+
+        self.action_surface = LEGACY_ACTION_SURFACE
+        self.score = score
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+        self.commands: list[str] = []
+        self.terminated = False
+
+    async def terminate(self) -> None:
+        self.terminated = True
+
+    async def _call_raw(  # type: ignore[no-untyped-def]
+        self, method, params, result_type, *, timeout, **kwargs
+    ):
+        from local_operator.evaluation.adapters.api import RunCommandResult
+
+        if method == "score":
+            return self.score
+        assert method == "run_command", method
+        self.commands.append(params.command)
+        out = SANDBOX_TOKEN if params.command == SANDBOX_PROBE else "ok"
+        if "slow-read" in params.command:
+            self.started.set()
+            await self.release.wait()
+            out = "late"
+        return RunCommandResult(
+            exit_code=0,
+            timed_out=False,
+            stdout=out + "\n",
+            stderr="",
+            stdout_bytes=len(out) + 1,
+            stderr_bytes=0,
+            stdout_truncated=False,
+            stderr_truncated=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.evaluation.completion_verifier as cv
+    from local_operator.evaluation.adapters.api import RunCommandParams, ScoreParams
+    from local_operator.evaluation.adapters.supervisor import (
+        HostVerifier,
+        VerifiedAdapterSession,
+    )
+    from local_operator.evaluation.session_arm import (
+        _arm_completion_verifier,
+        _make_run_command,
+    )
+    from local_operator.harness.types import ChatRequest
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from tests.unit.evaluation.adapters.test_supervisor import observation
+    from tests.unit.session.test_launch_subagent import MODEL
+    from tests.unit.session.test_verify_completion import TreeStream, tool_turn
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.chdir(tmp_path)
+    # A 1 s wall keeps the test fast; the real 15 s RPC slack would leave a
+    # 1 s verification no room for any read (the deadline clip), so it is
+    # zeroed here -- the clip itself is pinned by the next test.
+    monkeypatch.setattr(cv, "RUN_COMMAND_SLACK_S", 0.0)
+    (tmp_path / "artifacts").mkdir()
+    episode = "episode"
+    verifier = HostVerifier("task", episode, tmp_path / "artifacts")
+    verifier.accept_initial(observation("task", episode, 0))
+    worker = _GuestWorker(_score(tmp_path / "artifacts"))
+    session = VerifiedAdapterSession(worker, verifier)  # type: ignore[arg-type]
+
+    def reply(request: ChatRequest) -> list[Any]:
+        # The verifier's one move: a guest read that is still running when
+        # the wall cap cancels it.
+        return tool_turn("inspect_command", {"command": "cat slow-read", "timeout_s": 5})
+
+    parent = Session(
+        model=MODEL,
+        stream_fn=TreeStream(reply),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    bridge = _bridge(tmp_path, max_steps=10, instruction="Put 42 in cell B2.")
+    bridge.run_command = _make_run_command(session, episode)
+    written: list[tuple[str, dict[str, Any]]] = []
+    record = SimpleNamespace(write=lambda kind, payload: written.append((kind, payload)))
+    _arm_completion_verifier(
+        bridge=bridge,
+        handle=SimpleNamespace(session=parent, verifier_job_ids=set()),  # type: ignore[arg-type]
+        record=record,  # type: ignore[arg-type]
+        config=CompletionVerifierConfig(rounds=1, wall_s=1.0),
+        wall_remaining=None,
+    )
+    loop = asyncio.get_running_loop()
+
+    async def guest_answers_after_the_cut() -> None:
+        await worker.started.wait()
+        # Past the 1 s wall: the verifier child is cancelled mid-read first.
+        loop.call_later(1.5, worker.release.set)
+
+    releaser = asyncio.create_task(guest_answers_after_the_cut())
+    try:
+        reply_ = await asyncio.wait_for(bridge.call(DONE), timeout=20)
+        [verdict] = [p for k, p in written if k == "verifier_verdict"]
+        assert (verdict["status"], verdict["ended_by"]) == ("INCONCLUSIVE", "wall"), verdict
+        assert reply_["details"]["terminal"] == "completion-challenged"
+        # The cancel never reached the adapter RPC: no poison, no teardown...
+        assert not session._poisoned and not worker.terminated
+        # ...because the abandoned read was awaited before the worker resumed.
+        assert worker.release.is_set()
+        # The worker's next command and the score both still work.
+        after = await session.run_command(
+            RunCommandParams(
+                operation_id="worker-next",
+                episode_id=episode,
+                command="echo after",
+                timeout_s=5.0,
+                max_output_bytes=1024,
+            ),
+            timeout=5,
+        )
+        assert after.stdout == "ok\n" and after.error is None
+        scored = await session.score(
+            ScoreParams(operation_id="score", episode_id=episode), timeout=5
+        )
+        assert scored.score.binary == 1
+    finally:
+        releaser.cancel()
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_guest_reads_are_clipped_to_the_verification_deadline() -> None:
+    """A read whose RPC could not settle before the deadline never starts:
+    draining it later must not stretch the finish call past the envelope."""
+
+    import time as time_module
+
+    seen: list[tuple[str, float]] = []
+
+    async def run_command(command: str, timeout_s: float) -> Any:
+        seen.append((command, timeout_s))
+        if command == SANDBOX_PROBE:
+            return _command_result(stdout=SANDBOX_TOKEN + "\n", stdout_bytes=18)
+        return _command_result(stdout="v\n", stdout_bytes=2)
+
+    inspector = VerifierInspector(run_command=run_command, window=lambda: 1)
+    await inspector.ensure_mode()
+    from local_operator.evaluation.completion_verifier import RUN_COMMAND_SLACK_S
+
+    inspector.begin(time_module.monotonic() + RUN_COMMAND_SLACK_S + 4.0)
+    text, is_error = await inspector.inspect({"command": "cat f", "timeout_s": 30})
+    assert not is_error and seen[-1][1] <= 4.0  # clipped from 30 s
+    inspector.begin(time_module.monotonic() + RUN_COMMAND_SLACK_S + 0.5)
+    text, is_error = await inspector.inspect({"command": "cat g"})
+    assert is_error and "give your VERDICT now" in text
+    assert [c for c, _ in seen if "cat g" in c] == []  # never reached the guest
+    assert await inspector.drain() == 0

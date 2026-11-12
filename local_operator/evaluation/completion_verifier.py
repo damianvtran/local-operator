@@ -52,13 +52,19 @@ hiding them would make the check blind exactly where it must look.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 import shlex
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal
 
-from local_operator.harness.verifier import CANCEL_JOIN_S, VerifierLimits
+from local_operator.harness.verifier import (
+    CANCEL_JOIN_S,
+    DEFAULT_LOCAL_TOOL_ALLOWANCE,
+    VerifierLimits,
+)
 
 #: Per-command bound for the verifier's guest reads. A read that needs more
 #: than this is not a read; the worker's own commands keep their 300 s.
@@ -69,18 +75,39 @@ INSPECT_DEFAULT_TIMEOUT_S = 15
 #: ``DEFAULT_MCP_TIMEOUT_MS`` = 300 s) bounds the worker's finish call, and
 #: EVERYTHING the verifier costs runs inside that call: the once-per-episode
 #: sandbox probe (:data:`PROBE_ENVELOPE_S`), the wall cap, and the cancel join
-#: (``CANCEL_JOIN_S``; the request-cap settle grace is clipped to the wall).
+#: (``CANCEL_JOIN_S``; every wait inside ``verify_completion`` is clipped to
+#: the wall, including the request a cap leaves the child for its verdict).
 #: Review M2: the first version budgeted only wall + join (240 + 10) and the
 #: probe pushed the worst case to 295 s. The 50 s delivery margin is the one
 #: that version left for the challenge's own delivery.
 MCP_FINISH_DEADLINE_S = 300.0
-#: The probe's own timeout plus the adapter's per-command slack
-#: (``session_arm._make_run_command``: ``timeout=timeout_s + 15``).
-PROBE_ENVELOPE_S = float(INSPECT_MAX_TIMEOUT_S + 15)
+#: The adapter's per-command slack: ``session_arm._make_run_command`` gives
+#: each guest command an RPC deadline of ``timeout_s +`` this, which is how
+#: long a command may still be settling after its own timeout.
+RUN_COMMAND_SLACK_S = 15.0
+#: The probe's own timeout plus the adapter's per-command slack.
+PROBE_ENVELOPE_S = float(INSPECT_MAX_TIMEOUT_S) + RUN_COMMAND_SLACK_S
 FINISH_DELIVERY_MARGIN_S = 50.0
 MAX_VERIFIER_WALL_S = (
     MCP_FINISH_DEADLINE_S - PROBE_ENVELOPE_S - CANCEL_JOIN_S - FINISH_DELIVERY_MARGIN_S
 )
+
+
+VerdictDisposition = Literal["accepted", "challenged"]
+
+
+def verdict_disposition(status: str) -> VerdictDisposition:
+    """What the session arm does with a verdict -- THE rule, read by the
+    bridge's finish branch and written on every ``verifier_verdict`` row.
+
+    Only ``PASS`` accepts the claim. ``FAIL`` and ``INCONCLUSIVE`` both become
+    the claim's completion challenge (verifier-design.md: "FAIL/INCONCLUSIVE:
+    send ``build_completion_challenge`` plus ... the findings"), so an
+    INCONCLUSIVE is never a silent accept. Recorded explicitly because an
+    ablation reading ``status`` alone cannot tell which way INCONCLUSIVE went.
+    """
+
+    return "accepted" if status == "PASS" else "challenged"
 
 
 def verifier_envelope_s(wall_s: float) -> float:
@@ -114,8 +141,12 @@ class CompletionVerifierConfig:
     """
 
     rounds: int = 0
-    max_requests: int = 12
+    # No independent ``max_requests``: the generic primitive derives it from
+    # these (``VerifierLimits``) so the request cap always holds every
+    # command plus the verdict -- the live t31v episode's 12-request cap
+    # could not, and discarded a PASS.
     max_commands: int = 10
+    local_tool_allowance: int = DEFAULT_LOCAL_TOOL_ALLOWANCE
     wall_s: float = 180.0
 
     def __post_init__(self) -> None:
@@ -142,7 +173,9 @@ class CompletionVerifierConfig:
 
     def limits(self) -> VerifierLimits:
         return VerifierLimits(
-            max_requests=self.max_requests, max_commands=self.max_commands, wall_s=self.wall_s
+            max_commands=self.max_commands,
+            local_tool_allowance=self.local_tool_allowance,
+            wall_s=self.wall_s,
         )
 
     def stamp(self) -> dict[str, Any]:
@@ -277,12 +310,37 @@ RunCommand = Callable[[str, float], Awaitable[Any]]
 RecordEvent = Callable[[str, dict[str, Any]], None]
 
 
+class _NoTimeLeft(Exception):
+    """A guest call that could not settle before the verification's deadline."""
+
+
 class VerifierInspector:
     """The verifier's guest reads, gated on the bridge's verification window.
 
     ``window`` returns the current verification round (``None`` outside one);
     a call outside a window is refused before anything reaches the guest.
     No lock is taken anywhere here -- see the module docstring.
+
+    A GUEST CALL IS NEVER CANCELLED (PR #3837 round 3, live episode
+    ``t31v-t003``). ``run_command`` is the supervisor's ``_mutating_call``,
+    which POISONS the adapter session on any unclassified failure -- and a
+    ``CancelledError`` is one. The verifier child is cancelled by its caps
+    while an ``inspect_command`` may be mid-RPC; in that episode the cancel
+    landed there, the session was poisoned silently, and the worker's very
+    next command failed ("adapter session is poisoned"), wedging the bridge
+    with no score. So every guest call runs as its own task, awaited through
+    ``asyncio.shield``: cancelling the child abandons the WAIT, while the call
+    settles under its own RPC deadline. :meth:`drain` is the other half: the
+    arm awaits every in-flight call before the worker resumes, so the guest
+    is quiescent again and the next worker command is not racing a verifier
+    read. #3836 does the same for the worker's own commands at the action
+    server; this channel bypasses that path by design (module docstring).
+
+    THE DEADLINE KEEPS THE ENVELOPE. :meth:`begin` takes the verification's
+    hard deadline (its start + ``wall_s`` + ``CANCEL_JOIN_S``). A call is
+    clipped so its RPC deadline (``timeout +`` :data:`RUN_COMMAND_SLACK_S`)
+    lands before it, and refused with the verdict cue when no time is left,
+    so draining never extends the finish call past :func:`verifier_envelope_s`.
     """
 
     def __init__(
@@ -300,6 +358,57 @@ class VerifierInspector:
         self.mode: ReadonlyMode | None = None
         self._window_start: dict[int, str] = {}
         self._reported: set[str] = set()
+        self._inflight: set[asyncio.Task[Any]] = set()
+        self._deadline: float | None = None
+
+    def begin(self, deadline: float) -> None:
+        """Open one verification: guest calls must settle by ``deadline``
+        (``time.monotonic()``)."""
+
+        self._deadline = deadline
+
+    async def _guest(self, command: str, timeout: float) -> Any:
+        """One guest call: clipped to the deadline, tracked, never cancelled."""
+
+        if self._deadline is not None:
+            room = self._deadline - time.monotonic() - RUN_COMMAND_SLACK_S
+            if room < 1.0:
+                raise _NoTimeLeft
+            timeout = min(timeout, room)
+        operation = asyncio.ensure_future(self._run(command, timeout))
+        self._inflight.add(operation)
+        operation.add_done_callback(self._settled)
+        # Shielded: a cancelled caller (the verifier child, cut by a cap)
+        # stops waiting here; the RPC itself runs on to its own answer.
+        return await asyncio.shield(operation)
+
+    def _settled(self, operation: "asyncio.Task[Any]") -> None:
+        self._inflight.discard(operation)
+        # Retrieved so an abandoned call's failure is not an unhandled-task
+        # warning; the caller that wanted it, if any, already has it.
+        if not operation.cancelled():
+            operation.exception()
+
+    async def drain(self) -> int:
+        """Wait for every in-flight guest call; return how many were awaited.
+
+        Bounded by the deadline :meth:`begin` set (each call was clipped to
+        settle before it). One still running at the deadline is LEFT running
+        and recorded, never cancelled: cancelling it is exactly the poison
+        this exists to prevent.
+        """
+
+        pending = set(self._inflight)
+        if not pending:
+            return 0
+        # Without a ``begin`` (a direct embedder), one call's longest RPC life.
+        timeout = float(INSPECT_MAX_TIMEOUT_S) + RUN_COMMAND_SLACK_S
+        if self._deadline is not None:
+            timeout = max(0.0, self._deadline - time.monotonic())
+        _done, still = await asyncio.wait(pending, timeout=timeout)
+        if still:
+            self._emit({"job_id": self._job_id(), "detached_in_flight": len(still)})
+        return len(pending)
 
     async def ensure_mode(self) -> ReadonlyMode:
         """Probe once per episode; a failed probe is ``audit``, never a guess."""
@@ -308,7 +417,7 @@ class VerifierInspector:
             row: dict[str, Any] = {"probe": True, "command": SANDBOX_PROBE}
             probe_output: str | None = None
             try:
-                result = await self._run(SANDBOX_PROBE, float(INSPECT_MAX_TIMEOUT_S))
+                result = await self._guest(SANDBOX_PROBE, float(INSPECT_MAX_TIMEOUT_S))
                 probe_output = (result.stdout or "").strip()
                 ok = result.exit_code == 0 and SANDBOX_TOKEN in probe_output
                 row["exit_code"] = result.exit_code
@@ -337,7 +446,7 @@ class VerifierInspector:
             "| grep -v -E '/\\.cache/|/\\.lop-ro-probe' | head -n 50"
         )
         try:
-            result = await self._run(sweep, float(INSPECT_MAX_TIMEOUT_S))
+            result = await self._guest(sweep, float(INSPECT_MAX_TIMEOUT_S))
         except Exception:  # noqa: BLE001 -- recorded as an unknown, never "clean"
             return None
         changed = [line for line in (result.stdout or "").splitlines() if line.strip()]
@@ -385,7 +494,7 @@ class VerifierInspector:
         if mode == "audit":
             if round_ not in self._window_start:
                 try:
-                    stamp = await self._run("date +%s", 10.0)
+                    stamp = await self._guest("date +%s", 10.0)
                     self._window_start[round_] = (stamp.stdout or "").strip() or "0"
                 except Exception:  # noqa: BLE001
                     self._window_start[round_] = "0"
@@ -395,7 +504,15 @@ class VerifierInspector:
         if len(wire) > MAX_COMMAND_LENGTH:
             return "Refused: the command is too long.", True
         try:
-            result = await self._run(wire, float(timeout))
+            result = await self._guest(wire, float(timeout))
+        except _NoTimeLeft:
+            row.update(refused="deadline", exit_code=None, mutation_detected=None)
+            self._emit(row)
+            return (
+                "No time left for another command: give your VERDICT now from what you "
+                "have already seen, ending with the VERDICT line.",
+                True,
+            )
         except Exception as error:  # noqa: BLE001 -- the verifier is told, the row records
             row.update(exit_code=None, error=f"{type(error).__name__}: {error}")
             self._emit(row)

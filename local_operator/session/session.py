@@ -22886,8 +22886,11 @@ class Session:
           that child only, wrapped to count against ``max_commands``;
         * ``announce=False``: the result is returned here, never injected into
           this session's conversation;
-        * bounded by :class:`VerifierLimits`; whichever cap fires first cancels
-          the child and is reported as ``ended_by``.
+        * bounded by :class:`VerifierLimits`: a spent command budget refuses
+          and asks for the verdict; the request cap cancels once a request
+          past it asks for more tools; the wall cancels. A verdict line in
+          the child's final assistant message wins over all three, even when
+          the job was cancelled before it settled (PR #3837 round 3).
 
         Never raises for an expected refusal (closing session, memory
         admission, no request observation to enforce the request cap): those
@@ -22900,13 +22903,14 @@ class Session:
         from local_operator.harness.subagent import ChildSurface, run_subagent
         from local_operator.harness.verifier import (
             CANCEL_JOIN_S,
-            REQUEST_CAP_SETTLE_GRACE_S,
+            REQUEST_BUDGET_REFUSAL,
             VERIFIER_ROLE,
             VERIFIER_TOOL_ALLOWLIST,
             VerifierLimits,
             VerifierVerdict,
             build_verifier_prompt,
             counted_host_tools,
+            find_verdict,
             parse_verdict,
             verifier_profile,
         )
@@ -22935,18 +22939,32 @@ class Session:
         # ``_readonly_shell_root`` asks (cached after the first spawn). Asked
         # BEFORE the request subscription, so nothing awaits between that and
         # the ``finally`` that removes it.
-        from local_operator.tools.confinement import shell_sandbox_unavailable_reason_async
+        from local_operator.tools.confinement import (
+            shell_sandbox_unavailable_reason_async,
+        )
 
         no_shell_sandbox = await shell_sandbox_unavailable_reason_async() is not None
 
-        state: dict[str, Any] = {"job_id": None, "requests": 0, "ended_by": None}
-        stop = asyncio.Event()
+        cap_requests = limits.request_budget
+        state: dict[str, Any] = {
+            "job_id": None,
+            "requests": 0,
+            "assistant_messages": 0,
+            # The latest assistant message's text when it called NO tool --
+            # the child's answer -- else ``None`` (a later step supersedes it).
+            "answer": None,
+            "local_tools": 0,
+            "caps": [],
+        }
+        # Set only when a request PAST the cap asks for more tools: the child
+        # did not take its last request to answer, so it is cancelled now. A
+        # past-the-cap request that answers is the verdict and is waited for.
         overshoot = asyncio.Event()
+        host_names = frozenset(tool.name for tool in host_tools)
 
-        def end(reason: str) -> None:
-            if state["ended_by"] is None:
-                state["ended_by"] = reason
-            stop.set()
+        def hit(cap: str) -> None:
+            if cap not in state["caps"]:
+                state["caps"].append(cap)
 
         def observe(observation: Any) -> None:
             # Request-final rows of the WHOLE root tree arrive here; only the
@@ -22954,12 +22972,30 @@ class Session:
             if state["job_id"] is None or observation.job_id != state["job_id"]:
                 return
             state["requests"] += 1
-            if state["requests"] > limits.max_requests:
-                # A request PAST the cap finished inside the settle grace
-                # below: the cap's request was not the answer, so stop now.
+            if state["requests"] >= cap_requests:
+                hit("requests")
+            if state["requests"] > cap_requests + 1:
+                # Backstop for a request that ended without an assistant
+                # message (so ``on_message`` never judged it): never a
+                # second request past the cap.
                 overshoot.set()
-            if state["requests"] >= limits.max_requests:
-                end("requests")
+
+        def on_message(text: str, tool_names: tuple[str, ...]) -> None:
+            # From the child's relay, synchronously, at each finished
+            # assistant message (``ChildSurface.on_assistant_message``). Max
+            # of both counts: the request row and the message event of one
+            # request may arrive in either order.
+            state["assistant_messages"] += 1
+            state["answer"] = None if tool_names else text
+            state["local_tools"] += sum(1 for name in tool_names if name not in host_names)
+            if tool_names and max(state["assistant_messages"], state["requests"]) > cap_requests:
+                overshoot.set()
+
+        def request_budget_spent() -> str | None:
+            # Host calls made by the cap's own request (its row has arrived by
+            # the time they run) are refused with the cue to answer, so the one
+            # request past the cap is spent on the verdict.
+            return REQUEST_BUDGET_REFUSAL if state["requests"] >= cap_requests else None
 
         try:
             unsubscribe = self.subscribe_requests(observe)
@@ -22971,13 +23007,17 @@ class Session:
             host_tools,
             limit=limits.max_commands,
             on_call=lambda _count: None,
-            on_exhausted=lambda: end("commands"),
+            on_exhausted=lambda: hit("commands"),
+            refuse_when=request_budget_spent,
         )
         # ``readonly_shell`` confines this launch's ``bash`` by the launch
         # itself, never by the ``verifier`` name (an operator's registry role
         # of that name must keep its own shell: review R2 / QA Q1).
         surface = ChildSurface(
-            ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST), host_tools=wrapped, readonly_shell=True
+            ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST),
+            host_tools=wrapped,
+            readonly_shell=True,
+            on_assistant_message=on_message,
         )
         job_id: str | None = None
         settled: asyncio.Event | None = None
@@ -23027,19 +23067,16 @@ class Session:
                     for waiter in waiters:
                         waiter.cancel()
 
-            await first_of((settled, stop), deadline - time.monotonic())
-            if not settled.is_set() and state["ended_by"] == "requests":
-                # The cap fires on the request-final row of request N, which
-                # may BE the answer: the job settles moments later. Give it a
-                # short grace -- inside the wall, and cut short by request N+1
-                # finishing -- so a verdict on the cap's own request is kept
-                # (QA Q2: one on request 12 of 12 was cancelled and discarded).
-                await first_of(
-                    (settled, overshoot),
-                    min(REQUEST_CAP_SETTLE_GRACE_S, deadline - time.monotonic()),
-                )
+            # No short settle grace any more: a spent command budget and the
+            # request cap both leave the child its answering request, and only
+            # a past-the-cap request asking for MORE tools (``overshoot``) or
+            # the wall ends it early. The worst case is still ``wall_s +
+            # CANCEL_JOIN_S``, the envelope embedders budget for.
+            await first_of((settled, overshoot), deadline - time.monotonic())
+            ended_by: str | None = None
             if not settled.is_set():
-                end("wall")
+                ended_by = "requests" if overshoot.is_set() else "wall"
+                hit(ended_by)
                 await self.jobs.cancel(job_id)
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(settled.wait(), timeout=CANCEL_JOIN_S)
@@ -23060,15 +23097,25 @@ class Session:
                     else None
                 ),
                 "usage": usage.model_dump(mode="json") if usage is not None else None,
+                "caps_hit": tuple(state["caps"]),
+                "local_tools": state["local_tools"],
             }
-            # A child that answered wins over a cap that fired on the very
-            # request that produced the answer: the verdict exists, so use it.
+            # A child that answered wins over any cap: the verdict exists, so
+            # use it. Settled ``completed`` is the ordinary case; otherwise the
+            # job was cancelled (or failed) AFTER its final assistant message,
+            # whose verdict line is still the answer -- the live t31v episode
+            # discarded a ``VERDICT: PASS`` exactly here.
             if status_text == "completed" and job is not None:
                 verdict_status, findings = parse_verdict(job.result_text)
                 return VerifierVerdict(
                     status=verdict_status, findings=findings, ended_by="verdict", **common
                 )
-            ended_by = state["ended_by"] or "failed"
+            rescued = find_verdict(state["answer"])
+            if rescued is not None:
+                return VerifierVerdict(
+                    status=rescued[0], findings=rescued[1], ended_by="verdict", **common
+                )
+            ended_by = ended_by or "failed"
             detail = (
                 (getattr(job, "error_text", None) or "the verifier did not finish")
                 if ended_by == "failed"

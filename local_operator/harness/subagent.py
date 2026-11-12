@@ -1045,11 +1045,20 @@ class ChildSurface:
     no network, no shell at all without a sandbox). It rides the launch, not
     the role name, so it binds only the child the harness built -- a registry
     row or a ``task`` launch that happens to share the name is untouched.
+
+    ``on_assistant_message(text, tool_names)`` is called synchronously from
+    the child's relay at every finished assistant message. The launcher of a
+    bounded child needs the answer itself, not just the job's settled
+    result: a cap may cancel the job between the answer message and the
+    settle, and the cancelled job's ``result_text`` is then empty (PR #3837
+    round 3: a ``VERDICT: PASS`` on the request after the cap was discarded).
+    The tool names say whether the message was an answer or another step.
     """
 
     ceiling: frozenset[str] | None = None
     host_tools: tuple["AgentTool", ...] = ()
     readonly_shell: bool = False
+    on_assistant_message: Callable[[str, tuple[str, ...]], None] | None = None
 
     @property
     def host_tool_names(self) -> frozenset[str]:
@@ -2526,6 +2535,9 @@ def _make_runner(
                     parent_session.jobs,
                     comms,
                     on_tool_end=on_tool_end,
+                    on_assistant_message=(
+                        surface.on_assistant_message if surface is not None else None
+                    ),
                 )
             )
             bridge = asyncio.create_task(_abort_bridge(signal, child))
@@ -3212,6 +3224,7 @@ def _make_relay(
     owner_jobs: Any = None,
     comms: Any = None,
     on_tool_end: Callable[[str, str, bool], Awaitable[None]] | None = None,
+    on_assistant_message: Callable[[str, tuple[str, ...]], None] | None = None,
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """The child-stream handler: trajectory + throttled parent relay.
 
@@ -3402,6 +3415,14 @@ def _make_relay(
             if isinstance(message, Message) and message.role == "assistant":
                 # Capture the last assistant text as the job's result.
                 final["text"] = message.text
+                if on_assistant_message is not None:
+                    # A launcher's observer (``ChildSurface``) must not break
+                    # the relay that settles the job it is observing.
+                    with contextlib.suppress(Exception):
+                        on_assistant_message(
+                            message.text or "",
+                            tuple(call.name for call in message.tool_calls),
+                        )
                 _accumulate_usage(job, message.usage)
                 note_usage_changed = getattr(owner_jobs, "note_usage_changed", None)
                 if callable(note_usage_changed):

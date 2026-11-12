@@ -122,6 +122,10 @@ from local_operator.evaluation.adapters.supervisor import (
     persist_rescue,
     run_rescue,
 )
+from local_operator.evaluation.completion_verifier import (
+    RUN_COMMAND_SLACK_S,
+    verdict_disposition,
+)
 from local_operator.evaluation.lifecycle import (
     CleanupAction,
     CleanupPlan,
@@ -725,7 +729,9 @@ class SessionArmError(RuntimeError):
 #: fires first and tears the channel down -- losing the episode the probe exists
 #: to keep. Named, not inline, because the action server's MCP request timeout
 #: is derived from it (:func:`action_server_mcp_timeout_s`).
-COMMAND_RPC_MARGIN_S = 20.0
+# Keep the action server's nested deadlines and the verifier's guest-read
+# envelope on one margin: both use the same adapter RPC path.
+COMMAND_RPC_MARGIN_S = RUN_COMMAND_SLACK_S
 
 #: Slack between the ``run_command`` RPC deadline and the MCP client's request
 #: timeout for the episode action server. It covers what can still happen
@@ -1608,7 +1614,14 @@ class ActionBridge:
                 {"round": round_, "reason": "refused", "detail": verdict.findings},
             )
             return None
-        self._record_verifier("verifier_verdict", {"round": round_, **verdict.as_record()})
+        self._record_verifier(
+            "verifier_verdict",
+            {
+                "round": round_,
+                **verdict.as_record(),
+                "disposition": verdict_disposition(verdict.status),
+            },
+        )
         return verdict
 
     def _verifier_challenge(
@@ -2660,7 +2673,7 @@ class ActionBridge:
                 # the deliverable already agreed, so re-asking the worker adds
                 # nothing. ``None`` (off, rounds spent, skipped) is today's path.
                 check = await self._maybe_verify(claim, pending)
-                if check is not None and check.status != "PASS":
+                if check is not None and verdict_disposition(check.status) == "challenged":
                     return self._verifier_challenge(claim, pending, check)
                 # The rule is the runner's (``runner.completion.challenge_kind``);
                 # only the counters are this bridge's.
@@ -3458,6 +3471,10 @@ class EpisodeSession:
     #: loop).
     request_rows: list[dict[str, Any]] = field(default_factory=list, repr=False)
     request_usages: list[Any] = field(default_factory=list, repr=False)
+    #: Job ids of the harness completion verifier's children, added at
+    #: ``verifier_started`` (``_arm_completion_verifier``): the ONLY selector
+    #: for the cost row's ``verifier`` share. Empty when the verifier is off.
+    verifier_job_ids: set[str] = field(default_factory=set, repr=False)
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -5158,8 +5175,16 @@ def _flush_request_observation(
     # already part of (its rows are this tree's; nothing is excluded above).
     # Present only when a verifier made requests, so an arm without one
     # writes today's row byte for byte.
+    #
+    # Selected by the job ids the arm recorded at ``verifier_started``
+    # (``handle.verifier_job_ids``), NOT by ``actor_role == "verifier"``
+    # (review round 2, m3): the worker has ``task`` and may launch its own
+    # ``task(agent="verifier")``, whose rows carry the same role name. Those
+    # are the worker's spend, and with the verifier off they must not add a
+    # ``verifier`` key to a record that is otherwise byte-identical.
     verifier_share: dict[str, Any] = {}
-    verifier_rows = [row for row in rows if row.get("actor_role") == "verifier"]
+    verifier_ids = frozenset(getattr(handle, "verifier_job_ids", ()) or ())
+    verifier_rows = [row for row in rows if row.get("job_id") in verifier_ids]
     if verifier_rows:
         from local_operator.harness.types import Usage
 
@@ -5235,6 +5260,7 @@ def _arm_completion_verifier(
         VerifierInspector,
         verifier_envelope_s,
     )
+    from local_operator.harness.verifier import CANCEL_JOIN_S
 
     state: dict[str, Any] = {
         "config": config.stamp(),
@@ -5272,6 +5298,9 @@ def _arm_completion_verifier(
 
         def started(info: dict[str, Any]) -> None:
             current_job["id"] = info.get("job_id")
+            if info.get("job_id"):
+                # The cost share's selector (``_flush_request_observation``).
+                handle.verifier_job_ids.add(str(info["job_id"]))
             record.write(
                 "verifier_started", {"round": round_, **info, "readonly_enforcement": mode}
             )
@@ -5279,14 +5308,25 @@ def _arm_completion_verifier(
         observation_text = (
             pending.text if pending.text and pending.text != bridge.instruction else None
         )
-        verdict = await handle.session.verify_completion(
-            request=bridge.instruction,
-            claim=f"status: {claim.status}\nreason: {claim.reason}",
-            observation=observation_text,
-            host_tools=[inspector.tool()],
-            limits=config.limits(),
-            on_started=started,
-        )
+        # The verification's hard deadline: ``verify_completion`` returns by
+        # its own start + wall + cancel join, and every guest read is clipped
+        # to settle by this one (taken earlier, so no later than that).
+        inspector.begin(time.monotonic() + float(config.wall_s) + CANCEL_JOIN_S)
+        try:
+            verdict = await handle.session.verify_completion(
+                request=bridge.instruction,
+                claim=f"status: {claim.status}\nreason: {claim.reason}",
+                observation=observation_text,
+                host_tools=[inspector.tool()],
+                limits=config.limits(),
+                on_started=started,
+            )
+        finally:
+            # Before the worker resumes (the bridge still holds its lock): a
+            # read the cap abandoned is still running on the guest, and is
+            # awaited, never cancelled -- a cancelled adapter RPC poisons the
+            # session (live ``t31v-t003``: the worker's next command failed).
+            await inspector.drain()
         state["verdicts"].append(
             {
                 "round": round_,
@@ -5295,6 +5335,7 @@ def _arm_completion_verifier(
                 "job_id": verdict.job_id,
                 "requests": verdict.requests,
                 "commands": verdict.commands,
+                "disposition": verdict_disposition(verdict.status),
             }
         )
         if verdict.job_id and verdict.transcript_dir:
