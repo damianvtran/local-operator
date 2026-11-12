@@ -484,3 +484,53 @@ async def test_detach_stdio_false_keeps_stdio_servers_in_the_owner_group(
     assert await child_pgid(None) != os.getpgrp()
     assert await child_pgid(False) == os.getpgrp()
     assert _stub_processes(rig.script) == []
+
+
+def test_a_cancellation_escaping_the_probe_still_prints_an_engage_verdict(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Evidence rig run 2: a probe printed NO verdict (logged "no verdict").
+
+    ``CancelledError`` is a BaseException; ``main`` must still print one JSON
+    line naming it, so the supervisor's log says why it engaged.
+    """
+    import asyncio
+
+    async def cancelled(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(parked, "probe_session", cancelled)
+    # ``main`` re-roots CONFIG_DIR_ENV; registering it here restores it after.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert parked.main(["--session", SID, "--config-dir", str(tmp_path)]) == 0
+    verdict = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert verdict["verdict"] == "engage"
+    assert verdict["why"] == "probe raised CancelledError"
+    assert set(verdict["maxrss_kib"]) == {"self", "children"}
+
+
+@pytest.mark.asyncio
+async def test_one_probe_run_can_hold_two_servers_and_close_both_in_its_own_task(
+    rig: SimpleNamespace,
+) -> None:
+    """Evidence rig runs 2-3: a run that connected TWO servers raised
+    ``CancelledError`` from ``disconnect_all(in_task=True)``.
+
+    Each connect enters its transport's anyio cancel scope in the calling task,
+    so the scopes are NESTED; closing the first-opened one while the later one
+    is still open exits them out of order and anyio cancels the host task.
+    In-task teardown must therefore close in reverse (LIFO) order.
+    """
+    from local_operator.mcp.manager import McpManager
+
+    stub_b = rig.stub.parent / "stub_b"
+    stub_b.mkdir()
+    (stub_b / "thread.txt").write_text("b\n", encoding="utf-8")
+    second = {**rig.server, "env": {"STUB_DIR": str(stub_b)}}
+    _write_servers(rig, {"stub": rig.server, "stubb": second})
+    manager = McpManager(str(rig.cwd), None, secret_base=rig.root, detach_stdio=False)
+    await manager.connect_configured_server("stub", interactive=False)
+    await manager.connect_configured_server("stubb", interactive=False)
+    assert len(_stub_processes(rig.script)) == 2
+    await manager.disconnect_all(in_task=True)  # raised CancelledError before the fix
+    assert _stub_processes(rig.script) == []

@@ -2680,7 +2680,16 @@ class McpManager:
         # stack, so the only thing serial order bought was the wait.
         names = list(self._connections)
         if in_task:
-            for name in names:
+            # REVERSE (LIFO) ORDER. Each in-task connect entered its transport's
+            # anyio cancel scope in this same task, so with two or more servers
+            # the scopes are NESTED; closing the first-opened one while a later
+            # one is still open exits them out of order, and anyio answers by
+            # cancelling the host task (measured: the parked-monitor probe,
+            # which keeps one connection per server across a run's rows, raised
+            # ``CancelledError`` from here on every run that held two servers).
+            # ``_connections`` preserves connect order, so reversing it unwinds
+            # the scopes innermost-first. A one-server caller is unaffected.
+            for name in reversed(names):
                 await self._teardown_connection(name)
         elif names:
             await asyncio.gather(

@@ -727,7 +727,14 @@ def main(argv: list[str] | None = None) -> int:
         outcome = asyncio.run(
             probe_session(root, args.session, cwd=args.cwd, budget_s=args.budget_s)
         )
-    except Exception as exc:  # noqa: BLE001 — any failure means "let the session do it"
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 — any failure means "let the session do it"
+        # BaseException, not Exception: an anyio/asyncio cancellation escaping
+        # an MCP transport's teardown is a ``CancelledError`` (a BaseException),
+        # and letting it through printed NO verdict, which the supervisor logs
+        # as an anonymous "no verdict" engage (evidence rig run 2). Naming the
+        # type keeps the engage diagnosable from the supervisor log alone.
         outcome = {"verdict": ENGAGE, "why": f"probe raised {type(exc).__name__}", "checked": 0}
     outcome["maxrss_kib"] = _maxrss_kib()
     print(json.dumps(outcome))

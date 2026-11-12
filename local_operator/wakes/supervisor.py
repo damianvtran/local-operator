@@ -1248,7 +1248,7 @@ async def _parked_monitors_quiet(config_dir: Path, session_id: str, cwd: str = "
         "parked monitors %s: %s (%s, %s checked, maxrss self=%s KiB children=%s KiB)",
         session_id,
         "quiet — left parked" if quiet else "engaging",
-        verdict.get("why", "no verdict"),
+        verdict.get("why", f"no verdict, probe exit {proc.returncode}"),
         verdict.get("checked", 0),
         maxrss.get("self", "?"),
         maxrss.get("children", "?"),
