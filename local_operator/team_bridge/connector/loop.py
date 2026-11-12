@@ -538,6 +538,10 @@ async def retry_due_holds(
                     # this re-drive releases the spine's own claim; under the
                     # park code that release would read as "done" and retire
                     # the only reference to the message.
+                    #
+                    # The re-code goes through ``StoreRefused`` handling of its
+                    # own (below) rather than ``_write_hold``: its refusal must
+                    # cancel the re-drive, not just skip a log line.
                     store.persist_hold(
                         owner,
                         message_id,
@@ -649,40 +653,41 @@ async def retry_due_holds(
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
             new_code = str(outcome.get("code") or "")[:64]
-            try:
-                # The row's code is what the owner sees (F8): a message first
-                # held ``open_chief_of_staff`` and then held for a NEW reason
-                # once the owner messaged the session must not keep telling
-                # them to message it. The row keeps its ``created_at`` (m9).
-                #
-                # An UPSERT, the same writer the ordinary ref path uses — not
-                # a conditional UPDATE (PR #3063 r7 matrix,
-                # ``cache_hit/none/rename+revoked/kill``): a re-drive that
-                # re-screens commits a receipt, and the receipt commit DELETES
-                # this message's hold row; the ACK the hub then refuses (a
-                # sender revoked while the device was off) came back as a hold
-                # with no row left to update, and the message was never
-                # retried. The spine said "hold" THIS pass, so writing the row
-                # can never resurrect a delivered message.
-                store.persist_hold(
-                    owner,
-                    message_id,
-                    new_code or "hold",
-                    retry_at=_hold_due(outcome.get("retry_at"), _time.time() + gap),
-                    # A conversation handler stamps its own tier; the pair
-                    # spine never does, and a pair message is addressed to this
-                    # agent by construction. Without this a pair row born from
-                    # a stale-claim park (no tier) stayed NULL and ranked last
-                    # for its whole retry life (#3400 R3-m1).
-                    tier=(
-                        outcome.get("tier")
-                        if parsed is not None
-                        else Store.SCREENING_TIER_ADDRESSED
-                    ),
-                    no_batch=bool(outcome.get("no_batch")),
-                )
-            except StoreRefused:
-                pass  # fenced owner: the next live pass owns the row
+            now = _time.time()
+            # The row's code is what the owner sees (F8): a message first held
+            # ``open_chief_of_staff`` and then held for a NEW reason once the
+            # owner messaged the session must not keep telling them to message
+            # it. The row keeps its ``created_at`` (m9). Written through the same
+            # UPSERT writer the ordinary ref path uses - not a conditional
+            # UPDATE (PR #3063 r7 matrix, ``cache_hit/none/rename+revoked/kill``):
+            # a re-drive that re-screens commits a receipt, and the receipt
+            # commit DELETES this message's hold row; the ACK the hub then refuses
+            # (a sender revoked while the device was off) came back as a hold with
+            # no row left to update, and the message was never retried. The spine
+            # said "hold" THIS pass, so writing the row can never resurrect a
+            # delivered message.
+            #
+            # Through ``_write_hold``: this is where most of the schedule's work
+            # happens, and it has to be in the same distribution as a first-time
+            # hold or that line measures only half the backoff.
+            _write_hold(
+                store,
+                owner,
+                message_id,
+                new_code or "hold",
+                due=_hold_due(outcome.get("retry_at"), now + gap),
+                attempts=attempts,
+                now=now,
+                # A conversation handler stamps its own tier; the pair
+                # spine never does, and a pair message is addressed to this
+                # agent by construction. Without this a pair row born from
+                # a stale-claim park (no tier) stayed NULL and ranked last
+                # for its whole retry life (#3400 R3-m1).
+                tier=(
+                    outcome.get("tier") if parsed is not None else Store.SCREENING_TIER_ADDRESSED
+                ),
+                no_batch=bool(outcome.get("no_batch")),
+            )
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
         outcomes.append({"message_id": message_id, "action": action})
     if len(_RETRY_ATTEMPTS) > 512:
@@ -807,6 +812,52 @@ def _fold_retry_passes(first: dict[str, Any], second: dict[str, Any]) -> dict[st
     }
 
 
+def _write_hold(
+    store: Any,
+    owner: Any,
+    message_id: str,
+    code: str,
+    *,
+    due: float,
+    attempts: int,
+    now: float,
+    tier: Any = None,
+    no_batch: bool = False,
+) -> bool:
+    """Write/advance ONE hold row and record its schedule fact when it lands.
+
+    Every writer in this module that schedules a hold goes through here — the
+    feed paths (``_persist_hold_backoff``) and the re-drives inside
+    ``retry_due_holds`` — because the doubling gap lives in process memory and
+    this line is its only durable trace: without it the backoff can be judged
+    only by inference from hold ages, and the re-drives (most of the schedule's
+    actual work) were invisible.
+
+    Logged ONLY after the store accepted the write: a fenced owner's refused
+    write leaves no row, so a line for it would report a schedule that does not
+    exist. The code goes through ``closed_hold_code`` — a hub-supplied detail
+    after ``family:`` never reaches the log — and the line carries a code, a
+    count and a gap, never a message id or any content.
+
+    ``keep_existing`` parks (``_park_stale_claim``) deliberately keep their own
+    single line instead: they are not new schedule steps.
+    """
+
+    from local_operator.team_bridge.store import StoreRefused, closed_hold_code
+
+    try:
+        store.persist_hold(owner, message_id, code, retry_at=due, tier=tier, no_batch=no_batch)
+    except StoreRefused:
+        return False  # fenced owner: the next live pass owns the row
+    logger.info(
+        "bridge connector hold persisted: code=%s attempts=%d gap_s=%d",
+        closed_hold_code(code),
+        attempts,
+        max(0, int(due - now)),
+    )
+    return True
+
+
 def _persist_hold_backoff(
     store: Any,
     owner: Any,
@@ -827,25 +878,19 @@ def _persist_hold_backoff(
 
     import time as _time
 
-    from local_operator.team_bridge.store import StoreRefused
-
     attempts = _RETRY_ATTEMPTS.get(message_id, 0)
-    due = _hold_due(retry_at, _time.time() + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
-    try:
-        store.persist_hold(
-            owner, message_id, str(code)[:64] or "hold", retry_at=due, tier=tier, no_batch=no_batch
-        )
-    except StoreRefused:
-        pass  # fenced owner: the next live pass owns the row
-    # The ONE durable trace of how the retry schedule actually behaves on this
-    # machine: a code from the closed vocabulary, a count and a gap, never a
-    # message id or any content. Without it the backoff can only be judged by
-    # inference from hold ages.
-    logger.info(
-        "bridge connector hold persisted: code=%s attempts=%d gap_s=%d",
+    now = _time.time()
+    due = _hold_due(retry_at, now + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
+    _write_hold(
+        store,
+        owner,
+        message_id,
         str(code)[:64] or "hold",
-        attempts,
-        max(0, int(due - _time.time())),
+        due=due,
+        attempts=attempts,
+        now=now,
+        tier=tier,
+        no_batch=no_batch,
     )
     _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
 
@@ -959,13 +1004,16 @@ async def _run_iteration_inner(
     # quarantine must not wait for fresh traffic to retry, and a 204 timeout is
     # not a reason to skip it. Local metadata only.
     #
-    # FRESH WORK FIRST. The pass is split around the feed: this one skips the
-    # OWNER-REVIEW class, which waits on a person (or on a delivery window up
-    # to seven days), so a burst of review holds can never spend a whole wake
-    # window before the message that just arrived is even pulled — a lid-closed
-    # Mac woke for ~10 s at a time and a fresh message waited behind five
-    # review holds for exactly this reason. The review half runs at the end of
-    # this same iteration, so nothing is deferred to a later wake.
+    # FRESH WORK FIRST: the pass is split around the feed. This half SKIPS the
+    # OWNER-REVIEW class, which waits on a person (or on a delivery window up to
+    # seven days), so a burst of review holds can never spend a whole wake window
+    # before the message that just arrived is even pulled - a lid-closed Mac woke
+    # for ~10 s at a time and a fresh message waited behind five review holds.
+    # The review half runs after this iteration's pull and ref handling (and on
+    # the 204 path), so a window that closes during a quiet poll, or a pull that
+    # raises, DEFERS those re-drives to a later iteration rather than losing them.
+    # That is acceptable because a review re-drive can only re-notify the owner
+    # and only a person can clear the hold; nothing a receiver does advances it.
     retries = await retry_due_holds(
         owner,
         config_dir=config_dir,

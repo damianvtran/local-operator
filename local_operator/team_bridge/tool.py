@@ -93,13 +93,6 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   failed, or the page held more own posts than one read fetches). It means this agent
   has not been given that message; it is NOT an empty message and its content
   must not be inferred. No body, hold code or category is ever shown.
-  ``delay: transient`` on such a row means DELAYED ADMISSION on the reader's own
-  machine — the receiver is asleep or offline, or is still catching up — and
-  never a hold on the content. Retry ``channel_history`` later; no time is
-  promised, and nothing may be inferred from the delay about the content or
-  about any claim it might contain. ``receiver_last_active_s``, when present,
-  is how long ago this machine's receiver last screened a message or admitted
-  a body, so a freshly woken host reads as recently active.
   There is intentionally no local body cache here. The one
   exception to ``body: null`` is a message THIS account authored: the hub never
   delivers it back for admission, so history and thread fetch its text per read
@@ -3293,15 +3286,22 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
     already has a body gets nothing, and a stray hub ``body_state`` on it is
     removed.
 
-    DELAY IS NOT A HOLD. The receiver runs only while the host is awake, so a
-    lid-closed laptop admits bodies hours after they were posted; without this a
-    reader cannot tell that from a content hold and may refuse to act on a
-    message that is merely late (measured: 45-178 min to screening). A row gets
-    ``delay: transient`` when the hold class is transient (screening could not
-    run, delivery is pending) or when there is no hold row at all on a store
-    read that SUCCEEDED — queued or delivering here. ``awaiting_review`` never
-    gets it (a person may be deciding), and neither does a row whose store read
-    FAILED: that is unknown, and it stays a plain ``not_admitted``.
+    DELAY IS NOT A HOLD, AND IT NEEDS PROOF. The receiver runs only while the
+    host is awake, so a lid-closed laptop admits bodies hours after they were
+    posted; a reader must be able to tell that from a content hold or it may
+    refuse to act on a message that is merely late (measured: 45-178 min to
+    screening). ``delay: transient`` is claimed only on POSITIVE evidence that a
+    body is in flight on this machine: a hold whose class is transient
+    (screening could not run, delivery is pending), or — with no hold row — a
+    NON-TERMINAL body reservation for that exact message. A reservation exists
+    only for a message the screener already admitted, so the second arm cannot
+    describe a refused or never-received message, which leaves no trace here at
+    all. ``awaiting_review`` never gets it (a person may be deciding), and
+    neither does a row whose store read FAILED: that is unknown, and it stays a
+    plain ``not_admitted``. A null body with no ``delay`` stays unknown, which
+    is exactly what it is. ``receiver_last_active_s`` is a plain fact wherever
+    the store answered and an activity row exists — traffic, not liveness, so a
+    quiet channel reads old without meaning asleep.
     """
 
     import asyncio
@@ -3356,11 +3356,17 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
     receiver: dict[str, Any] | None = None
     if store is not None and holds_read:
         try:
-            receiver = await asyncio.to_thread(store.receiver_state_readonly, runtime.owner)
+            receiver = await asyncio.to_thread(
+                store.receiver_state_readonly,
+                runtime.owner,
+                [row["id"] for row in pending],
+            )
         except (StoreRefused, OSError):
             receiver = None
-    #: Rows whose null body is a DELAY, not a decision (see the constant above).
+    #: Rows whose null body is a DELAY, not a decision (see the module docstring).
     delayed: list[dict[str, Any]] = []
+    #: Rows that get the receiver's age as a plain fact (a superset of ``delayed``).
+    aged: list[dict[str, Any]] = []
     for row in pending:
         from_hub = _hub_body_state(row.get("body_state"))
         if from_hub is not None:
@@ -3375,6 +3381,7 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
                 state["held_for_s"] = max(0, int(now - created))
             if hold["hold_class"] in _DELAYED_HOLD_CLASSES:
                 delayed.append(state)
+                aged.append(state)
             row["body_state"] = state
         elif (
             own
@@ -3389,18 +3396,24 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
             row["body_state"] = {"state": "unavailable"}
         else:
             state = {"state": "not_admitted"}
-            # NO HOLD ROW, and the store answered: the message is queued or
-            # delivering ON THIS MACHINE, i.e. delayed admission. A store that
-            # could not answer leaves this plain ``not_admitted`` — unknown.
+            # NO HOLD ROW IS NOT EVIDENCE OF ANYTHING: a message this machine
+            # REFUSED, or never received at all, leaves no hold row either, and
+            # telling a reader to retry a permanent refusal is a lie. The delay
+            # claim needs the positive fact that a body is in flight HERE - a
+            # non-terminal reservation, which only an admitted message has.
+            # Without it the row stays unknown and carries only the plain age.
             if receiver is not None:
-                delayed.append(state)
+                if row["id"] in receiver["pending_admission"]:
+                    delayed.append(state)
+                aged.append(state)
             row["body_state"] = state
-    if delayed:
-        active = None if receiver is None else receiver.get("last_active_at")
-        age = None if active is None else max(0, int(now - active))
-        for state in delayed:
-            state["delay"] = "transient"
-            if age is not None:
+    for state in delayed:
+        state["delay"] = "transient"
+    if receiver is not None:
+        active = receiver.get("last_active_at")
+        if active is not None:
+            age = max(0, int(now - active))
+            for state in aged:
                 state["receiver_last_active_s"] = age
 
 

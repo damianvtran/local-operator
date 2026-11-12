@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,8 +26,10 @@ import httpx
 import pytest
 
 from local_operator.team_bridge import client as tb_client
+from local_operator.team_bridge import pull as pull_mod
 from local_operator.team_bridge import store as store_mod
 from local_operator.team_bridge.client import BridgeRefusal
+from local_operator.team_bridge.connector import conversation as conversation_mod
 from local_operator.team_bridge.connector import loop as loop_mod
 from local_operator.team_bridge.screening import HOLD_CODES, ScreenResult
 from local_operator.team_bridge.store import (
@@ -802,14 +805,23 @@ class _OrderingWire:
 
 
 def _ordering_rig(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wire: _OrderingWire
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wire: _OrderingWire,
+    *,
+    real_feed: bool = False,
+    hold_codes: dict[str, str] | None = None,
 ) -> tuple[Any, Path, Any, list[str]]:
-    """Five DUE review holds + one fresh ref in the feed, over the REAL store."""
+    """Five DUE review holds + one fresh ref in the feed, over the REAL store.
+
+    ``real_feed`` leaves ``drain_feed_refs`` alone and has the caller seed the
+    REAL ``feed_refs`` table, so consumption (delete) is exercised rather than
+    mocked. ``hold_codes`` makes the fake screener answer "hold again" for the
+    named message ids — the re-hold that a re-drive writes.
+    """
 
     from local_operator.team_bridge import host as host_mod
-    from local_operator.team_bridge import pull as pull_mod
     from local_operator.team_bridge.connector import coalesce as coalesce_mod
-    from local_operator.team_bridge.connector import conversation as conversation_mod
     from local_operator.team_bridge.events import plan_feed_refs
     from local_operator.team_bridge.types import project_events_batch
 
@@ -835,6 +847,10 @@ def _ordering_rig(
     for ref in review_refs:
         store.persist_hold(a, ref.encode(), REVIEW_HOLD_CODE, retry_at=0.0)
     fresh_ref = deliveries[-1].encode()
+    if real_feed:
+        from local_operator.team_bridge.types import feed_seq
+
+        store.record_feed_batch(a, feed_seq(1), [fresh_ref], resync_required=False)
 
     async def fake_events(
         owner: Any, *, config_dir: Path, access: Any, after: Any = None, **kw: Any
@@ -849,6 +865,9 @@ def _ordering_rig(
 
     async def fake_screen(owner: Any, item: Any, *, config_dir: Path, **kwargs: Any):
         message_id = item["message"]["id"]
+        again = (hold_codes or {}).get(message_id)
+        if again is not None:
+            return ScreenResult(disposition="hold", hold_code=again)
         receipt = _receipt("allow", wire.bodies[message_id])
         _persist_fake_receipt(config_dir, receipt, message_id=message_id)
         return ScreenResult(disposition="deliver", receipt=receipt)
@@ -857,7 +876,8 @@ def _ordering_rig(
         return "delivered and woke the session"
 
     monkeypatch.setattr(pull_mod, "events", fake_events)
-    monkeypatch.setattr(pull_mod, "drain_feed_refs", fake_drain)
+    if not real_feed:
+        monkeypatch.setattr(pull_mod, "drain_feed_refs", fake_drain)
     monkeypatch.setattr(conversation_mod, "_wire_for", fake_wire_for)
     monkeypatch.setattr(conversation_mod, "screen_item", fake_screen)
     monkeypatch.setattr(conversation_mod, "deliver_wake", fake_deliver)
@@ -937,3 +957,265 @@ def test_a_window_closing_mid_review_redrive_has_already_admitted_fresh_work(
     rows = {row["id"]: row for row in json.loads(answer["content"].split("\n\n", 1)[1])["messages"]}
     assert rows[fresh]["body"] == FRESH_BODY
     assert rows[fresh].get("body_state") is None
+
+
+# --- round 2: the branches round 1 left without a test -----------------------
+
+
+def test_fresh_work_admitted_before_a_later_pull_failure_is_not_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pull that raises later cannot undo what an earlier iteration admitted."""
+
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    wire = _OrderingWire(bodies)
+    a, config_dir, store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
+    _iterate(a, config_dir)
+    assert "bcmsg_fresh01" in wire.admitted
+
+    async def offline(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("hub unreachable")
+
+    monkeypatch.setattr(pull_mod, "events", offline)
+    with pytest.raises(RuntimeError):
+        _iterate(a, config_dir)
+
+    assert "bcmsg_fresh01" in wire.admitted, "the admission is durable, not per-iteration"
+    assert store.body_reservation(a, CID, "bcmsg_fresh01") is not None
+
+
+def _due_ids(store: Store, owner: Any) -> list[str]:
+    """The BARE message ids still due (the rows are keyed by encoded feed refs)."""
+
+    bare: list[str] = []
+    for row in store.due_screening_holds(owner, now=time.time() + 10):
+        parsed = loop_mod._conversation_hold_ref(row["message_id"])
+        bare.append(parsed.message_id if parsed is not None else row["message_id"])
+    return bare
+
+
+def test_the_two_retry_passes_report_as_one() -> None:
+    """``retries`` must still mean "everything the schedule did this turn"."""
+
+    folded = loop_mod._fold_retry_passes(
+        {"due": 2, "outcomes": [{"message_id": "a", "action": "hold"}]},
+        {"due": 5, "outcomes": [{"message_id": "b", "action": "duplicate"}]},
+    )
+
+    assert folded == {
+        "due": 7,
+        "outcomes": [
+            {"message_id": "a", "action": "hold"},
+            {"message_id": "b", "action": "duplicate"},
+        ],
+    }
+
+
+def test_the_partition_applies_before_the_limit(tmp_path: Path) -> None:
+    """A bounded read must not spend its slots on rows the pass did not ask for."""
+
+    store = _enroll(tmp_path, _owner("a", 1), "sess_a")
+    owner = _owner("a", 1)
+    review = frozenset({"model_hold"})
+    for index in range(12):
+        store.persist_hold(owner, f"bcmsg_{index:032x}", "provider_error", retry_at=0.0)
+    held = [f"bcmsg_{100 + index:032x}" for index in range(3)]
+    for message_id in held:
+        store.persist_hold(owner, message_id, "model_hold", retry_at=0.0)
+
+    only = store.due_screening_holds(
+        owner, now=time.time(), limit=8, only_codes=review, skip_codes=()
+    )
+    skipped = store.due_screening_holds(
+        owner, now=time.time(), limit=8, only_codes=None, skip_codes=review
+    )
+
+    bounded_out = {row["message_id"] for row in only}
+    assert bounded_out == set(held), "the review partition is not bounded out"
+    assert len(skipped) == 8, "the non-review pass kept its full bound"
+    assert not {row["message_id"] for row in skipped} & set(held)
+
+
+def test_an_empty_only_partition_reads_nothing(tmp_path: Path) -> None:
+    """An empty allow-list is an empty partition, never "all"."""
+
+    store = _enroll(tmp_path, _owner("a", 1), "sess_a")
+    owner = _owner("a", 1)
+    store.persist_hold(owner, "bcmsg_00000001", "model_hold", retry_at=0.0)
+
+    assert store.due_screening_holds(owner, now=time.time(), only_codes=[]) == []
+
+
+def test_a_204_iteration_still_runs_the_review_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No fresh traffic is exactly when the review half is the only work left."""
+
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    wire = _OrderingWire(bodies)
+    a, config_dir, store, review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
+
+    async def quiet(*_args: Any, **_kwargs: Any) -> None:
+        return None  # the hub's 204
+
+    def nothing(*_args: Any, **_kwargs: Any) -> list[str]:
+        return []
+
+    monkeypatch.setattr(pull_mod, "events", quiet)
+    monkeypatch.setattr(pull_mod, "drain_feed_refs", nothing)
+
+    outcome = _iterate(a, config_dir)
+
+    assert outcome["reissued"] is True and outcome["handled"] == []
+    assert set(wire.admitted) == set(review_ids), "the review holds were re-driven on a quiet feed"
+    assert outcome["retries"]["due"] == 5
+    assert _due_ids(store, a) == [], "they moved, so they are no longer due"
+
+
+def test_the_feed_refs_are_consumed_before_the_review_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window that closes during a review re-drive must not replay the fresh ref."""
+
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    # Two recorded calls are the fresh message's body read and its admit; the
+    # third is the first review-held body re-read, where the window closes.
+    wire = _OrderingWire(bodies, cancel_after=2)
+    a, config_dir, store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire, real_feed=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(a, config_dir)
+
+    assert wire.admitted == {"bcmsg_fresh01"}
+    remaining = store.drain_feed_refs(a, upto_seq=1)
+    assert remaining == [], "the fresh ref was deleted before the review half ran"
+
+
+def test_a_failing_fresh_ref_does_not_skip_the_review_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure is re-raised AFTER the review half, never instead of it."""
+
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    wire = _OrderingWire(bodies)
+    a, config_dir, _store, review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
+
+    original = loop_mod.handle_conversation_available
+
+    async def failing_conversation(owner: Any, ref: Any, **kwargs: Any) -> dict[str, Any]:
+        if ref.message_id == "bcmsg_fresh01":
+            raise RuntimeError("spine died mid-delivery")
+        return await original(owner, ref, **kwargs)
+
+    monkeypatch.setattr(loop_mod, "handle_conversation_available", failing_conversation)
+
+    with pytest.raises(RuntimeError):
+        _iterate(a, config_dir)
+
+    # The review half ran BEFORE the failure was re-raised (QA round 1, row 43):
+    # a poison ref must not cost the owner the holds that were already due.
+    assert set(review_ids) <= set(wire.admitted), "the review half must not be skipped by a failure"
+
+
+def test_a_pull_failure_defers_the_review_half_to_a_later_iteration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ordering costs a review re-drive when the pull raises — and loses nothing."""
+
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    wire = _OrderingWire(bodies)
+    a, config_dir, store, review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
+
+    async def offline(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("hub unreachable")
+
+    monkeypatch.setattr(pull_mod, "events", offline)
+
+    with pytest.raises(RuntimeError):
+        _iterate(a, config_dir)
+
+    assert wire.calls == [], "nothing reached the hub on a failed pull"
+    assert set(_due_ids(store, a)) == set(review_ids), "the review rows are still due"
+
+    # The next iteration, with the feed back and quiet, re-drives every one.
+    async def quiet(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def nothing(*_args: Any, **_kwargs: Any) -> list[str]:
+        return []
+
+    monkeypatch.setattr(pull_mod, "events", quiet)
+    monkeypatch.setattr(pull_mod, "drain_feed_refs", nothing)
+    _iterate(a, config_dir)
+    assert set(wire.admitted) >= set(review_ids)
+
+
+def test_the_hold_log_line_is_a_code_a_count_and_a_gap(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The one durable trace of the schedule must not carry an id or a raw detail."""
+
+    import logging
+
+    store = _enroll(tmp_path, _owner("a", 1), "sess_a")
+    owner = _owner("a", 1)
+    caplog.set_level(logging.INFO, logger=loop_mod.logger.name)
+
+    loop_mod._persist_hold_backoff(store, owner, "bcmsg_secret01", "provider_error")
+    loop_mod._persist_hold_backoff(store, owner, "bcmsg_secret02", "phase_refused:hubdetail")
+
+    lines = [record.getMessage() for record in caplog.records if "hold persisted" in record.msg]
+    assert len(lines) == 2
+    assert "code=provider_error attempts=0 gap_s=" in lines[0]
+    # A hub-supplied detail never reaches the log: the code goes through the
+    # closed whitelist, so the family survives and the detail does not.
+    assert "code=phase_refused " in lines[1] + " "
+    assert "hubdetail" not in lines[1]
+    joined = " ".join(lines)
+    assert "bcmsg_secret" not in joined
+
+
+def test_a_refused_hold_write_logs_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A fenced owner's write left no row, so it must not report a schedule."""
+
+    import logging
+
+    store = _enroll(tmp_path, _owner("a", 1), "sess_a")
+    stale = _owner("a", 1)
+    object.__setattr__(stale, "enrollment_generation", 9)
+    caplog.set_level(logging.INFO, logger=loop_mod.logger.name)
+
+    loop_mod._persist_hold_backoff(store, stale, "bcmsg_fenced01", "provider_error")
+
+    assert not [record for record in caplog.records if "hold persisted" in record.msg]
+
+
+def test_a_re_drives_rehold_is_logged_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The re-drive arm is most of the schedule; it must be in the distribution."""
+
+    import logging
+
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    wire = _OrderingWire(bodies)
+    a, config_dir, _store, review_ids = _ordering_rig(
+        tmp_path, monkeypatch, wire, hold_codes={"bcmsg_review00": "provider_error"}
+    )
+    caplog.set_level(logging.INFO, logger=loop_mod.logger.name)
+
+    _iterate(a, config_dir)
+
+    lines = [record.getMessage() for record in caplog.records if "hold persisted" in record.msg]
+    assert any(
+        "code=provider_error" in line for line in lines
+    ), f"the re-drive's own hold write was not logged: {lines}"
+    assert not any("bcmsg_" in line for line in lines)

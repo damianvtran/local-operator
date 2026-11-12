@@ -1666,6 +1666,23 @@ _REFUSAL_CLASS_BY_CATEGORY = {
 }
 
 
+def closed_hold_code(hold_code: Any) -> str:
+    """The CLOSED code a hold was written under, for logs and counters.
+
+    WHY THIS EXISTS. The retry schedule's only durable trace is a log line, and
+    a log is where free text becomes a leak: a hold code can carry a
+    hub-supplied detail after ``family:`` (``phase_refused:<hub code>`` reaches
+    the same writer that writes ``provider_error``), so the raw string must not
+    be logged. This exposes #3189's whitelist + family collapse
+    (:func:`_status_hold_code`) as the ONE mapping, so the line reports a code
+    from the closed vocabulary and ``other`` for anything outside it.
+    """
+
+    from local_operator.team_bridge.screening import HOLD_CODES
+
+    return _status_hold_code(hold_code, frozenset(HOLD_CODES) | _DELIVERY_HOLD_CODES)
+
+
 def delivery_hold_class(hold_code: Any) -> str:
     """The coarse ``hold_class`` a recipient may publish for one held message.
 
@@ -3182,7 +3199,9 @@ class Store:
                 prior["hold_class"] = delivery_hold_class(row["hold_code"])
         return held
 
-    def receiver_state_readonly(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
+    def receiver_state_readonly(
+        self, owner: OwnerSnapshot, message_ids: Sequence[str] = ()
+    ) -> dict[str, Any] | None:
         """This machine's receiver state, or ``None`` when the store cannot answer.
 
         WHY THIS EXISTS. A null ``body`` is usually just LATE: the receiver runs
@@ -3191,6 +3210,15 @@ class Store:
         fact (``delay: transient``), and this is its one number — how long since
         the receiver was last active — so a reader can tell a sleeping machine
         from a content hold without being shown a code or a body.
+
+        WHAT MAKES A DELAY TRUE. ``pending_admission`` is the subset of
+        ``message_ids`` this machine holds a NON-TERMINAL ``body_reservations``
+        row for (``pending``/``claimed``). A reservation exists only for a
+        message the screener already ADMITTED, so it is positive evidence that
+        the body is in flight HERE — the one fact a hold-less row may rest
+        ``delay`` on. It never reads ``screening_receipts``: a reject is not
+        derivable from this machine's point of view without disclosing
+        moderation detail, so that stays unknowable here by design.
 
         THE THREE ANSWERS ARE DIFFERENT. ``None`` means this machine cannot say:
         no store yet, or a fenced/damaged one. A dict means it CAN, and
@@ -3201,11 +3229,13 @@ class Store:
 
         NO HEARTBEAT EXISTS, and this adds none. The two rows that already mark a
         receiver doing its job are the newest screening attempt and the newest
-        body reservation; the later of the two is the answer. Read-only over an
-        EXISTING store, under the same live-owner fence as
+        body reservation; the later of the two is the answer — TRAFFIC, not
+        liveness, so a quiet channel reads old without meaning asleep.
+        Read-only over an EXISTING store, under the same live-owner fence as
         :meth:`hold_states_readonly`.
         """
 
+        wanted = sorted({value for value in message_ids if isinstance(value, str)})
         with self._connect_readonly() as conn:
             if conn is None:
                 return None
@@ -3220,6 +3250,18 @@ class Store:
                     "SELECT MAX(updated_at) FROM body_reservations WHERE owner_key = ?",
                     (_owner_key(owner),),
                 ).fetchone()[0]
+                pending: set[str] = set()
+                # Chunked: a page can carry more ids than SQLite takes binds for,
+                # and this read must never fail a history page.
+                for start in range(0, len(wanted), 400):
+                    chunk = wanted[start : start + 400]
+                    rows = conn.execute(
+                        "SELECT DISTINCT message_id FROM body_reservations "
+                        "WHERE owner_key = ? AND state IN ('pending', 'claimed') "
+                        f"AND message_id IN ({','.join('?' * len(chunk))})",
+                        (_owner_key(owner), *chunk),
+                    ).fetchall()
+                    pending.update(str(row[0]) for row in rows)
             except sqlite3.Error:
                 return None
         newest = max(
@@ -3230,7 +3272,7 @@ class Store:
             ),
             default=None,
         )
-        return {"last_active_at": newest}
+        return {"last_active_at": newest, "pending_admission": frozenset(pending)}
 
     def long_holds_readonly(
         self, owner: OwnerSnapshot, *, older_than_s: float, now: float | None = None
