@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests.e2e.signal_shutdown_diagnostics import CapturedChild
 
@@ -73,9 +74,17 @@ def test_default_shutdown_artifacts_match_ci_upload(
 ) -> None:
     """Exercise default staging, not just a custom artifact directory in tests."""
     workflow = Path(__file__).resolve().parents[2] / ".github/workflows/full-suite.yml"
-    upload = workflow.read_text().split("name: junit-timings-", 1)[1]
-    upload = upload.split("retention-days:", 1)[0]
-    globs = [line.strip() for line in upload.splitlines() if "test-artifacts/" in line]
+    jobs = yaml.safe_load(workflow.read_text())["jobs"]
+    # Jobs have separate working trees: unit-job allowlists cannot preserve
+    # files produced by the signal cases in tui-e2e, even if their names match.
+    upload = next(
+        step
+        for step in jobs["tui-e2e"]["steps"]
+        if step.get("name") == "Upload e2e junit timings"
+    )
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert upload["if"] == "always()"
+    globs = upload["with"]["path"].splitlines()
     monkeypatch.chdir(tmp_path)
     child = CapturedChild(
         [sys.executable, "-c", "import sys; sys.stderr.write('CI witness'); sys.exit(7)"],
