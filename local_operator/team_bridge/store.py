@@ -36,7 +36,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Collection, Iterable, Iterator, Mapping, Sequence
 
 from local_operator.team_bridge.settings import (
     DEFAULT_TEAM_BRIDGE_SCREENING_AMBIENT_BUDGET_PER_HOUR,
@@ -3181,6 +3181,56 @@ class Store:
                 prior["created_at"] = created
                 prior["hold_class"] = delivery_hold_class(row["hold_code"])
         return held
+
+    def receiver_state_readonly(self, owner: OwnerSnapshot) -> dict[str, Any] | None:
+        """This machine's receiver state, or ``None`` when the store cannot answer.
+
+        WHY THIS EXISTS. A null ``body`` is usually just LATE: the receiver runs
+        only while the host is awake, so a lid-closed Mac admits bodies minutes
+        or hours after the sender posted them. ``body_state`` carries the delay
+        fact (``delay: transient``), and this is its one number — how long since
+        the receiver was last active — so a reader can tell a sleeping machine
+        from a content hold without being shown a code or a body.
+
+        THE THREE ANSWERS ARE DIFFERENT. ``None`` means this machine cannot say:
+        no store yet, or a fenced/damaged one. A dict means it CAN, and
+        ``last_active_at`` is ``None`` when no row exists yet (a fresh install
+        that has not screened anything). Telling those apart is the point: a
+        delay fact derived from a store that never answered would promise a
+        retry this machine cannot make (the ``empty_reply`` lesson).
+
+        NO HEARTBEAT EXISTS, and this adds none. The two rows that already mark a
+        receiver doing its job are the newest screening attempt and the newest
+        body reservation; the later of the two is the answer. Read-only over an
+        EXISTING store, under the same live-owner fence as
+        :meth:`hold_states_readonly`.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            try:
+                screened = conn.execute(
+                    "SELECT MAX(at) FROM screening_attempts WHERE owner_key = ?",
+                    (_owner_key(owner),),
+                ).fetchone()[0]
+                reserved = conn.execute(
+                    "SELECT MAX(updated_at) FROM body_reservations WHERE owner_key = ?",
+                    (_owner_key(owner),),
+                ).fetchone()[0]
+            except sqlite3.Error:
+                return None
+        newest = max(
+            (
+                value
+                for value in (_status_timestamp(screened), _status_timestamp(reserved))
+                if value is not None
+            ),
+            default=None,
+        )
+        return {"last_active_at": newest}
 
     def long_holds_readonly(
         self, owner: OwnerSnapshot, *, older_than_s: float, now: float | None = None
@@ -8165,7 +8215,13 @@ class Store:
             return retired
 
     def due_screening_holds(
-        self, owner: OwnerSnapshot, *, now: float, limit: int = 8
+        self,
+        owner: OwnerSnapshot,
+        *,
+        now: float,
+        limit: int = 8,
+        only_codes: Collection[str] | None = None,
+        skip_codes: Collection[str] = (),
     ) -> list[dict[str, Any]]:
         """DUE quarantine rows for the connector's client-local retry (H4).
 
@@ -8177,6 +8233,13 @@ class Store:
         fenced or missing owner reads empty. The retry pass retires the bare
         ``bcmsg_`` duplicates first (:meth:`retire_due_bare_conversation_holds`),
         so the bounded read is spent on rows that can move.
+
+        ``only_codes``/``skip_codes`` partition the schedule IN SQL, before the
+        bound: the connector runs one pass for fresh work first and one for
+        owner-review holds after it, and a `limit`-bounded read filtered in
+        Python would let eight ordinary rows starve either pass. Codes match the
+        row's stored code exactly (that is what “a hold class” is derived
+        from); an empty ``only_codes`` is an empty partition, never "all".
         """
 
         try:
@@ -8199,6 +8262,21 @@ class Store:
                 # or duplicate row.
                 tier = "COALESCE(tier, -1) DESC, " if "tier" in columns else ""
                 no_batch = "COALESCE(no_batch, 0)" if "no_batch" in columns else "0"
+                # A partition is applied HERE, not by the caller: the bound sits
+                # on the result, so filtering afterwards would spend the pass on
+                # rows the caller did not ask for.
+                params: list[Any] = [_owner_key(owner), float(now)]
+                partition = ""
+                if only_codes is not None:
+                    asked = sorted({str(code) for code in only_codes})
+                    if not asked:
+                        return []
+                    partition += f" AND hold_code IN ({','.join('?' * len(asked))})"
+                    params.extend(asked)
+                if skip_codes:
+                    skipped = sorted({str(code) for code in skip_codes})
+                    partition += f" AND hold_code NOT IN ({','.join('?' * len(skipped))})"
+                    params.extend(skipped)
                 rows = conn.execute(
                     f"SELECT message_id, hold_code, retry_at, created_at, {no_batch} AS no_batch "
                     "FROM screening_holds "
@@ -8211,8 +8289,9 @@ class Store:
                     # #294 S-1; #3400 m3): a refill makes a whole backlog due at
                     # once, and the bounded pass must serve a person's DM before
                     # ambient chatter, the longest-waiting first within a tier.
+                    f"{partition}"
                     f"ORDER BY {tier}created_at, COALESCE(retry_at, created_at) LIMIT ?",
-                    (_owner_key(owner), float(now), int(limit)),
+                    (*params, int(limit)),
                 ).fetchall()
                 return [
                     {

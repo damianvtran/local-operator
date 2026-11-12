@@ -93,6 +93,13 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   failed, or the page held more own posts than one read fetches). It means this agent
   has not been given that message; it is NOT an empty message and its content
   must not be inferred. No body, hold code or category is ever shown.
+  ``delay: transient`` on such a row means DELAYED ADMISSION on the reader's own
+  machine — the receiver is asleep or offline, or is still catching up — and
+  never a hold on the content. Retry ``channel_history`` later; no time is
+  promised, and nothing may be inferred from the delay about the content or
+  about any claim it might contain. ``receiver_last_active_s``, when present,
+  is how long ago this machine's receiver last screened a message or admitted
+  a body, so a freshly woken host reads as recently active.
   There is intentionally no local body cache here. The one
   exception to ``body: null`` is a message THIS account authored: the hub never
   delivers it back for admission, so history and thread fetch its text per read
@@ -3233,6 +3240,11 @@ async def _restore_own_bodies(
 #: could not be read back in this read, whether the fetch failed or the row was
 #: past :data:`OWN_BODY_FETCH_MAX`); the other three may also arrive from the hub.
 _HUB_BODY_STATES = frozenset({"held", "rejected", "not_admitted"})
+#: The hold classes that are a DELAY on this machine, not a decision about the
+#: content: screening could not run yet, or delivery did not finish. A person
+#: is not deciding anything, and the reader is told ``delay: transient``.
+#: ``awaiting_review`` is deliberately absent — there a person may be deciding.
+_DELAYED_HOLD_CLASSES = frozenset({"screening_unavailable", "delivery_pending"})
 _BODY_STATE_SINCE_MAX = 40
 #: ``since`` is a timestamp the model will read as one: only the ISO-8601 shape
 #: (``T`` separator, explicit zone) passes, so a hub string cannot smuggle prose
@@ -3280,9 +3292,21 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
     hold code, categories or reasons: only a coarse class and an age. A row that
     already has a body gets nothing, and a stray hub ``body_state`` on it is
     removed.
+
+    DELAY IS NOT A HOLD. The receiver runs only while the host is awake, so a
+    lid-closed laptop admits bodies hours after they were posted; without this a
+    reader cannot tell that from a content hold and may refuse to act on a
+    message that is merely late (measured: 45-178 min to screening). A row gets
+    ``delay: transient`` when the hold class is transient (screening could not
+    run, delivery is pending) or when there is no hold row at all on a store
+    read that SUCCEEDED — queued or delivering here. ``awaiting_review`` never
+    gets it (a person may be deciding), and neither does a row whose store read
+    FAILED: that is unknown, and it stays a plain ``not_admitted``.
     """
 
     import asyncio
+
+    from .store import Store, StoreRefused
 
     pending: list[dict[str, Any]] = []
     for row in rows:
@@ -3310,20 +3334,33 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
         return
 
     holds: dict[str, dict[str, Any]] = {}
+    store: Store | None = None
+    holds_read = False
     if any(_hub_body_state(row.get("body_state")) is None for row in pending):
-        from .store import Store, StoreRefused
-
+        store = Store(Path(runtime.config_dir))
         try:
             holds = await asyncio.to_thread(
-                Store(Path(runtime.config_dir)).hold_states_readonly,
+                store.hold_states_readonly,
                 runtime.owner,
                 [row["id"] for row in pending],
             )
+            holds_read = True
         except (StoreRefused, OSError):
             holds = {}  # no hold information: the row reads not_admitted
 
     own = getattr(runtime.owner, "account_id", "")
     now = time.time()
+    # The receiver's own state, read ONCE: ``None`` means this store cannot
+    # answer (absent or fenced), which is what keeps ``delay`` off a row this
+    # machine has no evidence about.
+    receiver: dict[str, Any] | None = None
+    if store is not None and holds_read:
+        try:
+            receiver = await asyncio.to_thread(store.receiver_state_readonly, runtime.owner)
+        except (StoreRefused, OSError):
+            receiver = None
+    #: Rows whose null body is a DELAY, not a decision (see the constant above).
+    delayed: list[dict[str, Any]] = []
     for row in pending:
         from_hub = _hub_body_state(row.get("body_state"))
         if from_hub is not None:
@@ -3336,6 +3373,8 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
             created = hold.get("created_at")
             if isinstance(created, (int, float)):
                 state["held_for_s"] = max(0, int(now - created))
+            if hold["hold_class"] in _DELAYED_HOLD_CLASSES:
+                delayed.append(state)
             row["body_state"] = state
         elif (
             own
@@ -3349,7 +3388,20 @@ async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
             # could not be read back in THIS read.
             row["body_state"] = {"state": "unavailable"}
         else:
-            row["body_state"] = {"state": "not_admitted"}
+            state = {"state": "not_admitted"}
+            # NO HOLD ROW, and the store answered: the message is queued or
+            # delivering ON THIS MACHINE, i.e. delayed admission. A store that
+            # could not answer leaves this plain ``not_admitted`` — unknown.
+            if receiver is not None:
+                delayed.append(state)
+            row["body_state"] = state
+    if delayed:
+        active = None if receiver is None else receiver.get("last_active_at")
+        age = None if active is None else max(0, int(now - active))
+        for state in delayed:
+            state["delay"] = "transient"
+            if age is not None:
+                state["receiver_last_active_s"] = age
 
 
 def _strip_display_names(page: Any) -> None:

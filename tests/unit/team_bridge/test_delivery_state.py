@@ -14,6 +14,7 @@ Three layers, each at its own seam:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -42,6 +43,7 @@ from tests.unit.team_bridge.test_conversation_delivery import (
     FakeWire,
     _enroll,
     _owner,
+    _persist_fake_receipt,
     _receipt,
     _ref,
     _wire_rig,
@@ -714,3 +716,224 @@ def test_a_coalesced_card_publishes_no_state_because_delivered_rides_the_admit(
     assert published == [], "a delivered wake writes no delivery state; its admit did"
     assert len(admit_kwargs) == 1, "exactly one admit carries this message's verdict"
     assert "refusal_class" not in admit_kwargs[0]
+
+
+# ---------------------------------------------------------------------------
+# fresh work before owner-review re-drives
+# ---------------------------------------------------------------------------
+#
+# The receiver runs only while the host is awake, and a review hold waits on a
+# PERSON (or on a delivery window up to seven days). The retry pass used to run
+# as one block BEFORE the feed, so five review holds spent a whole wake window
+# first and a message that had just arrived was never pulled. The iteration now
+# runs the non-review half before the feed and the review half after it.
+
+REVIEW_HOLD_CODE = "model_hold"  # in hold_release.REVIEW_HOLD_CODES
+FRESH_BODY = "the message that just arrived"
+
+
+class _OrderingWire:
+    """One fake hub in both roles: the connector's wire and the tool's client.
+
+    ``calls`` records only the two calls this test orders (a body read and an
+    admit), and ``cancel_after`` models a wake window closing during one of
+    them: the call that would be the (``cancel_after`` + 1)th raises
+    ``CancelledError``, exactly as a stop does mid-spine.
+    """
+
+    def __init__(self, bodies: dict[str, str], *, cancel_after: int | None = None) -> None:
+        self.bodies = bodies
+        self.order = list(bodies)
+        self.admitted: set[str] = set()
+        self.calls: list[tuple[str, str]] = []
+        self.cancel_after = cancel_after
+
+    def _call(self, kind: str, message_id: str) -> None:
+        if self.cancel_after is not None and len(self.calls) >= self.cancel_after:
+            raise asyncio.CancelledError
+        self.calls.append((kind, message_id))
+
+    def _sha(self, message_id: str) -> str:
+        return hashlib.sha256(self.bodies[message_id].encode("utf-8")).hexdigest()
+
+    # -- the connector's wire ------------------------------------------------
+
+    async def conversation_body(self, conversation_id: str, message_id: str, **_: Any):
+        self._call("body", message_id)
+        return {
+            "message_id": message_id,
+            "body": self.bodies[message_id],
+            "body_hash": self._sha(message_id),
+            "conversation_name": "#qa-coordination",
+            "sender_label": "Ada",
+            "sender_kind": "agent",
+            "sender_account_id": "acc_other",
+            "conversation_kind": "channel",
+        }
+
+    async def conversation_admit(
+        self, conversation_id: str, message_id: str, *, verdict: str, body_hash: str, **_: Any
+    ) -> dict[str, Any]:
+        self._call("admit", message_id)
+        self.admitted.add(message_id)
+        return {"ok": True}
+
+    # -- the bridge tool's read client ---------------------------------------
+
+    async def conversation(self, conversation_id: str, **_: Any) -> dict[str, Any]:
+        return {"id": CID, "kind": "channel", "name": "#qa-coordination", "members": []}
+
+    async def conversation_messages(self, conversation_id: str, **_: Any) -> dict[str, Any]:
+        rows = [
+            {
+                "id": message_id,
+                "conversation_id": CID,
+                "seq": index + 1,
+                "sender": {"account_id": "acc_other", "kind": "agent"},
+                # The hub's own rule: a body exists only for an ADMITTED row.
+                "body": self.bodies[message_id] if message_id in self.admitted else None,
+                "body_hash": self._sha(message_id),
+                "origin": "agent",
+                "created_at": "2026-11-12T12:00:00Z",
+            }
+            for index, message_id in enumerate(self.order)
+        ]
+        return {"messages": list(reversed(rows)), "has_more": False}
+
+
+def _ordering_rig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wire: _OrderingWire
+) -> tuple[Any, Path, Any, list[str]]:
+    """Five DUE review holds + one fresh ref in the feed, over the REAL store."""
+
+    from local_operator.team_bridge import host as host_mod
+    from local_operator.team_bridge import pull as pull_mod
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+    from local_operator.team_bridge.connector import conversation as conversation_mod
+    from local_operator.team_bridge.events import plan_feed_refs
+    from local_operator.team_bridge.types import project_events_batch
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    store = _enroll(config_dir, a, "sess_a")
+    events = [
+        {
+            "type": "message_available",
+            "ids": {
+                "conversation_id": CID,
+                "message_id": message_id,
+                "conversation_seq": index + 1,
+            },
+            "at": "2026-11-12T12:00:00Z",
+        }
+        for index, message_id in enumerate(wire.order)
+    ]
+    _cursor, refs, _resync = project_events_batch({"cursor": "1", "events": events})
+    deliveries = plan_feed_refs(refs).conversation_deliveries
+    review_refs = [ref for ref in deliveries if ref.message_id != wire.order[-1]]
+    for ref in review_refs:
+        store.persist_hold(a, ref.encode(), REVIEW_HOLD_CODE, retry_at=0.0)
+    fresh_ref = deliveries[-1].encode()
+
+    async def fake_events(
+        owner: Any, *, config_dir: Path, access: Any, after: Any = None, **kw: Any
+    ):
+        return {"cursor": 1, "refs": [fresh_ref], "resync": False}
+
+    def fake_drain(owner: Any, *, config_dir: Path, upto_seq: int) -> list[str]:
+        return [fresh_ref]
+
+    async def fake_wire_for(owner: Any, config_dir: Path, auth_store: Any) -> Any:
+        return wire
+
+    async def fake_screen(owner: Any, item: Any, *, config_dir: Path, **kwargs: Any):
+        message_id = item["message"]["id"]
+        receipt = _receipt("allow", wire.bodies[message_id])
+        _persist_fake_receipt(config_dir, receipt, message_id=message_id)
+        return ScreenResult(disposition="deliver", receipt=receipt)
+
+    async def fake_deliver(owner: Any, payload: str, **kwargs: Any) -> str:
+        return "delivered and woke the session"
+
+    monkeypatch.setattr(pull_mod, "events", fake_events)
+    monkeypatch.setattr(pull_mod, "drain_feed_refs", fake_drain)
+    monkeypatch.setattr(conversation_mod, "_wire_for", fake_wire_for)
+    monkeypatch.setattr(conversation_mod, "screen_item", fake_screen)
+    monkeypatch.setattr(conversation_mod, "deliver_wake", fake_deliver)
+    monkeypatch.setattr(conversation_mod, "engagement_hold", lambda designation, config_dir: "")
+    monkeypatch.setattr(coalesce_mod, "CONNECTOR_COALESCER", coalesce_mod.WakeCoalescer())
+    # The tool's fences have their own suites; open them for the read-back.
+    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
+    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
+    return a, config_dir, store, [ref.message_id for ref in review_refs]
+
+
+def _iterate(a: Any, config_dir: Path) -> dict[str, Any]:
+    return asyncio.run(
+        loop_mod._run_iteration_inner(
+            a,
+            config_dir=config_dir,
+            access=SimpleNamespace(credential_id=a.credential_id),
+            auth_store=None,
+        )
+    )
+
+
+def test_fresh_work_is_admitted_before_any_review_held_body_is_re_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    wire = _OrderingWire(bodies)
+    a, config_dir, _store, review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
+
+    outcome = _iterate(a, config_dir)
+
+    fresh = wire.order[-1]
+    assert wire.admitted == {fresh, *review_ids}, "fresh work AND every due review hold moved"
+    fresh_admit = wire.calls.index(("admit", fresh))
+    first_hold_read = min(
+        index
+        for index, (kind, message_id) in enumerate(wire.calls)
+        if kind == "body" and message_id in review_ids
+    )
+    assert (
+        fresh_admit < first_hold_read
+    ), f"a review hold was re-read before the fresh message was admitted: {wire.calls}"
+    assert outcome["retries"]["due"] == 5
+
+
+def test_a_window_closing_mid_review_redrive_has_already_admitted_fresh_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bodies = {f"bcmsg_review{index:02d}": f"held {index}" for index in range(5)}
+    bodies["bcmsg_fresh01"] = FRESH_BODY
+    fresh = "bcmsg_fresh01"
+    # Two calls is exactly the fresh message's body read and its admit; the
+    # third (a review-held body re-read) is where the window closes.
+    wire = _OrderingWire(bodies, cancel_after=2)
+    a, config_dir, _store, _review_ids = _ordering_rig(tmp_path, monkeypatch, wire)
+
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(a, config_dir)
+
+    assert wire.admitted == {fresh}, "the fresh message was admitted before the window closed"
+    # ... and the reader can SEE it: history serves the body the hub admitted.
+    from local_operator.team_bridge.tool import BridgeRuntime, execute_bridge
+
+    runtime = BridgeRuntime(
+        client=wire,  # type: ignore[arg-type]
+        config_dir=config_dir,
+        tenant_id="tnt_1",
+        owner=a,
+        session_id="sess_a",
+    )
+    answer = asyncio.run(
+        execute_bridge(runtime, {"op": "channel_history", "channel_id": CID, "limit": 20})
+    )
+    assert answer["ok"] is True, answer
+    rows = {row["id"]: row for row in json.loads(answer["content"].split("\n\n", 1)[1])["messages"]}
+    assert rows[fresh]["body"] == FRESH_BODY
+    assert rows[fresh].get("body_state") is None
