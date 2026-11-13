@@ -2646,9 +2646,10 @@ async def test_list_explicit_peer_never_reads_local_rows(
     params: dict[str, Any] = {"op": "list", "peer": PEER, "limit": 1}
     if scope is not None:
         params["scope"] = scope
-    tool = build_sessions_tool(_context(root))
+    context = _context(root)
+    tool = build_sessions_tool(context)
     assert tool is not None
-    result = await tool.execute("t", params, None, None)
+    result = await tool.execute("t", params, None, None, context)
     assert not result.is_error, result.text
     assert (result.details or {})["scope"] == "remote"
     assert [row["session_id"] for row in (result.details or {})["rows"]] == ["aaaa11112222"]
@@ -2694,9 +2695,10 @@ async def test_list_explicit_peer_failure_never_falls_back_local(
         return 1, {"ok": False, "code": failure, "message": f"synthetic {failure}"}, ""
 
     monkeypatch.setattr(builtin, "_mesh_cli_json", fake)
-    tool = build_sessions_tool(_context(root))
+    context = _context(root)
+    tool = build_sessions_tool(context)
     assert tool is not None
-    result = await tool.execute("t", {"op": "list", "peer": PEER, "limit": 1}, None, None)
+    result = await tool.execute("t", {"op": "list", "peer": PEER, "limit": 1}, None, None, context)
     assert calls == [["network", "sessions", "--json", "--peer", PEER]]
     assert not (result.details or {}).get("rows")
     if failure == "unreachable":
