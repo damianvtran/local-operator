@@ -502,7 +502,17 @@ reportPrivateImportUsage = false
 # The test prepends the directory to `sys.path` at run time; this is the same path for
 # the ANALYZER, so the import resolves instead of being reported missing. Same reasoning
 # as the adapter entry above: a type-resolution path only, no runtime import change.
-extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
+# `examples/agentcore/{app,scripts}` are loose modules copied into a container
+# (`PYTHONPATH=/app`) or run as scripts, and their offline tests import them by
+# bare name after a conftest `sys.path` insert. Same reasoning again: a
+# type-resolution path only, so the example stays type-checked instead of being
+# excluded.
+extraPaths = [
+    "benchmarks/osworld_v2_adapter/src",
+    "packaging/macos",
+    "examples/agentcore/app",
+    "examples/agentcore/scripts",
+]
 # `i18n/audits/evidence` is AUDIT EVIDENCE, not source: each bundle carries the
 # `checks.py` an independent auditor ran, committed verbatim so a reader can
 # re-run the exact check. Those scripts are throwaway probes written by a
