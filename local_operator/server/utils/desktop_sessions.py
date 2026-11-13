@@ -4439,9 +4439,7 @@ class DesktopSessionBridge:
                 break
         step("pages", pages=len(order_pages), rows=len(collected))
         if index is None:
-            index = await self._frame_source(
-                deadline, order_pages, paint_deadline=paint_deadline
-            )
+            index = await self._frame_source(deadline, order_pages, paint_deadline=paint_deadline)
             if tail_read and not index_at_first_page:
                 # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
                 # carries the same rule): the facts will say ``ready``, so the rows
