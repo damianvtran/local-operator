@@ -198,6 +198,22 @@ _DELETES = [
     'print = len; print("{pad}")',
     'print(*["{pad}"])',
     'print(open("{pad}/a.log", "r", -1, None, None, None, True, print))',
+    # Review r3 M4: a binding the analyser counts but which never runs. The
+    # dead-branch alias left ``exec``/``eval`` the real builtin, and the
+    # first two deleted real files at LOW.
+    'if 0:\n    import re as exec\nexec("import shutil; shutil.rmtree(\\"{pad}\\")")',
+    "if 0:\n    from re import compile as eval\n"
+    'eval("__import__(\\"shutil\\").rmtree(\\"{pad}\\")")',
+    'for getattr in []: pass\ngetattr(1, "real"); print("{pad}")',
+    'for x in []: import json as getattr\nprint("{pad}")',
+    'import json as getattr; print("{pad}")',
+    'exec = 1; print("{pad}")',
+    'print([x for exec in [1] for x in [exec]], "{pad}")',
+    'if 1:\n    import json\nprint(json.dumps("{pad}"))',
+    'try:\n    import json\nexcept ImportError: pass\nprint("{pad}")',
+    'def f():\n    import json\nprint("{pad}")',
+    'print([__import__("json") for x in [1]], "{pad}")',
+    'del print; print("{pad}")',
 ]
 
 

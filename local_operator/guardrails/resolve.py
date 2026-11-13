@@ -1865,9 +1865,19 @@ def python_code_read_only(code: str) -> bool:
     and subscript must be on an allow-list. Consequences the lists alone do
     not express, each enforced below:
 
-    - a ``Name`` is loaded only if it is an allowed builtin, an imported
-      name, or bound by this program; binding a builtin or imported name
-      (``print = …``) is refused, so a callee name means what the list says;
+    - imports only as unconditional top-level statements (direct children
+      of the module): static analysis cannot tell which branch runs, so an
+      ``import re as exec`` under ``if 0:`` (or in a loop that never
+      iterates, a function, a comprehension) would be counted as imported
+      while at run time the name is still the real builtin (review r3 M4 —
+      real files deleted);
+    - no binding of ANY name in ``dir(builtins)`` — assignment, loop or
+      comprehension target, import alias — not only the allowed ones, and
+      no binding of an imported name; so a callee name is either an allowed
+      builtin that is never rebound or a top-level import, whatever branch
+      runs;
+    - a ``Name`` is loaded only if it is an allowed builtin, a top-level
+      import, or bound by this program;
     - a call's callee is an allowed builtin, an imported name, or an allowed
       attribute — never a local variable or a subscript, so a callable taken
       as a value (``s = re.sub``) cannot dodge the per-call checks;
@@ -1882,6 +1892,7 @@ def python_code_read_only(code: str) -> bool:
     and keeps the conservative ranking (a judge call, never a LOW).
     """
     import ast
+    import builtins
 
     try:
         tree = ast.parse(code)
@@ -1890,9 +1901,14 @@ def python_code_read_only(code: str) -> bool:
     nodes = list(ast.walk(tree))
     if any(type(n).__name__ not in _PY_ALLOWED_NODES for n in nodes):
         return False
+    # Only an unconditional top-level import is known to have run before a
+    # later call by its name; anything nested may never execute.
+    top_level = {id(n) for n in tree.body}
     imported: set[str] = set()
     bound: set[str] = set()
     for node in nodes:
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and id(node) not in top_level:
+            return False
         if isinstance(node, ast.Import):
             for a in node.names:
                 if a.name not in _PY_READ_MODULES:
@@ -1910,8 +1926,11 @@ def python_code_read_only(code: str) -> bool:
     if any(n.startswith("_") for n in imported | bound):
         return False
     # Rebinding a builtin or an import would let a later call by that name
-    # run whatever was bound; an import shadowing a builtin likewise.
-    if bound & (imported | _PY_ALLOWED_BUILTINS) or imported & _PY_ALLOWED_BUILTINS:
+    # run whatever was bound; an import shadowing a builtin likewise. Every
+    # builtin name, not just the allowed ones: an alias that shadows ``exec``
+    # is exactly how a denied builtin would sneak back in as a callee.
+    builtin_names = frozenset(dir(builtins)) | _PY_ALLOWED_BUILTINS
+    if bound & (imported | builtin_names) or imported & builtin_names:
         return False
     callees = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
     known = _PY_ALLOWED_BUILTINS | imported | bound
