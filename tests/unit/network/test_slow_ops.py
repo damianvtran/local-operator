@@ -443,7 +443,13 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # first turn for up to ``FIRST_TURN_WAIT_S``, which inline stalled the
             # whole link (#3547 review MAJOR-1/2).
             "net_session_create",
+            # The remote peek (network/peek.py): a deep needle search may take
+            # seconds, and the link reader must keep serving meanwhile.
+            "net_session_peek",
         }
+        from local_operator.network import peek as net_peek
+
+        assert server.slow_op_deadline("net_session_peek") == net_peek.SESSION_PEEK_DEADLINE_S
         assert server.slow_op_deadline("net_session_create") == relay.create_op_deadline_s(
             server.settings.op_wait_s
         )

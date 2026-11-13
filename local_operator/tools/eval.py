@@ -60,6 +60,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from local_operator import procstate
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
+from local_operator.harness.secret_sinks import steer_text as _secret_sink_steer
 from local_operator.harness.types import (
     FAULT_ABORTED,
     FAULT_KEY,
@@ -88,6 +89,7 @@ from local_operator.tools.builtin import (
     _safe_cwd,
     _text,
     _validation_error,
+    secret_redaction_live,
     session_id_env_injection,
     spill_truncate,
 )
@@ -1314,8 +1316,15 @@ async def execute_eval(
     # trailing expression whose repr IS the result). Scanning before the
     # background branch keeps the two modes in agreement — a background cell is
     # read from the job buffer, which is the same transcript.
+    #
+    # The same warn/refuse split as `bash` (see the comment there): a verbatim
+    # print of a value runs where the redaction chain is live — the worker
+    # scrubs every registered value from stdout, stderr, the result repr and
+    # the peek frames — and gets one steering line (added where the body is
+    # assembled, :func:`_eval_secret_steer`). A re-spelled value
+    # (`token[::-1]`, `b64encode`) or a shell string stays refused.
     cell = _scan_secret_cell(params.code)
-    if cell.refused:
+    if cell.refused and (cell.blocking or not secret_redaction_live(context)):
         return _error(
             tool_call_id,
             "eval",
@@ -1672,6 +1681,9 @@ def _build_render_result(
     pad_line = _eval_pad_write_check(code, context)
     if pad_line:
         notice.append(pad_line)
+    secret_line = _eval_secret_steer(code, context)
+    if secret_line:
+        notice.append(secret_line)
     # The result leads so head-biased truncation keeps it: it is the one line
     # the call existed to produce.
     if ok:
@@ -1700,6 +1712,21 @@ def _build_render_result(
         details=spill_details,
         is_error=True,
     )
+
+
+def _eval_secret_steer(code: str, context: ToolContext | None) -> str | None:
+    """The secret-sink steer for a cell that RAN under the warn path, if any.
+
+    Re-scanned here rather than threaded through the render call chain: the
+    scan is a pure, cheap function of the cell text, and recomputing it keeps
+    the renderer's signature (shared with the background path) unchanged. It
+    only fires for an advisory result on a live chain — exactly the cells the
+    gate in :func:`execute_eval` let through instead of refusing.
+    """
+    cell = _scan_secret_cell(code)
+    if not cell.advisory or not secret_redaction_live(context):
+        return None
+    return _secret_sink_steer(cell)
 
 
 #: How long one code-memory verb waits for its worker. Short on purpose: the verb

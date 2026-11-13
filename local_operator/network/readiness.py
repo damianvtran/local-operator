@@ -214,6 +214,9 @@ CODE_NOT_ON_PATH = "not_on_path"
 CODE_NOT_AUTHENTICATED = "not_authenticated"
 #: Resilience (2026-10-21): under :data:`RESILIENCE_MIN_RAM_MB` of RAM and no swap.
 CODE_LOW_MEMORY = "low_memory"
+#: The peer's relay unit lets systemd stop the relay when the kernel OOM-kills
+#: any session process in its cgroup (``relay.RELAY_OOM_POLICY``).
+CODE_RELAY_OOM_POLICY = "relay_oom_policy"
 #: The peer has not granted this device the lifecycle capability net_restart
 #: requires. The remedy is a grant ON THE PEER, never a local gate bypass.
 CODE_UPDATE_GRANT_MISSING = "update_grant_missing"
@@ -1714,6 +1717,10 @@ def collect_peer_facts(
         "github": github_fact(root, home),
         "operator": operator_fact(),
         "memory": memory_fact(),
+        # ADDITIVE ON THE WIRE: what this device's relay unit says OOMPolicy is.
+        # A viewer built before this key ignores it; this build reads its ABSENCE
+        # (an older peer) as no claim, never as a gap.
+        "relay_unit": relay_unit_fact(),
         # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
         # viewer reading a peer built before it renders ``unknown`` — never ok.
         "serve_daemons": serve_daemons_fact(root),
@@ -1909,6 +1916,41 @@ def custom_instructions_row(
 RESILIENCE_MIN_RAM_MB = 4096
 
 
+def relay_unit_fact() -> dict[str, Any]:
+    """This device's relay-unit OOM policy (``relay.installed_unit_oom_policy``).
+
+    No-raise: a readiness answer never fails on a diagnostic fact.
+    """
+    try:
+        from local_operator.network import relay as relay_mod
+
+        return relay_mod.installed_unit_oom_policy()
+    except Exception:  # noqa: BLE001 — a diagnostic fact degrades to unknown
+        return {"supervisor": None}
+
+
+def _relay_oom_policy_gap(facts: Mapping[str, Any]) -> bool:
+    """Whether the peer PROVED its installed relay unit lacks ``OOMPolicy=continue``."""
+    from local_operator.network import relay as relay_mod
+
+    unit = facts.get("relay_unit")
+    return (
+        isinstance(unit, Mapping)
+        and unit.get("supervisor") == "systemd"
+        and unit.get("installed") is True
+        and unit.get("readable") is True
+        and unit.get("oom_policy") != relay_mod.RELAY_OOM_POLICY
+    )
+
+
+def _relay_oom_policy_remedy(peer_label: str) -> str:
+    return (
+        f"on {peer_label}, run `lop network install`: it rewrites the relay unit with "
+        "OOMPolicy=continue and reloads systemd without restarting the relay (an "
+        "update does the same)"
+    )
+
+
 def memory_fact() -> dict[str, Any]:
     """Total RAM and swap on THIS device, in MB, or ``None`` per unknown field.
 
@@ -1954,6 +1996,10 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
             source=SOURCE_UNKNOWN,
         )
     swapless = isinstance(swap, int) and not isinstance(swap, bool) and swap == 0
+    # 2026-11-11: a session child's OOM kill stopped the relay UNIT five times on
+    # a 15.7 GB node, because the unit ran on systemd's default OOMPolicy=stop.
+    # RAM alone does not answer this row; the unit's policy is the other half.
+    policy_gap = _relay_oom_policy_gap(facts)
     if total < RESILIENCE_MIN_RAM_MB and swapless:
         return _capability_row(
             device_id=member.device_id,
@@ -1971,9 +2017,30 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
                 f"host with at least {RESILIENCE_MIN_RAM_MB // 1024} GB of RAM",
                 f"run `lop update` on {peer_label} so its relay unit carries "
                 "OOMScoreAdjust and its runtimes refuse to start when memory is short",
+                *([_relay_oom_policy_remedy(peer_label)] if policy_gap else []),
             ],
             source=SOURCE_PEER,
             observed={"total_mb": total, "swap_total_mb": swap},
+        )
+    if policy_gap:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_RESILIENCE,
+            ok=False,
+            code=CODE_RELAY_OOM_POLICY,
+            detail=(
+                f"{peer_label}'s relay service stops whenever the kernel OOM-kills any "
+                "session process there (its unit does not set OOMPolicy=continue), so "
+                "one heavy session takes the device off the mesh until the relay restarts"
+            ),
+            remedies=[_relay_oom_policy_remedy(peer_label)],
+            source=SOURCE_PEER,
+            observed={
+                "total_mb": total,
+                "swap_total_mb": swap,
+                "oom_policy": facts["relay_unit"].get("oom_policy"),
+            },
         )
     return _capability_row(
         device_id=member.device_id,

@@ -776,6 +776,40 @@ class MeshAwareAuthStore:
             return None
         return refusal.message
 
+    def no_credential_limit(self, provider: str) -> int | None:
+        """The owner's reset in ms when the last borrow was refused for QUOTA, else ``None``.
+
+        READ BY THE FAILOVER DRIVER beside :meth:`no_credential_reason`, so a borrowed
+        login's rate limit classifies exactly like a local account's: ``kind="quota"``
+        carrying the owner's stated reset, rather than the ``unknown`` the driver used
+        for every broker sentence (the 2026-11-12 ``lop-remote-node-2`` incident, where
+        the turn's error was labelled ``unknown:``). Only ``quota_blocked`` qualifies:
+        it is the owner saying its logins are resting (or this device's own cooldowns
+        excluded every one). ``rate_limited`` is the BROKER's request backpressure, not
+        the provider's quota, and keeps the generic class. ``0`` means quota with no
+        stated reset. Same freshness rule as the sentence: only this process's last
+        answer for the key, cleared by a later grant.
+        """
+        refusal = self._refusals.get(key_for(provider=provider))
+        if refusal is None or refusal.code != "quota_blocked":
+            return None
+        return max(0, int(refusal.retry_after_ms or 0))
+
+    def device_label(self) -> str:
+        """This device's mesh name, for the failover driver's "no fallback on <device>".
+
+        The turn runs here, so the chain it walks is this device's config; naming the
+        device tells an operator reading a remote session on another machine WHICH
+        config is missing the chain. ``""`` when unknown (the driver says "this
+        device").
+        """
+        label_for = getattr(self._mesh, "_self_label", None)
+        try:
+            label = label_for() if callable(label_for) else ""
+        except Exception:  # noqa: BLE001 — a label is decoration
+            return ""
+        return label if isinstance(label, str) else ""
+
     # -- the failure-accounting rung ---------------------------------------
 
     def rotate_sibling(

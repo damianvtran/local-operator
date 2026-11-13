@@ -460,6 +460,9 @@ def test_every_advertised_op_capability_has_a_registered_handler(rig):
         # The single-file pull (network/files.py; mesh-file-transfer.md S1).
         wire.MESH_FILE_V1: "net_file_get",
         "peer-journal-source-v1": "net_session_history",
+        # The remote peek (network/peek.py) is a real new peer op, not a pure feature:
+        # advertising it promises an owner that answers ``net_session_peek``.
+        wire.SESSION_PEEK_V1: "net_session_peek",
         # Change pushes gate a receiving mode on the existing membership op;
         # advertising them promises that its handler understands bound snapshots.
         wire.MEMBER_LIST_PUSH_V1: "net_member_list",

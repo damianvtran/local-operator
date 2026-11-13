@@ -202,6 +202,10 @@ def team() -> Msg:
     return Msg("wire.slash.team", {})
 
 
+def temporary() -> Msg:
+    return Msg("wire.slash.temporary", {})
+
+
 def theme() -> Msg:
     return Msg("wire.slash.theme", {})
 

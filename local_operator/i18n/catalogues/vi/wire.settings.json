@@ -857,5 +857,11 @@
   "wire.settings.web_search_timeout_seconds.help": "Hết giờ cho mỗi yêu cầu nhà cung cấp. Được kẹp trong khoảng 1-120 khi đọc.",
   "wire.settings.web_search_timeout_seconds.label": "Hết giờ (giây)",
   "wire.settings.web_tools.description": "Liệu các công cụ tìm kiếm và fetch có được cung cấp và cho phép chạy hay không.",
-  "wire.settings.web_tools.title": "Công cụ web"
+  "wire.settings.web_tools.title": "Công cụ web",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15 phút",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 phút",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 giờ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 giờ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Xóa cuộc trò chuyện tạm thời sau",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Thời gian một cuộc trò chuyện tạm thời có thể không hoạt động trước khi bị xóa. Thời gian hiển thị trên màn hình, tác vụ đang chạy hoặc câu hỏi đang mở không được tính là không hoạt động."
 }
