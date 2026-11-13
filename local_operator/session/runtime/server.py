@@ -6661,14 +6661,18 @@ class RuntimeServer:
             # approving a site (``browser_bridge/site_approval.py``). A
             # capability admission (the node's own console) carries none, which
             # the extension refuses as ``unsigned_decision`` — the operator, not
-            # whoever holds the node, decides a site.
+            # whoever holds the node, decides a site. Nor does an answer signed
+            # by a DEVICE certificate (a paired phone): the extension knows only
+            # the anchor point, so it could only call that signature "bad";
+            # without proof it says "answer from your own computer", which is
+            # the remedy (review R1-4).
             proof = (
                 {
                     "operator_sig": str(frame.get("operator_sig") or ""),
                     "operator_key_id": str(frame.get("operator_key_id") or ""),
                     "challenge": challenge,
                 }
-                if signature is True and challenge
+                if signature is True and challenge and frame.get("operator_cert") is None
                 else None
             )
             mint_bridge_decide_grant(

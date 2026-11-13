@@ -26498,15 +26498,14 @@ async def _node_site_access(
             ),
             details={**details, "state": "none"},
         )
-    question_id = site_approval.site_question_id(
+    question = site_approval.site_ask_question(
+        origin=origin,
+        node_name=_node_display_name(),
         node_device_id=str(result.get("node_device_id") or ""),
         entry_id=entry_id,
-        origin=origin,
         scope=str(result.get("scope") or site_approval.SITE_SCOPE),
     )
-    question = site_approval.site_ask_question(
-        origin=origin, node_name=_node_display_name(), question_id=question_id
-    )
+    question_id = str(question["question_id"])
     # The ask lives no longer than the extension entry it binds (10-minute
     # TTL): a card answered after the entry is gone could only be refused.
     # Never below the queue's own floor, which refuses a shorter timeout.

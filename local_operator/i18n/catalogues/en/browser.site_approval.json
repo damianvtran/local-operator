@@ -6,5 +6,7 @@
   "browser.site_approval.refused_bad_signature": "The node's browser refused this answer: its signature did not match the operator key installed on the node.",
   "browser.site_approval.refused_expired": "This site request expired before your answer reached the node's browser. The agent has to ask again.",
   "browser.site_approval.refused_unreachable": "Your answer could not reach the node's browser. Nothing was approved; try again in a moment.",
-  "browser.site_approval.card_title": "an agent on another machine asked to open a site — your answer is signed and sent to its browser"
+  "browser.site_approval.card_title": "an agent on another machine asked to open a site — your answer is signed and sent to its browser",
+  "browser.site_approval.refused_card_mismatch": "This site request was not signed: the card does not match the site it would approve. Nothing was approved. If the node and this computer run different Local Operator versions, update both and ask again.",
+  "browser.site_approval.refused_no_approver": "The node's browser has no operator key to check answers against, so it cannot approve sites. Nothing was approved."
 }

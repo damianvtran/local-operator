@@ -587,15 +587,26 @@ What can go wrong, and what to say:
   a person decided). Do not retry; tell the operator, and carry on without the
   site. The fix is theirs: install the anchor, then `lop browser setup --node
   --repair`.
-- An answer from the node's own terminal is refused (`unsigned_decision`):
-  only a signed answer from the operator's device decides. Approving from the
-  Local Operator app on their computer is the path.
+- An answer from the node's own terminal, or from a paired phone, is refused
+  (`unsigned_decision`): only an answer signed with the operator key itself
+  decides. Approving from the Local Operator app on their computer is the path.
+- The operator's computer refuses to sign a card it cannot rebuild
+  (`site_card_mismatch`): its words or buttons do not match the site its id
+  binds — tampering, or the two machines run different releases. Nothing was
+  approved; if they say both are up to date, raise it as a security problem.
 - The request expired before the answer reached the browser: the card says
   so; call `request_access` again and tell the operator once.
 
-The boundary is advisory on a node whose user can run `sudo` without a
-password: whoever holds the node can rewrite the root-owned policy. Doing so
-is a visible, audited act, not a quiet one — never do it, and never try to
+What is enforced where: the node's browser approves a site only for a
+signature from the operator key over that one request (its entry, origin and
+node), so a signature cannot be forged here or moved to another site. The
+operator's computer, before it signs, rebuilds the card from the site it
+binds and refuses one whose words differ, so what the operator reads is what
+the signature approves. That second check exists only in builds that carry it:
+an operator computer on an older build signs whatever card it shows. And on a
+node whose user can run `sudo` without a password the whole boundary is
+advisory: whoever holds the node can rewrite the root-owned policy (sudo logs
+it). Never do that, never write to a session's ask log, and never try to
 answer your own card.
 
 Other rules:

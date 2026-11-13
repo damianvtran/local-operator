@@ -13,9 +13,17 @@
  * call. So nothing short of a signature from the operator anchor — the public
  * point `lop browser setup --node` copies from the root-owned
  * `/etc/local-operator/operators/<uid>.json` into managed policy — decides an
- * entry here. On a node whose user has passwordless sudo that is an advisory,
- * audited boundary (rewriting root-owned policy is visible), not a hard one;
- * the operator accepted that ("leave it, disclose it").
+ * entry here. On a node whose user has passwordless sudo that is an advisory
+ * boundary (root-owned policy can be rewritten, which sudo logs), not a hard
+ * one; the operator accepted that ("leave it, disclose it").
+ *
+ * WHAT THIS CHECK DOES NOT PROVE. It proves the operator key signed THIS
+ * entry's digest — not that the card the operator read named this origin. The
+ * card's words are drawn on the node, where the agent could forge them, so the
+ * SIGNER (the operator's own Local Operator, `asks/decision.py` →
+ * `site_approval.verify_site_card`) rebuilds the card from the digest's inputs
+ * and refuses to sign one whose words differ. A signer older than that check
+ * signs whatever card it shows.
  *
  * WHAT A SIGNATURE BINDS. The signed message is `verify.py`'s
  * `signed_message("decide", session_id, f"{ask_id}#{question_id}#{word}",
@@ -146,12 +154,18 @@ export async function keyIdFor(point: Uint8Array): Promise<string> {
 
 /** DER `SEQUENCE { INTEGER r, INTEGER s }` → raw 64-byte r‖s for WebCrypto.
  *
- * Strict, because the input is attacker-supplied: every length is checked
- * against the buffer, the sequence must consume the whole signature, and each
- * integer must fit 32 bytes once its sign-padding zero is dropped. Anything
- * else is `undefined` (a refusal), never a best-effort guess. */
+ * Canonical DER only, because the input is attacker-supplied: short-form
+ * lengths that match the buffer exactly, the sequence consuming the whole
+ * signature, and each INTEGER minimally encoded and positive — a leading
+ * `0x00` only when the next byte has its top bit set (the sign pad), never a
+ * first byte ≥ `0x80` (a negative number), at most 33 bytes with the pad and
+ * 32 without. Anything else is `undefined` (a refusal), never a best-effort
+ * guess. What this does NOT do is reject a high-`s` signature (`n - s`): ECDSA
+ * accepts both halves, the runtime's `cryptography` verify does too, and a
+ * signer that does not normalise (the Secure Enclave) produces either — the
+ * entry is single-use, so a malleated twin decides nothing new. */
 export function derSignatureToRaw(der: Uint8Array): Uint8Array | undefined {
-  if (der.length < 8 || der.length > 80 || der[0] !== 0x30) return undefined;
+  if (der.length < 8 || der.length > 72 || der[0] !== 0x30) return undefined;
   if (der[1] !== der.length - 2) return undefined;
   const out = new Uint8Array(64);
   let offset = 2;
@@ -160,9 +174,15 @@ export function derSignatureToRaw(der: Uint8Array): Uint8Array | undefined {
     const length = der[offset + 1] ?? 0;
     const start = offset + 2;
     const end = start + length;
-    if (length < 1 || end > der.length) return undefined;
+    if (length < 1 || length > 33 || end > der.length) return undefined;
     let value = der.subarray(start, end);
-    while (value.length > 1 && value[0] === 0x00) value = value.subarray(1);
+    const first = value[0] ?? 0;
+    if (first >= 0x80) return undefined; // negative: r and s are positive
+    if (first === 0x00) {
+      // The only legal leading zero is ONE sign pad before a high-bit byte.
+      if (length === 1 || (value[1] ?? 0) < 0x80) return undefined;
+      value = value.subarray(1);
+    }
     if (value.length > 32) return undefined;
     out.set(value, half * 32 + (32 - value.length));
     offset = end;

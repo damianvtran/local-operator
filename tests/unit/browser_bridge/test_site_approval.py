@@ -107,10 +107,12 @@ def test_every_bound_field_changes_the_question_id() -> None:
 
 def test_the_card_question_is_code_built_and_human_required() -> None:
     question = site_approval.site_ask_question(
-        origin="http://127.0.0.1:8765", node_name="node-a", question_id="site:v1:abc"
+        origin="http://127.0.0.1:8765", node_name="node-a", node_device_id="d_1", entry_id="e"
     )
     assert question["human_required"] is True
-    assert question["question_id"] == "site:v1:abc"
+    assert question["question_id"] == site_approval.site_question_id(
+        node_device_id="d_1", entry_id="e", origin="http://127.0.0.1:8765"
+    )
     assert [option["id"] for option in question["options"]] == ["approve", "deny"]
     assert "http://127.0.0.1:8765" in question["question"]
     assert "node-a" in question["question"]
@@ -153,7 +155,9 @@ def test_a_grant_keeps_its_signed_proof_until_spent() -> None:
     assert bridge_decide_grant_proof(**target, word="approve") is None
 
 
-def _seam(verdict: bool | None, challenge: str, *, capability: bool = False) -> Any:
+def _seam(
+    verdict: bool | None, challenge: str, *, capability: bool = False, cert: Any = None
+) -> Any:
     """``_authority_admitted`` on a minimal stand-in for the runtime server."""
     from local_operator.session.runtime import server as server_mod
 
@@ -171,6 +175,8 @@ def _seam(verdict: bool | None, challenge: str, *, capability: bool = False) -> 
         "operator_sig": "3044",
         "operator_key_id": "kid",
     }
+    if cert is not None:
+        frame["operator_cert"] = cert
     original = server_mod.request_proof_ok
     server_mod.request_proof_ok = lambda **_: capability  # type: ignore[assignment]
     try:
@@ -198,6 +204,43 @@ def test_the_seam_stashes_proof_only_on_a_true_signature_verdict(
     assert bridge_decide_grant_proof(**target, word="approve") == proof
 
 
+def test_a_device_certificate_answer_is_admitted_without_proof() -> None:
+    """R1-4: a paired device's signature (verdict True through its certificate)
+    still admits the decision on the runtime, but no proof is stashed — the
+    node's extension knows only the anchor point, so it would have called the
+    signature "bad"; without proof it refuses as unsigned, whose sentence says
+    to answer from the operator's own computer."""
+    assert _seam(True, "ch", cert={"device": "phone"}) is True
+    target = dict(session_id="sess-seam", ask_id="ask-1", question_id="site:v1:q")
+    assert bridge_decide_grant_seen(**target, word="approve") is True
+    assert bridge_decide_grant_proof(**target, word="approve") is None
+
+
+def test_anchor_policy_fields_omits_an_anchor_whose_key_this_node_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: the extension itself reports ``no_approver`` on a node that holds
+    the anchor's private key — the agent could otherwise sign its own decision
+    straight into ``submit_signed_decision``."""
+    from local_operator.network import identity
+    from local_operator.operator import trust
+    from local_operator.operator.keychain import FileKeyBackend, default_file_path
+
+    held = FileKeyBackend(default_file_path(tmp_path / "held")).create()
+    point = bytes.fromhex(VECTOR["anchor_point"])
+
+    def anchor_for(key_id: str) -> Any:
+        return SimpleNamespace(usable=True, anchor=SimpleNamespace(spki=point, key_id=key_id))
+
+    monkeypatch.setattr(identity, "load", lambda: SimpleNamespace(device_id="d_node"))
+    monkeypatch.setattr(trust, "load_anchor", lambda: anchor_for(held.key_id))
+    assert site_approval.anchor_policy_fields(tmp_path / "held") == {"headlessNode": True}
+    monkeypatch.setattr(trust, "load_anchor", lambda: anchor_for(VECTOR["anchor_key_id"]))
+    assert site_approval.anchor_policy_fields(tmp_path / "held")["operatorKeyId"] == (
+        VECTOR["anchor_key_id"]
+    )
+
+
 # --- the site door on a real session -------------------------------------------------
 
 
@@ -216,10 +259,18 @@ async def _session_with_site_ask(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert session.bridge_runtime is None, "the site door must not need Team Bridge"
     question_id = VECTOR["question_id"]
     question = site_approval.site_ask_question(
-        origin=VECTOR["origin"], node_name="node-a", question_id=question_id
+        origin=VECTOR["origin"],
+        node_name="node-a",
+        node_device_id=VECTOR["node_device_id"],
+        entry_id=VECTOR["entry_id"],
     )
+    assert question["question_id"] == question_id
     receipt = session._enqueue_ask([question], 600)
     assert receipt["ok"], receipt
+    # The ``site`` block survives the queue's projection: it is what the
+    # signer on the operator's machine rebuilds the card from (R1-1).
+    stored = _record(session, receipt["details"]["ask_id"])["questions"][0]
+    assert stored["site"] == question["site"]
     return session, receipt["details"]["ask_id"], question_id
 
 
@@ -271,7 +322,7 @@ async def test_a_signed_site_decision_reaches_the_browser_then_the_record(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reason", ["unsigned_decision", "bad_signature", "wrong_key", "no_live_request"]
+    "reason", ["unsigned_decision", "bad_signature", "wrong_key", "no_live_request", "no_approver"]
 )
 async def test_a_refused_site_decision_records_nothing_and_withdraws_the_grant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str
@@ -290,6 +341,18 @@ async def test_a_refused_site_decision_records_nothing_and_withdraws_the_grant(
     outcome = await session.site_decide(ask_id, question_id, "approve", submit=submit)
     assert outcome["ok"] is False and outcome["code"] == reason
     assert outcome["error"]
+    # Each refusal says ITS cause (R1-4): a node with no anchor in policy is
+    # not a "bad signature", and the signature sentences are not reused for it.
+    from local_operator.i18n.keys import browser_site_approval as copy
+    from local_operator.i18n.messages import render_resolved
+
+    expected = {
+        "unsigned_decision": copy.refused_unsigned(),
+        "bad_signature": copy.refused_bad_signature(),
+        "wrong_key": copy.refused_bad_signature(),
+        "no_approver": copy.refused_no_approver(),
+    }.get(reason, copy.refused_expired())
+    assert outcome["error"] == render_resolved(expected)
     assert sent[0]["sig"] == "" and sent[0]["challenge"] == ""
     assert _record(session, ask_id)["status"] == "open"
     assert not bridge_decide_grant_seen(
@@ -458,7 +521,7 @@ def test_the_terminal_labels_a_site_ask_as_its_own_kind() -> None:
     site = SimpleNamespace(
         questions=[
             site_approval.site_ask_question(
-                origin="https://a.example", node_name="n", question_id="site:v1:x"
+                origin="https://a.example", node_name="n", node_device_id="d", entry_id="e"
             )
         ]
     )
@@ -495,3 +558,163 @@ async def test_the_runtime_op_routes_a_site_question_to_the_site_door(
     with pytest.raises(ValueError, match="agent messages are not active"):
         await handle.bridge_decide(ask_id, "bmsg_1", "approve")
     await session.dispose()
+
+
+# --- R1-1: the card the operator reads is the card the signature approves -------
+#
+# The question text is drawn on the NODE, in a runtime the agent shares a uid
+# with, and the signature covers only the opaque ``site:v1:`` digest. So the
+# SIGNER (the Mac's TUI and desktop route, through ``asks/decision.py``) rebuilds
+# both the digest and the card from the structured ``site`` block before it
+# signs. These cards are built by hand, not through ``site_ask_question``, so
+# the honest one is byte-for-byte what a node publishes and the forged one is
+# what an agent appending to ``asks.jsonl`` could publish.
+
+
+def _card(*, shown_origin: str, bound_origin: str, node: str = "node-a") -> dict[str, Any]:
+    from local_operator.i18n.messages import render
+
+    site = {
+        "node_device_id": VECTOR["node_device_id"],
+        "entry_id": VECTOR["entry_id"],
+        "origin": bound_origin,
+        "scope": "origin",
+        "node_name": node,
+    }
+    return {
+        "id": "site-access",
+        "question": render(
+            "browser.site_approval.question", {"origin": shown_origin, "node": node}, locale="en"
+        ),
+        "options": [
+            {
+                "id": "approve",
+                "label": render("browser.site_approval.option_approve", {}, locale="en"),
+            },
+            {"id": "deny", "label": render("browser.site_approval.option_deny", {}, locale="en")},
+        ],
+        "multi": False,
+        "secret": False,
+        "human_required": True,
+        "question_id": site_approval.site_question_id(
+            node_device_id=VECTOR["node_device_id"],
+            entry_id=VECTOR["entry_id"],
+            origin=bound_origin,
+        ),
+        "site": site,
+    }
+
+
+def _row(question: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(ask_id="a-site", questions=[question])
+
+
+HONEST = "http://127.0.0.1:8765"
+EVIL = "https://evil.example"
+
+
+def test_the_signer_maps_an_honest_card_to_its_decision() -> None:
+    from local_operator.asks.decision import bridge_decision_target
+
+    card = _card(shown_origin=HONEST, bound_origin=HONEST)
+    assert bridge_decision_target(_row(card), {"site-access": ["Approve"]}) == (
+        "a-site",
+        card["question_id"],
+        "approve",
+    )
+
+
+def test_the_card_builder_and_the_signer_agree() -> None:
+    """The node's builder and the signer's check share one template."""
+    from local_operator.asks.decision import bridge_decision_target
+
+    built = site_approval.site_ask_question(
+        origin=HONEST,
+        node_name="node-a",
+        node_device_id=VECTOR["node_device_id"],
+        entry_id=VECTOR["entry_id"],
+    )
+    assert built["question_id"] == VECTOR["question_id"]
+    assert built["site"]["origin"] == HONEST
+    target = bridge_decision_target(_row(built), {"site-access": ["deny"]})
+    assert target is not None and target[2] == "deny"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # The attack in R1-1: the text says loopback, the digest binds evil.example.
+        lambda c: c.update(_card(shown_origin=HONEST, bound_origin=EVIL)),
+        # The site block claims loopback, the digest is evil.example's.
+        lambda c: c.update(question_id=_card(shown_origin=EVIL, bound_origin=EVIL)["question_id"]),
+        # Labels swapped: the operator taps "Deny" and signs approve.
+        lambda c: c.update(
+            options=[{"id": "approve", "label": "Deny"}, {"id": "deny", "label": "Approve"}]
+        ),
+        # Free agent prose appended to the code-built sentence.
+        lambda c: c.update(question=c["question"] + " (safe: it is only loopback)"),
+        # No structured block at all: nothing to check the digest against.
+        lambda c: c.pop("site"),
+        lambda c: c.update(site={**c["site"], "origin": 7}),
+    ],
+    ids=["text-a-id-b", "block-a-id-b", "labels-swapped", "extra-prose", "no-block", "bad-block"],
+)
+def test_the_signer_refuses_a_card_it_cannot_rebuild(mutate) -> None:
+    from local_operator.asks.decision import bridge_decision_target
+
+    card = _card(shown_origin=HONEST, bound_origin=HONEST)
+    mutate(card)
+    with pytest.raises(site_approval.SiteCardMismatch) as caught:
+        bridge_decision_target(_row(card), {"site-access": ["Approve"]})
+    assert caught.value.code == "site_card_mismatch"
+    assert "not signed" in str(caught.value)
+
+
+def test_a_card_drawn_in_another_shipped_locale_still_verifies() -> None:
+    """The node renders in ITS language; the Mac may run another. Any shipped
+    locale's template over the SAME bound fields is honest — the template is
+    code, only the fields vary, and the fields are what the digest binds."""
+    from local_operator.asks.decision import bridge_decision_target
+    from local_operator.i18n.messages import render
+
+    card = _card(shown_origin=HONEST, bound_origin=HONEST)
+    card["question"] = render(
+        "browser.site_approval.question", {"origin": HONEST, "node": "node-a"}, locale="fr"
+    )
+    card["options"] = [
+        {"id": "approve", "label": render("browser.site_approval.option_approve", {}, locale="fr")},
+        {"id": "deny", "label": render("browser.site_approval.option_deny", {}, locale="fr")},
+    ]
+    assert bridge_decision_target(_row(card), {"site-access": ["approve"]}) is not None
+
+
+@pytest.mark.parametrize("shown", [HONEST, EVIL], ids=["mislabeled", "honest"])
+def test_the_terminal_owner_door_signs_only_an_honest_card(shown: str) -> None:
+    """The TUI's ``_deliver_owner_answer`` (the attached facade signs on the way
+    out) refuses a mislabeled card with the typed sentence and never calls the
+    signing door; the honest card reaches it."""
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.ask_queue import AskRow
+
+    decided: list[tuple[str, str, str]] = []
+    session = SimpleNamespace(bridge_decide=lambda *target: decided.append(target) or {"ok": True})
+    card = _card(shown_origin=shown, bound_origin=EVIL)
+    row = AskRow(
+        ask_id="a-site",
+        status="pending",
+        created_at=0,
+        expires_at=0,
+        urgent=False,
+        questions=(card,),
+    )
+    # Unbound: the method reads nothing off the app, and a mounted TUI adds
+    # nothing to what is under test (the door the row picks).
+    deliver: Any = OperatorApp._deliver_owner_answer
+    verdict = deliver(SimpleNamespace(), session, row, "a-site", {"site-access": ["Approve"]})
+    if shown == EVIL:
+        assert decided == [("a-site", card["question_id"], "approve")]
+    else:
+        assert decided == []
+        assert verdict["ok"] is False
+        assert verdict["code"] == "site_card_mismatch"
+        assert "not signed" in verdict["error"]

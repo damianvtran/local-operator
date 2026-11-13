@@ -13548,7 +13548,7 @@ class Session:
             reason = str(result.get("reason") or "")
             copy = {
                 "unsigned_decision": _copy.refused_unsigned(),
-                "no_approver": _copy.refused_bad_signature(),
+                "no_approver": _copy.refused_no_approver(),
                 "wrong_key": _copy.refused_bad_signature(),
                 "bad_signature": _copy.refused_bad_signature(),
             }.get(reason, _copy.refused_expired())

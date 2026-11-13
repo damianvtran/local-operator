@@ -30372,7 +30372,17 @@ class OperatorApp(App[None]):
         hands either to ``_handle_ask_outcome``, which reports an awaitable from
         the worker it raises rather than blocking the key.
         """
-        target = bridge_decision_target(row, answers or {}) if row is not None else None
+        try:
+            target = bridge_decision_target(row, answers or {}) if row is not None else None
+        except ValueError as refusal:
+            # The signer refused a site card it could not rebuild (R1-1,
+            # ``site_approval.verify_site_card``): nothing is signed or sent,
+            # and the refusal reaches the user in its own keyed words.
+            return {
+                "ok": False,
+                "error": str(refusal),
+                "code": str(getattr(refusal, "code", "") or "decision_refused"),
+            }
         decider: Any = getattr(session, "bridge_decide", None)
         if target is not None and callable(decider):
             try:

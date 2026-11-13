@@ -118,6 +118,26 @@ test("DER → raw: 64 bytes, verifies under WebCrypto; malformed DER is refused"
   assert.equal(mod.derSignatureToRaw(new Uint8Array([...der, 0x00])), undefined, "trailing byte");
 });
 
+test("DER → raw accepts canonical DER only (review R1-3)", () => {
+  // The golden r and s both carry their one legal sign pad (0x00 before a
+  // byte ≥ 0x80); each case below re-encodes them non-canonically.
+  const der = mod.hexToBytes(VECTOR.sig_der);
+  const r = der.subarray(4, 4 + der[3]);
+  const sOffset = 4 + der[3];
+  const s = der.subarray(sOffset + 2, sOffset + 2 + der[sOffset + 1]);
+  const int = (bytes) => [0x02, bytes.length, ...bytes];
+  const seq = (a, b) => new Uint8Array([0x30, a.length + b.length, ...a, ...b]);
+  assert.ok(mod.derSignatureToRaw(seq(int(r), int(s))), "the canonical re-encoding parses");
+  assert.equal(mod.derSignatureToRaw(seq(int([0x00, ...r]), int(s))), undefined, "a second leading zero");
+  assert.equal(mod.derSignatureToRaw(seq(int(r.subarray(1)), int(s))), undefined, "no sign pad: negative r");
+  assert.equal(mod.derSignatureToRaw(seq(int(r), int(s.subarray(1)))), undefined, "no sign pad: negative s");
+  const small = Array.from({ length: 31 }, () => 0x11);
+  assert.ok(mod.derSignatureToRaw(seq(int(small), int(s))), "a short positive r parses");
+  assert.equal(mod.derSignatureToRaw(seq(int([0x00, ...small]), int(s))), undefined, "a pad before a low byte");
+  assert.equal(mod.derSignatureToRaw(seq(int([0x00]), int(s))), undefined, "a lone zero (r = 0)");
+  assert.equal(mod.derSignatureToRaw(seq(int([0x00, 0x00, ...r.subarray(1)]), int(s))), undefined, "34-byte r");
+});
+
 test("a good signature from the anchor approves exactly its entry, as an exact-origin grant", async () => {
   const { result, h } = await submit({});
   assert.deepEqual(result, { applied: true, origin: VECTOR.origin, state: "allowed" });

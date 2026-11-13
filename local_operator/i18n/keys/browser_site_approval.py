@@ -30,8 +30,16 @@ def refused_bad_signature() -> Msg:
     return Msg("browser.site_approval.refused_bad_signature", {})
 
 
+def refused_card_mismatch() -> Msg:
+    return Msg("browser.site_approval.refused_card_mismatch", {})
+
+
 def refused_expired() -> Msg:
     return Msg("browser.site_approval.refused_expired", {})
+
+
+def refused_no_approver() -> Msg:
+    return Msg("browser.site_approval.refused_no_approver", {})
 
 
 def refused_unreachable() -> Msg:

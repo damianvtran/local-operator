@@ -2270,6 +2270,10 @@ class AskRowQuestion(AskQuestion):
     human_required: bool = False
     #: The authority block frozen at issuance (S-3), present only when supplied.
     bridge: dict[str, Any] | None = None
+    #: A headless node's site approval: the inputs its ``site:v1:`` question id
+    #: binds, so the SIGNER can rebuild the id and the card it shows
+    #: (``browser_bridge/site_approval.verify_site_card``). Present only then.
+    site: dict[str, Any] | None = None
     # The row's options are the strict option PLUS the carriage's id, so the
     # field narrows to the seat-bearing subclass. A list is mutable and therefore
     # invariant, which pyright reports even though every ``AskRowOption`` IS an

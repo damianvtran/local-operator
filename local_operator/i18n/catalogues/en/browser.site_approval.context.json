@@ -17,7 +17,7 @@
   "browser.site_approval.refused_unsigned": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
-    "note": "toast when a site approval is answered from a surface that cannot sign (e.g. the node's own terminal)"
+    "note": "toast when a site approval is answered from a surface that cannot sign with the operator key itself (the node's own terminal, or a paired phone whose device certificate the node's browser does not accept)"
   },
   "browser.site_approval.refused_bad_signature": {
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
@@ -38,5 +38,15 @@
     "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
     "tone": "plain, calm, operator-facing; URLs and product names verbatim",
     "note": "title line of the terminal ask card for a site approval; starts lowercase after a '?' glyph the code prepends"
+  },
+  "browser.site_approval.refused_card_mismatch": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast on the operator's own computer when it refuses to sign a site approval card because the card's words or hidden id do not match the site it would approve (possible tampering on the node, or the two machines run different versions)"
+  },
+  "browser.site_approval.refused_no_approver": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the node's browser has no operator public key configured, so no signed answer can be checked there"
   }
 }
