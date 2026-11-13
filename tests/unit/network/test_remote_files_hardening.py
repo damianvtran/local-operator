@@ -118,9 +118,7 @@ def test_r1_1_the_cache_never_builds_a_path_from_a_malformed_name(tmp_path: Path
 
 
 @pytest.mark.parametrize("linked_part", ["cache", "remote-files"])
-def test_eviction_never_follows_a_cache_directory_symlink(
-    tmp_path: Path, linked_part: str
-) -> None:
+def test_eviction_never_follows_a_cache_directory_symlink(tmp_path: Path, linked_part: str) -> None:
     root = tmp_path / "config"
     authoritative = _blob(root / "attachments", b"ONLY AUTHORITATIVE COPY")
     directory = remote_cache.cache_root(root)

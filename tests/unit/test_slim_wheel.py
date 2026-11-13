@@ -155,8 +155,7 @@ def test_repack_uses_maximum_lossless_compression(tmp_path: Path) -> None:
     # Structured resources distinguish level 9 from the default level 6; a
     # tiny repeated string would compress identically and miss the regression.
     payload = b"".join(
-        f'{{"id":{i},"label":"runtime resource","enabled":true}}\n'.encode()
-        for i in range(4000)
+        f'{{"id":{i},"label":"runtime resource","enabled":true}}\n'.encode() for i in range(4000)
     )
     expected_sizes = {}
     for level in (6, 9):
