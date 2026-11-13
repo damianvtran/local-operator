@@ -156,6 +156,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
+from local_operator.network import routing_sync
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.network.relay import RelayServer
 
@@ -1186,6 +1188,17 @@ def _apply_bundle_locked(
                 result = {"outcome": "refused", "reason": str(exc)}
             index_dirty = index_dirty or bool(result.pop("index_dirty", False))
             summary[OPERATOR_INSTRUCTIONS_KIND] = result
+    raw_routing = bundle.get(routing_sync.ROUTING_KIND)
+    if raw_routing is not None:
+        # Its own summary key for the same reason as the instructions: a node that
+        # kept its own chain is a state to report, never a refused create.
+        try:
+            routing_result = routing_sync.apply_routing_locked(root, raw_routing, origin, index)
+        except Exception as exc:  # noqa: BLE001 — the rows above already landed
+            logger.debug("definitions: could not apply routing", exc_info=True)
+            routing_result = {"outcome": "refused", "reason": str(exc)}
+        index_dirty = index_dirty or bool(routing_result.pop("index_dirty", False))
+        summary[routing_sync.ROUTING_KIND] = routing_result
     if index_dirty:
         write_index(root, index)
     return summary
@@ -1736,6 +1749,9 @@ def definition_state(
         "agents": agents,
         "teams": teams,
         OPERATOR_INSTRUCTIONS_KIND: operator_instructions_state(root),
+        # ADDITIVE: the failover routing mirror (``routing_sync``). Its presence is
+        # how a sender knows this build can hold it; an older peer omits it.
+        routing_sync.ROUTING_KIND: routing_sync.routing_state(root),
     }
 
 
@@ -1828,8 +1844,24 @@ def push_to_peer(
         row for row in bundle["teams"] if remote_teams.get(str(row["name"])) != digest_of(row)
     ]
     instructions_out, instructions_report = _instructions_to_send(bundle, remote)
+    # Failover routing is read HERE, not in ``local_bundle``: it is not a named
+    # definition a create pins, and keeping it out of the bundle digest leaves the
+    # create path's ``expect`` contract untouched. The cadence calls this every
+    # STATE_MIN_INTERVAL_S per reachable member, so an edited chain still reaches
+    # a node within about a minute.
+    routing_out, routing_report = routing_sync.to_send(
+        routing_sync.local_row(server.root),
+        remote,
+        origin=str(bundle.get("origin_device") or ""),
+        root=server.root,
+    )
     peer_label = _peer_sentence(server, device_id)
-    if not missing_agents and not missing_teams and instructions_out is None:
+    if (
+        not missing_agents
+        and not missing_teams
+        and instructions_out is None
+        and routing_out is None
+    ):
         _attach_instructions_notice(instructions_report, peer_label=peer_label)
         return {
             "ok": True,
@@ -1848,6 +1880,7 @@ def push_to_peer(
             "teams": {str(row["name"]): digest_of(row) for row in bundle["teams"]},
             "withheld": bundle.get("withheld") or [],
             OPERATOR_INSTRUCTIONS_KIND: instructions_report,
+            routing_sync.ROUTING_KIND: routing_report,
         }
     outbound = {
         "kind": BUNDLE_KIND,
@@ -1858,6 +1891,8 @@ def push_to_peer(
     }
     if instructions_out is not None:
         outbound[OPERATOR_INSTRUCTIONS_KIND] = instructions_out
+    if routing_out is not None:
+        outbound[routing_sync.ROUTING_KIND] = routing_out
     try:
         reply = link.request(
             {
@@ -1898,6 +1933,17 @@ def push_to_peer(
             else {"outcome": "no_answer"}
         )
     _attach_instructions_notice(instructions_report, peer_label=peer_label)
+    if routing_out is not None:
+        answered_routing = summary.get(routing_sync.ROUTING_KIND)
+        routing_report = (
+            {
+                key: answered_routing[key]
+                for key in ("outcome", "reason", "installed", "updated", "removed", "kept")
+                if answered_routing.get(key)
+            }
+            if isinstance(answered_routing, Mapping)
+            else {"outcome": "no_answer"}
+        )
     ok = not conflicts and not refused
     # WHAT WAS SENT, named by what actually moved (QA round 1, Q-2): a push that
     # carried only the instructions used to read "sent 0 agents and 0 team
@@ -1911,6 +1957,8 @@ def push_to_peer(
         )
     if instructions_out is not None:
         sent.append("the custom instructions")
+    if routing_out is not None:
+        sent.append("the failover routing")
     return {
         "ok": ok,
         "code": "applied" if ok else "conflict",
@@ -1935,6 +1983,7 @@ def push_to_peer(
         "agents": {str(row["name"]): digest_of(row) for row in bundle["agents"]},
         "teams": {str(row["name"]): digest_of(row) for row in bundle["teams"]},
         OPERATOR_INSTRUCTIONS_KIND: instructions_report,
+        routing_sync.ROUTING_KIND: routing_report,
     }
 
 
@@ -2460,6 +2509,13 @@ def make_handler(server: "RelayServer") -> Callable[[Any, dict[str, Any]], dict[
                             OPERATOR_INSTRUCTIONS_KIND: str(
                                 (summary.get(OPERATOR_INSTRUCTIONS_KIND) or {}).get("outcome") or ""
                             ),
+                            # Unit NAMES and the outcome, never a chain's hops.
+                            routing_sync.ROUTING_KIND: {
+                                key: list(
+                                    (summary.get(routing_sync.ROUTING_KIND) or {}).get(key) or []
+                                )
+                                for key in ("installed", "updated", "removed")
+                            },
                         },
                     )
                 )
