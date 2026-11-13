@@ -40,7 +40,7 @@ from local_operator.session.placement import SessionPlacement
 
 if TYPE_CHECKING:  # both are function-local at runtime (see the module docstring)
     from local_operator.mobile.attach_client import AttachClient
-    from local_operator.session.runtime.launch import WarmErrand
+    from local_operator.session.runtime.launch import EngageOutcome, WarmErrand
     from local_operator.session.runtime.types import SessionRecord
 
 
@@ -100,13 +100,21 @@ class SessionOwner(Protocol):
         """
         ...
 
-    async def engage(self, *, cwd: str, warm: "WarmErrand", **kwargs: Any) -> None:
+    async def engage(
+        self, *, cwd: str, warm: "WarmErrand", **kwargs: Any
+    ) -> "EngageOutcome | None":
         """Make an owner exist, or join one that is starting.
 
         ``kwargs`` carries the bind loop's own budgets (``preempt``,
-        ``preempt_budget_s``), which the local implementation forwards to
-        ``launch.engage_runtime`` and a remote one ignores — it has no local
-        spawn to preempt.
+        ``preempt_budget_s`` and, on a re-engage, ``deadline_s``), which the
+        local implementation forwards to ``launch.engage_runtime`` and a remote
+        one ignores — it has no local spawn to preempt.
+
+        Returns the engage's outcome when the owner has one to give (the local
+        form does), else ``None``. The bind reads one fact from it: a
+        ``LEAVING_DETAIL`` answer means the record it found belongs to an owner
+        that is retiring, so a record that vanishes moments later is that
+        owner's unpublish, not a failed start — and is worth one re-engage.
         """
         ...
 
@@ -148,16 +156,23 @@ class LocalOwner:
 
         return find_runtime_record(self._config_dir, self._session_id)
 
-    async def engage(self, *, cwd: str, warm: "WarmErrand", **kwargs: Any) -> None:
+    async def engage(self, *, cwd: str, warm: "WarmErrand", **kwargs: Any) -> "EngageOutcome":
         from local_operator.session.runtime.launch import engage_runtime
 
-        await engage_runtime(
+        # ``deadline_s`` is forwarded only when the caller set one (the bind's
+        # re-engage, clamped to what is left of its own budget), so every
+        # first engage makes exactly the call it made before this seam.
+        extra: dict[str, Any] = {}
+        if "deadline_s" in kwargs:
+            extra["deadline_s"] = kwargs["deadline_s"]
+        return await engage_runtime(
             self._session_id,
             cwd,
             warm,
             config_dir=self._config_dir,
             preempt=kwargs.get("preempt"),
             preempt_budget_s=kwargs.get("preempt_budget_s", 0.0),
+            **extra,
         )
 
     def make_client(

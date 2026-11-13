@@ -4904,6 +4904,7 @@ class AttachedSession:
             return
         from local_operator.mobile.attach_client import dialable_owner_record
         from local_operator.session.runtime.launch import (
+            LEAVING_DETAIL,
             ActionableConnectionError,
             RuntimeStartupError,
             WarmErrand,
@@ -4919,48 +4920,69 @@ class AttachedSession:
         # None.
         preempt = None if foreground else self._foreground_arrived
 
-        try:
-            # ROUTED THROUGH THE OWNER SEAM (§3.1): "is there a runtime, and whose
-            # job is it to start one?" is a question a local install answers from
-            # ``run/mobile`` and a mesh viewer answers by asking the peer. The
-            # facade does not learn which — it hands over the errand and the
-            # budgets it has always handed over.
-            await self._owner.engage(
-                cwd=self._cwd,
-                warm=WarmErrand(
-                    initial_model=self._birth_model,
-                    model_selection_override=self._model_selection_override,
-                ),
-                # The engage yields TIME, not the runtime: a candidate it
-                # spawned keeps constructing and the foreground caller's own
-                # engage finds it. See `engage_runtime`'s docstring for why a
-                # shortened deadline rather than a cancellation.
-                preempt=preempt,
-                preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
-            )
-        except TimeoutError as error:
-            # The engage ran out of deadline — either its own 30 s or, when a
-            # foreground caller arrived, the yield budget above. Both mean the
-            # same thing to this caller (no runtime was reached in the time
-            # available), and `_ensure_bound` is documented to fail with
-            # `ConnectionError`, so a bare `TimeoutError` escaping here would
-            # reach surfaces that only catch the latter.
-            logger.debug("engage timed out for %s: %s", self._session_id, error)
-            raise ConnectionError(self._unavailable_reason()) from error
-        except RuntimeStartupError as error:
-            # engage_runtime now fails FAST once no candidate can start,
-            # carrying the child's own cause. Re-raised as ConnectionError
-            # so it takes the existing owner-unavailable path, but keeping
-            # the vetted user-facing sentence when there is one, instead of
-            # a generic timeout nobody can act on (QA Q1).
-            logger.warning("engage failed for %s: %s", self._session_id, error)
-            # The vetted sentence rides a TYPE, so a relay can echo it
-            # without having to guess from the text which messages are safe
-            # to show. Anything unvetted stays a plain ConnectionError and
-            # gets the generic sentence at the surface.
-            if error.actionable:
-                raise ActionableConnectionError(error.actionable) from error
-            raise ConnectionError(self._unavailable_reason()) from error
+        async def _engage(**extra: Any) -> Any:
+            """One engage through the owner seam, its failures mapped to ``ConnectionError``.
+
+            A helper rather than inline so the leaving-owner re-engage below
+            takes exactly the same error mapping as the first engage.
+            """
+            try:
+                # ROUTED THROUGH THE OWNER SEAM (§3.1): "is there a runtime, and whose
+                # job is it to start one?" is a question a local install answers from
+                # ``run/mobile`` and a mesh viewer answers by asking the peer. The
+                # facade does not learn which — it hands over the errand and the
+                # budgets it has always handed over.
+                return await self._owner.engage(
+                    cwd=self._cwd,
+                    warm=WarmErrand(
+                        initial_model=self._birth_model,
+                        model_selection_override=self._model_selection_override,
+                    ),
+                    # The engage yields TIME, not the runtime: a candidate it
+                    # spawned keeps constructing and the foreground caller's own
+                    # engage finds it. See `engage_runtime`'s docstring for why a
+                    # shortened deadline rather than a cancellation.
+                    preempt=preempt,
+                    preempt_budget_s=_BACKGROUND_YIELD_BUDGET_S,
+                    **extra,
+                )
+            except TimeoutError as error:
+                # The engage ran out of deadline — either its own 30 s or, when a
+                # foreground caller arrived, the yield budget above. Both mean the
+                # same thing to this caller (no runtime was reached in the time
+                # available), and `_ensure_bound` is documented to fail with
+                # `ConnectionError`, so a bare `TimeoutError` escaping here would
+                # reach surfaces that only catch the latter.
+                logger.debug("engage timed out for %s: %s", self._session_id, error)
+                raise ConnectionError(self._unavailable_reason()) from error
+            except RuntimeStartupError as error:
+                # engage_runtime now fails FAST once no candidate can start,
+                # carrying the child's own cause. Re-raised as ConnectionError
+                # so it takes the existing owner-unavailable path, but keeping
+                # the vetted user-facing sentence when there is one, instead of
+                # a generic timeout nobody can act on (QA Q1).
+                logger.warning("engage failed for %s: %s", self._session_id, error)
+                # The vetted sentence rides a TYPE, so a relay can echo it
+                # without having to guess from the text which messages are safe
+                # to show. Anything unvetted stays a plain ConnectionError and
+                # gets the generic sentence at the surface.
+                if error.actionable:
+                    raise ActionableConnectionError(error.actionable) from error
+                raise ConnectionError(self._unavailable_reason()) from error
+
+        outcome = await _engage()
+        # THE OWNER WAS RETIRING WHEN WE ENGAGED. ``engage_runtime`` answers a
+        # warm engage on a ``leaving`` record with ``LEAVING_DETAIL`` and spawns
+        # nothing, because the record is still published. A retiring owner
+        # unpublishes only after its dispose (exit record written, sockets
+        # closed, lease released), so the locate below can find the record gone
+        # milliseconds later. Without a second engage that vanished record is
+        # reported as "could not start a runtime" and nothing ever starts the
+        # successor: a refresh-cold viewer stayed disconnected until the next
+        # keystroke (CI witness: #3823, job 131924458441). One re-engage, inside
+        # this bind's own budget, and only after a LEAVING answer — a record
+        # that vanished with no such answer keeps today's error.
+        reengage_pending = getattr(outcome, "detail", None) == LEAVING_DETAIL
         # Re-checked AFTER the engage, which is the long await here (a
         # spawn plus up to ~2 s of construction). The TUI engages at mount
         # now, so `/resume` or `/new` typed in that first second disposes
@@ -5042,6 +5064,31 @@ class AttachedSession:
                 # candidate doomed to lose the race while telling the user their
                 # session has no runtime.
                 record = await asyncio.to_thread(dialable_owner_record, self._config_dir, owner)
+            if record is None and owner is None and reengage_pending:
+                # The retiring owner's unpublish (see ``reengage_pending``):
+                # no record and no lease holder, so this engage spawns the
+                # successor. AT MOST ONCE — the flag clears before the await —
+                # and clamped to what is left of this bind's budget, so the
+                # retry neither loops nor widens any deadline. The successor's
+                # record is re-read inline rather than via ``continue``, which
+                # would spend a bind attempt (and on the last one fall out of
+                # the loop with nothing bound and nothing raised).
+                reengage_pending = False
+                remaining = _effective_deadline() - time.monotonic()
+                if remaining > 0:
+                    logger.debug(
+                        "owner of %s retired mid-bind; engaging its successor", self._session_id
+                    )
+                    await _engage(deadline_s=remaining)
+                    if self._disposed:
+                        if last_error is not None:
+                            raise last_error
+                        return
+                    record, owner = await asyncio.to_thread(self._owner.locate)
+                    if record is None and owner is not None:
+                        record = await asyncio.to_thread(
+                            dialable_owner_record, self._config_dir, owner
+                        )
             if record is None:
                 # No record at all is not a transient the way a refused
                 # dial is — ``engage_runtime`` returned, so one existed
@@ -9286,9 +9333,36 @@ class AttachedSession:
             remaining = cold_deadline - time.monotonic()
             return min(seconds, remaining) if remaining > 0 else seconds
 
+        def _refresh_for_retired_owner() -> None:
+            """The exit-record refresh arm, shared by the per-pass check and the deadline.
+
+            One body so the deadline's last look (agent review round 1 of
+            #3797, m2) cannot drift from the pass that normally takes it.
+            """
+            logger.info(
+                "owner of %s retired for a newer build (exit record); "
+                "refreshing instead of recovering",
+                self._session_id,
+            )
+            self._suspect_generation = None
+            # Cleared before ``_go_cold`` so the refresh callback's engage
+            # sees the same state as the frame path, where recovery never
+            # started.
+            self._recovering = False
+            self._go_cold(refresh=True)
+
         try:
             while not self._disposed:
                 if time.monotonic() >= cold_deadline:
+                    # ONE LAST LOOK AT THE EXIT RECORD before any give-up. The
+                    # per-pass check below runs after this branch, so a record
+                    # the owner wrote during the final paced sleep was never
+                    # read and the viewer went cold with refresh=False — no
+                    # successor engaged (agent review round 1 of #3797, m2).
+                    # Read once, here; no deadline is widened.
+                    if await self._lost_owner_retired_for_refresh(lost_run):
+                        _refresh_for_retired_owner()
+                        return
                     if self._can_go_cold:
                         logger.info(
                             "no runtime for %s after %.0fs; the viewer is going cold",
@@ -9415,17 +9489,7 @@ class AttachedSession:
                     # Checked on EVERY pass, not once: the owner writes
                     # its exit record on its way out, which can be after the socket
                     # dropped.
-                    logger.info(
-                        "owner of %s retired for a newer build (exit record); "
-                        "refreshing instead of recovering",
-                        self._session_id,
-                    )
-                    self._suspect_generation = None
-                    # Cleared before ``_go_cold`` so the refresh callback's engage
-                    # sees the same state as the frame path, where recovery never
-                    # started.
-                    self._recovering = False
-                    self._go_cold(refresh=True)
+                    _refresh_for_retired_owner()
                     return
                 # A PEER-HELD SESSION ASKS THE OWNER SEAM, as the read attach already
                 # does (``locate`` above): a scan of THIS machine's run directory

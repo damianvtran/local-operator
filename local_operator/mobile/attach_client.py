@@ -220,9 +220,10 @@ OVERSIZED_FRAME_REASON = "owner sent a frame too large to read"
 #: A transport error that follows one of them must not replace it. The owner
 #: socket is loopback TCP, and an owner that closes while the viewer's own
 #: outbound bytes sit unread in its receive buffer can make the kernel send an
-#: RST rather than a FIN (RFC 2525 §2.17; the owner closes at
-#: ``RuntimeServer._drop_client``). The pump then reads the announced frame
-#: and, on its NEXT read, gets ``ConnectionResetError``, so the bare
+#: RST rather than a FIN — the likely mechanism (RFC 2525 §2.17), inferred from
+#: the observed reset rather than established by a capture; the owner closes at
+#: ``RuntimeServer._drop_client``. What is observed: the pump reads the
+#: announced frame and, on its NEXT read, gets ``ConnectionResetError``, so the bare
 #: ``reason = "owner connection reset"`` assignment in :meth:`AttachClient._pump`
 #: overwrote a retirement the frame had already stated, and the viewer recovered
 #: a planned refresh as owner death.
