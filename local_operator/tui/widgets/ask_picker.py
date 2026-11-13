@@ -489,6 +489,12 @@ class _CardLayout:
     #: not afford). Composed once in ``tui/notify.py``; fitted to the card's
     #: width by :meth:`AskPickerScreen._remote_hint_text`.
     remote_hint: str
+    #: The question's suggested terminal command (``AskQuestion.command``) as
+    #: one ``$ <command>`` line fitted to the width, or ``""`` when the question
+    #: carries none (or the budget could not afford it). Display only: the TUI
+    #: offers no action for it (the desktop app does); see
+    #: :meth:`AskPickerScreen._command_text`.
+    command_line: str
     #: The title and its rule, which are shown or dropped together.
     show_title: bool
     space_above: bool
@@ -1634,6 +1640,31 @@ class AskPickerScreen(Container):
                 return rung
         return truncate_cells(rungs[-1], max(1, width))
 
+    def _command_text(self, width: int) -> str:
+        """The question's suggested command as one ``$ <command>`` line, or ``""``.
+
+        ``AskQuestion.command`` is a one-line shell command the agent suggests
+        the user run (core refuses control and format characters, so it is a
+        single printable line). The TUI only SHOWS it — in ``dim``, under the
+        question, where inline code in the prose used to be the only trace —
+        and offers no action: running it is the desktop app's confirmed flow.
+        ``$`` is the universal shell-prompt mark, not copy, so the line needs no
+        catalogue key. A command wider than the card is cut with the card's own
+        ``truncate_cells`` mark rather than wrapped, so a long one never pushes
+        the options down; the full text stays in the ask's tool call.
+
+        Read with ``getattr``: a question that predates the field (or a
+        duck-typed test stand-in) has no attribute, and must draw exactly as
+        before.
+        """
+        command = getattr(self.question, "command", None)
+        if not isinstance(command, str) or not command.strip():
+            return ""
+        line = f"$ {command.strip()}"
+        if cell_len(line) <= width:
+            return line
+        return truncate_cells(line, max(1, width))
+
     def _question_lines(self, width: int, *, reveal: bool) -> list[str]:
         """The question, wrapped and bounded by what the BODY can spare.
 
@@ -1966,6 +1997,7 @@ class AskPickerScreen(Container):
             + len(line_list)  # every option's label and its capped description
             + 1  # the windowing line, where the list turns out to need one
             + 1  # the footer
+            + (1 if self._command_text(self._card_width()) else 0)  # `$ <command>`
         )
         return min(room, wanted)
 
@@ -2278,6 +2310,7 @@ class AskPickerScreen(Container):
                 content_width=width,
                 question=tuple(first),
                 remote_hint="",
+                command_line="",
                 show_title=False,
                 space_above=False,
                 space_below=False,
@@ -2327,6 +2360,17 @@ class AskPickerScreen(Container):
             remaining -= 1
         else:
             hint = ""
+        # 6c. The question's suggested command, bought on the same terms as the
+        # remote hint and after it: it helps the user act on the question but
+        # must never cost the card an answer, its title, or the line saying
+        # where the gate lives. `_body_rows` counts it in `wanted`, so on any
+        # terminal with room it is drawn. A question without one computes ""
+        # here, so every frame drawn before the field existed is byte-identical.
+        command_line = self._command_text(width)
+        if command_line and remaining >= 1:
+            remaining -= 1
+        else:
+            command_line = ""
         # 7a is GONE. The reveal is no longer a constant-height block bought
         # here out of the option rows' remainder; it is a per-row cap LIFT on
         # the SELECTED row inside the ONE line viewport (§4, :meth:`_cap_for_row`).
@@ -2447,6 +2491,7 @@ class AskPickerScreen(Container):
             content_width=content_width,
             question=tuple(kept),
             remote_hint=hint,
+            command_line=command_line,
             show_title=show_title,
             space_above=space_above,
             space_below=space_below,
@@ -2956,6 +3001,12 @@ class AskPickerScreen(Container):
             # ink). One row, shed whole-clause in `_remote_hint_text`.
             newline(None)
             out.append(layout.remote_hint, style=muted)
+        if layout.command_line:
+            # The suggested command, `dim`: reference text the user may copy,
+            # quieter than the remote hint (which guards an allow) and than the
+            # question itself.
+            newline(None)
+            out.append(layout.command_line, style=dim)
         if layout.space_above:
             newline(None)
 

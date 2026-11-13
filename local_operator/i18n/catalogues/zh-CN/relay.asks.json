@@ -76,5 +76,9 @@
   "relay.asks.duration.less_than_minute": "<1 分钟",
   "relay.asks.duration.minutes": "{count, number} 分钟",
   "relay.asks.duration.hours": "{count, number} 小时",
-  "relay.asks.duration.days": "{count, number} 天"
+  "relay.asks.duration.days": "{count, number} 天",
+  "relay.asks.card.command.label": "建议的命令",
+  "relay.asks.card.command.copy": "复制",
+  "relay.asks.card.command.copied": "已复制",
+  "relay.asks.card.command.copy_failed": "无法复制——命令已选中，请从那里复制"
 }

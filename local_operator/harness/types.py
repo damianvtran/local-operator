@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 import urllib.parse
 import uuid
 from collections.abc import Iterable
@@ -1974,6 +1975,46 @@ class AskOption(BaseModel):
 # is PRE-TICKED: on a multi-select the visible ticks are the answer, and the
 # user builds them (see the pinned picker test). Consumers read
 # `recommended_rows`, never `recommended`, so a set cannot be half-drawn.
+#: The longest suggested command an ask may carry, in characters (after strip).
+#: A one-liner the user is expected to READ before running it; the desktop's
+#: Run confirmation shows the exact bytes untruncated, so the cap keeps that
+#: dialog legible and bounds what a row adds to every frame that carries it.
+ASK_COMMAND_MAX_CHARS = 500
+
+#: Unicode categories a suggested command may not contain. ``Cc`` covers C0,
+#: DEL and C1 — newline, carriage return, tab and ESC — so one command can never
+#: smuggle a second line, an Enter, or a bracketed-paste terminator into the
+#: terminal it is typed into. ``Cf`` covers bidi overrides, zero-width
+#: characters and the BOM, which make the bytes a user reviews differ from the
+#: bytes that run (Trojan Source). ``Zl``/``Zp`` are line/paragraph separators
+#: some terminals and renderers treat as a newline.
+_ASK_COMMAND_REFUSED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def ask_command_problem(command: str) -> str | None:
+    """Why ``command`` (already stripped) cannot ride an ask, or ``None``.
+
+    The ONE rule for the ``AskQuestion.command`` field, shared by the tool's
+    validator and by ``asks/queue._question_shape`` (which re-applies it to rows
+    that reach the queue without passing the tool, e.g. a hand-built or older
+    projection), so the two can never drift. Characters are REFUSED, never
+    stripped: the message goes back to the model, which can correct the
+    command, whereas silently rewriting it would put a command in front of the
+    user that nobody wrote.
+    """
+    if not command:
+        return "command is empty; omit it instead"
+    if len(command) > ASK_COMMAND_MAX_CHARS:
+        return f"command is longer than {ASK_COMMAND_MAX_CHARS} characters"
+    for char in command:
+        if unicodedata.category(char) in _ASK_COMMAND_REFUSED_CATEGORIES:
+            return (
+                f"command must be one plain line: U+{ord(char):04X} "
+                f"({unicodedata.name(char, 'control character')}) is not allowed"
+            )
+    return None
+
+
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -2015,8 +2056,66 @@ class AskQuestion(BaseModel):
         ),
     )
 
+    # A SUGGESTED terminal command for the user (e.g. `glab auth login`), so a
+    # surface can offer it as an action instead of the user copying inline code
+    # out of the prose: the desktop app types it into a NEW terminal tab on the
+    # device showing the card (Insert) or, after a confirmation dialog, types
+    # and runs it (Run). Nothing ever runs it without that click + confirm. One
+    # per question, not per option, to keep the card to one action row. Allowed
+    # with `secret` ("run `gh auth token`, paste the result"). The field is
+    # absent from a stored row unless supplied (`_question_shape`), and bridge
+    # rows never carry it: another team's agent may not hand the operator a
+    # command. The description is deliberately short — it rides every request's
+    # tools array (see the two ask ledgers in AGENTS.md "The ask queue").
+    command: str | None = Field(
+        default=None,
+        max_length=ASK_COMMAND_MAX_CHARS,
+        description=(
+            "Optional one-line shell command for the user to run; the app offers "
+            "it in a terminal. Include cd if the directory matters."
+        ),
+    )
+    # WHICH DEVICE the command is for. The desktop's terminal is a node-pty on
+    # the machine showing the card, which for a mesh-remote conversation is NOT
+    # the machine the agent works on: `glab auth login` meant for the agent's
+    # box would sign in the viewer's Mac instead. So the model names the
+    # target, and the desktop offers one-click Run only when the terminal it
+    # would type into IS that device (Insert/copy stay available everywhere).
+    # "agent" is the default because nearly every suggested command fixes the
+    # agent's own environment; "user" is for the operator's own computer
+    # ("glab is signed out on your Mac"). Only valid alongside `command`, and
+    # stamped "agent" on validation when omitted, so a stored row always
+    # carries an explicit target and a consumer never has to guess a default.
+    command_target: Literal["agent", "user"] | None = Field(
+        default=None,
+        description=(
+            "Where it must run: 'agent' (default: your machine) or 'user' (their "
+            "own computer). One-click run is offered only on the right device."
+        ),
+    )
+
+    @field_validator("command")
+    @classmethod
+    def _one_line_command(cls, value: str | None) -> str | None:
+        # A field validator, not part of `_shape`: `_shape` returns early for a
+        # secret question, and the command rule applies to both kinds.
+        if value is None:
+            return None
+        value = value.strip()
+        problem = ask_command_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
     @model_validator(mode="after")
     def _shape(self) -> "AskQuestion":
+        # Command target first: `_shape` returns early for a secret question
+        # below, and a secret question may carry a command too.
+        if self.command is None:
+            if self.command_target is not None:
+                raise ValueError("command_target only applies with a command")
+        elif self.command_target is None:
+            self.command_target = "agent"
         if self.secret:
             # A secret question is a masked paste, not a picker. Options and
             # multi-select have no meaning there, and a recommended option

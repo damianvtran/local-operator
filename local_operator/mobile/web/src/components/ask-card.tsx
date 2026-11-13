@@ -36,7 +36,7 @@
  * falls back to a plain line when the daemon said nothing usable.
  */
 import { contentDir } from "../lib/content-direction";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
@@ -224,6 +224,91 @@ function QuestionText({ text }: { text: string }) {
 		>
 			{text}
 		</span>
+	);
+}
+
+/** How long the Copy button reads "Copied" after a successful copy. Feedback
+    timing only (long enough to be read at a glance, short enough that a second
+    tap on a re-rendered card is not met by a stale "Copied"); nothing waits on it. */
+const COMMAND_COPIED_MS = 2000;
+
+/**
+ * The question's suggested terminal command (`AskQuestion.command`), as a
+ * monospace block with a Copy button.
+ *
+ * COPY ONLY, BY DESIGN. The phone has no terminal: the command is meant for the
+ * agent's machine or the user's computer (`command_target`), never the phone,
+ * so this card offers nothing about running it — the desktop app owns the
+ * confirmed Insert/Run flow. Showing it separately from the prose is still the
+ * point: inline code inside a capped, scrolling question is hard to select on a
+ * touch screen, and one tap here puts the exact bytes on the clipboard.
+ *
+ * `dir="ltr"` regardless of the UI locale: a shell command is LTR text, and an
+ * RTL paragraph would visually reorder its tokens (core already refuses bidi
+ * control characters in it). `break-all` + `whitespace-pre-wrap` show every
+ * character, wrapped rather than truncated, so what is copied is what was read.
+ *
+ * A clipboard write can fail (no secure context, permission denied); the block
+ * then selects the command so the platform's own copy gesture works, and says so.
+ */
+function CommandBlock({ command }: { command: string }) {
+	const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+	const code = useRef<HTMLElement>(null);
+	useEffect(() => {
+		if (copyState !== "copied") return;
+		const timer = window.setTimeout(() => setCopyState("idle"), COMMAND_COPIED_MS);
+		return () => window.clearTimeout(timer);
+	}, [copyState]);
+	const copy = async () => {
+		try {
+			await navigator.clipboard.writeText(command);
+			setCopyState("copied");
+		} catch {
+			const node = code.current;
+			const selection = window.getSelection();
+			if (node && selection) {
+				const range = document.createRange();
+				range.selectNodeContents(node);
+				selection.removeAllRanges();
+				selection.addRange(range);
+			}
+			setCopyState("failed");
+		}
+	};
+	return (
+		<div
+			role="group"
+			aria-label={messageRuntime.t("relay.asks.card.command.label")}
+			data-testid="ask-command"
+			className="flex flex-col gap-1"
+		>
+			<div className="flex min-w-0 items-start gap-2 rounded-sm bg-canvas py-1 ps-3 pe-1">
+				<code
+					ref={code}
+					dir="ltr"
+					data-testid="ask-command-text"
+					className="min-w-0 flex-1 self-center select-text break-all whitespace-pre-wrap py-1.5 font-mono text-mono-sm text-ink"
+				>
+					{command}
+				</code>
+				<button
+					type="button"
+					data-testid="ask-command-copy"
+					onClick={() => void copy()}
+					aria-live="polite"
+					className="flex min-h-11 shrink-0 items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated"
+				>
+					{copyState === "copied"
+						? messageRuntime.t("relay.asks.card.command.copied")
+						: messageRuntime.t("relay.asks.card.command.copy")}
+				</button>
+			</div>
+			{copyState === "failed" ? (
+				<p className="text-meta text-ink-dim">
+					{messageRuntime.t("relay.asks.card.command.copy_failed")}
+				</p>
+			) : null}
+		</div>
 	);
 }
 
@@ -860,6 +945,9 @@ export function AskCard({
 									) : null}
 									<QuestionText text={question.question} />
 								</span>
+								{typeof question.command === "string" && question.command.trim() ? (
+									<CommandBlock command={question.command.trim()} />
+								) : null}
 								<QuestionField
 									question={question}
 									value={draft.answers[id] ?? []}

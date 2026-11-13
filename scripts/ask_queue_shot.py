@@ -15,6 +15,7 @@ always the state its filename claims):
     list         EXPANDED onto the list of the three, with a timed-out row
                  collapsed to one settled line behind its `timed out` chip
     card         EXPANDED onto one ask's picker
+    card-command the same picker with a suggested terminal command (`$ …`)
     card-timeout the picker of an ask that timed out UNDER it (the title flips
                  and the card goes read-only: no answer keys, `esc` only)
     list-late    the list with one ask answered after its deadline: it is absent
@@ -728,6 +729,21 @@ async def main() -> None:
             app._sync_ask_surface(ask_rows([dict(THREE[0], status="timed_out")]))
         elif mode == "card":
             app._sync_ask_surface(ask_rows([THREE[0]]))
+            await pilot.pause()
+            app._expand_asks()
+        elif mode == "card-command":
+            # The same card with a suggested terminal command on its question
+            # (`AskQuestion.command`): the dim `$ <command>` line under the
+            # question. Its before half is `card` (a question without one).
+            row = dict(THREE[0])
+            row["questions"] = [
+                dict(
+                    row["questions"][0],
+                    command="cd ~/src/app && make migrate-backfill",
+                    command_target="agent",
+                )
+            ]
+            app._sync_ask_surface(ask_rows([row]))
             await pilot.pause()
             app._expand_asks()
         elif mode in {"response", "response-open", "timeout", "late"}:

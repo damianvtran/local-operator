@@ -8183,3 +8183,44 @@ async def test_the_remote_hint_sheds_whole_clauses_rather_than_truncating() -> N
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+# ---------------------------------------------------------------------------
+# A question's suggested terminal command (``AskQuestion.command``): one dim
+# ``$ <command>`` line under the question, display only, absent without one.
+
+
+def _command_question(command: str) -> AskQuestion:
+    return _question().model_copy(update={"command": command, "command_target": "agent"})
+
+
+@pytest.mark.asyncio
+async def test_a_question_with_a_command_draws_it_under_the_question() -> None:
+    app, card = await _real_app_card((100, 30), [_command_question("glab auth login")])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _show(app, pilot, card)
+        rows = [row.strip() for row in card.render_lines_for_test()]
+        assert "$ glab auth login" in rows, rows
+        # Directly under the question, above the options.
+        question_at = rows.index("What should happen to the stale rows?")
+        assert rows.index("$ glab auth login") == question_at + 1, rows
+
+
+@pytest.mark.asyncio
+async def test_a_question_without_a_command_draws_no_command_line() -> None:
+    app, card = await _real_app_card((100, 30), [_question()])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _show(app, pilot, card)
+        assert card._layout().command_line == ""
+        assert not any(row.strip().startswith("$ ") for row in card.render_lines_for_test())
+
+
+@pytest.mark.asyncio
+async def test_a_command_wider_than_the_card_is_cut_with_the_card_mark() -> None:
+    long = "git clone https://example.com/" + "a" * 200
+    app, card = await _real_app_card((60, 30), [_command_question(long)])
+    async with app.run_test(size=(60, 30)) as pilot:
+        await _show(app, pilot, card)
+        line = card._layout().command_line
+        assert line.startswith("$ git clone ") and line.endswith("…"), line
+        assert cell_len(line) <= card._layout().width
