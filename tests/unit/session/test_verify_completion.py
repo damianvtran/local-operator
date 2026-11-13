@@ -689,11 +689,23 @@ async def test_a_verdict_already_given_survives_a_wall_cancel(tmp_path, config_d
     from local_operator.harness import subagent as subagent_module
 
     real_finish = subagent_module._finish_child_browser
+    # This test pins an ORDERING, not a duration: the wall fires after the
+    # child's answer exists but before its job settles, so the verdict must be
+    # rescued from that answer. A real 1.5 s wall raced the child's own startup
+    # instead -- on a loaded CI runner the first provider request can arrive
+    # after the wall, so the child was cancelled before it ever answered and the
+    # rescue under test never ran. The wall edge is an event now: it "elapses"
+    # exactly when the child reports completion. The real timer arithmetic is
+    # pinned by test_wall_cap_cancels_a_slow_child.
+    wall_elapsed = asyncio.Event()
 
     async def slow_settle(  # type: ignore[no-untyped-def]
         child, comms, job_id, status, *, parent_session=None
     ):
         if status == "completed":
+            # The child's final assistant message is already recorded here:
+            # the terminal handoff runs after its run loop has ended.
+            wall_elapsed.set()
             await asyncio.sleep(30)
         # Keep the real settlement context: only its completion is delayed here.
         return await real_finish(child, comms, job_id, status, parent_session=parent_session)
@@ -702,8 +714,47 @@ async def test_a_verdict_already_given_survives_a_wall_cancel(tmp_path, config_d
     stream = TreeStream(lambda request: text_turn("B2 holds 42\nVERDICT: FAIL"))
     parent = make_parent(tmp_path, stream)
 
+    class SettledOrWall:
+        """The job's real settled event; its first wait also ends at the wall.
+
+        Waking once while still unset is the branch a timer expiry takes in
+        ``verify_completion`` (``first_of`` returns, settle unset, no
+        overshoot -> ``"wall"``); later waits (the cancel join) are the real
+        event's, so the cancellation path itself is unchanged.
+        """
+
+        def __init__(self, real: asyncio.Event) -> None:
+            self._real = real
+            self._armed = True
+
+        def is_set(self) -> bool:
+            return self._real.is_set()
+
+        async def wait(self) -> bool:
+            if not self._armed:
+                return await self._real.wait()
+            self._armed = False
+            waiters = [
+                asyncio.ensure_future(self._real.wait()),
+                asyncio.ensure_future(wall_elapsed.wait()),
+            ]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+            return self._real.is_set()
+
+    real_settled_event = parent.jobs.settled_event
+    monkeypatch.setattr(
+        parent.jobs, "settled_event", lambda job_id: SettledOrWall(real_settled_event(job_id))
+    )
+
     verdict = await parent.verify_completion(
-        request="r", claim="c", limits=VerifierLimits(wall_s=1.5)
+        # A hang ceiling, not the ordering under test (that is `wall_elapsed`).
+        request="r",
+        claim="c",
+        limits=VerifierLimits(wall_s=60),
     )
 
     assert verdict.job_id is not None
