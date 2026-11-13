@@ -715,9 +715,7 @@ raise SystemExit(process.main())
 """
 
 
-def _spawn_with_drain_bound(
-    config_dir: Path, session_id: str, bound_s: float
-) -> CapturedChild:
+def _spawn_with_drain_bound(config_dir: Path, session_id: str, bound_s: float) -> CapturedChild:
     """``_spawn``'s environment, a driver instead of ``-m``, and a short bound.
 
     A ``CapturedChild`` like every other runtime here, so a failing drain-bound
