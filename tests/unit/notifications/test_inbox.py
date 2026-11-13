@@ -441,13 +441,17 @@ def test_a_delegated_child_or_hidden_session_gets_no_door(tmp_path: Path) -> Non
     assert hidden._notify_inbox_callable() is None
 
 
-def test_an_agent_spawned_session_gets_no_door(tmp_path: Path) -> None:
+def test_an_agent_spawned_session_gets_no_notify_tool(tmp_path: Path) -> None:
     """Operator rule 2026-11-13: a session another agent started never notifies.
 
     A ``sessions spawn`` workstream is LISTED (so the hidden-session gate above
     does not catch it) and a session an agent minted on this device for another
     one carries ``origin.kind == "agent"`` on its mesh stamp; both report to the
-    agent that started them. The operator's own session keeps the door.
+    agent that started them. The operator's own session keeps the tool.
+
+    ONLY THE TOOL (review round 1, R1-2 / QA Q1): the inbox door itself stays
+    open for them, because ``raise_gate_item`` writes their parked approvals and
+    asks through it — ``test_gate_raises_notification`` pins those rows.
     """
     import json
 
@@ -457,7 +461,9 @@ def test_an_agent_spawned_session_gets_no_door(tmp_path: Path) -> None:
 
     workstream = make_session(tmp_path / "w", ScriptedStream([]))
     mark_session_origin(workstream.transcript.directory, ORIGIN_AGENT_WORKSTREAM)
-    assert workstream._notify_inbox_callable() is None
+    assert workstream._notify_tool_callable() is None
+    assert workstream._build_tool_context().notify_inbox is None
+    assert workstream._notify_inbox_callable() is not None
 
     def placed(name: str, kind: str) -> Any:
         session = make_session(tmp_path / name, ScriptedStream([]))
@@ -474,10 +480,13 @@ def test_an_agent_spawned_session_gets_no_door(tmp_path: Path) -> None:
         )
         return session
 
-    assert placed("a", "agent")._notify_inbox_callable() is None
-    assert placed("u", "user")._notify_inbox_callable() is not None
+    agent_placed = placed("a", "agent")
+    assert agent_placed._notify_tool_callable() is None
+    assert agent_placed._notify_inbox_callable() is not None
+    assert placed("u", "user")._notify_tool_callable() is not None
     mine = make_session(tmp_path / "m", ScriptedStream([]))
-    assert mine._notify_inbox_callable() is not None
+    assert mine._notify_tool_callable() is not None
+    assert mine._build_tool_context().notify_inbox is not None
 
 
 def test_the_session_door_never_reads_a_new_item_from_presence(tmp_path: Path, monkeypatch) -> None:

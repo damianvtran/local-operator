@@ -676,12 +676,16 @@ class NotificationStore:
                 "notifications: marked %d forwarded remote rows read (%s)", len(marked), CLEANUP_VIA
             )
 
-    def remote_backfill_cleanup_record(self) -> dict[str, Any] | None:
+    def remote_backfill_cleanup_record(self, *, read_only: bool = False) -> dict[str, Any] | None:
         """The one-time cleanup's record (``{"at", "rows", ["undone_at"]}``), or ``None``.
 
-        Opens a WRITE connection on purpose: opening is what runs the cleanup,
-        so asking about it on a store that has not been opened since the
-        upgrade answers with the record it just wrote rather than "none".
+        Opens a WRITE connection by default, on purpose: opening is what runs
+        the cleanup, so asking about it on a store that has not been opened
+        since the upgrade answers with the record it just wrote rather than
+        "none". ``read_only`` (the CLI's ``--dry-run``, QA round 1 Q2) reads
+        over ``mode=ro`` instead, so it never triggers the cleanup; ``None``
+        then may mean "not run yet" — :meth:`remote_backfill_pending` counts
+        what it would mark.
         """
 
         def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
@@ -691,7 +695,32 @@ class NotificationStore:
             data = json.loads(str(row[0]))
             return data if isinstance(data, dict) else None
 
+        if read_only:
+            return self._read(body, None, "remote_backfill_cleanup_record")
         return self._write(body, "remote_backfill_cleanup_record")
+
+    def remote_backfill_pending(self) -> int:
+        """How many rows the one-time cleanup WOULD mark read, read-only (Q2).
+
+        The same selection as :meth:`_cleanup_remote_backfill` (prefix and
+        unread), counted over ``mode=ro`` so a dry run writes nothing. 0 once
+        the cleanup has run: it is one-time, so nothing more would be marked.
+        """
+
+        def body(conn: sqlite3.Connection) -> int:
+            if conn.execute("SELECT 1 FROM meta WHERE k=?", (CLEANUP_META_KEY,)).fetchone():
+                return 0
+            prefix_sql = " OR ".join("substr(key, 1, ?) = ?" for _ in CLEANUP_KEY_PREFIXES)
+            params: list[Any] = []
+            for prefix in CLEANUP_KEY_PREFIXES:
+                params += [len(prefix), prefix]
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM items WHERE ({prefix_sql}) AND read_rev < revision",
+                params,
+            ).fetchone()
+            return int(row[0])
+
+        return self._read(body, 0, "remote_backfill_pending")
 
     def undo_remote_backfill_cleanup(self, *, dry_run: bool = False) -> int:
         """Restore the read marks :meth:`_cleanup_remote_backfill` replaced. Returns rows restored.
@@ -702,7 +731,10 @@ class NotificationStore:
         a different ``read_via``/``revision`` and is left alone. Idempotent — a
         second undo finds no row still marked :data:`CLEANUP_VIA`. The flag
         stays (with ``undone_at``) so the cleanup never re-runs on the next open.
-        ``dry_run`` counts without writing.
+        ``dry_run`` counts over a read-only connection, so it never writes —
+        not even the cleanup a write open would run (QA round 1, Q2).
+        ``undone_at`` records the first undo that restored anything (or the
+        first undo at all); a repeat that restores nothing leaves it (Q3).
         """
 
         def body(conn: sqlite3.Connection) -> int:
@@ -734,7 +766,7 @@ class NotificationStore:
                     "UPDATE items SET seq=?, read_rev=?, read_at=?, read_via=? WHERE id=?",
                     (self._next_seq(conn), int(read_rev), read_at, read_via, item_id),
                 )
-            if not dry_run:
+            if not dry_run and (restored or not data.get("undone_at")):
                 data["undone_at"] = now_ms()
                 conn.execute(
                     "UPDATE meta SET v=? WHERE k=?",
@@ -742,6 +774,8 @@ class NotificationStore:
                 )
             return restored
 
+        if dry_run:
+            return self._read(body, 0, "undo_remote_backfill_cleanup")
         return self._write(body, "undo_remote_backfill_cleanup")
 
     @staticmethod

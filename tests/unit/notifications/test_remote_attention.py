@@ -10,8 +10,8 @@ their edges into inbox rows.
 
 Each acceptance line of the brief is one test below:
 
-* no TUI, one node turn end → exactly one ``remote-done:`` row within one poll
-  (``test_serve_host_raises_one_done_row_within_one_poll``);
+* no remote turn end is ever an inbox row (operator rule 2026-11-13; the
+  ``remote-done:`` producer is gone and only its read-marking settle remains);
 * ``notify priority=high`` → one banner-eligible row
   (``test_a_high_notice_is_one_banner_eligible_row``);
 * a restarted watcher does not duplicate
@@ -775,6 +775,89 @@ def test_an_agent_spawned_sessions_notices_never_cross_the_wire(tmp_path: Path) 
     user_rows = [_catalog_row()]
     ra.stamp_rows_for_viewer(owner, user_rows, HEAD)
     assert [n["key"] for n in user_rows[0]["notices"]] == ["deploy"]
+
+
+def test_first_contact_is_the_listing_not_the_first_notice(root: Path) -> None:
+    """Review round 1, R1-1: the first deliberate notice from a new device is raised.
+
+    The baseline used to be recorded when the first NOTICE was observed, at the
+    observation instant — always after that notice was posted, so it was
+    dropped for good. Contact is now the first listing that names the device,
+    notices or not.
+    """
+    assert not (root / ra.BASELINES_FILE).exists()
+    before = int(time.time() * 1000)
+    ra.RemoteAttentionWatcher(root).observe([_row()])  # first contact: no notices
+    # Read the file, not ``origin_baseline_ms`` (which would record it itself).
+    import json
+
+    baseline = json.loads((root / ra.BASELINES_FILE).read_text(encoding="utf-8"))[NODE]
+    assert before <= baseline <= int(time.time() * 1000), "recorded at the empty poll"
+    posted = baseline + 2_000
+    listing = [_row(notice=("first", 1, "normal", "First real notice", posted))]
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    [item] = _items(root)
+    assert item["created_at"] == posted
+
+
+def test_a_notice_older_than_first_contact_is_still_backfill(root: Path) -> None:
+    """The other side of R1-1: a notice already there at first contact is skipped,
+    even when that first listing is also where the baseline is recorded."""
+    posted = int(time.time() * 1000) - 2_000
+    listing = [_row(notice=("historic", 1, "high", "Posted before contact", posted))]
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    assert _items(root) == []
+    assert ra.origin_baseline_ms(root, NODE) > posted
+    # A restart does not turn it into news either.
+    ra.RemoteAttentionWatcher(root).observe(listing)
+    assert _items(root) == []
+
+
+def test_baselines_merge_across_writers_and_keep_the_earliest(tmp_path: Path) -> None:
+    """Review round 1, R1-4: a second process's write never drops or moves a device.
+
+    Simulates the TUI and ``lop serve`` racing: another writer recorded device B
+    between this process's reads; recording A must keep B, and an already
+    recorded value is never replaced by a later one.
+    """
+    import json
+
+    first = ra.origin_baselines_ms(tmp_path, ["d_a"])["d_a"]
+    path = tmp_path / ra.BASELINES_FILE
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["d_b"] = 1_000  # another process's earlier record
+    path.write_text(json.dumps(data), encoding="utf-8")
+    got = ra.origin_baselines_ms(tmp_path, ["d_a", "d_b", "d_c"])
+    assert got["d_a"] == first and got["d_b"] == 1_000
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["d_a"] == first and on_disk["d_b"] == 1_000 and on_disk["d_c"] >= first
+    assert (tmp_path / f".{ra.BASELINES_FILE}.lock").is_file(), "the cross-process lock"
+
+
+def test_baselines_hold_under_concurrent_processes(tmp_path: Path) -> None:
+    """R1-4 for real: several processes recording different devices lose none."""
+    import json
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    procs = [
+        ctx.Process(
+            target=_record_baselines, args=(str(tmp_path), [f"d_{n}_{i}" for i in range(5)])
+        )
+        for n in range(4)
+    ]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(60)
+        assert proc.exitcode == 0
+    on_disk = json.loads((tmp_path / ra.BASELINES_FILE).read_text(encoding="utf-8"))
+    assert sorted(on_disk) == sorted(f"d_{n}_{i}" for n in range(4) for i in range(5))
+
+
+def _record_baselines(root: str, devices: list[str]) -> None:
+    for device in devices:
+        ra.origin_baselines_ms(Path(root), [device])
 
 
 def test_the_baselines_file_is_owner_only_and_heals_when_corrupt(tmp_path: Path) -> None:

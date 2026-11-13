@@ -29,6 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m local_operator.notifications.backfill_cleanup")
     parser.add_argument("--config-dir", default="", help="config root (default: the runtime's)")
     parser.add_argument("--undo", action="store_true", help="restore the rows the cleanup marked")
+    # --dry-run never writes in ANY mode (QA round 1, Q2): every read below
+    # goes over a read-only connection, because a write open is what runs the
+    # one-time cleanup itself.
     parser.add_argument("--dry-run", action="store_true", help="count only; write nothing")
     args = parser.parse_args(argv)
 
@@ -41,11 +44,16 @@ def main(argv: list[str] | None = None) -> int:
 
         root = config_dir()
     store = NotificationStore(root)
-    record = store.remote_backfill_cleanup_record() or {}
+    found = store.remote_backfill_cleanup_record(read_only=args.dry_run)
+    record = found or {}
     marked = record.get("rows")
     rows: dict[str, object] = marked if isinstance(marked, dict) else {}
     print(f"store: {store.path}")  # i18n: ignore maintenance output, not product copy
-    print(f"cleanup marked read: {len(rows)} rows")  # i18n: ignore maintenance output
+    if found is None and args.dry_run:
+        pending = store.remote_backfill_pending()
+        print(f"cleanup not run yet; would mark read: {pending} rows")  # i18n: ignore maintenance
+    else:
+        print(f"cleanup marked read: {len(rows)} rows")  # i18n: ignore maintenance output
     if record.get("undone_at"):
         print(f"undone at (epoch ms): {record['undone_at']}")  # i18n: ignore maintenance output
     if args.undo:

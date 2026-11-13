@@ -75,7 +75,7 @@ A FORWARDED NOTICE MUST BE NEW AND THE OPERATOR'S. Three filters, same date:
   child reports to the agent that spawned it, not to the operator — dropped by
   the owner in :func:`stamp_rows_for_viewer`;
 * NO BACKFILL: the owner carries each notice's own ``updated_at`` (``at``, ms)
-  and the origin raises only a notice newer than its persisted first-seen
+  and the origin raises only a notice newer than its persisted first-contact
   baseline for that device (:func:`origin_baseline_ms`), writing the row with
   the owner's timestamp rather than "now". A notice with no ``at`` (an owner
   older than this rule) cannot prove it is new, so it is not raised.
@@ -568,11 +568,17 @@ class RemoteAttentionWatcher:
             settle_unclaimed_done_items(self.root, rows, listed_at_ms=listed_at_ms)
             notices, notice_state = notice_edges(self._notice, rows, unanswered=silent)
             self._notice = notice_state
-            baselines: dict[str, int] = {}
+            # FIRST CONTACT is the listing, not the first notice (R1-1): every
+            # owner device named here gets its baseline before any notice is
+            # judged, so the first deliberate notice after contact is raised.
+            baselines = origin_baselines_ms(
+                self.root, (str(getattr(row, "owner_device", "") or "") for row in rows)
+            )
             for notice in notices:
-                if notice.device_id not in baselines:
-                    baselines[notice.device_id] = origin_baseline_ms(self.root, notice.device_id)
-                if notice.at_ms <= 0 or notice.at_ms < baselines[notice.device_id]:
+                baseline = baselines.get(notice.device_id)
+                if baseline is None:
+                    baseline = origin_baseline_ms(self.root, notice.device_id)
+                if notice.at_ms <= 0 or notice.at_ms < baseline:
                     # NO BACKFILL: posted before this device first watched
                     # that one (or by an owner too old to say when). Skipped
                     # deterministically, so a restart skips it again.
@@ -696,7 +702,7 @@ def forwarding_origins(root: Path) -> dict[str, float]:
 #: in the networks directory. WHY PERSISTED (2026-11-13): the backfill flood came
 #: from a FIRST CONTACT treating every historic unread item as news; a baseline
 #: kept in memory would be "first contact" again after every restart. Written
-#: once per device, the first time a notice from it is seen; never moved later,
+#: once per device, the first listing that names it; never moved later,
 #: so reconnects and restarts compare against the same instant. The comparison
 #: is against the OWNER's clock (``at``): skew between the two devices shifts the
 #: cut-off by that skew, which only matters for a notice posted within seconds of
@@ -705,44 +711,84 @@ BASELINES_FILE = "remote-attention-baselines.json"
 _baselines_lock = threading.Lock()
 
 
-def origin_baseline_ms(root: Path, device_id: str) -> int:
-    """This origin's first-seen instant for ``device_id`` (ms), recording it now if new.
+def _valid_baseline(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
-    Never raises: a file that cannot be read or written answers "now", the
-    conservative direction — a notice that cannot be shown to be new is not
-    raised, which costs at worst a missed notice, never a flood.
+
+def origin_baselines_ms(root: Path, device_ids: Iterable[str]) -> dict[str, int]:
+    """This origin's first-contact instant (ms) for each of ``device_ids``.
+
+    A device not yet recorded is recorded NOW. :meth:`RemoteAttentionWatcher.observe`
+    calls this for every owner device in a listing BEFORE it looks at notices
+    (review round 1, R1-1): recording lazily, on the first notice, stamped that
+    notice's own observation instant as the baseline, so the first deliberate
+    notice from a newly watched device was always older than its baseline and
+    was dropped for good. Recorded at first contact, a notice posted after the
+    first listing that named the device is raised; one posted before is the
+    backfill this file exists to skip.
+
+    CROSS-PROCESS (R1-4): the TUI and ``lop serve`` both run the watcher, so the
+    read-merge-replace runs under an ``fcntl.flock`` on a sidecar lock file (the
+    ``network/approvals.py`` pattern) as well as the in-process lock, and a
+    device already in the file keeps its EARLIEST value — two writers can never
+    move a baseline later and silently swallow the notices in between.
+
+    Never raises: anything unreadable or unwritable answers "now" for the
+    devices it could not settle, the conservative direction — a notice that
+    cannot be shown to be new is not raised, which costs at worst a missed
+    notice, never a flood.
     """
     import json
     import os
     import time
 
-    fallback = int(time.time() * 1000)
+    wanted = sorted({str(d) for d in device_ids if d})
+    now = int(time.time() * 1000)
+    if not wanted:
+        return {}
     try:
+        import fcntl
+
         with _baselines_lock:
             path = Path(root) / BASELINES_FILE
-            try:
-                known = json.loads(path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, ValueError):
-                # Absent, or unparseable (rewritten below rather than leaving
-                # every later poll to answer "now" forever).
-                known = {}
-            if not isinstance(known, dict):
-                known = {}
-            value = known.get(device_id)
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                return value
-            known[device_id] = fallback
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            # 0600 like ``ORIGINS_FILE``: it names the mesh devices this one reads.
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(known, sort_keys=True))
-            os.replace(tmp, path)
-            return fallback
+            lock_fd = os.open(path.with_name(f".{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                try:
+                    try:
+                        known = json.loads(path.read_text(encoding="utf-8"))
+                    except (FileNotFoundError, ValueError):
+                        # Absent, or unparseable (rewritten below rather than
+                        # leaving every later poll to answer "now" forever).
+                        known = {}
+                    if not isinstance(known, dict):
+                        known = {}
+                    missing = [d for d in wanted if not _valid_baseline(known.get(d))]
+                    if missing:
+                        for device_id in missing:
+                            known[device_id] = now
+                        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                        # 0600 like ``ORIGINS_FILE``: it names the mesh devices this one reads.
+                        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                            handle.write(json.dumps(known, sort_keys=True))
+                        os.replace(tmp, path)
+                    return {d: int(known[d]) for d in wanted}
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
     except Exception:  # noqa: BLE001 — see the docstring: unknown is "now"
-        logger.debug("remote attention: baseline unavailable for %s", device_id, exc_info=True)
-        return fallback
+        logger.debug("remote attention: baselines unavailable", exc_info=True)
+        return {d: now for d in wanted}
+
+
+def origin_baseline_ms(root: Path, device_id: str) -> int:
+    """:func:`origin_baselines_ms` for one device (recording it now if new)."""
+    import time
+
+    return origin_baselines_ms(root, (device_id,)).get(device_id, int(time.time() * 1000))
 
 
 def forwarded_notice_sentence(root: Path, session_id: str, key: str = "") -> str:

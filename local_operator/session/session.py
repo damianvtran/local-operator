@@ -18286,9 +18286,11 @@ class Session:
           session puts nothing on the operator's screen;
         * a one-shot host or an output-contract session (the ``quiet_end``
           exclusions — the host's product is the final text);
-        * ``LOP_NOTIFY=0``;
-        * a session ANOTHER AGENT started (:meth:`_session_was_agent_spawned`,
-          operator rule 2026-11-13).
+        * ``LOP_NOTIFY=0``.
+
+        A session ANOTHER AGENT started keeps this door (its parked approvals
+        and asks are gate rows the operator must see) and loses only the
+        ``notify`` TOOL — :meth:`_notify_tool_callable`, review round 1 R1-2/Q1.
 
         The gate answers "is there an inbox the operator reads for this
         session" — reachability, not host identity (AGENTS.md footprint ladder).
@@ -18301,9 +18303,23 @@ class Session:
             return None
         if not self._session_is_listed():
             return None
-        if self._session_was_agent_spawned():
-            return None
         return self._notify_inbox
+
+    def _notify_tool_callable(self) -> Callable[..., Awaitable[str]] | None:
+        """The door the ``notify`` TOOL is built on: the inbox door, minus agent-spawned sessions.
+
+        WHY A SEPARATE DOOR (review round 1, R1-2 / QA Q1): the agent-spawned
+        exclusion first sat in :meth:`_notify_inbox_callable`, which
+        :meth:`raise_gate_item` also uses — so a spawned workstream (and every
+        subagent under it) parked approvals and asks with no ``gate:`` row, and
+        the operator never saw them. The operator rule withholds only the
+        deliberate ``notify`` channel from agent-started sessions; asks must
+        still reach the inbox, so the gate path keeps the unfiltered door.
+        """
+        door = self._notify_inbox_callable()
+        if door is None or self._session_was_agent_spawned():
+            return None
+        return door
 
     def _session_was_agent_spawned(self) -> bool:
         """Whether ANOTHER AGENT started this session, so it reports to that agent.
@@ -22707,8 +22723,9 @@ class Session:
             # THE INBOX DOOR (docs/design/notifications-inbox.md §3.2): the
             # whole availability fact of ``notify`` — ``None`` for delegated
             # children, hidden sessions, one-shot hosts, output-contract
-            # sessions and under the kill switch.
-            notify_inbox=self._notify_inbox_callable(),
+            # sessions and under the kill switch — and, for the TOOL only,
+            # sessions another agent started (``_notify_tool_callable``).
+            notify_inbox=self._notify_tool_callable(),
             # The channel-spend ingest seam. ACTIVE only where a session owns a
             # fold: tools build a frozen record and call it, and the session
             # folds, journals and publishes. A bound method (not a value) so the
