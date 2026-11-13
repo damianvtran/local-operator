@@ -383,6 +383,12 @@ NET_OPS: tuple[str, ...] = (
     # authoriser's session-scope rule decides ownership at the chokepoint: a
     # session this device does not hold is a REFUSAL, never an empty page.
     "net_session_history",
+    # THE REMOTE PEEK (network/peek.py): the owner runs the local peek's bounded
+    # readers (session/peek.py) on its own journal — head, cursors, search,
+    # digest, stored sessions. Same shape as ``net_session_history``: names a
+    # ``session_id`` (so the session-scope chokepoint decides ownership),
+    # capability ``view``, starts nothing.
+    "net_session_peek",
     # AGENT AND TEAM DEFINITIONS (definitions.py). A peer-scope op of its own
     # rather than part of a session op: a definition is install-wide
     # configuration with no owner device, and a create that named one had
@@ -476,6 +482,9 @@ LOCAL_OPS: tuple[str, ...] = (
     # journal. A local name, so it may never appear in ``OP_CAPABILITY`` — the
     # peer-scope half is the ``net_session_history`` row.
     "peer_session_history",
+    # The remote peek's local half (network/peek.py); ``net_session_peek`` is
+    # the peer-scope half, so this name may never appear in ``OP_CAPABILITY``.
+    "peer_session_peek",
     # The readiness report (readiness.py): a VIEWER asks its own relay whether
     # one peer (or every peer) can complete work offloaded to it — the link's
     # own reachability, then the peer's install facts. A local op by the
@@ -704,6 +713,10 @@ OP_CAPABILITY: dict[str, str | None] = {
     # — and it writes nothing on either device, so ``prompt`` (which would let a
     # viewer start a turn) is broader than the act needs.
     "net_session_history": "view",
+    # ``view`` for the reason the row above records: a peek reads the same
+    # journal bytes ``net_session_history`` already serves, through bounded
+    # readers, and writes nothing on either device.
+    "net_session_peek": "view",
     # ``admin``, and the conservative choice is deliberate. Installing a
     # definition writes DURABLE, install-wide state on the receiving device and
     # changes what every FUTURE session there resolves by name — which is

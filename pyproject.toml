@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.102.2"
+version = "0.102.3"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -110,6 +110,16 @@ dependencies = [
     "apscheduler",
     "dill",
     "tiktoken",
+    # The owner side of a REMOTE `sessions peek` (session/peek.py,
+    # BoundedPeerPattern) runs a peer-supplied regex on this machine's CPU, and
+    # the stdlib `re` cannot be interrupted: one catastrophic pattern pinned a
+    # shared relay worker indefinitely (PR #3831 review M1). `regex` takes a
+    # per-call `timeout=`, which is the bound. It already arrives through
+    # tiktoken, but a direct import belongs in a direct dependency (same reason
+    # as `cryptography` above); the floor matches the dev pin below and is the
+    # first release with cp314 wheels (the classifiers claim 3.14), so a
+    # constrained resolve never builds from sdist.
+    "regex>=2025.7.29",
     "mcp>=1.2",
     # JSON Schema validation for ``--output-schema`` files (and an SDK caller's
     # raw-schema spelling): ``local_operator/output_contract.py`` imports it
@@ -239,7 +249,7 @@ dev = [
     "pytest-xdist",
     "pytest-textual-snapshot",
     # Capture glyph origins must follow grapheme clusters, not codepoints.
-    "regex>=2024.11.6",
+    "regex>=2025.7.29",
     "pip-audit",
     # Independent decoder used to verify our own PNG encoder's output.
     "pillow",
@@ -418,13 +428,17 @@ local_operator = [
     "mobile/web/src/styles/*.css",
     "mobile/web/src/themes/*.ts",
     # Data the sources READ rather than source themselves. `tsc -b` compiles
-    # all of src (tsconfig.app.json includes it, and the *.test.tsx files
-    # ship), so a fixture a test reads is a build input like any other: without
-    # it the shipped tree cannot build at all — TS2307 "Cannot find module
+    # all of src (tsconfig.app.json includes it), and while the *.test.tsx files
+    # shipped (they no longer do: see the exclude-package-data table below) a
+    # fixture a test read was a build input like any other: without
+    # it the shipped tree could not build at all — TS2307 "Cannot find module
     # './fixtures/models.ranked.json'", raised by src/model-sheet.order.test.tsx
     # — and the one documented repair for a source-snapshot install (`lop
-    # mobile install` → pnpm install && pnpm build) fails on every such
+    # mobile install` → pnpm install && pnpm build) failed on every such
     # install, leaving the phone on 503 "bundle not built" with no way back.
+    # They keep shipping (a few KB) so the tree stays whole if a test file is
+    # ever shipped again; tests/unit/mobile/test_web_package_data.py still
+    # requires every asset any src file imports to be covered here.
     "mobile/web/src/fixtures/*.json",
     # Read with `readFileSync` by src/lib/format.test.ts instead of imported,
     # so `tsc` never names it: the same missing build input, failing one step
@@ -440,6 +454,31 @@ local_operator = [
     # mobile/static/. Missing it shows a broken image on sign-in.
     "mobile/static/*",
 ]
+
+# THE RELAY WEB'S UNIT TESTS STAY IN GIT, NOT IN THE WHEEL. The 2026-11-13
+# packaging-smoke-build run for PR #3832 put the slimmed wheel at 18,383,341
+# bytes, over the 17.5 MiB budget (18,350,080) that guards PyPI's 10 GB project
+# cap (scripts/check_dist_size.py), with main's own wheel ~41 KB under it.
+# The `src/**/*.test.ts(x)` files were ~0.44 MiB of it compressed (143 files on
+# main), and nothing installed reads them: the daemon serves the built `dist/`,
+# and the one thing that runs over the shipped SOURCES — the `lop mobile
+# install` repair, `pnpm build` = `check-i18n.mjs && tsc -b && vite build` —
+# needs no test: check-i18n.mjs skips `*.test.ts(x)` by name, `tsc -b` compiles
+# whatever `src` holds (no non-test source imports a test file; the package-data
+# test pins that), and vite bundles from `main.tsx`. `vitest` never runs in an
+# installed tree. `*.type-test.ts` is NOT matched: it is a compile-only check
+# the build itself runs, so it still ships.
+#
+# WHY THE `"*"` KEY, measured on setuptools 84.2.1: `packages.find` runs with
+# namespace discovery on, so every directory under `src/` is its own package
+# (`local_operator.mobile.web.src.lib`, ...) and setuptools matches a key's
+# patterns only against THAT package's own files. A `local_operator` key never
+# sees them (tried first: the wheel kept all 147, byte-identical). `"*"` applies
+# to every package, which is safe only while every `*.test.ts(x)` under
+# `local_operator/` lives in the relay web's `src/` — the package-data test
+# asserts that, so a test file anywhere else has to be decided on first.
+[tool.setuptools.exclude-package-data]
+"*" = ["*.test.ts", "*.test.tsx"]
 
 [project.urls]
 Homepage = "https://github.com/damianvtran/local-operator"
@@ -502,7 +541,17 @@ reportPrivateImportUsage = false
 # The test prepends the directory to `sys.path` at run time; this is the same path for
 # the ANALYZER, so the import resolves instead of being reported missing. Same reasoning
 # as the adapter entry above: a type-resolution path only, no runtime import change.
-extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
+# `examples/agentcore/{app,scripts}` are loose modules copied into a container
+# (`PYTHONPATH=/app`) or run as scripts, and their offline tests import them by
+# bare name after a conftest `sys.path` insert. Same reasoning again: a
+# type-resolution path only, so the example stays type-checked instead of being
+# excluded.
+extraPaths = [
+    "benchmarks/osworld_v2_adapter/src",
+    "packaging/macos",
+    "examples/agentcore/app",
+    "examples/agentcore/scripts",
+]
 # `i18n/audits/evidence` is AUDIT EVIDENCE, not source: each bundle carries the
 # `checks.py` an independent auditor ran, committed verbatim so a reader can
 # re-run the exact check. Those scripts are throwaway probes written by a

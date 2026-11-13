@@ -859,5 +859,11 @@
   "wire.settings.web_search_timeout_seconds.help": "Тайм-аут запроса на провайдера. При чтении ограничивается диапазоном 1–120.",
   "wire.settings.web_search_timeout_seconds.label": "Тайм-аут (сек)",
   "wire.settings.web_tools.description": "Предлагаются ли инструменты search и fetch и разрешено ли им работать.",
-  "wire.settings.web_tools.title": "Веб-инструменты"
+  "wire.settings.web_tools.title": "Веб-инструменты",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15 минут",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 минут",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 часа",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 часа",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "Удалять временные чаты через",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "Сколько временный чат может простаивать, прежде чем будет удалён. Время на экране, выполняющаяся задача или открытый вопрос простоем не считаются."
 }

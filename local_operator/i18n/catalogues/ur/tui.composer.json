@@ -1,3 +1,4 @@
 {
-  "tui.composer.placeholder_default": "Local Operator کو پیغام لکھیں…"
+  "tui.composer.placeholder_default": "Local Operator کو پیغام لکھیں…",
+  "tui.composer.temporary_placeholder": "پیغام (عارضی چیٹ — محفوظ نہیں رہے گی)…"
 }

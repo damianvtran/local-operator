@@ -109,6 +109,9 @@ ECHO_POLICY = {
     # state and the band carries it from then on. Same rule as `/effort`, its
     # neighbour on the same request.
     "fast": False,
+    # `/fast`'s rule: the receipt names the chat's resulting state (temporary
+    # with its countdown, or kept) and the band carries it from then on.
+    "temporary": False,
     # Both spellings are session controls whose receipt names the durable state.
     "radient": False,
     "saver": False,
@@ -259,6 +262,8 @@ PROMPT_POLICY = {
     "model": False,
     "effort": False,
     "fast": False,
+    # on/off/status, a setting word: never a prompt for the model.
+    "temporary": False,
     "radient": False,
     "saver": False,
     "theme": False,

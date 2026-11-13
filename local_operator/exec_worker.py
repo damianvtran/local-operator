@@ -501,6 +501,8 @@ def _default_session_factory(
         # `--background --workstream` run would come back hidden while the
         # operator's own command said otherwise.
         workstream=bool(getattr(parsed, "workstream", False)),
+        # The detached half of ``exec_mode``'s ``temporary``, for the same reason.
+        temporary=bool(getattr(parsed, "temporary", False)),
         # Same field, same semantics as ``exec_mode._make_default_session_factory``'s
         # namespace: the team-launch model suggestion, or None. The worker is
         # spawned with `--team` forwarded (``STARTUP_FIELDS``), so it resolves

@@ -96,5 +96,12 @@
   "wire.errors.desktop.sort_unknown": "sort phải là một trong {sorts}.",
   "wire.errors.desktop.start_after_end": "Thời điểm bắt đầu phải trước thời điểm kết thúc",
   "wire.errors.desktop.unknown_command": "Lệnh không xác định",
-  "wire.errors.desktop.unknown_provider": "Nhà cung cấp không xác định"
+  "wire.errors.desktop.unknown_provider": "Nhà cung cấp không xác định",
+  "wire.errors.desktop.session_in_project": "cuộc trò chuyện {session_id} được liên kết với một dự án; hãy hủy liên kết trước",
+  "wire.errors.desktop.session_pinned": "cuộc trò chuyện {session_id} đang được ghim; hãy bỏ ghim trước",
+  "wire.errors.desktop.session_temporary": "cuộc trò chuyện {session_id} là cuộc trò chuyện tạm thời; hãy giữ lại trước",
+  "wire.errors.desktop.session_temporary_deleted": "cuộc trò chuyện tạm thời này đã bị xóa sau khi không hoạt động",
+  "wire.errors.desktop.temporary_mark_failed": "không thể ghi nhận cuộc trò chuyện {session_id} là tạm thời, nên không có gì thay đổi",
+  "wire.errors.desktop.temporary_not_user": "cuộc trò chuyện {session_id} không do bạn bắt đầu, nên không thể chuyển thành tạm thời",
+  "wire.errors.desktop.temporary_peer_unsupported": "chưa thể bắt đầu cuộc trò chuyện tạm thời trên thiết bị khác"
 }

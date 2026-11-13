@@ -96,5 +96,12 @@
   "wire.errors.desktop.sort_unknown": "sort должен быть одним из {sorts}.",
   "wire.errors.desktop.start_after_end": "Начало должно быть раньше конца",
   "wire.errors.desktop.unknown_command": "Неизвестная команда",
-  "wire.errors.desktop.unknown_provider": "Неизвестный провайдер"
+  "wire.errors.desktop.unknown_provider": "Неизвестный провайдер",
+  "wire.errors.desktop.session_in_project": "разговор {session_id} привязан к проекту; сначала отвяжите его",
+  "wire.errors.desktop.session_pinned": "разговор {session_id} закреплён; сначала открепите его",
+  "wire.errors.desktop.session_temporary": "разговор {session_id} — временный чат; сначала сохраните его",
+  "wire.errors.desktop.session_temporary_deleted": "этот временный чат удалён после простоя",
+  "wire.errors.desktop.temporary_mark_failed": "не удалось отметить разговор {session_id} как временный, поэтому ничего не изменилось",
+  "wire.errors.desktop.temporary_not_user": "разговор {session_id} начали не вы, поэтому его нельзя сделать временным",
+  "wire.errors.desktop.temporary_peer_unsupported": "временный чат пока нельзя начать на другом устройстве"
 }

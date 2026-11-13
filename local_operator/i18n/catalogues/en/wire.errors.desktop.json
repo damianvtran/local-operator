@@ -96,5 +96,12 @@
   "wire.errors.desktop.sort_unknown": "sort must be one of {sorts}.",
   "wire.errors.desktop.start_after_end": "The start must precede the end",
   "wire.errors.desktop.unknown_command": "Unknown command",
-  "wire.errors.desktop.unknown_provider": "Unknown provider"
+  "wire.errors.desktop.unknown_provider": "Unknown provider",
+  "wire.errors.desktop.session_in_project": "conversation {session_id} is linked to a project; unlink it first",
+  "wire.errors.desktop.session_pinned": "conversation {session_id} is pinned; unpin it first",
+  "wire.errors.desktop.session_temporary": "conversation {session_id} is a temporary chat; keep it first",
+  "wire.errors.desktop.session_temporary_deleted": "this temporary chat was deleted after it sat idle",
+  "wire.errors.desktop.temporary_mark_failed": "could not record conversation {session_id} as temporary, so nothing was changed",
+  "wire.errors.desktop.temporary_not_user": "conversation {session_id} was not started by you, so it cannot be made temporary",
+  "wire.errors.desktop.temporary_peer_unsupported": "a temporary chat cannot be started on another device yet"
 }

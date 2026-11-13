@@ -96,5 +96,12 @@
   "wire.errors.desktop.sort_unknown": "sort ان میں سے ایک ہونا چاہیے: {sorts}۔",
   "wire.errors.desktop.start_after_end": "آغاز کو اختتام سے پہلے ہونا چاہیے",
   "wire.errors.desktop.unknown_command": "نامعلوم کمانڈ",
-  "wire.errors.desktop.unknown_provider": "نامعلوم پرووائیڈر"
+  "wire.errors.desktop.unknown_provider": "نامعلوم پرووائیڈر",
+  "wire.errors.desktop.session_in_project": "گفتگو {session_id} ایک پروجیکٹ سے منسلک ہے؛ پہلے اسے الگ کریں",
+  "wire.errors.desktop.session_pinned": "گفتگو {session_id} پن کی گئی ہے؛ پہلے اس کا پن ہٹائیں",
+  "wire.errors.desktop.session_temporary": "گفتگو {session_id} ایک عارضی چیٹ ہے؛ پہلے اسے محفوظ رکھیں",
+  "wire.errors.desktop.session_temporary_deleted": "یہ عارضی چیٹ غیر فعال رہنے کے بعد حذف کر دی گئی",
+  "wire.errors.desktop.temporary_mark_failed": "گفتگو {session_id} کو عارضی کے طور پر درج نہیں کیا جا سکا، اس لیے کچھ نہیں بدلا",
+  "wire.errors.desktop.temporary_not_user": "گفتگو {session_id} آپ نے شروع نہیں کی، اس لیے اسے عارضی نہیں بنایا جا سکتا",
+  "wire.errors.desktop.temporary_peer_unsupported": "عارضی چیٹ ابھی کسی دوسری ڈیوائس پر شروع نہیں کی جا سکتی"
 }

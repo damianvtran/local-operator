@@ -156,6 +156,10 @@ class ExecArgs:
     #: ``agent-workstream``; outside one nothing is stamped and the flag is a
     #: no-op, so the run is an ordinary session either way.
     workstream: bool = False
+    #: ``lop exec --temporary``: mark the fresh session a temporary chat
+    #: (``session/temporary.py``). Refused with ``--resume``/``--workstream``
+    #: and from an agent's shell, before any directory exists (``cli``).
+    temporary: bool = False
     goal: str | None = None
     clear_goal: bool = False
     loop: int | None = None
@@ -930,6 +934,14 @@ def _make_default_session_factory(exec_args: ExecArgs, team: Any | None = None) 
             # an ordinary attribute, so it can never masquerade as a user flag.
             team_model_suggestion=team.model_suggestion if team is not None else None,
         )
+        # ``lop exec --temporary``: read by ``session_factory._prepare`` (via
+        # ``getattr``, default off) on the FRESH path only, which writes and
+        # verifies the mark before the first turn. Bound ONLY when asked: this
+        # namespace is pinned field-for-field to ``SessionSpec.to_namespace``
+        # (the SDK's published eight-field shape, which has no temporary
+        # chats), so an ordinary run must hand the factory exactly that shape.
+        if exec_args.temporary:
+            session_args.temporary = True
         # Exec constructs an in-process Session, so it never calls _spawn_runtime.
         # Keep the shared resolver here at that separate lifetime boundary.
         # A RESUME HONOURS THE SESSION'S RECORDED MOVE, like every other path that

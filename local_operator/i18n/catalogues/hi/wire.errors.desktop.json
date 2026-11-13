@@ -96,5 +96,12 @@
   "wire.errors.desktop.sort_unknown": "sort {sorts} में से एक होना चाहिए।",
   "wire.errors.desktop.start_after_end": "शुरुआत समाप्ति से पहले होनी चाहिए",
   "wire.errors.desktop.unknown_command": "अज्ञात कमांड",
-  "wire.errors.desktop.unknown_provider": "अज्ञात प्रोवाइडर"
+  "wire.errors.desktop.unknown_provider": "अज्ञात प्रोवाइडर",
+  "wire.errors.desktop.session_in_project": "बातचीत {session_id} एक प्रोजेक्ट से जुड़ी है; पहले उसे अलग करें",
+  "wire.errors.desktop.session_pinned": "बातचीत {session_id} पिन की गई है; पहले उसका पिन हटाएँ",
+  "wire.errors.desktop.session_temporary": "बातचीत {session_id} एक अस्थायी चैट है; पहले उसे रखें",
+  "wire.errors.desktop.session_temporary_deleted": "यह अस्थायी चैट निष्क्रिय रहने के बाद हटा दी गई",
+  "wire.errors.desktop.temporary_mark_failed": "बातचीत {session_id} को अस्थायी के रूप में दर्ज नहीं किया जा सका, इसलिए कुछ नहीं बदला",
+  "wire.errors.desktop.temporary_not_user": "बातचीत {session_id} आपने शुरू नहीं की, इसलिए इसे अस्थायी नहीं बनाया जा सकता",
+  "wire.errors.desktop.temporary_peer_unsupported": "अस्थायी चैट अभी किसी दूसरे डिवाइस पर शुरू नहीं की जा सकती"
 }

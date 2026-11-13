@@ -182,6 +182,8 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     # which a complete viewer must never mistake for a complete result. Named
     # here so the tuple, the ask condition and the tests read ONE spelling.
     "peer-journal-source-v1",
+    # The remote peek (``network/peek.py``): see SESSION_PEEK_V1 below.
+    "session-peek-v1",
     # Conditional member-table pull; see MEMBER_LIST_DIGEST_V1 below for why.
     "member-list-digest-v1",
     # Change-only member tables permit a long anti-entropy interval, without
@@ -222,6 +224,13 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+#: The remote peek's capability (``network/peek.py``: ``net_session_peek``).
+#: Advertised by every build that can answer a peek from its own journal with
+#: the local readers; a viewer's relay checks it BEFORE asking, and a peer
+#: without it is answered ``unsupported`` so the caller falls back to the
+#: live-display tail and names why, instead of composing a not-implemented
+#: refusal on the far side.
+SESSION_PEEK_V1 = "session-peek-v1"
 MEMORY_SYNC_V1 = "memory-sync-v1"
 #: The 512-content-token memory item cap (``memory.ITEM_TOKENS``). Advertised by
 #: every build whose ``validate_fact`` accepts it. A peer WITHOUT it still refuses a

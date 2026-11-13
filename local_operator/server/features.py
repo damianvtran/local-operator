@@ -1007,6 +1007,17 @@ def static_feature_flags() -> dict[str, Any]:
         # the body would be rejected as an unknown field. Absent ⇒ no
         # "close anyway" affordance anywhere.
         "projects_force_done": 1,
+        # TEMPORARY CHATS (``session/temporary.py``): `temporary` on
+        # `POST /v1/desktop/sessions` and `POST /api/sessions/start`,
+        # `include_temporary` on the session lists, the
+        # `POST …/sessions/{id}/temporary` toggle, the `temporary` object on
+        # every row and snapshot, and the `session_temporary(_deleted)` codes.
+        # NOT desktop-only, so the relay republishes it. The
+        # `projects_force_done` precedent: absent ⇒ no toggle, no pill, no
+        # group, no ⌘⇧N and no palette entry, and the client never sends
+        # `temporary` or `include_temporary` — `Input` models are
+        # `extra="forbid"`, so an ungated send would 422.
+        "temporary_chats": 1,
         # THE SILENT INPUT-METADATA CARRIAGE: `input_mode`/`input_path` on a
         # message body (`POST /v1/desktop/sessions/{id}/messages`) and onto the
         # durable user row. ONE key un-gates BOTH fields, because they landed

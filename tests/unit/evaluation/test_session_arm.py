@@ -4563,6 +4563,13 @@ class TestTextOnlyContinuationThroughTheDriver:
 #: Captured from the identical scripted run on the base commit ``371ce48ace08``
 #: (see the test's docstring); pinned so a later change to this path is a
 #: visible diff here rather than a silent drift.
+#:
+#: Deliberate drift since that capture: the trailing ``accounting`` row (PR
+#: #3887). ``run_session_episode`` writes it once, after the ``finally`` that
+#: stops the bridge and closes the adapter session (so after ``shutdown``) and
+#: before the seal, carrying the same typed snapshot as ``outcome.json``. It is
+#: additive and terminal: no earlier row moved, and the continuation's
+#: ``action_text_only_continuation`` is still absent on a normal finish.
 BASE_FINISH_EVENT_KINDS: list[str] = [
     "reset",
     "declaration",
@@ -4583,6 +4590,7 @@ BASE_FINISH_EVENT_KINDS: list[str] = [
     "agent_event",
     "requests",
     "shutdown",
+    "accounting",
 ]
 
 
@@ -5368,6 +5376,54 @@ def _tool_delta(model: str, calls: list[tuple[str, dict[str, Any]]]) -> dict[str
     }
 
 
+class TestSessionAccounting:
+    def test_legacy_two_epochs_are_not_two_of_the_decision_budget(self) -> None:
+        from local_operator.evaluation.session_arm import (
+            SessionAccounting,
+            SessionArmOutcome,
+            _outcome_json,
+        )
+
+        outcome = SessionArmOutcome(
+            status="agent_stop",
+            episode_id="synthetic",
+            record_root=None,
+            steps=2,
+            attempted_groups=40,
+            accounting=SessionAccounting(
+                decision_groups_used=40,
+                decision_groups_limit=500,
+                legacy_screen_epochs=2,
+                command_attempts=37,
+            ),
+        )
+        payload = _outcome_json(outcome)
+        assert payload["steps"] == 2
+        assert payload["attempted_groups"] == 40
+        assert payload["accounting"]["decision_groups_used"] == 40
+        assert payload["accounting"]["decision_groups_limit"] == 500
+        assert payload["accounting"]["legacy_screen_epochs"] == 2
+        assert payload["accounting"]["command_attempts"] == 37
+        assert payload["accounting"]["logical_requests"] is None
+        assert payload["accounting"]["verifier_requests"] is None
+
+    def test_missing_run_counters_are_unknown_not_zero(self) -> None:
+        from local_operator.evaluation.session_arm import (
+            SessionArmOutcome,
+            _outcome_json,
+        )
+
+        payload = _outcome_json(
+            SessionArmOutcome(
+                status="failed_pre_bundle",
+                episode_id="synthetic",
+                record_root=None,
+            )
+        )
+        assert all(value is None for value in payload["accounting"].values())
+        assert payload["steps"] == 0  # retained legacy default, not new telemetry
+
+
 class TestTheStreamCompletedStopBoundary:
     """R1 C1: a stream-completed Nth group must stop the NEXT ROOT REQUEST.
 
@@ -5417,6 +5473,7 @@ class TestTheStreamCompletedStopBoundary:
         max_steps: int,
         progress_guards: Any = None,
         frozen: bool = False,
+        commands: bool = False,
     ) -> tuple[list[dict[str, Any]], Any, str]:
         """One real episode; returns (wire calls, outcome, record text).
 
@@ -5478,7 +5535,7 @@ class TestTheStreamCompletedStopBoundary:
             async def handshake(self, *, timeout: float = 10.0) -> Any:
                 base = await super().handshake(timeout=timeout)
                 capabilities = base.metadata.capabilities.model_copy(
-                    update={"ask_user_answer_owner": "adapter"}
+                    update={"ask_user_answer_owner": "adapter", "command": commands}
                 )
                 return base.model_copy(
                     update={
@@ -5495,6 +5552,20 @@ class TestTheStreamCompletedStopBoundary:
         spec = build_spec("ep-stop-boundary")
         config = build_config(short_scratch, observation_retry_delay=0.0, max_steps=max_steps)
         adapter = _AskOwnerAdapter(short_scratch, spec.episode_id)
+        if commands:
+            original_call = adapter._call_raw
+
+            async def call_raw(method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+                if method != "run_command":
+                    return await original_call(method, params, result_type, **kwargs)
+                # A durable target-side effect distinguishes execution from a
+                # merely requested/refused N+1 command; no shell or VM needed.
+                marker = world / "commands.jsonl"
+                with marker.open("a", encoding="utf-8") as sink:
+                    sink.write(json.dumps(params.command) + "\n")
+                return _command_result()
+
+            monkeypatch.setattr(adapter, "_call_raw", call_raw)
         session_spec = SessionSpec(
             hosting="test",
             model="mock",
@@ -5601,6 +5672,63 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.attempted_groups == 1
         assert outcome.steps == 0
         assert text.count("tool_execution_end") == 2  # both paired
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("calls_per_group", [1, 2])
+    async def test_command_groups_report_the_enforced_clock_and_never_run_n_plus_one(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch, calls_per_group: int
+    ) -> None:
+        from local_operator.evaluation.session_arm import _outcome_json
+
+        command = "mcp__episode_actions_run_command"
+        script = [
+            [
+                (command, {"command": f"group-{group}-call-{call}"})
+                for call in range(calls_per_group)
+            ]
+            for group in range(4)
+        ]
+        wire, outcome, text = await self._run(
+            real_arm_scratch, monkeypatch, script=script, max_steps=3, commands=True
+        )
+        print(
+            json.dumps(
+                {
+                    "status": outcome.status,
+                    "terminal_reason": outcome.terminal_reason,
+                    "diagnostic": outcome.diagnostic,
+                    "accounting": outcome.accounting.to_json(),
+                }
+            )
+        )
+        # The existing command-only close-out labels graceful budget stops as
+        # agent_stop/aborted (unlike screen-epoch exhaustion). Reporting must
+        # neither change that legacy status nor mistake it for lost enforcement.
+        assert outcome.status == "agent_stop", (outcome, text)
+        assert outcome.terminal_reason == "aborted"
+        assert len(wire) == 3
+        assert outcome.steps == 0  # commands never claimed a screen epoch
+        assert outcome.attempted_groups == 3
+        effects = (real_arm_scratch / "world" / "commands.jsonl").read_text().splitlines()
+        assert [json.loads(row) for row in effects] == [
+            f"group-{group}-call-{call}" for group in range(3) for call in range(calls_per_group)
+        ]
+        accounting = _outcome_json(outcome)["accounting"]
+        assert accounting == {
+            "decision_groups_used": 3,
+            "decision_groups_limit": 3,
+            "legacy_screen_epochs": 0,
+            "command_attempts": 3 * calls_per_group,
+            "logical_requests": 3,
+            "verifier_requests": None,
+            "requests_complete": True,
+        }
+        sealed = json.loads((outcome.record_root / "outcome.json").read_text())
+        assert sealed["accounting"] == accounting
+        assert sealed["steps"] == 0
+        event_rows = [json.loads(line) for line in text.splitlines()]
+        assert any(row.get("kind") == "accounting" for row in event_rows)
+        print(json.dumps({"accounting": accounting, "target_effects": len(effects)}))
 
     @staticmethod
     def _policy_stamp_from_record(outcome: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:

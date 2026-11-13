@@ -2446,6 +2446,30 @@ def session_cleanup_remove_empty_label() -> Msg:
     return Msg("wire.settings.session_cleanup_remove_empty.label", {})
 
 
+def session_cleanup_temporary_idle_minutes_choice_15m_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_24h_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_2h_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_choice_30m_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label", {})
+
+
+def session_cleanup_temporary_idle_minutes_help() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.help", {})
+
+
+def session_cleanup_temporary_idle_minutes_label() -> Msg:
+    return Msg("wire.settings.session_cleanup_temporary_idle_minutes.label", {})
+
+
 def session_compression_description() -> Msg:
     return Msg("wire.settings.session_compression.description", {})
 

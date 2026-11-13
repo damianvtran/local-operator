@@ -859,5 +859,11 @@
   "wire.settings.web_search_timeout_seconds.help": "प्रति-प्रोवाइडर अनुरोध टाइमआउट। पढ़ते समय 1-120 पर सीमित।",
   "wire.settings.web_search_timeout_seconds.label": "टाइमआउट (s)",
   "wire.settings.web_tools.description": "search और fetch टूल दिए जाते हैं और चलने की अनुमति पाते हैं या नहीं।",
-  "wire.settings.web_tools.title": "वेब टूल"
+  "wire.settings.web_tools.title": "वेब टूल",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15 मिनट",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 मिनट",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 घंटे",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 घंटे",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "इतनी देर बाद अस्थायी चैट हटाएँ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "अस्थायी चैट हटाए जाने से पहले कितनी देर निष्क्रिय रह सकती है। स्क्रीन पर रहने का समय, चल रहा काम या खुला सवाल निष्क्रियता में नहीं गिना जाता।"
 }

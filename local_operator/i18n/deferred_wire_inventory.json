@@ -11,7 +11,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 850
+        "settings_io.py": 856
       }
     },
     "wire.settings.hub_defaults": {
@@ -225,7 +225,7 @@
         }
       ],
       "references": {
-        "slash_commands.py": 53
+        "slash_commands.py": 54
       }
     },
     "wire.slash.library": {
