@@ -2796,6 +2796,18 @@ class MeshCredentialClient:
         No record, an unreadable store, a missing self row or an inactive one all
         answer ``False``: the question is permission to keep using a bearer, and
         every failure mode of the proof must fail closed.
+
+        A network this device no longer TRUSTS answers ``False`` too. ``lop network
+        panic`` (raised here, or received from a peer) only latches
+        ``record.trust = "untrusted"``; it never touches membership, so a check on
+        ``member.active`` alone let the owner-unreachable hold keep serving the held
+        bearer until its own expiry — and after a panic the owner IS unreachable,
+        because the latch closes every link. Anything but exactly ``"active"``
+        (``untrusted``, an unknown future state) fails closed: the panic's promise
+        is that this network's credentials stop now, and re-trusting
+        (``lop network trust --active``) brings fresh grants via the online path
+        rather than resurrecting the held ones (the deny this verdict triggers is
+        persistent by design).
         """
         if not self.network_id:
             return True
@@ -2805,6 +2817,8 @@ class MeshCredentialClient:
             for record in store.list_networks(self.root):
                 if record.network_id != self.network_id:
                     continue
+                if record.trust != "active":
+                    return False
                 member = record.self_member()
                 return bool(member is not None and member.active)
             return False
