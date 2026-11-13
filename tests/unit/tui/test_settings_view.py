@@ -241,7 +241,7 @@ async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(
 def test_no_other_enum_choice_changes_its_collapsed_text(
     locale: str, restore_active_locale: Any
 ) -> None:
-    """The other 165 ENUM choices keep reading their stored word, in every locale.
+    """The other 169 ENUM choices keep reading their stored word, in every locale.
 
     V2-1's restriction: the label swap-in is for the ONE choice whose label
     names a combination (``delivery.busy_default=both``). Every other choice
@@ -292,8 +292,11 @@ def test_no_other_enum_choice_changes_its_collapsed_text(
             )
     # The registry's ENUM value space at the time of the fix (measured in this
     # tree, not remembered): a setting or choice added later decides its own
-    # case and must re-state this count deliberately.
-    assert checked == 166, checked
+    # case and must re-state this count deliberately. The pin is deliberate:
+    # origin/main's four ``session.cleanup.temporary.idle_minutes`` choices
+    # raised it from 166 to 170, so a new ENUM choice must be looked at on
+    # purpose.
+    assert checked == 170, checked
 
     # A hand-edited value that is not one of the choices still shows what is
     # there rather than the nearest legal answer (the docstring's contract).
