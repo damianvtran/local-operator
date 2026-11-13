@@ -100,8 +100,10 @@ const sendRecordingDisc = () => screen.getByRole("button", { name: "send recordi
    WHY: Enter-while-recording is handled by a window listener the composer installs in a passive
    `useEffect(..., [dictation])`. React commits the "stop and transcribe" button to the DOM
    BEFORE that passive effect flushes (it runs after paint on the Scheduler), so a test that
-   waits only on the button can dispatch Enter into a window with no listener yet; on a loaded
-   hosted runner that dropped the one Enter (DOM stayed Recording, box stayed "typed").
+   waits only on the button can dispatch Enter into a window with no listener yet. SUSPECTED cause
+   of one hosted failure (NOT reproduced locally; an inference, see Q-CI-MOBILE-ENTER): the one
+   Enter was dropped (DOM stayed Recording, box stayed "typed"). The `act` flush below is the
+   synchronization; the `waitFor` after it is only a guard that names the missing listener.
    CONSTRAINT: the barrier waits on the listener itself, never on a delay, and the test still
    dispatches exactly ONE Enter. If the product stops installing the listener the barrier times
    out naming it, instead of passing vacuously. */
@@ -122,7 +124,7 @@ function trackWindowKeydownListeners() {
 	restoreWindowListeners = () => { window.addEventListener = add; window.removeEventListener = remove; };
 }
 
-/** Flush passive effects, then require the recording-Enter window listener to be installed. Extend to any test that sends Enter while recording by calling it after `startRecording` (already folded into it). */
+/** Flush passive effects, then require the recording-Enter window listener to be installed. Built into `startRecording`, so every test that records and then sends Enter gets it; no separate call is needed. */
 async function awaitRecordingEnterListenerInstalled(baseline: number) {
 	await act(async () => {});
 	await waitFor(() => {
