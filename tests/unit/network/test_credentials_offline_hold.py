@@ -253,6 +253,9 @@ def test_an_outage_past_the_grant_is_served_and_past_the_hold_lapses_honestly(
     ended = [r for r in records if r["event"] == "credential.held_lapsed"]
     assert len(ended) == 1, records
     assert ended[0]["detail"]["serves"] == 2 and ended[0]["detail"]["pending"] == 1
+    # R1-m1 / Q1: the lapse names the limit the serves were held to, never the plain
+    # grant end the cached copy (``held_until_ms == 0``) used to report.
+    assert ended[0]["detail"]["bound"] == served[0]["detail"]["bound"] != "grant", records
     # No token, anywhere on this device's disk records.
     raw = audit_path(mesh.b.root).read_text(encoding="utf-8")
     assert grant.access_token not in raw
@@ -345,6 +348,54 @@ def test_a_bearer_the_provider_rejected_during_the_hold_is_not_served_again(
     assert access.usable is False, access
     assert access.last_grant_expires_at is not None
     assert access.last_grant_expires_at <= time.time(), access
+
+
+@pytest.mark.parametrize("path", ["unauthorized", "untrusted", "not-a-holder"])
+def test_a_held_grant_dropped_without_a_lapse_writes_its_pending_serves(
+    mesh: Any, short_hold: Any, path: str  # noqa: F811
+) -> None:
+    """R1-m2: a 401, a panic or a revoke drops the slot; its serves are still written.
+
+    The first held serve is written at once and the second only counted, so a drop
+    that forgot the tally left one offline serve in memory and in no receipt.
+    """
+    from local_operator.network import store
+
+    client, grant = short_hold
+    _stop_owner(mesh)
+    for _ in range(2):
+        served = client.request_grant_sync(
+            STUB_PROVIDER, session_id="sess-1", model_id="stub-model"
+        )
+        assert isinstance(served, Grant) and served.held_offline, served
+    if path == "unauthorized":
+        client.report_sync(STUB_PROVIDER, kind="unauthorized", session_id="sess-1")
+    else:
+        if path == "untrusted":
+            with store.mutate(mesh.network_id, mesh.b.root) as copy:
+                copy.trust = "untrusted"
+                store.save(copy, mesh.b.root)
+        else:
+            client.should_borrow = lambda _key: False  # type: ignore[method-assign]
+        refused = client.request_grant_sync(
+            STUB_PROVIDER, session_id="sess-1", model_id="stub-model"
+        )
+        assert isinstance(refused, BrokerError), refused
+    assert client.grants.peek(STUB_PROVIDER, "sess-1") is None
+    rows = [r for r in _hold_records(mesh.b.root) if r["event"] == "credential.held_served"]
+    assert sum(r["detail"]["serves"] for r in rows) == 2, rows
+    assert {r["detail"]["grant_id"] for r in rows} == {grant.grant_id}
+    assert not client._held_receipts, "the tally outlived the dropped grant"
+
+
+def test_the_settings_row_floor_is_the_grant_ttl_the_reader_floors_at() -> None:
+    """R1-m3: a value the reader would silently raise to the grant TTL is refused."""
+    from local_operator.network.credentials import GRANT_TTL_S
+    from local_operator.settings_io import resolve_key
+
+    row = resolve_key("network.credentials.offline_hold_s")
+    assert row is not None
+    assert row.minimum == GRANT_TTL_S, row.minimum
 
 
 @pytest.mark.parametrize("inside_hold", [False, True], ids=["inside-grant", "past-grant"])
