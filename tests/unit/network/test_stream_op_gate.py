@@ -38,7 +38,6 @@ from tests.unit.network.test_session_plane import (
     _seed,
     _serve,
     _serve_real_sessions,
-    _settle,
     _stop_all,
     _stop_real,
     _StreamClient,
@@ -292,6 +291,28 @@ class _Deleted:
 
     def rehearsal(self) -> str:
         return "this would delete it"
+
+
+def _settle(client: _StreamClient) -> None:
+    """Read until the owner stops pushing, so THIS connection is past its bind.
+
+    The runtime refuses every non-priority op while a connection's canonical sync
+    is still pending — "this viewer is still connecting to the session; the
+    request was not run — retry once the interface has connected" — and the flag
+    clears in the BIND TASK's ``finally`` (``server.py``), i.e. when the OWNER
+    finishes its own work. A raw viewer that sends a gate frame the instant the
+    welcome lands is racing that task: this file did exactly that and passed by
+    luck until it failed under load (measured), which is a flake wearing a security
+    test. The real client does not race it either — its dial sends its own
+    ``frontend_sync`` and waits for the answer — so waiting is the faithful shape
+    rather than a workaround.
+
+    Bounded, and it returns on the first quiet interval: the pushes stop when the
+    bind is done, and an idle fake session has nothing else to say.
+    """
+    for _ in range(20):
+        if client.recv(timeout=0.5) is None:
+            return
 
 
 def test_the_delete_gate_refuses_a_relayed_caller_with_no_capability_set_at_all() -> None:
