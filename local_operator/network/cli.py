@@ -1216,6 +1216,14 @@ def add_parser(
         action="store_true",
         help="Ask GitHub again now instead of using the cached list ('repos' only)",
     )
+    cred_github.add_argument(
+        "--use-default",
+        action="store_true",
+        help=(
+            "Explicitly return to every pushable repository minus opt-outs, removing "
+            "the hand-picked list and its clear fence ('repos' only)"
+        ),
+    )
     cred_github.add_argument("--json", action="store_true")
 
     install = actions.add_parser("install", help="Install the relay's restart-on-boot service")
@@ -3767,7 +3775,7 @@ def _designation_lines(designated: Any, source: str, *, receipt: bool) -> list[s
 
 
 def _cmd_credential_github(args: argparse.Namespace) -> int:
-    """``credential github repos [--refresh] | exclude|include <owner/repo>``.
+    """``credential github repos [--refresh] [--use-default] | exclude|include <owner/repo>``.
 
     LOCAL: the designation is this device's own (it is the owner that lends), so
     nothing crosses the mesh. ``exclude`` takes effect at each borrower's next
@@ -3788,9 +3796,22 @@ def _cmd_credential_github(args: argparse.Namespace) -> int:
     if action == "repos":
         if args.repository:
             raise MeshRefusal("bad_request", "'repos' takes no repository")
-        designated, source = _github_designation_now(refresh=bool(args.refresh))
+        use_default = bool(getattr(args, "use_default", False))
+        if use_default:
+            try:
+                github_mod.use_default_repositories(root)
+            except OSError as exc:
+                raise MeshRefusal(
+                    "github_default_reset_failed",
+                    "could not complete the return to the automatic GitHub repository list "
+                    f"({exc.__class__.__name__}); check this device's data folder is writable, "
+                    "then retry lop network credential github repos --use-default",
+                ) from exc
+        designated, source = _github_designation_now(refresh=bool(args.refresh) or use_default)
         payload = {"action": "repos", **_designation_payload(designated)}
         return _emit(args, payload, _designation_lines(designated, source, receipt=False))
+    if getattr(args, "use_default", False):
+        raise MeshRefusal("bad_request", "--use-default applies to 'repos' only")
     if args.refresh:
         raise MeshRefusal("bad_request", "--refresh applies to 'repos' only")
     entry = github_mod.normalise_repository(args.repository)
@@ -10986,7 +11007,7 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
         "       lop network credential refresh <provider> [--json]\n"
-        "       lop network credential github repos [--refresh] [--json] | "
+        "       lop network credential github repos [--refresh] [--use-default] [--json] | "
         "exclude|include <owner/repo> [--json]\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,

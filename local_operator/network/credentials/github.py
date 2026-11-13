@@ -376,6 +376,49 @@ def _owner_marker_path(root: Path | None) -> Path:
     return network_root(root) / OWNER_DESIGNATION_MARKER
 
 
+@contextlib.contextmanager
+def _owner_designation_transaction(root: Path | None) -> Iterator[Path]:
+    """Serialize the owner list AND its clear fence with the existing config lock.
+
+    CLI and relay are separate processes. An unlocked marker writer could read
+    the old explicit list, then recreate its fence after --use-default removed
+    it. Reuse the reentrant cross-process config transaction, not a second lock
+    or a new authority record. Keep GitHub HTTP work outside this short section.
+    """
+    from local_operator.config_writer import config_write_lock
+    from local_operator.paths import config_dir
+
+    directory = Path(root) if root is not None else config_dir()
+    with config_write_lock(directory):
+        yield directory
+
+
+def use_default_repositories(root: Path | None = None) -> None:
+    """Explicitly leave the hand-picked/cleared policy; preserve all opt-outs.
+
+    Both serving readers and marker writers hold the same lock, so no borrower
+    sees a half-reset and no old reader can resurrect the marker. Delete the
+    config key only AFTER arming the existing clear fence (even if this owner
+    never lent the override). A failed marker removal then stays refuse-all,
+    never silently opts in. Only a completed explicit call
+    enables enumeration; it does not extend a token or change holder permission.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.network import store
+
+    with _owner_designation_transaction(root) as directory:
+        marker = _owner_marker_path(directory)
+        if not marker.exists():
+            # Unlike best-effort marking during a serve, this write MUST succeed
+            # before removing the override; otherwise failed cleanup could widen.
+            store._write_private_json(marker, {"delivered": True})  # noqa: SLF001
+        settings_io._delete(  # noqa: SLF001 — the shared locked config deletion primitive
+            ConfigManager(directory), REPOSITORIES_PATH
+        )
+        marker.unlink(missing_ok=True)
+
+
 def mark_designation_delivered(root: Path | None = None) -> None:
     """Record (once) that this owner has served a non-empty designation.
 
@@ -383,12 +426,13 @@ def mark_designation_delivered(root: Path | None = None) -> None:
     borrowers guarantee for a later clear, never the serve that is happening now.
     """
     try:
-        path = _owner_marker_path(root)
-        if path.exists():
-            return
-        from local_operator.network import store
+        with _owner_designation_transaction(root):
+            path = _owner_marker_path(root)
+            if path.exists():
+                return
+            from local_operator.network import store
 
-        store._write_private_json(path, {"delivered": True})  # noqa: SLF001 — the ONE writer
+            store._write_private_json(path, {"delivered": True})  # noqa: SLF001 — the ONE writer
     except Exception as exc:  # noqa: BLE001 — see the docstring
         logger.warning("github designation: the delivered marker was not written: %s", exc)
 
@@ -407,16 +451,17 @@ def owner_designation(root: Path | None = None) -> tuple[tuple[str, ...], bool]:
     A device that never lent a list still sends nothing, so a borrower's hand-set
     backstop survives an owner that has said nothing.
     """
-    repositories, explicit = designation_for(root)
-    if explicit and repositories:
-        mark_designation_delivered(root)
-        return repositories, True
-    if not explicit:
-        try:
-            explicit = _owner_marker_path(root).exists()
-        except OSError:
-            explicit = False
-    return repositories, explicit
+    with _owner_designation_transaction(root):
+        repositories, explicit = designation_for(root)
+        if explicit and repositories:
+            mark_designation_delivered(root)
+            return repositories, True
+        if not explicit:
+            try:
+                explicit = _owner_marker_path(root).exists()
+            except OSError:
+                explicit = False
+        return repositories, explicit
 
 
 def designation_digest(repositories: Sequence[str]) -> str:
@@ -497,8 +542,6 @@ def mint_repository_names(repositories: Sequence[str]) -> list[str]:
 # The effective designation: explicit, or enumerated minus opt-outs
 # ---------------------------------------------------------------------------
 
-_UNSET: Any = object()
-
 
 def explicit_repositories(root: Path | None = None) -> tuple[str, ...] | None:
     """The hand-picked list, or ``None`` when the operator never set one.
@@ -508,21 +551,20 @@ def explicit_repositories(root: Path | None = None) -> tuple[str, ...] | None:
     """
     from local_operator.network import store
 
-    raw = store.read_config(REPOSITORIES_PATH, _UNSET, root)
-    if raw is _UNSET:
-        # Preserve #3841's durable explicit-clear fence: deleting a previously
-        # delivered hand-picked list must not silently re-enable every repo.
-        # Enumeration itself never creates this marker, so a genuinely unset
-        # owner continues using its default on every successive borrow.
-        previous, delivered = owner_designation(root)
-        return previous if delivered else None
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, (list, tuple)):
-        return ()
-    return tuple(entry for entry in (normalise_repository(item) for item in raw) if entry)
+    with _owner_designation_transaction(root):
+        raw = store.read_config(REPOSITORIES_PATH, _UNSET, root)
+        if raw is _UNSET:
+            # A plain settings clear remains refuse-all. Only --use-default
+            # removes this marker together with the override under this lock.
+            previous, delivered = owner_designation(root)
+            return previous if delivered else None
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, (list, tuple)):
+            return ()
+        return tuple(entry for entry in (normalise_repository(item) for item in raw) if entry)
 
 
 def excluded_repositories(root: Path | None = None) -> tuple[str, ...]:
@@ -617,7 +659,8 @@ class Designation:
         if self.origin == ORIGIN_EXPLICIT:
             return (
                 "add repositories to the GitHub repositories setting (search it in "
-                "/settings), or clear it to lend every repository the login can push to"
+                "/settings), or explicitly return to every pushable repository minus opt-outs "
+                "with lop network credential github repos --use-default"
             )
         if self.origin == ORIGIN_UNAVAILABLE:
             return "retry when GitHub is reachable: lop network credential github repos --refresh"

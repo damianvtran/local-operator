@@ -3664,15 +3664,11 @@ def _grant_ttl_s(root: Path | None) -> float:
     return float(grant_ttl_s(root))
 
 
-def _token_arm_narrowing(
-    root: Path | None, repositories: Sequence[str] | None = None
-) -> dict[str, Any]:
+def _token_arm_narrowing(root: Path | None, repositories: Sequence[str]) -> dict[str, Any]:
     """Deliver the resolved list without losing explicit-clear ordering semantics."""
     from local_operator.network.credentials import github as github_app
 
-    configured, explicit = github_app.owner_designation(root)
-    if repositories is None:
-        return github_app.grant_narrowing(configured, explicit=explicit)
+    github_app.owner_designation(root)
     return github_app.grant_narrowing(repositories, explicit=True)
 
 

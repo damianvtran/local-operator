@@ -1008,7 +1008,8 @@ command, so a re-login or a token rotation needs no gesture on the node):
    and the borrowing device never reads it.
 
 **Which repositories a share lends for — by default, every one the owner's
-login can push to.** With no list set, the owner ENUMERATES: for a token or a
+login can push to.** Before a hand-picked list has been lent (or after the
+explicit return to the default below), the owner ENUMERATES: for a token or a
 `gh` login, every repository that login can push to (`GET /user/repos`, owned,
 collaborator and organization-member, keeping push access); for an App, every
 repository the installation covers. It is always an explicit list — shown on
@@ -1042,6 +1043,16 @@ repositories":
   (`network.credentials.github.repositories`; search it in `/settings`,
   `owner/repo` entries) and only those are lent, minus any opt-outs; nothing is
   fetched from GitHub.
+- **Clear means refuse-all, not return to the default.** After lending a
+  hand-picked list, clearing it in `/settings` (including deleting its config
+  key) keeps a device-local clear fence: borrowers receive an empty list and
+  cannot push. `repos --refresh` does not remove that fence. To explicitly
+  return to every pushable repository minus opt-outs, run
+  `lop network credential github repos --use-default` **on the owner**. It
+  unsets the hand-picked list and removes its clear marker in one locked
+  transaction, preserves opt-outs, asks GitHub again and prints the effective
+  list. The next ordinary fetch carries the new list and its order metadata;
+  already-cached GitHub credentials retain the existing grant window above.
 - **Limits:** one share carries at most 2000 repositories, and an App token at
   most 500 (GitHub's own per-token limit). A larger list is refused by name —
   pick the ones to lend with the GitHub repositories setting, or opt some out —

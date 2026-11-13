@@ -50,6 +50,7 @@ from tests.unit.network.test_credentials_github import (
     _seed_app_key,
 )
 from tests.unit.network.test_credentials_real_link import _lop_network
+from tests.unit.network.test_github_designation_refresh import github_mesh  # noqa: F401
 from tests.unit.network.test_github_source_ladder import _seed_secret
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _pair,
@@ -356,6 +357,10 @@ def test_enumerated_defaults_keep_serving_and_carry_ordered_delivery(
     expected = ["acme/one", "acme/two"]
     if arm == "token":
         _token_arm(env, api, [_repo(name) for name in expected])
+        # Pin the resolved enumeration MINUS opt-outs at the grant boundary;
+        # a config-only second lookup would lose both this list and its digest.
+        _config(env.root, excluded=["acme/two"])
+        expected = ["acme/one"]
     else:
         _seed_app_key(env.root, app_keypair[0])
         api.forge.installation_repos = [_repo(name) for name in expected]
@@ -371,6 +376,164 @@ def test_enumerated_defaults_keep_serving_and_carry_ordered_delivery(
     assert int(second["narrowing"]["generation"]) >= int(first["narrowing"]["generation"])
 
 
+def test_two_relays_explicit_clear_then_use_default_restores_only_the_enumerated_list(
+    request: pytest.FixtureRequest,
+    api: _FakeGithubApi,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A clear remains refuse-all until an explicit owner opt-in, not a refresh."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.network.credentials.client import MeshCredentialClient
+
+    mesh = request.getfixturevalue("github_mesh")
+    owner, node = mesh.a.root, mesh.b.root
+    _config(owner, repositories=["acme/one"], excluded=["acme/blocked"])
+    api.forge.user_repos["synthetic-pat"] = [
+        _repo("acme/one"),
+        _repo("acme/two"),
+        _repo("acme/blocked"),
+    ]
+    monkeypatch.setattr(github_mod, "default_minter", api.minter)
+
+    def borrow() -> dict[str, Any]:
+        # Each ordinary CLI/helper invocation has its own client. Do not change
+        # GitHub's existing in-process grant TTL or force an admin refresh to
+        # make this owner-policy round trip appear to pass.
+        client = MeshCredentialClient.for_this_device(node)
+        assert client is not None
+        github_mod.borrowed_git_env(root=node, client=client)
+        return github_mod.designation_delivered(node, mesh.a.identity.device_id)
+
+    before = borrow()
+    assert github_mod.repositories_for(node) == ("acme/one",)
+    marker = github_mod._owner_marker_path(owner)  # noqa: SLF001 — marker invariant
+    assert marker.is_file()
+    settings_io._delete(ConfigManager(owner), github_mod.REPOSITORIES_PATH)  # noqa: SLF001
+    cleared = borrow()
+    assert github_mod.repositories_for(node) == ()
+    assert cleared["digest"] == github_mod.designation_digest([])
+    assert cleared["digest"] != before["digest"]
+    assert (
+        github_mod.git_helper_reply(
+            "get",
+            ["protocol=https", "host=github.com", "path=acme/one.git", ""],
+            token="synthetic-helper-token",
+            repositories=github_mod.repositories_for(node),
+        )
+        == ""
+    )
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(owner))
+    assert _cli("credential", "github", "repos") == 0
+    blocked_text = capsys.readouterr().out
+    # RED on 6fc3d960: parser refuses this opt-in; merely clearing or refreshing
+    # cannot escape the intentional #3841 marker, already proved above on TCP.
+    assert _cli("credential", "github", "repos", "--use-default") == 0
+    default_text = capsys.readouterr().out
+    assert "--use-default" in blocked_text
+    assert "  acme/one" in default_text and "  acme/two" in default_text
+    assert "opted out (1): acme/blocked" in default_text
+    assert not marker.exists()
+    assert github_mod.designation_for(owner) == ((), False)
+    restored = borrow()
+    assert github_mod.repositories_for(node) == ("acme/one", "acme/two")
+    assert restored["digest"] == github_mod.designation_digest(["acme/one", "acme/two"])
+    assert restored["digest"] != cleared["digest"]
+    assert restored["generation"] > cleared["generation"]
+    assert not marker.exists(), "automatic delivery must not recreate the explicit-clear marker"
+    print(
+        "round trip: explicit=1 -> cleared=0/refuse-all -> default=2/excluded=1; "
+        "new digest/generation; marker absent; ordinary borrower path over two relays"
+    )
+    print(blocked_text)
+    print(default_text)
+
+
+def test_default_reset_serializes_an_inflight_explicit_marker_writer(
+    env: _Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old explicit snapshot cannot recreate the fence after the opt-in.
+
+    Hold an owner read before its marker write; reset overlaps that read. The
+    lock-ownership assertion is the negative control, not a sleep that might
+    miss an unprotected snapshot on a loaded node.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from local_operator import config_writer
+
+    _config(env.root, repositories=["acme/one"], excluded=["acme/two"])
+    read = threading.Event()
+    release = threading.Event()
+    original = github_mod.designation_for
+
+    def held_read(root: Path | None = None) -> tuple[tuple[str, ...], bool]:
+        snapshot = original(root)
+        assert config_writer._owned.roots.get(env.root.resolve(), 0)  # noqa: SLF001
+        read.set()
+        assert release.wait(5), "test did not release its owner read"
+        return snapshot
+
+    monkeypatch.setattr(github_mod, "designation_for", held_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(github_mod.owner_designation, env.root)
+        try:
+            assert read.wait(5), "owner did not reach its explicit snapshot"
+            reset = pool.submit(github_mod.use_default_repositories, env.root)
+        finally:
+            release.set()
+        assert writer.result(timeout=5) == (("acme/one",), True)
+        reset.result(timeout=5)
+    assert original(env.root) == ((), False)
+    assert github_mod.excluded_repositories(env.root) == ("acme/two",)
+    assert not github_mod._owner_marker_path(env.root).exists()  # noqa: SLF001
+
+
+@pytest.mark.parametrize("already_delivered", [False, True])
+def test_a_failed_marker_reset_stays_refuse_all_and_can_be_retried(
+    env: _Env,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    already_delivered: bool,
+) -> None:
+    """Failure after the key deletion leaves the marker, never automatic access."""
+    _config(env.root, repositories=["acme/one"], excluded=["acme/two"])
+    if already_delivered:
+        assert github_mod.owner_designation(env.root) == (("acme/one",), True)
+    marker = github_mod._owner_marker_path(env.root)  # noqa: SLF001
+    original = Path.unlink
+
+    def failed_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path == marker:
+            raise OSError("synthetic marker removal failure")
+        original(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", failed_unlink)
+        with pytest.raises(OSError, match="synthetic marker removal failure"):
+            github_mod.use_default_repositories(env.root)
+        assert marker.is_file(), "failed opt-in must leave a fence even before the first lend"
+        assert github_mod.explicit_repositories(env.root) == ()
+        assert _cli("credential", "github", "repos", "--use-default", "--json") == 1
+        refusal = json.loads(capsys.readouterr().out)
+        assert refusal["code"] == "github_default_reset_failed"
+    assert github_mod.designation_for(env.root) == ((), False)
+    assert marker.is_file()
+    assert github_mod.explicit_repositories(env.root) == ()
+    github_mod.use_default_repositories(env.root)
+    assert not marker.exists()
+    assert github_mod.explicit_repositories(env.root) is None
+    assert github_mod.excluded_repositories(env.root) == ("acme/two",)
+
+
+def test_use_default_applies_only_to_repos(env: _Env) -> None:
+    _config(env.root, repositories=["acme/one"])
+    assert _cli("credential", "github", "include", "acme/two", "--use-default") == 1
+    assert github_mod.repositories_for(env.root) == ("acme/one",)
+
+
 def test_an_explicit_app_clear_never_reverts_to_the_enumerated_installation(
     env: _Env, api: _FakeGithubApi, app_keypair: tuple[str, str]
 ) -> None:
@@ -384,6 +547,7 @@ def test_an_explicit_app_clear_never_reverts_to_the_enumerated_installation(
         _config(env.root)
         refused = _refused(broker)
     assert refused["code"] == github_mod.CODE_REPOSITORIES_UNSET
+    assert "lop network credential github repos --use-default" in refused["message"]
     assert len(api.forge.mints) == before
     assert api.forge.gets == []
 
@@ -870,7 +1034,8 @@ def test_n2_n3_usage_shows_json_and_the_example_is_not_a_real_handle(
     net_cli._guard_credential_subcommand(argparse.Namespace())  # noqa: SLF001
     usage = capsys.readouterr().err
     assert (
-        "lop network credential github repos [--refresh] [--json] | exclude|include "
+        "lop network credential github repos [--refresh] [--use-default] [--json] | "
+        "exclude|include "
         "<owner/repo> [--json]"
     ) in usage, usage
     code, text = _cli_text(capsys, "credential", "github", "exclude", "nope", "--json")
