@@ -717,15 +717,17 @@ raise SystemExit(process.main())
 
 def _spawn_with_drain_bound(
     config_dir: Path, session_id: str, bound_s: float
-) -> subprocess.Popen[bytes]:
-    """``_spawn``'s environment, a driver instead of ``-m``, and a short bound."""
-    return subprocess.Popen(
+) -> CapturedChild:
+    """``_spawn``'s environment, a driver instead of ``-m``, and a short bound.
+
+    A ``CapturedChild`` like every other runtime here, so a failing drain-bound
+    child leaves the same bounded stderr evidence and ``_Rig.children`` stays
+    honestly typed; ``_Rig.aclose`` stops its capture via ``shutdown_evidence``.
+    """
+    return CapturedChild(
         [sys.executable, "-c", _DRAIN_BOUND_DRIVER, str(bound_s)],
+        config=config_dir,
         env=_child_env(config_dir, session_id),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
     )
 
 

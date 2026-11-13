@@ -78,9 +78,7 @@ def test_default_shutdown_artifacts_match_ci_upload(
     # Jobs have separate working trees: unit-job allowlists cannot preserve
     # files produced by the signal cases in tui-e2e, even if their names match.
     upload = next(
-        step
-        for step in jobs["tui-e2e"]["steps"]
-        if step.get("name") == "Upload e2e junit timings"
+        step for step in jobs["tui-e2e"]["steps"] if step.get("name") == "Upload e2e junit timings"
     )
     assert upload["uses"].startswith("actions/upload-artifact@")
     assert upload["if"] == "always()"
