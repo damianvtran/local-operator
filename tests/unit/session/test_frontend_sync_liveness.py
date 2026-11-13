@@ -1304,3 +1304,86 @@ async def test_a_raw_bind_lock_acquisition_announces_itself(tmp_path: Path, monk
         await viewer.dispose()
     finally:
         server.close()
+
+
+# --------------------------------------------------------------------------
+# 7. engage succeeded, then the record it saw is gone (dying-owner race)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_vanishes_after_engage_is_re_engaged(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``engage`` OK + ``locate`` -> (None, None) must engage again, not raise.
+
+    The runtime-refresh e2e flake: ``engage_runtime`` saw the DYING old owner's
+    record (its socket closed, its record not yet removed) and returned without
+    spawning; milliseconds later the registry held nothing and the bind raised
+    "could not start a runtime for this session" with no successor ever
+    started. Deterministic repro: the first lookup finds nothing (the record
+    the engage saw is gone), the second finds the successor's record.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    handle = FakeHandle()
+    server = RuntimeServer(handle, kind="tui")
+    server.start()
+    try:
+        record = await _record(tmp_path)
+        viewer = await AttachedSession.cold(
+            "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+        )
+        engages = 0
+
+        async def counting_engage(session_id, cwd, work, **_kwargs):
+            nonlocal engages
+            engages += 1
+
+        monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", counting_engage)
+        lookups = 0
+
+        def find(config_dir, session_id):
+            nonlocal lookups
+            lookups += 1
+            # Gone until the second engage has published the successor.
+            return (None, None) if engages < 2 else (record, None)
+
+        monkeypatch.setattr("local_operator.mobile.attach_client.find_runtime_record", find)
+
+        await viewer._ensure_bound()
+
+        assert engages == 2, "a vanished record must trigger exactly one more engage"
+        assert not viewer.is_cold
+        await viewer.dispose()
+    finally:
+        server.close()
+
+
+@pytest.mark.asyncio
+async def test_a_record_that_never_appears_still_raises_after_bounded_re_engages(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Negative control: engage OK, nothing ever published -> same error, bounded."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _claim(tmp_path)
+    viewer = await AttachedSession.cold(
+        "s1", config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    engages = 0
+
+    async def counting_engage(session_id, cwd, work, **_kwargs):
+        nonlocal engages
+        engages += 1
+
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", counting_engage)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda config_dir, session_id: (None, None),
+    )
+
+    with pytest.raises(ConnectionError, match="could not start a runtime for this session"):
+        await asyncio.wait_for(viewer._ensure_bound(), timeout=20)
+
+    assert engages == 1 + remote_module._BIND_REENGAGE_ATTEMPTS
+    await viewer.dispose()
