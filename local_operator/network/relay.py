@@ -513,6 +513,10 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # One peer's own relay recovery; the member answers before its
         # supervisor replaces the process, and the origin verifies on reconnect.
         "net_restart",
+        # The remote peek (network/peek.py): the owner runs the local peek's
+        # readers on its own journal. Slow by registration — a deep search may
+        # take seconds and must not hold the link reader.
+        "net_session_peek",
     }
 )
 
@@ -545,6 +549,8 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         # ``net_update``).
         "peer_update",
         "peer_restart",
+        # The remote peek's local half (``net_session_peek`` is the peer half).
+        "peer_session_peek",
     }
 )
 
@@ -577,6 +583,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # thread — and it opens no record by itself: the trigger that does is
     # S3b's, so this slice ships inert in production by construction.
     "local_operator.network.rollouts",
+    # The remote peek: one slow peer op plus its local half, no threads.
+    "local_operator.network.peek",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -5773,6 +5781,11 @@ class RelayServer:
         self._create_keys = CreateKeyIndex(self.root)
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
+        #: Devices with a peer-regex peek in flight here (``network.peek.
+        #: peer_regex_device``, PR #3831 QA Q5): at most one each, so one
+        #: member's burst of bad patterns cannot take the shared slow lane.
+        self._peer_regex_lock = threading.Lock()
+        self._peer_regex_inflight: set[str] = set()
         #: The create lane (``SESSION_CREATE_WORKERS``), under the same lock.
         self._create_pool: ThreadPoolExecutor | None = None
         self._create_slots: threading.BoundedSemaphore | None = None
@@ -8169,8 +8182,34 @@ class RelayServer:
         """
         req = frame.get("req")
         op = granted.action
+        # ONE PEER REGEX PER DEVICE, decided before a slot or a worker is taken
+        # (PR #3831 QA Q5): a cap inside the handler would already hold the
+        # worker it is meant to protect. Released when the WORKER finishes, not
+        # when the overdue answer leaves — the worker is what was being spent.
+        from local_operator.network import peek as net_peek
+
+        regex_device = net_peek.peer_regex_device(link, frame)
+        if regex_device is not None:
+            with self._peer_regex_lock:
+                busy = regex_device in self._peer_regex_inflight
+                if not busy:
+                    self._peer_regex_inflight.add(regex_device)
+            if busy:
+                return wire.refusal_frame(
+                    req,
+                    net_peek.PEER_REGEX_BUSY_SENTENCE.format(
+                        owner=self._own_label(), budget=net_peek.PEER_REGEX_BUDGET_S
+                    ),
+                )
+
+        def _release_regex() -> None:
+            if regex_device is not None:
+                with self._peer_regex_lock:
+                    self._peer_regex_inflight.discard(regex_device)
+
         pool, slots = self._slow_executor(op)
         if not slots.acquire(blocking=False):
+            _release_regex()
             return wire.refusal_frame(
                 req,
                 f"this device is already running {SLOW_OP_MAX_PENDING} long operations "
@@ -8221,6 +8260,7 @@ class RelayServer:
             finally:
                 timer.cancel()
                 slots.release()
+                _release_regex()
 
         try:
             timer.start()
@@ -8229,6 +8269,7 @@ class RelayServer:
             # The pool refuses new work once ``stop`` has shut it down.
             timer.cancel()
             slots.release()
+            _release_regex()
             return wire.refusal_frame(req, f"this device's relay is stopping; {op} was not started")
         return None
 

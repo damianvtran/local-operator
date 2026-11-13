@@ -669,7 +669,11 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     assert "Remote sessions (mesh)" in flat
     assert "each remote row names the device that holds it" in flat
     assert "ONE note saying why no remote rows could be" in flat
-    assert "`query`/`regex`/`digest` stay local" in flat
+    # The remote peek takes every local window now (the owner reads its own
+    # journal), and the guide must say so rather than the old tail-only limit.
+    assert "the same readers and budgets as a local peek" in flat
+    assert "stored sessions are readable" in flat
+    assert "`query`/`regex`/`digest` stay local" not in flat
     # THE REMOTE STOP IS A REFUSAL, NOT AN ESCALATION. This cell used to require
     # the sentence naming `lop network sessions --stop <id> --force`; the tool
     # answers `stop` with a `peer` target by refusing outright — no idle-only,
