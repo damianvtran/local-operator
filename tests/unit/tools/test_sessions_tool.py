@@ -2022,11 +2022,9 @@ async def test_help_returns_the_reference_and_refuses_an_address() -> None:
     result = await execute_sessions("t", {"op": "help"}, None, None, None)
     assert not result.is_error, result.text
     assert result.text == render_sessions_reference()
-    # Round 1 (NIT): the reference's refusal line must match behavior —
-    # `include_stored` widens only the LOCAL half (refused beside
-    # `scope='remote'` alone), while `query` is refused beside `peer` too.
+    # Local-only fields must not be silently ignored by an addressed peer.
     assert (
-        "`include_stored` widens only the local half and is refused beside `scope='remote'`."
+        "`include_stored` widens only the local half and is refused beside `peer`/`scope='remote'`."
         in result.text
     )
 
@@ -2640,6 +2638,96 @@ async def test_list_scope_remote_and_peer_narrow_the_fetch(
     assert "local-stored" not in result.text
     assert "shared-one" in result.text
     assert calls == [(["network", "sessions", "--json", "--peer", PEER], 30.0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", [None, "all", "remote"])
+async def test_list_explicit_peer_never_reads_local_rows(
+    root: Path, monkeypatch: pytest.MonkeyPatch, scope: str | None
+) -> None:
+    """An address selects its device before the shared result limit is applied."""
+
+    def forbidden_local(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("an explicitly addressed peer must not read the local catalogue")
+
+    monkeypatch.setattr("local_operator.info.collect.session_rows", forbidden_local)
+    calls: list[tuple[list[str], float]] = []
+    _fake_mesh(monkeypatch, _fed_doc(), calls=calls)
+    params: dict[str, Any] = {"op": "list", "peer": PEER, "limit": 1}
+    if scope is not None:
+        params["scope"] = scope
+    context = _context(root)
+    tool = build_sessions_tool(context)
+    assert tool is not None
+    result = await tool.execute("t", params, None, None, context)
+    assert not result.is_error, result.text
+    assert (result.details or {})["scope"] == "remote"
+    assert [row["session_id"] for row in (result.details or {})["rows"]] == ["aaaa11112222"]
+    assert (result.details or {})["total"] == 2
+    assert "shared-one" in result.text and "second" not in result.text
+    assert calls == [(["network", "sessions", "--json", "--peer", PEER], 30.0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", ["relay_unavailable", "peer_not_found", "no_json", "timeout", "unreachable"]
+)
+async def test_list_explicit_peer_failure_never_falls_back_local(
+    root: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def forbidden_local(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("a peer failure must never fall back to local sessions")
+
+    monkeypatch.setattr("local_operator.info.collect.session_rows", forbidden_local)
+    calls: list[list[str]] = []
+
+    async def fake(argv: list[str], timeout: float, context: object | None = None):
+        calls.append(argv)
+        if failure == "timeout":
+            raise TimeoutError
+        if failure == "no_json":
+            return 1, None, "synthetic peer transport failed"
+        if failure == "unreachable":
+            return (
+                0,
+                _fed_doc(
+                    sessions=[],
+                    peers={
+                        "d_b": {
+                            "name": PEER,
+                            "reachable": False,
+                            "reason": "connect_failed:ConnectionRefusedError",
+                        }
+                    },
+                ),
+                "",
+            )
+        return 1, {"ok": False, "code": failure, "message": f"synthetic {failure}"}, ""
+
+    monkeypatch.setattr(builtin, "_mesh_cli_json", fake)
+    context = _context(root)
+    tool = build_sessions_tool(context)
+    assert tool is not None
+    result = await tool.execute("t", {"op": "list", "peer": PEER, "limit": 1}, None, None, context)
+    assert calls == [["network", "sessions", "--json", "--peer", PEER]]
+    assert not (result.details or {}).get("rows")
+    if failure == "unreachable":
+        assert not result.is_error
+        assert f"{PEER}: unreachable" in result.text
+        assert (result.details or {})["scope"] == "remote"
+    else:
+        assert result.is_error, result.text
+        assert "synthetic" in result.text or "did not finish" in result.text
+
+
+def test_list_peer_conflicts_refuse_instead_of_ignoring_local_fields() -> None:
+    for scope in ("all", "remote"):
+        refusal = _sessions_validation_error(
+            SessionsParams(op="list", peer=PEER, scope=scope, include_stored=True)
+        )
+        assert refusal is not None and "include_stored" in refusal and "drop" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="list", peer=PEER, scope="local"))
+    assert refusal is not None and "drop one" in refusal
 
 
 @pytest.mark.asyncio
