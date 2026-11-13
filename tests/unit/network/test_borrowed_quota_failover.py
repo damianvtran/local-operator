@@ -23,6 +23,7 @@ relay and ``stream_with_failover``:
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -69,7 +70,12 @@ def _rest_every_owner_row(borrowed: Any, *, seconds: int = 35 * 60) -> None:
         )
 
 
-async def _turn(auth: Any, stub: StubProvider, settings: dict[str, Any]) -> list[Any]:
+#: What ``httpx.MockTransport`` accepts: both ``StubProvider`` and the hop-only
+#: ``_ShortRateLimit`` below are plain request handlers, not one class hierarchy.
+_Handler = Callable[[httpx.Request], httpx.Response]
+
+
+async def _turn(auth: Any, stub: _Handler, settings: dict[str, Any]) -> list[Any]:
     import httpx
 
     from local_operator.harness.types import ChatRequest, ModelSpec
@@ -140,9 +146,9 @@ async def test_an_exhausted_borrowed_rate_limit_is_a_quota_error_not_unknown(
     assert classify_provider_error(error) == "quota", str(error)
     # The owner's reset rides on the error, so the bench and any loop-back sweep
     # wait for it instead of re-asking a pool that is known to be resting.
-    assert error.retry_after_ms and 30 * 60_000 < error.retry_after_ms <= 35 * 60_000, (
-        error.retry_after_ms
-    )
+    assert (
+        error.retry_after_ms and 30 * 60_000 < error.retry_after_ms <= 35 * 60_000
+    ), error.retry_after_ms
     text = str(error)
     # Rendered as the broker's sentence, with no "unknown"/kind label in front.
     assert text.startswith(f"'{STUB_PROVIDER}' on "), text
@@ -247,9 +253,32 @@ async def test_a_switched_off_fallback_is_not_called_unconfigured(borrowed: Any)
     text = str(raised.value)
     assert "retry.fallbackChains" not in text, text
     assert text.endswith(
-        "Fallback is switched off on this device (retry.modelFallback), "
-        "so the turn stops here."
+        "Fallback is switched off on this device (retry.modelFallback), " "so the turn stops here."
     ), text
+
+
+class _NoLabelAuth:
+    """A ``FailoverAuthStore`` with no ``device_label`` hook.
+
+    The tail reads ``device_label`` duck-typed; a store without it is the case
+    under test, so this double carries only the Protocol's two members.
+    """
+
+    async def get_api_key(
+        self, provider: str, session_id: str | None = None, **kwargs: Any
+    ) -> str | None:
+        return None
+
+    def rotate_sibling(
+        self,
+        provider: str,
+        session_id: str | None,
+        error: BaseException,
+        api_key: str | None = None,
+        *,
+        model_id: str = "",
+    ) -> bool:
+        return False
 
 
 def test_a_tail_never_claims_unconfigured_when_a_chain_exists() -> None:
@@ -262,7 +291,7 @@ def test_a_tail_never_claims_unconfigured_when_a_chain_exists() -> None:
     error = ProviderError(None, "'x' on mac is rate-limited for another 5 min.", kind="quota")
     setattr(error, BORROWED_QUOTA_ATTR, True)
     _say_borrowed_quota_outcome(
-        error, object(), hops_tried=(), fallback_off=None, chain_configured=True
+        error, _NoLabelAuth(), hops_tried=(), fallback_off=None, chain_configured=True
     )
     assert error.message.endswith("No fallback model served this turn."), error.message
     assert "retry.fallbackChains" not in error.message, error.message

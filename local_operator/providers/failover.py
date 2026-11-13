@@ -4763,9 +4763,7 @@ async def _stream_with_failover_events(
                     # hop that is benched below waits it out like a local 429's
                     # advertised reset, instead of re-asking a resting pool each
                     # message. Errors without one leave the bench floor as it was.
-                    target_retry_after_ms = max(
-                        target_retry_after_ms, missing.retry_after_ms or 0
-                    )
+                    target_retry_after_ms = max(target_retry_after_ms, missing.retry_after_ms or 0)
                     if missing.retryable:
                         # Retryable means blocked-not-absent: backoffs expire on
                         # their own (and other processes release credentials),
