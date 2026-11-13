@@ -20,6 +20,7 @@ import pytest
 from fastapi import FastAPI
 
 from local_operator import logger as lo_logger
+from local_operator.serve_logging import ServeLogHandler
 from local_operator.server import app as app_module
 
 
@@ -34,35 +35,54 @@ async def test_the_server_lifespan_quiets_httpx_at_log_level_info(
     root = logging.getLogger()
     saved_handlers, saved_level = list(root.handlers), root.level
     saved_clients = {name: logging.getLogger(name).level for name in lo_logger._CHATTY_WIRE_CLIENTS}
+    saved_uvicorn = {
+        name: (
+            list(logging.getLogger(name).handlers),
+            logging.getLogger(name).level,
+            logging.getLogger(name).propagate,
+        )
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
+    }
     calls: list[str] = []
+    configure = app_module.configure_serve_logging
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    # Begin permissive so the assertion proves the lifespan pins the clients,
+    # rather than inheriting a WARNING filter installed by an earlier test.
+    for name in saved_clients:
+        logging.getLogger(name).setLevel(logging.INFO)
 
-    def console(*args: object, **kwargs: object) -> None:
-        calls.append("console")
-        # The operator's LOG_LEVEL=INFO: the level that let httpx's line through.
-        lo_logger.configure_console_logging(level=logging.INFO)
+    def serve_logging() -> ServeLogHandler:
+        calls.append("serve")
+        return configure()
 
     def quiet(*args: object, **kwargs: object) -> None:
         calls.append("quiet")
         lo_logger.quiet_wire_clients()
         raise _StopAfterLoggingSetup
 
-    monkeypatch.setattr(app_module, "configure_console_logging", console)
+    monkeypatch.setattr(app_module, "configure_serve_logging", serve_logging)
     monkeypatch.setattr(app_module, "quiet_wire_clients", quiet)
     try:
         with pytest.raises(_StopAfterLoggingSetup):
             async with app_module.lifespan(FastAPI()):
                 pass  # pragma: no cover - the pin stops startup first
-        # ORDER matters: the console configurator resets the wire clients to the
-        # root level, so a pin that ran before it would be undone.
-        assert calls == ["console", "quiet"]
+        # Exercise the real nonblocking sink setup before the policy pin, through
+        # the public lifespan wrapper that delegates startup to _lifespan.
+        assert calls == ["serve", "quiet"]
+        assert root.level == logging.INFO
         assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
         assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
     finally:
         for name, level in saved_clients.items():
             logging.getLogger(name).setLevel(level)
         for open_handler in list(root.handlers):
-            open_handler.close()
-            root.removeHandler(open_handler)
-        for handler in saved_handlers:
-            root.addHandler(handler)
+            if open_handler not in saved_handlers:
+                assert isinstance(open_handler, ServeLogHandler)
+                open_handler.close()
+                open_handler._worker.join(2)
+                assert not open_handler._worker.is_alive()
+        root.handlers = saved_handlers
         root.setLevel(saved_level)
+        for name, (handlers, level, propagate) in saved_uvicorn.items():
+            named = logging.getLogger(name)
+            named.handlers, named.level, named.propagate = handlers, level, propagate

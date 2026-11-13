@@ -374,6 +374,7 @@ def test_queue_retains_only_capacity_payload_graphs() -> None:
     handler.handle(record("inflight"))
     assert sink.entered.wait(2)
     payloads = weakref.WeakSet()
+    payload = None  # Definite binding for deletion even if the capacity loop is empty.
     try:
         for _ in range(3 * handler.capacity):
             payload = Payload()
