@@ -208,11 +208,6 @@ RELAY_DETAIL = {
         "out (that computer may be heavily loaded, or its connection slow). It "
         "reauthorizes by itself once a request completes."
     ),
-    SERVER_UNAVAILABLE: (
-        "Radient answered this computer's relay authorization check with a temporary "
-        "server error. Nothing is wrong with the login or this computer; it "
-        "reauthorizes by itself once Radient recovers."
-    ),
     CREDENTIAL_STORE_BUSY: (
         "The computer running this tunnel could not open its own credential store in "
         "time because another Local Operator process was using it. It reauthorizes by "
@@ -296,12 +291,6 @@ TERMINAL_DETAIL = {
         "was answered (this computer may be heavily loaded, or its connection slow). "
         "It retries every 10 seconds and reauthorizes by itself once a request "
         "completes; no local command is needed."
-    ),
-    SERVER_UNAVAILABLE: (
-        "Radient answered the connector's authorization check with a temporary server "
-        "error (HTTP 5xx), so the login and this computer are not at fault. It retries "
-        "every 10 seconds and reauthorizes by itself once Radient recovers; no local "
-        "command is needed."
     ),
     CREDENTIAL_STORE_BUSY: (
         "The local credential store was busy: another Local Operator process held it "
@@ -417,7 +406,6 @@ REASON_LABEL = {
     UNREACHABLE: "control plane unreachable",
     CONTROL_PLANE_TIMEOUT: "request to Radient timed out",
     CREDENTIAL_STORE_BUSY: "local credential store busy",
-    SERVER_UNAVAILABLE: "Radient server error",
     REFUSED: "authorization refused",
     AUTHORIZATION_DEFERRED: "sign-in refresh deferred",
     NOT_AUTHORIZED: "not authorized",
@@ -437,6 +425,9 @@ def reason_label(reason: str) -> str:
     a daemon from another version naming its own state is more useful to an
     operator than a shrug, and `terminal_detail` already takes that position.
     """
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[0]
     return REASON_LABEL.get(reason, reason)
 
 
@@ -447,7 +438,42 @@ def terminal_detail(reason: str, relay_detail: str) -> str:
     a daemon from another version — rather than saying nothing about a cause the
     daemon plainly named.
     """
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[1]
     return TERMINAL_DETAIL.get(reason, relay_detail)
+
+
+def relay_detail(reason: str) -> str:
+    """The phone-facing sentence for a refusal reason (the 503 body's ``detail``)."""
+    localized = _localized(reason)
+    if localized is not None:
+        return localized[2]
+    return RELAY_DETAIL[reason]
+
+
+def _localized(reason: str) -> tuple[str, str, str] | None:
+    """``(label, terminal detail, relay detail)`` for a reason whose copy is keyed.
+
+    The tables above predate the i18n catalogues and are still English
+    literals; copy ADDED since then lives in the `tunnel.status` namespace
+    (AGENTS.md: new user-facing copy is keyed), so it is resolved here, at call
+    time — never at import, so a live language change is followed — and every
+    caller keeps reading one vocabulary through `reason_label`,
+    `terminal_detail` and `relay_detail`. Imported lazily to keep this module's
+    import graph (pinned in `tests/unit/test_import_graph.py`) unchanged.
+    """
+    if reason != SERVER_UNAVAILABLE:
+        return None
+    from local_operator.i18n.keys import tunnel_status
+    from local_operator.i18n.text import tr
+
+    _t = tr("tunnel.status")
+    return (
+        _t(tunnel_status.server_unavailable_label()),
+        _t(tunnel_status.server_unavailable_terminal()),
+        _t(tunnel_status.server_unavailable_relay()),
+    )
 
 
 # Only presentation/protocol headers cross the boundary. In particular the
@@ -655,7 +681,7 @@ class Gateway:
         terminal cannot disagree about the cause.
         """
         reason = self.refusal_reason()
-        return {"detail": RELAY_DETAIL[reason], "reason": reason}
+        return {"detail": relay_detail(reason), "reason": reason}
 
     def unavailable_body(self) -> dict[str, str]:
         """The phone-facing 503 body.

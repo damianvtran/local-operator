@@ -144,6 +144,9 @@ from local_operator.session.runtime.types import (
 from local_operator.session.store_failures import store_failure
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
+# stdlib-only module (no httpx/starlette), unlike `tunnels.gateway` below.
+from local_operator.tunnels.request_log import note_reason
+
 logger = logging.getLogger(__name__)
 #: The gateway's own spelling (``tunnels.gateway.STREAM_CLEANUP_FAILED``): one
 #: name for the one failure class, with the logger name carrying the surface.
@@ -6522,6 +6525,7 @@ def build_app(daemon: MobileDaemon):
         if (
             origin is not None and origin not in {f"http://{host}", f"https://{host}"}
         ) or request.headers.get("sec-fetch-site") == "cross-site":
+            note_reason(request.scope, "cross_origin")
             return JSONResponse({"error": "same-origin request required"}, status_code=403)
         return None
 
@@ -6534,6 +6538,9 @@ def build_app(daemon: MobileDaemon):
         if authed(request):
             return None
         if request.url.path.startswith("/api/"):
+            # A reason code on the request log's entry (QA round 1, Q3): a 401
+            # with an empty reason could not be told apart from a handler's own.
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         return RedirectResponse("/login", status_code=303)
 
@@ -6569,6 +6576,7 @@ def build_app(daemon: MobileDaemon):
         form = await request.form()
         candidate = str(form.get("password", ""))
         if not daemon.password or not check_password(candidate, daemon.password):
+            note_reason(request.scope, "login_failed")
             return HTMLResponse(
                 await asyncio.to_thread(_render_login_html, error=True),
                 status_code=401,
@@ -6853,6 +6861,7 @@ def build_app(daemon: MobileDaemon):
         if origin_denied is not None:
             return origin_denied
         if not authed(request):
+            note_reason(request.scope, "unauthorized")
             return JSONResponse({"error": "authentication required"}, status_code=401)
         from local_operator import agent_avatar
         from local_operator.i18n.http import etag_matches

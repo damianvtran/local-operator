@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 
 from local_operator import launchd
+from local_operator.i18n.keys import tunnel_status
+from local_operator.i18n.text import tr
 from local_operator.providers.auth_store import self_clearing_window
 from local_operator.tunnels import config, gateway, report, request_log, state
 from local_operator.tunnels.api import (
@@ -35,6 +37,10 @@ from local_operator.tunnels.service import (
     cloudflared_binary,
     tunnel_path,
 )
+
+#: Copy added to this module since the catalogues exist is keyed (AGENTS.md
+#: "Internationalization"); resolved at call time so a language change applies.
+_t = tr("tunnel.status")
 
 
 def _read_origin_auth(path: Path) -> dict[str, str]:
@@ -179,10 +185,14 @@ def _status_text(
         # The connector's own last retrying exit, from service.log: shown so the
         # cause is on this screen rather than only in a log file (field report:
         # an upstream 503 visible only in service.log).
+        # It may be HISTORY (`current: false`): `report.probe` decides whether
+        # it explains the present state; this row only says when it happened.
         at = _stamp(last_error.get("at"))
+        label = gateway.reason_label(str(last_error["reason"]))
         lines.append(
-            f"Last connector exit: {gateway.reason_label(str(last_error['reason']))}"
-            f"{f' (at {at})' if at else ''}"
+            _t(tunnel_status.last_exit_at(label=label, at=at))
+            if at
+            else _t(tunnel_status.last_exit_plain(label=label))
         )
     transport = connector.get("transport")
     if transport:
@@ -285,7 +295,7 @@ def _status_text(
         # (U1: the window re-arms, so a deferral that keeps returning is where a sign-in
         # becomes the remedy).
         if connector["reason"] == gateway.AUTHORIZATION_DEFERRED:
-            lines.append("Login: refresh deferred — retried automatically.")
+            lines.append(_t(tunnel_status.login_deferred_retried()))
         else:
             window = f"about {self_clearing_window()}"
             lines.append(
@@ -296,7 +306,7 @@ def _status_text(
         # Never "sign-in expired": this state means the check itself could not run,
         # and naming it anything else sends an operator whose network is down to a
         # login that cannot help them.
-        lines.append("Login: could not be checked (a refresh could not reach Radient).")
+        lines.append(_t(tunnel_status.login_unchecked()))
     lines.extend(_summary(record, source, stopped=stopped).splitlines())
     lines.extend(request_log.render(payload.get("requests") or {}))
     return "\n".join(lines)
@@ -435,6 +445,15 @@ async def _adopt_conflicting_create(api: RadientTunnels, pending: dict[str, Any]
     the conflict rather than a bare status, because "HTTP 409" gives the
     operator nothing to act on.
     """
+    device_id = pending.get("device_id")
+    name = pending.get("name")
+    # Exact, typed matches only (review round 1, R1-2): a pending intent saved
+    # from a config whose record had no device id carries `None`, and `None ==
+    # None` would match every same-name record without one; a defaulted name
+    # would let a NAMELESS record match. Either is a guess, and a guess here
+    # binds (and bills) a tunnel, so a missing proof means no adoption.
+    if not isinstance(device_id, str) or not device_id or not isinstance(name, str):
+        raise ValueError(_t(tunnel_status.create_conflict_unmatched()))
     records = await api.request("GET")
     if isinstance(records, dict):
         records = records.get("tunnels", [])
@@ -443,15 +462,11 @@ async def _adopt_conflicting_create(api: RadientTunnels, pending: dict[str, Any]
         for record in (records if isinstance(records, list) else [])
         if isinstance(record, dict)
         and isinstance(record.get("id"), str)
-        and record.get("device_id") == pending.get("device_id")
-        and record.get("name", pending.get("name")) == pending.get("name")
+        and record.get("device_id") == device_id
+        and record.get("name") == name
     ]
     if len(matches) != 1:
-        raise ValueError(
-            "Radient says a tunnel for this request already exists, but this login's "
-            "tunnel list has no single matching record. Check lop tunnel list, then "
-            "connect it with lop tunnel connect --tunnel-id <id>."
-        )
+        raise ValueError(_t(tunnel_status.create_conflict_unmatched()))
     return matches[0]
 
 

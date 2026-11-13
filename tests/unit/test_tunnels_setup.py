@@ -944,3 +944,44 @@ async def test_a_409_with_no_matching_record_stays_a_reservation_failure(rig, mo
     with pytest.raises(ValueError, match="already exists") as failure:
         await cli.dispatch(args)
     assert "HTTP 409" not in str(failure.value)
+
+
+class _ListingApi:
+    """A fake owner-pinned list read for `_adopt_conflicting_create`."""
+
+    def __init__(self, records):
+        self.records = records
+        self.calls = 0
+
+    async def request(self, method, path="", **kwargs):
+        self.calls += 1
+        assert method == "GET"
+        return {"tunnels": self.records}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("device_id", [None, "", 7])
+async def test_a_409_adoption_needs_a_real_pending_device_id(device_id):
+    """R1-2: a `None` device id must not match every record that lacks one."""
+    from local_operator.tunnels import cli
+
+    api = _ListingApi([{"id": "tun-a", "name": "mac"}, {"id": "tun-b", "device_id": device_id}])
+    with pytest.raises(ValueError, match="already exists"):
+        await cli._adopt_conflicting_create(api, {"device_id": device_id, "name": "mac"})
+    assert api.calls == 0, "no list read without a proof to match it against"
+
+
+@pytest.mark.asyncio
+async def test_a_409_adoption_never_matches_a_nameless_record():
+    """R1-2: the name is compared exactly; a record without one is not a match."""
+    from local_operator.tunnels import cli
+
+    pending = {"device_id": "dev-1", "name": "mac"}
+    nameless = _ListingApi([{"id": "tun-a", "device_id": "dev-1"}])
+    with pytest.raises(ValueError, match="already exists"):
+        await cli._adopt_conflicting_create(nameless, pending)
+    renamed = _ListingApi([{"id": "tun-a", "device_id": "dev-1", "name": "other"}])
+    with pytest.raises(ValueError, match="already exists"):
+        await cli._adopt_conflicting_create(renamed, pending)
+    exact = _ListingApi([{"id": "tun-a", "device_id": "dev-1", "name": "mac"}])
+    assert (await cli._adopt_conflicting_create(exact, pending))["id"] == "tun-a"

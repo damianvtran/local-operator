@@ -50,6 +50,7 @@ from local_operator.tunnels.gateway import (
     TERMINAL_DETAIL,
     UNREACHABLE,
     Gateway,
+    terminal_detail,
 )
 from local_operator.tunnels.relay.connector import (
     RelayConnector,
@@ -562,7 +563,7 @@ def classify_failure(failure: BaseException) -> Failure:
         # Transient, on the supervisor's existing 10 s floor: Radient's own outage
         # clears without anyone on this machine acting, and naming it keeps the
         # retry line from blaming the login (see `_is_a_server_error`).
-        return Failure("transient", SERVER_UNAVAILABLE, TERMINAL_DETAIL[SERVER_UNAVAILABLE])
+        return Failure("transient", SERVER_UNAVAILABLE, terminal_detail(SERVER_UNAVAILABLE, ""))
     if isinstance(failure, LocalPrerequisite):
         # The sentence is the failure's own, and that is safe: every ValueError
         # this package raises is a fixed module literal (see `main`), and these

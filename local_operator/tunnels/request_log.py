@@ -19,12 +19,11 @@ a short token of safe characters (it is attacker-controlled input written to a
 file), otherwise a fresh random one; it is echoed back as ``X-Request-Id`` so a
 phone-side report and this log can be joined.
 
-BOUNDS. In memory: a ring of :data:`RING_SIZE` entries per process — enough to
-hold several minutes of an active phone's traffic (a session view polls a
-handful of routes every few seconds) for in-process readers, at roughly 200 B an
-entry (~40 KB). On disk: a rotating file capped at :data:`FILE_MAX_BYTES` with
+BOUNDS. On disk only: a rotating file capped at :data:`FILE_MAX_BYTES` with
 :data:`FILE_BACKUPS` backup, so the worst case is ~1 MiB per surface whatever the
-uptime; status readers read only a bounded tail of the current file. The file is
+uptime; status readers read only a bounded tail of the current file. There is
+no in-memory copy: every reader is another process (review round 1, R1-5 —
+an in-process ring nothing read was dead state). The file is
 the cross-process channel: ``lop tunnel status`` and ``lop mobile status`` run in
 another process than the server that served the requests, and the file still
 answers when that server is hung — which is exactly the case being diagnosed.
@@ -35,21 +34,17 @@ import graph does not grow.
 
 from __future__ import annotations
 
-import collections
 import json
 import logging
 import logging.handlers
 import os
 import re
-import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, MutableMapping
 from pathlib import Path
 from typing import Any
 
-#: In-memory entries kept per process (see the module docstring for the sizing).
-RING_SIZE = 200
 #: Rotating file cap: 512 KiB holds ~2,500 entries, hours of an active phone.
 FILE_MAX_BYTES = 512 * 1024
 FILE_BACKUPS = 1
@@ -77,6 +72,9 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 #: is available: session ids, share tokens and pairing codes are long and opaque,
 #: while route words ("api", "sessions", "events") are short.
 _OPAQUE_SEGMENT = 16
+#: Shorter segments are masked from this length when they carry a digit (see
+#: ``_opaque``); below it sit version words such as ``v1`` and ``v2``.
+_ID_MIN = 6
 _MAX_PATH = 160
 
 Scope = MutableMapping[str, Any]
@@ -109,8 +107,22 @@ def _template(scope: Scope) -> str:
         root = scope.get("root_path") or ""
         return (root + template)[:_MAX_PATH]
     raw = str(scope.get("path") or "/")
-    segments = [":id" if len(part) >= _OPAQUE_SEGMENT else part for part in raw.split("/")]
-    return "/".join(segments)[:_MAX_PATH]
+    return "/".join(":id" if _opaque(part) else part for part in raw.split("/"))[:_MAX_PATH]
+
+
+def _opaque(segment: str) -> bool:
+    """Whether a raw path segment is an identifier rather than a route word.
+
+    Length alone missed lop's own ids (review round 1, R1-4): session ids are 12
+    hex characters (`/api/sessions/3b11f69df1d3/history`), as are project keys
+    and tag ids, all under the long-token bound. Route words are lowercase
+    letters with at most ``_``/``-`` (``sessions``, ``history``, ``push-devices``)
+    and short versions (``v1``), so a segment of :data:`_ID_MIN` or more
+    characters carrying a digit is treated as an id, as is anything long.
+    """
+    if len(segment) >= _OPAQUE_SEGMENT:
+        return True
+    return len(segment) >= _ID_MIN and any(c.isdigit() for c in segment)
 
 
 def _request_id(scope: Scope) -> str:
@@ -127,12 +139,10 @@ def _request_id(scope: Scope) -> str:
 
 
 class RequestLog:
-    """The ring plus the rotating file for one surface (gateway or mobile daemon)."""
+    """The rotating file for one surface (gateway or mobile daemon)."""
 
-    def __init__(self, path: Path | None, *, ring_size: int = RING_SIZE) -> None:
+    def __init__(self, path: Path | None) -> None:
         self.path = path
-        self.ring: collections.deque[dict[str, Any]] = collections.deque(maxlen=ring_size)
-        self._lock = threading.Lock()
         self._handler: logging.Handler | None = None
         if path is not None:
             try:
@@ -149,8 +159,6 @@ class RequestLog:
                 self._handler = None
 
     def record(self, entry: dict[str, Any]) -> None:
-        with self._lock:
-            self.ring.append(entry)
         if self._handler is not None:
             message = json.dumps(entry, separators=(",", ":"), allow_nan=False)
             # `handle`, not `emit`: it takes the handler's own lock, so two
@@ -277,23 +285,33 @@ def read_tail(path: Path, *, limit: int = STATUS_RECENT) -> dict[str, Any]:
 def render(summary: dict[str, Any]) -> list[str]:
     """Plain lines for a terminal: a counts line, then the recent entries.
 
-    Developer-facing diagnostic rows built from protocol tokens (methods,
-    paths, status codes, reason codes); no prose is composed here.
+    The rows are protocol tokens (methods, paths, status codes, reason codes);
+    the heading and the no-response word are prose, so they are keyed
+    (`tunnel.status`, review round 1, R1-3) and resolved at call time. Imported
+    here rather than at module top: the gateway imports this module, and its
+    import graph stays as pinned.
     """
+    from local_operator.i18n.keys import tunnel_status
+    from local_operator.i18n.text import tr
+
+    _t = tr("tunnel.status")
     recent = summary.get("recent") or []
     if not recent:
         return []
     counts = summary.get("counts") or {}
     order = ("2xx", "3xx", "4xx", "5xx", "1xx", "none")
     tally = " ".join(f"{key}={counts[key]}" for key in order if counts.get(key))
-    lines = [f"Requests (last {summary.get('window', len(recent))}): {tally}"]
+    window = str(summary.get("window", len(recent)))
+    lines = [_t(tunnel_status.requests_heading(window=window, tally=tally))]
+    no_response = _t(tunnel_status.requests_no_response())
     for entry in recent:
         stamp = time.strftime("%H:%M:%S", time.localtime(float(entry.get("at") or 0)))
         status = entry.get("status")
         reason = f" {entry['reason']}" if entry.get("reason") else ""
         lines.append(
+            # i18n: ignore protocol-token row (time, method, path, status, reason code, ms, id)
             f"  {stamp} {entry.get('method', '')} {entry.get('path', '')} "
-            f"{status if status is not None else 'no-response'}{reason} "
+            f"{status if status is not None else no_response}{reason} "
             f"{entry.get('ms', '')}ms id={entry.get('id', '')}"
         )
     return lines
