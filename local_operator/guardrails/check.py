@@ -558,7 +558,14 @@ class DeleteCase:
             basis = [*basis[:6], f"… and {len(basis) - 6} more"]
         return "; ".join(basis)
 
-    def verify(self, answer: str, *, alone: bool = False) -> tuple[str, str]:
+    def verify(
+        self,
+        answer: str,
+        *,
+        alone: bool = False,
+        forked: bool = False,
+        scope_eligible: frozenset[str] = frozenset(),
+    ) -> tuple[str, str]:
         """``(basis, missing)``: what verified each path, and what did not verify.
 
         The answer's first line may cite ``evidence=e1,e2``, ``ask=a-1234`` and
@@ -586,6 +593,24 @@ class DeleteCase:
         # never sends such a call to the forked judge.
         by_evidence = verify_evidence(
             evidence_ids, self.paths, self.evidence, env=self.env, stop=self.stop, alone=alone
+        )
+        # An ID proves the source, not semantics: only the independent prefix fork
+        # may decide completion, restrictions and holds. Never a judge-free route.
+        scope = re.fullmatch(r"ALLOW scope=o([1-9][0-9]*)", first)
+        scope_id = int(scope.group(1)) if scope else 0
+        scope_words = (
+            self.operator.words[scope_id - 1] if 0 < scope_id <= len(self.operator.words) else None
+        )
+        scoped = (
+            not alone
+            and forked
+            and not self.unverifiable
+            and not self.operator_only
+            and bool(self.paths)
+            and set(self.paths) <= scope_eligible
+            and scope_words is not None
+            and scope_words.label == "operator, direct"
+            and not scope_words.ask_id
         )
         basis: list[str] = []
         missing: list[str] = []
@@ -616,6 +641,12 @@ class DeleteCase:
             if words is not None:
                 where = f"ask {words.ask_id}" if words.ask_id else "the operator's message"
                 basis.append(f"{path} named by {where}")
+                continue
+            if scoped:
+                basis.append(
+                    f"{path} covered by trusted direct-user cleanup scope o{scope_id}; "
+                    "independent judge verified completion and scope"
+                )
                 continue
             missing.append(path)
         if missing:
@@ -824,6 +855,53 @@ def evidence_write_verdict(
     return None
 
 
+def _scope_eligible(case: DeleteCase, verdict: Verdict, ctx: CallContext) -> frozenset[str]:
+    """Fresh negative gates only; these facts grant neither consent nor completion."""
+    from local_operator.guardrails.provenance import (
+        _running_owners,
+        worktree_activity,
+        worktree_state,
+    )
+
+    if (
+        case.unverifiable
+        or case.operator_only
+        or not case.paths
+        or not any(w.label == "operator, direct" and not w.ask_id for w in case.operator.words)
+    ):
+        return frozenset()
+    # All operands, not just HIGH ones: no parent/glob/symlink/mixed-target scope.
+    for ranked in verdict.targets:
+        t = ranked.target
+        if (
+            not t.path
+            or t.pattern
+            or t.opaque
+            or t.unknown_cwd
+            or t.climbs
+            or t.empty
+            or t.credential_derived
+            or t.unpinned
+            or t.landings
+            or os.path.abspath(t.raw_path or t.path) != os.path.realpath(t.raw_path or t.path)
+            or t.path not in case.paths
+            or t.op not in ("delete", "worktree-remove")
+        ):
+            return frozenset()
+    for path in case.paths:
+        if worktree_state(path) != "clean":
+            return frozenset()
+        try:
+            if _running_owners(path, ctx.session_id, strict=True):
+                return frozenset()
+        except Exception:  # noqa: BLE001 — incomplete owner inventory is not idle
+            return frozenset()
+        activity = worktree_activity(path, ctx.session_id)
+        if activity.pr_state != "none" or activity.owners_running:
+            return frozenset()
+    return frozenset(case.paths)
+
+
 async def _dangerous_delete(
     args: Mapping[str, Any],
     ctx: CallContext,
@@ -878,6 +956,7 @@ async def _dangerous_delete(
         )
         outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {proven}.")
         return outcome
+    eligible = _scope_eligible(case, verdict, ctx) if forked_judge else frozenset()
     result = await run_judge(
         JudgeBrief(
             tool="bash",
@@ -889,7 +968,12 @@ async def _dangerous_delete(
             intent=ctx.intent,
             operator_words=case.operator_words,
             excluded=case.excluded,
-            target_facts=case.facts,
+            target_facts=(
+                *case.facts,
+                "Scoped cleanup eligibility (fresh clean/idle/no-open-PR; "
+                "owner inventory complete): "
+                f"{sorted(eligible)!r}",
+            ),
             evidence=case.evidence.describe(),
         ),
         # The fork reads the session's history, injected text included, so it
@@ -905,7 +989,11 @@ async def _dangerous_delete(
         # (see ``guardrails/evidence.py``). A forked judge read the whole
         # session, injected text included, so an uncited or unverifiable
         # ALLOW is a block.
-        basis, missing = case.verify(result.answer)
+        basis, missing = case.verify(
+            result.answer,
+            forked=bool(forked_judge) and not result.context_free,
+            scope_eligible=eligible,
+        )
         if missing:
             # Live ask a-1d54 (2026-11-11): the paths sat only in the picked
             # option's DESCRIPTION, four of five relative, so no citation could
@@ -928,6 +1016,11 @@ async def _dangerous_delete(
         outcome = GuardOutcome(
             blocked=False, rule=DANGEROUS_DELETE_RULE, risk=risk_name, destructive=True
         )
+        if "covered by trusted direct-user cleanup scope" in basis:
+            outcome.warnings.append(
+                "Completed-worktree cleanup authorized by direct-user scope; "
+                "finished/idle checks passed."
+            )
         if basis:
             outcome.warnings.append(f"Guardrail {DANGEROUS_DELETE_RULE}: allowed — {basis}.")
         return outcome
