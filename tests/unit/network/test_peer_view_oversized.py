@@ -119,6 +119,44 @@ def test_metadata_that_cannot_fit_is_still_refused_by_name(
         relay.fit_session_history_reply(1, page)
 
 
+def test_a_custom_row_with_bulk_outside_details_is_bounded_not_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-3: a ``CustomMessage`` is ``extra="allow"``, so its bulk can live in a
+    list ``content`` or an extra key. Cutting only ``details`` left it oversized
+    and the page was refused as "metadata too large"; identity is all it keeps."""
+    budget = 64 * 1024
+    monkeypatch.setattr(relay, "SESSION_HISTORY_REPLY_BUDGET_BYTES", budget)
+    newest = {
+        "id": "cm",
+        "ts": 3.0,
+        "type": "custom",
+        "payload": {
+            "custom_type": "handoff",
+            "attribution": "agent",
+            "id": "cm",
+            "details": {"note": "d" * budget},
+            "content": [{"type": "text", "text": "c" * budget}],
+            "extra_blob": "e" * (budget * 2),
+        },
+    }
+    page = {"entries": [newest], "has_more": False, "cursor_missing": False}
+
+    fitted = relay.fit_session_history_reply(1, page)
+
+    assert relay.session_history_reply_bytes(1, fitted) <= budget
+    row = fitted["entries"][-1]
+    assert (row["id"], row["ts"], row["type"]) == ("cm", 3.0, "custom")
+    assert set(row["payload"]) == {"custom_type", "attribution", "id", "details"}
+    assert row["payload"]["custom_type"] == "handoff"
+    assert MARKER_WORDS in row["payload"]["details"]["truncated"]
+    # A string ``content`` is kept as a key, carrying the marker.
+    stringy = {**newest, "payload": {**newest["payload"], "content": "s" * (budget * 2)}}
+    cut = relay.bounded_history_entry(stringy, budget // 4)
+    assert MARKER_WORDS in cut["payload"]["content"]
+    assert "extra_blob" not in cut["payload"]
+
+
 # --- the owner's display window ----------------------------------------------
 
 
@@ -216,3 +254,63 @@ async def test_a_cold_peer_read_serves_an_oversized_newest_row_marked(
     finally:
         await pool.close()
         link.close("test")
+
+
+# --- the locality gate ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locality", ["local", "remote"])
+async def test_only_a_non_local_viewer_gets_the_bounded_page(
+    tmp_path: Path, locality: str
+) -> None:
+    """R1-2: the two server routes that pick exact vs bounded by locality.
+
+    A LOCAL viewer can replay the transcript itself, so its sync frame and its
+    ``history_page`` answer stay ``full_required`` byte-for-byte; a REMOTE one
+    cannot, so both routes hand it the bounded, marked page instead.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime.server import (
+        RuntimeServer,
+        _serve_peer_bounded_history,
+    )
+    from tests.unit.session.runtime.test_server import FakeHandle
+
+    transcript = Transcript(tmp_path)
+    big = Message.assistant("oversized prose " * 100_000)
+    await transcript.append_messages([Message.user("before"), big])
+    exact = _window(transcript)
+    bounded = _window(transcript, bound_oversized=True)
+    assert (exact.status, bounded.status) == ("full_required", "ok")
+    expected = "full_required" if locality == "local" else "ok"
+
+    # Route 1: the sync frame (pushed frame and ``frontend_sync`` RPC).
+    exact_json = exact.model_dump(mode="json")
+    payload: dict[str, Any] = {"display_history": exact_json}
+    sync = SimpleNamespace(_peer_display_history=bounded)
+    _serve_peer_bounded_history(payload, sync, locality)
+    assert payload["display_history"]["status"] == expected
+    if locality == "local":
+        assert payload["display_history"] == exact_json
+
+    # Route 2: the ``history_page`` op, through the real dispatcher.
+    class PagingHandle(FakeHandle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[bool] = []
+
+        def history_page(self, before: str, anchor: str, bound_oversized: bool = False):
+            self.calls.append(bound_oversized)
+            return _window(transcript, bound_oversized=bound_oversized).model_dump(mode="json")
+
+    handle = PagingHandle()
+    server = RuntimeServer(handle, kind="tui")
+    page = await server._dispatch_payload(
+        "history_page", {"op": "history_page", "before": "t", "anchor": ""}, locality=locality
+    )
+    assert handle.calls == [locality != "local"]
+    assert page["status"] == expected
+    if locality == "remote":
+        assert MARKER_WORDS in json.dumps(page)

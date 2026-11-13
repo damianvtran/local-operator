@@ -4343,8 +4343,10 @@ def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
     tool-call/tool-result identity the renderer pairs cards by, and its body
     becomes a text preview plus the same marker the live view uses
     (``history_window.TRUNCATED_ENTRY_MARKER``) — one sentence for one condition,
-    whichever path served the row. Any other payload keeps its ``custom_type``
-    and swaps ``details`` for the marker. Never mutates ``entry``.
+    whichever path served the row. Any other payload (a ``CustomMessage``) keeps
+    only its identity — ``custom_type``, ``attribution``, ``id`` — and carries
+    the marker in ``details`` (and in ``content`` when that was a string). Never
+    mutates ``entry``.
     """
     from local_operator.session.history_window import (
         TRUNCATED_ENTRY_MARKER,
@@ -4390,9 +4392,16 @@ def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
             ]
         cut = kept
     else:
-        cut = {key: value for key, value in payload.items() if key != "details"}
+        # AN ALLOW-LIST, like the role branch above, not "everything but
+        # details": a ``CustomMessage`` is ``extra="allow"``, so its bulk can
+        # sit in a list ``content`` or any extra key. Keeping those would leave
+        # the row oversized and surface as the misleading "metadata is too
+        # large" refusal; only identity is needed to render and page past it.
+        cut = {
+            key: payload[key] for key in ("custom_type", "attribution", "id") if key in payload
+        }
         cut["details"] = {"truncated": marker}
-        if isinstance(cut.get("content"), str):
+        if isinstance(payload.get("content"), str):
             cut["content"] = marker
     return {**entry, "payload": cut}
 
@@ -4441,7 +4450,7 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
             > SESSION_HISTORY_REPLY_BUDGET_BYTES
         ):
             # Only the envelope can still be too large here (the bounded row
-            # is a few KB), which is the metadata refusal above in another hat.
+            # is ≤ budget/4), which is the metadata refusal above in another hat.
             raise MeshRefusal(
                 "page_too_large", "this page's metadata is too large to serve over the mesh"
             )

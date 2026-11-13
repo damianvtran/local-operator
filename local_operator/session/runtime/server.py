@@ -2626,7 +2626,6 @@ def has_durable_history(session: Any) -> bool:
     return durable_conversation_path(path)
 
 
-
 def _accepts_keyword(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes keyword ``name`` (a handle kind may predate it)."""
     try:
@@ -2653,6 +2652,7 @@ def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: st
     if bounded is None:
         return
     payload["display_history"] = bounded.model_dump(mode="json")
+
 
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
