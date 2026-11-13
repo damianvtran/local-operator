@@ -1,0 +1,6 @@
+queued arm (policy.enabled()) = False
+hook got: command='glab auth login' target='agent'
+pending.title = 'Sign in to GitLab?\n\nglab auth login'
+tool result: False The user answered:
+signin — Sign in to GitLab?
+  answer: Done
