@@ -552,6 +552,10 @@ export interface SpendChannels {
 export interface SessionProjection {
 	/** Absent on old owners; raw entry metadata alone never enables this. */
 	peer_cycles?: 1;
+	/** The temporary mark on the session events frame, when the relay sends
+	    it there (contract §2.3). Absent means "not said here": the screen then
+	    reads the list row's field, which the same relay always carries. */
+	temporary?: TemporaryInfo | null;
 	attention?: CompletionAttention;
 	session_id: string;
 	pid: number;
@@ -718,9 +722,40 @@ export interface SessionTagsResponse {
 	primary: string | null;
 }
 
+/** Why the temporary pass is holding a temporary chat's clock (closed enum,
+    frozen wire, contract §2.2). The client keys its copy off these codes. */
+export const TEMPORARY_HOLD_CODES = [
+	"running",
+	"on_screen",
+	"open_ask",
+	"armed_wake",
+	"armed_monitor",
+	"unread_mail",
+	"operator_hold",
+	"unseen_result",
+	"unsaved_files",
+	"linked",
+	"cannot_verify",
+] as const;
+export type TemporaryHoldCode = (typeof TEMPORARY_HOLD_CODES)[number];
+
+/** A temporary chat's state (contract §2.3, frozen). `deletes_at` is null
+    while the pass holds the chat; `hold` names why. Epoch seconds. */
+export interface TemporaryInfo {
+	marked_at: number;
+	idle_minutes: number;
+	deletes_at: number | null;
+	hold: TemporaryHoldCode | null;
+}
+
 export interface SessionSummary {
 	session_id: string;
 	section: "active" | "previous";
+	/** ALWAYS PRESENT on a relay with `features.temporary_chats`: `null` is
+	    the explicit "not temporary", the object the mark (contract §2.3). An
+	    older relay omits it; a reader gates on the capability, never on this
+	    key's presence (`lib/temporary.ts`). */
+	temporary?: TemporaryInfo | null;
 	/** True when this conversation is in the shared durable pin store
 	    (`sidebar-pins.json`) — the SAME pin the terminal's F10 and the desktop
 	    app's row action read and write, so the phone's ★ Pinned section and

@@ -78,6 +78,7 @@ from local_operator.session.placement import (
 )
 from local_operator.session.runtime.types import (
     JOURNAL_ORDER_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_JOURNAL_SOURCE_CAPABILITY,
     PEER_JOURNAL_SOURCE_FLAG,
@@ -223,6 +224,65 @@ class PeerFacts:
     age_s: float = 0.0
 
 
+def _attention_block(value: Any) -> tuple[str, str] | None:
+    """``attention: {token, outcome}`` as ``(token, outcome)``, else no claim.
+
+    A peer's row is input from another machine: anything but a dict with a
+    non-empty string token is NO claim (never a raise, never a coerced value),
+    which is also what an older owner's row — no key at all — reads as.
+    """
+    if not isinstance(value, dict):
+        return None
+    token = value.get("token")
+    if not isinstance(token, str) or not token:
+        return None
+    outcome = value.get("outcome")
+    return token[:128], (outcome if isinstance(outcome, str) else "")[:32]
+
+
+#: The most notice blocks one row may carry, read side. It matches the owner's
+#: cap (``remote_attention.NOTICES_ON_WIRE``) and is spelled here, not
+#: imported, so the projection keeps no import edge into the notifications
+#: package; a test asserts the two equal. A row claiming more is cut to the
+#: first (newest) ones rather than refused, so one over-long list costs only
+#: its tail.
+NOTICES_MAX = 8
+
+
+def _notices_block(value: Any) -> tuple[tuple[str, int, str, str], ...] | None:
+    """``notices: [{key, revision, priority, title}, ...]`` as tuples, else no claim.
+
+    Each entry follows :func:`_notice_block`'s refusal rule; a malformed entry is
+    dropped on its own, so one bad item cannot hide the others beside it. An
+    empty result is no claim (``None``), the same reading as an older owner's
+    row that has no key at all.
+    """
+    if not isinstance(value, list):
+        return None
+    parsed = tuple(
+        block for block in (_notice_block(item) for item in value[:NOTICES_MAX]) if block
+    )
+    return parsed or None
+
+
+def _notice_block(value: Any) -> tuple[str, int, str, str] | None:
+    """One ``{key, revision, priority, title}`` notice as a tuple, else no claim.
+
+    Same refusal rule as :func:`_attention_block`; the revision must be a real
+    positive integer (a bool is not one) because it is the episode identity the
+    origin dedupes on.
+    """
+    if not isinstance(value, dict):
+        return None
+    key, title, revision = value.get("key"), value.get("title"), value.get("revision")
+    if not isinstance(key, str) or not key or not isinstance(title, str) or not title:
+        return None
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        return None
+    priority = value.get("priority")
+    return key[:256], revision, (priority if isinstance(priority, str) else "normal"), title[:200]
+
+
 def _binding_name(binding: Any, key: str) -> str:
     """One name out of a peer row's ``binding`` block, or ``""`` (no claim).
 
@@ -311,6 +371,13 @@ class PeerRow:
     version: str = ""
     source_ref: str = ""
     native_provider_ids: tuple[str, ...] | None = None
+    #: The origin-only completion/notice facts (``notifications/remote_attention``),
+    #: parsed by :func:`_attention_block`/:func:`_notices_block`. ``None`` is no claim.
+    attention: tuple[str, str] | None = None
+    notices: tuple[tuple[str, int, str, str], ...] | None = None
+    #: ``attention_unknown: true`` — the owner's completion read failed, so a
+    #: missing ``attention`` says nothing (R2-m2). Only a real ``True`` counts.
+    attention_unknown: bool = False
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -437,6 +504,11 @@ class PeerRow:
             archived=(bool(data["archived"]) if isinstance(data.get("archived"), bool) else None),
             team=_binding_name(data.get("binding"), "team"),
             agent=_binding_name(data.get("binding"), "agent"),
+            # A STALE row's runtime is gone, so its live notice claim is too; the
+            # completion is a stored fact and rides either way.
+            attention=_attention_block(data.get("attention")),
+            notices=None if stale else _notices_block(data.get("notices")),
+            attention_unknown=data.get("attention_unknown") is True,
         )
 
     def to_row_json(self) -> dict[str, Any]:
@@ -1338,6 +1410,9 @@ class RemoteSessionClient(AttachClient):
             INPUT_MODE_CAPABILITY in capabilities
         )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in capabilities
+        # MAY A MESH ``send`` USE THE OWNER'S MAILBOX (``peer_message``) — read off
+        # the OWNER's welcome like its neighbours; see ``MESH_PEER_MESSAGE_CAPABILITY``.
+        self._mesh_peer_message_supported = MESH_PEER_MESSAGE_CAPABILITY in capabilities
         # THE SIGNATURE GATE — the mirror a remote dial needs on its own
         # account, not for parity alone: a mesh viewer never holds the spawn
         # capability (the peer's runtime was not started by this process), so

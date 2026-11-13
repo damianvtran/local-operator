@@ -71,6 +71,9 @@ ACTIONS = (
     # The onboarding approval record (remote-onboarding §3.5): file it, read it,
     # answer it, run it — six verbs under one group, the shape the design froze.
     "approvals",
+    # Mesh file transfer (docs/design/mesh-file-transfer.md, Decision 5): a group
+    # whose verbs take a source and a destination path; S1 ships `pull`.
+    "files",
 )
 
 
@@ -301,8 +304,17 @@ def test_every_leaf_action_accepts_json() -> None:
         # LEAF rather than on the group (a bare group prints usage): the mesh slice's
         # own ``definitions`` group, plus ``member``, ``identity`` and ``credential``
         # (the last from the credential broker's surfaces), and ``mcp`` (the
-        # definitions pair's shape for the user-scope MCP servers).
-        if name in ("member", "identity", "definitions", "credential", "mcp", "approvals"):
+        # definitions pair's shape for the user-scope MCP servers), and ``files`` (mesh
+        # file transfer: ``pull`` now, ``push`` in S2).
+        if name in (
+            "member",
+            "identity",
+            "definitions",
+            "credential",
+            "mcp",
+            "approvals",
+            "files",
+        ):
             for nested_name, nested_parser in net_fixtures.subcommands_of(subparser).items():
                 nested_flags = {
                     option for action in nested_parser._actions for option in action.option_strings

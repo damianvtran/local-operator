@@ -220,6 +220,14 @@ def build_cli_parser() -> LocalizedArgumentParser:
         dest="resume",
         help=_gh.resume().envelope(locale=help_locale)["text"],
     )
+    # A fresh TEMPORARY chat (``session/temporary.py``); refused with --resume
+    # (that names a conversation to adopt, not one to start).
+    parser.add_argument(
+        "--temporary",
+        action="store_true",
+        default=False,
+        help=_gh.temporary().envelope(locale=help_locale)["text"],
+    )
     # ``installed_version()``, not ``version("local-operator")``: install
     # metadata is written once and never moves when the checkout's
     # ``pyproject.toml`` does, so the bare metadata call reports the version an
@@ -7171,7 +7179,13 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
     if not isinstance(carry, dict):
         return []
     lines: list[str] = []
-    for key in ("running_notice", "notice", "monitors_notice", "session_roles_notice"):
+    for key in (
+        "running_notice",
+        "notice",
+        "monitors_notice",
+        "session_roles_notice",
+        "definitions_notice",
+    ):
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)
@@ -17766,6 +17780,24 @@ def _reject_extra_positionals(parser: Any, args: Any) -> None:
     parser.error(_tr(message))
 
 
+def _exec_temporary_refusal(args: argparse.Namespace) -> str | None:
+    """Why ``lop exec --temporary`` must not run, in the operator's language; else ``None``."""
+    if not getattr(args, "temporary", False):
+        return None
+    from local_operator.agent_shell import in_agent_shell
+    from local_operator.i18n.keys import cli_exec_runtime as _er
+    from local_operator.i18n.text import tr
+
+    _t = tr("cli.exec_runtime")
+    if in_agent_shell():
+        return str(_t(_er.temporary_agent_shell_refused()))
+    if getattr(args, "resume", None):
+        return str(_t(_er.temporary_conflicts_resume()))
+    if getattr(args, "workstream", False):
+        return str(_t(_er.temporary_conflicts_workstream()))
+    return None
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -17782,6 +17814,19 @@ def main() -> int:
         from local_operator.exec_startup import fold_saver_argv
 
         args = parser.parse_args(fold_saver_argv(sys.argv[1:]))
+        # `lop --temporary --resume <id>` is a usage error: one starts a chat
+        # that will be deleted, the other adopts one that exists. (`lop exec`
+        # answers its own combinations in its branch.)
+        if (
+            getattr(args, "subcommand", None) is None
+            and getattr(args, "temporary", False)
+            and getattr(args, "resume", None) is not None
+        ):
+            from local_operator.i18n.keys import cli_exec_runtime as _er
+            from local_operator.i18n.text import tr
+
+            print(str(tr("cli.exec_runtime")(_er.temporary_conflicts_resume())), file=sys.stderr)
+            return 2
 
         # macOS: replace this process with a branded image so Activity Monitor
         # stops showing a wall of `python3.x`. NEVER RETURNS when it brands;
@@ -17881,6 +17926,19 @@ def main() -> int:
             try:
                 args.resume = resolve_resume_id(config_dir(), str(args.resume))
             except ResumeNotFound as error:
+                # A DELETED TEMPORARY CHAT is not a typo either: it existed and
+                # was removed on purpose. Say so (and how to start another)
+                # rather than listing recent sessions as if the id were wrong.
+                from local_operator.tui.temporary_chat import deleted_sentence
+
+                tombstone = deleted_sentence(config_dir(), str(args.resume))
+                if tombstone:
+                    print(
+                        # i18n: ignore ANSI colour around an already-keyed sentence
+                        f"\033[31m{tombstone}\033[0m",
+                        file=sys.stderr,
+                    )
+                    return 1
                 # A CONVERSATION ANOTHER DEVICE HOLDS IS NOT A TYPO. The resolver
                 # above only answers for a directory on THIS disk, so a peer's id
                 # reached the "no session to resume" sentence and the listing of
@@ -18627,6 +18685,18 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # A TEMPORARY CHAT IS A USER GESTURE, refused before any directory
+            # exists: from an agent's shell (even one allowed to delegate),
+            # and beside a flag that names a session to keep (--resume adopts
+            # an existing conversation; a workstream is listed and retained).
+            temporary_refusal = _exec_temporary_refusal(args)
+            if temporary_refusal is not None:
+                print(
+                    # i18n: ignore stable prefix + dynamic payload
+                    f"exec failed: {temporary_refusal}",
+                    file=sys.stderr,
+                )
+                return 2
             # ``--output-schema`` is absolutised HERE, before the optional
             # ``--background`` process boundary, because the detached worker
             # resolves it from its own cwd and a relative path would silently
@@ -18695,6 +18765,7 @@ def main() -> int:
                 # hidden exactly as before. In `STARTUP_FIELDS`, so the detached
                 # worker is told the same thing.
                 workstream=bool(getattr(args, "workstream", False)),
+                temporary=bool(getattr(args, "temporary", False)),
                 # The output-contract flags, getattr'd like the additive flags
                 # above; the schema value is already absolutised above.
                 output_format=getattr(args, "output_format", None),
@@ -19233,6 +19304,13 @@ def main() -> int:
                     on_config_changed=config_manager.reload,
                     warm_session_imports=False,
                 )
+                # ``lop --temporary``: the app marks its first bound session.
+                # Bound only when asked, so a plain ``lop`` start keeps the
+                # exact ``run_tui`` call it had before temporary chats existed;
+                # an ``run_tui`` stand-in (an embedder's, the suite's) written
+                # against that call keeps working.
+                if getattr(args, "temporary", False):
+                    tui_entry = functools.partial(tui_entry, start_temporary=True)
 
                 # ``/resume <id>`` in the TUI needs a factory that boots an
                 # ARBITRARY session, not just the one the launch args named.

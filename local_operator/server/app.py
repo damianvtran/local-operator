@@ -591,6 +591,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.warning("hub update runner could not start", exc_info=True)
         app.state.hub_sync = None
 
+    # THE TEMPORARY-CHAT SWEEPER. Hosted here too (not only by session
+    # processes) so a temporary chat still expires when the desktop is open and
+    # every runtime has gone: the delegated sweep runs only inside a session.
+    # One daemon thread; the first pass waits a full cadence.
+    temporary_sweeper_started = False
+    try:
+        from local_operator.session.cleanup import start_temporary_sweeper
+
+        temporary_sweeper_started = start_temporary_sweeper(
+            app.state.config_manager, config_dir, actor="desktop-server"
+        )
+    except Exception:  # noqa: BLE001 - housekeeping never fails the daemon
+        logger.warning("temporary-chat sweeper could not start", exc_info=True)
+
     # THE ORG AGENT HUB GATE at daemon start: refresh the cached Radient Team
     # eligibility and enrol new org items, on a daemon thread so readiness
     # never waits on a memberships read. Never raises; ineligible = no-op.
@@ -624,6 +638,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — a resume failure must never fail startup
         logger.warning("settings intents could not be resumed", exc_info=True)
 
+    # REMOTE ATTENTION, hosted where no TUI is needed (remote-session parity): a
+    # turn that finishes, or a ``notify``, on a mesh node reaches THIS device's
+    # inbox when this device started that session. The TUI hosts the same
+    # watcher; the store's episode digest keeps the two to one row. A device in
+    # no mesh pays one directory check per poll (``peer_rows`` short-circuits).
+    remote_attention_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.notifications import remote_attention
+
+        remote_attention_task = asyncio.create_task(
+            remote_attention.run_forever(app.state.config_manager.config_dir),
+            name="remote-attention-watch",
+        )
+    except Exception:  # noqa: BLE001 — a forwarder must never fail startup
+        logger.warning("remote attention watch could not start", exc_info=True)
+
     # ONE HUB CONNECTION POOL FOR THE SERVER LOOP. Every desktop Team Bridge
     # read used to open its own TLS connection to the hub (41-124 ms each,
     # bridge-instant-load); binding a pool here lets them reuse sockets. The
@@ -634,6 +664,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     bind_hub_pool()
     yield
+    if remote_attention_task is not None:
+        remote_attention_task.cancel()
+        await asyncio.gather(remote_attention_task, return_exceptions=True)
     try:
         # Stop the settings-intent workers before the session pool closes under
         # them; an in-flight move is shielded and finishes on its own.
@@ -653,6 +686,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await cancel_prewarm()
         except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
             logger.debug("prewarm cancellation failed at shutdown", exc_info=True)
+        if temporary_sweeper_started:
+            try:
+                from local_operator.session.cleanup import stop_temporary_sweeper
+
+                stop_temporary_sweeper()
+            except Exception:  # noqa: BLE001 — teardown never raises
+                logger.debug("temporary sweeper stop failed", exc_info=True)
         if hub_sync_task is not None:
             if app.state.hub_sync is not None:
                 app.state.hub_sync.stop()

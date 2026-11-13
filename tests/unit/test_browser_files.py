@@ -269,7 +269,6 @@ def test_check_upload_judges_a_symlink_by_its_target(tmp_path: Path) -> None:
     "name",
     [
         "id_rsa",
-        "id_ed25519.pub",
         "server.pem",
         "server.key",
         "keystore.p12",
@@ -1463,3 +1462,52 @@ def test_check_upload_a_permission_error_is_not_called_missing(tmp_path: Path) -
     assert "could not be opened" in reason
     assert "Permission denied" in reason
     assert "does not exist" not in reason
+
+
+def test_check_upload_allows_a_public_key_for_ssh_key_rotation(tmp_path: Path) -> None:
+    """Uploading `id_ed25519.pub` to a web console IS key rotation; it is public.
+
+    Allowed even from `~/.ssh`, where the directory rule would otherwise refuse.
+    """
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    public = ssh / "id_ed25519.pub"
+    public.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISyntheticPublicKey user@host\n")
+    resolved, reason = bf.check_upload(str(public), cwd=str(tmp_path))
+    assert resolved is not None, reason
+
+
+@pytest.mark.parametrize("name", ["id_ed25519", "id_ed25519.pub", ".env"])
+def test_check_upload_still_refuses_private_key_material(name: str, tmp_path: Path) -> None:
+    """A private key renamed `.pub`, the private key itself, and `.env` stay refused."""
+    path = tmp_path / name
+    path.write_text(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nsynthetic\n" if name != ".env" else "K=v\n"
+    )
+    resolved, reason = bf.check_upload(str(path), cwd=str(tmp_path))
+    assert resolved is None, name
+    assert "credential deny-list" in reason
+
+
+@pytest.mark.parametrize(
+    ("name", "body"),
+    [
+        ("prod.env.pub", "API_KEY=synthetic-not-a-public-key\n"),
+        ("service-account.pub", '{"type": "service_account", "private_key_id": "abc"}\n'),
+        ("notes.pub", "just some text\n"),
+    ],
+)
+def test_check_upload_needs_a_public_key_shape_for_the_pub_exception(
+    name: str, body: str, tmp_path: Path
+) -> None:
+    """Agent review round 1, R8: absence of private armour is not a public key.
+
+    A `.pub` name whose first line is not an OpenSSH/PEM/PGP public key falls
+    through to the ordinary checks; under `secrets/` the directory rule refuses it.
+    """
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    path = secrets_dir / name
+    path.write_text(body)
+    resolved, reason = bf.check_upload(str(path), cwd=str(tmp_path))
+    assert resolved is None, (name, reason)

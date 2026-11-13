@@ -74,10 +74,14 @@ Parameters:
 - `now` (default **false**) — steer the peer mid-turn instead of using the
   mailbox; opens a turn if the peer is idle.
 - `peer` — a device on your **mesh** (a name or id). With `peer`, the target
-  addresses a session ON that device: the send drives a turn there and the
-  owner's reply comes back in the result — a different trust boundary from the
-  loopback mailbox, and `wake`/`now`/`patience`/`model` are local-only and
-  refused beside it.
+  addresses a session ON that device: the message lands in its mailbox there
+  exactly as a local send does (`wake`/`now` honoured), and the result says it
+  was delivered at mailbox admission — not that a turn ran. The receiver sees
+  your session and device (stamped by its owner from the authenticated link)
+  and answers with `send peer=`. `patience`/`model` are local-only and refused
+  beside it. An owner on an older build takes it as a turn instead; a turn
+  still queued behind its running turn when the wait ends is reported as NOT
+  delivered.
 
 Addressing precedence is `pid`, then `session`, then an EXACT `target` match on
 the conversation name, session id or cwd basename, then the `target` substring —
@@ -564,7 +568,7 @@ git log -1 --stat | lop send "release cutter"
 - **Message size cap:** bodies are capped at 256 KB, well under the control
   socket's frame limit. A larger paste is rejected with a clear error rather
   than silently dropped.
-- **The mailbox is loopback-only; `send(peer=…)` is the mesh path.** It reaches
-  paired devices only, over a different trust boundary, and the delivery is a
-  driven turn on that device — the reply comes back in the result rather than
-  being spooled for a later read.
+- **`send(peer=…)` is the mesh path to the same mailbox.** It reaches paired
+  devices only, over a different trust boundary, and lands as the same mailbox
+  card a local send makes — its reply arrives later as that session's own
+  `send peer=` back to you, not in this call's result.

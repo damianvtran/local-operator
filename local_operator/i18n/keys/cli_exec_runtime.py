@@ -45,6 +45,18 @@ def retry(*, attempt: str, error: str) -> Msg:
     return Msg("cli.exec_runtime.retry", {"attempt": attempt, "error": error})
 
 
+def temporary_agent_shell_refused() -> Msg:
+    return Msg("cli.exec_runtime.temporary_agent_shell_refused", {})
+
+
+def temporary_conflicts_resume() -> Msg:
+    return Msg("cli.exec_runtime.temporary_conflicts_resume", {})
+
+
+def temporary_conflicts_workstream() -> Msg:
+    return Msg("cli.exec_runtime.temporary_conflicts_workstream", {})
+
+
 def thinking() -> Msg:
     return Msg("cli.exec_runtime.thinking", {})
 

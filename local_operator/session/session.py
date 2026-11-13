@@ -5145,10 +5145,14 @@ class Session:
         #: across read-only turns (a read refreshes, it does not change, the
         #: lifetime). ``None`` until a usage reports a 5m/1h write split.
         self._idle_cache_ttl_s: float | None = None
-        #: Epoch ms of the latest assistant ``message_start``, which the loop
-        #: yields BEFORE building the request — a lower bound on when the
-        #: provider last read (and so refreshed) the cached prefix, which makes
-        #: ``E = anchor + TTL`` err early, the safe direction.
+        self._idle_cache_route: tuple[str, str] | None = None
+        self._idle_cache_generation = 0
+        self._idle_request_started_ms = 0
+        self._idle_usage_message_id: str | None = None
+        #: Start of the request whose usage established this serving cache
+        #: clock. ``message_start`` precedes dispatch, so expiry errs early.
+        #: The pending request start above survives route invalidation, but
+        #: cannot establish a warm cache until that request reports usage.
         self._idle_cache_anchor_ms = 0
         # --- Asynchronous compaction pass (advisor-triggered path only) ------
         #
@@ -5765,7 +5769,12 @@ class Session:
         # the agent could never close. dispose() closes whatever is still open.
         from local_operator.browser_bridge.resources import BrowserResource
 
-        self._browser = BrowserSurface(BrowserResource(transcript.directory, self._session_id))
+        self._browser = BrowserSurface(
+            BrowserResource(transcript.directory, self._session_id),
+            # A child's retained tab is handed to this id when it ends (see
+            # ``BrowserSurface.handed``); "" for a top-level session.
+            parent_session_id=self._parent_session_id,
+        )
         # Connections and overlapping read requests are owned by the conversation.
         # This avoids rebuilding pools for every tool call without allowing one
         # child's disposal to close a sibling's active transport.
@@ -7910,9 +7919,7 @@ class Session:
         # the parked advisor on the new model as a full cache WRITE of the
         # context, the one cost the feature must never buy (PR #3753 review
         # R1). Forget both; the next turn end re-arms from fresh usage.
-        self._cancel_idle_compaction()
-        self._idle_cache_ttl_s = None
-        self._idle_cache_anchor_ms = 0
+        self._reset_idle_cache_clock()
         if explicit:
             # The user chose: from here a ``hosting``/``model_name`` edit on
             # disk keeps its hands off this session (see
@@ -11061,7 +11068,7 @@ class Session:
                     # not abort the receive; absent beats guessed.
                     account_display = ""
             from local_operator.harness.message_types import (
-                BRIDGE_CONFIG_REQUEST_RULE,
+                BRIDGE_RECEIVER_RULES,
                 BRIDGE_UNTRUSTED_CLAUSE,
             )
 
@@ -11073,10 +11080,35 @@ class Session:
                 # wrap, ahead of the body, so the model reads the content as
                 # data — never as instructions from a colleague's agent.
                 f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
-                # B5: a teammate's config suggestion is relayed, never applied.
-                f"{BRIDGE_CONFIG_REQUEST_RULE}\n"
+                # B5 + peer default: coordinate as peers; a teammate's config
+                # suggestion is relayed, never applied.
+                f"{BRIDGE_RECEIVER_RULES}\n"
                 f"{Session._neutralize_bridge_tag(text)}\n"
                 "</team-bridge-message>"
+            )
+        elif sender.get("mesh_device_id"):
+            # A MESH PEER WROTE THIS (``send peer=``, PR #3827 A1). Its pid names
+            # a process on another machine, so the envelope names what a REPLY
+            # needs instead: the sending session and the device, the latter
+            # stamped by this owner from the authenticated link
+            # (``server._stamp_peer_sender``) — never taken from the frame.
+            device = str(sender.get("mesh_device_name") or sender.get("mesh_device_id"))
+            from_session = str(sender.get("session_id") or "")
+            wrapped = (
+                f"<peer-session-message "
+                f"from_session={from_session!r} "
+                f"device={device!r} "
+                f"conversation={conversation!r} "
+                f"model={model_label!r}>\n"
+                f"{text}\n"
+                "</peer-session-message>\n"
+                # The exact reply call, because the local reply habit (target= /
+                # pid=) cannot reach another device.
+                + (
+                    f"(Reply with send peer={device!r} session={from_session!r}.)"
+                    if from_session
+                    else f"(It came from device {device!r}; reply with send peer={device!r}.)"
+                )
             )
         else:
             wrapped = (
@@ -15930,8 +15962,23 @@ class Session:
                 self._last_usage = message.usage
                 if message.usage.context_tokens:
                     self._context_tokens_hint = int(message.usage.context_tokens)
-                # Idle compaction's cache clock: sticky, so a read-only turn
-                # keeps the lifetime the prefix was written with.
+                # Re-scans may find a previous route's last usage when the
+                # new request reported none. It cannot warm the new namespace
+                # or borrow this request's start merely by being read again.
+                if message.id == self._idle_usage_message_id:
+                    return
+                self._idle_usage_message_id = message.id
+                # The wire stamp, not the selected model, owns this cache:
+                # fallback/recovery can report usage before the display route
+                # settles. Read-only usage is sticky ONLY in that namespace.
+                route = (
+                    message.usage.provider or self.effective_model.provider,
+                    message.usage.model_id or self.effective_model.model_id,
+                )
+                if route != self._idle_cache_route:
+                    self._reset_idle_cache_clock()
+                    self._idle_cache_route = route
+                self._idle_cache_anchor_ms = self._idle_request_started_ms
                 written_ttl = _idle_cache_ttl_from_usage(message.usage)
                 if written_ttl is not None:
                     self._idle_cache_ttl_s = written_ttl
@@ -18342,13 +18389,35 @@ class Session:
             agent_id=self._agent_id or "",
         )
         self._run_notified = True
+        forwarded = ""
+        if outcome.action in ("created", "updated", "revived"):
+            # A session ANOTHER device placed here: the row is in THIS device's
+            # inbox and reaches the operator only when the origin forwards it
+            # (``notifications/remote_attention``), so a bare "Notified" would
+            # tell the model the operator was told. Empty for every local session.
+            #
+            # READ BEFORE THE BANNER ROUTE, never after it: ``_route_item_banner``
+            # spawns the held-banner task, and its hold must start only once this
+            # tool call has returned (the in-view receipt that may cancel it
+            # needs the call's result row on screen). Any await between that
+            # spawn and the return yields the loop, so a slow disk read here
+            # would let the task finish inside the call and flip
+            # ``_run_notified_banner`` early (PR #3830 CI race).
+            from local_operator.notifications.remote_attention import (
+                forwarded_notice_sentence,
+            )
+
+            forwarded = await asyncio.to_thread(
+                forwarded_notice_sentence, root, self.session_id, key
+            )
         # THE BANNER, decided here because this is the only place that knows
         # the write's action, revision and priority. Best-effort: a banner is
         # chrome and the item is already durable, so a delivery failure leaves
         # an unread row rather than failing the tool call the model made.
+        # Nothing may await after this call before the return (see above).
         if raise_banner and outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
-        return _notify_sentence(outcome)
+        return _notify_sentence(outcome) + forwarded
 
     def _notification_owner(self) -> "Session | None":
         """The session whose inbox an item raised for THIS one belongs in.
@@ -19521,6 +19590,7 @@ class Session:
         model display from.
         """
         if target is None:
+            self._invalidate_idle_cache_route(self._model)
             self._active_fallback = None
             self._active_route = None
             self._active_route_reason = None
@@ -19558,6 +19628,7 @@ class Session:
             # the fallback still serves, the display just cannot follow it.
             logger.warning("could not resolve fallback spec for %r", target.selector)
             return
+        self._invalidate_idle_cache_route(spec)
         self._active_fallback = spec
         self._active_route = (selector, target_effort)
         self._active_route_reason = reason
@@ -19739,7 +19810,7 @@ class Session:
             and event.message.role == "assistant"
         ):
             # Idle compaction's cache anchor; see ``_idle_cache_anchor_ms``.
-            self._idle_cache_anchor_ms = int(time.time() * 1000)
+            self._idle_request_started_ms = int(time.time() * 1000)
         if isinstance(event, MessageEndEvent):
             self._note_usage([event.message])
             # The provider-cache clock the prune sweeps read
@@ -26463,10 +26534,11 @@ class Session:
         # costs one forgone idle pass — the same outcome as idle compaction off.
         runnable = self._wake.armed_schedules
         next_wake = min((row.next_due_at for row in runnable), default=None)
-        ttl_s = self._idle_cache_ttl_s or compaction_api.fallback_cache_ttl_s(
-            self.effective_model.provider
+        provider = (
+            self._idle_cache_route[0] if self._idle_cache_route else self.effective_model.provider
         )
-        anchor = self._idle_cache_anchor_ms or self._last_provider_request_ms
+        ttl_s = self._idle_cache_ttl_s or compaction_api.fallback_cache_ttl_s(provider)
+        anchor = self._idle_cache_anchor_ms
         expiry = int(anchor + ttl_s * 1000)
         decision = compaction_api.idle_compaction_due(
             enabled=bool(settings.enabled) and bool(getattr(settings, "idle_enabled", False)),
@@ -26520,7 +26592,9 @@ class Session:
             logger.debug("idle compaction arm failed", exc_info=True)
             return
         generation = self._generation
-        self._idle_timer = loop.call_later(delay_s, self._on_idle_timer, generation)
+        self._idle_timer = loop.call_later(
+            delay_s, self._on_idle_timer, generation, self._idle_cache_generation
+        )
         logger.debug(
             "idle compaction armed in %.0fs (context=%d growth=%d/%d wake_pending=%s)",
             delay_s,
@@ -26550,6 +26624,24 @@ class Session:
         reply = max(0, int(usage.output_tokens or 0) - int(usage.reasoning_tokens or 0))
         return int(usage.context_tokens) + reply
 
+    def _reset_idle_cache_clock(self) -> None:
+        """A cache namespace change cannot inherit a warm deadline or TTL.
+
+        Keep the current request's start separately: recovery is announced
+        AFTER its usage, whereas fallback may be announced BEFORE it. The
+        usage hook can therefore adopt the actual serving clock in either
+        order without borrowing the previous route's lifetime.
+        """
+        self._cancel_idle_compaction()
+        self._idle_cache_generation += 1
+        self._idle_cache_route = None
+        self._idle_cache_ttl_s = None
+        self._idle_cache_anchor_ms = 0
+
+    def _invalidate_idle_cache_route(self, model: ModelSpec) -> None:
+        if self._idle_cache_route != (model.provider, model.model_id):
+            self._reset_idle_cache_clock()
+
     def _cancel_idle_compaction(self) -> None:
         """Drop the armed timer, and an idle pass that has not taken the lock.
 
@@ -26567,10 +26659,14 @@ class Session:
             task.cancel()
             self._idle_task = None
 
-    def _on_idle_timer(self, generation: int) -> None:
-        self._idle_timer = None
+    def _on_idle_timer(self, generation: int, cache_generation: int | None = None) -> None:
+        # A queued callback from the previous route must not clear the new
+        # route's timer (nor spend an advisor call in its cold namespace).
+        if cache_generation is not None and cache_generation != self._idle_cache_generation:
+            return
         if self._disposed or generation != self._generation:
             return
+        self._idle_timer = None
         self._idle_task = self._spawn_background(self._run_idle_compaction(generation))
 
     def _idle_may_proceed(self, generation: int) -> bool:
@@ -27693,9 +27789,9 @@ class Session:
         enabled = policy(self._config_dir)
         if not enabled["enabled"] or not enabled["capture"] or not self._session_id:
             return
-        from local_operator.memory_capture import import_capture_disabled
+        from local_operator.memory_capture import auto_capture_skipped
 
-        if import_capture_disabled(getattr(self._transcript, "directory", None)):
+        if auto_capture_skipped(getattr(self._transcript, "directory", None)):
             return
         # The task returns data only. It is not a session background job and
         # cannot wake/continue a turn; stale speculative plans simply lose it.
@@ -34734,6 +34830,19 @@ class Session:
         ``CancelledError``), so the timeout does not trade a stranded tab for an
         orphaned process.
         """
+        # Tabs children handed to this session are this session's to close now:
+        # a top-level session ending is the last owner that could, and a child
+        # parent hands them further up in ``_finish_child_browser`` BEFORE its
+        # dispose, which empties this list. Settled first and independently, so
+        # a fault in this session's own surface cannot strand a handed one.
+        from local_operator.browser_bridge.handoff import close_handed_browser_surfaces
+
+        await close_handed_browser_surfaces(self._browser, outcome="disposed")
+        if self._browser.handed_to:
+            # This session's own surface now belongs to its parent: closing it
+            # here would recreate the bug the handoff fixes (the human is sent
+            # to a tab disposal already closed).
+            return
         resource = self._browser.resource
         if resource.generation or resource.path.exists():
             # Disposal is a fallback for process exit, not a claim that an idle
@@ -35524,6 +35633,21 @@ class Session:
             # across the restart, via the boot reconcile pass.
             teardown_stamps = self._stamp_teardown_attribution()
             await self.jobs.dispose()
+            # SECOND handed-tab pass (review R1). The first ran in
+            # ``_close_browser_surface`` above, but ``jobs.dispose`` is what
+            # cancels a still-running child, and that child hands its retained
+            # tab to this session on its way out — after the first pass, into a
+            # list nothing would read again. A child whose runner will pass late
+            # arrivals further up (``late_handoff_to_parent``) leaves them for it.
+            if not getattr(self._browser, "late_handoff_to_parent", False):
+                from local_operator.browser_bridge.handoff import (
+                    close_handed_browser_surfaces,
+                )
+
+                try:
+                    await close_handed_browser_surfaces(self._browser, outcome="disposed")
+                except Exception:  # noqa: BLE001 - teardown must always proceed
+                    logger.warning("closing late-handed browser tabs failed", exc_info=True)
             # AFTER dispose has awaited every runner, so each status is final: a
             # child that settled on its own instead of being cancelled must not
             # keep a parent-teardown attestation.

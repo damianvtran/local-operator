@@ -44,9 +44,14 @@ could be; a peer that did not answer is named. `info`, `peek`, `spawn`,
 runtime: `spawn` mints the session there; `resume` warms it, or with `prompt`
 drives a turn there and returns the owner's reply; `stop` is ALWAYS REFUSED for
 a `peer` target — an idle-only, no-signal remote stop is not on the wire yet, so
-nothing is sent and the operator stops it on that device. `peek` reads only the
-newest `steps` rows where the session LIVES, live sessions only — a stored one
-refuses with the warm-up named — and `query`/`regex`/`digest` stay local.
+nothing is sent and the operator stops it on that device. `peek` with `peer`
+takes every local window — `steps`, `head` (the original request),
+`before_id`/`around_id`, `query`/`regex`, `digest` — and the OWNER reads its
+own journal with the same readers and budgets as a local peek, so stored
+sessions are readable and nothing is started there. A peer-side `regex` is
+length-capped and may not nest quantifiers (it runs on the owner's CPU). An
+owner on an older build answers the newest `steps` of a LIVE session instead,
+and the result's note names the reason and the dropped windows.
 Message delivery to a session on another device is `send` with `peer`;
 `guide://peer-messaging` carries it.
 

@@ -15,5 +15,6 @@
   "cli.global_help.propagated_resume": "Возобновить предыдущую сессию по id. Без id — самую недавнюю.",
   "cli.global_help.propagated_hosting": "Платформа размещения для этого запуска (например, anthropic, openai, openrouter)",
   "cli.global_help.propagated_model": "Модель для этого запуска",
-  "cli.global_help.propagated_run_in": "Рабочий каталог для запуска оператора"
+  "cli.global_help.propagated_run_in": "Рабочий каталог для запуска оператора",
+  "cli.global_help.temporary": "Начать временный чат: он не попадает в историю и удаляется после простоя (по умолчанию 30 минут)."
 }
