@@ -977,6 +977,7 @@ STATIC_READ_TIER = {
     "glob": "local file names",
     "grep": "local content; cross-session reads are a pull (S-60)",
     "hub": "in-process children; latch linked (R1)",
+    "inspect_command": "classified: always write (verifier guest shell; audit mode has net)",
     "jobs": "local job ledger",
     "library": "durable writer: classified by op",
     "list_variables": "local",

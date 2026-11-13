@@ -381,6 +381,7 @@ if TYPE_CHECKING:
     # Type-only: the consent intent is a harness value, held without being
     # constructed here.
     from local_operator.harness.types import DurableWriteIntent
+    from local_operator.harness.verifier import VerifierLimits, VerifierVerdict
     from local_operator.mcp.manager import McpManager
 
     # Type-only: the contract itself is built by the host that installs it
@@ -22891,6 +22892,312 @@ class Session:
             effort=effort,
             model_selector=model,
         )
+
+    async def verify_completion(
+        self,
+        *,
+        request: str,
+        claim: str,
+        observation: str | None = None,
+        host_tools: "Sequence[AgentTool]" = (),
+        limits: "VerifierLimits | None" = None,
+        on_started: "Callable[[dict[str, Any]], None] | None" = None,
+        label: str = "Verify completion",
+    ) -> "VerifierVerdict":
+        """Run the harness completion verifier against a claimed-finished task.
+
+        WHY A SESSION PRIMITIVE. The check must be independent of the model
+        that did the work (fresh context, read-only reach), and it must be the
+        HARNESS's decision to run it: the model that most needs checking is the
+        one that never delegates (``harness/verifier.py`` has the measurement).
+        It reuses the ordinary child machinery (``run_subagent``) so the
+        verifier is a real child session: its own transcript, its request rows
+        attributed by ``job_id`` and ``actor_role="verifier"`` into whatever
+        accounting the root tree feeds, its job cancelled with this session.
+
+        What differs from a ``task`` launch, and why:
+
+        * the role is code-defined (``verifier_profile``), never the registry's;
+        * a :class:`ChildSurface` ceiling of the verifier allowlist, so the
+          child gets no ``web_*`` floor, no ``hub``/``task``, no inherited MCP,
+          and ``readonly_shell``: its ``bash`` is write-confined by THIS launch,
+          not by the ``verifier`` name (an operator role of that name keeps
+          its own shell);
+        * ``host_tools`` -- whatever lets it SEE the deliverable -- exist in
+          that child only, wrapped to count against ``max_commands``;
+        * ``announce=False``: the result is returned here, never injected into
+          this session's conversation;
+        * bounded by :class:`VerifierLimits`: a spent command budget refuses
+          and asks for the verdict; the request cap cancels once a request
+          past it asks for more tools; the wall cancels. A verdict line in
+          the child's final assistant message wins over all three, even when
+          the job was cancelled before it settled (PR #3837 round 3).
+
+        Never raises for an expected refusal (closing session, memory
+        admission, no request observation to enforce the request cap): those
+        return ``INCONCLUSIVE`` with ``ended_by="refused"`` so the caller can
+        record a skip and carry on exactly as if no verifier existed. Blocks
+        until the verdict; the caller decides what the worker sees.
+        """
+
+        from local_operator import memory_guard
+        from local_operator.harness.subagent import ChildSurface, run_subagent
+        from local_operator.harness.verifier import (
+            CANCEL_JOIN_S,
+            REQUEST_BUDGET_REFUSAL,
+            VERIFIER_ROLE,
+            VERIFIER_TOOL_ALLOWLIST,
+            VerifierLimits,
+            VerifierVerdict,
+            build_verifier_prompt,
+            counted_host_tools,
+            find_verdict,
+            parse_verdict,
+            verifier_profile,
+        )
+
+        limits = limits or VerifierLimits()
+        started = time.monotonic()
+
+        def refused(reason: str) -> VerifierVerdict:
+            return VerifierVerdict(
+                status="INCONCLUSIVE",
+                findings=reason,
+                ended_by="refused",
+                wall_s=time.monotonic() - started,
+            )
+
+        if self._disposed or self._owned_work_closing:
+            return refused("this session is shutting down")
+        # The same admission every child pays (``_launch_subagent``): a verifier
+        # is resident work in this process like any other child.
+        admission = memory_guard.admission_check("a completion verifier")
+        if not admission.admitted:
+            return refused(admission.reason or "memory admission refused")
+        # What the child is actually GIVEN, for ``verifier_started``/``tools``
+        # (review M5): the declaration lists ``bash``, but a confined child on
+        # a host that cannot sandbox gets no shell at all, by the same probe
+        # ``_readonly_shell_root`` asks (cached after the first spawn). Asked
+        # BEFORE the request subscription, so nothing awaits between that and
+        # the ``finally`` that removes it.
+        from local_operator.tools.confinement import (
+            shell_sandbox_unavailable_reason_async,
+        )
+
+        no_shell_sandbox = await shell_sandbox_unavailable_reason_async() is not None
+
+        cap_requests = limits.request_budget
+        state: dict[str, Any] = {
+            "job_id": None,
+            "requests": 0,
+            "assistant_messages": 0,
+            # The latest assistant message's text when it called NO tool --
+            # the child's answer -- else ``None`` (a later step supersedes it).
+            "answer": None,
+            "local_tools": 0,
+            "caps": [],
+        }
+        # Set only when a request PAST the cap asks for more tools: the child
+        # did not take its last request to answer, so it is cancelled now. A
+        # past-the-cap request that answers is the verdict and is waited for.
+        overshoot = asyncio.Event()
+        host_names = frozenset(tool.name for tool in host_tools)
+
+        def hit(cap: str) -> None:
+            if cap not in state["caps"]:
+                state["caps"].append(cap)
+
+        def observe(observation: Any) -> None:
+            # Request-final rows of the WHOLE root tree arrive here; only the
+            # verifier's own job counts. Synchronous, append-and-return.
+            if state["job_id"] is None or observation.job_id != state["job_id"]:
+                return
+            state["requests"] += 1
+            if state["requests"] >= cap_requests:
+                hit("requests")
+            if state["requests"] > cap_requests + 1:
+                # Backstop for requests that end without an assistant message
+                # (so ``on_message`` never judges them): the first past the
+                # cap cannot be told from one whose message is still on its
+                # way (row and message arrive in either order), so it is the
+                # SECOND past the cap that is cancelled -- at most two past
+                # the cap in this case, one in every other.
+                overshoot.set()
+
+        def on_message(text: str, tool_names: tuple[str, ...], stop_reason: str | None) -> None:
+            # From the child's relay, synchronously, at each finished
+            # assistant message (``ChildSurface.on_assistant_message``). Max
+            # of both counts: the request row and the message event of one
+            # request may arrive in either order.
+            state["assistant_messages"] += 1
+            # Only a message the provider FINISHED is an answer: a stream that
+            # errored (or was aborted, or hit its length) still ends the
+            # message with its partial text, whose last line may be a
+            # per-requirement ``Verdict: PASS`` written on the way to the real
+            # one (review round 3, M1: a failed job read as a PASS).
+            state["answer"] = None if tool_names or stop_reason != "stop" else text
+            state["local_tools"] += sum(1 for name in tool_names if name not in host_names)
+            if tool_names and max(state["assistant_messages"], state["requests"]) > cap_requests:
+                overshoot.set()
+
+        def request_budget_spent() -> str | None:
+            # Tool calls made by the cap's own request (its row has arrived by
+            # the time they run) -- host or the child's own -- are refused
+            # with the cue to answer, so the one request past the cap is spent
+            # on the verdict.
+            return REQUEST_BUDGET_REFUSAL if state["requests"] >= cap_requests else None
+
+        try:
+            unsubscribe = self.subscribe_requests(observe)
+        except RuntimeError:
+            # Without request observation the request cap cannot be enforced,
+            # and an uncapped verifier is not one this method may launch.
+            return refused("request observation unavailable; the request cap cannot be enforced")
+        wrapped, command_count = counted_host_tools(
+            host_tools,
+            limit=limits.max_commands,
+            on_call=lambda _count: None,
+            on_exhausted=lambda: hit("commands"),
+            refuse_when=request_budget_spent,
+        )
+        # ``readonly_shell`` confines this launch's ``bash`` by the launch
+        # itself, never by the ``verifier`` name (an operator's registry role
+        # of that name must keep its own shell: review R2 / QA Q1).
+        surface = ChildSurface(
+            ceiling=frozenset(VERIFIER_TOOL_ALLOWLIST),
+            host_tools=wrapped,
+            readonly_shell=True,
+            on_assistant_message=on_message,
+            # The child's own tools (read/grep/bash) get the same cue on the
+            # cap's request as the host tools, so a child is never cancelled
+            # for a request past the cap it was not told to spend answering.
+            tool_gate=request_budget_spent,
+        )
+        job_id: str | None = None
+        settled: asyncio.Event | None = None
+        granted = surface.declaration(getattr(self, "_declared_tools", None)) or frozenset()
+        if no_shell_sandbox:
+            granted = granted - {"bash"}
+        granted_tools = tuple(sorted(granted))
+        prompt = build_verifier_prompt(request=request, claim=claim, observation=observation)
+        try:
+            try:
+                job_id = run_subagent(
+                    label,
+                    prompt,
+                    parent_session=self,
+                    jobs_manager=self.jobs,
+                    agent=VERIFIER_ROLE,
+                    profile_override=verifier_profile(),
+                    surface=surface,
+                    announce=False,
+                )
+            except Exception as error:  # noqa: BLE001 -- a refused launch is a skip
+                logger.warning("completion verifier could not launch", exc_info=True)
+                return refused(f"launch refused: {error}")
+            # Set before the first await: the runner has not run yet, so no
+            # request of this job can have finished unobserved.
+            state["job_id"] = job_id
+            job = self.jobs.get(job_id)
+            if on_started is not None:
+                on_started(
+                    {
+                        "job_id": job_id,
+                        "model": getattr(job, "model_label", None),
+                        "tools": list(granted_tools),
+                        "limits": limits.as_record(),
+                    }
+                )
+            settled = self.jobs.settled_event(job_id)
+            deadline = started + float(limits.wall_s)
+
+            async def first_of(events: "tuple[asyncio.Event, ...]", timeout: float) -> None:
+                waiters = [asyncio.ensure_future(event.wait()) for event in events]
+                try:
+                    await asyncio.wait(
+                        waiters, timeout=max(0.0, timeout), return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for waiter in waiters:
+                        waiter.cancel()
+
+            # No short settle grace any more: a spent command budget and the
+            # request cap both leave the child its answering request, and only
+            # a past-the-cap request asking for MORE tools (``overshoot``) or
+            # the wall ends it early. The worst case is still ``wall_s +
+            # CANCEL_JOIN_S``, the envelope embedders budget for.
+            await first_of((settled, overshoot), deadline - time.monotonic())
+            ended_by: str | None = None
+            if not settled.is_set():
+                ended_by = "requests" if overshoot.is_set() else "wall"
+                hit(ended_by)
+                await self.jobs.cancel(job_id)
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(settled.wait(), timeout=CANCEL_JOIN_S)
+            job = self.jobs.get(job_id)
+            status_text = getattr(job, "status", None)
+            usage = getattr(job, "usage", None)
+            common: dict[str, Any] = {
+                "job_id": job_id,
+                "requests": state["requests"],
+                "commands": command_count(),
+                "wall_s": time.monotonic() - started,
+                "model": getattr(job, "model_label", None),
+                "tools": granted_tools,
+                "transcript_dir": (
+                    str(directory)
+                    if (comms := getattr(self, "subagent_comms", None)) is not None
+                    and (directory := comms.session_dir_of(job_id)) is not None
+                    else None
+                ),
+                "usage": usage.model_dump(mode="json") if usage is not None else None,
+                "caps_hit": tuple(state["caps"]),
+                "local_tools": state["local_tools"],
+            }
+            # A child that answered wins over any cap: the verdict exists, so
+            # use it. Settled ``completed`` is the ordinary case; otherwise the
+            # job was cancelled (or failed) AFTER its final assistant message,
+            # whose verdict line is still the answer -- the live t31v episode
+            # discarded a ``VERDICT: PASS`` exactly here.
+            if status_text == "completed" and job is not None:
+                verdict_status, findings = parse_verdict(job.result_text)
+                return VerifierVerdict(
+                    status=verdict_status, findings=findings, ended_by="verdict", **common
+                )
+            # Never from a job that FAILED: its last message is whatever the
+            # error left, and a failed check is INCONCLUSIVE, never a pass
+            # (M1). The rescue is for a job a cap cancelled after it answered.
+            rescued = (
+                find_verdict(state["answer"])
+                if status_text not in ("failed", "interrupted")
+                else None
+            )
+            if rescued is not None:
+                return VerifierVerdict(
+                    status=rescued[0], findings=rescued[1], ended_by="verdict", **common
+                )
+            ended_by = ended_by or "failed"
+            detail = (
+                (getattr(job, "error_text", None) or "the verifier did not finish")
+                if ended_by == "failed"
+                else f"the verifier was stopped by its {ended_by} cap before giving a verdict"
+            )
+            return VerifierVerdict(
+                status="INCONCLUSIVE", findings=detail, ended_by=ended_by, **common
+            )
+        except BaseException:
+            # The caller was cancelled (an Esc, a teardown) or a callback
+            # raised: the observer enforcing the request cap is about to be
+            # unsubscribed and the wall cap WAS the wait above, so a child left
+            # running here would run uncapped and, being consumed, never
+            # surface (review R3). Shielded so the cancel itself completes even
+            # though this task is being cancelled.
+            if job_id is not None and not (settled is not None and settled.is_set()):
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(self.jobs.cancel(job_id))
+            raise
+        finally:
+            unsubscribe()
 
     def _record_divergence_notice(self, payload: dict[str, Any]) -> None:
         """Paint a divergence notice into the transcript, from the judge's callback.
