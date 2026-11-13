@@ -12,7 +12,7 @@
   "wire.settings.keymap.send_steer.label": "Enviar: guiar",
   "wire.settings.keymap.send_steer.help": "Envía ya e interrumpe el paso. Anula “Entrega con el agente ocupado”.",
   "wire.settings.keymap.send_queue.label": "Enviar: en cola",
-  "wire.settings.keymap.send_queue.help": "Espera; no interrumpe herramientas. Anula “Entrega con el agente ocupado”.",
+  "wire.settings.keymap.send_queue.help": "Espera a que termine el paso; nunca interrumpe las herramientas. Anula “Entrega con el agente ocupado”.",
   "wire.settings.keymap.send_both.label": "Enviar: en cola, luego guiar",
   "wire.settings.keymap.send_both.help": "Espera y luego guía si tarda. Anula “Entrega con el agente ocupado”."
 }

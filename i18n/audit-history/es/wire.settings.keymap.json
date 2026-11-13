@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "f5ac508a13dabaad666253b5cf19b1c5c64d2aad3cca9bb4f2ed7f62d1c13c2d",
+  "history_sha256": "daac5bca3a10ad0839feac712015e00917cd06a0bf723365c987bc717aea113b",
   "entries": [
     {
       "locale": "es",
@@ -114,6 +114,33 @@
       },
       "status": "passed",
       "note": "Wave S8 queue-then-steer rename, backend (branch feat/tui-send-chords at ae5669467, English source in 3b2bc7423, translated strings audited while still uncommitted, 2026-11-11): 2 keys in this namespace: wire.settings.keymap.send_both.label (changed), wire.settings.keymap.send_both.help (changed). Translator: task subagent tr8-es (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine); anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-es job). Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit rounds for es until PASS: rounds 1-3 FAIL, round 4 PASS, 0 blocker/major at the final round. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's final verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "7407d69c7173aaa5390e6ca1f06e0abbab4d0f43dacceef02970432ee3ae5144",
+      "context_sha256": "fdd22221ca4fc3768b486a1690ccd6ce1baae0a69f4a15a0c1291a58f410f964",
+      "target_sha256": "32f3a194c1cf6da96cca2a36f25ca7efbcb8f547cc4e45fc3f2cee409cfdb535",
+      "keys_audited": 1,
+      "round": "r5",
+      "receipt": "2405ebc40b47-fold2-es",
+      "translator": {
+        "agent": "task subagent coder-tr-converge (lopdev coder subagent in manager session 2405ebc40b47; applied the independent auditor's suggested replacements to these strings; the originals were written by the tr8-es translator agents)",
+        "model": null,
+        "model_kind": "not recorded: the coder subagent's served model is not independently verifiable in this session, so no model is claimed; the originals were anthropic/claude-sonnet-5-5 as recorded in the tr8-es rows",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-13",
+        "independent_from_translator": true,
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Fold2 wording fold-in, backend (branch feat/tui-send-chords, the commit that carries these rows, translated strings and rows both dated 2026-11-13): 1 key in this namespace: wire.settings.keymap.send_queue.help (changed). Translator: task subagent coder-tr-converge (lopdev coder subagent in manager session 2405ebc40b47; applied the independent auditor's suggested replacements to these strings; the originals were written by the tr8-es translator agents); served model not recorded because the coder subagent's model is not independently verifiable here; the originals were anthropic/claude-sonnet-5-5 as recorded in the tr8-es rows. Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit: fold2 round 2 (audit-fold2-r2) PASS 0/0 first pass. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field. Receipt instance 2405ebc40b47-fold2-es."
     }
   ]
 }
