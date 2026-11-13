@@ -442,7 +442,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # the non-retryable detail). Net -7 chars, so the doc is now 8177. The
     # untrusted rule is deliberately NOT duplicated into the opt-in notes: the
     # wire carries it every turn, and that duplication is what would not fit.
-    "bridge": 1986,
+    "bridge": 1988,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

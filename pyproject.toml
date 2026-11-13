@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.102.1"
+version = "0.102.2"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -110,6 +110,16 @@ dependencies = [
     "apscheduler",
     "dill",
     "tiktoken",
+    # The owner side of a REMOTE `sessions peek` (session/peek.py,
+    # BoundedPeerPattern) runs a peer-supplied regex on this machine's CPU, and
+    # the stdlib `re` cannot be interrupted: one catastrophic pattern pinned a
+    # shared relay worker indefinitely (PR #3831 review M1). `regex` takes a
+    # per-call `timeout=`, which is the bound. It already arrives through
+    # tiktoken, but a direct import belongs in a direct dependency (same reason
+    # as `cryptography` above); the floor matches the dev pin below and is the
+    # first release with cp314 wheels (the classifiers claim 3.14), so a
+    # constrained resolve never builds from sdist.
+    "regex>=2025.7.29",
     "mcp>=1.2",
     # JSON Schema validation for ``--output-schema`` files (and an SDK caller's
     # raw-schema spelling): ``local_operator/output_contract.py`` imports it
@@ -239,7 +249,7 @@ dev = [
     "pytest-xdist",
     "pytest-textual-snapshot",
     # Capture glyph origins must follow grapheme clusters, not codepoints.
-    "regex>=2024.11.6",
+    "regex>=2025.7.29",
     "pip-audit",
     # Independent decoder used to verify our own PNG encoder's output.
     "pillow",

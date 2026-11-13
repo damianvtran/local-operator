@@ -46,6 +46,7 @@ for a picture that never left the machine.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -53,7 +54,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
-from local_operator.team_bridge.cos_name import SHA256_HEX, published_agent
+from local_operator.team_bridge.cos_name import (
+    SHA256_HEX,
+    UNRESOLVED,
+    designated_aida,
+    published_agent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +203,15 @@ def plan_avatar(
     tenant_id: str,
     config_dir: Path | str | None,
     endpoint_id: str | None = None,
+    *,
+    designated: Any = UNRESOLVED,
 ) -> AvatarPlan:
     """Resolve the one action this status answer calls for.
+
+    Synchronous and file/Pillow-bound (hundreds of ms on a cold memo): async
+    callers go through :func:`_plan_off_loop`, never call this on the loop.
+    ``designated`` is the caller's on-loop :func:`designated_aida` answer (see
+    there for why that half must not move to a worker thread).
 
     ``config_dir`` is ``None`` on the clear path, where the local definition is
     deliberately not consulted: clearing the hub copy is the caller's decision
@@ -227,7 +240,7 @@ def plan_avatar(
     base = AvatarPlan(endpoint_id=endpoint_id, hub_hash=hub_hash, hub_sha256=hub_sha)
     if config_dir is None:
         return base
-    agent = published_agent(config_dir)
+    agent = published_agent(config_dir, designated=designated)
     if agent is None or agent.avatar_broken:
         # A doubt: neither publish nor delete (see the module docstring).
         return base
@@ -275,6 +288,37 @@ async def _apply(client: AvatarClient, plan: AvatarPlan, account_id: str | None)
     )
 
 
+async def _plan_off_loop(
+    status: Any,
+    tenant_id: str,
+    config_dir: Path | str | None,
+    endpoint_id: str | None = None,
+) -> AvatarPlan:
+    """:func:`plan_avatar` with its expensive half on a worker thread.
+
+    WHY: on the status boundary the plan scanned every agent definition and
+    re-encoded the picture through Pillow INSIDE the ``lop serve`` event loop —
+    ~0.86 s per full status check profiled on v0.101.50 (normalise ~0.51 s,
+    agent.yml scan ~0.35 s), at app start, every status-cache expiry and after
+    every mutation — and every in-flight Team Bridge read (conversation list,
+    messages) stalled behind it.
+
+    THREAD SAFETY: only the designated-CoS gate stays here on the loop (it
+    polls the config watcher, whose listeners are loop-affine). The rest reads
+    files, hashes and runs Pillow; its two memos are lock-guarded; the plan is
+    a frozen dataclass handed back by value. Nothing in the worker touches the
+    loop, a client or an asyncio primitive.
+
+    A cancelled caller leaves the worker to finish and discards its plan:
+    planning writes nothing, so an orphaned plan is harmless.
+    """
+
+    designated = designated_aida(config_dir) if config_dir is not None else None
+    return await asyncio.to_thread(
+        plan_avatar, status, tenant_id, config_dir, endpoint_id, designated=designated
+    )
+
+
 def _account_id(status: Any) -> str | None:
     account_id = getattr(status, "account_id", None)
     return account_id if isinstance(account_id, str) and account_id else None
@@ -296,7 +340,7 @@ async def reconcile(
     """
 
     try:
-        plan = plan_avatar(status, tenant_id, config_dir, endpoint_id)
+        plan = await _plan_off_loop(status, tenant_id, config_dir, endpoint_id)
         await _apply(client, plan, _account_id(status))
     except Exception as exc:  # noqa: BLE001 - a picture never fails a status read
         code = getattr(exc, "code", None)
@@ -330,7 +374,7 @@ async def publish_agent_avatar(
 
     access = access if access is not None else await client.current_access()
     status = status if status is not None else await client.status(access=access)
-    plan = plan_avatar(status, tenant_id, config_dir)
+    plan = await _plan_off_loop(status, tenant_id, config_dir)
     if plan.endpoint_id is None or plan.digest is None or plan.data is None:
         # Nothing to publish IS the answer: an explicit publish never turns into
         # a delete behind the caller's back.

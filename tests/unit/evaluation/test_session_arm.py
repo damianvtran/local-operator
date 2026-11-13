@@ -507,6 +507,107 @@ class TestResolution:
             assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
 
 
+class TestActionServerDeadlineNesting:
+    """The MCP client's request bound must nest OUTSIDE every command deadline.
+
+    Sealed episode ``t29a-t030-20261111-192648``: a ``timeout_s: 300`` command
+    (the advertised maximum) was cut by the MCP client at 305.06 s -- the 300 s
+    client default -- before the harness's own ``timeout_s + 20`` RPC deadline,
+    and the cancellation poisoned the session. These tests fail if the
+    declaration stops carrying a timeout, or if anyone raises the command
+    maximum (or the RPC margin) without the MCP bound following.
+    """
+
+    @staticmethod
+    def _declared_timeout_ms(tmp_path: Path) -> float:
+        config = tmp_path / "config"
+        config.mkdir(exist_ok=True)
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface(), command=True
+        )
+        document = json.loads((config / "mcp.json").read_text(encoding="utf-8"))
+        return float(document["mcpServers"]["episode-actions"]["timeout"])
+
+    @staticmethod
+    def _floor_s(command_max_s: float) -> float:
+        from local_operator.evaluation.adapters.supervisor import TERM_GRACE_SECONDS
+        from local_operator.evaluation.session_arm import COMMAND_RPC_MARGIN_S
+
+        # RPC deadline, then its 1 s cancel grace, the poison's SIGTERM and
+        # post-SIGKILL waits and a 1 s drainer join -- everything that can still
+        # happen before the bridge replies (``ACTION_SERVER_REPLY_SLACK_S``).
+        return command_max_s + COMMAND_RPC_MARGIN_S + 1.0 + 2 * TERM_GRACE_SECONDS + 1.0
+
+    def test_action_server_mcp_timeout_nests_outside_the_longest_command(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation import action_server
+        from local_operator.mcp.manager import DEFAULT_MCP_TIMEOUT_MS
+
+        declared_s = self._declared_timeout_ms(tmp_path) / 1000.0
+        assert declared_s > self._floor_s(action_server.COMMAND_MAX_TIMEOUT_S)
+        # The measured defect: the client default sat AT the command maximum.
+        assert declared_s > DEFAULT_MCP_TIMEOUT_MS / 1000.0
+        # The ordinary-session default is untouched by this per-server bound.
+        assert DEFAULT_MCP_TIMEOUT_MS == 300_000.0
+
+    def test_action_server_mcp_timeout_nests_when_the_command_max_is_raised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.evaluation import action_server
+
+        monkeypatch.setattr(action_server, "COMMAND_MAX_TIMEOUT_S", 900)
+        assert self._declared_timeout_ms(tmp_path) / 1000.0 > self._floor_s(900)
+
+    def test_the_resolved_client_bound_is_the_declared_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.evaluation import action_server
+        from local_operator.mcp.config import load_all_mcp_configs
+        from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+        home = tmp_path / "home"
+        config = home / ".local-operator"
+        work = home / "work"
+        config.mkdir(parents=True)
+        work.mkdir()
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface()
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+        configs, _ = load_all_mcp_configs(work)
+        resolved = resolve_mcp_timeout_s(configs["episode-actions"])
+        assert resolved is not None
+        assert resolved > self._floor_s(action_server.COMMAND_MAX_TIMEOUT_S)
+        assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+
+    @pytest.mark.parametrize(("env_ms", "refused"), [("300000", True), ("0", False)])
+    def test_an_env_override_below_the_nesting_bound_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_ms: str, refused: bool
+    ) -> None:
+        # ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks the per-server timeout, so
+        # an inherited 300 s override would silently restore the measured loss;
+        # ``0`` disables the client bound entirely and nests trivially.
+        home = tmp_path / "home"
+        config = home / ".local-operator"
+        work = home / "work"
+        config.mkdir(parents=True)
+        work.mkdir()
+        declare_action_server(
+            config_dir=config, endpoint=tmp_path / "b.sock", surface=ActionSurface()
+        )
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", env_ms)
+        if refused:
+            with pytest.raises(SessionArmError, match="MCP request timeout resolves to 300 s"):
+                assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+        else:
+            assert_declaration_resolved(cwd=work, config_dir=config, scratch_root=home)
+
+
 class TestBridgeDiscipline:
     @pytest.mark.asyncio
     async def test_one_batch_per_observation_until_the_turn_ends(self, tmp_path: Path) -> None:
@@ -6317,9 +6418,18 @@ async def test_pending_command_serializes_finish(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("late_error", [False, True])
-async def test_mcp_cancellation_seals_unknown_even_after_late_success(
+async def test_mcp_cancellation_detaches_and_seals_unknown_even_after_late_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native: bool, late_error: bool
 ) -> None:
+    """A caller cancelled after dispatch DETACHES the command; it never cancels it.
+
+    Cancelling the in-flight command used to cancel the adapter RPC, which
+    poisons its channel and kills the worker (sealed episode
+    ``t29a-t030-20261111-192648``: every later call and ``score`` failed). The
+    command now settles under its own deadline. The row still seals the
+    UNKNOWN outcome the caller was left with -- a late success must never read
+    as green -- and records what the target actually answered beside it.
+    """
     from mcp import types
 
     from local_operator.evaluation.action_server import (
@@ -6367,20 +6477,27 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
             await writer.wait_closed()
 
     async def run(command: str, timeout: float) -> Any:
-        remote = asyncio.create_task(http_request())
-        while True:
-            try:
-                return await asyncio.shield(remote)
-            except asyncio.CancelledError:
-                if remote.cancelled():
-                    raise
-                # Publish only once the bridge operation has observed cancellation.
-                # Native socket teardown can cancel it again while it collects the
-                # late reply; keep shielding on EVERY await so that teardown cannot
-                # cancel the independent HTTP task before the handshake releases it.
-                cancelled.set()
+        try:
+            return await http_request()
+        except asyncio.CancelledError:
+            # The defect this test guards: the caller's cancellation reaching
+            # the dispatched command (and with it the adapter RPC).
+            cancelled.set()
+            raise
 
     bridge.run_command = run
+    # Observe the bridge's detach signal, so the late reply is released only
+    # once the caller's cancellation has reached the bridge (the MCP cancel is
+    # an asynchronous notification across the stdio transport).
+    detached: list[asyncio.Event] = []
+    original_call_command = bridge.call_command
+
+    async def spy_call_command(arguments: Any, **kwargs: Any) -> Any:
+        if kwargs.get("caller_gone") is not None:
+            detached.append(kwargs["caller_gone"])
+        return await original_call_command(arguments, **kwargs)
+
+    monkeypatch.setattr(bridge, "call_command", spy_call_command)
     await bridge.start()
     server = build_mcp_server(str(bridge.endpoint), ActionSurface(), timeout=5, command=True)
     entry = server.get_request_handler("tools/call")
@@ -6419,19 +6536,28 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
 
     task = asyncio.create_task(invoke())
     try:
-        await admitted.wait()
+        await asyncio.wait_for(admitted.wait(), 10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         # MCP cancellation is a notification across a subprocess transport,
-        # not a synchronous remote ACK. Hold the actual HTTP reply until
-        # cancellation reaches the operation, then deliver its late success.
-        await asyncio.wait_for(cancelled.wait(), 2)
+        # not a synchronous remote ACK. Hold the actual HTTP reply until the
+        # bridge has seen the caller leave, then deliver its late answer.
+        for _ in range(200):
+            if detached and detached[0].is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert detached and detached[0].is_set(), "caller cancellation never reached the bridge"
         release.set()
         await asyncio.wait_for(completed.wait(), 2)
         await asyncio.wait_for(recorded.wait(), 2)
-        assert cancelled.is_set(), "caller cancellation never reached the bridge operation"
+        assert not cancelled.is_set(), "caller cancellation reached the dispatched command"
         row = [p for k, p in rows if k == "command"][0]
+        settled = (
+            {"error": "ValueError: late reply could not be decoded"}
+            if late_error
+            else _command_result().model_dump(mode="json", exclude={"stdout", "stderr"})
+        )
         assert row == {
             "call_id": row["call_id"],
             "command": "late success",
@@ -6444,7 +6570,9 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
             "stdout_truncated": None,
             "stderr_truncated": None,
             "error": "CancelledError: command outcome unknown",
+            "settled_after_cancel": settled,
         }
+        assert len([k for k, _ in rows if k == "command"]) == 1
     finally:
         release.set()
         if manager is not None:
@@ -6452,3 +6580,394 @@ async def test_mcp_cancellation_seals_unknown_even_after_late_success(
         await bridge.stop()
         target.close()
         await target.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_a_command_at_the_advertised_maximum_is_not_cut_by_the_mcp_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measured loss, scaled down and driven through the real MCP client.
+
+    Sealed episode ``t29a-t030-20261111-192648``: ``timeout_s: 300`` (the
+    advertised maximum) met the client's 300 s default request timeout and was
+    cut at 305.06 s. Here the client default is scaled to 0.5 s and the command
+    takes 1 s (its own deadline plus downstream margins, scaled): without the
+    per-server bound the declaration now carries, the client cuts it exactly as
+    the sealed run did; with it, the command's real answer reaches the caller.
+    """
+
+    from local_operator.mcp import manager as manager_mod
+
+    monkeypatch.setattr(manager_mod, "DEFAULT_MCP_TIMEOUT_MS", 500.0)
+    monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+    bridge = _bridge(tmp_path)
+
+    async def run(command: str, timeout: float) -> Any:
+        await asyncio.sleep(1.0)
+        return _command_result(stdout="trained\n", stdout_bytes=8)
+
+    bridge.run_command = run
+    await bridge.start()
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    decl = declare_action_server(
+        config_dir=config,
+        endpoint=bridge.endpoint,
+        surface=ActionSurface(),
+        python_executable=sys.executable,
+        cwd=Path(__file__).resolve().parents[3],
+        command=True,
+    )
+    manager = McpManager(str(tmp_path))
+    try:
+        await manager.discover_and_connect()
+        await manager.wait_settled(20)
+        tool = next(t for t in manager.get_tools() if t.name == decl.command_tool_name)
+        result = await asyncio.wait_for(
+            tool.execute(
+                "max-timeout",
+                {"command": "python train.py", "timeout_s": 300},
+                None,
+                None,
+                ToolContext(),
+            ),
+            30,
+        )
+        text = "".join(getattr(block, "text", "") for block in result.content)
+        assert "timed out" not in text, text
+        assert "exit_code: 0" in text and "trained" in text, text
+    finally:
+        await manager.disconnect_all()
+        await bridge.stop()
+
+
+# ---------------------------------------------------------------------------
+# PR #3836 round 1 (R1 = Q1, m1, m2, Q2): a command never runs after its caller
+# left while it was still QUEUED on the mutation lane, and the lane wait is
+# bounded so the MCP client's from-send timer cannot cut a queued command.
+# ---------------------------------------------------------------------------
+
+
+async def _forward_command(bridge: ActionBridge, arguments: dict[str, Any]) -> dict[str, Any]:
+    """The REAL client half of the wire (``action_server.forward_call``)."""
+
+    from local_operator.evaluation.action_server import COMMAND_TOOL_NAME, forward_call
+
+    return await forward_call(str(bridge.endpoint), arguments, timeout=None, tool=COMMAND_TOOL_NAME)
+
+
+def _text_of(reply: Any) -> str:
+    content = reply["content"] if isinstance(reply, dict) else reply.content
+    return "".join(
+        (block.get("text", "") if isinstance(block, dict) else getattr(block, "text", ""))
+        for block in content
+    )
+
+
+def _dispatch_recorder(
+    hold_s: float,
+) -> tuple[list[str], Any]:
+    dispatched: list[str] = []
+
+    async def run(command: str, timeout: float) -> Any:
+        del timeout
+        dispatched.append(command)
+        if command.startswith("first"):
+            await asyncio.sleep(hold_s)
+        return _command_result(stdout=f"{command}\n", stdout_bytes=len(command) + 1)
+
+    return dispatched, run
+
+
+@pytest.mark.asyncio
+async def test_a_command_cancelled_while_queued_is_never_dispatched(tmp_path: Path) -> None:
+    """QA row 9 / review R1: A holds the lane, B queues, B's caller leaves.
+
+    Before the fix B ran once the lane freed (``DISPATCHED: ['first',
+    'second']``, a ``command_started`` row and ``cancelled_after_dispatch``),
+    mutating the target after its caller had been told the call failed.
+    """
+
+    rows: list[tuple[str, dict[str, Any]]] = []
+    bridge = _bridge(tmp_path, record=lambda kind, payload: rows.append((kind, payload)))
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=1.0)
+    await bridge.start()
+    try:
+        first = asyncio.create_task(_forward_command(bridge, {"command": "first; sleep"}))
+        await asyncio.sleep(0.2)
+        second = asyncio.create_task(_forward_command(bridge, {"command": "second > marker"}))
+        await asyncio.sleep(0.3)
+        assert dispatched == ["first; sleep"], "second must still be queued"
+        second.cancel()  # the interrupted turn: forward_call half-closes
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        reply = await asyncio.wait_for(first, 5)
+        assert "exit_code: 0" in _text_of(reply)
+        for _ in range(100):
+            if any(p.get("command") == "second > marker" for k, p in rows if k == "command"):
+                break
+            await asyncio.sleep(0.02)
+        assert dispatched == ["first; sleep"], f"a queued, cancelled command ran: {dispatched}"
+        started = [p["command"] for k, p in rows if k == "command_started"]
+        assert started == ["first; sleep"]
+        refused = [p for k, p in rows if k == "command" and p["command"] == "second > marker"]
+        assert refused == [
+            {
+                "call_id": refused[0]["call_id"],
+                "command": "second > marker",
+                "timeout_s": None,
+                "cancelled": True,
+                "dispatched": False,
+                "outcome": "cancelled_before_dispatch",
+                "target_may_have_run": False,
+            }
+        ]
+        # The lane is healthy: a later command runs normally.
+        later = await asyncio.wait_for(_forward_command(bridge, {"command": "later"}), 5)
+        assert "later" in _text_of(later)
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_parallel_commands_at_the_maximum_are_refused_unsent_not_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA's parallel shape: MCP tools run ``concurrency="shared"``.
+
+    Three ``timeout_s: 300`` calls in one turn at the REAL declared bound
+    (350 s): before the fix the second and third queued for up to 600 s, the
+    client's from-send timer cut them, and they ran anyway. At the maximum the
+    nesting leaves no queue headroom, so a busy lane refuses them at once with
+    a reply the caller actually receives -- and nothing is sent.
+    """
+
+    monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+    rows: list[tuple[str, dict[str, Any]]] = []
+    bridge = _bridge(tmp_path, record=lambda kind, payload: rows.append((kind, payload)))
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=0.5)
+    await bridge.start()
+    try:
+        first = asyncio.create_task(
+            _forward_command(bridge, {"command": "first", "timeout_s": 300})
+        )
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        others = await asyncio.wait_for(
+            asyncio.gather(
+                _forward_command(bridge, {"command": "second", "timeout_s": 300}),
+                _forward_command(bridge, {"command": "third", "timeout_s": 300}),
+            ),
+            5,
+        )
+        assert time.monotonic() - started < 0.4, "a no-headroom command waited for the lane"
+        for reply in others:
+            assert reply["is_error"] is True
+            assert _text_of(reply).startswith("Not run:"), _text_of(reply)
+            assert "Nothing was sent" in _text_of(reply)
+        assert "exit_code: 0" in _text_of(await asyncio.wait_for(first, 5))
+        assert dispatched == ["first"]
+        outcomes = sorted(
+            (p["command"], p["outcome"], p["target_may_have_run"])
+            for k, p in rows
+            if k == "command" and p.get("dispatched") is False
+        )
+        assert outcomes == [
+            ("second", "refused_lane_busy", False),
+            ("third", "refused_lane_busy", False),
+        ]
+        # At the maximum a FREE lane is still taken: no headroom is not no lane.
+        free = await asyncio.wait_for(
+            _forward_command(bridge, {"command": "alone", "timeout_s": 300}), 5
+        )
+        assert "exit_code: 0" in _text_of(free)
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_command_waits_only_within_the_headroom_the_bound_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lane bound is derived, not invented: client bound minus the command's
+    own nested budget. Scaled through the env override the client itself reads:
+    1 s command, client bound 51.4 s -> 51.4 - (1 + 20 + 30) = 0.4 s of queue.
+    """
+
+    from local_operator.evaluation import session_arm
+
+    monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "51400")
+    assert session_arm.action_server_client_timeout_s() == pytest.approx(51.4)
+    bridge = _bridge(tmp_path)
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=1.5)
+    await bridge.start()
+    try:
+        first = asyncio.create_task(_forward_command(bridge, {"command": "first", "timeout_s": 1}))
+        await asyncio.sleep(0.1)
+        started = time.monotonic()
+        late = await asyncio.wait_for(
+            _forward_command(bridge, {"command": "queued", "timeout_s": 1}), 5
+        )
+        waited = time.monotonic() - started
+        assert _text_of(late).startswith("Not run:"), _text_of(late)
+        assert 0.3 < waited < 1.2, waited
+        await asyncio.wait_for(first, 5)
+        assert dispatched == ["first"]
+        # Within the headroom a queued command waits and runs.
+        first = asyncio.create_task(_forward_command(bridge, {"command": "first", "timeout_s": 1}))
+        await asyncio.sleep(0.1)
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "53000")  # 2 s of headroom
+        ok = await asyncio.wait_for(
+            _forward_command(bridge, {"command": "fits", "timeout_s": 1}), 5
+        )
+        assert "exit_code: 0" in _text_of(ok)
+        await asyncio.wait_for(first, 5)
+        assert dispatched == ["first", "first", "fits"]
+    finally:
+        await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_command_cut_by_the_mcp_client_is_never_dispatched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA row 2b through the REAL MCP client and stdio action server.
+
+    A per-server ``timeout: 1000`` the bridge's lane bound does not know about
+    (the case the bound cannot prevent): both calls are cut at 1 s; the first
+    was dispatched and settles detached, the second was still queued and must
+    never reach the target. Before the fix it ran (``settled_after_cancel
+    exit 0``).
+    """
+
+    monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", raising=False)
+    rows: list[tuple[str, dict[str, Any]]] = []
+    bridge = _bridge(tmp_path, record=lambda kind, payload: rows.append((kind, payload)))
+    dispatched, bridge.run_command = _dispatch_recorder(hold_s=2.0)
+    await bridge.start()
+    config = tmp_path / "config"
+    config.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    decl = declare_action_server(
+        config_dir=config,
+        endpoint=bridge.endpoint,
+        surface=ActionSurface(),
+        python_executable=sys.executable,
+        cwd=Path(__file__).resolve().parents[3],
+        command=True,
+    )
+    document = json.loads(decl.config_path.read_text(encoding="utf-8"))
+    document["mcpServers"]["episode-actions"]["timeout"] = 1000
+    decl.config_path.write_text(json.dumps(document), encoding="utf-8")
+    manager = McpManager(str(tmp_path))
+    try:
+        # Connect under a generous budget, cut the CALLS at 1 s. The per-server
+        # ``timeout`` also becomes the session's read timeout for
+        # ``initialize`` and ``tools/list``, and a cold stdio action server
+        # (a fresh interpreter importing local_operator) can take over 1 s to
+        # answer on a loaded runner: CI saw no tool listed (StopIteration
+        # below), reproduced here with a 1.5 s interpreter-start delay. The
+        # env override outranks the config only while connecting; ``call_tool``
+        # resolves the timeout per call, so once it is dropped both calls read
+        # the per-server 1000 ms this test is about.
+        monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "20000")
+        await manager.discover_and_connect()
+        await manager.wait_settled(20)
+        monkeypatch.delenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS")
+        tools = {t.name: t for t in manager.get_tools()}
+        assert decl.command_tool_name in tools, f"action server not listed: {sorted(tools)}"
+        tool = tools[decl.command_tool_name]
+
+        async def call(call_id: str, command: str) -> Any:
+            return await tool.execute(call_id, {"command": command}, None, None, ToolContext())
+
+        first = asyncio.create_task(call("a", "first; sleep"))
+        await asyncio.sleep(0.3)
+        second = await asyncio.wait_for(call("b", "second > marker"), 10)
+        assert "timed out" in _text_of(second), _text_of(second)
+        await asyncio.wait_for(first, 10)
+        for _ in range(200):
+            if any(p.get("command") == "second > marker" for k, p in rows if k == "command"):
+                break
+            await asyncio.sleep(0.02)
+        assert dispatched == ["first; sleep"], f"a queued, cut command ran: {dispatched}"
+        outcome = [
+            p["outcome"] for k, p in rows if k == "command" and p["command"] == "second > marker"
+        ]
+        assert outcome == ["cancelled_before_dispatch"]
+    finally:
+        await manager.disconnect_all()
+        await bridge.stop()
+
+
+@pytest.mark.parametrize(("env_ms", "refused"), [("1000", True), ("349999", True), ("0", False)])
+def test_the_env_refusal_needs_no_provisioning(
+    monkeypatch: pytest.MonkeyPatch, env_ms: str, refused: bool
+) -> None:
+    """QA Q2: the refusal reads only env + constants, so it can run first."""
+
+    from local_operator.evaluation.session_arm import assert_action_server_timeout_nests
+
+    monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", env_ms)
+    if refused:
+        with pytest.raises(SessionArmError, match="MCP request timeout resolves to"):
+            assert_action_server_timeout_nests()
+    else:
+        assert_action_server_timeout_nests()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_env_override_never_launches_the_adapter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+) -> None:
+    """QA Q2: the refused run's record was ``["reset", "error"]`` -- prepare and
+    reset (an AWS VM) had already happened. Now ``launch`` is never called."""
+
+    monkeypatch.setenv("LOCAL_OPERATOR_MCP_TIMEOUT_MS", "1000")
+    home = short_scratch / "home"
+    for path in (home / ".local-operator", home / "lh", home / "work"):
+        path.mkdir(parents=True, exist_ok=True)
+    launched: list[Any] = []
+
+    def launch(selected: Any) -> Any:
+        launched.append(selected)
+        raise AssertionError("launch must not run for a refused episode")
+
+    async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+        del descriptor, kwargs
+        return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+    outcome = await run_session_episode(
+        spec=build_spec("ep-env-refused"),
+        config=build_config(tmp_path, observation_retry_delay=0.0),
+        selector=selector(tmp_path),
+        roots=SessionRoots(
+            config_dir=home / ".local-operator",
+            agent_home=home / "lh",
+            cwd=home / "work",
+            allow_volatile=True,
+        ),
+        scratch_root=short_scratch,
+        session_spec=SessionSpec(
+            hosting="test",
+            model="mock",
+            world_root=tmp_path / "world",
+            tools=EPISODE_TOOL_SURFACE,
+            approvals=ApprovalPolicy.declared(EPISODE_TOOL_SURFACE),
+            name="arm-env-refused",
+        ),
+        secrets=(),
+        launch=launch,
+        rescue=rescue,
+    )
+    assert launched == []
+    assert outcome.terminal_reason == "session-arm", outcome
+    assert "LOCAL_OPERATOR_MCP_TIMEOUT_MS" in (outcome.diagnostic or "")
+    assert outcome.record_root is not None
+    kinds = [
+        json.loads(line)["kind"]
+        for line in (outcome.record_root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert "reset" not in kinds, kinds

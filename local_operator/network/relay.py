@@ -513,6 +513,10 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         # One peer's own relay recovery; the member answers before its
         # supervisor replaces the process, and the origin verifies on reconnect.
         "net_restart",
+        # The remote peek (network/peek.py): the owner runs the local peek's
+        # readers on its own journal. Slow by registration — a deep search may
+        # take seconds and must not hold the link reader.
+        "net_session_peek",
     }
 )
 
@@ -545,6 +549,8 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         # ``net_update``).
         "peer_update",
         "peer_restart",
+        # The remote peek's local half (``net_session_peek`` is the peer half).
+        "peer_session_peek",
     }
 )
 
@@ -577,6 +583,8 @@ SLICE_MODULES: tuple[str, ...] = (
     # thread — and it opens no record by itself: the trigger that does is
     # S3b's, so this slice ships inert in production by construction.
     "local_operator.network.rollouts",
+    # The remote peek: one slow peer op plus its local half, no threads.
+    "local_operator.network.peek",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -5773,6 +5781,11 @@ class RelayServer:
         self._create_keys = CreateKeyIndex(self.root)
         self._slow_pool: ThreadPoolExecutor | None = None
         self._slow_slots: threading.BoundedSemaphore | None = None
+        #: Devices with a peer-regex peek in flight here (``network.peek.
+        #: peer_regex_device``, PR #3831 QA Q5): at most one each, so one
+        #: member's burst of bad patterns cannot take the shared slow lane.
+        self._peer_regex_lock = threading.Lock()
+        self._peer_regex_inflight: set[str] = set()
         #: The create lane (``SESSION_CREATE_WORKERS``), under the same lock.
         self._create_pool: ThreadPoolExecutor | None = None
         self._create_slots: threading.BoundedSemaphore | None = None
@@ -8169,8 +8182,34 @@ class RelayServer:
         """
         req = frame.get("req")
         op = granted.action
+        # ONE PEER REGEX PER DEVICE, decided before a slot or a worker is taken
+        # (PR #3831 QA Q5): a cap inside the handler would already hold the
+        # worker it is meant to protect. Released when the WORKER finishes, not
+        # when the overdue answer leaves — the worker is what was being spent.
+        from local_operator.network import peek as net_peek
+
+        regex_device = net_peek.peer_regex_device(link, frame)
+        if regex_device is not None:
+            with self._peer_regex_lock:
+                busy = regex_device in self._peer_regex_inflight
+                if not busy:
+                    self._peer_regex_inflight.add(regex_device)
+            if busy:
+                return wire.refusal_frame(
+                    req,
+                    net_peek.PEER_REGEX_BUSY_SENTENCE.format(
+                        owner=self._own_label(), budget=net_peek.PEER_REGEX_BUDGET_S
+                    ),
+                )
+
+        def _release_regex() -> None:
+            if regex_device is not None:
+                with self._peer_regex_lock:
+                    self._peer_regex_inflight.discard(regex_device)
+
         pool, slots = self._slow_executor(op)
         if not slots.acquire(blocking=False):
+            _release_regex()
             return wire.refusal_frame(
                 req,
                 f"this device is already running {SLOW_OP_MAX_PENDING} long operations "
@@ -8221,6 +8260,7 @@ class RelayServer:
             finally:
                 timer.cancel()
                 slots.release()
+                _release_regex()
 
         try:
             timer.start()
@@ -8229,6 +8269,7 @@ class RelayServer:
             # The pool refuses new work once ``stop`` has shut it down.
             timer.cancel()
             slots.release()
+            _release_regex()
             return wire.refusal_frame(req, f"this device's relay is stopping; {op} was not started")
         return None
 
@@ -8645,8 +8686,29 @@ class RelayServer:
                 "name": self._own_label(),
             },
             "generated_at": time.time(),
-            "sessions": self.local_session_rows(),
+            "sessions": self._rows_for_viewer(link),
         }
+
+    def _rows_for_viewer(self, link: PeerLink) -> list[dict[str, Any]]:
+        """The catalogue rows as THIS link's viewer may see them.
+
+        ``local_session_rows`` stays viewer-blind (the federated listing, the
+        row lookups and the local surfaces call it); only the PEER catalogue op
+        knows who is asking, so the origin-only completion/notice fields are
+        added here (``notifications/remote_attention``). Both conditions are the
+        authenticated link's: the viewer advertised ``REMOTE_ATTENTION_V1`` (an
+        older viewer gets the exact rows it always did), and the per-row origin
+        match on ``link.device_id`` happens inside the stamp — so one member can
+        never read another member's completions by asking.
+        """
+        rows = self.local_session_rows()
+        if wire.REMOTE_ATTENTION_V1 in link.capabilities:
+            from local_operator.notifications.remote_attention import (
+                stamp_rows_for_viewer,
+            )
+
+            stamp_rows_for_viewer(self.root, rows, str(link.device_id or ""))
+        return rows
 
     def local_session_rows(self) -> list[dict[str, Any]]:
         """This device's rows: every LIVE session, then every stored one.
@@ -13577,7 +13639,7 @@ class RelayServer:
         endings = (
             engine.deliver_removal_endings(device_id)
             if engine is not None
-            else {"copies": 0, "wiped": 0, "timed_out": 0}
+            else {"copies": 0, "wiped": 0, "timed_out": 0, "unacknowledged": 0}
         )
         with store.mutate(resolved.network_id, self.root) as record:
             outcome = remove_member(
@@ -13607,6 +13669,7 @@ class RelayServer:
             "copies": int(endings.get("copies") or 0),
             "wiped": int(endings.get("wiped") or 0),
             "timed_out": int(endings.get("timed_out") or 0),
+            "unacknowledged": int(endings.get("unacknowledged") or 0),
         }
 
     def _ctl_member_caps(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -15910,6 +15973,37 @@ DELIBERATE_STOP_MARKER = "relay-stop-requested.json"
 #: failure this exists to stop.
 RELAY_OOM_SCORE_ADJUST = -500
 
+#: The relay unit's ``OOMPolicy``: when the kernel OOM-kills ANY process in the
+#: unit's cgroup, keep the unit running instead of stopping it.
+#:
+#: WHY (2026-11-11, the Linux node, 23:31–23:33Z): systemd's default is ``stop``
+#: (``DefaultOOMPolicy``), and it applies to every process in the cgroup, not only
+#: the main one. The relay's session runtimes and their tool children live in
+#: that cgroup (``KillMode=process`` keeps them there across restarts, by design),
+#: so a remote session's desktop rig — Electron, xvfb and a ``node`` build at
+#: 4.4–6.9 GB — tripping a GLOBAL OOM stopped the RELAY five times in 2½ minutes.
+#: The user journal shows the pairs: "A process of this unit has been killed by
+#: the OOM killer" → "Failed with result 'oom-kill'" → "Scheduled restart job,
+#: restart counter is at 1…5". The kernel's victim each time was ``node-22``
+#: (``oom_score_adj`` 300), never the relay: :data:`RELAY_OOM_SCORE_ADJUST`
+#: protected the PROCESS and the default policy took down the UNIT anyway, so
+#: the node was off the mesh and a session on it read "the relay is not running".
+#:
+#: WHY ``continue`` IS SAFE HERE: the kernel has already killed exactly the one
+#: process it chose; ``continue`` only stops systemd from ALSO stopping the
+#: unit's main process. Every other process keeps running either way (under
+#: ``KillMode=process`` a stop kills only the main process), so ``stop`` bought
+#: no memory back — it only cost the relay's restart window. If the relay itself
+#: is the victim, its own exit still restarts it through ``Restart=always``. Not
+#: ``kill``: that would SIGKILL every session runtime in the cgroup.
+#:
+#: VERSIONS: ``OOMPolicy=`` exists from systemd 243. An older manager logs
+#: "Unknown key name 'OOMPolicy'… ignoring" and loads the unit; it also predates
+#: systemd's OOM tracking, so it never stopped a unit for a child's OOM in the
+#: first place. The render therefore stays unconditional (and deterministic, which
+#: ``refresh_unit_if_stale``'s content comparison needs).
+RELAY_OOM_POLICY = "continue"
+
 
 def log_path() -> Path:
     return log_dir() / "network.log"
@@ -15956,6 +16050,45 @@ def plist_path() -> Path:
 def systemd_path() -> Path:
     """``~/.config/systemd/user/<unit>`` for the CURRENT home (redirectable)."""
     return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+
+
+def installed_unit_oom_policy() -> dict[str, Any]:
+    """What the INSTALLED relay unit says ``OOMPolicy`` is, read from disk.
+
+    The readiness fact behind the resilience row's ``relay_oom_policy`` warning
+    (:data:`RELAY_OOM_POLICY` has the incident). Read from the unit file and its
+    ``<unit>.d/*.conf`` drop-ins in systemd's order (lexical, last assignment
+    wins), not from ``systemctl show``: the readiness answer is built on every
+    ``net_readiness`` and must not wait on the user manager, and a unit the
+    update path rewrote is ``daemon-reload``ed in the same step, so disk and
+    manager agree after any refresh this code performs. ``oom_policy`` is
+    ``None`` when no line sets it — the manager's default (``stop``).
+
+    ``{"supervisor": None}`` off Linux or without systemctl (launchd has no
+    such policy), ``installed: False`` with no unit, ``readable: False`` when
+    the files could not be read: an unknown is never reported as a gap.
+    """
+    if not (sys.platform.startswith("linux") and is_supported()):
+        return {"supervisor": None}
+    try:
+        unit = systemd_path()
+        if not unit.exists():
+            return {"supervisor": "systemd", "installed": False}
+        dropins = unit.parent / f"{unit.name}.d"
+        files = [unit, *sorted(dropins.glob("*.conf"))] if dropins.is_dir() else [unit]
+        policy: str | None = None
+        for path in files:
+            section = ""
+            for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    section = line
+                elif section == "[Service]" and line.partition("=")[0].strip() == "OOMPolicy":
+                    # An empty assignment resets to the default, as systemd reads it.
+                    policy = line.partition("=")[2].strip() or None
+    except OSError:
+        return {"supervisor": "systemd", "installed": True, "readable": False}
+    return {"supervisor": "systemd", "installed": True, "readable": True, "oom_policy": policy}
 
 
 def deliberate_stop_marker_path(root: Path | None = None) -> Path:
@@ -16213,6 +16346,9 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         # differs from this render, so existing installs gain the line on their
         # next update without a reinstall.
         oom_score_adjust=RELAY_OOM_SCORE_ADJUST,
+        # See RELAY_OOM_POLICY: a session child's OOM kill must not stop the
+        # relay. Existing installs gain the line the same way as the two above.
+        oom_policy=RELAY_OOM_POLICY,
         post_lines=[
             f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
             *supervisors.output_redirect_lines(log_path()),
