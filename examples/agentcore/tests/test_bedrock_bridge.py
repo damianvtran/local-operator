@@ -101,6 +101,41 @@ def test_tool_round_trip_history_merges_into_alternating_turns() -> None:
     assert kwargs["toolConfig"]["toolChoice"] == {"any": {}}
 
 
+def test_tool_choice_none_sends_no_tool_config_so_no_tool_can_be_called() -> None:
+    """R3: Converse has no "none" choice; omitting toolConfig is what forbids calls."""
+    kwargs = to_converse(
+        {
+            "messages": [{"role": "user", "content": "just talk"}],
+            "tools": TOOLS,
+            "tool_choice": "none",
+        },
+        MODEL,
+    )
+    assert "toolConfig" not in kwargs
+
+
+def test_tool_choice_none_after_a_tool_round_keeps_specs_converse_requires() -> None:
+    """With toolUse/toolResult in history Converse rejects a missing toolConfig."""
+    kwargs = to_converse(
+        {
+            "messages": [
+                {"role": "user", "content": "add"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "function": {"name": "add", "arguments": "{}"}}],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": "1"},
+            ],
+            "tools": TOOLS,
+            "tool_choice": "none",
+        },
+        MODEL,
+    )
+    assert kwargs["toolConfig"]["tools"][0]["toolSpec"]["name"] == "add"
+    assert "toolChoice" not in kwargs["toolConfig"]
+
+
 def test_data_uri_images_translate_and_remote_urls_are_not_fetched() -> None:
     kwargs = to_converse(
         {

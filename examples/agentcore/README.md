@@ -83,7 +83,7 @@ bridge cannot report one.
 | `infra/runtime.yaml` | CloudFormation: least-privilege execution role + `AWS::BedrockAgentCore::Runtime` |
 | `scripts/deploy.sh` | build stack → image build in CodeBuild → runtime stack |
 | `scripts/invoke.py` | streaming client (`invoke_agent_runtime`) |
-| `scripts/teardown.sh` | deletes both stacks |
+| `scripts/teardown.sh` | deletes both stacks and the two service-created log groups |
 | `tests/` | offline unit tests (no AWS needed) |
 
 ## Prerequisites
@@ -126,7 +126,7 @@ out a new runtime version. Measured builds took about one minute.
 | `--region` | profile's region | Deployment region; required if the profile has none. |
 | `--stack-name` | `lop-agentcore` | Base name: stacks `<name>-build` and `<name>-runtime`, ECR repo `<name>`, runtime `<name with _>`. |
 | `--model-id` | `global.anthropic.claude-sonnet-5-5` | Bedrock model or system inference profile id. Only this model is granted to the role. |
-| `--lop-version` | `0.92.1` | `local-operator` release installed from PyPI. The build asserts the installed version. |
+| `--lop-version` | `0.92.1` | `local-operator` release installed from PyPI. The build asserts the installed version. The default stays at `0.92.1`, the release this sample was validated end to end on (the transcripts below); pass a newer release to try it. |
 | `--approvals` | `auto` | lop tool-approval policy in the microVM: `auto`, `refuse`, or a comma-separated tool list. See [Security](#security-notes). |
 | `--tools` | lop default | Optional comma-separated lop tool allow-list. |
 
@@ -147,7 +147,7 @@ execution role must also allow that model.
 The response is `text/event-stream`, one JSON object per `data:` line:
 
 ```json
-{"type": "session", "session_id": "...", "model": "..."}
+{"type": "session", "session_id": "...", "model": "...", "notice": "..."}
 {"type": "text", "text": "..."}
 {"type": "tool_start", "tool": "bash", "args": {"command": "uname -m"}}
 {"type": "tool_end", "tool": "bash", "is_error": false, "result": "..."}
@@ -155,7 +155,11 @@ The response is `text/event-stream`, one JSON object per `data:` line:
 {"type": "error", "error": "..."}
 ```
 
-`text` events are assistant deltas. `end` closes a turn, and its `error` is
+`session` opens every turn and names the model the session actually runs on.
+A session keeps the model it started with: a `"model"` sent on a later turn of
+the same session is not applied, and the `session` event then carries a
+`notice` saying so (`invoke.py` prints it as `[notice] …`). Use a new session
+id to change models. `text` events are assistant deltas. `end` closes a turn, and its `error` is
 non-null when the turn failed (for example, the model was denied). `error`
 means the invocation itself was refused (for example, an empty prompt).
 
@@ -225,7 +229,9 @@ OpenAI-compatible provider.
 ```text
 $ python3 scripts/invoke.py ... --session-id lop-demo-session-a-89b7…c15e \
     "Remember this for later: my project codename is BLUE-HERON-42. Just acknowledge."
-Noted: your project codename is BLUE-HERON-42.
+[tool] memory {"op": "store", "text": "User's project codename is BLUE-HERON-42.", "scope": "session"}
+[tool ok] {"id": "01a1d342-…", "scope": "session", "status": "active", … (quota details elided) …}
+Noted: your project codename is BLUE-HERON-42. I've saved it to this session's memory.
 
 $ python3 scripts/invoke.py ... --session-id lop-demo-session-a-89b7…c15e \
     "What is my project codename? Answer with just the codename."
@@ -400,7 +406,12 @@ You pay for:
 
 `scripts/teardown.sh --profile <p> --region <r> --stack-name <name>` deletes the
 runtime stack, then empties the build-context bucket and deletes the build
-stack, ECR images included.
+stack, ECR images included. It then deletes the two log groups the services
+create outside CloudFormation: `/aws/codebuild/<stack>-image` and the runtime's
+`/aws/bedrock-agentcore/runtimes/<runtime-id>-*`, named from the stack outputs.
+Expect it to take about 6 minutes, most of it the build-stack delete. It checks
+credentials first and exits non-zero on any error other than "stack does not
+exist", so a `Teardown complete.` line means the resources are gone.
 
 ## Troubleshooting
 
@@ -434,7 +445,8 @@ stack, ECR images included.
 
 ## Tests
 
-The offline tests need no AWS credentials or network:
+The offline tests need no AWS credentials or network. Run them from the
+repository root (from `examples/agentcore`, use `python -m pytest -q`):
 
 ```bash
 python -m venv .venv && .venv/bin/pip install "local-operator==0.92.1" boto3 pytest

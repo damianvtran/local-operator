@@ -34,6 +34,20 @@ def test_render_shows_tools_and_turn_errors() -> None:
     assert "[turn error] 403 AccessDenied" in text
 
 
+def test_render_shows_an_ignored_model_notice() -> None:
+    out = io.StringIO()
+    invoke.render(
+        {
+            "type": "session",
+            "session_id": "s",
+            "model": "m.a",
+            "notice": "requested model 'm.b' ignored",
+        },
+        out,
+    )
+    assert out.getvalue() == "[session s model=m.a]\n[notice] requested model 'm.b' ignored\n"
+
+
 def test_new_session_ids_meet_the_agentcore_minimum() -> None:
     session_id = invoke.new_session_id()
     assert len(session_id) >= invoke.MIN_SESSION_ID_LENGTH

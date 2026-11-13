@@ -136,33 +136,64 @@ class FakeEvent:
         self.payload = payload
 
 
+_CLOSED = FakeEvent({"type": "__closed__"})
+
+
 class FakeStream:
-    def __init__(self, queue: "asyncio.Queue[FakeEvent]") -> None:
-        self.queue = queue
+    """Mimics ``SessionEventStream``: its own queue per subscription, and
+    ``close()`` queues a sentinel that ends iteration after queued events."""
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[FakeEvent] = asyncio.Queue()
         self.closed = False
 
     def __aiter__(self) -> "FakeStream":
         return self
 
     async def __anext__(self) -> FakeEvent:
-        return await self.queue.get()
+        event = await self.queue.get()
+        if event is _CLOSED:
+            raise StopAsyncIteration
+        return event
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self.queue.put_nowait(_CLOSED)
 
     async def aclose(self) -> None:
-        self.closed = True
+        self.close()
 
 
 class FakeSession:
     """Emits a text delta and agent_end per prompt, like a one-step lop turn."""
 
     def __init__(self) -> None:
-        self.queue: asyncio.Queue[FakeEvent] = asyncio.Queue()
         self.prompts: list[str] = []
         self.streams: list[FakeStream] = []
 
+    def emit(self, payload: dict[str, Any]) -> None:
+        for stream in self.streams:
+            if not stream.closed:
+                stream.queue.put_nowait(FakeEvent(payload))
+
     async def prompt(self, text: str) -> None:
         self.prompts.append(text)
-        await self.queue.put(FakeEvent({"type": "message_update", "delta": f"echo {text}"}))
-        await self.queue.put(FakeEvent({"type": "agent_end", "error": None}))
+        self.emit({"type": "message_update", "delta": f"echo {text}"})
+        await asyncio.sleep(0)
+        self.emit({"type": "agent_end", "error": None})
+
+
+class TurnInFlight(RuntimeError):
+    """Stand-in for the SDK's refusal to start a second concurrent turn."""
+
+
+class RefusingSession(FakeSession):
+    """``prompt`` raises before emitting any event, as lop's does when it refuses a turn."""
+
+    async def prompt(self, text: str) -> None:
+        self.prompts.append(text)
+        raise TurnInFlight("a turn is already running")
 
 
 @pytest.fixture
@@ -172,11 +203,11 @@ def pool(tmp_path: Path, monkeypatch: Any) -> SessionPool:
 
     async def fake_session(key: str, model: str | None) -> Any:
         if key not in sessions:
-            sessions[key] = FakeSession()
-        return lop_runtime._Entry(session=sessions[key])
+            sessions[key] = RefusingSession() if key.startswith("refuse") else FakeSession()
+        return lop_runtime._Entry(session=sessions[key], model=model or "m.x")
 
     def fake_events(session: FakeSession) -> FakeStream:
-        stream = FakeStream(session.queue)
+        stream = FakeStream()
         session.streams.append(stream)
         return stream
 
@@ -201,7 +232,11 @@ def test_run_turn_streams_until_agent_end_and_unsubscribes(pool: SessionPool) ->
         return [event async for event in pool.run_turn("s1", Turn("hello"))]
 
     events = asyncio.run(run())
-    assert events == [{"type": "text", "text": "echo hello"}, {"type": "end", "error": None}]
+    assert events == [
+        {"type": "session", "session_id": "s1", "model": "m.x"},
+        {"type": "text", "text": "echo hello"},
+        {"type": "end", "error": None},
+    ]
     session = pool.fake_sessions["s1"]  # type: ignore[attr-defined]
     assert session.streams[0].closed
 
@@ -217,9 +252,58 @@ def test_turns_in_one_session_are_serialised_and_sessions_stay_separate(
             collect("a", "one"), collect("a", "two"), collect("b", "three")
         )
         # Each turn saw exactly its own reply, despite sharing a's event queue.
-        assert a1[0]["text"] == "echo one" and a2[0]["text"] == "echo two"
-        assert b1[0]["text"] == "echo three"
+        assert a1[1]["text"] == "echo one" and a2[1]["text"] == "echo two"
+        assert b1[1]["text"] == "echo three"
 
     asyncio.run(run())
     assert pool.fake_sessions["a"].prompts == ["one", "two"]  # type: ignore[attr-defined]
     assert pool.fake_sessions["b"].prompts == ["three"]  # type: ignore[attr-defined]
+
+
+def test_a_prompt_that_raises_before_emitting_surfaces_instead_of_hanging(
+    pool: SessionPool,
+) -> None:
+    """R1: a refused turn must raise out of run_turn, not wait for an agent_end."""
+    seen: list[dict[str, Any]] = []
+
+    async def run() -> None:
+        async for event in pool.run_turn("refuse-1", Turn("hello")):
+            seen.append(event)
+
+    async def bounded() -> None:
+        # 5 s is far above the microseconds this takes; the pre-fix code never returned.
+        await asyncio.wait_for(run(), timeout=5)
+
+    with pytest.raises(TurnInFlight, match="already running"):
+        asyncio.run(bounded())
+    assert [event["type"] for event in seen] == ["session"]
+    session = pool.fake_sessions["refuse-1"]  # type: ignore[attr-defined]
+    assert session.streams[0].closed
+    # The per-session lock is released, so the next turn is not queued forever.
+    with pytest.raises(TurnInFlight):
+        asyncio.run(bounded())
+
+
+def test_a_model_on_an_existing_session_is_reported_not_silently_ignored(
+    pool: SessionPool,
+) -> None:
+    """R2: the session frame names the model in effect and flags an ignored request."""
+
+    async def first_frame(turn: Turn) -> dict[str, Any]:
+        return [event async for event in pool.run_turn("s1", turn)][0]
+
+    opened = asyncio.run(first_frame(Turn("one", "m.first")))
+    assert opened == {"type": "session", "session_id": "s1", "model": "m.first"}
+    same = asyncio.run(first_frame(Turn("two", "m.first")))
+    assert "notice" not in same
+    changed = asyncio.run(first_frame(Turn("three", "m.other")))
+    assert changed["model"] == "m.first"
+    assert "'m.other' ignored" in changed["notice"]
+
+
+def test_session_event_without_a_requested_model_has_no_notice() -> None:
+    assert lop_runtime.session_event("k", "m.x", None) == {
+        "type": "session",
+        "session_id": "k",
+        "model": "m.x",
+    }

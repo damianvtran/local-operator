@@ -232,9 +232,31 @@ def project_event(event: dict[str, Any]) -> dict[str, Any] | None:
     return {"type": "end", "error": event.get("error")}
 
 
+def session_event(key: str, model_in_effect: str, requested: str | None) -> dict[str, Any]:
+    """The first frame of every turn: which session and which model ran it.
+
+    A lop session keeps the model it was opened with, so a ``model`` sent on a
+    later turn of the same runtime session cannot take effect. Rather than
+    ignore it silently (and mislabel the turn), the frame reports the model in
+    effect and carries a ``notice`` saying the request was not applied.
+    """
+    event: dict[str, Any] = {"type": "session", "session_id": key, "model": model_in_effect}
+    if requested and requested != model_in_effect:
+        event["notice"] = (
+            f"requested model {requested!r} ignored: this session already runs "
+            f"{model_in_effect!r}; a model applies only when a session starts "
+            "(use a new session id to change it)"
+        )
+    return event
+
+
 @dataclass
 class _Entry:
     session: Any
+    # The model the lop session was opened with. A session's model is fixed for
+    # its lifetime here, so this (not the latest request's ``model``) is what
+    # every turn of the session actually runs on and what the caller is told.
+    model: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -307,16 +329,17 @@ class SessionPool:
             if model:
                 self.declare_model(model)
             self.workdir.mkdir(parents=True, exist_ok=True)
+            opened_model = model or self.settings.model_id
             spec = SessionSpec(
                 hosting=HOSTING,
-                model=model or self.settings.model_id,
+                model=opened_model,
                 approvals=approval_policy(self.settings.approvals),
                 tools=self.settings.tools,
                 name=f"agentcore {key[:12]}",
             )
             log.info("opening lop session for runtime session %s model=%s", key, spec.model)
             session = await self._stack.enter_async_context(open_session(spec, roots=self.roots()))
-            entry = _Entry(session=session)
+            entry = _Entry(session=session, model=opened_model)
             self._entries[key] = entry
             return entry
 
@@ -331,9 +354,20 @@ class SessionPool:
         from local_operator.sdk import events
 
         entry = await self._session(key, turn.model)
+        yield session_event(key, entry.model, turn.model)
         async with entry.lock:
             stream = events(entry.session)  # subscribe BEFORE prompting: no replay
             prompt_task = asyncio.create_task(entry.session.prompt(turn.prompt))
+            # ``prompt`` can raise before it emits anything (TurnInFlight while
+            # lop's own compaction holds the turn, a disposed session, a
+            # capability gate). Then no ``agent_end`` ever arrives, so the loop
+            # below would wait forever and the invocation would hang until the
+            # caller's read timeout. Closing the stream when the task finishes
+            # bounds the loop by the prompt itself; ``close()`` queues its
+            # sentinel AFTER any already-queued ``agent_end``, so a normal turn
+            # still ends on ``end``. ``await prompt_task`` then re-raises the
+            # failure for ``main.py`` to report as an ``error`` event.
+            prompt_task.add_done_callback(lambda _task: stream.close())
             try:
                 async for event in stream:
                     projected = project_event(printable_event(event))
@@ -349,4 +383,11 @@ class SessionPool:
                 await stream.aclose()
 
     async def aclose(self) -> None:
+        """Close every open lop session.
+
+        ``main.py`` deliberately never calls this: AgentCore discards the whole
+        microVM when a runtime session idles out or the runtime is updated, and
+        ``BedrockAgentCoreApp`` exposes no shutdown hook to run it from. Tests
+        and local embedders that outlive a pool should call it.
+        """
         await self._stack.aclose()

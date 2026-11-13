@@ -156,6 +156,14 @@ def _append(messages: list[dict[str, Any]], role: str, blocks: list[dict[str, An
         messages.append({"role": role, "content": blocks})
 
 
+def _has_tool_blocks(messages: list[dict[str, Any]]) -> bool:
+    return any(
+        "toolUse" in block or "toolResult" in block
+        for message in messages
+        for block in message.get("content", [])
+    )
+
+
 def to_converse(request: dict[str, Any], model_id: str) -> dict[str, Any]:
     """Translate an OpenAI Chat Completions body into ``converse_stream`` kwargs."""
     system: list[dict[str, Any]] = []
@@ -235,16 +243,23 @@ def to_converse(request: dict[str, Any], model_id: str) -> dict[str, Any]:
         for tool in request.get("tools") or []
         if tool.get("type") == "function" and tool.get("function", {}).get("name")
     ]
+    choice = request.get("tool_choice")
+    if tools and choice == "none" and not _has_tool_blocks(kwargs["messages"]):
+        # Converse has no "none" tool choice; the only way to forbid tool calls
+        # is to send no toolConfig. That is allowed only while the history has
+        # no toolUse/toolResult blocks (Converse rejects those without a
+        # toolConfig), so a "none" after a tool round degrades to auto below.
+        tools = []
     if tools:
         tool_config: dict[str, Any] = {"tools": tools}
-        choice = request.get("tool_choice")
         if choice == "required":
             tool_config["toolChoice"] = {"any": {}}
         elif isinstance(choice, dict) and choice.get("type") == "function":
             tool_config["toolChoice"] = {"tool": {"name": choice["function"]["name"]}}
         elif choice in (None, "auto"):
             tool_config["toolChoice"] = {"auto": {}}
-        # "none": keep the specs (history may reference them) but set no choice.
+        # "none" reaching here: history references tools, so the specs must
+        # stay and no choice is set (Converse then behaves as auto).
         kwargs["toolConfig"] = tool_config
     return kwargs
 

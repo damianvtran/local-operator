@@ -17,7 +17,8 @@ messaging channels.
 
 Streamed events (each one SSE ``data:`` line of JSON)::
 
-    {"type": "session", "session_id": "...", "model": "..."}
+    {"type": "session", "session_id": "...", "model": "...",  # model in effect
+     "notice": "..."}                                       # only if a model was ignored
     {"type": "text", "text": "..."}                       # assistant text deltas
     {"type": "tool_start", "tool": "bash", "args": {...}}
     {"type": "tool_end", "tool": "bash", "is_error": false, "result": "..."}
@@ -79,8 +80,9 @@ async def invoke(payload: Any, context: Any) -> AsyncIterator[dict[str, Any]]:
     except PayloadError as exc:
         yield {"type": "error", "error": str(exc)}
         return
-    yield {"type": "session", "session_id": session_id, "model": turn.model or SETTINGS.model_id}
     try:
+        # run_turn's first frame is the ``session`` event, naming the model the
+        # session actually runs on (see lop_runtime.session_event).
         async for event in POOL.run_turn(session_id, turn):
             yield event
     except Exception as exc:  # surface, never swallow: the caller sees why

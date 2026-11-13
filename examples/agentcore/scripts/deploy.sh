@@ -30,15 +30,23 @@ LOP_VERSION="0.92.1"
 APPROVALS="auto"
 TOOLS=""
 
+# A flag given without its value must fail loudly, not as a silent `shift 2`
+# under `set -e`.
+need_value() {
+  if [[ $# -lt 2 || "$2" == --* ]]; then
+    echo "error: $1 needs a value" >&2
+    exit 2
+  fi
+}
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --profile) PROFILE="${2:-}"; shift 2 ;;
-    --region) REGION="${2:-}"; shift 2 ;;
-    --stack-name) STACK="${2:-}"; shift 2 ;;
-    --model-id) MODEL_ID="${2:-}"; shift 2 ;;
-    --lop-version) LOP_VERSION="${2:-}"; shift 2 ;;
-    --approvals) APPROVALS="${2:-}"; shift 2 ;;
-    --tools) TOOLS="${2:-}"; shift 2 ;;
+    --profile) need_value "$@"; PROFILE="$2"; shift 2 ;;
+    --region) need_value "$@"; REGION="$2"; shift 2 ;;
+    --stack-name) need_value "$@"; STACK="$2"; shift 2 ;;
+    --model-id) need_value "$@"; MODEL_ID="$2"; shift 2 ;;
+    --lop-version) need_value "$@"; LOP_VERSION="$2"; shift 2 ;;
+    --approvals) need_value "$@"; APPROVALS="$2"; shift 2 ;;
+    --tools) need_value "$@"; TOOLS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -93,8 +101,12 @@ PROJECT="$(stack_output "$BUILD_STACK" BuildProjectName)"
 
 # Content-addressed tag: same app/ + same lop version => same tag => no rebuild.
 # ECR tags are immutable, so a tag always names exactly one build.
-APP_HASH="$(cd "$HERE/app" && find . -type f ! -name '*.pyc' ! -path '*/__pycache__/*' | LC_ALL=C sort \
-  | xargs cat | { cat; printf '%s' "$LOP_VERSION"; } | shasum -a 256 | cut -c1-12)"
+# NUL-separated so names with spaces hash correctly; dotfiles (.DS_Store) and
+# bytecode are excluded here AND from the zip below, so junk neither changes
+# the tag nor ships in the image.
+APP_HASH="$(cd "$HERE/app" && find . -type f ! -name '.*' ! -name '*.pyc' ! -path '*/__pycache__/*' \
+  ! -path '*/.*/*' -print0 | LC_ALL=C sort -z | xargs -0 cat \
+  | { cat; printf '%s' "$LOP_VERSION"; } | shasum -a 256 | cut -c1-12)"
 IMAGE_TAG="lop-${LOP_VERSION}-${APP_HASH}"
 IMAGE_URI="${REPO_URI}:${IMAGE_TAG}"
 
@@ -111,8 +123,10 @@ import pathlib, sys, zipfile
 root, out = pathlib.Path(sys.argv[1]), sys.argv[2]
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.parts:
-            zf.write(path, path.relative_to(root).as_posix())
+        rel = path.relative_to(root)
+        junk = "__pycache__" in rel.parts or any(p.startswith(".") for p in rel.parts)
+        if path.is_file() and not junk and path.suffix != ".pyc":
+            zf.write(path, rel.as_posix())
 PY
   KEY="contexts/${IMAGE_TAG}.zip"
   "${AWS[@]}" s3 cp --only-show-errors "$WORK/context.zip" "s3://$BUCKET/$KEY"

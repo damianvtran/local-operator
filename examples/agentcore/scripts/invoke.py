@@ -69,6 +69,8 @@ def render(event: dict[str, Any], out: Any = sys.stdout) -> None:
         out.write(f"[tool {status}] {result}\n")
     elif kind == "session":
         out.write(f"[session {event.get('session_id')} model={event.get('model')}]\n")
+        if event.get("notice"):
+            out.write(f"[notice] {event['notice']}\n")
     elif kind == "end":
         if event.get("error"):
             out.write(f"\n[turn error] {event['error']}\n")
