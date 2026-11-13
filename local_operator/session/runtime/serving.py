@@ -1203,6 +1203,15 @@ class ServingSessionHandle(SessionHandle):
         #: without this a gate opened under a watching terminal is never
         #: announced after that terminal closes (round 3, B2).
         self._parked_announcement: tuple[str, str, str] | None = None
+        #: Whether this conversation has an OPEN queued ask (the ask fold's
+        #: outstanding count, last seen by ``_ask_state_changed``). A queued ask
+        #: never parks a gate, so before this flag nothing set the record's
+        #: ``pending`` for it: a node session's question was invisible to every
+        #: device that reads ``pending`` off the peer listing (the Mac's
+        #: "needs" badge, ``lop sessions``), and the operator never learned a
+        #: remote agent was waiting on them (2026-11-13). See
+        #: ``_sync_queued_ask_pending``.
+        self._queued_asks_open = False
         #: In-flight MCP reloads after a `/mcp add|remove` wrote the config.
         #: Held only so a fire-and-forget task is not garbage-collected while
         #: it runs — asyncio keeps no strong reference of its own.
@@ -1917,9 +1926,46 @@ class ServingSessionHandle(SessionHandle):
             self._ask_fold_installed_at = time.monotonic()
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
+        self._sync_queued_ask_pending(outstanding_count)
         self._publish_pending_gate()
         if self._on_projection is not None:
             self._on_projection()
+
+    def _sync_queued_ask_pending(self, outstanding_count: Any) -> None:
+        """Claim (or drop) the record's ``pending="ask"`` for open QUEUED asks.
+
+        WHY: ``pending`` is the one field a PEER listing carries for "a person
+        is owed here" (``relay._op_catalog`` -> ``types.row_needs_claim``), and
+        until now only the BLOCKING gates set it (``_announce_pending``). A
+        queued ask -- the default since the ask queue shipped -- left it
+        ``None``, so a session running on a mesh node asked its question into
+        a void: no badge on the origin's sidebar, no row in ``lop sessions``.
+
+        CONSTRAINTS. The record write ONLY (``set_record_pending``), never
+        ``_announce_pending``: the queue already raised its own notification
+        through the ask path, and a second OS toast for the same question is
+        exactly the duplicate ``asks/dedupe.py`` exists to prevent. A parked
+        gate owns the field while it is parked (its kind is the more urgent
+        remedy); ``_announce_settled`` hands it back to this flag when the gate
+        resolves. ``"ask"`` is the existing ``NEEDS_ASK`` kind every consumer
+        already paints, so no surface needs a new vocabulary. No authority is
+        added: the claim is a FACT on the listing, and answering still travels
+        the permissioned ``ask_respond`` wire op.
+        """
+        try:
+            open_now = int(outstanding_count or 0) > 0
+        except (TypeError, ValueError):
+            open_now = False
+        self._queued_asks_open = open_now
+        if getattr(self, "_parked_announcement", None) is not None:
+            return
+        setter = getattr(getattr(self, "_registrant", None), "set_record_pending", None)
+        if not callable(setter):
+            return
+        try:
+            setter("ask" if open_now else None)
+        except Exception:  # noqa: BLE001 -- a listing fact is never worth a turn
+            logger.debug("ask: could not publish the queued-ask pending state", exc_info=True)
 
     def _ask_reach_probe(self) -> list[str]:
         """Surface names something is attached as, for a queued ask's receipt.
@@ -7933,7 +7979,10 @@ class ServingSessionHandle(SessionHandle):
         if not callable(setter):
             return
         try:
-            setter(None)
+            # An open QUEUED ask still owes the operator an answer after the
+            # gate settles: hand the claim back to it rather than clearing a
+            # fact that is still true (``_sync_queued_ask_pending``).
+            setter("ask" if getattr(self, "_queued_asks_open", False) else None)
         except Exception:  # noqa: BLE001
             logger.debug("could not clear the pending state", exc_info=True)
 

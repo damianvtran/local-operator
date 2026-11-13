@@ -469,6 +469,11 @@ def park_edges(
         kind = str(row.pending or "")
         if not kind or not row.live_state:
             continue
+        if kind == "ask" and _carries_forwarded_ask(row):
+            # A QUEUED ask's ``pending`` (``_sync_queued_ask_pending``) whose
+            # questions already arrive one row each through the notice
+            # forwarder: a park row too would be two inbox rows for one ask.
+            continue
         key = (str(row.owner_device or ""), row.id)
         current[key] = kind
         fresh[key] = RemotePark(
@@ -485,6 +490,20 @@ def park_edges(
             state[key] = kind
     edges = tuple(fresh[key] for key, kind in current.items() if previous.get(key) != kind)
     return edges, state
+
+
+#: ``remote_attention.ASK_NOTICE_PREFIX``, spelled here rather than imported so
+#: this module keeps no import edge into the notifications package (the
+#: projection's ``NOTICES_MAX`` rule); a test pins the two equal.
+FORWARDED_ASK_PREFIX = "remote-ask:"
+
+
+def _carries_forwarded_ask(row: SessionRow) -> bool:
+    """Whether the owner forwarded at least one open ask on this row's notices."""
+    return any(
+        claim and str(claim[0]).startswith(FORWARDED_ASK_PREFIX)
+        for claim in (row.remote_notices or ())
+    )
 
 
 class RemoteNotice(NamedTuple):

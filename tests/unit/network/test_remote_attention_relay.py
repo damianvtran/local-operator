@@ -140,6 +140,94 @@ def test_the_origin_gets_both_fields_and_its_watcher_raises_the_rows(
     assert notice["created_at"] == notice_block["at"] > 0
 
 
+#: The owner-side key of the forwarded ask, spelled literally so this cell fails
+#: on BEHAVIOUR (no such notice) against a build without the forwarder.
+ASK_KEY = "remote-ask:q7"
+
+
+def _ask_event(owner: relay.RelayServer, kind: str, ask_id: str, **extra: Any) -> None:
+    from local_operator.asks import store as ask_store
+
+    now = ask_store.now_ms()
+    ask_store.append_event(
+        ask_store.session_dir(owner.root, SID),
+        {"v": ask_store.EVENT_SCHEMA, "kind": kind, "at": now, "ask_id": ask_id, **extra},
+    )
+
+
+def test_an_open_queued_ask_crosses_and_its_answer_retires_the_origin_row(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """node-ask-forward (2026-11-13): a node session's queued ask over the wire.
+
+    The ask is NOT a NotificationStore row on the owner, so before this nothing
+    carried it: the origin never learned an agent on the node was waiting.
+    """
+    from local_operator.asks import store as ask_store
+
+    server_a, server_b, _host, _port = pair
+    owner = server_a.identity.device_id
+    _record, link = _live_link(pair, monkeypatch)
+    _own_session(server_a, server_b.identity.device_id)
+    _ask_event(
+        server_a,
+        ask_store.EVENT_QUEUED,
+        "q7",
+        expires_at=ask_store.now_ms() + 3_600_000,
+        questions=[{"id": "q0", "question": "Install Chromium here?", "options": []}],
+    )
+
+    class _Peer:
+        device_id = owner
+        name = "lop-remote-node-2"
+        network_id = "n_test"
+        reachable = True
+        reason = ""
+
+    def _origin_rows(row: dict[str, Any]) -> Any:
+        class _Catalog:
+            def peers(self) -> list[Any]:
+                return [_Peer()]
+
+            def rows(self) -> list[Any]:
+                return [PeerRow.from_json(row, device_id=owner)]
+
+        return peer_rows.peer_session_rows(None, ttl_s=0, catalog=_Catalog())
+
+    monkeypatch.setattr(ra, "_deliver_async", lambda *_a, **_k: None)
+    monkeypatch.setattr(ra, "_deliver_done_banner", lambda *_a, **_k: None)
+    head = tmp_path / "head-inbox"
+    watcher = ra.RemoteAttentionWatcher(head)
+    try:
+        row = _catalog_row(link)
+        assert row["notices"][0] == {
+            "key": ASK_KEY,
+            "revision": 1,
+            "priority": "high",
+            "title": "Install Chromium here?",
+        }
+        watcher.observe(_origin_rows(row), listed_at_ms=ra_now())
+        key = ra.notice_key(owner, SID, ASK_KEY)
+        item = NotificationStore(head).get_by_key(SID, key)
+        assert item is not None and item["priority"] == "high" and not item["dismissed_at"]
+
+        # Answered on the node (any settle; dismissal is the simplest to write).
+        _ask_event(server_a, ask_store.EVENT_DISMISSED, "q7", reason="answered_in_chat")
+        row = _catalog_row(link)
+    finally:
+        link.close("test")
+    assert all(b["key"] != ASK_KEY for b in row.get("notices", []))
+    watcher.observe(_origin_rows(row), listed_at_ms=ra_now() + 1)
+    item = NotificationStore(head).get_by_key(SID, key)
+    assert item is not None and item["dismissed_at"], "the answered ask still asks on the origin"
+
+
+def ra_now() -> int:
+    from local_operator.notifications.store import now_ms
+
+    return now_ms()
+
+
 def test_a_non_origin_viewer_gets_neither_field(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
