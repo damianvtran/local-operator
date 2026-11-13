@@ -26622,19 +26622,6 @@ async def _bridge_access(
     if action == "request_access":
         from local_operator.browser_bridge import backend as _bridge_backend
 
-        # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
-        # Chrome is always the bridge (extension) host.
-        if host != HOST_UI_PREFIX and _bridge_backend._on_headless_node():  # noqa: SLF001
-            # On a headless node the prompt would queue in an extension popup
-            # nobody can reach, and its text tells the model to send the
-            # operator there (PR #3935 round 1, U1). Answer instead of queueing.
-            node_origin = _bridge_backend._origin(url)  # noqa: SLF001
-            return _text(
-                tool_call_id,
-                "browser",
-                _bridge_backend.node_approval_unavailable(node_origin),
-                details={"origin": node_origin, "state": "unavailable_on_node"},
-            )
         result, problem = await _bridge_call(
             tool_call_id, "request_access", {"url": url, **identity}, client=client
         )
@@ -26649,6 +26636,24 @@ async def _bridge_access(
             # agent to wait on nothing.
             return await _node_site_access(
                 tool_call_id, context, result, url, origin, client=client
+            )
+        # `host` is the handle spelling here (`bridge`/`ui`); a node's managed
+        # Chrome is always the bridge (extension) host.
+        if host != HOST_UI_PREFIX and _bridge_backend._on_headless_node():  # noqa: SLF001
+            # A node whose extension answered WITHOUT an ``approval`` field
+            # predates signed approvals: its entry would wait in a popup nobody
+            # can reach (PR #3935 round 1, U1). Withdraw it and say why.
+            try:
+                await _bridge_call(
+                    tool_call_id, "cancel_access", {"url": url, **identity}, client=client
+                )
+            except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
+                logger.debug("node request_access: cancel_access failed", exc_info=True)
+            return _text(
+                tool_call_id,
+                "browser",
+                _bridge_backend.node_approval_unavailable(origin),
+                details={"origin": origin, "state": "unavailable_on_node"},
             )
         return _text(
             tool_call_id,

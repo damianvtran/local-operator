@@ -348,24 +348,44 @@ def _origin(value: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else value
 
 
-def node_approval_unavailable(origin: str) -> str:
-    """Model-facing: why a site cannot be opened on a HEADLESS NODE, and what to do.
+def node_approval_steps(origin: str, url: str) -> str:
+    """Model-facing ``origin_not_allowed`` on a HEADLESS NODE: the signed-card flow.
 
-    The extension host's approval copy sends the operator to the extension
-    popup, which nobody can reach in a node-managed headless Chrome: setup →
-    new session → `open` → "approve it in the popup" was a dead end that looked
-    like progress (PR #3935 round 1, U1). The honest answer is that this build
-    cannot approve a site on a node — not even the operator can, so the copy
-    must not read as "ask the operator to unblock it" (round 2, U18).
-    English by design: tool results are model-facing, like every sibling here.
+    The extension host's ordinary copy sends the operator to the extension
+    popup, which nobody can reach in a node-managed headless Chrome (PR #3935
+    round 1, U1). With operator-signed approvals (#3938) the same
+    ``request_access`` call raises a card the operator answers on their OWN
+    device instead (``tools/builtin._node_site_access``), so the steps are the
+    usual ones minus the popup. English by design: tool results are
+    model-facing, like every sibling here.
     """
     return (
-        f"site {origin or '(unknown origin)'} is not allowed, and this build cannot open "
-        "sites on a headless node yet: nothing on this node can show an approval prompt, "
-        "and a later update adds operator approval from their own device. Do not raise "
-        "an access request and do not work around it with another browser. Tell the "
-        "operator which site you needed and why (it cannot be approved on a node in this "
-        "build), and stop the browser part of the task (guide://browser 'Headless nodes')."
+        f"site {origin or '(unknown origin)'} is not allowed yet. Nobody can approve "
+        f"anything inside this headless node's browser: call browser "
+        f"action='request_access' url={url}, which raises a card the operator answers "
+        "on their own device, signed with their operator key (do not write your own "
+        f"ask for it), then action='await_access' url={url} until it returns allowed "
+        "or denied. Never work around it with another browser (guide://browser "
+        "'On a headless node')."
+    )
+
+
+def node_approval_unavailable(origin: str) -> str:
+    """Model-facing: this node's EXTENSION cannot take a signed approval.
+
+    ``request_access`` reached an extension that answered without an
+    ``approval`` field — a build older than operator-signed approvals — so its
+    prompt would sit in a popup nobody can reach (PR #3935 round 1, U1). The
+    entry is withdrawn by the caller; the remedy is a current extension build.
+    """
+    return (
+        f"site {origin or '(unknown origin)'} is not allowed, and this headless node's "
+        "browser extension is too old to take the operator's signed approval, so "
+        "nothing on this node can present the request. Do not work around it with "
+        "another browser. Tell the operator which site you needed and why, that the "
+        "node's browser needs `lop browser setup --node --repair` with a current "
+        "build, and stop the browser part of the task (guide://browser 'Headless "
+        "nodes')."
     )
 
 
@@ -677,7 +697,7 @@ def format_error(
         # A node's managed Chrome is served by the EXTENSION host; the desktop
         # app's host never runs on a node.
         if host == HOST_EXTENSION and _on_headless_node():
-            return node_approval_unavailable(origin)
+            return node_approval_steps(origin, url)
         return (
             f"site {origin or '(unknown origin)'} is not allowed yet. Call browser "
             f"action='request_access' url={url} to raise the approval prompt, then NOTIFY "

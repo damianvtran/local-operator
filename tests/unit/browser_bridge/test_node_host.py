@@ -993,13 +993,13 @@ def test_pairing_refuses_to_share_the_code_with_a_shared_primary_group(paths: Pa
     outcome = node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
     assert _states(outcome)["pairing"] == node_host.STATE_FAILED
     assert "alice" in outcome.steps[-1].detail
-    assert not any("3rdparty" in w["content"] for w in node.policy_writes)
+    assert not any(_pairing_codes(w["content"]) for w in node.policy_writes)
     # Another account whose PRIMARY gid is the same group counts too.
     node.group_members = ""
     node.extra_passwd = "bob:x:1001:1000::/home/bob:/bin/bash\n"
     outcome = node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
     assert "bob" in outcome.steps[-1].detail
-    assert not any("3rdparty" in w["content"] for w in node.policy_writes)
+    assert not any(_pairing_codes(w["content"]) for w in node.policy_writes)
 
 
 def test_each_step_is_reported_as_it_completes(paths: Path) -> None:
@@ -1099,7 +1099,7 @@ def test_sigterm_mid_pairing_still_removes_the_code(paths: Path) -> None:
 
     def sleep(seconds: float) -> None:
         policy = json.loads(node.policy_path.read_text(encoding="utf-8"))
-        if "3rdparty" in policy:
+        if _pairing_codes(policy):
             os.kill(os.getpid(), signal.SIGTERM)
         tick(seconds)
 
@@ -1108,8 +1108,9 @@ def test_sigterm_mid_pairing_still_removes_the_code(paths: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         node_host.setup(node_host.Options(repair=True, authorised_by="x"), node.env)
     assert excinfo.value.code == 128 + signal.SIGTERM
-    assert any("3rdparty" in w["content"] for w in node.policy_writes)
-    assert "3rdparty" not in json.loads(node.policy_path.read_text(encoding="utf-8"))
+    assert any(_pairing_codes(w["content"]) for w in node.policy_writes)
+    # The anchor block (#3938) stays; only the CODE must be gone.
+    assert not _pairing_codes(json.loads(node.policy_path.read_text(encoding="utf-8")))
     # The previous handler is back once setup returns.
     assert signal.getsignal(signal.SIGTERM) == before
 
@@ -1232,14 +1233,15 @@ def test_cli_uninstall_rows_say_remove_and_name_what_is_kept(
     assert "Kept:" in out
 
 
-def test_paired_line_says_no_site_opens_yet(
+def test_paired_line_says_how_a_site_gets_approved(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], paths: Path
 ) -> None:
-    """U1: success read as "ready", but no site can be approved on a node yet."""
+    """U1: success read as "ready" without saying how a site gets approved on a
+    node; with signed approvals (#3938) the line names the operator's device."""
     node = FakeNode(paths, provisioned=True)
     monkeypatch.setattr(node_host, "default_env", lambda: node.env)
     _code, out = _cli(monkeypatch, capsys, ["setup", "--node", "--dry-run"])
-    assert "no site can be opened" in out.splitlines()[-1]
+    assert "signs on their own device" in out.splitlines()[-1]
 
 
 def _pairing_codes(policy: dict[str, Any]) -> list[str]:
