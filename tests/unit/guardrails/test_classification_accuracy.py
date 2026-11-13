@@ -1163,6 +1163,17 @@ def test_bsd_sed_capital_i_is_an_in_place_write(home: Path) -> None:
         ), flags
 
 
+@pytest.mark.parametrize("flags", ["-I .bak", "-EI ''"])
+def test_bsd_sed_capital_i_suffix_word_is_not_a_target(home: Path, flags: str) -> None:
+    """Review R2-2: ``-I`` ending a cluster takes the next word as its suffix."""
+    target = home / "work" / "f.txt"
+    command = f"sed {flags} 's/a/b/' {target}"
+    result = resolve_command(
+        command, cwd=str(home / "work"), env={"HOME": str(home)}, home=str(home)
+    )
+    assert [(t.op, t.path) for t in result.targets] == [("overwrite", str(target))]
+
+
 def test_unset_is_an_env_only_long_value_flag(home: Path) -> None:
     """Review F2: ``sudo --unset rm -rf X`` still ranks the ``rm``."""
     (home / "work" / "keep.txt").write_text("x\n")
@@ -1184,6 +1195,33 @@ def test_unset_is_an_env_only_long_value_flag(home: Path) -> None:
 def test_env_split_string_after_other_options_is_not_dropped(home: Path, command: str) -> None:
     """``-S`` anywhere in env's option prefix runs a command line: never LOW."""
     assert _verdict(home, command).risk is not Risk.LOW
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("env -i -u A -S 'node ~/x {stranger}'", Risk.HIGH),
+        ("env -S 'node ~/x {stranger}'", Risk.HIGH),
+        ("env -C /tmp -S 'node ~/x {stranger}'", Risk.HIGH),
+        ("env -u FOO -S 'node ~/x ~/.local-operator/sessions'", Risk.HIGH),
+        ("env -S'rm -rf ~'", Risk.CRITICAL),
+        ("env -u FOO -S 'cat {own}'", Risk.LOW),
+        ("env -u FOO -S 'rm -rf ~/x'", Risk.HIGH),
+    ],
+)
+def test_env_split_string_is_resolved_as_the_real_command(
+    home: Path, command: str, expected: Risk
+) -> None:
+    """Review R2-1: the ``-S`` words are the program, not a delete-word scan.
+
+    Returning after the delete-word check dropped every other split command,
+    so opaque code handed a stranger's pad through ``env -i -u A -S`` was LOW.
+    """
+    own = _pad(home, PARENT) / "notes.txt"
+    own.write_text("x\n")
+    text = command.format(stranger=_pad(home, STRANGER), own=own)
+    verdict = _verdict(home, text)
+    assert verdict.risk is expected, verdict.reasons
 
 
 def test_tracked_script_with_uncommitted_edits_is_high(home: Path) -> None:

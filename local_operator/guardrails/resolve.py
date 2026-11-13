@@ -2085,36 +2085,54 @@ _ENV_VALUE_LETTERS = "uCaPLU"
 _ENV_LONG_VALUE_FLAGS = frozenset({"--unset", "--chdir", "--argv0"})
 
 
-def _env_splits(args: list[Expanded]) -> bool:
-    """Does ``env args…`` carry ``-S``/``--split-string`` in its option prefix?
+def _env_split(
+    args: list[Expanded],
+) -> tuple[list[Expanded], Expanded | None, list[Expanded]] | None:
+    """Find ``-S``/``--split-string`` in ``env args…``'s option prefix.
+
+    Returns ``(options before it, its value word, words after the value)``, or
+    ``None`` when env carries no ``-S``. A missing value is ``None`` in the
+    middle slot. Flags clustered before ``S`` (``-iS``) come back as their own
+    option word so the caller keeps them.
 
     WHY (review on PR #3906): the check used to look at the first two words
     only, so ``env -u FOO -S 'rm -rf …'`` hid its command string behind a
-    valued flag and the split command was dropped (LOW). Every option word up
-    to the first operand or ``--`` is scanned, valued flags skip their value,
-    and ``S`` anywhere in a short cluster (``-iS``) counts.
+    valued flag. Every option word up to the first operand or ``--`` is
+    scanned, valued flags skip their value, and ``S`` anywhere in a short
+    cluster counts; the rest of the cluster (``-S'rm -rf ~'``) is the value.
     """
     i = 0
     while i < len(args):
         t = args[i].text
+        start = i
         i += 1
         if t == "--" or t == "-" or not t.startswith("-"):
-            return False
+            return None
         if t.startswith("--"):
-            key, eq, _value = t.partition("=")
+            key, eq, value = t.partition("=")
             if key == "--split-string":
-                return True
+                if eq:
+                    return args[:start], Expanded(text=value, opaque=args[start].opaque), args[i:]
+                value_word = args[i] if i < len(args) else None
+                return args[:start], value_word, args[i + 1 :]
             if key in _ENV_LONG_VALUE_FLAGS and not eq:
                 i += 1
             continue
         for k, ch in enumerate(t[1:], start=1):
             if ch == "S":
-                return True
+                before = list(args[:start])
+                if k > 1:
+                    before.append(Expanded(text=t[:k]))
+                if k < len(t) - 1:
+                    glued = Expanded(text=t[k + 1 :], opaque=args[start].opaque)
+                    return before, glued, args[i:]
+                value_word = args[i] if i < len(args) else None
+                return before, value_word, args[i + 1 :]
             if ch in _ENV_VALUE_LETTERS:
                 if k == len(t) - 1:
                     i += 1  # the value is the next word
                 break  # otherwise the rest of the word is the value
-    return False
+    return None
 
 
 def _split_cluster(name: str, cluster: str) -> tuple[str, str | None]:
@@ -2675,12 +2693,35 @@ class _Walker:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
             return
-        if name == "env" and _env_splits(words[1:]):
-            # S6: ``env -S 'cmd …'`` runs its argument as a command line.
-            joined = " ".join(w.text for w in words[1:])
-            if _DELETE_WORD_RE.search(joined):
-                self.result.opaque_reasons.append("env -S runs a command string")
-            return
+        split = _env_split(words[1:]) if name == "env" else None
+        if split is not None:
+            # S6 / review R2-1 on PR #3906: ``env -S 'cmd …'`` splits its value
+            # into words and runs them as if they had been env's own argv, so
+            # the split words are spliced in place of ``-S`` and the segment
+            # carries on as a plain ``env``: options and assignments around it
+            # still peel, and the real program's targets and mentions are
+            # ranked. Returning early here once dropped non-delete commands
+            # (``env -i -u A -S 'node x <stranger pad>'``) to LOW. Tilde and
+            # ``${VAR}`` are expanded shell-style, which can only over-rank.
+            before, value, after = split
+            spliced: list[Expanded] | None = None
+            if value is not None and not value.opaque:
+                split_words, split_redirects = scan(value.text)
+                spliced = []
+                for raw in split_words:
+                    spliced.extend(expand_all(raw, st.env, st.home))
+                # env passes ``>``/``|`` through as literal words; keep the
+                # operands visible rather than drop them.
+                for _op, raw in split_redirects:
+                    spliced.extend(expand_all(raw, st.env, st.home))
+            if spliced is None:
+                # Unknowable value: fall through to the peel and the backstop,
+                # flagging a delete word so it never stays LOW.
+                joined = " ".join(w.text for w in words[1:])
+                if _DELETE_WORD_RE.search(joined):
+                    self.result.opaque_reasons.append("env -S runs a command string")
+            else:
+                words = [words[0], *before, *spliced, *after]
         # Kept for the backstop: a wrapper's own flags can carry a path
         # (``env -Q<path>``, ``xargs -a <path>``) that peeling would hide.
         unpeeled = words
@@ -2894,7 +2935,9 @@ class _Walker:
                         gnu_files.append(args[k + 2])
                     k += 2
                     continue
-                k += 1
+                # R2-2: BSD ``-I`` ending a cluster takes the next word as its
+                # suffix (``-I .bak``, ``-EI ''``); it is not the script.
+                k += 2 if name in ("sed", "gsed") and t.endswith("I") else 1
                 continue
             if t.startswith("--"):
                 k += 1
@@ -4770,6 +4813,9 @@ def _sed_script_text(args: list[Expanded]) -> str | None:
                     if ch == "e":
                         scripts.append(value)
                     break
+            else:
+                if t.endswith("I"):
+                    i += 1  # R2-2: BSD ``-I <suffix>``; the suffix is no script
             continue
         operands.append(t)
     if not scripts and operands:
