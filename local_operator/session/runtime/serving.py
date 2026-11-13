@@ -3976,7 +3976,13 @@ class ServingSessionHandle(SessionHandle):
         await self._session.record_shell(command, result)
 
     @_on_session_loop
-    async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
+    async def history_page(
+        self, before: str, anchor: str = "", *, bound_oversized: bool = False
+    ) -> dict[str, Any]:
+        # Only a non-local viewer asks for the bounded form; a session class
+        # that predates the keyword is called exactly as before.
+        if bound_oversized:
+            return self._session.history_page(before, anchor, bound_oversized=True)
         return self._session.history_page(before, anchor)
 
     @property

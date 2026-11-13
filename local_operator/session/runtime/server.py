@@ -2626,6 +2626,34 @@ def has_durable_history(session: Any) -> bool:
     return durable_conversation_path(path)
 
 
+
+def _accepts_keyword(fn: Any, name: str) -> bool:
+    """Whether ``fn`` takes keyword ``name`` (a handle kind may predate it)."""
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _serve_peer_bounded_history(payload: dict[str, Any], sync: Any, locality: str) -> None:
+    """Swap in the bounded page for a NON-LOCAL viewer whose exact page escalated.
+
+    ``full_required`` means "replay the transcript locally": exact for a viewer
+    on this machine, impossible for one on another device, whose facade then
+    refused the bind — and with it every mesh ``send``/``peek`` riding that
+    viewer — because ONE newest row was larger than a page. The session captured
+    the same cut's bounded page beside the exact one
+    (``FrontendSync._peer_display_history``); a local connection never sees it,
+    so a local viewer's frame is byte-for-byte what it was. The caller's strip
+    helpers run after this, so capability gating applies to the swapped page too.
+    """
+    if locality == "local":
+        return
+    bounded = getattr(sync, "_peer_display_history", None)
+    if bounded is None:
+        return
+    payload["display_history"] = bounded.model_dump(mode="json")
+
 class RuntimeServer:
     """One per interactive process. Construct, ``start()``, ``close()``."""
 
@@ -4860,6 +4888,7 @@ class RuntimeServer:
             # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
             # cannot carry them.
             sync_payload = sync_wire_payload(sync)
+            _serve_peer_bounded_history(sync_payload, sync, conn.locality)
             # The sync frame carries the FIRST display page, so it is one of
             # the THREE places the audit fields reach the wire (the others are
             # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
@@ -9711,6 +9740,7 @@ class RuntimeServer:
             )
             try:
                 payload = sync_wire_payload(subscription.sync)
+                _serve_peer_bounded_history(payload, subscription.sync, locality)
                 # The THIRD wire route, and the one an old viewer uses most:
                 # ``AttachedSession._refresh_display_history`` calls this op on
                 # every history refresh, which fires whenever the frontend's
@@ -9786,7 +9816,14 @@ class RuntimeServer:
                 raise ValueError("invalid history page request")
             if len(before) > 4096 or len(anchor) > 512:
                 raise ValueError("invalid history page request")
-            result = fetch(before, anchor)
+            if locality != "local" and _accepts_keyword(fetch, "bound_oversized"):
+                # A NON-LOCAL VIEWER cannot perform the local replay a
+                # ``full_required`` page asks for, so an oversized older group
+                # rides bounded and marked instead (see
+                # ``_serve_peer_bounded_history``).
+                result = fetch(before, anchor, bound_oversized=True)
+            else:
+                result = fetch(before, anchor)
             payload = await result if inspect.isawaitable(result) else result
             # Same contract as the sync frame: a viewer that did not negotiate
             # the audit capability must not be handed fields its page model

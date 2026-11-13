@@ -4334,16 +4334,80 @@ def session_history_reply_bytes(req: Any, detail: dict[str, Any]) -> int:
     )
 
 
+def bounded_history_entry(entry: Any, max_bytes: int) -> Any:
+    """One stored-journal row cut to fit ``max_bytes``, with its identity kept.
+
+    The wire row is ``{id, ts, type, payload, …}``; everything but ``payload`` is
+    small coordinates and is kept verbatim, so ``before_id`` paging and dedupe by
+    id are unaffected. A message payload keeps its role, id, timestamp and the
+    tool-call/tool-result identity the renderer pairs cards by, and its body
+    becomes a text preview plus the same marker the live view uses
+    (``history_window.TRUNCATED_ENTRY_MARKER``) — one sentence for one condition,
+    whichever path served the row. Any other payload keeps its ``custom_type``
+    and swaps ``details`` for the marker. Never mutates ``entry``.
+    """
+    from local_operator.session.history_window import (
+        TRUNCATED_ENTRY_MARKER,
+        _text_prefix_within,
+    )
+
+    if not isinstance(entry, dict) or not isinstance(entry.get("payload"), dict):
+        return entry
+    payload = entry["payload"]
+    size = len(json.dumps(entry, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    marker = TRUNCATED_ENTRY_MARKER.format(size=size)
+    if "role" in payload:
+        text = "".join(
+            str(block.get("text") or "")
+            for block in payload.get("content") or []
+            # The journal encoder omits a block's DEFAULT ``type`` ("text"),
+            # so an absent type is a text block too.
+            if isinstance(block, dict) and block.get("type", "text") == "text"
+        )
+        preview = _text_prefix_within(text, max(0, max_bytes // 2))
+        kept = {
+            key: payload[key]
+            for key in (
+                "role",
+                "id",
+                "timestamp",
+                "tool_call_id",
+                "tool_name",
+                "is_error",
+                "stop_reason",
+            )
+            if key in payload
+        }
+        kept["content"] = [
+            {"type": "text", "text": f"{preview}\n\n{marker}" if preview else marker}
+        ]
+        calls = payload.get("tool_calls")
+        if isinstance(calls, list):
+            kept["tool_calls"] = [
+                {"id": call.get("id"), "name": call.get("name"), "arguments": {}}
+                for call in calls
+                if isinstance(call, dict)
+            ]
+        cut = kept
+    else:
+        cut = {key: value for key, value in payload.items() if key != "details"}
+        cut["details"] = {"truncated": marker}
+        if isinstance(cut.get("content"), str):
+            cut["content"] = marker
+    return {**entry, "payload": cut}
+
+
 def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any]:
     """``detail`` cut to as many of its entries as fit ONE link record (R1-1).
 
     Keeps the NEWEST rows: the page is the TAIL of the requested window, so the
     rows dropped are its oldest and the reader reaches them with the same
     ``before_id`` cursor it pages with — a partial page with ``has_more: True``
-    and no gap. If not even the newest single row fits, this raises a NAMED
-    per-op refusal (``page_too_large``): the reader cannot be served rows this
-    frame physically cannot carry, and the one answer that must never come back
-    is a torn-down link.
+    and no gap. If not even the newest single row fits, that row is served in
+    a bounded, marked form (:func:`bounded_history_entry`) rather than refusing
+    the page; only metadata that cannot fit raises the NAMED per-op refusal
+    (``page_too_large``), and the one answer that must never come back is a
+    torn-down link.
 
     A page that already fits — every ordinary page — is returned untouched.
     """
@@ -4363,11 +4427,24 @@ def fit_session_history_reply(req: Any, detail: dict[str, Any]) -> dict[str, Any
         session_history_reply_bytes(req, {**bounded, "entries": entries[-1:]})
         > SESSION_HISTORY_REPLY_BUDGET_BYTES
     ):
-        raise MeshRefusal(
-            "page_too_large",
-            "this conversation has a single entry too large to serve over the mesh; "
-            "open it on the device that holds it",
+        # ONE ROW LARGER THAN THE RECORD used to refuse the WHOLE page, so a
+        # conversation whose newest entry was a huge paste or tool result could
+        # not be read from any other device at all. The row is served instead
+        # in a bounded, explicitly marked form (identity kept, body cut — see
+        # ``bounded_history_entry``): the reader still pages from its id, so
+        # the window stays gap-free, and the marker names the remedy.
+        entries[-1] = bounded_history_entry(
+            entries[-1], SESSION_HISTORY_REPLY_BUDGET_BYTES // 4
         )
+        if (
+            session_history_reply_bytes(req, {**bounded, "entries": entries[-1:]})
+            > SESSION_HISTORY_REPLY_BUDGET_BYTES
+        ):
+            # Only the envelope can still be too large here (the bounded row
+            # is a few KB), which is the metadata refusal above in another hat.
+            raise MeshRefusal(
+                "page_too_large", "this page's metadata is too large to serve over the mesh"
+            )
     # MONOTONE in the rows kept, so the largest fitting suffix is found in
     # O(log limit) serializations rather than one per row.
     low, high = 1, len(entries)

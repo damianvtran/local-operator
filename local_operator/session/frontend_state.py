@@ -40,6 +40,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     SerializationInfo,
     SerializerFunctionWrapHandler,
     TypeAdapter,
@@ -4331,6 +4332,12 @@ class FrontendSync(BaseModel):
     snapshot: FrontendSessionState
     live_cursor: str | None = None
     display_history: DisplayHistoryWindow | None = None
+    #: The SAME cut's bounded page (``history_window.bounded_display_message``),
+    #: present only when ``display_history`` escalated to ``full_required``. A
+    #: PRIVATE attribute so it never serializes: the runtime swaps it into the
+    #: frame only for a non-local viewer, which cannot perform the local replay
+    #: ``full_required`` asks for; a local viewer's frame is unchanged.
+    _peer_display_history: DisplayHistoryWindow | None = PrivateAttr(default=None)
 
 
 class FrontendUpdate(BaseModel):

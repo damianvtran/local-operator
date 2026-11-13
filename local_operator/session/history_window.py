@@ -31,7 +31,7 @@ from local_operator.harness.rows import (
     is_hidden_tool_message,
     without_ask_gate_divert,
 )
-from local_operator.harness.types import AgentMessage, Message
+from local_operator.harness.types import AgentMessage, CustomMessage, Message, TextContent
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.transcript import (
     audit_slice,
@@ -70,6 +70,26 @@ DISPLAY_HISTORY_ENTRY_TIMES_CAPABILITY = "display-history-entry-times-v1"
 DISPLAY_HISTORY_PEER_CYCLE_CAPABILITY = "display-history-peer-cycle-records-v1"
 DISPLAY_HISTORY_MESSAGES = 120
 DISPLAY_HISTORY_BYTES = 512 * 1024
+
+#: THE PEER VIEWER'S BOUNDED FORM OF AN OVERSIZED GROUP. A group larger than the
+#: whole page budget answers ``full_required`` — "replay the transcript locally" —
+#: which is exact for a viewer on THIS machine and impossible for one on another
+#: device: a remote facade cannot read a journal it does not hold, so it refused
+#: the bind outright ("this session's newest history is too large to send
+#: here"), and because a mesh ``send``/``peek`` rides the same bound viewer, ONE
+#: big newest row (a pasted log, a large tool result) made the whole session
+#: unreachable from every other device — messages included. The bounded form
+#: keeps every row of the group (ids, roles, tool-call ids and names, so the
+#: page stays gap-free and the cursor still resolves) and cuts only the BODY of
+#: rows too large to ride, with :data:`TRUNCATED_ENTRY_MARKER` naming the size
+#: and the remedy. It is built ONLY when the exact page escalated, and served
+#: only to a non-local viewer (``RuntimeServer`` decides by the connection's
+#: locality), so a local viewer keeps today's exact replay byte for byte.
+PEER_BOUNDED_MIN_MESSAGE_BYTES = 4 * 1024
+TRUNCATED_ENTRY_MARKER = (
+    "[truncated: this entry is {size:,} bytes, too large to show on this device; "
+    "open the conversation on the device that holds it for the full entry]"
+)
 
 # Per RUNTIME, not per viewer: a fleet of sessions must not retain a full replay
 # per speculative attach. Admission examines only the already bounded page,
@@ -439,6 +459,7 @@ def display_window(
     max_messages: int = DISPLAY_HISTORY_MESSAGES,
     max_wire_bytes: int = DISPLAY_HISTORY_BYTES,
     durable_seed_tools: frozenset[str] = frozenset(),
+    bound_oversized: bool = False,
 ) -> DisplayHistoryWindow:
     """Reuse exact bounded display requests, never the mutable public replay.
 
@@ -467,6 +488,9 @@ def display_window(
         max_messages,
         max_wire_bytes,
         durable_seed_tools,
+        # A bounded page and the exact page for the same cut are different
+        # answers; sharing a slot would hand a local viewer the cut rows.
+        bound_oversized,
     )
     cached = cache.get(key)
     if cached is not None:
@@ -481,6 +505,7 @@ def display_window(
         max_messages=max_messages,
         max_wire_bytes=max_wire_bytes,
         durable_seed_tools=durable_seed_tools,
+        bound_oversized=bound_oversized,
     )
     # Replay creates fresh models, but nested JSON-ish tool/provider payloads
     # may still share children with journal dictionaries. The mutable display
@@ -783,6 +808,71 @@ def _entry_time_join(
     return {entry.id: entry.ts for entry in entries if entry.id in carried}
 
 
+def _message_wire_bytes(message: AgentMessage) -> int:
+    """The bytes one row costs on the display socket (same rule as the page loop)."""
+    return len(json.dumps(message.model_dump(mode="json")).encode())
+
+
+def _text_prefix_within(text: str, max_bytes: int) -> str:
+    """The longest-ish prefix of ``text`` whose JSON-escaped form fits ``max_bytes``.
+
+    Halving rather than an exact search: escaping can grow a character up to six
+    bytes (``\\uXXXX``), so a character count is not a byte count, and the prefix
+    is a courtesy preview rather than content anybody depends on.
+    """
+    if max_bytes <= 0:
+        return ""
+    prefix = text[:max_bytes]
+    while prefix and len(json.dumps(prefix).encode()) > max_bytes:
+        prefix = prefix[: len(prefix) // 2]
+    return prefix
+
+
+def bounded_display_message(message: AgentMessage, max_bytes: int) -> AgentMessage:
+    """``message`` itself when it fits ``max_bytes``, else a marked, bounded copy.
+
+    The copy keeps the row's IDENTITY — ``id``, role, timestamp, tool-call ids
+    and names, ``tool_call_id``/``tool_name``/``is_error``/``stop_reason`` — so
+    paging, tool-card pairing and dedupe by id keep working, and replaces the
+    body with a text preview plus :data:`TRUNCATED_ENTRY_MARKER`. Media blocks are
+    dropped rather than cut (a half base64 image is corrupt, not shorter), tool
+    arguments are emptied, and ``provider_payload`` (replay-only, never painted)
+    is dropped. Never mutates ``message``: the original is the canonical row.
+    """
+    size = _message_wire_bytes(message)
+    if size <= max_bytes:
+        return message
+    marker = TRUNCATED_ENTRY_MARKER.format(size=size)
+    if isinstance(message, Message):
+        text = "".join(
+            block.text for block in message.content if isinstance(block, TextContent)
+        )
+        preview = _text_prefix_within(text, max(0, max_bytes // 2 - len(marker) - 256))
+        body = f"{preview}\n\n{marker}" if preview else marker
+        return message.model_copy(
+            update={
+                "content": [TextContent(text=body)],
+                "tool_calls": [
+                    call.model_copy(update={"arguments": {}, "raw_arguments": None})
+                    for call in message.tool_calls
+                ],
+                "provider_payload": None,
+            }
+        )
+    if isinstance(message, CustomMessage):
+        update: dict[str, Any] = {"details": {"truncated": marker}}
+        if isinstance(getattr(message, "content", None), str):
+            update["content"] = marker
+        return message.model_copy(update=update)
+    return message
+
+
+def _bounded_group(group: Sequence[AgentMessage], budget: int) -> list[AgentMessage]:
+    """``group`` with each row cut to an equal share of ``budget`` (floor-bounded)."""
+    share = max(PEER_BOUNDED_MIN_MESSAGE_BYTES, budget // max(1, 2 * len(group)))
+    return [bounded_display_message(message, share) for message in group]
+
+
 def _capture_display_window(
     transcript: Transcript,
     *,
@@ -794,6 +884,7 @@ def _capture_display_window(
     max_messages: int = DISPLAY_HISTORY_MESSAGES,
     max_wire_bytes: int = DISPLAY_HISTORY_BYTES,
     durable_seed_tools: frozenset[str] = frozenset(),
+    bound_oversized: bool = False,
 ) -> DisplayHistoryWindow:
     """Return complete replay rows, with tool call/result groups kept together.
 
@@ -927,6 +1018,21 @@ def _capture_display_window(
         # Match the socket's JSON encoding, including escaped non-ASCII text;
         # a character budget or UTF-8-only estimate understates that frame.
         cost = sum(len(json.dumps(m.model_dump(mode="json")).encode()) + 1 for m in group)
+        if (
+            bound_oversized
+            and not selected
+            and not anchor
+            and used + cost > max_wire_bytes - 8192
+            and len(group) <= max_messages
+        ):
+            # THE PEER VIEWER'S ANSWER to the one case below that escalates
+            # (see ``PEER_BOUNDED_MIN_MESSAGE_BYTES``): the newest group cannot
+            # ride whole, so its rows ride bounded and marked instead of the page
+            # escalating to a local replay the remote viewer cannot perform. Only
+            # the FIRST group selected, and never an anchored read, so every
+            # other group is exact and older pages are reached by the same token.
+            group = _bounded_group(group, max_wire_bytes - 8192)
+            cost = sum(len(json.dumps(m.model_dump(mode="json")).encode()) + 1 for m in group)
         if used + cost > max_wire_bytes - 8192 or len(selected) + len(group) > max_messages:
             if not selected or (
                 anchor
