@@ -11592,6 +11592,20 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
                 else ""
             )
         )
+    # Failover routing (``retry.*`` units, see ``routing_sync``): which units are a
+    # peer's mirror and which this device owns. Kept units are the answer to "why
+    # does this node fail over differently from my Mac".
+    from local_operator.network import routing_sync
+
+    routing = state.get(routing_sync.ROUTING_KIND) or {}
+    for unit, cls in sorted((routing.get("units") or {}).items()):
+        source = str(cls.get("source") or "")
+        if source == "mirror":
+            lines.append(f"failover routing {unit}: mirrored from {cls.get('origin') or '?'}")
+        elif source in ("local", "edited"):
+            lines.append(f"failover routing {unit}: yours")
+    if routing.get("status") == "unreadable":
+        lines.append("failover routing: config.yml could not be read")
     if not lines:
         lines = ["no agent or team definitions on this device"]
     return _emit(
@@ -11602,6 +11616,7 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
             "teams": state.get("teams") or {},
             "mirrored": mirrored,
             definitions.OPERATOR_INSTRUCTIONS_KIND: instructions,
+            routing_sync.ROUTING_KIND: routing,
         },
         lines,
     )

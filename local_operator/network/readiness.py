@@ -1713,7 +1713,22 @@ def collect_peer_facts(
         # ADDITIVE ON THE WIRE: an older viewer ignores it, and an older peer's
         # answer lacks it, which this build reads as "nothing to report" (no row).
         "custom_instructions": custom_instructions_fact(root),
+        # ADDITIVE ON THE WIRE: the fallback chain this device's default would
+        # actually walk, and whose it is (mirrored from the operator's device or
+        # this device's own). An older viewer ignores it; an older peer omits it
+        # and the model-credential row then reads byte-for-byte as before.
+        "failover": _failover_fact(root, model),
     }
+
+
+def _failover_fact(root: Path, model: Mapping[str, Any]) -> dict[str, Any] | None:
+    from local_operator.network import routing_sync
+
+    return routing_sync.failover_fact(
+        root,
+        hosting=str(model.get("hosting") or ""),
+        model_name=str(model.get("model_name") or ""),
+    )
 
 
 def custom_instructions_fact(root: Path) -> dict[str, Any] | None:
@@ -1783,6 +1798,46 @@ def custom_instructions_row(
         source=SOURCE_PEER,
         observed={"status": str(fact.get("status") or ""), "origin": origin},
     )
+
+
+def _attach_failover(row: dict[str, Any], facts: Mapping[str, Any], *, server: Any) -> None:
+    """Name the peer's effective fallback chain on its model-credential row.
+
+    WHY ON THIS ROW: "can the default be served" and "what happens when it is
+    rate-limited" are one question for an operator handing a node work — a node
+    whose chain is primary-only ends a turn on the first borrowed 429. Riding the
+    existing row (sentence + ``observed.failover``) instead of a new capability
+    keeps enrollment's closed capability set (``enrollment.public_report``)
+    untouched. Absent fact (an older peer) leaves the row exactly as it was.
+    """
+    fact = facts.get("failover")
+    if not isinstance(fact, Mapping):
+        return
+    from local_operator.network import routing_sync
+
+    origin = str(fact.get("origin") or "")
+    self_id = str(getattr(getattr(server, "identity", None), "device_id", "") or "")
+    label = ""
+    if origin:
+        label = (
+            _self_label(server)
+            if origin == self_id
+            else str(server._member_name(origin) or "")  # noqa: SLF001 — the mesh's own name
+        )
+    # The sentence only when the peer HAS routing to name: a bare peer's row keeps
+    # its existing words (its empty chain is still in ``observed``), so a viewer
+    # reading an unconfigured fleet sees no new prose on every row.
+    if fact.get("hops") or fact.get("model_fallback") is False:
+        sentence = routing_sync.failover_sentence(fact, origin_label=label)
+        detail = str(row.get("detail") or "")
+        row["detail"] = f"{detail} {sentence}".strip()
+    observed = dict(row.get("observed") or {})
+    observed["failover"] = {
+        key: fact.get(key)
+        for key in ("chain_key", "hops", "source", "origin", "model_fallback")
+        if key in fact
+    }
+    row["observed"] = observed
 
 
 #: The RAM below which a swapless member is reported as a resilience risk. 4 GB
@@ -5760,7 +5815,9 @@ def _peer_checks(
     rows.append(git_row(member, facts, peer_label=peer_label, viewer=viewer))
     rows.append(repository_row(member, facts, peer_label=peer_label, repository=repository))
     rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
-    rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    credential_row = model_credential_row(member, facts, viewer=viewer, peer_label=peer_label)
+    _attach_failover(credential_row, facts, server=server)
+    rows.append(credential_row)
     switch_row = model_switch_row(
         member,
         facts,

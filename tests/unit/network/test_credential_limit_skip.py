@@ -45,7 +45,7 @@ from local_operator.network.credentials.store import MeshAwareAuthStore
 from local_operator.network.credentials.types import BrokerError, Grant
 from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS, AuthStore
 from local_operator.providers.clients import OpenAICompatClient
-from local_operator.providers.failover import stream_with_failover
+from local_operator.providers.failover import ProviderError, stream_with_failover
 from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtures by import
     BORROWER_DEVICE,
     OWNER_DEVICE,
@@ -708,3 +708,104 @@ def test_a_cached_owner_quota_refusal_keeps_its_pool_depleted_marker(
     assert cached is not None and cached.code == "quota_blocked", cached
     assert cached.reason == "pool_depleted", cached
     assert not cached.is_holder_exclusion, cached
+
+
+class _LocalFallbackKey(_NoLocalLogins):
+    """The node holds its OWN key for the chain's next hop, and nothing else."""
+
+    FALLBACK_PROVIDER = "openai"
+
+    async def get_api_key(self, provider: str, *_a: Any, **_k: Any) -> str | None:
+        return "local-fallback-key" if provider == self.FALLBACK_PROVIDER else None
+
+
+class _EveryOwnerRowSpent(StubProvider):
+    """Both of the owner's lent rows answer 429 retry-in-24h; any other bearer serves."""
+
+    def __init__(self) -> None:
+        super().__init__("bearer-a")
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        bearer = request.headers.get("authorization", "").removeprefix("Bearer ")
+        if bearer == "bearer-b":
+            self.seen.append(bearer)
+            return httpx.Response(
+                429,
+                headers={"retry-after": str(DAY_S)},
+                json={"error": {"message": "rate limit or quota exceeded", "type": "rate_limit"}},
+            )
+        return super().__call__(request)
+
+
+@pytest.mark.asyncio
+async def test_a_mirrored_chain_moves_a_borrowed_quota_block_to_the_next_hop(
+    borrowed: Any,
+) -> None:
+    """The operator's chain, mirrored onto the node, is what the remote turn walks.
+
+    THE GAP (lop-remote-node-2): ``retry.fallbackChains`` never reached a mesh node,
+    so with the owner's borrowed rows quota-blocked the node's primary-only chain
+    ENDED the turn, where the operator's Mac would have moved on to the next hop.
+    The control half of this cell reproduces that on the node's own config before
+    the sync; the second half applies the head's routing through the real
+    ``routing_sync`` receiver and drives the same real failover + MeshAwareAuthStore
+    turn, which must now be served by the next chain hop with the node's own key.
+    """
+    from local_operator.config import read_config_values
+    from local_operator.network import routing_sync
+
+    borrowed.store._local = _LocalFallbackKey()  # noqa: SLF001 — the node's own logins
+    chain = [f"{STUB_PROVIDER}/claude-opus-5-5", "openai/gpt-6.1-sol"]
+    fast = {"baseDelayMs": 1, "maxRetries": 2}
+
+    async def _node_turn(session_id: str) -> tuple[list[Any], _EveryOwnerRowSpent]:
+        stub = _EveryOwnerRowSpent()
+        mirrored = dict((read_config_values(borrowed.root) or {}).get("retry") or {})
+        settings = {"retry": {**mirrored, **fast}}
+        request = ChatRequest(model=ModelSpec(provider=STUB_PROVIDER, model_id="claude-opus-5-5"))
+        async with httpx.AsyncClient(transport=httpx.MockTransport(stub)) as http:
+
+            async def client_for(spec: ModelSpec) -> Any:
+                return OpenAICompatClient("https://stub.invalid/v1", http_client=http)
+
+            events: list[Any] = []
+            try:
+                async for event in stream_with_failover(
+                    request, borrowed.store, settings, client_for, session_id=session_id
+                ):
+                    events.append(event)
+            except ProviderError as exc:
+                # The turn ENDED on the error: kept as its terminal event so the
+                # control half can assert on it.
+                events.append(exc)
+        return events, stub
+
+    # Control: the node's own config (no chain) ends the turn on the borrowed 429s.
+    before, stub_before = await _node_turn("sess-before")
+    assert not _ended(before), f"control did not reproduce the gap: {before}"
+    assert isinstance(before[-1], ProviderError) and before[-1].status == 429, before
+    assert "local-fallback-key" not in stub_before.seen, stub_before.seen
+
+    index: dict[str, Any] = {}
+    applied = routing_sync.apply_routing_locked(
+        borrowed.root,
+        {"units": {"fallbackChains.default": chain}},
+        OWNER_DEVICE,
+        index,
+    )
+    assert applied["outcome"] == "installed", applied
+
+    after, stub_after = await _node_turn("sess-after")
+    assert _ended(after), f"the mirrored chain did not reach its next hop: {after}"
+    assert stub_after.seen[-1] == "local-fallback-key", stub_after.seen
+    # The control turn left both lent rows resting for their window, so the
+    # primary had no servable borrow and the walk went straight to the next hop
+    # instead of re-serving a spent row: no owner bearer reached the wire again.
+    assert stub_after.seen == ["local-fallback-key"], stub_after.seen
+    resting = borrowed.client.state.cooldowns(
+        STUB_PROVIDER, "claude-opus-5-5", owner_device=OWNER_DEVICE
+    )
+    assert {row["credential_id"] for row in resting} == {
+        borrowed.row_a.id,
+        borrowed.row_b.id,
+    }, resting
