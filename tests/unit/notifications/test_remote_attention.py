@@ -100,7 +100,7 @@ def _timed(notices: tuple[tuple[Any, ...], ...] | None) -> tuple[tuple[Any, ...]
     """
     if not notices:
         return notices
-    fresh = int(time.time() * 1000) + 60_000
+    fresh = _fresh_ms()
     return tuple(n if len(n) > 4 else (*n, fresh) for n in notices)
 
 
@@ -660,13 +660,30 @@ def test_r2_m2_a_failed_attention_read_is_unknown_not_acknowledged(
     assert _items(root)[0]["read"] is True
 
 
-#: An owner time after any baseline a test records (wall clock + 1 min).
-_FRESH = int(time.time() * 1000) + 60_000
+def _fresh_ms() -> int:
+    """An owner time after any baseline a test records (wall clock + 1 h).
+
+    Evaluated at USE, never at import: the baseline is recorded from the wall
+    clock when ``observe`` runs, and under a loaded xdist shard a test can run
+    minutes after this module was imported, so an import-time constant fell
+    before the baseline and every notice read as backfill (CI shard 3.13/3 on
+    PR #3902). The hour margin keeps the notice fresh however long the gap
+    between this call and ``observe`` stretches.
+    """
+    return int(time.time() * 1000) + 3_600_000
 
 
+# ``import_lag_s`` simulates the loaded-shard case directly: the clock the
+# watcher reads for its baseline is pushed well past module import, which
+# failed against the old import-time constant.
+@pytest.mark.parametrize("import_lag_s", [0, 120])
 def test_r2_m1_minor_a_batch_of_notices_lands_oldest_first(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+    root: Path, monkeypatch: pytest.MonkeyPatch, import_lag_s: int
 ) -> None:
+    if import_lag_s:
+        real_time = time.time
+        monkeypatch.setattr(time, "time", lambda: real_time() + import_lag_s)
+    fresh = _fresh_ms()
     # Every store write a distinct millisecond, so ``updated_at`` order is the
     # write order rather than a tie broken by id.
     ticks = iter(range(1_800_000_000_000, 1_800_000_001_000))
@@ -676,8 +693,8 @@ def test_r2_m1_minor_a_batch_of_notices_lands_oldest_first(
         [
             _row(
                 notices=(
-                    ("k-new", 1, "normal", "Deploy done (newer)", _FRESH + 2),
-                    ("k-old", 1, "normal", "Tests failed (older)", _FRESH + 1),
+                    ("k-new", 1, "normal", "Deploy done (newer)", fresh + 2),
+                    ("k-old", 1, "normal", "Tests failed (older)", fresh + 1),
                 )
             )
         ]
