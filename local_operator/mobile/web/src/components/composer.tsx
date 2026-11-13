@@ -22,6 +22,15 @@ import {
 } from "../lib/delivery";
 import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
+	QUEUED_DETAIL,
+	deferredSettingsFields,
+	dismissSettingsRefusal,
+	reconcileSettingsResults,
+	settleSettingsPick,
+	trackSettingsPick,
+	useSessionSettings,
+} from "../lib/settings-defer";
+import {
 	getPendingContinuation,
 	submitContinuation,
 } from "../continuation-command";
@@ -358,10 +367,16 @@ function EffortSheet({
 	projection: SessionProjection;
 }) {
 	const set = async (effort: string) => {
+		const fields = deferredSettingsFields();
+		/* Same contract as the model sheet: tracked before sending, closed on
+		   the ack, and a later refusal shown by the composer (R1-M2). */
+		trackSettingsPick(pid, { requestId: fields.request_id, kind: "effort", label: effort });
 		try {
-			await sendCommand(pid, { op: "set_effort", effort });
+			const receipt = await sendCommand(pid, { op: "set_effort", effort, ...fields });
+			if (receipt.detail !== QUEUED_DETAIL) settleSettingsPick(pid, fields.request_id);
 		} catch {
 			/* The next repaint shows the truth; a failed set leaves it. */
+			settleSettingsPick(pid, fields.request_id);
 		}
 		onClose();
 	};
@@ -955,6 +970,15 @@ export function Composer({
 	/* Success acknowledgement lives apart from `error` so it renders in the
 	   success token, not the danger alert (D11). */
 	const [notice, setNotice] = useState("");
+	/* Deferred settings picks (model/effort sheets) and their late outcomes,
+	   per session in `lib/settings-defer`: the sheets close on the `queued` ack,
+	   so the refusal — which lands on a later repaint — is shown HERE, where it
+	   is still on screen after the sheet is gone (PR #3697 review R1-M2). */
+	const sessionSettings = useSessionSettings(pid);
+	useEffect(() => {
+		reconcileSettingsResults(pid, projection.settings_results);
+	}, [pid, projection.settings_results]);
+	const settingsPending = Object.keys(sessionSettings.pending).length > 0;
 	/* WHICH CONTAINER the notice paints in (design round 1, D1). A receipt reports
 	   an OUTCOME, and the runtime leaves a completed write and a plain report at
 	   the same `style="info"` — so the daemon classifies and the tone travels on
@@ -2124,6 +2148,32 @@ export function Composer({
 			{sending ? (
 				<p role="status" aria-live="polite" className="text-body-sm text-ink-muted">
 					{text.trim() ? SENDING_HINT : CONNECTING_STATUS}
+				</p>
+			) : null}
+
+			{sessionSettings.refusal ? (
+				/* Wraps, never truncates: the reason is the only place the user
+				   learns WHY (a provider without a credential), and the desktop's
+				   clipped reason was a design MAJOR (local-operator-ui#1823 D1). */
+				<div className="rounded-sm bg-danger-wash px-3 py-2 text-body-sm text-danger">
+					<div className="flex items-start gap-2">
+						<p role="alert" aria-live="assertive" className="min-w-0 flex-1 break-words py-2">
+							{messageRuntime.t("relay.session.model.refused", {
+								model: sessionSettings.refusal.label,
+								reason: sessionSettings.refusal.reason,
+							})}
+						</p>
+						<button type="button" onClick={() => dismissSettingsRefusal(pid)}
+							aria-label={messageRuntime.t("relay.chrome.snackbar.dismiss")}
+							className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface">×</button>
+					</div>
+				</div>
+			) : settingsPending && projection.streaming ? (
+				/* Only while a turn runs: then the pick genuinely waits for the
+				   next step. Idle, it lands at once and the repaint is the answer;
+				   saying "queued" there would claim a wait that is not happening. */
+				<p role="status" aria-live="polite" className="text-body-sm text-ink-muted">
+					{messageRuntime.t("relay.session.model.queued")}
 				</p>
 			) : null}
 

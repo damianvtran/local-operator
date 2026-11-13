@@ -52,11 +52,13 @@ from local_operator.guardrails.check import (
     _targets_text,
     build_delete_case,
     builtin_branch,
+    credential_refusal_text,
     evidence_write_verdict,
     read_settings,
     review_text,
     rule_block_text,
     rule_warn_text,
+    worktree_flagged,
 )
 from local_operator.guardrails.classify import Verdict, classify_bash
 from local_operator.guardrails.rules import call_text, load_rules
@@ -332,9 +334,7 @@ def preview_tool_call(
             if effect == BUILTIN_REFUSE_CRITICAL:
                 builtin_text = _critical_text(verdict)
             elif effect == BUILTIN_REFUSE_CREDENTIAL:
-                builtin_text = review_text(
-                    DANGEROUS_DELETE_RULE, "an unresolvable target", _targets_text(verdict)
-                )
+                builtin_text = credential_refusal_text(command)
             elif effect == BUILTIN_JUDGE:
                 case = build_delete_case(verdict, context)
                 builtin_facts = (*case.facts, *case.evidence.describe())
@@ -348,7 +348,10 @@ def preview_tool_call(
                     builtin_facts += (f"allowed without the judge: {proven}",)
                 else:
                     builtin_text = review_text(
-                        DANGEROUS_DELETE_RULE, "<judge reason>", _targets_text(verdict)
+                        DANGEROUS_DELETE_RULE,
+                        "<judge reason>",
+                        _targets_text(verdict),
+                        worktree=worktree_flagged(verdict),
                     )
 
     elif tool_name in FILE_DESTINATION_TOOLS:

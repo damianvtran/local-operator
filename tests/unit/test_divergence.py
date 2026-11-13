@@ -2355,6 +2355,11 @@ async def test_a_model_scheduled_wake_does_not_explain_its_root_end_to_end(
     from local_operator.session.transcript import Transcript
     from local_operator.tools.registry import create_tools
 
+    # The model schedules this wake from inside the operator's turn: wake
+    # deferral would (correctly) hold it to last turn end + W. This test's
+    # subject is the woken turn's divergence read, not deferral.
+    monkeypatch.setattr("local_operator.session.session.WAKE_OPERATOR_QUIET_S", 0)
+
     scratch = home.parent
     config_dir = scratch / "config"
     monkeypatch.setenv("HOME", str(home))

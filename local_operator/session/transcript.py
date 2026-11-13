@@ -102,6 +102,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ENTRY_MESSAGE = "message"
+
+#: The host's profile-trust EPISODE record (``Session``'s durable taint bit;
+#: ``details = {"untrusted": bool}``). Defined here, beside the journal, because
+#: a fork cut must treat it as prefix state (``fork_snapshot``).
+PROFILE_TRUST_CUSTOM_TYPE = "profile_trust"
 ENTRY_COMPACTION = "compaction"
 ENTRY_CUSTOM = "custom"
 
@@ -219,6 +224,13 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         CHANNEL_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
         "frontend_state_checkpoint_v1",
+        # Idle / pre-wake compaction's anti-thrash receipts
+        # (``compaction/idle.py``): written while the session is parked, so
+        # they must not move the activity clock. Literals pinned against
+        # ``COMPACTION_IDLE_*_TYPE`` by a unit test (this module does not import
+        # the compaction package).
+        "compaction_idle_pass",
+        "compaction_idle_declined",
         # Each finite display proof has its own deterministic key. Unlike the
         # hot checkpoint this archive must survive compaction of later turns.
         "frontend_peer_cycle_display_v1",
@@ -264,6 +276,34 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
 #: ``_COLLAPSIBLE_CUSTOM_TYPES`` (records for different messages are not
 #: superseded copies of one another).
 STT_TRANSCRIPT_CUSTOM_TYPE = "stt_transcript_v1"
+
+
+#: Owner-only mode for transcript.jsonl and its rewrite temp, matching spill
+#: files and compression archives (``compression._reserve``).
+_TRANSCRIPT_MODE = 0o600
+
+
+def _keep_private(fd: int) -> None:
+    """Make an open transcript descriptor owner-only (best-effort).
+
+    WHY (follow-up to PR #3756): a transcript holds every tool result the model
+    read, and a credential the redactor did not recognise is in it verbatim, yet
+    it was created with the process umask (``0644``, world-readable to every
+    local account) while the spill files beside it were ``0600``. Applied on
+    EVERY open for writing rather than only at creation, so a transcript written
+    by an older build, ``fork``, or an import becomes private on its next append.
+    A filesystem that refuses ``chmod`` (some network mounts) must not fail the
+    append: losing the turn is worse than a wider mode, so errors are swallowed.
+    The containing ``sessions/`` directory is already ``0700``; this closes the
+    file itself for a copy, a backup or a looser parent.
+    """
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is None:  # Windows: POSIX modes do not apply
+        return
+    try:
+        fchmod(fd, _TRANSCRIPT_MODE)
+    except OSError:
+        logger.debug("transcript: could not restrict mode", exc_info=True)
 
 
 def is_bookkeeping_entry(entry: "TranscriptEntry") -> bool:
@@ -2876,6 +2916,7 @@ class Transcript:
         carried_asks: list[dict[str, Any]] | None = None,
         carried_decisions: list[dict[str, Any]] | None = None,
         resume_card: dict[str, Any] | None = None,
+        trigger: str | None = None,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -2955,6 +2996,13 @@ class Transcript:
         # byte-identical to one written before the card existed (#3448).
         if resume_card is not None:
             payload["resume_card"] = resume_card
+        # Only non-default triggers are spelled (today: ``"idle"``), for the
+        # same byte-identity reason: a size or manual pass writes the record
+        # it always wrote. The idle pass's measured after-size rides its
+        # ``compaction_idle_pass`` custom row, because it is only known after
+        # this marker is committed.
+        if trigger:
+            payload["trigger"] = trigger
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(
@@ -3229,6 +3277,25 @@ class Transcript:
                             continue
                         if later:
                             excluded.add(row.id)
+                if through_entry_id is not None:
+                    # EPISODE FACTS ARE PREFIX STATE. A ``profile_trust`` row
+                    # after the cut describes conversation the child does not
+                    # have -- a later owner turn's CLEAN marker would launder
+                    # the child's own untrusted tail, a later taint would
+                    # misdescribe a clean prefix. Drop every such row; the
+                    # child rebuilds its episode from what it kept (newest
+                    # retained record plus the retained rows after it).
+                    last_kept = max(
+                        (i for i, row in enumerate(self._entries) if row.id in retained),
+                        default=-1,
+                    )
+                    excluded.update(
+                        row.id
+                        for i, row in enumerate(self._entries)
+                        if i > last_kept
+                        and row.type == ENTRY_CUSTOM
+                        and row.payload.get("custom_type") == PROFILE_TRUST_CUSTOM_TYPE
+                    )
                 fork_id = fork_session(
                     self.directory.parent.parent,
                     self.directory.name,
@@ -3339,6 +3406,7 @@ class Transcript:
                 )
                 try:
                     with self.path.open("a", encoding="utf-8") as handle:
+                        _keep_private(handle.fileno())
                         for entry in entries:
                             # Retain the LAST row's bytes: the selection ledger's
                             # boundary digest is otherwise a 2 MB backward read of
@@ -3375,6 +3443,7 @@ class Transcript:
             )
             try:
                 with self.path.open("w", encoding="utf-8") as handle:
+                    _keep_private(handle.fileno())
                     for row in (*self._entries, *entries):
                         handle.write(row.to_json() + "\n")
                     handle.flush()
@@ -3976,7 +4045,9 @@ class Transcript:
         interrupted compaction leaves the original transcript readable.
         """
         tmp = self.path.with_suffix(self.path.suffix + ".compact")
-        tmp.write_text(payload, encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as handle:
+            _keep_private(handle.fileno())
+            handle.write(payload)
         os.replace(tmp, self.path)
 
     def flush(self) -> None:

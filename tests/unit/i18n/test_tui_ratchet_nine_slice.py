@@ -120,13 +120,44 @@ BASE = {
     "tui.app.providers.no_live_list": "no live list: {names}",
 }
 
+#: Keys the shell gained AFTER extraction, kept apart from ``BASE`` so that dict
+#: stays what it says -- the bytes each site carried before extraction -- while the
+#: whole namespace is still pinned below. These are the idle-compaction receipt and
+#: skip lines (PR #3753), whose English and translations were audited at these
+#: bytes; a re-word is a diff hunk here, as for ``BASE``.
+SINCE_EXTRACTION = {
+    "tui.app.compaction.idle_receipt": "context compacted while idle · {detail}",
+    "tui.app.compaction.idle_receipt_bare": "context compacted while idle",
+    "tui.app.compaction.idle_skipped": "idle compaction skipped · nothing changed",
+    # The temporary-chat sidebar group, its countdown and the "kept while ..."
+    # hold hints (core #3832, ``tui/temporary_chat.py`` and the session
+    # sidebar): NEW copy with no earlier literal, pinned at the bytes it ships.
+    "tui.app.section_temporary": "{count, plural, one {Temporary · #} other {Temporary · #}}",
+    "tui.app.temporary_deletes_in": (
+        "{minutes, plural, one {deletes in # min} other {deletes in # min}}"
+    ),
+    "tui.app.temporary_hold_armed_monitor": "kept while a monitor is set",
+    "tui.app.temporary_hold_armed_wake": "kept while a wake is set",
+    "tui.app.temporary_hold_cannot_verify": "kept: could not check",
+    "tui.app.temporary_hold_linked": "kept while pinned or linked",
+    "tui.app.temporary_hold_on_screen": "kept while on screen",
+    "tui.app.temporary_hold_open_ask": "kept while a question is open",
+    "tui.app.temporary_hold_operator_hold": "kept by a hold",
+    "tui.app.temporary_hold_running": "kept while it runs",
+    "tui.app.temporary_hold_unread_mail": "kept while a message is unread",
+    "tui.app.temporary_hold_unsaved_files": "kept while files are unsaved",
+    "tui.app.temporary_hold_unseen_result": "kept until you see the result",
+}
+
 
 def test_the_namespace_is_exactly_the_base_bytes() -> None:
-    """Every key, pinned to the bytes its site carried before extraction."""
+    """Every key, pinned to the bytes its site carried before extraction (or, for a
+    key added since, the bytes it shipped with)."""
     live = catalogues.load_catalogue("en", "tui.app")
-    assert live == BASE
+    assert live == {**BASE, **SINCE_EXTRACTION}
+    assert not set(BASE) & set(SINCE_EXTRACTION)
     sidecar = catalogues.context("en", "tui.app")
-    assert set(sidecar) == set(BASE)
+    assert set(sidecar) == set(BASE) | set(SINCE_EXTRACTION)
     for key, entry in sidecar.items():
         assert all(entry.get(field) for field in ("role", "tone", "note")), key
 

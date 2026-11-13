@@ -78,6 +78,7 @@ from tests.unit.tui.conftest import (
     chevron_colour,
     composer_cells,
 )
+from tests.unit.tui.waiting import settle
 
 
 def _set_editor_line(editor, text: str) -> None:
@@ -3278,6 +3279,19 @@ async def test_quit_keys_join_attached_recovery_during_app_shutdown(
     monkeypatch.setattr(app, "_retire_unused_runtime", no_retirement)
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
+        # The boot worker ("session" group) must have adopted the factory's
+        # session BEFORE the swap below. One pause does not join it: its
+        # first-run ledger read and construction hop off the loop, and on a
+        # loaded CI shard ``_adopt_session`` then landed AFTER the swap and
+        # rebound ``app._session`` to the FakeSession — so quit disposed the
+        # wrong session and the attached facade's recovery stayed parked
+        # (#3767 gate 42944510412, test (3.12, 4)).
+        await settle(
+            pilot,
+            lambda: app._session is not None,
+            what="boot session adopted before the attached swap",
+            workers=("session",),
+        )
         app._session = session
         # Exercise the real disconnect callback, recovery loop and retry sleep;
         # the attached facade remains the app's session throughout this test.

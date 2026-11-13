@@ -72,6 +72,15 @@ CREDENTIAL_MARK = OPAQUE_MARK + "credential" + OPAQUE_MARK
 #: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
 #: unknowable, but known to be a fresh entry under the temp directory.
 TEMP_MARK = "\x02"
+#: Prefix of a ``for VAR in <glob>`` binding: ``FOR_GLOB_MARK + <key> +
+#: OPAQUE_MARK``, where ``<key>`` indexes ``_Walker.for_globs``. It contains
+#: OPAQUE_MARK, so every use of ``$VAR`` that is not a whole recorded word
+#: (``cd $f``, ``x-$f``, ``$f/..``) stays opaque exactly as before; only a
+#: word that IS the variable is pinned to the glob (see ``_Walker._add``).
+#: Carried in the VALUE, not a side table keyed by name, so a reassignment
+#: (``f=$(cmd)``) can never inherit a stale glob, and a copy (``g=$f``)
+#: carries it correctly.
+FOR_GLOB_MARK = OPAQUE_MARK + "for-glob:"
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +895,27 @@ class Target:
     #: opaque word). ``os.path.realpath`` of it resolves ``..`` physically, so
     #: ``classify`` adds that spelling to the ones it judges.
     raw_path: str | None = None
+    #: A ``..`` in the word whose physical landing cannot be pinned now (a
+    #: component before it is missing or unsearchable, or the ``..`` follows a
+    #: glob component): ``path`` is only the lexical reading. ``classify``
+    #: keeps any CRITICAL that reading earns but never ranks the target LOW,
+    #: not even inside this session's scratchpad, because the missing component
+    #: may be created as a link by an earlier part of the same command
+    #: (``ln -s <repo>/sub <pad>/n && rm -rf <pad>/n/../.git``). Also set when
+    #: the component EXISTS but an earlier part of the command named it — as
+    #: an ``ln`` link, a ``mv``/``cp``/``rsync`` destination, or a delete or
+    #: creation target — since it may be a different link by then
+    #: (``_Walker._unpin_relinked``, review R1-1 on PR #3811).
+    unpinned: bool = False
+    #: For an ``unpinned`` word: where it lands if every missing component
+    #: becomes a directory and every component an earlier ``ln -s``/``cp -s``
+    #: of THIS command re-linked to a literal target points there
+    #: (:func:`_relinked_landing`). ``classify`` ranks this reading alongside
+    #: ``path`` and keeps the worse, so a ``..`` that crosses a link after the
+    #: missing part, or follows a re-link into the state root or another
+    #: session, stays CRITICAL and the judge is shown that file (review R2-1,
+    #: QA Q2-1 on PR #3811). Empty when it equals ``path`` or cannot be built.
+    landings: tuple[str, ...] = ()
     # A judge cannot approve a root deliberately hidden for privacy. Keep this
     # distinct from ordinary opaque substitutions that can receive review.
     credential_derived: bool = False
@@ -898,6 +928,11 @@ class Target:
     forced: bool = False
     #: Double force is narrowly allowed for a verified stale git initialization lock.
     force_count: int = 0
+    #: A target only an ALTERNATE parse produces (GNU sed's reading of BSD
+    #: ``-i ''``, review M1 on PR #3816): ``classify`` keeps it only when it
+    #: ranks CRITICAL, so it can raise a verdict to CRITICAL and never add a
+    #: HIGH for what is, under the other reading, the script.
+    critical_only: bool = False
     #: A ``touch`` handed to an interpreter (``node``/``python``) running a
     #: script FILE: that script's absolute path. ``classify`` lets a read of a
     #: same-task-tree session's scratch file rank LOW only when the script is
@@ -926,7 +961,9 @@ class Creation:
     snapshots the matches before the call and records only new ones after it.
     """
 
-    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone"
+    #: ``symlink`` is the link ENTRY ``ln -s[f] SRC LINK`` makes, never the
+    #: directory it points at (see ``provenance.owned_link``).
+    kind: str  # "mkdir" | "mktemp" | "worktree" | "clone" | "symlink"
     path: str | None = None
     parent: str | None = None
     pattern: str | None = None
@@ -974,13 +1011,185 @@ def kernel_path(raw: str | None) -> str | None:
     return None
 
 
-def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
-    """``(normalised absolute path, cwd_was_unknown)`` for a word's text."""
+def physical_path(raw: str) -> str | None:
+    """Where ``rm``/``>``/``mv`` act on the absolute word ``raw``: every ``..``
+    applied AFTER the links before it are followed, the FINAL component kept
+    as written (``rm`` removes a trailing link itself, not what it points at;
+    the trailing-slash form is covered by ``classify._spellings`` adding the
+    ``realpath``). ``None`` when a component before a ``..`` cannot be
+    resolved (missing, unsearchable).
+
+    WHY. ``os.path.normpath`` collapses ``..`` lexically, but path lookup does
+    not: with ``~/other/sl -> <repo>/subdir``, ``~/other/sl/../.git`` IS
+    ``<repo>/.git``, while normpath reads ``~/other/.git``. Ranking the lexical
+    form let any CRITICAL or HIGH target be reached at LOW through a link plus
+    ``..`` (security review on PR #3802). A word with no ``..`` cannot differ,
+    so it keeps the lexical form; one whose physical landing is the same place
+    keeps the spelling it was written with, so reasons and provenance read as
+    the agent wrote them.
+    """
+    lexical = os.path.normpath("/" + raw.lstrip("/"))
+    if ".." not in raw.split("/"):
+        return lexical
+    head, _sep, last = raw.rstrip("/").rpartition("/")
+    if last == "..":
+        # ``sl/..`` names the parent of what ``sl`` resolves to.
+        physical = kernel_path(raw)
+    else:
+        parent = kernel_path(head or "/")
+        physical = None if parent is None else os.path.join(parent, last)
+    if physical is None:
+        return None
+    try:
+        same = os.path.realpath(os.path.dirname(lexical)) == os.path.realpath(
+            os.path.dirname(physical)
+        ) and os.path.basename(lexical) == os.path.basename(physical)
+    except OSError:
+        same = False
+    return lexical if same else os.path.normpath(physical)
+
+
+def _physical(text: str, cwd: str | None) -> tuple[str | None, bool, bool]:
+    """``(absolute path, cwd_was_unknown, unpinned)`` for a word's text, ``..``
+    resolved the way the kernel resolves it (:func:`physical_path`).
+
+    ``unpinned``: the word has a ``..`` whose physical landing cannot be known
+    now (a component before it is missing or unsearchable — it may be created
+    as a link by an earlier part of this very command). ``path`` is then the
+    lexical reading, so a protected name it spells is still caught, and the
+    caller must not let that reading earn a LOW (``Target.unpinned``).
+    """
     if text.startswith("/"):
-        return os.path.normpath("/" + text.lstrip("/")), False
-    if cwd is None:
-        return None, True
-    return os.path.normpath(os.path.join(cwd, text)), False
+        raw = text
+    elif cwd is None:
+        return None, True, False
+    else:
+        raw = os.path.join(cwd, text)
+    path = physical_path(raw)
+    if path is None:
+        return os.path.normpath("/" + raw.lstrip("/")), False, True
+    return path, False, False
+
+
+#: Links :func:`_relinked_landing` follows in ONE walk, in total, before it
+#: gives up — Linux's MAXSYMLINKS (macOS stops at 32), after which the kernel
+#: itself fails the lookup with ELOOP. A bound on nesting alone was not enough:
+#: ``l_k -> l_{k+1}/../l_{k+1}`` resolved each sibling again at every level, so
+#: 16 planted links took ~20 s and 24 would take hours, before and outside the
+#: judge timeout (review R3-2, PR #3811).
+_MAX_RELINK_HOPS = 40
+
+
+def _relinked_landing(
+    raw: str,
+    links: Mapping[str, str],
+    *,
+    follow_last: bool = False,
+    memo: dict[str, str] | None = None,
+) -> str | None:
+    """Where the kernel lands the absolute, un-normalised ``raw`` if every
+    MISSING component becomes a directory and each component in ``links``
+    (physical link path -> literal target, ``_Walker.link_targets``) is the
+    symlink an earlier part of this command made. ``None`` past a link loop.
+
+    WHY. ``physical_path`` cannot pin a ``..`` after a component that is
+    missing or re-linked, and its lexical fallback collapses EVERY ``..``,
+    including one that comes after an existing link further on:
+    ``rm -f <pad>/nope/../slk/../config.yml`` with ``slk -> <state>/secrets``
+    reads as ``<pad>/config.yml`` while the kernel, once ``nope`` exists,
+    removes ``<state>/config.yml`` (review R2-1, PR #3811). Walking the word
+    one component at a time — dropping only each ``<missing>/..`` pair,
+    following existing links and literal re-links as lookup does — gives the
+    landing the command produces in its ordinary reading. A re-link whose
+    target cannot be known (``mv``, ``cp -a``, a variable) is not in
+    ``links``, so it reads as what is on disk now; the target stays unpinned
+    and is never ranked below HIGH, which is the conservative answer there.
+    ``follow_last``: resolve the final component too (a link's own target).
+    ``memo`` (link path -> where it resolves) is valid only while ``links``
+    and the filesystem are unchanged; the walker clears its copy whenever
+    ``link_targets`` changes. ``None`` too once :data:`_MAX_RELINK_HOPS`
+    links were followed: unknown, which ranks HIGH (CRITICAL if the lexical
+    reading is), the fail-closed answer for a lookup the kernel refuses too.
+    """
+    return _relinked_walk(raw, links, follow_last, [_MAX_RELINK_HOPS], {} if memo is None else memo)
+
+
+def _relinked_walk(
+    raw: str, links: Mapping[str, str], follow_last: bool, budget: list[int], memo: dict[str, str]
+) -> str | None:
+    """One :func:`_relinked_landing` walk; ``budget`` is shared by every
+    recursive call of it, so the total number of links followed is bounded."""
+    comps = [c for c in raw.split("/") if c not in ("", ".")]
+    cur = "/"
+    for k, comp in enumerate(comps):
+        if comp == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, comp)
+        if k == len(comps) - 1 and not follow_last:
+            return nxt
+        pointee = links.get(nxt)
+        if pointee is None:
+            try:
+                pointee = os.readlink(nxt) if os.path.islink(nxt) else None
+            except OSError:
+                pointee = None
+        if pointee is None:
+            # A directory, a file, or missing: missing reads as a directory.
+            cur = nxt
+            continue
+        resolved = memo.get(nxt)
+        if resolved is None:
+            budget[0] -= 1
+            if budget[0] < 0:
+                return None
+            resolved = _relinked_walk(
+                pointee if pointee.startswith("/") else os.path.join(cur, pointee),
+                links,
+                True,
+                budget,
+                memo,
+            )
+            if resolved is None:
+                return None
+            memo[nxt] = resolved
+        cur = resolved
+    return cur
+
+
+def _physical_pattern(pattern: str) -> tuple[str, bool]:
+    """``(pattern, unpinned)``: an absolute glob with its LITERAL directory
+    prefix resolved by :func:`physical_path` (bash's expansion opens
+    ``sl/../`` through the link, so ``~/other/sl/../.wor*`` matches
+    ``<repo>/.worktrees``). A ``..`` AFTER a glob component (``*/../x``) cannot
+    be pinned before expansion: the lexical form is kept for the CRITICAL
+    name checks and the result is ``unpinned``."""
+    parts = pattern.split("/")
+    cut = next((k for k, part in enumerate(parts) if _GLOB_CHARS.search(part)), len(parts))
+    prefix, rest = "/".join(parts[:cut]) or "/", parts[cut:]
+    if ".." in rest:
+        return os.path.normpath(pattern), True
+    resolved = physical_path(prefix)
+    if resolved is None:
+        return os.path.normpath(pattern), True
+    return os.path.normpath(os.path.join(resolved, *rest)), False
+
+
+def _absolute(text: str, cwd: str | None) -> tuple[str | None, bool]:
+    """``(absolute path, cwd_was_unknown)`` for a word's text: ``..`` resolved
+    physically where it can be (:func:`_physical`), lexically otherwise."""
+    path, unknown, _unpinned = _physical(text, cwd)
+    return path, unknown
+
+
+def _logical(text: str, cwd: str | None) -> str | None:
+    """A LOGICAL ``cd``'s destination: bash (and zsh, ``sh``) canonicalise
+    ``..`` lexically BEFORE ``chdir``, so ``cd ~/other/sl/..`` really lands in
+    ``~/other`` even when ``sl`` is a link (measured 2026-11-11, ``pwd -P``).
+    This is the one place a lexical collapse matches the kernel."""
+    if text.startswith("/"):
+        return os.path.normpath("/" + text.lstrip("/"))
+    return None if cwd is None else os.path.normpath(os.path.join(cwd, text))
 
 
 def _joined(text: str, cwd: str | None) -> str | None:
@@ -997,6 +1206,7 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     opaque = exp.opaque
     contained = opaque and exp.opaque_contained
     climbs = False
+    unpinned = False
     if opaque and OPAQUE_MARK in text:
         # S4: a ``..`` AFTER an unknowable component climbs by an unknown amount
         # from an unknown place; containment is void.
@@ -1023,14 +1233,15 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         literal = literal[: literal.rfind("/") + 1] if "/" in literal else ""
         if opaque:
             pattern = None
-        path, unknown = _absolute(literal or ".", state.cwd)
+        path, unknown, unpinned = _physical(literal or ".", state.cwd)
         if pattern is not None:
             base = state.cwd or ""
             pattern = pattern if pattern.startswith("/") else os.path.join(base, pattern)
-            pattern = os.path.normpath(pattern) if not unknown else None
+            pattern, pattern_unpinned = (None, False) if unknown else _physical_pattern(pattern)
+            unpinned = unpinned or pattern_unpinned
         raw_path = None
     else:
-        path, unknown = _absolute(text or ".", state.cwd)
+        path, unknown, unpinned = _physical(text or ".", state.cwd)
         raw_path = _joined(text or ".", state.cwd)
     is_temp = (
         exp.temp
@@ -1063,6 +1274,7 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         temp=is_temp,
         climbs=climbs,
         dotdot=".." in exp.text.split("/"),
+        unpinned=unpinned and not is_temp,
         raw_path=None if is_temp else raw_path,
     )
 
@@ -1349,6 +1561,28 @@ def _split_cluster(name: str, cluster: str) -> tuple[str, str | None]:
     return cluster, None
 
 
+def _sed_quiet(args: list[Expanded]) -> bool:
+    """Whether a sed command line asks for ``-n``/``--quiet``/``--silent``.
+
+    Review M1 (PR #3816): under GNU sed, ``-n -i ''`` runs the empty script
+    ``''`` with output suppressed and so truncates the next word's file in
+    place; the BSD ``-i ''`` reading must not apply then. Scans every option
+    word, a cluster up to its first script letter (``-ni``, ``-in``), and
+    stops at ``--``. A script word that merely looks like ``-n`` only makes
+    the reading stricter.
+    """
+    for w in args:
+        t = w.text
+        if t == "--":
+            return False
+        if t in ("--quiet", "--silent"):
+            return True
+        if t.startswith("-") and not t.startswith("--") and len(t) > 1:
+            if "n" in _split_cluster("sed", t[1:])[0]:
+                return True
+    return False
+
+
 @dataclass
 class _Feed:
     """What reaches a pipeline stage's stdin from the stages before it."""
@@ -1432,6 +1666,79 @@ def _group_closes(text: str) -> int:
             continue
         break
     return count
+
+
+#: A word that changes the shell's directory, or how a later ``cd`` resolves,
+#: anywhere in a ``for`` body (review round 2 m1 on PR #3816). Quote- and
+#: context-blind on purpose: a match only makes a relative glob pin opaque,
+#: so an ``echo cd`` over-blocking is the safe direction.
+_BODY_MOVES_RE = re.compile(
+    r"(?<![\w./~$-])(?:cd|pushd|popd)(?![\w./-])"
+    r"|(?<![\w./~$-])set(?:\s+\S+)*?\s+(?:[-+][A-Za-z]*P|[-+]o\b|\$)"
+)
+_LOOP_OPENERS = ("for", "while", "until", "select")
+#: Words that may sit in front of a loop keyword or ``done`` in command
+#: position (review round 3 m1). ``time`` takes an optional ``-p``.
+_LOOP_LEAD_WORDS = ("time", "!", "if", "then", "else", "elif", "do")
+
+
+def _command_word(text: str) -> str:
+    """The word in command position of a piece, past reserved lead words.
+
+    Strips leading ``time [-p]``, ``!``, ``if``, ``then``, ``else``, ``elif``,
+    ``do`` and group openers ``{``/``(`` (not ``((``, arithmetic), and trailing
+    ``)``/``}`` glued to the word (``done)`` closes a loop in a subshell).
+    """
+    head = text.strip()
+    while head:
+        word = head.split(None, 1)[0]
+        if word in _LOOP_LEAD_WORDS:
+            head = head[len(word) :].lstrip()
+            if word == "time" and head.split(None, 1)[:1] == ["-p"]:
+                head = head[2:].lstrip()
+        elif head[:1] in ("(", "{") and head[:2] != "((":
+            head = head[1:].lstrip()
+        else:
+            return word.rstrip(")}")
+    return ""
+
+
+def _for_body_moves(pieces: Sequence[tuple[str, bool, str]], index: int) -> bool:
+    """Whether the loop opened at ``pieces[index]`` changes directory in its body.
+
+    Review round 2 m1 (PR #3816): the use-site cwd check in
+    ``_Walker._for_glob_words`` sees the body ONCE, in order, with subshell
+    state restored, so two shapes real bash runs against the state root slip
+    past it: a ``cd`` AFTER the use (``do : > $f; cd ~/.local-operator;
+    done`` re-anchors ``$f`` from the second iteration on) and a ``cd`` in a
+    subshell (``do (cd ~/.local-operator && sed -i … $f)``). Rather than
+    model iterations and subshells, a relative glob is pinned only when the
+    body, nested loops and subshells included, holds no ``cd``/``pushd``/
+    ``popd``/``set -P`` at all.
+
+    The extent runs to the matching ``done`` (nested loops counted). Review
+    round 3 m1: ``done`` and the loop openers count only in COMMAND position
+    (:func:`_command_word`) — ``echo done`` is an argument, and a nested
+    ``time while …`` / ``then while …`` is a loop whose ``done`` must not
+    close this one. Either mistake ended the scan before a later ``cd``.
+    When no matching ``done`` is found the extent is unknown, so this fails
+    closed (``True``: do not pin).
+    """
+    depth = 0
+    body: list[str] = []
+    for text, _flag, _op in pieces[index:]:
+        word = _command_word(text)
+        if word in _LOOP_OPENERS:
+            depth += 1
+        elif word == "done":
+            depth -= 1
+        if not body and depth != 1:
+            return True  # this piece does not open a loop as parsed: fail closed
+        # The header (``for f in <words>``) is excluded: a list word is data.
+        body.append(text if body else "")
+        if depth <= 0:
+            return bool(_BODY_MOVES_RE.search("\n".join(body[1:])))
+    return True
 
 
 #: A STDOUT redirect: fd-less or ``1>``, or ``&>`` (R6-2). ``2>err.log`` only
@@ -1544,12 +1851,38 @@ class _Walker:
         #: Paths an earlier segment of THIS command made into a symlink (S7):
         #: what they point at is resolved only at run time.
         self.linked: set[str] = set()
+        #: Every path an earlier part of THIS command deleted, moved, copied or
+        #: wrote to, or created (lexical and resolved spellings, no trailing
+        #: ``/``). Any of them may be a symlink by the time a later word's
+        #: ``..`` is looked up (``rm -rf <pad>/d && mv <link> <pad>/d``), so a
+        #: ``..`` after one is unpinned (review R1-1, PR #3811); see
+        #: :meth:`_unpin_relinked`. ``linked`` is the ``ln -s`` half of the same
+        #: fact and stays separate because S7 also uses it on its own.
+        self.named: set[str] = set()
+        #: The ``ln -s``/``cp -s`` links an earlier part of THIS command made
+        #: with a LITERAL target: link path (as :func:`_relinked_landing`
+        #: spells it) -> target as written. Any later naming of the path drops
+        #: its entry (:meth:`_name`), so only the latest known link is used.
+        self.link_targets: dict[str, str] = {}
+        #: :func:`_relinked_landing` memo for the current ``link_targets``;
+        #: cleared on every change to it (:meth:`_set_link`, :meth:`_name`).
+        self._landing_memo: dict[str, str] = {}
         #: ``for VAR in a b c`` literal lists: a target using $VAR fans out.
         self.for_lists: dict[str, list[str]] = {}
         #: The loop variable each ``for_lists`` entry derives from (itself for
         #: the loop variable; ``VAR`` for ``D=…/$VAR`` inside the body), so one
         #: iteration rewrites every related reference together.
         self.for_roots: dict[str, str] = {}
+        #: ``for VAR in <glob> …`` bindings, by the key inside the variable's
+        #: ``FOR_GLOB_MARK`` value: one ``(absolute text, absolute pattern)``
+        #: per list word (``pattern`` is ``None`` for a literal word), plus the
+        #: cwd of the ``for`` itself and whether every word was absolute. Bash
+        #: expands a relative glob to RELATIVE words, so the pin holds only
+        #: where the cwd still equals the loop's (review B1, PR #3816).
+        self.for_globs: dict[str, tuple[list[tuple[str, str | None]], str | None, bool]] = {}
+        #: Whether the ``for`` being walked changes directory anywhere in its
+        #: body; set per piece by ``walk`` from :func:`_for_body_moves`.
+        self.for_body_moves = False
 
     # -- state isolation (R4) ----------------------------------------------------
     def _save(self) -> _Snapshot:
@@ -1652,6 +1985,8 @@ class _Walker:
                 stages=[p[0] for p in pieces[start:index]],
                 earlier=[item for item in produced_so_far if not item.provably_sunk()],
             )
+            # Read by ``_for`` when this piece opens a ``for`` (review round 2 m1).
+            self.for_body_moves = _for_body_moves(pieces, index)
             if isolated:
                 snap = self._save()
                 self._segment(
@@ -1854,7 +2189,14 @@ class _Walker:
                     # are reads either way.
                     self._add(dest, "append", name)
                 else:
-                    self._add_overwrite_dest(dest, name, operands[:-1])
+                    self._add_overwrite_dest(dest, name, operands[:-1], flags)
+                if (
+                    name != "install"
+                    and len(operands) == 2
+                    and (_has_short(flags, "s") or "--symbolic-link" in flags)
+                ):
+                    # ``cp -s SRC DEST`` makes DEST a symlink to SRC as written.
+                    self._record_link(dest, operands[0], flags)
             return
         if name == "rsync":
             self._rsync(args)
@@ -1911,7 +2253,10 @@ class _Walker:
         # ``e`` such as ``-pe``), EVERY operand is a file; otherwise the
         # first operand is the script.
         files: list[Expanded] = []
+        #: Words only GNU sed's reading of ``-i ''`` makes files (review M1).
+        gnu_files: list[Expanded] = []
         script_by_flag = False
+        quiet = name == "sed" and _sed_quiet(args)
         k = 0
         while k < len(args):
             t = args[k].text
@@ -1937,6 +2282,39 @@ class _Walker:
                     script_by_flag = True
                     k += 1 if attached else 2
                     continue
+                if (
+                    # Review M1 (PR #3816): never ``gsed``, which is always GNU,
+                    # and never with ``-n``/``--quiet``/``--silent``: GNU's
+                    # ``-i`` takes only an ATTACHED suffix, so there ``''`` is
+                    # the script, the next word a file, and ``-n`` with an empty
+                    # script truncates it (``gsed -n -i '' config.yml``).
+                    name == "sed"
+                    and not quiet
+                    and _flags.endswith("i")
+                    and k + 1 < len(args)
+                    and args[k + 1].text == ""
+                    and not args[k + 1].opaque
+                    and not args[k + 1].empty
+                ):
+                    # BSD sed (macOS ``sed``): ``-i ''`` is ``-i`` with an EMPTY
+                    # backup suffix, so the '' is not the script and the word
+                    # after it is not a file. Read as GNU instead, '' would be
+                    # the script, which edits nothing: either way the next word
+                    # is never rewritten, so it is never a target. Before,
+                    # ``sed -i '' '/"$k"/d' f`` ranked the SCRIPT as a path (an
+                    # unset ``$k`` made it an "expanded empty" HIGH), and with
+                    # ``-e`` the '' itself resolved to the cwd as an overwrite.
+                    # Only a literal '' qualifies: ``-i "$SUF"`` may hold a name.
+                    # ``sed`` is GNU on Linux, though, where the next word IS a
+                    # file: rank it under that reading too, max of both. It is
+                    # ``critical_only`` because without ``-n`` GNU rewrites it
+                    # unchanged, so only a protected path (where even that is
+                    # forbidden) should move the verdict; a script word read
+                    # as a path must not re-create the HIGH this skip removed.
+                    if k + 2 < len(args) and not args[k + 2].text.startswith("-"):
+                        gnu_files.append(args[k + 2])
+                    k += 2
+                    continue
                 k += 1
                 continue
             if t.startswith("--"):
@@ -1944,8 +2322,17 @@ class _Walker:
                 continue
             files.append(args[k])
             k += 1
-        for w in files if script_by_flag else files[1:]:
+        chosen = files if script_by_flag else files[1:]
+        for w in chosen:
             self._add(w, "overwrite", name)
+        chosen_ids = {id(w) for w in chosen}
+        for w in gnu_files:
+            if id(w) in chosen_ids:
+                continue  # both readings already agree it is a file
+            before = len(self.result.targets)
+            self._add(w, "overwrite", name)
+            for target in self.result.targets[before:]:
+                target.critical_only = True
         return
 
     # -- program handlers ------------------------------------------------------
@@ -2187,8 +2574,16 @@ class _Walker:
                 # later relative words HIGH) when it cannot be pinned.
                 raw = _joined(w.text, st.cwd)
                 path = kernel_path(raw) if raw is not None else None
+                # A component an earlier part of this command re-linked is
+                # followed at RUN time, not as it is now (review round 2,
+                # PR #3811): unknown cwd, so later relative words rank HIGH.
+                if raw is not None and self._names_any(
+                    {os.path.normpath(raw[: m.start()] or "/") for m in re.finditer(r"/|$", raw)}
+                ):
+                    path = None
             else:
-                path, _unknown = _absolute(w.text, st.cwd)
+                # Logical: lexical, as the shell itself canonicalises it.
+                path = _logical(w.text, st.cwd)
         try:
             searchable = (
                 path is not None
@@ -2239,6 +2634,51 @@ class _Walker:
         if not values:
             st.env[var] = OPAQUE_MARK
             return
+        if (
+            st.cwd is not None
+            and any(v.pattern is not None for v in values)
+            and len(values) <= _MAX_FOR_COMBINATIONS
+            and all(not v.opaque and not v.empty and CREDENTIAL_MARK not in v.text for v in values)
+        ):
+            # FIELD CASE (2026-11-11, session a85e507ffdfa): ``for f in
+            # src/i18n/catalogues/*/ui.teamBridge.json; do sed -i '' '/…/d' $f;
+            # done`` in the session's own worktree bound ``$f`` to OPAQUE_MARK,
+            # so the edit's target collapsed onto the worktree ROOT and went
+            # to the judge as an opaque delete there. Bash iterates the glob's
+            # matches (or the pattern itself when nothing matches), so
+            # ``CMD $f`` inside the body touches exactly what ``CMD <glob>``
+            # would: the target IS that glob, ranked by the existing glob rules
+            # (CRITICAL when it reaches a protected name, LOW for an ordinary
+            # match set). Resolved against the cwd of the ``for`` itself, as
+            # bash expands it there. But bash binds ``$f`` to the RELATIVE match
+            # (``config.yml``), so a ``cd``/``pushd`` in the body re-anchors it:
+            # ``for f in *.yml; do cd ~/.local-operator && sed -i … $f`` edits
+            # the state root's config.yml (review B1, reproduced in real bash).
+            # The loop's cwd is recorded so ``_for_glob_words`` pins only where
+            # the use site's cwd still equals it, or every word was absolute.
+            key = str(len(self.for_globs))
+            entries: list[tuple[str, str | None]] = []
+            for v in values:
+                text = v.text if v.text.startswith("/") else os.path.join(st.cwd, v.text)
+                pattern = None
+                if v.pattern is not None:
+                    pattern = (
+                        v.pattern
+                        if v.pattern.startswith("/")
+                        else os.path.join(_glob_escape(st.cwd), v.pattern)
+                    )
+                entries.append((text, pattern))
+            # A relative word is never pinned when the body moves directory
+            # ANYWHERE (review round 2 m1): ``absolute`` is then the only way
+            # to pin, and a relative glob stays opaque at every use site.
+            absolute = all(v.text.startswith("/") for v in values)
+            if not absolute and self.for_body_moves:
+                entries_cwd: str | None = None
+            else:
+                entries_cwd = st.cwd
+            self.for_globs[key] = (entries, entries_cwd, absolute)
+            st.env[var] = FOR_GLOB_MARK + key + OPAQUE_MARK
+            return
         if any(v.opaque or v.pattern is not None for v in values):
             st.env[var] = (
                 CREDENTIAL_MARK if any(CREDENTIAL_MARK in v.text for v in values) else OPAQUE_MARK
@@ -2267,6 +2707,30 @@ class _Walker:
         path, _ = _absolute(link.text, self.state.cwd)
         if path is not None:
             self.linked.add(path.rstrip("/"))
+        # Provenance (q1029 incident, remote node 0.101.44): a session that
+        # made ``ln -s <pad> ~/q1029`` could not remove that link later. Only
+        # the plain two-operand form names the link itself; ``-t DIR`` or
+        # several sources put links INSIDE a directory, and a trailing slash
+        # asks ln to place the link inside an existing directory. The ledger
+        # re-checks after the call that the link really appeared there
+        # (``provenance.commit_creations``), so a dereferenced directory
+        # destination records nothing.
+        if (
+            len(operands) == 2
+            and not _cluster_value(args, "t", "--target-directory")
+            and not link.text.endswith("/")
+        ):
+            self._create("symlink", self._literal_dir(link))
+        # AFTER the provenance record, never before: ``_create`` calls
+        # ``_name``, which drops any ``link_targets`` entry for the path it
+        # names. Run second, it erased the target ``_record_link`` had just
+        # stored, so ``ln -sfn <secrets> PAD/l && rm -f PAD/l/../config.yml``
+        # lost its re-linked landing and fell from CRITICAL to HIGH
+        # (convergence of PR #3811 onto #3793). ``_record_link`` names the
+        # path itself before storing, so this order invalidates the stale
+        # target and keeps the new one.
+        if len(operands) == 2:
+            self._record_link(link, operands[0], flags)
 
     def _find(self, args: list[Expanded]) -> None:
         roots: list[Expanded] = []
@@ -2314,10 +2778,15 @@ class _Walker:
             self._add_stdin("mv")
         if target_dir is not None:
             sources = operands
+            if target_dir.text.startswith("--target-directory="):
+                value = target_dir.text.split("=", 1)[1]
+                target_dir = None if target_dir.opaque else Expanded(text=value)
+            if target_dir is not None:
+                self._add_into_dir(target_dir, "mv", sources)
         else:
             sources = operands[:-1]
             if len(operands) >= 2:
-                self._add_overwrite_dest(operands[-1], "mv", sources)
+                self._add_overwrite_dest(operands[-1], "mv", sources, flags)
         for w in sources:
             self._add(w, "move", "mv")
 
@@ -2488,6 +2957,7 @@ class _Walker:
     def _create(self, kind: str, path: str | None) -> None:
         if path is not None:
             self.result.created.append(Creation(kind=kind, path=path))
+            self._name(path)
 
     def _mkdir(self, args: list[Expanded]) -> None:
         operands, _flags = _operands(args, _MKDIR_VALUE_FLAGS)
@@ -2573,8 +3043,23 @@ class _Walker:
     def _add(self, exp: Expanded, op: str, program: str, *, selected: bool = False) -> None:
         if exp.vanished and not exp.empty:
             return
+        pinned = self._for_glob_words(exp) if op in ("overwrite", "append") else None
+        if pinned is not None:
+            # ``$f`` from ``for f in <glob>``: one target per list word, each
+            # the glob (or literal) bash iterates — never the opaque cwd.
+            # WRITES ONLY (in-place edits and redirections here; a copy's
+            # overwritten destination is folded the same way in
+            # ``_add_overwrite_dest``):
+            # a delete/move keeps the opaque reading, because a glob DELETE
+            # ranks by rules that are looser than the opaque judge for some
+            # shapes (``rm -rf .worktrees/*`` ranks LOW today, foreign trees
+            # included), and this fix must not widen what a loop may remove.
+            for word in pinned:
+                self._add(word, op, program, selected=selected)
+            return
         target = _target(exp, op, program, self.state)
         target.selected = selected
+        self._unpin_relinked(target, exp.text)
         if target.path is not None:
             stripped = target.path.rstrip("/") or "/"
             if any(stripped == ln or stripped.startswith(ln + "/") for ln in self.linked):
@@ -2595,9 +3080,195 @@ class _Walker:
             target.opaque_contained = False
             return
         for _roots, values in iterations:
-            extra = _target(_fan_out(exp, values), op, program, self.state)
+            fanned = _fan_out(exp, values)
+            extra = _target(fanned, op, program, self.state)
             extra.selected = selected
+            self._unpin_relinked(extra, fanned.text)
             self.result.targets.append(extra)
+
+    def _unpin_relinked(self, target: Target, text: str) -> None:
+        """Mark ``target`` unpinned when a component before one of its ``..``
+        was named earlier in this command, then remember ``target`` itself.
+
+        WHY. ``physical_path`` resolves ``..`` against the filesystem as it is
+        at CHECK time, but the command runs its parts in order: in
+        ``ln -sfn ~/.local-operator/secrets <pad>/lnk && rm -f <pad>/lnk/../config.yml``
+        the ``rm`` follows the NEW link, so the kernel deletes the state root's
+        ``config.yml`` while the check-time lookup (``lnk`` -> ``<pad>/build``)
+        reads ``<pad>/config.yml`` — LOW (review R1-1, PR #3811). The same goes
+        for a path an earlier part deleted (and so may recreate), moved or
+        copied onto, or created. Where the new link will point is often
+        knowable, but not in general (``mv``, ``cp -a`` of a link, variables),
+        so the target is ``unpinned``: ``classify`` keeps any CRITICAL its
+        lexical or check-time reading earns and otherwise ranks it HIGH, never
+        LOW. Only a component BEFORE a ``..`` matters — without a ``..`` the
+        path is named through the link itself and S7 (``_add``) covers it.
+        """
+        raw = _joined(text, self.state.cwd)
+        if raw and (self.linked or self.named) and ".." in raw.split("/"):
+            parts = raw.split("/")
+            last = max(k for k, part in enumerate(parts) if part == "..")
+            prefixes = {
+                os.path.normpath("/" + "/".join(parts[:k]).lstrip("/"))
+                for k in range(1, last + 1)
+                if parts[k - 1] not in ("", ".", "..")
+            }
+            if self._names_any(prefixes):
+                target.unpinned = True
+        if target.unpinned and target.raw_path is not None:
+            landing = self._landing(target.raw_path)
+            if landing is not None and landing != target.path:
+                target.landings = (landing,)
+        for spelled in (target.path, os.path.normpath(raw) if raw else None):
+            if spelled:
+                self._name(spelled)
+
+    def _name(self, path: str) -> None:
+        """Record that an earlier part of this command named ``path`` (see
+        ``named``); it may no longer be the link ``link_targets`` recorded."""
+        path = path.rstrip("/") or "/"
+        self.named.add(path)
+        if not self.link_targets:
+            # Nothing to invalidate: skip the walk, which only maps ``path``
+            # to its ``link_targets`` key (review R3-2, PR #3811).
+            return
+        key = self._landing(path)
+        for stale in (path, key):
+            if stale is not None and self.link_targets.pop(stale, None) is not None:
+                self._landing_memo.clear()
+
+    def _landing(self, path: str, *, follow_last: bool = False) -> str | None:
+        """:func:`_relinked_landing` against this command's ``link_targets``,
+        memoised until they change."""
+        return _relinked_landing(
+            path, self.link_targets, follow_last=follow_last, memo=self._landing_memo
+        )
+
+    def _set_link(self, key: str, pointee: str) -> None:
+        self.link_targets[key] = pointee
+        self._landing_memo.clear()
+
+    def _names_any(self, prefixes: set[str]) -> bool:
+        """Whether an earlier part of this command named (or linked) any of
+        ``prefixes``, compared by spelling AND by physical location.
+
+        WHY. After ``cd -P`` the cwd is the realpath (``/private/var/…`` on
+        macOS), while a path named before it kept the spelling it was written
+        with (``/var/…``): ``ln -sfn <state> <pad>/lnk && cd -P <pad> &&
+        cd -P lnk`` missed the re-link and ranked a later delete LOW (review
+        R3-3, PR #3811). The final component is kept as spelled — resolving it
+        would follow the very link in question.
+        """
+        named = self.linked | self.named
+        if not named or not prefixes:
+            return False
+        if prefixes & named:
+            return True
+
+        def physical(p: str) -> str:
+            head, tail = os.path.split(p)
+            try:
+                return os.path.join(os.path.realpath(head), tail)
+            except OSError:
+                return p
+
+        return bool({physical(p) for p in prefixes} & {physical(n) for n in named})
+
+    def _record_link(self, link: Expanded, pointee: Expanded, flags: list[str]) -> None:
+        """Remember ``link -> pointee`` for :func:`_relinked_landing` when both
+        words are literal and ``link`` itself becomes the link: not ``-t``, and
+        not an existing directory unless ``-n``/``-T`` (otherwise the link is
+        made INSIDE it). Anything else stays unknown, which ranks HIGH."""
+        path, _ = _absolute(link.text, self.state.cwd)
+        if path is None:
+            return
+        self._name(path)
+        literal = all(
+            not w.opaque and w.pattern is None and not w.empty and w.text for w in (link, pointee)
+        )
+        no_deref = _has_short(flags, "nT") or bool(
+            {"--no-dereference", "--no-target-directory"} & set(flags)
+        )
+        if not literal or any(f.startswith(("-t", "--target-directory")) for f in flags):
+            return
+        if os.path.isdir(path) and not no_deref:
+            return
+        key = self._landing(path)
+        if key is not None:
+            self._set_link(key, pointee.text)
+
+    def _link_state(self, src: Expanded) -> tuple[bool, str | None]:
+        """``(known, link target)`` of what ``mv``/``cp`` of ``src`` puts at
+        its destination: a link to ``target``, or (``target`` ``None``) not a
+        link. Unknown for a non-literal source, one missing now (something
+        unmodelled may create it), or one this command already changed in a
+        way ``link_targets`` does not record.
+
+        ``cp`` without ``-P``/``-a``/``-R`` copies what a link points at, not
+        the link; treating it as a link anyway only ever reads the riskier
+        landing (a copied link-to-directory without ``-R`` fails anyway).
+        """
+        if src.opaque or src.pattern is not None or src.empty or not src.text:
+            return False, None
+        path, _ = _absolute(src.text, self.state.cwd)
+        if path is None:
+            return False, None
+        path = path.rstrip("/") or "/"
+        key = self._landing(path)
+        if key is None:
+            return False, None
+        if key in self.link_targets:
+            return True, self.link_targets[key]
+        if self._names_any({path, key}):
+            return False, None
+        try:
+            if os.path.islink(key):
+                return True, os.readlink(key)
+            return os.path.lexists(key), None
+        except OSError:
+            return False, None
+
+    def _carry_link(self, dest: str, state: tuple[bool, str | None]) -> None:
+        """Record at ``dest`` the link ``state`` a move/copy put there.
+
+        WHY (review R3-1, PR #3811). Naming the destination dropped any link
+        it held, so ``ln -sfn <state>/secrets <pad>/a && mv <pad>/a <pad>/b &&
+        rm -f <pad>/b/../config.yml`` read ``b`` as a fresh directory, and the
+        refusal named ``<pad>/config.yml`` while rename(2) keeps the link and
+        the kernel removes the state root's ``config.yml``. The target string
+        moves as written, so a relative one resolves from the new place, as
+        the kernel does. An unknown link state records nothing: the ``..``
+        after ``dest`` is already unpinned (``dest`` is named), and an unpinned
+        ``..`` landing lexically in session state is CRITICAL regardless.
+        """
+        known, pointee = state
+        key = self._landing(dest)
+        if known and pointee is not None and key is not None:
+            self._set_link(key, pointee)
+
+    def _for_glob_words(self, exp: Expanded) -> list[Expanded] | None:
+        """The list words a whole-word ``$VAR`` bound by a glob ``for`` stands for.
+
+        Only when the word is EXACTLY that one value (``$f``, ``"$f"``,
+        ``${f}``): a prefix, suffix or second expansion leaves it opaque, the
+        fail-closed reading it had before.
+        """
+        text = exp.text
+        if not text.startswith(FOR_GLOB_MARK) or not text.endswith(OPAQUE_MARK):
+            return None
+        key = text[len(FOR_GLOB_MARK) : -len(OPAQUE_MARK)]
+        binding = self.for_globs.get(key)
+        if binding is None or exp.substitutions or exp.empty or exp.temp:
+            return None
+        entries, loop_cwd, absolute = binding
+        # ``loop_cwd`` is ``None`` when the body moves directory anywhere
+        # (review round 2 m1): a relative glob is then never pinned.
+        if not absolute and (loop_cwd is None or self.state.cwd != loop_cwd):
+            # Review B1: a relative match moved with a ``cd``/``pushd`` (or an
+            # unknowable one, cwd ``None``) in the body; the pin would name
+            # the wrong file. The opaque reading is the fail-closed one.
+            return None
+        return [Expanded(text=t, pattern=p, opaque_contained=False) for t, p in entries]
 
     def _iterations(self, exp: Expanded) -> list[tuple[tuple[str, ...], dict[str, str]]] | None:
         """``(loop vars, {ref name: value})`` for every iteration after the first.
@@ -2662,24 +3333,67 @@ class _Walker:
         ]
 
     def _add_overwrite_dest(
-        self, exp: Expanded, program: str, sources: list[Expanded] | None = None
+        self,
+        exp: Expanded,
+        program: str,
+        sources: list[Expanded] | None = None,
+        flags: list[str] | None = None,
     ) -> None:
+        pinned = self._for_glob_words(exp)
+        if pinned is not None:
+            # Review m2 (PR #3816): ``for f in ~/.local-operator/*.yml; do cp x
+            # $f`` hit the opaque early return below and named NOTHING (LOW),
+            # while the direct ``cp x ~/.local-operator/config.yml`` is
+            # CRITICAL. The destination is overwritten, so it takes the same
+            # pin as a redirection; never looser, since before it named nothing.
+            for word in pinned:
+                self._add(word, "overwrite", program)
+            return
         if exp.opaque or exp.pattern is not None:
             return
         path, _ = _absolute(exp.text, self.state.cwd)
-        if path is not None and os.path.isdir(path):
-            # Moving/copying INTO a directory replaces nothing named here, but
-            # it CREATES ``dir/<source name>``: recorded as an append so a
-            # fake session directory moved into ``<state>/sessions/`` is ranked
-            # (``classify._evidence_reason``) and nothing else changes.
-            for src in sources or ():
-                if src.opaque or src.pattern is not None or not src.text:
-                    continue
-                name = os.path.basename(src.text.rstrip("/"))
-                if name:
-                    self._add(Expanded(text=os.path.join(path, name)), "append", program)
+        no_target_dir = _has_short(flags or [], "T") or "--no-target-directory" in (flags or [])
+        # A destination this command itself made a link to an existing
+        # directory stays that link: the move lands INSIDE it (review R3-1).
+        resolved = None if path is None else self._landing(path, follow_last=True)
+        into = not no_target_dir and resolved is not None and os.path.isdir(resolved)
+        kept_link = (
+            into
+            and path is not None
+            and self._landing(path.rstrip("/") or "/") in self.link_targets
+        )
+        if path is not None and not kept_link:
+            # The destination may BECOME a link (``mv <link> <dest>`` after an
+            # earlier ``rm -rf <dest>``): see ``_unpin_relinked``.
+            self._name(path)
+        if path is not None and into:
+            self._add_into_dir(exp, program, sources or [])
             return
+        states = [self._link_state(s) for s in sources or ()]
         self._add(exp, "overwrite", program)
+        if path is not None and len(states) == 1:
+            self._carry_link(path.rstrip("/") or "/", states[0])
+
+    def _add_into_dir(self, exp: Expanded, program: str, sources: list[Expanded]) -> None:
+        """``mv``/``cp`` of ``sources`` INTO the directory ``exp``."""
+        if exp.opaque or exp.pattern is not None:
+            return
+        path, _ = _absolute(exp.text, self.state.cwd)
+        if path is None:
+            return
+        # Moving/copying INTO a directory replaces nothing named here, but
+        # it CREATES ``dir/<source name>``: recorded as an append so a
+        # fake session directory moved into ``<state>/sessions/`` is ranked
+        # (``classify._evidence_reason``) and nothing else changes.
+        for src in sources:
+            if src.opaque or src.pattern is not None or not src.text:
+                continue
+            name = os.path.basename(src.text.rstrip("/"))
+            if name:
+                state = self._link_state(src)
+                landed = os.path.join(path, name)
+                self._add(Expanded(text=landed), "append", program)
+                self._carry_link(landed, state)
 
     def _add_stdin(self, program: str) -> None:
         self.result.targets.append(
@@ -3639,7 +4353,9 @@ def _mention_path(raw: str, home: str, cwd: str | None) -> str | None:
         if cwd is None:
             return None
         text = os.path.join(cwd, text)
-    return os.path.normpath(text)
+    # Physically where it can be pinned (a ``..`` after a link lands where the
+    # kernel puts it); the lexical spelling otherwise, as before.
+    return (None if _GLOB_CHARS.search(text) else physical_path(text)) or os.path.normpath(text)
 
 
 #: Anything that can make ``**`` recursive for this command (review round 9,

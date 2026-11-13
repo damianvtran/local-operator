@@ -40,6 +40,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import contextvars
 import copy
 import hmac
 import inspect
@@ -127,6 +128,9 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     INPUT_MODE_CAPABILITY,
     LIVE_INBOX_CAPABILITY,
+    MESH_PEER_MESSAGE_CAPABILITY,
+    MESH_SENDER_DEVICE_ID_KEY,
+    MESH_SENDER_DEVICE_NAME_KEY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
@@ -1341,6 +1345,59 @@ _SWITCH_OPS = frozenset({"set_model", "set_effort"})
 #: among themselves, which is the lane's first guarantee.
 _SWITCH_SLASH_COMMANDS = frozenset({"model", "effort", "fast"})
 
+#: DEFERRED SETTINGS ARE ACCEPTED IMMEDIATELY. A ``defer_ok`` switch is acked
+#: ``queued`` without waiting on the session loop (``_run_deferrable_switch``),
+#: idle or busy — once its hop is QUEUED there, never once it has run: an
+#: earlier 1.5 s inline window, measured at busy medians of 528–796 ms,
+#: failed the operator's instant-acceptance requirement. Application and
+#: outcome delivery stay ordered on the switch lane; the outcome travels as
+#: ``settings_result``/``settings_results`` state, never on the reply. A caller
+#: that must carry a refusal on its reply (the relay's remote create) simply
+#: does not send ``defer_ok``.
+
+
+@dataclass
+class _DeferredReply:
+    """Suppress the body reply after the immediate queued receipt.
+
+    The receipt task sends acceptance first. Its child body inherits this gate
+    so deep dispatch/error arms cannot emit a second reply for the same req.
+    State/event frames are not replies and remain unaffected.
+    """
+
+    conn: Any
+    req: Any
+    sent: bool = False
+    queued: bool = False
+    #: Set when the body reaches its handle call (``_settings_request_kw``),
+    #: which is what lets the ``queued`` ack trail the session-loop hop it
+    #: promises (see ``RuntimeServer._run_deferrable_switch``). Created lazily
+    #: on the runtime loop that owns the gate.
+    dispatched: asyncio.Event | None = None
+
+
+#: The ``_DeferredReply`` of the switch body running in THIS task context, read
+#: by ``_send_to``. A context variable rather than a per-connection map because
+#: the body's reply is written from deep inside ``_on_request``'s many arms; the
+#: deferred body task sets it once and every send it makes sees it, while no
+#: other task (state pushes, other connections) can.
+_DEFERRED_REPLY: contextvars.ContextVar[_DeferredReply | None] = contextvars.ContextVar(
+    "lop_deferred_switch_reply", default=None
+)
+
+#: Reply ops ``_DeferredReply`` gates. Event and state frames are never replies.
+_REPLY_OPS = frozenset({"ack", "result", "error"})
+
+
+def _defers_reply(frame: dict[str, Any]) -> bool:
+    """Whether a switch frame opted in to a ``queued`` ack (``defer_ok``).
+
+    Strictly ``True`` and a present ``req``: without a ``req`` there is nothing
+    to answer, and anything other than the literal ``true`` keeps the historic
+    "answer when it lands" contract byte-for-byte.
+    """
+    return frame.get("defer_ok") is True and frame.get("req") is not None
+
 
 def _is_switch_frame(frame: Any) -> bool:
     """Whether ``frame`` is a model/effort switch that rides the switch lane.
@@ -1673,6 +1730,73 @@ _DEVICE_CERT_TTL_S = 300.0
 _MAX_CACHED_DEVICE_CERTS = 32
 
 
+def _settings_request_kw(fn: Any, frame: dict[str, Any]) -> dict[str, Any]:
+    """``{"request_id": ...}`` for a handle method that publishes switch outcomes.
+
+    Empty unless the frame carries a non-blank string ``request_id`` AND the
+    handle accepts the keyword (``_accepts_kw``): a TUI host, an older owner or
+    a test double keeps the exact call it always received, which is what keeps
+    the no-``request_id`` path byte-for-byte unchanged.
+    """
+    # THE DISPATCH MARK of a deferred switch body. Every switch arm evaluates
+    # this helper as the LAST argument of the handle call, with nothing awaited
+    # between it and the call, so once it runs the body goes on synchronously
+    # into the handle until its first suspension — and for the serving handle
+    # that suspension is AFTER ``run_coroutine_threadsafe`` has queued the
+    # session-loop hop. The ack waiter wakes only when this task yields, so
+    # the hop is already queued by the time ``queued`` is written. A non-
+    # deferred call has no gate and is untouched.
+    gate = _DEFERRED_REPLY.get()
+    if gate is not None and gate.dispatched is not None:
+        gate.dispatched.set()
+    request_id = frame.get("request_id")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return {}
+    if not _accepts_kw(fn, "request_id"):
+        return {}
+    return {"request_id": request_id}
+
+
+def _switch_reports_outcome(handle: Any, frame: dict[str, Any]) -> bool:
+    """Whether the handle method this switch frame reaches publishes its outcome.
+
+    WHY (PR #3697 review R1-M2, TUI-hosted owners). A ``defer_ok`` switch is
+    acked ``queued`` BEFORE its body runs, so the only place its refusal can
+    reach the requester is the ``settings_result(s)`` the body publishes for its
+    ``request_id``. A handle whose switch methods do not take ``request_id``
+    (the TUI host, ``mobile.tui_handle.TuiSessionHandle``, which applies a
+    switch through the app's slash commands and so cannot tell a refusal from
+    a landing; an older owner; a test double) would publish nothing, and the
+    early ack would read as a silent success. Such a switch keeps the historic
+    synchronous reply instead — slower while the owner is busy, never false.
+
+    Mirrors the method choice in ``_on_request``'s ``set_model``/``set_effort``/
+    ``slash_result`` arms; probed with the same ``_accepts_kw`` that decides
+    whether ``request_id`` is passed, so "acked queued" and "will publish" can
+    never disagree.
+
+    Independent ``if`` arms, NOT an ``elif`` chain: an ``elif`` is nested in the
+    previous arm's ``orelse``, so the authority-seam pin
+    (``test_the_authority_op_set_matches_the_dispatch_source``), which walks
+    each ``if op == ...`` body, would credit ``set_model``/``set_effort`` with
+    the ``slash_result`` arm's ``run_slash_authoritative`` probe. Kept flat so
+    each op is attributed only what its own arm touches: a switch never reaches
+    the slash sink, and this function only probes, never calls.
+    """
+    op = frame.get("op")
+    target: Any = None
+    if op == "set_model":
+        if frame.get("offered_only") is True or frame.get("effort"):
+            target = getattr(handle, "set_model_effort", None) or getattr(handle, "set_model", None)
+        else:
+            target = getattr(handle, "set_model", None)
+    if op == "set_effort":
+        target = getattr(handle, "set_effort", None)
+    if op == "slash_result":
+        target = getattr(handle, "run_slash_authoritative", None)
+    return callable(target) and _accepts_kw(target, "request_id")
+
+
 def _accepts_kw(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes the keyword ``name``.
 
@@ -1989,6 +2113,40 @@ class _ConnectionAuthority:
 
     locality: ClientLocality = "local"
     capabilities: frozenset[str] = frozenset()
+    #: ``{"device_id", "name"}`` of the device a RELAYED connection speaks for,
+    #: from the auth frame the owner's own relay wrote off its authenticated link
+    #: (``relay._peer_block``) — empty for a local dial. ``peer_message`` stamps it
+    #: onto the card (``_stamp_peer_sender``) so the receiver knows which device
+    #: wrote and can answer with ``send peer=``.
+    peer: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _stamp_peer_sender(raw: Any, authority: "_ConnectionAuthority") -> dict[str, Any]:
+    """The sender dict a ``peer_message`` card carries, device stamped by the OWNER.
+
+    The frame's sender is ADVISORY (a session id and name the sending side read
+    off its own registry): it is display only. The device is a different kind of
+    fact — it decides where a reply goes — so it comes from the connection, never
+    the frame. Any frame-supplied device key is dropped first, for a local dial
+    too (a local caller must not be able to dress a note up as a mesh peer's),
+    and a remote connection then gets the link's identity plus the
+    ``remote_origin`` stamp a relayed ``prompt`` already carries. ``pid`` and
+    ``cwd`` of a remote sender name things on ANOTHER machine, which nothing
+    here can act on, so they are dropped rather than shown as if local.
+    """
+    sender = dict(raw) if isinstance(raw, Mapping) else {}
+    sender.pop(MESH_SENDER_DEVICE_ID_KEY, None)
+    sender.pop(MESH_SENDER_DEVICE_NAME_KEY, None)
+    if authority.locality == "local":
+        return sender
+    sender.pop("pid", None)
+    sender.pop("cwd", None)
+    sender["remote_origin"] = True
+    device_id = str(authority.peer.get("device_id") or "")
+    if device_id:
+        sender[MESH_SENDER_DEVICE_ID_KEY] = device_id
+        sender[MESH_SENDER_DEVICE_NAME_KEY] = str(authority.peer.get("name") or "")
+    return sender
 
 
 #: What a dispatch under no connection at all is treated as: the pre-existing
@@ -2300,6 +2458,11 @@ class _ClientConn:
     #: hold them, while still running in order among themselves — see
     #: :data:`_SWITCH_OPS`.
     switch_chain: asyncio.Task[None] | None = None
+    #: Set once the most recently admitted ``defer_ok`` switch on this
+    #: connection has written its ``queued`` ack. A later deferred switch
+    #: acks only after it, so acks stay in send order even though each ack
+    #: now waits for its own body to dispatch (``_run_deferrable_switch``).
+    last_deferred_ack: asyncio.Event | None = None
     #: Strong references to those tasks. A bare ``create_task`` can be collected
     #: mid-await, which would leave an op half-run and its reply never written —
     #: the same reason ``RuntimeServer._event_sends`` exists.
@@ -2826,6 +2989,15 @@ class RuntimeServer:
                 # drop the id cannot dedupe that retry -- so an owner that does
                 # not take the keyword must not advertise it.
                 + ([PEER_MESSAGE_ID_CAPABILITY] if receives_message_id(handle) else [])
+                # A MESH ``send`` MAY USE THE MAILBOX, gated on the handle that
+                # can receive one at all: the dispatch below stamps the relayed
+                # device on every remote ``peer_message``. See
+                # ``MESH_PEER_MESSAGE_CAPABILITY`` for why the sender gates on it.
+                + (
+                    [MESH_PEER_MESSAGE_CAPABILITY]
+                    if callable(getattr(handle, "receive_peer_message", None))
+                    else []
+                )
                 # THE LIVE INBOX DRAIN, gated on the flag the runtime child sets
                 # when it starts the watcher (``process._watch_live_inbox``): a
                 # sender that sees it may queue a message to ``inbox.jsonl``
@@ -3077,6 +3249,13 @@ class RuntimeServer:
         # the revision also invalidates repaints built before a newer switch.
         self._switch_refresh_task: asyncio.Task[None] | None = None
         self._switch_refresh_dirty = False
+        #: Switches acked ``queued`` (``defer_ok``) whose body is still waiting
+        #: for the session loop. Held at SERVER level, not on the connection:
+        #: a queued switch is a promise made to the user, and the desktop drops
+        #: and redials its socket freely, so the socket closing must not unpick
+        #: it. Drained by cancellation in ``_shutdown_impl`` only. See
+        #: ``_run_deferrable_switch``.
+        self._deferred_switches: set[asyncio.Task[None]] = set()
         self._switch_revision = 0
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._attention_task: asyncio.Task[None] | None = None
@@ -4145,6 +4324,7 @@ class RuntimeServer:
         # prevents (a ``stop`` whose ack lost a race with its own teardown) and
         # for why the wait is bounded.
         await self._await_in_flight_requests()
+        await self._cancel_deferred_switches()
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
         if self._attention_task is not None:
@@ -4198,6 +4378,28 @@ class RuntimeServer:
         if self._publisher is not None:
             self._publisher.close()
             self._publisher = None
+
+    async def _cancel_deferred_switches(self) -> None:
+        """Cancel switches still queued behind the session loop, and join them.
+
+        CANCELLED, NOT AWAITED. A queued switch is parked on a session loop that
+        is busy by definition (that is why it was queued), and shutdown cannot
+        wait out a turn step. Its client already holds the ``queued`` ack, so
+        nothing is left unanswered; the cancellation reaches the hop's remote
+        body (``serving._on_session_loop``'s documented propagation), so a
+        switch never lands on a session after its runtime has gone.
+        """
+        pending = [task for task in self._deferred_switches if not task.done()]
+        if not pending:
+            return
+        logger.info(
+            "session runtime: cancelling %d queued settings switch(es) at shutdown",
+            len(pending),
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._deferred_switches.clear()
 
     async def _drain_abandoned_binds(self, timeout: float = _ABANDONED_BIND_DRAIN_S) -> None:
         """Let shielded binds land before the runtime's loop can disappear.
@@ -5324,7 +5526,10 @@ class RuntimeServer:
             finally:
                 self._release_request()
 
-        task = asyncio.create_task(run())
+        if switch and _defers_reply(frame) and _switch_reports_outcome(self._handle, frame):
+            task = asyncio.create_task(self._run_deferrable_switch(conn, frame, previous))
+        else:
+            task = asyncio.create_task(run())
         if switch:
             conn.switch_chain = task
             # The head becomes the JOIN of everything admitted so far, so an op
@@ -5347,6 +5552,92 @@ class RuntimeServer:
             conn.op_chain = task
         conn.op_tasks.add(task)
         task.add_done_callback(lambda completed: self._op_settled(conn, completed))
+
+    async def _run_deferrable_switch(
+        self,
+        conn: _ClientConn,
+        frame: dict[str, Any],
+        previous: asyncio.Task[None] | None,
+    ) -> None:
+        """Accept without waiting on the session loop, then apply in switch order.
+
+        The chain retains this task until application completes: A→B and later
+        prompts cannot overtake the mutation. Only acceptance is detached from
+        the body's completion; it trails the body's dispatch (comment below).
+        The server owns queued bodies across socket closure and cancels
+        them at shutdown; outcomes arrive through ``settings_result``.
+        """
+        # HOP FIRST, RECEIPT SECOND, and the receipt still never waits on the
+        # session loop. ``queued`` promises "applies at the next step": work a
+        # client puts on the session loop AFTER reading the ack must run after
+        # the switch. Hops land FIFO, so that holds only if the body's hop is
+        # already queued when the ack is written. The old order (ack, then
+        # spawn the body) let a client's next step reach the loop first on a
+        # slow host and read the old setting (full-suite shard 3.12/1 on PR
+        # #3697, ``test_a_deferred_effort_switch_acks_queued_while_the_session_
+        # loop_is_blocked``). So the body starts first and the ack waits only
+        # until it has DISPATCHED (``_settings_request_kw`` marks it; the hop is
+        # submitted, not awaited, before the body next yields) or settled.
+        #
+        # Exception, by design: while an earlier switch on this connection is
+        # still applying, the body must wait for it before dispatching, and
+        # acceptance must not inherit that latency — the ack goes as soon as
+        # the earlier switch's own ack has (acks keep send order), and the
+        # chain keeps application behind the previous switch.
+        gate = _DeferredReply(
+            conn=conn, req=frame.get("req"), queued=True, dispatched=asyncio.Event()
+        )
+        # Claimed before the first await: tasks start in admission order, so
+        # each deferred switch sees exactly its predecessor's ack event.
+        earlier_ack = conn.last_deferred_ack
+        acked = asyncio.Event()
+        conn.last_deferred_ack = acked
+
+        async def body() -> None:
+            _DEFERRED_REPLY.set(gate)
+            if previous is not None:
+                await asyncio.wait({previous})
+            await self._on_request(frame, conn)
+
+        inner = asyncio.create_task(body())
+        self._deferred_switches.add(inner)
+        inner.add_done_callback(self._deferred_switches.discard)
+        try:
+            if previous is None or previous.done():
+                dispatched = asyncio.ensure_future(cast(asyncio.Event, gate.dispatched).wait())
+                try:
+                    await asyncio.wait({inner, dispatched}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    dispatched.cancel()
+            elif earlier_ack is not None and not earlier_ack.is_set():
+                await earlier_ack.wait()
+            await self._send_queued_ack(conn, frame, gate)
+        finally:
+            # Set however this ends (a cancelled or failed ack included), so a
+            # later switch never waits on an ack that will not come.
+            acked.set()
+        await asyncio.wait({inner})
+        if not inner.cancelled() and inner.exception() is not None:
+            raise cast(BaseException, inner.exception())
+
+    async def _send_queued_ack(
+        self, conn: _ClientConn, frame: dict[str, Any], gate: _DeferredReply
+    ) -> None:
+        """Write a deferred switch's ``queued`` receipt (one admitted request)."""
+        self._admit_request()
+        try:
+            ack: dict[str, Any] = {
+                "op": "ack",
+                "req": gate.req,
+                "detail": "queued",
+                "duplicate": False,
+                "queued": True,
+            }
+            if frame.get("request_id"):
+                ack["request_id"] = frame["request_id"]
+            await self._send_to(conn, ack)
+        finally:
+            self._release_request()
 
     def _op_settled(self, conn: _ClientConn, completed: asyncio.Task[None]) -> None:
         """Retire a dispatched op and consume its outcome.
@@ -8410,7 +8701,9 @@ class RuntimeServer:
         """
         kwargs: dict[str, Any] = {}
         if _accepts_kw(self._dispatch, "authority"):
-            kwargs["authority"] = _ConnectionAuthority(conn.locality, conn.capabilities)
+            kwargs["authority"] = _ConnectionAuthority(
+                conn.locality, conn.capabilities, dict(conn.peer)
+            )
         if deliver is not None and _accepts_kw(self._dispatch, "deliver"):
             kwargs["deliver"] = deliver
         return await self._dispatch(op, frame, **kwargs)
@@ -8675,7 +8968,11 @@ class RuntimeServer:
                 if callable(strict) and _accepts_kw(strict, "offered_only"):
                     typed_strict = cast(Callable[..., Awaitable[str]], strict)
                     return await typed_strict(
-                        provider, model_id, str(effort) if effort else None, offered_only=True
+                        provider,
+                        model_id,
+                        str(effort) if effort else None,
+                        offered_only=True,
+                        **_settings_request_kw(strict, frame),
                     )
             if effort:
                 # Optional capability, getattr-probed like every other addition
@@ -8689,11 +8986,17 @@ class RuntimeServer:
                 # failing a switch the user asked for.
                 with_effort = getattr(h, "set_model_effort", None)
                 if callable(with_effort):
-                    typed_model = cast(Callable[[str, str, str], Awaitable[str]], with_effort)
-                    return await typed_model(provider, model_id, str(effort))
-            return await h.set_model(provider, model_id)
+                    typed_model = cast(Callable[..., Awaitable[str]], with_effort)
+                    return await typed_model(
+                        provider, model_id, str(effort), **_settings_request_kw(with_effort, frame)
+                    )
+            set_model = cast(Callable[..., Awaitable[str]], h.set_model)
+            return await set_model(provider, model_id, **_settings_request_kw(h.set_model, frame))
         if op == "set_effort":
-            return await h.set_effort(str(frame.get("effort", "")))
+            set_effort = cast(Callable[..., Awaitable[str]], h.set_effort)
+            return await set_effort(
+                str(frame.get("effort", "")), **_settings_request_kw(h.set_effort, frame)
+            )
         if op == "rehome_if_current":
             # A sign-in re-homing a session whose model provider has no credential
             # left (design: the stranded default). Optional capability,
@@ -8957,7 +9260,9 @@ class RuntimeServer:
                 "text": frame["text"],
                 "mode": str(frame.get("mode", "mailbox")),
                 "wake": bool(frame.get("wake", False)),
-                "sender": frame.get("sender") or {},
+                # THE DEVICE COMES FROM THE LINK, not the frame — see
+                # ``_stamp_peer_sender`` (PR #3827 A1: mesh ``send`` lands here).
+                "sender": _stamp_peer_sender(frame.get("sender"), authority),
             }
             # SENDER-MINTED MESSAGE IDENTITY, probed exactly like ``command_id``
             # above: a handle from before the carriage never receives a keyword
@@ -9241,6 +9546,16 @@ class RuntimeServer:
                 # updated is not forced into a lockstep change, and one that
                 # cannot accept the set is left at the flat behaviour it had.
                 kwargs["capabilities"] = capabilities
+            if frame.get("bridge_ack") is True and _accepts_kw(run, "bridge_ack"):
+                # Team Bridge capability marker (team-bridge-egress.md: "bridge_ack"), forwarded
+                # only
+                # when literally ``true``. Absent means "not acknowledged",
+                # which refuses a loosening for a latched conversation.
+                kwargs["bridge_ack"] = True
+            # The settings switch's identity, so the owner can publish its
+            # outcome as ``settings_result`` (a ``defer_ok`` ack may have
+            # answered before it landed). Same optional probe as above.
+            kwargs.update(_settings_request_kw(run, frame))
 
             result = run(*args, **kwargs)
             if inspect.isawaitable(result):
@@ -10450,6 +10765,26 @@ class RuntimeServer:
                 "RuntimeServer._send_to() must run on its owning event loop "
                 "(conn.send_lock and conn.writer belong to it)"
             )
+        # ONE REPLY PER ``defer_ok`` SWITCH (see :class:`_DeferredReply`). Only
+        # the body task of a deferred switch carries a gate, and only its reply
+        # to its own request on its own connection is gated; a body whose window
+        # expired has already been answered ``queued``.
+        gate = _DEFERRED_REPLY.get()
+        if (
+            gate is not None
+            and gate.conn is conn
+            and frame.get("req") == gate.req
+            and frame.get("op") in _REPLY_OPS
+        ):
+            if gate.queued:
+                logger.debug(
+                    "session runtime: queued switch landed; its reply is carried by "
+                    "settings_result, not resent (req=%s op=%s)",
+                    gate.req,
+                    frame.get("op"),
+                )
+                return
+            gate.sent = True
         timeout = (
             _TUI_SEND_TIMEOUT_S if conn.wants_events and conn.wants_frontend else _SEND_TIMEOUT_S
         )

@@ -137,6 +137,17 @@ REFUSED = "authorization_refused"
 #: a state the login had nothing to do with (that sentence is what a phone
 #: rendered as "the authentication expired" through the whole outage).
 AUTHORIZATION_DEFERRED = "authorization_deferred"
+#: Two causes that USED to read as `UNREACHABLE` and are not (2026-11-11: a
+#: loaded machine showed "control plane unreachable" while the API served every
+#: request, which points an operator at their network or at Radient for a fault
+#: in neither). `CONTROL_PLANE_TIMEOUT`: the request to Radient started but no
+#: answer arrived in time — httpx's timeouts are `TransportError`s, so they fell
+#: into the transport arm; slow is not the same claim as unreachable, and on a
+#: busy machine the slowness is often local. `CREDENTIAL_STORE_BUSY`: this
+#: computer's own credential store was held by another `lop` process past its
+#: lock deadline, so no request was sent at all. Both clear by themselves.
+CONTROL_PLANE_TIMEOUT = "control_plane_timeout"
+CREDENTIAL_STORE_BUSY = "credential_store_busy"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
 # The connector's own terminal states, not relay refusals: the connector exited
@@ -182,6 +193,16 @@ RELAY_DETAIL = {
         "network may be down, or Radient may be unreachable). It reauthorizes by itself "
         "once the control plane answers again — check this computer's network "
         "connection if it does not clear."
+    ),
+    CONTROL_PLANE_TIMEOUT: (
+        "This computer's request to Radient to renew the relay authorization timed "
+        "out (that computer may be heavily loaded, or its connection slow). It "
+        "reauthorizes by itself once a request completes."
+    ),
+    CREDENTIAL_STORE_BUSY: (
+        "The computer running this tunnel could not open its own credential store in "
+        "time because another Local Operator process was using it. It reauthorizes by "
+        "itself once the store is free."
     ),
     REFUSED: (
         "Radient refused this computer's relay authorization check. The Radient login "
@@ -256,6 +277,18 @@ TERMINAL_DETAIL = {
         "again. It retries every 10 seconds and clears by itself within about two "
         "minutes; sign in again only if it persists past that."
     ),
+    CONTROL_PLANE_TIMEOUT: (
+        "A request to Radient to renew the relay authorization timed out before it "
+        "was answered (this computer may be heavily loaded, or its connection slow). "
+        "It retries every 10 seconds and reauthorizes by itself once a request "
+        "completes; no local command is needed."
+    ),
+    CREDENTIAL_STORE_BUSY: (
+        "The local credential store was busy: another Local Operator process held it "
+        "past its lock deadline, so the connector could not read its sign-in and sent "
+        "nothing to Radient. It retries every 10 seconds and clears by itself once "
+        "the store is free; no local command is needed."
+    ),
     LEASE_PENDING: (
         "The relay has not renewed its authorization yet. It retries every 10 seconds "
         "and usually clears a few seconds after the connector starts. Run lop tunnel "
@@ -323,6 +356,9 @@ TERMINAL_DETAIL = {
 #: repair command there would send them to fix something that is not broken.
 TERMINAL_REMEDY = {
     UNREACHABLE: "lop tunnel status",
+    # Self-clearing like `UNREACHABLE`, so they name the check, not a repair.
+    CONTROL_PLANE_TIMEOUT: "lop tunnel status",
+    CREDENTIAL_STORE_BUSY: "lop tunnel status",
     REFUSED: "lop login radient",
     NOT_AUTHORIZED: "lop tunnel connect",
     LEASE_PENDING: "lop tunnel status",
@@ -358,6 +394,8 @@ TERMINAL_REMEDY = {
 #: it lives beside the vocabulary so a new code cannot ship without one.
 REASON_LABEL = {
     UNREACHABLE: "control plane unreachable",
+    CONTROL_PLANE_TIMEOUT: "request to Radient timed out",
+    CREDENTIAL_STORE_BUSY: "local credential store busy",
     REFUSED: "authorization refused",
     AUTHORIZATION_DEFERRED: "sign-in refresh deferred",
     NOT_AUTHORIZED: "not authorized",
@@ -542,6 +580,8 @@ class Gateway:
         mobile_password: str | None = None,
         opencode_basic: dict[str, str] | None = None,
         connector_ready: Callable[[], bool] | None = None,
+        connector_transport: Callable[[], str] | None = None,
+        cloudflared_running: Callable[[], bool] | None = None,
     ) -> None:
         self.connection = validate_connection(connection)
         self.client = client
@@ -549,6 +589,13 @@ class Gateway:
         self.mobile_password = mobile_password
         self.opencode_basic = opencode_basic
         self.connector_ready = connector_ready or (lambda: False)
+        # Which connector carries public traffic (`relay` or `cloudflare`), and
+        # whether cloudflared is still up beside the relay during the dual-run.
+        # Reported on the loopback health answer only, so `lop tunnel status`
+        # and the desktop setup route can say which path this device is on
+        # without a second source of truth.
+        self.connector_transport = connector_transport or (lambda: "cloudflare")
+        self.cloudflared_running = cloudflared_running or self.connector_ready
         self.authorized_until = time.monotonic() + AUTHORIZATION_LEASE_SECONDS
         self.revoked = False
         # The last reason the poller could not renew the lease, as a `reason`
@@ -663,6 +710,8 @@ class Gateway:
             payload: dict[str, Any] = {
                 "ok": not self.revoked and time.monotonic() < self.authorized_until,
                 "connected": self.connector_ready(),
+                "transport": self.connector_transport(),
+                "cloudflared": self.cloudflared_running(),
             }
             if not payload["ok"]:
                 # The same cause the phone is given, so `lop tunnel status` can

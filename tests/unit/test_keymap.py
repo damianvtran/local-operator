@@ -987,3 +987,68 @@ def test_send_chord_copy_is_catalogued_and_survives_a_locale_move() -> None:
     finally:
         i18n_text.set_active_locale("en")
     assert keymap.BY_ID["keymap.send_queue"].label == "Send as queue"
+
+
+def test_unbound_is_accepted_only_for_clearable_desktop_rows() -> None:
+    """`none` means a cleared hotkey, not an invalid one — opt-in only.
+
+    Invalid still falls back / refuses; `none` is the cleared state the
+    backend stores. Only desktop rows that opt in (`push_to_talk`,
+    `start_recording`) may store it.
+    """
+    assert keymap.validate_desktop_key("none", action_id="keymap.push_to_talk") is None
+    assert keymap.validate_desktop_key("none", action_id="keymap.start_recording") is None
+    assert keymap.validate_key("none", scope="desktop", action_id="keymap.push_to_talk") is None
+    for action_id in ("keymap.quick_send", "keymap.new_session"):
+        scope = keymap.scope_of(action_id)
+        assert (
+            keymap.validate_key("none", scope=scope, action_id=action_id) is None
+        ) is False, action_id
+    for bad in ("", None):
+        assert keymap.validate_desktop_key(bad, action_id="keymap.push_to_talk") is not None, bad
+        assert keymap.validate_desktop_key(bad, action_id="keymap.start_recording") is not None, bad
+
+
+def test_both_rows_cleared_do_not_collide() -> None:
+    """Both cleared at once is legal: `none` collides with nothing.
+
+    The canonical variants for `none` are empty, so a second cleared row is
+    not refused as "already uses none".
+    """
+    values = {
+        "keymap.push_to_talk": "none",
+        "keymap.start_recording": "none",
+    }
+    assert keymap.group_conflict("keymap.push_to_talk", "none", values) is None
+    assert keymap.group_conflict("keymap.start_recording", "none", values) is None
+    # First row cleared does not make the other row collide.
+    assert (
+        keymap.group_conflict("keymap.start_recording", "none", {"keymap.push_to_talk": "none"})
+        is None
+    )
+    assert (
+        keymap.group_conflict("keymap.push_to_talk", "none", {"keymap.start_recording": "none"})
+        is None
+    )
+
+
+def test_resolved_keymap_keeps_none_and_not_rejected() -> None:
+    """A stored `none` resolves to `none`, never to rejected.
+
+    Invalid still lands in rejected; cleared is distinct from invalid in
+    every resolver.
+    """
+    resolved, rejected = keymap.resolved_keymap(
+        {
+            "keymap.push_to_talk": "none",
+            "keymap.start_recording": "none",
+        }
+    )
+    assert resolved == {
+        "keymap.push_to_talk": "none",
+        "keymap.start_recording": "none",
+    }
+    assert rejected == []
+    resolved, rejected = keymap.resolved_keymap({"keymap.quick_send": "none"})
+    assert resolved == {}
+    assert rejected == ["keymap.quick_send"]

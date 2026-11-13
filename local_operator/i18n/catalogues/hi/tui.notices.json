@@ -28,5 +28,17 @@
   "tui.notices.model_default_changed": "{model} बनाए रखा; नए सत्रों के लिए डिफ़ॉल्ट बदल गया है। /model saved इसे यहाँ अपना लेता है",
   "tui.notices.model_default_changed_headline": "मॉडल अपरिवर्तित",
   "tui.notices.effort_default_changed": "नए सत्रों के लिए रीज़निंग प्रयास का डिफ़ॉल्ट बदल गया है ({effort}); /model saved इसे यहाँ अपना लेता है",
-  "tui.notices.effort_default_changed_headline": "प्रयास डिफ़ॉल्ट बदला"
+  "tui.notices.effort_default_changed_headline": "प्रयास डिफ़ॉल्ट बदला",
+  "tui.notices.model_switch_queued": "{model} पर बदलाव कतार में — अगले चरण में लागू होगा",
+  "tui.notices.model_switch_refused": "{model} लागू नहीं हुआ: {reason}",
+  "tui.notices.temporary_on": "अस्थायी चैट: इतिहास से बाहर और {minutes} मिनट निष्क्रिय रहने के बाद हटाई जाएगी — /temporary off इसे रखता है",
+  "tui.notices.temporary_off": "रखी गई: यह चैट अब अस्थायी नहीं है और आपके इतिहास में रहेगी",
+  "tui.notices.temporary_status_on": "अस्थायी चैट — {deletes_in} (/temporary off इसे रखता है)",
+  "tui.notices.temporary_status_off": "यह चैट आपके इतिहास में रखी गई है (अस्थायी नहीं)",
+  "tui.notices.temporary_confirm": "इस चैट को अस्थायी बनाएँ? निष्क्रिय रहने के बाद इसके संदेश, स्क्रैचपैड की फ़ाइलें और सत्र मेमोरी हटा दी जाएँगी; जो आपने कहीं और सहेजा है वह रहेगा। पुष्टि के लिए 30 सेकंड के भीतर फिर से /temporary on लिखें।",
+  "tui.notices.temporary_refused_pinned": "यह चैट पिन है, इसलिए इसे अस्थायी नहीं बनाया जा सकता — पहले इसका पिन हटाएँ",
+  "tui.notices.temporary_refused_project": "यह चैट एक प्रोजेक्ट से जुड़ी है, इसलिए इसे अस्थायी नहीं बनाया जा सकता — पहले इसे अलग करें",
+  "tui.notices.temporary_deleted": "अस्थायी चैट {session_id} निष्क्रिय रहने के बाद हटा दी गई। नई शुरू करें: lop --temporary",
+  "tui.notices.temporary_new_hint": "/new temporary [संदेश] एक अस्थायी चैट शुरू करता है जो इतिहास से बाहर रहती है और निष्क्रिय होने पर हटा दी जाती है",
+  "tui.notices.temporary_refused": "इस चैट को अस्थायी नहीं बनाया जा सकता: {reason}"
 }

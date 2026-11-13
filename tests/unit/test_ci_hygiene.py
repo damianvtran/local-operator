@@ -64,7 +64,7 @@ CI_YML = REPO / ".github" / "workflows" / "ci.yml"
 #: `_ci_jobs` for how the pins follow them.
 FULL_SUITE_YML = REPO / ".github" / "workflows" / "full-suite.yml"
 #: Jobs that live in full-suite.yml, not ci.yml. `changes` is in both.
-FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "report", "merge-gate"})
+FULL_SUITE_JOBS = frozenset({"test", "coverage-report", "tui-e2e", "merge-gate"})
 PYPROJECT = REPO / "pyproject.toml"
 MAKEFILE = REPO / "Makefile"
 
@@ -3446,7 +3446,7 @@ def test_shard_plugin_bootstrap_does_not_export_a_cwd_pythonpath():
 # runner time, measured 2026-10-24..11-07) in favour of targeted local
 # evidence (`scripts/affected_tests.py`) plus a `guards` job. The full suite
 # then runs ONCE, at the merge gate (`pull_request: [labeled]`), and
-# post-merge/nightly on `main` (which files a `ci-main-red` issue). These pins
+# post-merge/nightly on `main` (a red run opens no issue; it is swept on a cadence). These pins
 # keep each half of that bargain from eroding silently.
 
 
@@ -3496,10 +3496,7 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
 
     `needs` is derived, not listed: a new suite job that the aggregate does not
     wait on is a job that can go red while the required check stays green —
-    the whole defect this gate exists to prevent. `report` is the one
-    exclusion, and it is structural: it is the `ci-main-red` issue filer, it
-    acts only on `refs/heads/main`, and making the PR gate wait on it would put
-    an issue-writing job on the merge path.
+    the whole defect this gate exists to prevent.
     """
     jobs = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]
     gate = jobs["merge-gate"]
@@ -3512,21 +3509,14 @@ def test_merge_gate_aggregates_every_full_suite_job() -> None:
         "started it — a condition that can be false publishes `skipped`, which "
         f"satisfies a required check (if: {gate['if']!r})"
     )
-    assert set(gate["needs"]) == set(jobs) - {"merge-gate", "report"}, (
+    assert set(gate["needs"]) == set(jobs) - {"merge-gate"}, (
         "merge-gate must need every job that can go red, or a red suite passes "
         f"it (needs={gate['needs']!r}, jobs={sorted(jobs)!r})"
     )
     assert not gate.get(
         "continue-on-error"
     ), "continue-on-error makes a required check report success for a red run"
-    run = gate["steps"][-1]["run"]
-    assert (
-        '"failure"' in run and '"cancelled"' in run and "exit 1" in run
-    ), "the aggregate must fail on a failed or cancelled need"
-    assert '"skipped"' not in run, (
-        "a classifier skip must pass the gate: a docs-only head legitimately "
-        "skips the matrix and must still be mergeable"
-    )
+    _assert_gate_allowlists_results(gate["steps"][-1]["run"])
 
 
 def test_no_merge_gate_job_is_conditional_on_the_label_name() -> None:
@@ -4236,19 +4226,12 @@ def test_full_suite_keeps_both_interpreters_and_bounded_concurrency() -> None:
     assert "'full-suite-main'" in group and "github.ref" in group, group
     assert "workflow_dispatch" in (full.get("on", full.get(True)) or {})
     assert full["permissions"] == {"contents": "read"}, "test jobs must keep a read-only token"
-    report = full["jobs"]["report"]
-    assert report["if"] == "always()"
-    assert report["permissions"] == {"issues": "write"}
-    # `merge-gate` is excluded deliberately: on `main` it mirrors this job's
-    # verdict, so the issue filer stays the aggregate that narrates main's
-    # health (and the gate must never wait on an issue-writing job).
-    assert set(report["needs"]) == set(full["jobs"]) - {"report", "merge-gate"}
-    run = report["steps"][0]["run"]
-    assert (
-        'if [ "$GITHUB_REF" != "refs/heads/main" ]' in run
-    ), "branch runs must not touch the issue"
-    for needle in ("--label ci-main-red", "gh issue create", "gh issue comment", "gh issue close"):
-        assert needle in run, needle
+    # No issue is filed for a red main run (operator decision; swept on a
+    # cadence), so the `report` job and its write permission must stay gone.
+    assert "report" not in full["jobs"]
+    text = FULL_SUITE_YML.read_text()
+    for needle in ("gh issue", "ci-main-red", "issues: write"):
+        assert needle not in text, needle
 
 
 def test_full_suite_changes_job_matches_ci() -> None:
@@ -4348,6 +4331,72 @@ def test_guards_job_reads_the_one_guard_list() -> None:
     assert "tests/unit/" not in run, "the guard list must not be re-spelled in ci.yml"
 
 
+# The two required aggregates (`CI Gate`, `Merge gate (full suite)`) must FAIL
+# CLOSED: a need passes only on exactly `success` or `skipped`. They used to
+# reject only `failure`/`cancelled`, and during GitHub's 2026-11-11 Actions
+# incident both reported SUCCESS on PR #3804 over jobs whose result was
+# `abandoned` (never ran). A text pin cannot tell an allowlist from a denylist
+# that happens to mention the same words, so the behavioural test below runs
+# the REAL step script, extracted from the workflow, under bash with jq.
+_GATE_PASSING_RESULTS = ("success", "skipped")
+
+
+def _assert_gate_allowlists_results(run: str) -> None:
+    assert (
+        '.value.result != "success" and .value.result != "skipped"' in run
+    ), "the aggregate must allowlist success/skipped, not denylist failures"
+    assert "exit 1" in run
+    assert '== "failure"' not in run and '== "cancelled"' not in run, (
+        "a denylist of bad results passes any result it does not name "
+        "(`abandoned`, empty, future values)"
+    )
+
+
+def _gate_step_runs() -> dict[str, str]:
+    ci = yaml.safe_load(CI_YML.read_text())["jobs"]["ci-gate"]
+    full = yaml.safe_load(FULL_SUITE_YML.read_text())["jobs"]["merge-gate"]
+    return {"ci-gate": ci["steps"][-1]["run"], "merge-gate": full["steps"][-1]["run"]}
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None or shutil.which("bash") is None,
+    reason="the real gate script needs bash and jq",
+)
+@pytest.mark.parametrize("gate", ["ci-gate", "merge-gate"])
+@pytest.mark.parametrize(
+    ("results", "passes"),
+    [
+        ({"a": "success", "b": "skipped"}, True),
+        ({"a": "success"}, True),
+        ({"a": "success", "b": "abandoned"}, False),
+        ({"a": "success", "b": "failure"}, False),
+        ({"a": "skipped", "b": "cancelled"}, False),
+        ({"a": "success", "b": ""}, False),
+        ({"a": "success", "b": None}, False),
+        ({"a": "success", "b": "some-future-result"}, False),
+    ],
+)
+def test_required_gate_script_fails_closed_on_non_success_results(
+    gate: str, results: dict[str, str | None], passes: bool
+) -> None:
+    """Run the gate's own step script against a synthetic `toJSON(needs)`."""
+    needs = {key: {"result": value, "outputs": {}} for key, value in results.items()}
+    proc = subprocess.run(
+        ["bash", "-c", _gate_step_runs()[gate]],
+        env={"PATH": os.environ.get("PATH", ""), "NEEDS": json.dumps(needs)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (proc.returncode == 0) is passes, (proc.returncode, proc.stdout, proc.stderr)
+    if not passes:
+        bad = {k: v for k, v in results.items() if v not in _GATE_PASSING_RESULTS}
+        for key, value in bad.items():
+            # The error must name the job AND its result, so a reader of the
+            # check sees `b=abandoned`, not just a red gate.
+            assert f"{key}={'null' if value is None else value}" in proc.stdout
+
+
 def test_ci_gate_aggregates_every_pr_job() -> None:
     """`CI Gate` is the single required check: it must see every job."""
     jobs = _pr_jobs()
@@ -4355,6 +4404,4 @@ def test_ci_gate_aggregates_every_pr_job() -> None:
     assert gate["name"] == "CI Gate"
     assert gate["if"] == "always()"
     assert set(gate["needs"]) == set(jobs) - {"ci-gate"}
-    run = gate["steps"][-1]["run"]
-    assert '"failure"' in run and '"cancelled"' in run and "exit 1" in run
-    assert '"skipped"' not in run, "a classifier skip must pass the gate"
+    _assert_gate_allowlists_results(gate["steps"][-1]["run"])

@@ -1036,7 +1036,13 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
         "gcp-service-account-value-open",
         "authorization-basic-bare",
         "credential-query-param",
+        # Guarded since PR #3789 (R4): kubectl, not the client, owns ``-p`` there.
+        "client-inline-password",
     }
+    client_value = "Guarded" + "Inline" + "Pw7X9q"
+    assert scrub_shapes(f"mysql -h db -u app -p{client_value} appdb") == (
+        f"mysql -h db -u app -p{REDACTION_MARKER} appdb"
+    )
 
     assignment = scrub_shapes("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
     assert assignment == f"AWS_SECRET_ACCESS_KEY={REDACTION_MARKER}"
@@ -4284,18 +4290,24 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         "named-variable-dump": "printenv MONGO_DSN",
         "kubectl-exec-env": "kubectl exec x -- env",
         "kubectl-secret-read": "kubectl get secret n -o yaml",
+        "kubectl-secret-decode": "kubectl get secret n -o jsonpath='{.data.K}' | base64 -d",
         "docker-inspect": "docker inspect api",
         "docker-exec-env": "docker exec x env",
         "docker-compose-config": "docker compose config",
-        "aws-credentials-read": "aws secretsmanager get-secret-value",
+        "aws-secret-value": "aws secretsmanager get-secret-value --secret-id x",
+        "aws-credentials-read": "aws sts get-session-token",
         "gcloud-token": "gcloud auth print-access-token",
         "github-auth-token": "gh auth token",
         "gitlab-auth-token": "glab auth status -t",
         "vault-read": "vault kv get secret/x",
         "heroku-config": "heroku config",
+        "terraform-plan-json": "curl https://app.terraform.io/api/v2/plans/plan-x/json-output",
+        "terraform-show-json": "terraform show -json plan.tfplan",
         "terraform-output": "terraform output",
         "npm-token-list": "npm token list",
         "credential-file-read": "cat ~/.netrc",
+        "secret-cli-read": "op read op://vault/item/password",
+        "git-add-credential-file": "git add .env",
     }
     assert set(probes) == {shape.label for shape in DUMP_SHAPES}, "a rule has no probe"
     for label, command in probes.items():
@@ -8874,3 +8886,47 @@ def test_a_real_client_invocation_still_masks_its_inline_password(line: str) -> 
 def test_the_published_port_negatives_are_untouched_by_the_anchor(line: str) -> None:
     """``-p`` as a PORT (or a Go package flag) is not this rule's, and never was."""
     assert scrub_shapes(line) == line, f"{line!r} was rewritten"
+
+
+@pytest.mark.parametrize(
+    ("command", "label"),
+    [
+        ("op read op://vault/item/password", "secret cli"),
+        ("cd x && op read op://a/b/c", "secret cli"),
+        ("security find-generic-password -s svc -w", "secret cli"),
+        ("git add .env", "git"),
+        ("git add f.env", "git"),
+        ("git add .env.local", "git"),
+        ("git add src/app.py config/sa-service-account.json", "git"),
+        ("git add id_ed25519", "git"),
+        ("git add certs/tls.pem && git commit -m x", "git"),
+        ("git commit -m wip prod.env", "git"),
+    ],
+)
+def test_the_new_secret_task_advisories_steer(command: str, label: str) -> None:
+    """Warn-only steers for two egregious habits (never a block; see DUMP_SHAPES)."""
+    notice = credential_dump_notice(command)
+    assert notice is not None and notice.startswith(f"[credential guard] {label}:"), notice
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Piped or captured: the sanctioned consumer forms.
+        "op read op://v/i/p | docker login --password-stdin",
+        'docker login -p "$(op read op://v/i/p)" registry',
+        "x=$(op read op://v/i/p)",
+        "op read --out-file /tmp/k op://v/i/p",
+        "security find-generic-password -s svc -w | pbcopy",
+        "security find-generic-password -s svc",
+        # Not a credential file, or not a path argument.
+        "git add .env.example",
+        "git add prod.env.sample",
+        "git add ~/.ssh/id_ed25519.pub",
+        'git commit -m "drop .env"',
+        "git add -A",
+        "git add environment.py docs/env.md",
+    ],
+)
+def test_the_new_advisories_stay_quiet_on_the_safe_forms(command: str) -> None:
+    assert credential_dump_notice(command) is None, command

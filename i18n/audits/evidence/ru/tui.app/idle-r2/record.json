@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "audit_id": "idle-r2",
+  "audit_kind": "hash_binding_of_passed_delta_audit",
+  "locale": "ru",
+  "namespace": "tui.app",
+  "status": "passed",
+  "verdict": "passed",
+  "audit_task": "i18n-audit-idle-r2",
+  "audited_revision": "90fdf91871dd",
+  "scope": "the three keys PR #3753 appends to tui.app (tui.app.compaction.idle_receipt, idle_receipt_bare, idle_skipped); every pre-existing value is byte-identical to the cg1 audit input (i18n/audits/evidence/ru/_input/cg1.json)",
+  "keys_audited": [
+    "tui.app.compaction.idle_receipt",
+    "tui.app.compaction.idle_receipt_bare",
+    "tui.app.compaction.idle_skipped"
+  ],
+  "auditor": {
+    "agent": "translation-auditor specialist (local-operator lopdev team, task i18n-audit-idle-r2)",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-10",
+    "result": "passed",
+    "findings": 0
+  },
+  "binding_note": "Written by the PR #3753 implementer (coder) to bind the bytes the ledger row says i18n-audit-idle-r2 passed, so the cg1 byte pin moves to this record (tests/unit/i18n/test_audit_input_manifests.py::_superseded). It is NOT the auditor's report and adds no judgement of its own; the catalogue bytes are unchanged between the audited revision 90fdf91871dd and this record.",
+  "source_sha256": "5587089e1159c87e4d22e7de5a539fb210582b6c517bb6725af5c30e7acd24e7",
+  "target_sha256": "09c297c09c6cfcefffaf565351b05d7d32b346f86b424d71aa48e15bbb6aa25f",
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/tui.app.json",
+    "target": "local_operator/i18n/catalogues/ru/tui.app.json"
+  }
+}

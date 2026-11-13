@@ -438,6 +438,11 @@ class Setting:
     #: a desktop row with the rules that own it. Never authored twice — an
     #: empty string means "not a hotkey row".
     hotkey_scope: str = ""
+    #: Whether this HOTKEY row may be CLEARED to ``"none"`` (keymap.UNBOUND),
+    #: DERIVED from ``keymap.KeyAction.clearable`` like ``hotkey_scope`` —
+    #: never authored twice. Projected on the wire so the desktop app can
+    #: offer the Clear affordance only on rows that accept the sentinel.
+    clearable: bool = False
     #: SEARCH VOCABULARY for this row, never rendered: a query may match these
     #: words, but no surface ever draws them as a sentence — the settings page
     #: paints the row and, when it explains a match, names the word that hit.
@@ -1670,6 +1675,17 @@ def _validate_github_repositories(value: object) -> object:
     """
     if not isinstance(value, (list, tuple)):
         raise ValueError("GitHub repositories must be a list of owner/repo entries.")
+    # The SAME ceiling the mesh boundary carries (GitHub's App mint maximum): a
+    # longer designation could neither be minted nor delivered whole, so it is
+    # refused here, where a person can fix it, rather than truncated downstream.
+    # Lazy import: this module loads on every CLI start; the validator runs on write.
+    from local_operator.network.credentials.types import MAX_NARROWING_LIST_ENTRIES
+
+    if len(value) > MAX_NARROWING_LIST_ENTRIES:
+        raise ValueError(
+            f"at most {MAX_NARROWING_LIST_ENTRIES} GitHub repositories can be designated "
+            f"(GitHub's limit for one App token); got {len(value)}"
+        )
     for entry in value:
         text = str(entry).strip()
         owner, sep, repo = text.partition("/")
@@ -3303,6 +3319,7 @@ SETTINGS: tuple[Setting, ...] = (
             default=action.default,
             help=_keymap_copy(action, "help"),
             hotkey_scope=action.scope,
+            clearable=action.clearable,
             synonyms=_HOTKEY_SYNONYMS,
         )
         for action in _keymap.KEY_ACTIONS
@@ -3602,6 +3619,28 @@ SETTINGS: tuple[Setting, ...] = (
         validate_value=_validate_delegated_max_age_hours,
         gated_by="session.cleanup.delegated.enabled",
         synonyms=("retention", "expiry", "purge"),
+    ),
+    # -- temporary chats -------------------------------------------------------
+    # The idle window of a TEMPORARY chat (``session/temporary.py``). Read LIVE
+    # by every pass (``cleanup.policy_from_config``), never gated by
+    # ``session.cleanup.enabled``: the per-chat mark is the opt-in. An ENUM of
+    # the four presets the clients offer; ``cleanup`` clamps any other stored
+    # value UP to the next preset (kept longer, the fail-closed side).
+    Setting(
+        key="session.cleanup.temporary.idle_minutes",
+        path=("session", "cleanup", "temporary", "idle_minutes"),
+        section="session_cleanup",
+        label=_t(_ws.session_cleanup_temporary_idle_minutes_label()),
+        kind=Kind.ENUM,
+        default=30,
+        help=_t(_ws.session_cleanup_temporary_idle_minutes_help()),
+        choices=(
+            Choice(15, _t(_ws.session_cleanup_temporary_idle_minutes_choice_15m_label())),
+            Choice(30, _t(_ws.session_cleanup_temporary_idle_minutes_choice_30m_label())),
+            Choice(120, _t(_ws.session_cleanup_temporary_idle_minutes_choice_2h_label())),
+            Choice(1440, _t(_ws.session_cleanup_temporary_idle_minutes_choice_24h_label())),
+        ),
+        synonyms=("retention", "expiry", "ephemeral"),
     ),
     Setting(
         key="runtime.unattended_gate_timeout",
@@ -4514,6 +4553,43 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.compaction_mid_turn_enabled_choice_true_description()),
             _t(_ws.compaction_mid_turn_enabled_choice_false_description()),
         ),
+    ),
+    # Idle / pre-wake compaction (``compaction/idle.py``). Defaults are literals
+    # mirroring ``compaction.thresholds.DEFAULT_IDLE_*`` (importing that module
+    # here would pull the pass engine into every settings read); the consumer
+    # map in ``tests/unit/test_settings_io.py`` pins each pair.
+    Setting(
+        key="compaction.idle_enabled",
+        path=("compaction", "idle_enabled"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ws.compaction_idle_enabled_help()),
+        choices=_bool_choices(
+            _t(_ws.compaction_idle_enabled_choice_true_description()),
+            _t(_ws.compaction_idle_enabled_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="compaction.idle_threshold_tokens",
+        path=("compaction", "idle_threshold_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_threshold_tokens_label()),
+        kind=Kind.INT,
+        default=200_000,
+        help=_t(_ws.compaction_idle_threshold_tokens_help()),
+        minimum=0,
+    ),
+    Setting(
+        key="compaction.idle_min_growth_tokens",
+        path=("compaction", "idle_min_growth_tokens"),
+        section="compaction",
+        label=_t(_ws.compaction_idle_min_growth_tokens_label()),
+        kind=Kind.INT,
+        default=60_000,
+        help=_t(_ws.compaction_idle_min_growth_tokens_help()),
+        minimum=1,
     ),
     # Opt-in cost trade for RESUMED contexts (#3448); see the field comment in
     # ``compaction/thresholds.py``. The help text must keep saying that earlier
@@ -6668,6 +6744,13 @@ def coerce(setting: Setting, text: str) -> Any:
             raise ValueError(
                 'expected JSON, e.g. {"default": ["anthropic/claude-opus-5"]}'
             ) from None
+    if setting.kind is Kind.ENUM:
+        # An ENUM whose members are whole numbers (the temporary-chat window)
+        # stores ints, so typed text must become the member, not its digits.
+        for choice in setting.resolved_choices or ():
+            value = choice.value
+            if type(value) is int and text == str(value):
+                return value
     if setting.validate_value is validate_tier_value and text.startswith("{"):
         # A ``{model, effort}`` tier typed on the page or via ``lop config
         # edit`` (#2428): parsed here so the MAPPING is stored, never the JSON

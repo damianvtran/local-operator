@@ -70,6 +70,14 @@ def model_info_incomplete_headline() -> Msg:
     return Msg("tui.notices.model_info_incomplete_headline", {})
 
 
+def model_switch_queued(*, model: str) -> Msg:
+    return Msg("tui.notices.model_switch_queued", {"model": model})
+
+
+def model_switch_refused(*, model: str, reason: str) -> Msg:
+    return Msg("tui.notices.model_switch_refused", {"model": model, "reason": reason})
+
+
 def output_limit_before_call() -> Msg:
     return Msg("tui.notices.output_limit_before_call", {})
 
@@ -108,6 +116,46 @@ def steering_not_saved(*, command_id: str, reason: str) -> Msg:
 
 def stopped_session_held() -> Msg:
     return Msg("tui.notices.stopped_session_held", {})
+
+
+def temporary_confirm() -> Msg:
+    return Msg("tui.notices.temporary_confirm", {})
+
+
+def temporary_deleted(*, session_id: str) -> Msg:
+    return Msg("tui.notices.temporary_deleted", {"session_id": session_id})
+
+
+def temporary_new_hint() -> Msg:
+    return Msg("tui.notices.temporary_new_hint", {})
+
+
+def temporary_off() -> Msg:
+    return Msg("tui.notices.temporary_off", {})
+
+
+def temporary_on(*, minutes: str) -> Msg:
+    return Msg("tui.notices.temporary_on", {"minutes": minutes})
+
+
+def temporary_refused(*, reason: str) -> Msg:
+    return Msg("tui.notices.temporary_refused", {"reason": reason})
+
+
+def temporary_refused_pinned() -> Msg:
+    return Msg("tui.notices.temporary_refused_pinned", {})
+
+
+def temporary_refused_project() -> Msg:
+    return Msg("tui.notices.temporary_refused_project", {})
+
+
+def temporary_status_off() -> Msg:
+    return Msg("tui.notices.temporary_status_off", {})
+
+
+def temporary_status_on(*, deletes_in: str) -> Msg:
+    return Msg("tui.notices.temporary_status_on", {"deletes_in": deletes_in})
 
 
 def too_large_images_removed() -> Msg:

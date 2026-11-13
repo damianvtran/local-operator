@@ -62,6 +62,7 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 # TypeVar comes from typing_extensions, NOT typing: the ``default=`` parameter
 # below is PEP 696, which landed in typing only in 3.13, while this package
@@ -1773,9 +1774,17 @@ class BrowserSurface:
     own one without importing the tool layer.
     """
 
-    __slots__ = ("surface_id", "resource", "extension_update_notified")
+    __slots__ = (
+        "surface_id",
+        "resource",
+        "extension_update_notified",
+        "parent_session_id",
+        "handed",
+        "handed_to",
+        "late_handoff_to_parent",
+    )
 
-    def __init__(self, resource: Any = None) -> None:
+    def __init__(self, resource: Any = None, *, parent_session_id: str = "") -> None:
         self.surface_id = ""
         # Host-owned persistence stays outside the harness import graph.
         self.resource = resource
@@ -1789,6 +1798,59 @@ class BrowserSurface:
         # new member would make every other implementor fail its isinstance
         # check for a purely advisory flag.
         self.extension_update_notified = False
+        # CHILD → PARENT BROWSER HANDOFF (2026-11-11, session 363d303f3e48).
+        #
+        # A subagent that opened a tab for a HUMAN (a sign-in, a site approval)
+        # used to end, have its teardown close that tab, and still tell the
+        # operator "the tab is open" — twice in one evening the operator was sent
+        # to a tab that no longer existed. A child's lifetime is one task; a
+        # human's sign-in is not bounded by it. So a child's RETAINED surface is
+        # not closed when the child ends: it is handed to the parent session,
+        # which owns it from then on (lists it as its own, closes it, and closes
+        # it on its own teardown, or hands it further up if it is a child too).
+        #
+        # * ``parent_session_id`` — the session a retained tab is handed to when
+        #   this (child) session ends; "" for a top-level session, whose
+        #   teardown simply closes. The browser tool reads it to tell a child,
+        #   at open/retain time, exactly what will happen to its tab.
+        # * ``handed`` — surfaces children handed to THIS session: a list of
+        #   :class:`HandedBrowserSurface`. Each keeps the CHILD's ownership
+        #   resource, because the host fences owner calls on the scope's
+        #   ``requester``/``owner_proof``/``owner_generation`` params, not on the
+        #   connection, so the parent speaking with the child's record is
+        #   byte-identical to the child speaking — no host protocol change.
+        # * ``handed_to`` — set on the CHILD once its surface was handed, so its
+        #   own disposal does not close the tab the parent now owns.
+        # * ``late_handoff_to_parent`` — set on a CHILD by its runner once a live
+        #   parent took its handoff. A grandchild still RUNNING when this child
+        #   ends is cancelled by this child's dispose and hands its tab here
+        #   AFTER the handoff already ran (review R1); with this set, dispose
+        #   leaves those late arrivals in ``handed`` for the runner to pass up
+        #   (``subagent._hand_up_late_browser_surfaces``) instead of closing a
+        #   tab a human may be using. Unset (top-level, or no live parent),
+        #   dispose closes them, since nobody else would.
+        self.parent_session_id = parent_session_id
+        self.handed: list[HandedBrowserSurface] = []
+        self.handed_to = ""
+        self.late_handoff_to_parent = False
+
+
+@dataclass
+class HandedBrowserSurface:
+    """One browser surface a finished child handed to this (parent) session.
+
+    ``surface_id`` is the full capability token (never printed whole — see
+    ``public_surface_label``); ``resource`` is the child's
+    ``BrowserResource``, the only identity the host will accept owner calls
+    for this scope from; ``from_session`` is the child that opened it, named
+    in the parent's listing so the parent knows why it holds a tab it never
+    opened; ``reason`` is the retention reason the child recorded.
+    """
+
+    surface_id: str
+    resource: Any
+    from_session: str
+    reason: str = ""
 
 
 @runtime_checkable
@@ -1897,6 +1959,21 @@ class AskOption(BaseModel):
 #
 # The marker indexes `options` AS CARRIED, never the authored order: a consumer
 # that re-sorts the list and keeps the index moves the badge to the wrong row.
+#
+# A MULTI-select may recommend several rows, so the AUTHORED `recommended` is
+# `int | list[int]`. The wire keeps the old contract anyway: after validation
+# `recommended` is ALWAYS `int | None` (0 or None, never a list), so every
+# client and every stored row that only knows the int still shows the first
+# pick correctly. The rest of the set rides a second, derived field,
+# `recommended_all`, which is `[0..k-1]` and present only when k >= 2 — the
+# listed rows are hoisted to the top IN THE ORDER THE MODEL LISTED THEM (that
+# order is its ranking), then everything else in authored order. It is declared
+# (so `model_dump()` -> `model_validate()` is a fixed point; the model forbids
+# extras) but hidden from the published tool schema with `SkipJsonSchema`,
+# because it is derived output, not something the model should author. Nothing
+# is PRE-TICKED: on a multi-select the visible ticks are the answer, and the
+# user builds them (see the pinned picker test). Consumers read
+# `recommended_rows`, never `recommended`, so a set cannot be half-drawn.
 class AskQuestion(BaseModel):
     """One question the ``ask`` tool puts to the user."""
 
@@ -1914,12 +1991,15 @@ class AskQuestion(BaseModel):
     multi: bool = Field(
         default=False, description="True lets the user pick several options instead of one."
     )
-    recommended: int | None = Field(
+    recommended: int | list[int] | None = Field(
         default=None,
         description=(
-            "0-based index of the option you recommend; it is moved to the top and preselected."
+            "0-based index you recommend (multi-select: a list, best first); "
+            "moved to top, badged, not ticked."
         ),
     )
+    # Derived, never authored: see the comment above the class.
+    recommended_all: SkipJsonSchema[list[int] | None] = None
     secret: bool = Field(
         default=False,
         description=(
@@ -1946,7 +2026,7 @@ class AskQuestion(BaseModel):
                 raise ValueError("a secret question has no options; the answer is a pasted value")
             if self.multi:
                 raise ValueError("a secret question cannot be multi-select")
-            if self.recommended is not None:
+            if self.recommended is not None or self.recommended_all is not None:
                 raise ValueError("a secret question has no options to recommend")
             from local_operator.variables import normalize_credential_key
 
@@ -1963,21 +2043,63 @@ class AskQuestion(BaseModel):
             raise ValueError("persist only applies to a secret question")
         if len(self.options) < 2:
             raise ValueError("at least two answers to pick from")
-        if self.recommended is not None and not 0 <= self.recommended < len(self.options):
-            raise ValueError(
-                f"recommended must index options (0..{len(self.options) - 1}), "
-                f"got {self.recommended}"
-            )
-        if self.recommended is not None:
+        if self.recommended_all is not None:
+            # A previously normalised dump being re-validated. Only the exact
+            # shape `_shape` itself emits is accepted, so a hand-built row
+            # cannot smuggle in a set that disagrees with the hoisted order.
+            if (
+                self.recommended != 0
+                or len(self.recommended_all) < 2
+                or self.recommended_all != list(range(len(self.recommended_all)))
+            ):
+                raise ValueError(
+                    "recommended_all is derived: it must be [0..k-1] (k >= 2) with recommended 0"
+                )
+            picks = list(self.recommended_all)
+        elif isinstance(self.recommended, list):
+            picks = list(self.recommended)
+        elif self.recommended is not None:
+            picks = [self.recommended]
+        else:
+            picks = []
+        if isinstance(self.recommended, list) and not picks:
+            raise ValueError("recommended is an empty list; omit it instead")
+        if len(set(picks)) != len(picks):
+            raise ValueError(f"recommended lists an option twice: {picks}")
+        # Bounds first, before any reordering: see the comment above the class.
+        for pick in picks:
+            if not 0 <= pick < len(self.options):
+                raise ValueError(
+                    f"recommended must index options (0..{len(self.options) - 1}), got {pick}"
+                )
+        if len(picks) > 1 and not self.multi:
+            raise ValueError("several recommendations need multi=true; give one index")
+        if picks:
             # Rotate rather than swap: the authored order of everything the
             # model did NOT recommend is still its ranking, and a swap would
             # promote whatever happened to sit at index 0 over the rest of it.
-            # Rotating by 0 is the identity, so an already-normalised question
-            # passes through untouched however many times it is re-validated.
-            hoisted = self.options.pop(self.recommended)
-            self.options.insert(0, hoisted)
+            # Hoisting an already-normalised [0..k-1] set is the identity, so
+            # a question passes through untouched however many times it is
+            # re-validated.
+            hoisted = [self.options[pick] for pick in picks]
+            rest = [option for index, option in enumerate(self.options) if index not in picks]
+            self.options[:] = hoisted + rest
             self.recommended = 0
+            self.recommended_all = list(range(len(picks))) if len(picks) > 1 else None
         return self
+
+    @property
+    def recommended_rows(self) -> tuple[int, ...]:
+        """Every recommended row index, first pick first; ``()`` when none.
+
+        The one accessor consumers read, so a multi-select's set is drawn whole
+        and pyright never sees ``recommended``'s authored ``list`` arm.
+        """
+        if self.recommended_all:
+            return tuple(self.recommended_all)
+        if isinstance(self.recommended, int):
+            return (self.recommended,)
+        return ()
 
 
 # THE ROW SHAPE. The ask the TOOL takes and the ask a ROW stores are two shapes,
@@ -2062,6 +2184,12 @@ class ProposedProfileWrite:
     profile_name: str
     changes: tuple[str, ...] = ()
     diff: tuple[str, ...] = ()
+    #: Bounded per-field lines (``instructions: +12 −3 lines``) computed by the
+    #: host from the filed record (``profile_proposals.summary_line``). The
+    #: receipt shows THESE, never ``diff``: a replaced brief's ``diff`` is the
+    #: whole new text, and an agent that saw it echoed it into its ask to the
+    #: user, which filled the conversation (operator report 2026-11-10).
+    summary: tuple[str, ...] = ()
     #: The record's real state. ``pending`` for a fresh filing; an identical
     #: re-filing of an already-decided or expired proposal reports that state
     #: so the receipt never claims a pending proposal that does not exist.
@@ -2308,6 +2436,16 @@ class ToolContext(BaseModel):
     #: guardrail creation ledger writes a child's creations under these ids
     #: too, so a parent may clean up after its subagents.
     ancestor_session_ids: tuple[str, ...] = ()
+    #: The session's Team Bridge taint latch (``harness/bridge_egress.py``
+    #: ``BridgeTaintLatch``), owned by the session and injected per turn. The
+    #: loop's tier seam and the web tools' provider filter read it; ``None`` on
+    #: a host that does not track taint, which is then judged by the live
+    #: context alone. Never serialized: it is host state, not tool input.
+    bridge_taint: Any = Field(default=None, exclude=True, repr=False)
+    #: Set on a ``task`` child spawned from a latched session
+    #: (team-bridge-egress.md: "Propagation between sessions").
+    #: Tighten-only: a child inherits its parent's taint for life.
+    inherited_bridge_taint: bool = False
     # Human-readable title is display metadata only. Security-sensitive tools
     # must continue using ``session_id`` for identity and authorization.
     session_name: str = ""

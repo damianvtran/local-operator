@@ -44,5 +44,21 @@
   "tui.app.providers.stale_all": "устаревший список: все провайдеры",
   "tui.app.providers.stale_named": "устаревший список: {names}",
   "tui.app.providers.stale_all_error": "устаревший список: все провайдеры — {error}",
-  "tui.app.providers.no_live_list": "нет актуального списка: {names}"
+  "tui.app.providers.no_live_list": "нет актуального списка: {names}",
+  "tui.app.compaction.idle_receipt": "контекст сжат в простое · {detail}",
+  "tui.app.compaction.idle_receipt_bare": "контекст сжат в простое",
+  "tui.app.compaction.idle_skipped": "сжатие в простое пропущено · ничего не изменилось",
+  "tui.app.section_temporary": "{count, plural, one {Временные · #} few {Временные · #} many {Временные · #} other {Временные · #}}",
+  "tui.app.temporary_deletes_in": "{minutes, plural, one {удаление через # мин} few {удаление через # мин} many {удаление через # мин} other {удаление через # мин}}",
+  "tui.app.temporary_hold_running": "сохраняется, пока выполняется",
+  "tui.app.temporary_hold_on_screen": "сохраняется, пока на экране",
+  "tui.app.temporary_hold_open_ask": "сохраняется, пока открыт вопрос",
+  "tui.app.temporary_hold_armed_wake": "сохраняется: задано пробуждение",
+  "tui.app.temporary_hold_armed_monitor": "сохраняется: идёт мониторинг",
+  "tui.app.temporary_hold_unread_mail": "сохраняется: есть непрочитанное",
+  "tui.app.temporary_hold_operator_hold": "сохраняется: на удержании",
+  "tui.app.temporary_hold_unseen_result": "сохраняется: результат не открыт",
+  "tui.app.temporary_hold_unsaved_files": "сохраняется: несохранённые файлы",
+  "tui.app.temporary_hold_linked": "сохраняется: закреплён/привязан",
+  "tui.app.temporary_hold_cannot_verify": "сохранён: не удалось проверить"
 }

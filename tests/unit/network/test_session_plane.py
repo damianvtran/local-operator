@@ -3618,28 +3618,36 @@ async def test_the_viewer_surfaces_the_owners_frame_for_a_peer_row(
         link.close("test")
 
 
-def test_a_stored_session_refuses_a_peek_and_stays_cold(
+def test_a_stored_session_peek_is_served_from_the_journal_and_stays_cold(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """§8.3, over a real link: the gate reads the row state BEFORE any viewer.
+    """§8.3, over a real link: a remote read of a STORED session starts nothing.
 
-    The tempting implementation of a remote read is to open the viewer and let
-    the bind warm whatever is there — that is what ENGAGE does, and it is why
-    this cell sits beside the cold-engage one: the refusal is only half the
-    claim; the other half is read off the OWNER's own rows afterwards, because
-    a gate that merely raised after a bind would still have started a runtime
-    on a device nobody is watching.
+    This cell used to pin a REFUSAL (``session_stored``): the live-only gate was
+    the only way to keep a read from warming a runtime. PR #3831 replaced that
+    gate with the owner's journal read (``net_session_peek``): the owner answers
+    from its own disk and never opens, binds or warms the session, so the read
+    is now SERVED. ``session_stored`` survives only for an owner too old to read
+    its journal for us, which ``test_sessions_pilot`` covers.
+
+    The half that never changed is the cold check, and it stays strict: it is
+    read off the OWNER's own rows afterwards, because a read that answered after
+    a bind would still have started a runtime on a device nobody is watching —
+    the tempting implementation (open the viewer and let the bind warm whatever
+    is there) is what ENGAGE does, which is why this cell sits beside the
+    cold-engage one.
 
     Driven through the CLI's own handler over the real relay control socket,
-    so the RESOLUTION (a real fan-out, a real stored row) and the GATE run as
-    one path.
+    so the RESOLUTION (a real fan-out, a real stored row) and the journal read
+    run as one path. A REAL journal is seeded so "served" is proved by its text
+    coming back, not by an exit code alone.
     """
     from local_operator.network import cli as network_cli
 
     server_a, server_b, _host_a, _port_a = peer_pair
     record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
     host_b, port_b = _listen(server_b)
-    _seed(server_b.root, SESSION)
+    _seed_journal(server_b.root, SESSION, ["a stored line only the owner's disk holds"])
     link = _dial_to(server_a, record, host_b, port_b)
     try:
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
@@ -3653,11 +3661,13 @@ def test_a_stored_session_refuses_a_peek_and_stays_cold(
                     peek=SESSION,
                 )
             )
-            == 1
+            == 0
         )
         payload = json.loads(capsys.readouterr().out)
-        assert payload["code"] == "session_stored", payload
-        assert "engage" in payload["message"] and "resume" in payload["message"], payload
+        assert payload["ok"] is True, payload
+        assert payload["source"] == "journal", payload
+        assert payload["session_id"] == SESSION, payload
+        assert "a stored line only the owner's disk holds" in json.dumps(payload), payload
         states = [
             item["state"] for item in server_b.local_session_rows() if item["session_id"] == SESSION
         ]

@@ -116,6 +116,14 @@
   "wire.settings.compaction_enabled.choice.true.description": "अपने-आप संपीडित करें",
   "wire.settings.compaction_enabled.help": "संदर्भ भर जाने पर पुराना इतिहास सारांशित करें।",
   "wire.settings.compaction_enabled.label": "संपीडन",
+  "wire.settings.compaction_idle_enabled.choice.false.description": "निष्क्रिय सत्र को कभी संपीडित न करें",
+  "wire.settings.compaction_idle_enabled.choice.true.description": "कैश समाप्त होने से पहले निष्क्रिय सत्र संपीडित करें",
+  "wire.settings.compaction_idle_enabled.help": "निष्क्रिय सत्र का प्रॉम्प्ट-कैश समाप्त होने से ठीक पहले, सलाहकार सहमत हो तो उसे संपीडित करें।",
+  "wire.settings.compaction_idle_enabled.label": "निष्क्रिय-सत्र संपीडन",
+  "wire.settings.compaction_idle_min_growth_tokens.help": "पिछले संपीडन या अस्वीकृत निष्क्रिय-सत्र संपीडन के बाद इतना नया संदर्भ चाहिए; संपीडन थ्रेशोल्ड के 25% तक सीमित।",
+  "wire.settings.compaction_idle_min_growth_tokens.label": "निष्क्रिय-सत्र न्यूनतम वृद्धि (टोकन)",
+  "wire.settings.compaction_idle_threshold_tokens.help": "संदर्भ का वह आकार जिससे निष्क्रिय-सत्र संपीडन शुरू होता है; 0 इसे बंद करता है। संपीडन थ्रेशोल्ड के 60% तक सीमित।",
+  "wire.settings.compaction_idle_threshold_tokens.label": "निष्क्रिय-सत्र थ्रेशोल्ड (टोकन)",
   "wire.settings.compaction_keep_recent_tokens.help": "संपीडन के दौरान हाल का इतिहास ज्यों का त्यों रखा जाता है।",
   "wire.settings.compaction_keep_recent_tokens.label": "हाल के टोकन रखें",
   "wire.settings.compaction_mid_turn_enabled.choice.false.description": "सिर्फ़ टर्नों के बीच",
@@ -859,5 +867,11 @@
   "wire.settings.web_search_timeout_seconds.help": "प्रति-प्रोवाइडर अनुरोध टाइमआउट। पढ़ते समय 1-120 पर सीमित।",
   "wire.settings.web_search_timeout_seconds.label": "टाइमआउट (s)",
   "wire.settings.web_tools.description": "search और fetch टूल दिए जाते हैं और चलने की अनुमति पाते हैं या नहीं।",
-  "wire.settings.web_tools.title": "वेब टूल"
+  "wire.settings.web_tools.title": "वेब टूल",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.15m.label": "15 मिनट",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.30m.label": "30 मिनट",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.2h.label": "2 घंटे",
+  "wire.settings.session_cleanup_temporary_idle_minutes.choice.24h.label": "24 घंटे",
+  "wire.settings.session_cleanup_temporary_idle_minutes.label": "इतनी देर बाद अस्थायी चैट हटाएँ",
+  "wire.settings.session_cleanup_temporary_idle_minutes.help": "अस्थायी चैट हटाए जाने से पहले कितनी देर निष्क्रिय रह सकती है। स्क्रीन पर रहने का समय, चल रहा काम या खुला सवाल निष्क्रियता में नहीं गिना जाता।"
 }

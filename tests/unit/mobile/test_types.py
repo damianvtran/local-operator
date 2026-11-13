@@ -242,6 +242,8 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
         approval_mode="ask",
         approval_provenance="session",
         approval_global_mode="auto",
+        taint_raised=True,
+        bridge_latched=True,
     )
     approval_payload = SessionProjection(session_id="s1", pid=0, pending=approval).to_json()
     approval_received = _projection_from_json(approval_payload, _record())
@@ -250,6 +252,15 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     assert approval_received.pending.approval_provenance == "session"
     assert approval_received.pending.approval_global_mode == "auto"
     assert approval_payload["pending"]["approval_global_mode"] == "auto"
+    # Team Bridge flags: host-set on a gate card only. A dropped
+    # ``bridge_latched`` would let a viewer offer allow-all on a card that must
+    # reach a person, so both rebuilds must carry them NON-DEFAULT.
+    assert approval_received.pending.taint_raised is True
+    assert approval_received.pending.bridge_latched is True
+    approval_from_gate = _pending_request(PendingGateState(**approval_payload["pending"]))
+    assert approval_from_gate is not None
+    assert approval_from_gate.taint_raised is True
+    assert approval_from_gate.bridge_latched is True
 
     # The fields this question cannot exercise, each with why. `secret` and
     # `persist` are covered non-default by the secret test below, which is the
@@ -264,6 +275,10 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
         "approval_mode",
         "approval_provenance",
         "approval_global_mode",
+        # Team Bridge gate flags: never set on an ask; asserted non-default
+        # through both approval rebuilds above.
+        "taint_raised",
+        "bridge_latched",
     }
     assert set(derived) | not_derivable_here == set(defaults), (
         "a PendingRequest field is neither asserted with a derived value nor "
@@ -314,7 +329,10 @@ def test_the_ask_wire_carries_every_field_the_picker_reads() -> None:
     # `id` is replaced by `request_id` (mapped back via _pending_question_ids);
     # `multi` is DEFERRED — the answer path is single-value end to end, so
     # carrying it would render a picker that discards every answer but the first.
-    deliberately_dropped = {"id", "multi"}
+    # `recommended_all` rides with `multi`: the set only exists on a multi-select,
+    # which this wire cannot express, so the phone keeps the int contract
+    # (`recommended=0`, the first pick) and the set is not carried.
+    deliberately_dropped = {"id", "multi", "recommended_all"}
     # `question` is the one deliberate RENAME: AskQuestion.question is carried
     # as PendingRequest.title.
     assert ask_fields - deliberately_dropped <= expected | {"question"}, (
@@ -817,3 +835,24 @@ def test_a_malformed_delivery_refuses_the_command_payload() -> None:
         ContinuationCommand.from_json({**base, "delivery": "someday"})
     with pytest.raises(ValueError, match="delivery"):
         ContinuationCommand.from_json({**base, "delivery": ["queue"]})
+
+
+def test_a_recommendation_set_reaches_the_phone_as_the_first_pick_only() -> None:
+    """The native phone's `PendingRequest` has no `multi` and no set, so it
+    keeps the int contract: `recommended=0`, and no new key on the wire."""
+    question = AskQuestion(
+        id="wire-2",
+        question="Which scopes?",
+        options=[AskOption(label=label) for label in ("Gamma", "Alpha", "Beta")],
+        multi=True,
+        recommended=[2, 0],
+    )
+    assert question.recommended_all == [0, 1]
+
+    wire, pending, rebuilt = _round_trip(question)
+
+    assert pending.recommended == 0
+    assert wire["recommended"] == 0
+    assert "recommended_all" not in wire
+    assert [option.label for option in rebuilt.options] == ["Beta", "Gamma", "Alpha"]
+    assert rebuilt.recommended == 0

@@ -101,6 +101,13 @@ _keymap_t = tr("wire.settings.keymap")
 #: that a newly-registered action could be missing from.
 KEYMAP_PREFIX = "keymap."
 
+#: The stored value meaning "no hotkey". Distinct from invalid (which falls
+#: back / refuses) and from unset (which reads as the default): a cleared row
+#: stores this string, and every resolver keeps it. Only desktop-scope rows
+#: that opt in via ``KeyAction.clearable`` accept it — today exactly the two
+#: dictation rows. Both cleared at once is legal.
+UNBOUND = "none"
+
 
 @dataclasses.dataclass(frozen=True)
 class KeyAction:
@@ -148,6 +155,11 @@ class KeyAction:
     #: desktop's settings page must refuse the same values the capture UI
     #: does.
     scope: str = "app"
+    #: Whether this row may be CLEARED to :data:`UNBOUND` (``"none"``).
+    #: Opt-in only, and only the desktop dictation rows set it: reset deletes
+    #: the key and restores the default, so `none` is the one way to have no
+    #: shortcut at all. Surfacing it on the wire is ``settings_io``'s job.
+    clearable: bool = False
 
 
 #: Every remappable action, in the order the settings page lists them.
@@ -221,6 +233,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         help="Hold to dictate (desktop); release to stop.",
         tip="",
         scope="desktop",
+        clearable=True,
     ),
     # DESKTOP-owned recording action, not a Textual action: the desktop reads
     # this persisted value directly, including when no daemon is reachable.
@@ -244,6 +257,7 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         help="Starts speech-to-text recording in the desktop window.",
         tip="",
         scope="desktop",
+        clearable=True,
     ),
     # COMPOSER-scoped send chords (D4-D9, architect contract): the TUI
     # composer reads these from the resolved keymap and rewrites the chord
@@ -1095,8 +1109,10 @@ def normalize_desktop_key(text: str, *, action_id: str | None = None) -> str:
     One stored value maps correctly on every platform by construction:
     ``primary`` is the platform's command modifier (⌘ / Ctrl) and ``meta`` the
     literal Super/Command key, so the string in the file is
-    platform-independent.
+    platform-independent. The cleared sentinel is already canonical.
     """
+    if text.strip().lower() == UNBOUND:
+        return UNBOUND
     return _grammar_for(action_id).normalize(text)
 
 
@@ -1108,6 +1124,13 @@ def validate_desktop_key(value: Any, *, action_id: str | None = None) -> str | N
     action with a different value space cannot be validated by the wrong
     rules.
     """
+    if isinstance(value, str) and value.strip().lower() == UNBOUND:
+        action = BY_ID.get(action_id or "")
+        if action is not None and action.clearable:
+            return None
+        # Fall through to the grammar for every other row: it already names
+        # why `none` is not a key in that grammar, which is the honest
+        # refusal for a row that cannot be cleared.
     reason = _grammar_for(action_id).validate(value)
     if (
         action_id == "keymap.start_recording"
@@ -1134,6 +1157,10 @@ def _canonical_variants(action_id: str | None, text: str) -> frozenset[str]:
     class).
     """
     if scope_of(action_id) == "desktop":
+        if text.strip().lower() == UNBOUND:
+            # Cleared collides with nothing, so both dictation rows can be
+            # `none` at once without the second reading as "already uses none".
+            return frozenset()
         normalized = normalize_desktop_key(text, action_id=action_id)
         return frozenset({normalized}) if normalized else frozenset()
     if scope_of(action_id) == "composer":
@@ -1380,6 +1407,7 @@ __all__ = [
     "COMPOSER_KEYS",
     "DESKTOP_RESERVED_COMBOS",
     "KEYMAP_PREFIX",
+    "UNBOUND",
     "KEY_ACTIONS",
     "SCOPE_BY_ID",
     "SEND_MODES",

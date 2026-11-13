@@ -41,6 +41,8 @@ SID = "bbbbbbbbbbbb"
 # The real PR-lookup helpers, kept before the ``home`` fixture stubs them.
 _REAL_GITHUB_REPO = prov._github_repo
 _REAL_GH_OPEN_PRS = prov._gh_open_prs
+_REAL_GH_PRS = prov._gh_prs
+_REAL_GLAB_MRS = prov._glab_mrs
 
 
 @pytest.fixture
@@ -55,7 +57,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Synthetic repos have no GitHub remote either: by default every worktree is
     # on GitHub with no open PR. The PR lookup has its own tests below.
     monkeypatch.setattr(prov, "_github_repo", lambda _: "o/r")
-    monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: [])
+    monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: [])
     monkeypatch.setattr(prov, "_cwd_inventory_cache", None)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
@@ -476,11 +478,11 @@ def test_open_pr_refuses_any_linked_worktree_outright(
     """Operator incident: a clean worktree whose branch had an open PR was removed."""
     seen: list[tuple[str, str]] = []
 
-    def lookup(repo_name: str, branch: str) -> list[int]:
+    def lookup(repo_name: str, branch: str) -> list[prov.ForgeChange]:
         seen.append((repo_name, branch))
-        return [1828]
+        return [prov.ForgeChange(1828, "open", "2026-11-09")]
 
-    monkeypatch.setattr(prov, "_gh_open_prs", lookup)
+    monkeypatch.setattr(prov, "_gh_prs", lookup)
     wt = _add(repo, repo / ".worktrees" / "pp", "feat/profile-proposals-agents")
     assert prov.worktree_state(str(wt)) == "clean"
     verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
@@ -501,7 +503,7 @@ def test_open_pr_refusal_is_not_lifted_by_an_answered_ask(
     """CRITICAL never reaches the ask/judge route: an earlier approval cannot cover it."""
     from local_operator.guardrails.check import BUILTIN_REFUSE_CRITICAL, builtin_branch
 
-    monkeypatch.setattr(prov, "_gh_open_prs", lambda r, b: [7])
+    monkeypatch.setattr(prov, "_gh_prs", lambda r, b: [prov.ForgeChange(7, "open", "")])
     wt = _add(repo, repo / ".worktrees" / "asked", "asked")
     verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
     assert builtin_branch(verdict, critical_override=False) == BUILTIN_REFUSE_CRITICAL
@@ -518,7 +520,7 @@ def test_unknown_pr_state_goes_to_the_judge(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, repo_name, prs, detail
 ) -> None:
     monkeypatch.setattr(prov, "_github_repo", lambda _: repo_name)
-    monkeypatch.setattr(prov, "_gh_open_prs", lambda r, b: prs)
+    monkeypatch.setattr(prov, "_gh_prs", lambda r, b: prs)
     wt = _add(repo, repo / ".worktrees" / "unk", "unk")
     verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
     assert verdict.risk is Risk.HIGH
@@ -683,7 +685,12 @@ def test_refusal_text_says_another_route_is_the_same_action() -> None:
 
 
 @pytest.mark.parametrize(
-    ("mrs", "risk"), [([42], Risk.CRITICAL), ([], Risk.LOW), (None, Risk.HIGH)]
+    ("mrs", "risk"),
+    [
+        ([prov.ForgeChange(42, "open", "")], Risk.CRITICAL),
+        ([], Risk.LOW),
+        (None, Risk.HIGH),
+    ],
 )
 def test_gitlab_open_mr_refuses_and_no_mr_stays_low(
     home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, mrs, risk: Risk
@@ -695,7 +702,7 @@ def test_gitlab_open_mr_refuses_and_no_mr_stays_low(
         seen.append((project, branch))
         return mrs
 
-    monkeypatch.setattr(prov, "_glab_open_mrs", lookup)
+    monkeypatch.setattr(prov, "_glab_mrs", lookup)
     _git("remote", "add", "origin", "git@gitlab.com:minervaai/sub/core.git", cwd=repo)
     wt = _add(repo, repo / ".worktrees" / "gl", "feat/gl")
     verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
@@ -744,3 +751,198 @@ def test_glab_lookup_parses_remotes_and_never_prompts(
 
     monkeypatch.setattr(prov.subprocess, "run", fail)
     assert prov._glab_open_mrs("g/p", "feat/x") is None
+
+
+# -- PR/MR history in the worktree facts (operator request, 2026-11-11) -------------
+#
+# "No open PR" used to read the same for merged, closed-unmerged and never-proposed
+# branches. The facts now name the newest PR/MR and its date; ranking still rests on
+# the open state alone, so every rank below matches what it was before.
+
+_FC = prov.ForgeChange
+
+
+@pytest.mark.parametrize(
+    ("changes", "fact", "risk"),
+    [
+        ([_FC(120, "merged", "2026-10-01"), _FC(7, "open", "")], "open PR #7", Risk.CRITICAL),
+        (
+            [_FC(99, "closed", "2026-11-01"), _FC(123, "merged", "2026-11-09")],
+            "no open PR; newest PR #123 merged 2026-11-09",
+            Risk.LOW,
+        ),
+        (
+            [_FC(55, "closed", "2026-11-02")],
+            "no open PR; newest PR #55 closed unmerged 2026-11-02",
+            Risk.LOW,
+        ),
+        ([], "no open PR; no PR found for this branch", Risk.LOW),
+        (None, "PR state unknown (gh lookup on o/r failed or timed out)", Risk.HIGH),
+    ],
+    ids=["open", "merged", "closed", "never", "unknown"],
+)
+def test_worktree_facts_name_pr_history_without_changing_the_rank(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, changes, fact: str, risk: Risk
+) -> None:
+    monkeypatch.setattr(prov, "_gh_prs", lambda r, b: changes)
+    wt = _add(repo, repo / ".worktrees" / "hist", "hist")
+    activity = prov.worktree_activity(str(wt), SID)
+    assert fact in activity.facts()
+    assert activity.pr_state == {Risk.CRITICAL: "open", Risk.LOW: "none"}.get(risk, "unknown")
+    verdict = _verdict(home, f"git -C {repo} worktree remove {wt}")
+    assert verdict.risk is risk
+    assert fact in verdict.targets[0].reason
+
+
+def test_gitlab_history_names_newest_mr_and_open_only_fallback_says_unchecked() -> None:
+    merged = prov.WorktreeActivity(
+        "b", "none", pr_label="MR !", newest=_FC(12, "merged", "2026-11-03")
+    )
+    assert "no open MR; newest MR !12 merged 2026-11-03" in merged.facts()
+    unchecked = prov.WorktreeActivity("b", "none", pr_label="MR !", history_checked=False)
+    assert "no open MR; merged/closed MRs not checked" in unchecked.facts()
+
+
+@pytest.mark.parametrize("fallback", [[], [3], None])
+def test_full_history_page_falls_back_to_the_open_only_listing(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, fallback
+) -> None:
+    """A reused branch (10+ PRs) may hide an older open PR past the page."""
+    page = [_FC(100 + i, "merged", "2026-11-0%d" % (i % 9 + 1)) for i in range(10)]
+    monkeypatch.setattr(prov, "_gh_prs", lambda r, b: page)
+    monkeypatch.setattr(prov, "_gh_open_prs", lambda r, b: fallback)
+    wt = _add(repo, repo / ".worktrees" / "reused", "reused")
+    activity = prov.worktree_activity(str(wt), SID)
+    if fallback is None:
+        assert activity.pr_state == "unknown"
+    elif fallback:
+        assert activity.pr_state == "open" and activity.pr_number == 3
+    else:
+        assert activity.pr_state == "none" and "newest PR #109 merged" in activity.facts()
+
+
+def test_gh_history_lookup_is_one_bounded_call_and_failure_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+    rows = (
+        '[{"number": 5, "state": "MERGED", "mergedAt": "2026-11-09T15:16:50Z",'
+        ' "closedAt": "2026-11-09T15:16:50Z", "updatedAt": "2026-11-10T00:00:00Z"},'
+        ' {"number": 4, "state": "CLOSED", "mergedAt": null,'
+        ' "closedAt": "2026-11-01T01:00:00Z", "updatedAt": "2026-11-01T01:00:00Z"}]'
+    )
+
+    def run(argv, **kwargs):
+        seen.update(
+            argv=argv, timeout=kwargs["timeout"], prompt=kwargs["env"]["GH_PROMPT_DISABLED"]
+        )
+        return subprocess.CompletedProcess(argv, 0, rows, "")
+
+    monkeypatch.setattr(prov.subprocess, "run", run)
+    assert _REAL_GH_PRS("o/r", "feat/x") == [
+        _FC(5, "merged", "2026-11-09"),
+        _FC(4, "closed", "2026-11-01"),
+    ]
+    assert seen["argv"] == [
+        "gh", "pr", "list", "--repo", "o/r", "--head", "feat/x", "--state", "all",
+        "--json", "number,state,mergedAt,closedAt,updatedAt", "--limit", "10",
+    ]  # fmt: skip
+    assert seen["timeout"] == prov._GH_TIMEOUT_S and seen["prompt"] == "1"
+
+    def timeout(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    def fail(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "HTTP 502")
+
+    def garbage(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, '[{"state": "OPEN"}]', "")
+
+    for broken in (timeout, fail, garbage):
+        monkeypatch.setattr(prov.subprocess, "run", broken)
+        assert _REAL_GH_PRS("o/r", "feat/x") is None, broken.__name__
+
+
+def test_glab_history_lookup_lists_all_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    rows = (
+        '[{"iid": 9, "state": "opened", "updated_at": "2026-11-10T00:00:00Z"},'
+        ' {"iid": 8, "state": "merged", "merged_at": "2026-11-08T00:00:00Z"}]'
+    )
+
+    def run(argv, **kwargs):
+        seen.update(argv=argv, timeout=kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, 0, rows, "")
+
+    monkeypatch.setattr(prov.subprocess, "run", run)
+    assert _REAL_GLAB_MRS("g/p", "feat/x") == [
+        _FC(9, "open", "2026-11-10"),
+        _FC(8, "merged", "2026-11-08"),
+    ]
+    assert seen["argv"] == [
+        "glab", "mr", "list", "--repo", "g/p", "--source-branch", "feat/x",
+        "--all", "--per-page", "10", "-F", "json",
+    ]  # fmt: skip
+    assert seen["timeout"] == prov._GH_TIMEOUT_S
+
+
+def _old_review_text(rule: str, reason: str, targets: str) -> str:
+    """``review_text`` as it was before the worktree clause (965c5113855e)."""
+    from local_operator.guardrails.check import BLOCK_MARKER, SUPPORTED_DELETE_PATHS
+
+    return (
+        f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. "
+        f"{SUPPORTED_DELETE_PATHS} {REFUSAL_SCOPE}"
+    )
+
+
+def test_high_worktree_refusal_carries_facts_and_quote_clause_others_unchanged(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.guardrails.check import (
+        DANGEROUS_DELETE_RULE,
+        WORKTREE_ASK_CLAUSE,
+        _targets_text,
+        worktree_flagged,
+    )
+
+    monkeypatch.setattr(prov, "_gh_prs", lambda r, b: [_FC(123, "merged", "2026-11-09")])
+    wt = _add(repo, repo / ".worktrees" / "busy", "busy")
+    (wt / "notes.txt").write_text("dirty")  # dirty → HIGH with the facts named
+    verdict = _verdict(home, f"git -C {repo} worktree remove --force {wt}")
+    assert verdict.risk is Risk.HIGH and worktree_flagged(verdict)
+    text = review_text(
+        DANGEROUS_DELETE_RULE, "r", _targets_text(verdict), worktree=worktree_flagged(verdict)
+    )
+    assert "newest PR #123 merged 2026-11-09" in text
+    assert text.endswith(f"{REFUSAL_SCOPE} {WORKTREE_ASK_CLAUSE}")
+    # Every other delete: the clause never appears, the text is byte-identical.
+    other = home / "data"
+    other.mkdir()
+    (other / "x").write_text("x")
+    plain = _verdict(home, f"rm -rf {other}")
+    assert plain.risk is Risk.HIGH and not worktree_flagged(plain)
+    targets = _targets_text(plain)
+    got = review_text(DANGEROUS_DELETE_RULE, "r", targets, worktree=worktree_flagged(plain))
+    assert got == review_text(DANGEROUS_DELETE_RULE, "r", targets)
+    assert got == _old_review_text(DANGEROUS_DELETE_RULE, "r", targets)
+    assert WORKTREE_ASK_CLAUSE not in got
+
+
+def test_preview_of_a_high_worktree_remove_shows_history_and_clause(
+    home: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.guardrails.check import WORKTREE_ASK_CLAUSE
+
+    monkeypatch.setattr(prov, "_gh_prs", lambda r, b: [_FC(123, "merged", "2026-11-09")])
+    wt = _add(repo, repo / ".worktrees" / "pv", "pv")
+    (wt / "notes.txt").write_text("dirty")
+    ctx = CallContext(cwd=str(home), env=_env(home), scratchpad=None, session_id=SID)
+    settings = GuardSettings(enabled=True, rules_dirs=())
+    report = preview_tool_call(
+        "bash", {"command": f"git -C {repo} worktree remove --force {wt}"}, ctx, settings=settings
+    )
+    assert report.builtin_effect == "judge"
+    assert "newest PR #123 merged 2026-11-09" in report.builtin_text
+    assert WORKTREE_ASK_CLAUSE in report.builtin_text
+    assert WORKTREE_ASK_CLAUSE in report.render()

@@ -19,6 +19,7 @@ from typing import Any
 
 from local_operator.info.model import format_duration
 from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
+from local_operator.session import temporary
 from local_operator.session.archived import archived_ids
 from local_operator.session.creation import (
     CREATED_AT_NAME,
@@ -1286,6 +1287,7 @@ def decorate_rows(
     *,
     include_live: bool = False,
     include_archived: bool = False,
+    include_temporary: bool = False,
 ) -> list[SessionRow]:
     """Fill in each row's runtime state, and float the ones needing a person.
 
@@ -1434,6 +1436,12 @@ def decorate_rows(
                 is_archived = session_id in archived
                 if is_archived and not include_archived:
                     continue
+                # The same temporary-chat predicate as the scan's: a live
+                # runtime the scan did not carry must not put a temporary chat
+                # back into a listing that did not ask for one.
+                is_temporary = temporary.is_marked_path(session_dir)
+                if is_temporary and not include_temporary:
+                    continue
                 rows.append(
                     SessionRow(
                         session_id,
@@ -1446,6 +1454,7 @@ def decorate_rows(
                         # only when it IS archived, and a renderer paints the
                         # mark from this flag.
                         archived=is_archived,
+                        temporary=is_temporary,
                     )
                 )
     updated: list[SessionRow] = []
@@ -1792,8 +1801,9 @@ def cached_session_rows(
     directory: Path,
     limit: int = CATALOG_SCAN_LIMIT,
     *,
-    candidates: list[tuple[str, float, str, bool]] | None = None,
+    candidates: list[tuple[str, float, str, bool, bool]] | None = None,
     include_archived: bool = False,
+    include_temporary: bool = False,
 ) -> list[SessionRow]:
     """:func:`recent_session_rows` for the poll, memoized on transcript stat.
 
@@ -1823,7 +1833,12 @@ def cached_session_rows(
     selected = (
         candidates
         if candidates is not None
-        else _recent_sessions_with_origin(directory, limit, include_archived=include_archived)
+        else _recent_sessions_with_origin(
+            directory,
+            limit,
+            include_archived=include_archived,
+            include_temporary=include_temporary,
+        )
     )
     # Resolved ONCE for the store, not per row. ``Path.resolve()`` is a
     # ``realpath`` — an ``lstat`` per path component — and the loop below called
@@ -1839,7 +1854,7 @@ def cached_session_rows(
     # a cache MISS (a row rebuilt from disk, which is correct by construction),
     # never a wrong or stale row.
     root = (directory / "sessions").resolve()
-    for session_id, mtime, origin, archived in selected:
+    for session_id, mtime, origin, archived, is_temporary in selected:
         session_dir = directory / "sessions" / session_id
         key = _row_stat_key(session_dir)
         cached = _ROW_CACHE.get(root / session_id)
@@ -1856,7 +1871,8 @@ def cached_session_rows(
             # ``archived=False`` for as long as the conversation is not
             # appended to, which for the picker's reveal toggle is precisely
             # the row it exists to reveal.
-            row = cached[1]._replace(mtime=mtime, archived=archived)
+            # ``temporary`` likewise: the mark changes without the transcript.
+            row = cached[1]._replace(mtime=mtime, archived=archived, temporary=is_temporary)
         else:
             row = SessionRow(
                 session_id,
@@ -1877,6 +1893,7 @@ def cached_session_rows(
                 opened_by=(
                     workstream_opened_by(session_dir) if origin == ORIGIN_AGENT_WORKSTREAM else None
                 ),
+                temporary=is_temporary,
             )
         rows.append(row)
         if key is not None:
@@ -1924,8 +1941,9 @@ def _ranked_candidates(
     *,
     include_subagents: bool = False,
     include_archived: bool = False,
+    include_temporary: bool = False,
     pinned_hidden_ids: Sequence[str] = (),
-) -> tuple[list[CatalogEntry], dict[str, tuple[str, float, str, bool]], set[str]]:
+) -> tuple[list[CatalogEntry], dict[str, tuple[str, float, str, bool, bool]], set[str]]:
     """Scan, decorate and rank: the catalogue's MIDDLE, and its only implementation.
 
     Extracted from :func:`load_catalog` WITHOUT a behaviour change -- the proof is
@@ -1965,11 +1983,13 @@ def _ranked_candidates(
     # see the docstring above, and ``_scan_sessions`` for the boundary it draws
     # between a store that is not there (an empty listing, still) and a store
     # that cannot be read (an unavailable one).
-    candidates, hidden = _scan_sessions(directory, strict=True, include_archived=include_archived)
-    source = {
-        session_id: (session_id, mtime, origin, archived)
-        for session_id, mtime, origin, archived in candidates
-    }
+    candidates, hidden = _scan_sessions(
+        directory,
+        strict=True,
+        include_archived=include_archived,
+        include_temporary=include_temporary,
+    )
+    source = {candidate[0]: candidate for candidate in candidates}
     # -- the opt-in subagent layer (PROPOSAL 5a) ----------------------------
     #
     # Every syscall this layer costs is inside this branch: with both keyword
@@ -2034,6 +2054,7 @@ def _ranked_candidates(
                 mtimes[session_id],
                 "subagent",
                 session_id in archived_hidden,
+                False,
             )
             subagent_entries.append(
                 CatalogEntry(
@@ -2070,8 +2091,9 @@ def _ranked_candidates(
             # ``cached_session_rows`` below (nothing here guarantees every
             # candidate is hydrated) still states its archive state honestly.
             archived=archived,
+            temporary=is_temporary,
         )
-        for session_id, mtime, _origin, archived in candidates
+        for session_id, mtime, _origin, archived, is_temporary in candidates
     ]
     # One directory read plus a stat per unlisted candidate, NOT
     # ``glob("*/desktop.json")``. The glob looks equivalent and is not: a
@@ -2164,6 +2186,11 @@ def _ranked_candidates(
                     continue
                 if archived_marker_rows is None:
                     archived_marker_rows = archived_ids(directory)
+                # A desktop draft marked temporary (the create writes the mark
+                # before the desktop marker) follows the scan's predicate.
+                marker_temporary = temporary.is_marked_path(entry.path)
+                if marker_temporary and not include_temporary:
+                    continue
                 rows.append(
                     SessionRow(
                         entry.name,
@@ -2177,6 +2204,7 @@ def _ranked_candidates(
                         # the mark from, so the row would be indistinguishable
                         # from an ordinary one.
                         archived=entry.name in archived_marker_rows,
+                        temporary=marker_temporary,
                     )
                 )
                 marker_rows_added = True
@@ -2186,7 +2214,13 @@ def _ranked_candidates(
     # ranks them as candidates and its archive predicate never saw them.
     if marker_rows_added and not include_archived:
         rows = [row for row in rows if row.id not in (archived_marker_rows or frozenset())]
-    rows = decorate_rows(directory, rows, include_live=True, include_archived=include_archived)
+    rows = decorate_rows(
+        directory,
+        rows,
+        include_live=True,
+        include_archived=include_archived,
+        include_temporary=include_temporary,
+    )
     # The namespace is a property of the PARENT directory, and every row here
     # shares one, so `conversation_identity` is asked once and its answer reused.
     # Building a `Path` per row just to ask it was 0.56 s of a 1.9 s list at
@@ -2232,6 +2266,7 @@ def load_catalog(
     *,
     include_subagents: bool = False,
     include_archived: bool = False,
+    include_temporary: bool = False,
     pinned_hidden_ids: Sequence[str] = (),
     pinned_off_page: Sequence[str] = (),
 ) -> list[CatalogEntry]:
@@ -2293,6 +2328,7 @@ def load_catalog(
         directory,
         include_subagents=include_subagents,
         include_archived=include_archived,
+        include_temporary=include_temporary,
         pinned_hidden_ids=pinned_hidden_ids,
     )
     entries = ranked[:limit]
@@ -2324,7 +2360,7 @@ def load_catalog(
 
 def _hydrate(
     directory: Path,
-    source: dict[str, tuple[str, float, str, bool]],
+    source: dict[str, tuple[str, float, str, bool, bool]],
     entries: list[CatalogEntry],
 ) -> list[CatalogEntry]:
     """Give the chosen page its real name, fork mark, archive flag and opener.
@@ -2353,6 +2389,7 @@ def _hydrate(
                     # rather than from the row cache; see
                     # ``cached_session_rows``.
                     archived=named[entry.id].archived,
+                    temporary=named[entry.id].temporary,
                     # WHO opened this row, for a workstream only (``None``
                     # otherwise). Hydration is an allow-list of fields, so
                     # leaving it out here would drop the attribution on the one
@@ -2431,6 +2468,7 @@ def catalogue_page(
     cursor: str | None = None,
     limit: int = CATALOG_SCAN_LIMIT,
     include_archived: bool = False,
+    include_temporary: bool = False,
     with_counts: bool = False,
     pinned_off_page: Sequence[str] = (),
     pinned_hidden_ids: Sequence[str] = (),
@@ -2498,6 +2536,7 @@ def catalogue_page(
     ranked, source, _hidden = _ranked_candidates(
         directory,
         include_archived=include_archived,
+        include_temporary=include_temporary,
         pinned_hidden_ids=pinned_hidden_ids,
     )
     if exclude_ids:
