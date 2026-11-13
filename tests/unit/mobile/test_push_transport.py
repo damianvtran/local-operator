@@ -518,3 +518,96 @@ def test_a_disarmed_lane_re_arms_on_a_config_change_or_backoff(
     clock.now += advance
     assert transport.disarmed is (not rearmed)
     assert transport.credential_id == credential
+
+
+def test_a_re_login_before_the_failing_call_re_arms_on_the_next_check(login: int) -> None:
+    """Round 2 M1: the disarm key is the credential the call USED.
+
+    The config already names the new login when the old one's call fails; the
+    disarm must still see that as a change and re-arm on the next spaced check,
+    not after the 1 h backoff.
+    """
+    clock = _Clock()
+    reads: list[int] = []
+
+    def key() -> tuple[str, int]:
+        reads.append(1)
+        return (TUNNEL, login + 1)  # re-login already rewrote the config
+
+    cloud = Cloud(httpx.Response(404, json={"error": "tunnel_not_found"}))
+    transport = _transport(login, cloud, tunnel_key=key, clock=clock)
+    assert transport.emit({"v": 1}, idempotency_key="k") == EmitRefused(404)
+    assert reads == []  # the disarm itself read no config
+    assert transport.disarmed  # inside the retry spacing: no check yet
+    clock.now += 60.0
+    assert not transport.disarmed
+    assert transport.credential_id == login + 1
+    assert len(reads) == 1
+
+
+def test_the_register_forward_never_reads_the_tunnel_config_on_the_loop(login: int) -> None:
+    """Round 2 M2: schedule + forward + disarm on the event loop do no file I/O."""
+    reads: list[int] = []
+
+    def key() -> tuple[str, int]:
+        reads.append(1)
+        return (TUNNEL, login)
+
+    cloud = Cloud(httpx.Response(404, json={"error": "tunnel_not_found"}))
+    clock = _Clock()
+    transport = _transport(login, cloud, tunnel_key=key, clock=clock)
+
+    async def go() -> None:
+        task = transport.schedule_register_forward({"device_id": "d"}, [])
+        assert task is not None
+        await task  # the 404 disarms on the loop
+        clock.now += 7200.0  # a re-arm would be due, yet the loop path must not check
+        assert transport.schedule_register_forward({"device_id": "d"}, []) is None
+
+    asyncio.run(go())
+    assert len(cloud.seen) == 1
+    assert reads == []
+    # The scan-thread check is where the re-arm happens.
+    assert not transport.disarmed
+    assert reads == [1]
+
+
+def test_the_scan_arms_the_lane_when_a_tunnel_appears_after_start(
+    login: int, tmp_path: Path
+) -> None:
+    """Late tunnel: ``lop tunnel create`` after start no longer needs a restart."""
+    from local_operator.mobile.daemon import MobileDaemon
+
+    builds: list[int] = []
+
+    def factory() -> PushLane | None:
+        builds.append(1)
+        return build_push_lane(tmp_path)
+
+    daemon = MobileDaemon(port=0, password="pw123", push_lane_factory=factory)
+    assert daemon.push_lane is None
+
+    async def go() -> None:
+        await daemon._maybe_arm_push_lane()  # no tunnel yet
+        assert daemon.push_lane is None and len(builds) == 1
+        tunnel_config.save({"tunnel_id": TUNNEL, "credential_id": login, "record": {"id": TUNNEL}})
+        await daemon._maybe_arm_push_lane()  # inside the spacing: not retried
+        assert daemon.push_lane is None and len(builds) == 1
+        daemon._push_lane_tried_at = -1e9  # the spacing elapsed
+        await daemon._maybe_arm_push_lane()
+        assert daemon.push_lane is not None and len(builds) == 2
+        assert daemon.push_worker is daemon.push_lane.worker
+        assert daemon.push_lane.transport.computer == TUNNEL
+        daemon._push_lane_tried_at = -1e9
+        await daemon._maybe_arm_push_lane()  # armed: never rebuilt
+        assert len(builds) == 2
+
+    asyncio.run(go())
+
+
+def test_no_factory_means_the_scan_never_builds_a_lane() -> None:
+    from local_operator.mobile.daemon import MobileDaemon
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    asyncio.run(daemon._maybe_arm_push_lane())
+    assert daemon.push_lane is None and daemon.push_worker is None

@@ -4141,6 +4141,7 @@ class MobileDaemon:
         dial_registrants: bool = True,
         push_worker: PushWorker | None = None,
         push_lane: PushLane | None = None,
+        push_lane_factory: Callable[[], PushLane | None] | None = None,
     ) -> None:
         self.port = port
         self.password = password
@@ -4173,6 +4174,16 @@ class MobileDaemon:
         self.push_lane = push_lane
         if push_lane is not None:
             self.push_worker = push_lane.worker
+        # Late arming (follow-up to #3875): ``lop tunnel create`` after the
+        # daemon started used to leave push dark until a restart, because the
+        # lane was only ever built in ``service.amain``. With a factory (the
+        # same ``build_push_lane`` gating: live tunnel id, integer credential
+        # id, not revoked; ``service.amain`` passes none to a no-dial observer)
+        # the scan retries the build while no lane exists. ``None`` — every
+        # test and every embedder that did not ask for it — never reads the
+        # tunnel config from the scan.
+        self._push_lane_factory = push_lane_factory
+        self._push_lane_tried_at: float | None = None
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later comparison in ``_log_import_failure`` is
         # against this value.
@@ -5008,6 +5019,7 @@ class MobileDaemon:
         # this pass, and caught locally: the scan loop's own guard would log it
         # too, but only after the exception unwound out of this pass, and a push
         # fault is not a reason to skip anything else the scan does.
+        await self._maybe_arm_push_lane()
         push_worker = self.push_worker
         if push_worker is not None:
             try:
@@ -5040,6 +5052,38 @@ class MobileDaemon:
                 )
             except Exception:  # noqa: BLE001 — a push fault must not cost the tick
                 logger.warning("push heartbeat failed", exc_info=True)
+
+    async def _maybe_arm_push_lane(self) -> None:
+        """Build the push lane once a tunnel appears after start (late arming).
+
+        Spaced to one attempt per ``EMIT_RETRY_INTERVAL_S`` (the disarmed
+        lane's own re-check spacing) rather than every 2 s scan, and run off the
+        loop because the build reads the tunnel config file and opens the
+        attention store. A lane is never rebuilt once set: a disarmed lane
+        re-arms itself (``push_transport`` RE-ARM), and a different tunnel id
+        still needs a restart, as before. An injected bare worker is kept.
+        """
+        factory = self._push_lane_factory
+        if factory is None or self.push_lane is not None:
+            return
+        from local_operator.mobile.push_worker import EMIT_RETRY_INTERVAL_S
+
+        now = time.monotonic()
+        tried = self._push_lane_tried_at
+        if tried is not None and now - tried < EMIT_RETRY_INTERVAL_S:
+            return
+        self._push_lane_tried_at = now
+        try:
+            lane = await asyncio.to_thread(factory)
+        except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+            logger.warning("push lane build failed", exc_info=True)
+            return
+        if lane is None:
+            return
+        self.push_lane = lane
+        if self.push_worker is None:
+            self.push_worker = lane.worker
+        logger.info("mobile push armed for tunnel %s (tunnel appeared)", lane.transport.computer)
 
     async def _refresh_notifications_if_changed(self) -> None:
         """Wake the list stream when the INBOX store moved.

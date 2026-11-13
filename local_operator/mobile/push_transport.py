@@ -48,6 +48,19 @@ live. A config naming a different tunnel, or none, never re-arms it: the
 lane's ``computer`` handle is the old tunnel id, so only a restart can bind
 the new one. The cost of a wrong re-arm is one more refused call and one more
 disarm line per hour, which is the bound.
+
+The disarm records the credential the transport was USING when the call
+failed, not the config on disk at disarm time (review round 2 on #3875, M1):
+a ``lop login radient`` that rewrote the config while the failing call was in
+flight would otherwise be recorded as the disarm key itself, read as "no
+change" and left dark for the full hour.
+
+LOOP SAFETY (round 2, M2). Only the scan-thread callers (``emit``, the
+heartbeat's ``credentials`` and ``PushLane.heartbeat``) go through
+:attr:`RadientPushTransport.disarmed`, which may read the tunnel config file.
+The register forward is scheduled from the daemon's event loop, so it reads the
+in-memory flag only; a forward that lands while the lane is dark is dropped,
+and the next scan's heartbeat check does the re-arm off the loop.
 """
 
 from __future__ import annotations
@@ -203,7 +216,12 @@ class RadientPushTransport:
 
     @property
     def disarmed(self) -> bool:
-        """Whether calls are refused locally; a disarmed lane may re-arm here."""
+        """Whether calls are refused locally; a disarmed lane may re-arm here.
+
+        The re-arm check reads the tunnel config FILE, so this is for worker
+        threads only — never call it on the event loop (module docstring, LOOP
+        SAFETY); loop code reads ``_disarmed`` instead.
+        """
         if self._disarmed:
             self._maybe_rearm()
         return self._disarmed
@@ -234,7 +252,11 @@ class RadientPushTransport:
         )
 
     def _disarm(self, failure: Exception) -> None:
-        key = self._tunnel_key()
+        # The key the failing call actually ran under, never a fresh config
+        # read (M1, and no file I/O here since register_forward disarms on the
+        # event loop — M2). A config already rewritten by a re-login then
+        # differs from this key and re-arms on the next check.
+        key = (self.tunnel_id, self.credential_id)
         now = self._clock()
         with self._disarm_lock:
             if self._disarmed:
@@ -349,8 +371,12 @@ class RadientPushTransport:
         The app's register response must not wait on the cloud (SESSION-PUSH
         §4.5): a slow or absent cloud would otherwise turn every app launch into
         a 30 s spinner. Returns the task for tests; ``None`` when disarmed.
+
+        Runs ON the event loop, so it reads the in-memory flag, not
+        :attr:`disarmed`: that property's re-arm check reads the tunnel config
+        file, and a blocking read here would stall every mobile stream (M2).
         """
-        if self.disarmed:
+        if self._disarmed:
             return None
         task = asyncio.get_running_loop().create_task(self.register_forward(device, devices))
         self._forwards.add(task)
