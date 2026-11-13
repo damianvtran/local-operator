@@ -540,7 +540,9 @@ def test_an_unknown_or_unavailable_codec_is_reported_never_absent(tmp_path: Path
     # A .zst archive and a build that cannot decode it is the cross-version case
     # the module documents; on 3.14 the same bytes are simply a corrupt archive.
     (directory / "transcript.jsonl.zst").write_bytes(b"\x28\xb5\x2f\xfd not really zstd")
-    if compression.available_codec() == "gzip":
+    # Keyed on the DECODER, not the write codec: a 3.12/3.13 build with the
+    # ``backports.zstd`` fallback writes gzip yet decodes zstd.
+    if compression.zstd_decoder() is None:
         with pytest.raises(compression.ArchiveUnavailable):
             compression.read_head(directory, 64)
     else:
@@ -605,6 +607,136 @@ def test_gzip_and_zstd_archives_coexist_and_each_reads_by_suffix(tmp_path: Path)
     (second / compression.PLAIN_FILENAME).unlink()
     assert compression.read_head(second, 32) == second_body[:32]
     assert compression.transcript_source(second)[1] == "zstd"
+
+
+# ---------------------------------------------------------------------------
+# Cross-version READ: a 3.14-written .zst on a 3.12/3.13 runtime
+# ---------------------------------------------------------------------------
+
+#: A real archive written by CPython 3.14's ``compression.zstd`` (checksum flag
+#: on, as :func:`compression._archive_writer` writes), committed as bytes so the
+#: cross-version read is tested against the actual on-disk format rather than
+#: against whatever this interpreter would produce. Field report: a 3.13 CLI's
+#: mobile daemon could not decode the 3.14 desktop app's archives.
+_PY314_BODY = b'{"kind":"fixture","written_by":"cpython-3.14"}\n'
+_PY314_ZST = bytes.fromhex(
+    "28b52ffd242f7901007b226b696e64223a2266697874757265222c227772697474656e5f6279"
+    "223a2263707974686f6e2d332e3134227d0a0fad9275"
+)
+
+
+def _load_compression_isolated(
+    monkeypatch: pytest.MonkeyPatch, *, stdlib: bool, backport: object | None
+):
+    """Execute compression.py's import block under a chosen set of zstd modules.
+
+    Runs the module source as a FRESH module object (never a reload of the
+    shared one: other modules hold its exception classes, and a reload would
+    split their identity for every later test). ``sys.modules[name] = None``
+    makes an import raise ImportError, which is how a 3.12/3.13 interpreter
+    without the stdlib module behaves.
+    """
+    import importlib.util
+    import sys
+    import types
+
+    if not stdlib:
+        monkeypatch.setitem(sys.modules, "compression.zstd", None)
+    if backport is None:
+        monkeypatch.setitem(sys.modules, "backports.zstd", None)
+    else:
+        package = types.ModuleType("backports")
+        package.__path__ = []  # type: ignore[attr-defined]
+        package.zstd = backport  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "backports", package)
+        monkeypatch.setitem(sys.modules, "backports.zstd", backport)
+    spec = importlib.util.spec_from_file_location("_compression_isolated", compression.__file__)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # ``@dataclass`` resolves its module through sys.modules while executing.
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_without_stdlib_zstd_the_backport_decodes_but_gzip_is_still_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import types
+
+    backport = types.ModuleType("backports.zstd")
+    isolated = _load_compression_isolated(monkeypatch, stdlib=False, backport=backport)
+
+    assert isolated._zstd is None
+    assert isolated.zstd_decoder() is backport
+    # The manager's decision, pinned: a decoder being importable must not
+    # promote the write codec, or older builds sharing the store would be
+    # handed .zst archives they cannot open.
+    assert isolated.available_codec() == "gzip"
+
+
+def test_without_any_zstd_the_decoder_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    isolated = _load_compression_isolated(monkeypatch, stdlib=False, backport=None)
+
+    assert isolated.zstd_decoder() is None
+    assert isolated.available_codec() == "gzip"
+
+
+def test_the_read_path_decodes_through_the_fallback_not_the_write_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routing, on ANY interpreter: reads go through ``_zstd_decoder``.
+
+    A stand-in decoder module proves the read path asks the decoder slot even
+    when ``_zstd`` (the write module) is absent — the exact 3.13 state that
+    aborted the mobile daemon's bootstrap in the field.
+    """
+    import io
+    import types
+
+    opened: list[str] = []
+
+    def _zstd_file(path: str, mode: str) -> io.BytesIO:
+        opened.append(mode)
+        return io.BytesIO(_PY314_BODY)
+
+    fake = types.SimpleNamespace(ZstdFile=_zstd_file)
+    monkeypatch.setattr(compression, "_zstd", None)
+    monkeypatch.setattr(compression, "_zstd_decoder", fake)
+    directory = _session(_store(tmp_path), "route001")
+    (directory / compression.PLAIN_FILENAME).unlink()
+    (directory / "transcript.jsonl.zst").write_bytes(_PY314_ZST)
+
+    assert compression.read_head(directory, 1024) == _PY314_BODY
+    assert opened == ["rb"]
+    assert compression.available_codec() == "gzip"
+
+
+def test_a_py314_archive_reads_through_the_backport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real backport decodes the real 3.14 bytes (skips where not installed)."""
+    backport = pytest.importorskip("backports.zstd")
+    monkeypatch.setattr(compression, "_zstd", None)
+    monkeypatch.setattr(compression, "_zstd_decoder", backport)
+    directory = _session(_store(tmp_path), "bport001")
+    (directory / compression.PLAIN_FILENAME).unlink()
+    (directory / "transcript.jsonl.zst").write_bytes(_PY314_ZST)
+
+    assert compression.read_head(directory, 1024) == _PY314_BODY
+    materialised = compression.transcript_for_read(directory)
+    assert materialised is not None and materialised.read_bytes() == _PY314_BODY
+
+
+def test_a_py314_archive_reads_on_whatever_decoder_this_build_has(tmp_path: Path) -> None:
+    """Unpatched: stdlib on 3.14, backport on 3.12/3.13 installs of this package."""
+    if compression.zstd_decoder() is None:
+        pytest.skip("neither compression.zstd nor backports.zstd is importable here")
+    directory = _session(_store(tmp_path), "native01")
+    (directory / compression.PLAIN_FILENAME).unlink()
+    (directory / "transcript.jsonl.zst").write_bytes(_PY314_ZST)
+
+    assert compression.read_head(directory, 1024) == _PY314_BODY
 
 
 # ---------------------------------------------------------------------------

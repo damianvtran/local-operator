@@ -25,8 +25,9 @@ THE CODEC DECISION, WITH THE NUMBERS
 
 Primary: stdlib :mod:`compression.zstd` (PEP 784, Python 3.14+), level 3.
 Fallback: :mod:`gzip`, level 6, when that module is absent (the pyproject floor
-is 3.12). No third-party dependency — ``zstandard`` and ``pyzstd`` are not
-options for a stdlib-first harness.
+is 3.12). ``zstandard`` and ``pyzstd`` are not options for a stdlib-first
+harness; the one third-party module this file touches is ``backports.zstd``,
+the PEP 784 official backport, and only to DECODE on 3.12/3.13 (below).
 
 Measured on real transcripts from this store (444-629 MB/s compress):
 
@@ -51,14 +52,31 @@ by 3.14 and 3.12 runtimes, and each is decoded by whatever can decode it.
 THE CROSS-VERSION CONSEQUENCE, STATED PLAINLY
 =============================================
 
-A 3.12/3.13 runtime cannot decode a ``.zst`` archive written by a 3.14 runtime.
-There is no stdlib zstd before 3.14 and this module will not grow a dependency
-for it, so on such a build a ``.zst`` transcript is READ-ONLY unavailable: the
-readers raise :class:`ArchiveUnavailable` naming the codec, they never report an
-empty transcript, and :func:`has_transcript` still answers ``True`` so listing,
-the picker and stored-session search still find the row. Such a build also never
-*writes* ``.zst`` (it compresses with gzip), so the situation can only arise from
-a newer runtime's archives — and the production ``lop`` runtime here is 3.14.3.
+There is no stdlib zstd before 3.14, yet one store is routinely shared across
+interpreters (a field report: CLI on 3.13, desktop app on 3.14, both on the same
+``~/.local-operator``). A 3.13 runtime that could not decode the 3.14 runtime's
+``.zst`` archives broke more than a transcript view: the mobile daemon's
+attention bootstrap aborted on the first one and retried every scan.
+
+So READING ``.zst`` falls back to ``backports.zstd`` (PEP 784's official
+backport, same ``ZstdFile`` API), declared in pyproject.toml for
+``python_version < '3.14'``. The decoder is :data:`_zstd_decoder`; every read
+path goes through :func:`_open_archive_reader`, which uses it.
+
+WRITING is deliberately unchanged: :func:`available_codec` still answers
+``"gzip"`` below 3.14 even when the backport is importable. The store is read
+by whatever else the operator runs, including older lop builds on 3.12/3.13
+(anything released before the backport was declared, or an install whose
+resolver skipped it); a 3.13 writer producing ``.zst`` would hand those a
+transcript they cannot open. gzip is readable by every build ever shipped, so a
+3.12/3.13 writer keeps producing it; only 3.14 — where zstd is stdlib and
+therefore unconditional — writes zstd.
+
+If neither decoder is importable (a 3.12/3.13 install without the backport),
+a ``.zst`` transcript is READ-ONLY unavailable: the readers raise
+:class:`ArchiveUnavailable` naming the codec, they never report an empty
+transcript, and :func:`has_transcript` still answers ``True`` so listing, the
+picker and stored-session search still find the row.
 
 THE SAFETY ORDERING (the whole point of this module)
 ====================================================
@@ -189,6 +207,33 @@ try:  # PEP 784 — Python 3.14+. The only codec import that may be absent.
     from compression import zstd as _zstd  # pyright: ignore[reportAttributeAccessIssue]
 except ImportError:  # 3.12/3.13: gzip is the working codec.
     _zstd = None
+
+#: The zstd module used to DECODE: stdlib on 3.14, else ``backports.zstd``
+#: (same API, PEP 784 backport), else ``None``. Kept separate from ``_zstd`` on
+#: purpose — ``_zstd`` alone decides the WRITE codec (:func:`available_codec`),
+#: so a 3.12/3.13 build that can now read ``.zst`` still writes gzip that every
+#: older build can read (module docstring, "cross-version consequence").
+_zstd_decoder: Any
+if _zstd is not None:
+    _zstd_decoder = _zstd
+else:
+    try:
+        from backports import zstd as _backport  # pyright: ignore[reportMissingImports]
+    except ImportError:  # backport not installed: .zst is read-unavailable
+        _zstd_decoder = None
+    else:
+        _zstd_decoder = _backport
+
+
+def zstd_decoder() -> Any:
+    """The importable zstd module for decoding, or ``None``.
+
+    Public so other readers of zstd streams (harness import's Codex rollouts)
+    share this module's stdlib-then-backport resolution instead of repeating
+    a 3.14-only import.
+    """
+    return _zstd_decoder
+
 
 try:  # POSIX advisory locks; absent on Windows.
     import fcntl as _fcntl
@@ -413,8 +458,11 @@ def available_codec() -> str:
 
     Reading is NEVER routed through this: a reader dispatches on the archive's
     own suffix (:func:`_codec_for`), so a gzip-only build still decodes the gzip
-    archives it shares with a zstd build, and reports a zstd archive as
-    :class:`ArchiveUnavailable` rather than as absent.
+    archives it shares with a zstd build, decodes zstd through
+    :data:`_zstd_decoder` (the backport on 3.12/3.13), and reports a zstd
+    archive it has no decoder for as :class:`ArchiveUnavailable` rather than
+    as absent. A decoder being importable deliberately does NOT promote the
+    write codec — see the module docstring.
     """
     return "zstd" if _zstd is not None else "gzip"
 
@@ -551,12 +599,12 @@ def _open_archive_reader(archive: Path, codec: str | None) -> _ArchiveReader:
     empty transcript.
     """
     if codec == "zstd":
-        if _zstd is None:
+        if _zstd_decoder is None:
             raise ArchiveUnavailable(
                 "transcript archive uses zstd, which this Python build cannot decode"
             )
         try:
-            return _zstd.ZstdFile(os.fspath(archive), "rb")
+            return _zstd_decoder.ZstdFile(os.fspath(archive), "rb")
         except Exception as exc:  # noqa: BLE001 - any decoder failure is corruption
             raise ArchiveCorrupt(f"{archive.name}: {exc}") from exc
     if codec == "gzip":

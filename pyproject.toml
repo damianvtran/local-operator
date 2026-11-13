@@ -153,6 +153,17 @@ dependencies = [
     # ``indexer.py``'s optional-observer fallback, which hands over to the timed
     # reconcile: a failed watch costs a slower refresh, not a broken runtime.
     "watchdog>=6.0.0",
+    # READ-ONLY zstd for 3.12/3.13. Session transcripts are compressed with the
+    # stdlib ``compression.zstd`` (PEP 784) on 3.14, and a 3.13 runtime sharing
+    # the same ~/.local-operator store (CLI on 3.13, desktop app on 3.14 — a
+    # field report) could not decode them: the mobile daemon's attention
+    # bootstrap aborted on the first ``.zst`` and the phone showed "Not
+    # answering". ``backports.zstd`` is the PEP 784 official backport with the
+    # same ``ZstdFile`` API, publishes wheels for cp312/cp313 on macOS, Linux
+    # and Windows, and is never installed on 3.14 (its own requires-python is
+    # <3.14). ``session/compression.py`` uses it for DECODING only; see its
+    # module docstring for why the write codec stays gzip below 3.14.
+    "backports.zstd>=1.0; python_version < '3.14'",
 ]
 requires-python = ">=3.12"
 

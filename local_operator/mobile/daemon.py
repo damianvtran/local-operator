@@ -1887,12 +1887,44 @@ def _bootstrap_mobile_attention() -> None:
     # Match the relay's bounded recent-history surface. Older conversations are
     # imported when a real Session loads them, avoiding an unbounded boot scan.
     live = {record.session_id for record, state in registry.scan() if state == "live"}
-    directories = sorted(root.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def _mtime(path: Path) -> float:
+        # A directory deleted between ``iterdir`` and ``stat`` would otherwise
+        # raise out of ``sorted`` and abort the sweep the same way an
+        # unreadable transcript did; it sorts last and is skipped below.
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    directories = sorted(root.iterdir(), key=_mtime, reverse=True)
+    skipped = 0
     for directory in directories[:100]:
         if directory.name in live:
             continue
-        if _durable_user_session_dir(directory.name) is not None:
-            bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        # ONE unreadable session must never abort the sweep. The caller marks
+        # ``_attention_bootstrapped`` only after this returns, so a raise here
+        # re-ran the whole sweep on every 2 s scan forever (57k+ warnings in
+        # the field, phone stuck on "Not answering"). The field case was a
+        # ``.zst`` archive written by a 3.14 runtime and read by a 3.13 daemon
+        # (``ArchiveUnavailable``), but a truncated archive, a permission
+        # error or a malformed journal line fail the same way, so the guard is
+        # deliberately broad: a skipped session is still migrated later when a
+        # real Session opens it. The log names only the session id and the
+        # exception class — never transcript content — and is one line per
+        # skipped session, bounded by the 100-directory window above.
+        try:
+            if _durable_user_session_dir(directory.name) is not None:
+                bootstrap_transcript(Transcript(directory, defer_materialise=True))
+        except Exception as exc:  # noqa: BLE001 — see the comment above
+            skipped += 1
+            logger.warning(
+                "mobile attention bootstrap skipped session %s: %s",
+                directory.name,
+                type(exc).__name__,
+            )
+    if skipped:
+        logger.info("mobile attention bootstrap finished with %d skipped session(s)", skipped)
 
 
 #: The outcome types the runtime NAMES as a completed mutation, and therefore the
