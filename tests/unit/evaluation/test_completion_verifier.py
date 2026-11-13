@@ -751,6 +751,9 @@ class _GuestWorker:
         self.score = score
         self.release = asyncio.Event()
         self.started = asyncio.Event()
+        # Set when the slow read has ANSWERED, so a test can order it against
+        # the drain rather than infer that from a release timer.
+        self.read_done = asyncio.Event()
         self.commands: list[str] = []
         self.terminated = False
 
@@ -770,6 +773,7 @@ class _GuestWorker:
         if "slow-read" in params.command:
             self.started.set()
             await self.release.wait()
+            self.read_done.set()
             out = "late"
         return RunCommandResult(
             exit_code=0,
@@ -806,10 +810,6 @@ async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     monkeypatch.chdir(tmp_path)
-    # A 1 s wall keeps the test fast; the real 20 s RPC slack would leave a
-    # 1 s verification no room for any read (the deadline clip), so it is
-    # zeroed here -- the clip itself is pinned by the next test.
-    monkeypatch.setattr(cv, "RUN_COMMAND_SLACK_S", 0.0)
     (tmp_path / "artifacts").mkdir()
     episode = "episode"
     verifier = HostVerifier("task", episode, tmp_path / "artifacts")
@@ -829,6 +829,63 @@ async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
         transcript=Transcript(tmp_path / "sess"),
         system_blocks_provider=lambda: ["stable"],
     )
+    # This test pins an ORDERING, not durations: the wall cuts the verifier
+    # WHILE its guest read is mid-RPC, and the arm awaits that read before the
+    # worker resumes. A real 1 s wall plus a 1.5 s release timer raced the
+    # child's own startup instead: at load ~30 the child sometimes had not
+    # sent its first request when the wall fired (`requests: 0`), so no read
+    # existed, nothing was drained, and `release` was never set. Both edges
+    # are events now; the real timer arithmetic is pinned elsewhere
+    # (test_verify_completion.py::test_wall_cap_cancels_a_slow_child).
+    #
+    # Wall edge: the verifier's settled event wakes once, still unset, the
+    # moment the read reaches the guest -- the branch a timer expiry takes
+    # (`first_of` returns, settle unset, no overshoot -> "wall").
+    class SettledOrWall:
+        def __init__(self, real: asyncio.Event) -> None:
+            self._real = real
+            self._armed = True
+
+        def is_set(self) -> bool:
+            return self._real.is_set()
+
+        async def wait(self) -> bool:
+            if not self._armed:
+                return await self._real.wait()
+            self._armed = False
+            waiters = [
+                asyncio.ensure_future(self._real.wait()),
+                asyncio.ensure_future(worker.started.wait()),
+            ]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    waiter.cancel()
+            return self._real.is_set()
+
+    real_settled_event = parent.jobs.settled_event
+    monkeypatch.setattr(
+        parent.jobs, "settled_event", lambda job_id: SettledOrWall(real_settled_event(job_id))
+    )
+
+    # Release edge: the guest answers only once the arm enters its drain.
+    # Setting `release` before the real drain runs cannot let the read finish
+    # first -- the read task needs a loop turn to resume, and drain snapshots
+    # its in-flight set synchronously -- so a drain that awaits it returns 1
+    # with the read already answered. No drain, no release: the read is still
+    # pending when `bridge.call` returns.
+    real_drain = cv.VerifierInspector.drain
+    drains: list[tuple[int, bool]] = []
+
+    async def drain_releases_the_guest(self: Any) -> int:
+        worker.release.set()
+        awaited = await real_drain(self)
+        drains.append((awaited, worker.read_done.is_set()))
+        return awaited
+
+    monkeypatch.setattr(cv.VerifierInspector, "drain", drain_releases_the_guest)
+
     bridge = _bridge(tmp_path, max_steps=10, instruction="Put 42 in cell B2.")
     bridge.run_command = _make_run_command(session, episode)
     written: list[tuple[str, dict[str, Any]]] = []
@@ -837,17 +894,12 @@ async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
         bridge=bridge,
         handle=SimpleNamespace(session=parent, verifier_job_ids=set()),  # type: ignore[arg-type]
         record=record,  # type: ignore[arg-type]
-        config=CompletionVerifierConfig(rounds=1, wall_s=1.0),
+        # A hang ceiling, not the ordering under test (that is the wall edge
+        # above); it also leaves the deadline clip room for the real 20 s RPC
+        # slack, so the slack is no longer zeroed.
+        config=CompletionVerifierConfig(rounds=1, wall_s=60.0),
         wall_remaining=None,
     )
-    loop = asyncio.get_running_loop()
-
-    async def guest_answers_after_the_cut() -> None:
-        await worker.started.wait()
-        # Past the 1 s wall: the verifier child is cancelled mid-read first.
-        loop.call_later(1.5, worker.release.set)
-
-    releaser = asyncio.create_task(guest_answers_after_the_cut())
     try:
         reply_ = await asyncio.wait_for(bridge.call(DONE), timeout=20)
         [verdict] = [p for k, p in written if k == "verifier_verdict"]
@@ -857,6 +909,7 @@ async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
         assert not session._poisoned and not worker.terminated
         # ...because the abandoned read was awaited before the worker resumed.
         assert worker.release.is_set()
+        assert drains == [(1, True)], drains
         # The worker's next command and the score both still work.
         after = await session.run_command(
             RunCommandParams(
@@ -874,7 +927,6 @@ async def test_cancelling_the_verifier_mid_inspect_keeps_the_session_usable(
         )
         assert scored.score.binary == 1
     finally:
-        releaser.cancel()
         await parent.dispose()
 
 
