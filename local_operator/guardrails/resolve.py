@@ -4207,6 +4207,26 @@ def _read_inputs(name: str, args: list[Expanded]) -> set[int]:
     return out
 
 
+def _sed_read_only(argv: list[str]) -> bool:
+    """Is this ``sed`` call provably a pure read (prints, never writes)?
+
+    WHY (field report 2026-11-12, case B): ``sed -n '1,135p' <file>`` is how
+    agents page a file, yet sed was never trusted, so every path it named hit
+    the backstop as "handed to sed" and a reviewer could not read the frozen
+    files it was reviewing. Trusted only when every flag is a known non-writing
+    one (no ``-i``, no ``-f``, no unknown or abbreviated long option) and the
+    script — the ``-e`` values or the first operand, never the input files
+    (``_sed_script_text``) — holds no ``w``/``W``/``e`` at all. That letter
+    test is deliberately crude: it also rejects ``s/we/x/p``, which costs a
+    judge call, never a missed ``w FILE`` or ``s///e``.
+    """
+    words = [Expanded(text=a) for a in argv]
+    script = _sed_script_text(words)
+    if script is None or _SED_WRITES_RE.search(script):
+        return False
+    return _flags_known(words, _SED_READ_FLAGS)
+
+
 def _identify_read_only(argv: list[str]) -> bool:
     return not any(a.lstrip("+-").startswith("write") or _MAGICK_CODER_RE.match(a) for a in argv)
 
@@ -4221,6 +4241,8 @@ def read_only_argv(name: str, argv: list[str], *, assigned: Sequence[str] = ()) 
         return _identify_read_only(argv)
     if name == "magick":
         return bool(argv) and argv[0] == "identify" and _identify_read_only(argv[1:])
+    if name in ("sed", "gsed"):
+        return _sed_read_only(argv)
     if name == "find":
         return not any(a in _FIND_WRITES for a in argv)
     if name == "git":
@@ -4533,6 +4555,25 @@ _SED_FLAGS = _Flags(
     ),
     frozenset({"-e", "--expression", "-f", "--file", "-l"}),
 )
+#: ``sed`` flags that never write: ``_SED_FLAGS`` without ``-i``/``--in-place``
+#: and without ``-f`` (a script file cannot be inspected here).
+_SED_READ_FLAGS = _Flags(
+    "nErsuz",
+    frozenset(
+        {
+            "--quiet",
+            "--silent",
+            "--regexp-extended",
+            "--separate",
+            "--unbuffered",
+            "--null-data",
+            "--posix",
+        }
+    ),
+    frozenset({"-e", "--expression", "-l", "--line-length"}),
+)
+
+
 #: A sed script that writes a file of its own (``w FILE``, ``s/a/b/w FILE``).
 _SED_WRITES_RE = re.compile(r"[wWe]")
 #: A path-looking filename after a ``w``/``W`` (``1w /x``, ``s/a/b/gw ~/x``).
@@ -4588,6 +4629,62 @@ def _copy_dest(args: list[Expanded], spec: _Flags) -> list[Expanded]:
     return operands[-1:] if len(operands) >= 2 else []
 
 
+def _sed_script_text(args: list[Expanded]) -> str | None:
+    """The text of sed's SCRIPT only, or ``None`` when it comes from a file.
+
+    WHY (field report 2026-11-12): the write check used to scan every
+    non-flag word, FILE operands included, so the ``e`` in ``…/sessions/…``
+    matched ``_SED_WRITES_RE`` and a pure ``sed -n '1,135p' <pad file>`` was
+    never fully modelled — the path went to the backstop as "handed to sed".
+    The script is each ``-e``/``--expression`` value, else the first operand;
+    every later operand is an input file. ``-f`` (script in a file) is
+    unknowable, so the caller keeps the conservative ranking.
+    """
+    scripts: list[str] = []
+    operands: list[str] = []
+    i = 0
+    while i < len(args):
+        t = args[i].text
+        i += 1
+        if t == "--":
+            operands.extend(w.text for w in args[i:])
+            break
+        if t.startswith("--"):
+            key, eq, value = t.partition("=")
+            if key in ("--file",):
+                return None
+            if key == "--expression":
+                if eq:
+                    scripts.append(value)
+                elif i < len(args):
+                    scripts.append(args[i].text)
+                    i += 1
+            elif key == "--line-length" and not eq:
+                i += 1
+            continue
+        if t.startswith("-") and t != "-":
+            for k, ch in enumerate(t[1:], start=1):
+                if ch in "efl":
+                    if ch == "f":
+                        return None
+                    glued = t[k + 1 :]
+                    if glued:
+                        value = glued
+                    elif i < len(args):
+                        value = args[i].text
+                        i += 1
+                    else:
+                        value = ""
+                    if ch == "e":
+                        scripts.append(value)
+                    break
+            continue
+        operands.append(t)
+    if not scripts and operands:
+        scripts.append(operands[0])
+    return " ".join(scripts)
+
+
 def _write_surface(
     name: str, args: list[Expanded], home: str
 ) -> tuple[list[Expanded], bool] | None:
@@ -4620,7 +4717,7 @@ def _write_surface(
         return [], _flags_known(args, _META_FLAGS)  # metadata only, no content
     if name in ("sed", "gsed"):
         # ``-i`` operands are resolver targets; a script's own ``w`` is not.
-        scripts = " ".join(w.text for w in args if not w.text.startswith("-"))
+        scripts = _sed_script_text(args)
         # Its own ``w``/``W`` commands write: a parseable filename there is a
         # destination (review R5-MINOR-1); a script that is not a provably
         # read-only one is never fully modelled, so the backstop sees it.
@@ -4628,6 +4725,9 @@ def _write_surface(
             Expanded(text=_tilde_value(m, home))
             for m in _SED_W_PATH_RE.findall(" ".join(w.text for w in args))
         ]
+        if scripts is None:
+            # ``-f FILE``: the script is a file this check cannot read.
+            return dests, False
         return dests, _flags_known(args, _SED_FLAGS) and not _SED_WRITES_RE.search(scripts)
     if name in ("cp", "gcp"):
         return _copy_dest(args, _CP_FLAGS), _flags_known(args, _CP_FLAGS)

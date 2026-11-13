@@ -408,7 +408,9 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
     and the backstop refused it as another session's files. ``None`` = LOW:
     the file exists, its session is in the caller's subagent tree
     (``provenance.same_task_tree``), the interpreter runs a git-tracked script
-    (``Target.script``) and no output flag names the file. Otherwise the
+    (``Target.script``) and no output flag names the file — or, with no
+    script condition at all, when every owner is the caller's ancestor or
+    descendant (``_all_in_lineage``; field report 2026-11-12). Otherwise the
     suffix shown with the HIGH: the lineage fact when there is one, so the
     judge sees it; ``""`` for a stranger's pad (unchanged). Evidence files
     never reach here (``_touch_reason`` returns another reason for them).
@@ -438,6 +440,25 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
             if not relation:
                 return ""
             relations[owner] = relation
+    if not target.as_output and _all_in_lineage(set(relations), session_id, roots):
+        # Field report 2026-11-12 (UI #1888 native QA): QA child fbd3094083f4
+        # read its launcher a7450d93932d's staged manifest with ``node -e
+        # '…readFileSync("<parent pad>/…")…'``, and the launcher in turn ran
+        # its descendants' frozen supervisor (``node <child pad>/x.mjs``) and
+        # audit JSON — both refused as "another session's files". One subagent
+        # LINEAGE is one owner's working state, so a read of an ancestor's or a
+        # descendant's scratch that the resolver cannot pin (an interpreter
+        # running opaque code) ranks as it would in the caller's own pad: LOW.
+        # Kept narrow on purpose: only a ``touch`` (path handed to an unknown
+        # program) reaches here — deletes, overwrites and known writes into a
+        # lineage member's pad keep ``_high_reason``'s HIGH, because that pad
+        # is a live session's state (what the caller itself created there is
+        # already credited through the ledger). A word named as an output stays
+        # HIGH for the same reason. Every spelling, the realpath included, must
+        # land in a lineage member's pad, so a link out to a sibling or a
+        # stranger never borrows the credit. Siblings are NOT lineage (see
+        # ``_all_in_lineage``): they keep case 7's tracked-script rule below.
+        return None
     if (
         os.path.isfile(path)
         and not os.path.islink(path)
@@ -467,6 +488,32 @@ def _tree_read(target: Target, prot: _Protected, session_id: str) -> str | None:
         return None
     owner = _pad_owner(os.path.realpath(path), roots) or ""
     return f" (session {owner} is this session's {relations.get(owner, '')} in one task tree)"
+
+
+def _all_in_lineage(owners: set[str], session_id: str, roots: set[str]) -> bool:
+    """Is every ``owner`` an ancestor or a descendant of ``session_id``?
+
+    By ``parent`` links only (``provenance.subagent_ancestors``), the full
+    depth either way. An ``opener`` relation is a separate task and never
+    qualifies. Siblings and cousins do not either, deliberately: they share a
+    launcher, not a line of delegation — neither briefed the other, so neither
+    can know what the other's opaque script does with its files, and the
+    launcher, which CAN read both, is the party that hands one lane's output to
+    another. Their reads keep case 7's narrower rule (a git-tracked script,
+    no output flag) and otherwise the judge's HIGH.
+    """
+    from local_operator.guardrails import provenance
+
+    if not owners:
+        return False
+    for owner in owners:
+        root = _owner_root(owner, roots)
+        if owner in provenance.subagent_ancestors(session_id, state_root=root):
+            continue
+        if session_id in provenance.subagent_ancestors(owner, state_root=root):
+            continue
+        return False
+    return True
 
 
 def _pad_owner(path: str, roots: set[str]) -> str | None:
@@ -1714,7 +1761,9 @@ def classify_targets(
             if reason == OTHER_SCRATCHPAD:
                 tree = _tree_read(t, prot, session_id)
                 if tree is None:
-                    continue  # LOW: a tracked script reading a teammate's file
+                    # LOW: a tracked script reading a teammate's file, or any
+                    # read of a lineage member's scratch (``_tree_read``).
+                    continue
                 shown += tree
             evidence_hits.append(RankedTarget(t, Risk.HIGH, shown))
     for name in dict.fromkeys(blind):

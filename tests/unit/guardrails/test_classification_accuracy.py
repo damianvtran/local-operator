@@ -826,6 +826,225 @@ def test_symlink_in_a_siblings_pad_to_a_strangers_pad_stays_high(home: Path) -> 
     assert not any("task tree" in r for r in verdict.reasons)
 
 
+# -- 8. one subagent lineage reads its own scratch (2026-11-12, UI #1888) ---------------
+#
+# Field reports under manager a7450d93932d, all reads refused as "another
+# session's files":
+# A. QA child fbd3094083f4 ran ``stat`` plus a ``node -e`` reading the
+#    parent's staged ``manifest.json``. ``stat`` yields no target; the path
+#    literal inside the inline script is an unresolvable read (op ``touch``).
+# B. Reviewer b745482bd2a1 (the QA child's SIBLING) paged the QA child's
+#    frozen files with ``sed -n 'N,Mp'``: sed was never trusted, and its write
+#    check scanned the FILE operands, whose ``sessions`` holds an ``e``.
+# C. The parent ran its descendants' supervisor/audit under ``env -u
+#    NODE_OPTIONS … run_bounded.py -- node <child pad>/x.mjs``; ``-u``'s value
+#    was read as the program ("handed to NODE_OPTIONS").
+
+SIBLING = "eeeeeeeeeeee"
+GRANDCHILD = "ffffffffffff"
+
+
+def _staged_manifest(home: Path, sid: str) -> Path:
+    stage = _pad(home, sid) / "ui1888-native-stage-ehzeemcn"
+    (stage / "bundle").mkdir(parents=True, exist_ok=True)
+    (stage / "stage-receipt.json").write_text("{}\n")
+    manifest = stage / "bundle" / "manifest.json"
+    manifest.write_text('{"files": [1, 2]}\n')
+    return manifest
+
+
+def _field_command(manifest: Path) -> str:
+    """The refused call, byte-for-byte in shape (only the root differs)."""
+    stage = manifest.parent.parent
+    return (
+        f"stat -f 'stage-receipt.json bytes=%z' {stage}/stage-receipt.json; "
+        'node -e \'const fs=require("fs");const m=JSON.parse(fs.readFileSync('
+        f'"{manifest}"));console.log("Manifest-listed executable/package files="'
+        "+m.files.length)'"
+    )
+
+
+def _tree(home: Path) -> None:
+    """PARENT launched CHILD and SIBLING; CHILD launched GRANDCHILD."""
+    for sid in (SIBLING, GRANDCHILD):
+        _pad(home, sid).mkdir(parents=True, exist_ok=True)
+    _child_of(home, CHILD, PARENT)
+    _child_of(home, SIBLING, PARENT)
+    _child_of(home, GRANDCHILD, CHILD)
+
+
+@pytest.mark.parametrize(
+    ("reader", "owner"),
+    [
+        (CHILD, PARENT),  # case A as filed
+        (GRANDCHILD, PARENT),  # full depth upward
+        (PARENT, CHILD),  # descendant
+        (PARENT, GRANDCHILD),  # full depth downward
+    ],
+)
+def test_inline_read_within_one_lineage_is_low(home: Path, reader: str, owner: str) -> None:
+    _tree(home)
+    command = _field_command(_staged_manifest(home, owner))
+    verdict = _tree_verdict(home, command, reader, home / "work")
+    assert verdict.risk is Risk.LOW, verdict.reasons
+
+
+def test_field_read_from_outside_the_lineage_stays_high(home: Path) -> None:
+    """A stranger, a sibling and a cousin keep the HIGH (siblings are not lineage)."""
+    _tree(home)
+    parent_file = _staged_manifest(home, PARENT)
+    child_file = _staged_manifest(home, CHILD)
+    grandchild_file = _staged_manifest(home, GRANDCHILD)
+    cases = [
+        (STRANGER, parent_file, ""),
+        (SIBLING, child_file, f"session {CHILD} is this session's sibling"),
+        # A cousin-shaped relation: SIBLING's nephew is not in its lineage.
+        (SIBLING, grandchild_file, f"session {GRANDCHILD} is this session's sibling"),
+    ]
+    for reader, target, fact in cases:
+        verdict = _tree_verdict(home, _field_command(target), reader, home / "work")
+        assert verdict.risk is Risk.HIGH, (reader, verdict.reasons)
+        if fact:
+            assert any(fact in r for r in verdict.reasons), (reader, verdict.reasons)
+        else:
+            assert not any("task tree" in r for r in verdict.reasons), verdict.reasons
+
+
+def test_opener_link_is_not_a_launcher(home: Path) -> None:
+    """An agent-opened workstream is a separate task: no inherited scratch."""
+    prov.record_lineage(
+        CHILD, origin="workstream", opener=PARENT, state_root=home / ".local-operator"
+    )
+    command = _field_command(_staged_manifest(home, PARENT))
+    assert _tree_verdict(home, command, CHILD, home / "work").risk is Risk.HIGH
+
+
+def test_child_writes_and_deletes_in_a_launchers_scratch_stay_high(home: Path) -> None:
+    """Inheritance covers reads only: the launcher's pad is a live session's state."""
+    _tree(home)
+    manifest = _staged_manifest(home, PARENT)
+    pad = _pad(home, PARENT)
+    for command in (
+        f"rm -rf {pad}",
+        f"rm -rf {manifest.parent.parent}",
+        f"rm -f {manifest}",
+        f"echo x > {manifest}",
+        f"mv {manifest} ~/work/x",
+        f"node tool.mjs -o {manifest}",
+    ):
+        verdict = _tree_verdict(home, command, CHILD, home / "work")
+        assert verdict.risk is Risk.HIGH, (command, verdict.reasons)
+
+
+def test_child_read_of_launchers_evidence_or_state_root_is_unchanged(home: Path) -> None:
+    _tree(home)
+    state = home / ".local-operator"
+    transcript = state / "sessions" / PARENT / "transcript.jsonl"
+    transcript.write_text("{}\n")
+    high = _tree_verdict(home, f"node -e 'x' {transcript}", CHILD, home / "work")
+    assert high.risk is Risk.HIGH, high.reasons
+    glob = _tree_verdict(home, f"rm -rf {home}/.local-op*", CHILD, home / "work")
+    assert glob.risk is Risk.CRITICAL, glob.reasons
+    read_glob = _tree_verdict(home, f"node -e 'x' {home}/.local-operator*", CHILD, home / "work")
+    assert read_glob.risk is Risk.HIGH, read_glob.reasons
+
+
+def test_link_in_a_launchers_pad_to_a_strangers_pad_stays_high(home: Path) -> None:
+    """Every spelling, the realpath included, must land in a launcher's pad."""
+    _tree(home)
+    secret = _pad(home, STRANGER) / "secret.md"
+    secret.write_text("synthetic\n")
+    link = _pad(home, PARENT) / "lnk"
+    link.symlink_to(_pad(home, STRANGER))
+    verdict = _tree_verdict(home, f"node -e 'x' {link}/secret.md", CHILD, home / "work")
+    assert verdict.risk is Risk.HIGH, verdict.reasons
+
+
+def test_case_b_sibling_pages_frozen_files_with_sed_but_cannot_run_them(home: Path) -> None:
+    """Case B: ``sed -n 'N,Mp'`` is a pure read; running a sibling's code is not."""
+    _tree(home)
+    pad = _pad(home, CHILD)
+    for name in ("consent-native-supervisor.mjs", "consent-guards.cjs", "consent-static.test.cjs"):
+        (pad / name).write_text("// synthetic\n")
+    paged = (
+        f"shasum -a 256 {pad}/consent-native-supervisor.mjs; "
+        f"sed -n '1,135p' {pad}/consent-native-supervisor.mjs; "
+        f"sed -n '7,23p' {pad}/consent-guards.cjs; tail -9 {pad}/consent-guards.cjs"
+    )
+    assert _tree_verdict(home, paged, SIBLING, home / "work").risk is Risk.LOW
+    run = f"node --test --test-concurrency=1 {pad}/consent-static.test.cjs"
+    assert _tree_verdict(home, run, SIBLING, home / "work").risk is Risk.HIGH
+
+
+def test_case_c_parent_runs_descendants_files_under_env_unset(home: Path) -> None:
+    """Case C's exact shape: LOW for the launcher, HIGH for a stranger."""
+    _tree(home)
+    child, grandchild = _pad(home, CHILD), _pad(home, GRANDCHILD)
+    (child / "consent-native-supervisor.mjs").write_text("// synthetic\n")
+    (grandchild / "audit.json").write_text("{}\n")
+    stage = _staged_manifest(home, PARENT).parent.parent
+    command = (
+        f"set +e\nenv -u NODE_OPTIONS LOCAL_OPERATOR_SCRATCHPAD={child} PYTHONPATH={home}/work "
+        f"python3 {home}/work/run_bounded.py --contract=command-status --timeout 170 -- "
+        f"node {child}/consent-native-supervisor.mjs --manifest {stage}/bundle/manifest.json "
+        f"--binding-audit {grandchild}/audit.json 2>&1 | tee {stage}/native-run.log\n"
+        'rc=${PIPESTATUS[0]}\nexit "$rc"'
+    )
+    parent = _tree_verdict(home, command, PARENT, home / "work")
+    assert parent.risk is Risk.LOW, parent.reasons
+    assert not any("NODE_OPTIONS" in r for r in parent.reasons)
+    assert _tree_verdict(home, command, STRANGER, home / "work").risk is Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    ("argv", "read_only"),
+    [
+        (["-n", "1,135p", "/s/sessions/x/scratchpad/a.mjs"], True),
+        (["-ne", "1p", "f"], True),
+        (["-n", "-e", "7,55p", "f"], True),
+        (["--expression=1,3p", "f"], True),
+        (["-i", "", "1p", "f"], False),
+        (["-ni", "1p", "f"], False),
+        (["--in-place", "p", "f"], False),
+        (["-n", "1w /x", "f"], False),
+        (["-n", "s/a/b/e", "f"], False),
+        (["-f", "script.sed", "f"], False),
+        (["--qui", "1p", "f"], False),  # abbreviated long option: unknown
+    ],
+)
+def test_sed_is_read_only_only_for_a_printing_script(argv: list[str], read_only: bool) -> None:
+    from local_operator.guardrails.resolve import read_only_argv
+
+    assert read_only_argv("sed", argv) is read_only
+
+
+def test_env_unset_value_is_not_the_program() -> None:
+    from local_operator.tools.search_guard import (
+        _WRAPPER_LONG_VALUE_FLAGS,
+        _WRAPPER_VALUE_FLAGS,
+    )
+
+    assert "u" in _WRAPPER_VALUE_FLAGS["env"]
+    assert "--unset" in _WRAPPER_LONG_VALUE_FLAGS
+    resolution = resolve_command(
+        "env -u NODE_OPTIONS node /x/.local-operator/sessions/s/scratchpad/a.mjs",
+        cwd="/tmp",
+        env={"HOME": "/h"},
+        home="/h",
+    )
+    assert {t.program for t in resolution.touched} <= {"node"}, resolution.touched
+
+
+def test_subagent_ancestors_follows_parent_links_only(home: Path) -> None:
+    _tree(home)
+    state = home / ".local-operator"
+    assert prov.subagent_ancestors(GRANDCHILD, state_root=state) == [CHILD, PARENT]
+    assert prov.subagent_ancestors(SIBLING, state_root=state) == [PARENT]
+    assert prov.subagent_ancestors(PARENT, state_root=state) == []
+    assert prov.task_tree_root(GRANDCHILD, state_root=state) == PARENT
+    assert prov.task_tree_root(PARENT, state_root=state) == PARENT
+
+
 def test_tracked_script_with_uncommitted_edits_is_high(home: Path) -> None:
     """Review R2-m1: an edited tracked script is the agent's code, not the repo's."""
     manager = "dddddddddddd"

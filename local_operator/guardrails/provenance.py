@@ -2457,6 +2457,26 @@ def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None
     workstream an assistant ever opened never becomes one tree. The registry
     row is read first (``read_lineage``), then ``origin.json``.
     """
+    chain = subagent_ancestors(session_id, state_root=state_root)
+    return chain[-1] if chain else session_id
+
+
+def subagent_ancestors(
+    session_id: str, *, state_root: str | os.PathLike[str] | None = None
+) -> list[str]:
+    """``session_id``'s launchers, nearest first: ``parent`` links only, self excluded.
+
+    WHY (field report 2026-11-12, child fbd3094083f4 of a7450d93932d): one
+    subagent lineage is one owner's working state, so ``classify._tree_read``
+    lets an unresolvable read of an ancestor's or a descendant's pad rank LOW
+    (a descendant is a session whose chain contains the caller). That credit
+    must come from authoritative metadata, never text:
+    the harness-written registry row first (``read_lineage``, first row wins),
+    then ``origin.json`` — both guard evidence a session cannot forge
+    (``_touch_reason`` ranks a write to either CRITICAL). ``opener`` links are
+    NOT followed: an agent-opened workstream is a separate task. A sibling is
+    in neither session's chain, so it inherits nothing.
+    """
     from local_operator.paths import config_dir
 
     root = Path(state_root) if state_root is not None else config_dir()
@@ -2471,7 +2491,7 @@ def task_tree_root(session_id: str, *, state_root: str | os.PathLike[str] | None
         if not isinstance(parent, str) or not parent:
             break
         sid = parent
-    return seen[-1] if seen else session_id
+    return seen[1:]
 
 
 def same_task_tree(a: str, b: str, *, state_root: str | os.PathLike[str] | None = None) -> str:

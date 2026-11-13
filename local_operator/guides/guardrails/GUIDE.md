@@ -220,9 +220,23 @@ three routes the checkpoint can verify. Everything CRITICAL is still refused.
   inside a quoted script or pager setting, or a working directory there — is
   at least HIGH, so a misparsed writer costs a judge call, never a silent
   LOW. A glob counts when it could reach those trees (`~/.local-operator/sess*`).
-  `sed`, `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
-  (`w`, `.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
-  they rank HIGH when they name session state. Under a working directory that
+  One exception, for reads only: one subagent lineage is one owner, so a
+  session treats its ancestors' and descendants' scratchpads (any depth, by
+  `parent` links in the harness lineage registry or `origin.json`) as its own
+  — a path in one of them handed to any program, `node -e '…readFileSync(…)'`
+  or `node <child pad>/x.mjs` included, ranks LOW. Every spelling, the
+  resolved one included, must land in such a pad, and the word must not be
+  named as an output. Siblings, cousins, agent-opened and unrelated sessions
+  inherit nothing (a sibling's read still passes with a git-tracked script);
+  evidence files keep their ranking; and deleting, overwriting or writing
+  into a lineage member's scratchpad — `rm -rf` of the pad itself included —
+  stays HIGH, because it is a live session's working state (what you created
+  there is already credited through the creation ledger).
+  `sqlite3 -readonly`, `rg`, `less` and `file` are not trusted there
+  (`.once`/`.shell`, `--pre`, `-o`, `-C` all write or run something), so
+  they rank HIGH when they name session state; nor is `sed`, unless every flag
+  is a known non-writing one (no `-i`, no `-f`) and its script has no `w`,
+  `W` or `e` at all (`sed -n '1,135p' <file>` is a read). Under a working directory that
   cannot be determined (`cd $(…)`, a glob `cd`, `CDPATH`), naming an evidence
   file (`origin.json`, `transcript.jsonl` …) is HIGH. The `write`, `edit` and `browser` (screenshot/recording `path`)
   tools refuse those files the same way. An interpreter that computes the path

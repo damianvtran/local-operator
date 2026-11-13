@@ -168,6 +168,11 @@ _WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
     "sudo": frozenset({"u", "g", "p", "C", "h", "r", "t", "U", "D"}),
     "nice": frozenset({"n"}),
     "xargs": frozenset({"I", "n", "P", "s", "L", "a", "d", "E"}),
+    # ``env -u NAME`` unsets NAME: without this the variable name read as the
+    # program (field report 2026-11-12: ``env -u NODE_OPTIONS … python
+    # run_bounded.py -- node <pad>/x.mjs`` was ranked as paths "handed to
+    # NODE_OPTIONS", so the real program's read-only inputs hit the backstop).
+    "env": frozenset({"u"}),
 }
 
 #: The same, spelled long and with a space rather than an ``=``.
@@ -185,6 +190,7 @@ _WRAPPER_LONG_VALUE_FLAGS = frozenset(
         "--max-chars",
         "--delimiter",
         "--arg-file",
+        "--unset",
     }
 )
 
