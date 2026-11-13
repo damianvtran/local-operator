@@ -16803,6 +16803,36 @@ async def _execute_send_peer(
     return _text(tool_call_id, "send", text, details=details)
 
 
+async def _execute_send_routed(
+    tool_call_id: str, params: SendParams, holder: Any, context: ToolContext | None
+) -> ToolResult:
+    """Deliver an exact-id send to the ONE device that holds it.
+
+    The caller named no ``peer``; the peer catalogue named exactly one holder,
+    so this is ``send(peer=<that device>)`` with the receipt saying where it
+    went. The device is addressed by its ID, not its name: the relay refuses a
+    name two devices share, and the id is what the catalogue actually gave us.
+    Every mesh rule (local-only modes, body, refusals) is the explicit-peer
+    path's, unchanged — routing only fills in the argument.
+    """
+    device_id = str(holder.owner_device)
+    device_name = str(holder.owner_device_name or device_id)
+    routed = params.model_copy(update={"peer": device_id})
+    result = await _execute_send_peer(tool_call_id, routed, context)
+    # Identifier field: the session id the receipt names.
+    line = f"routed to {device_name} (it holds `{identifier_text(context, routed.session or '')}`)"
+    text = result.text
+    details = dict(result.details or {})
+    details["routed_to"] = device_name
+    details.setdefault("peer", device_id)
+    return result.model_copy(
+        update={
+            "content": [TextContent(text=f"{line}\n{text}" if text else line)],
+            "details": details,
+        }
+    )
+
+
 def _mesh_send_failed(payload: Mapping[str, Any]) -> bool:
     """Is a pilot ``send`` receipt a failure the TOOL result must flag?
 
@@ -17012,6 +17042,21 @@ async def execute_send(
         # (`session=`, and `target=` when the needle is a full id) are
         # covered; every other error form returns None before any read; see
         # _peer_holder_hint.
+        #
+        # AUTO-ROUTING (local/remote parity, 2026-11-13): when the address is
+        # an exact `session=` id and exactly ONE peer holds it, the refusal
+        # would only tell the caller to repeat itself with `peer=` — so deliver
+        # there instead, and say so. Deliberately NOT for `target=` (its
+        # substring semantics stay the resolver's; a full-id target keeps the
+        # hint) and never for several holders, which stay a refusal listing
+        # each candidate: picking one would be the wrong-recipient guess the
+        # mesh refuses everywhere else.
+        if params.session and _EXACT_ID_MISS in (error or ""):
+            holders = await asyncio.to_thread(_peer_holders, params.session.strip())
+            if len(holders) == 1:
+                return await _execute_send_routed(tool_call_id, params, holders[0], context)
+            routed_refusal = _peer_holders_sentence(params.session.strip(), holders, context)
+            return _error(tool_call_id, "send", routed_refusal or error or "no target resolved")
         hint = await _peer_holder_hint(
             params.session or "", params.target or "", error or "", context
         )
@@ -18443,20 +18488,56 @@ def _peer_holder_sentence(session_id: str, context: ToolContext | None = None) -
     ``owner_label``, whose fallback truncates the id to an 8-character
     fragment that would resolve nowhere.
     """
-    from local_operator.session.peer_rows import peer_session_row, peer_session_rows
+    return _peer_holders_sentence(session_id, _peer_holders(session_id), context)
+
+
+def _peer_holders(session_id: str) -> list[Any]:
+    """Every remote ``SessionRow`` holding ``session_id``, one per device.
+
+    Blocking; the lookup policy is :func:`_peer_holder_sentence`'s (cache
+    first, one bounded federated read on a miss). ``peer_session_row`` stays
+    the GATE — it is the entry point the zero-read guards poison, so a path
+    that must not touch the catalogue still fails loudly — and only once it
+    found a row does ``peer_session_holders`` widen the answer to every
+    device reporting the id, which is what tells "the holder" from "a holder".
+    """
+    from local_operator.session.peer_rows import (
+        peer_session_holders,
+        peer_session_row,
+        peer_session_rows,
+    )
 
     root = config_dir()
     row = peer_session_row(session_id, root)
     if row is None:
         peer_session_rows(root, ttl_s=0)
         row = peer_session_row(session_id, root)
-    if row is None or not row.is_remote or not row.owner_device:
+    if row is None:
+        return []
+    return peer_session_holders(session_id, root)
+
+
+def _peer_holders_sentence(
+    session_id: str, holders: Sequence[Any], context: ToolContext | None = None
+) -> str | None:
+    """The refusal naming ``holders`` of ``session_id``; ``None`` for none.
+
+    ONE holder keeps the original sentence byte for byte. SEVERAL holders list
+    each by DEVICE ID (with its name beside it): a name can repeat across
+    devices, so the id is the only ``peer=`` value guaranteed to pick exactly
+    the device the caller means.
+    """
+    if not holders:
         return None
-    device = row.owner_device_name or row.owner_device
     # Identifier field: the session id the caller must pass back.
-    return (
-        f"`{identifier_text(context, session_id)}` is held by {device} — " f"pass `peer={device}`"
-    )
+    shown = identifier_text(context, session_id)
+    if len(holders) == 1:
+        device = holders[0].owner_device_name or holders[0].owner_device
+        return f"`{shown}` is held by {device} — pass `peer={device}`"
+    lines = [f"`{shown}` is held by {len(holders)} devices — pass `peer=` with one of:"]
+    for row in holders:
+        lines.append(f"  peer={row.owner_device}  ({row.owner_device_name or row.owner_device})")
+    return "\n".join(lines)
 
 
 async def _peer_holder_hint(
