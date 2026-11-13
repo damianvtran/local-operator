@@ -1898,20 +1898,33 @@ def test_an_oversized_stored_page_is_bounded_and_never_tears_the_link_down(
         pong = link.request({"op": "ping", "req": 99_001, "locality": "remote"}, timeout=10.0)
         assert pong is not None and pong.get("op") == "ack", pong
 
-        # NOTHING SERVABLE AT ALL is a NAMED refusal over the same live link: one
-        # row larger than the frame cannot be served "in part", and the reader is
-        # told which page it was rather than left with a dead link.
+        # ONE ROW LARGER THAN THE FRAME is SERVED BOUNDED AND MARKED over the same
+        # live link (PR #3903 changed this from a ``page_too_large`` refusal, which
+        # left a conversation whose newest entry was a huge paste unreadable from
+        # any other device): its identity survives so paging stays gap-free, its
+        # body is a preview plus the truncation marker, and since no row was left
+        # behind the page claims no more. Metadata too large to fit is still the
+        # named refusal; ``test_peer_view_oversized`` pins that half.
         huge = "9f3ac1e0b7d3"
-        _seed_journal(server_b.root, huge, ["y" * 9_000_000])
-        refused = _call(
+        huge_ids = _seed_journal(server_b.root, huge, ["y" * 9_000_000])
+        served = _call(
             server_a.root,
             "peer_session_history",
             peer=server_b.identity.device_id,
             session_id=huge,
         )
-        assert refused.get("op") == "error", refused
-        assert refused.get("code") == "page_too_large", refused
-        assert link.alive, "a row too large to serve closed the peer link"
+        assert served.get("op") == "ack", served
+        huge_page = served["detail"]
+        assert [entry["id"] for entry in huge_page["entries"]] == huge_ids
+        assert huge_page["has_more"] is False, "nothing was left behind"
+        payload = huge_page["entries"][0]["payload"]
+        assert payload["role"] == "user"
+        text = payload["content"][0]["text"]
+        assert text.startswith("y") and "[truncated: this entry is" in text
+        assert len(text) < 9_000_000, "the oversized body was sent whole"
+        assert link.alive, "a row too large for one frame closed the peer link"
+        pong = link.request({"op": "ping", "req": 99_002, "locality": "remote"}, timeout=10.0)
+        assert pong is not None and pong.get("op") == "ack", pong
     finally:
         link.close("test")
 

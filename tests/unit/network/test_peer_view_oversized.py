@@ -93,7 +93,11 @@ def test_an_oversized_newest_row_is_served_bounded_and_marked_not_refused(
     fitted = relay.fit_session_history_reply(1, page)
 
     assert relay.session_history_reply_bytes(1, fitted) <= budget
-    assert fitted["has_more"] is True, "rows left behind must be reachable by cursor"
+    # BOTH rows fit once the newest is cut, so nothing was left behind and the
+    # page must not claim more (CI run 43367540518: a one-row journal came back
+    # ``has_more: true``, which sends a reader paging back into an empty page).
+    assert [entry["id"] for entry in fitted["entries"]] == ["old", "big"]
+    assert fitted["has_more"] is False, "no row was dropped, so there is no more"
     row = fitted["entries"][-1]
     # IDENTITY KEPT: id/ts/type and the role and tool-call identity the
     # renderer pairs on; only the body was cut, and it says so.
@@ -104,6 +108,14 @@ def test_an_oversized_newest_row_is_served_bounded_and_marked_not_refused(
     assert MARKER_WORDS in text and text.startswith("y")
     # The caller's page is not mutated: the canonical row stays whole.
     assert len(page["entries"][-1]["payload"]["content"][0]["text"]) == budget * 2
+
+    # An OLDER row that no longer fits beside the bounded one IS left behind,
+    # and then ``has_more`` must say so: the reader reaches it by cursor.
+    heavy = {**older, "payload": {"role": "user", "content": [{"text": "o" * budget}]}}
+    dropped = relay.fit_session_history_reply(1, {**page, "entries": [heavy, newest]})
+    assert [entry["id"] for entry in dropped["entries"]] == ["big"]
+    assert dropped["has_more"] is True, "rows left behind must be reachable by cursor"
+    assert relay.session_history_reply_bytes(1, dropped) <= budget
 
 
 def test_metadata_that_cannot_fit_is_still_refused_by_name(
@@ -145,6 +157,7 @@ def test_a_custom_row_with_bulk_outside_details_is_bounded_not_refused(
     fitted = relay.fit_session_history_reply(1, page)
 
     assert relay.session_history_reply_bytes(1, fitted) <= budget
+    assert fitted["has_more"] is False, "the only row was served, so there is no more"
     row = fitted["entries"][-1]
     assert (row["id"], row["ts"], row["type"]) == ("cm", 3.0, "custom")
     assert set(row["payload"]) == {"custom_type", "attribution", "id", "details"}
