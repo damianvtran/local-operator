@@ -142,6 +142,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.i18n.keys import tui_app as _x
 from local_operator.i18n.keys import tui_asks as _ask_keys
+from local_operator.i18n.keys import tui_busy_delivery as _busy_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_notification_kinds as _kind_keys
 from local_operator.i18n.keys import tui_projects as _pc
@@ -253,6 +254,7 @@ from local_operator.tui.ask_open_policy import (
     read_queue,
 )
 from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.busy_delivery import busy_delivery_mode
 from local_operator.tui.command_palette import (
     OperatorCommandPalette,
     OperatorCommandProvider,
@@ -646,6 +648,10 @@ _t_sound = tr("tui.sound")
 #: The queued-ask surfaces' own namespace (R5). Read through the binding at every
 #: use site, never copied: a language move re-materialises the catalogue.
 _t_asks = tr("tui.asks")
+#: Busy-send delivery notices (steer/queue/both). Its own namespace so a
+#: translation of one mode cannot stale the others' passed rows; read through
+#: the binding at every use so a language move re-materialises it.
+_t_busy = tr("tui.busy_delivery")
 #: First-run setup cues (the composer placeholder and the no-provider cue). Read
 #: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
 #: the two module constants below on a live language move.
@@ -778,8 +784,52 @@ RESTORED_COST_PREFIX = LOWER_BOUND_MARK
 #: things internally — a turn contains several steps, which is exactly why the
 #: deferred case exists — and the UI teaches neither, so a pair that used both
 #: made the reader translate. All four now describe what the user observes.
-QUEUED_STEER_NOTICE = "queued — sends when this step finishes"
+#:
+#: The waiting text names its MODE, because one line for every mode was false
+#: for two of the three: a steer does not wait for the step to finish (it
+#: interrupts the turn at its next boundary), and a `both` send may steer
+#: instead of waiting. Each mode's row says what that message will actually do.
+#:
+#: "may stop a running tool" rather than "stops" for the steer: a streaming
+#: model or a tool the runtime cannot interrupt is not actually stopped, and the
+#: row must not promise more than the interrupt does.
+STEER_NOTICE = _t_busy(_busy_keys.steer_notice())
+#: Not a mode: what a QUEUE or BOTH row becomes once a steer waits BESIDE it.
+#: Any waiting steer makes every waiting queue/both message urgent — the drain
+#: takes the whole queue together at the next boundary (`_has_urgent_steering`
+#: tests the whole queue, not the newest entry) — so those rows stop promising
+#: a wait this turn will not see out and say where the message is going
+#: instead. Derived from the queue on every append and recall
+#: (`_refresh_busy_receipts`) rather than stored event by event, so recalling
+#: the steer reverts the rows it had joined.
+STEER_JOINED_NOTICE = _t_busy(_busy_keys.steer_joined_notice())
 SENT_STEER_NOTICE = "sent — the agent has it now"
+#: The post-send receipts for the two non-urgent delivery modes (``queue``
+#: and ``both``). One string per mode, both in the same family: from the
+#: reader's side both are one fact while the message waits — the tools are
+#: NOT interrupted. What differs is what the wait promises: ``queue``
+#: promises it forever, ``both`` promises it may steer if the wait runs
+#: long, and each notice says which.
+#:
+#: HEIGHT baseline: the string these replace, ``queued — sends when this step
+#: finishes`` (38 cells of body), is the shipped height every waiting receipt
+#: is still measured against. None of the four waiting states may render
+#: TALLER than it at a supported width (40 up), which is the direction that
+#: pushes the transcript below down; the deferred row is pinned separately (one
+#: row taller at 48-52 columns), since this change does not touch its copy.
+#: Some render a row shorter, which is harmless because
+#: the transcript spaces blocks by a gap rather than pinning rows. The submit
+#: swap and the in-place restate both happen under the user's eyes, so the
+#: changed row must not grow. Below 40 columns nothing is pinned: the app
+#: supports widths from 40 up. `tests/unit/tui/test_busy_delivery.py` measures
+#: each string against that baseline per width. "queued" leads because the
+#: row's job is to say the message is waiting, so it must read as the same
+#: family as the row it replaces rather than a different kind of row.
+QUEUED_WAIT_NOTICE = _t_busy(_busy_keys.queue_notice())
+#: Its own family member for the same reason: a `both` send that steers
+#: settles through the same `SENT_STEER_NOTICE` on delivery, and while it
+#: waits it says it waits first.
+BOTH_WAIT_NOTICE = _t_busy(_busy_keys.both_notice())
 #: Printed under a ``/model`` switch made WHILE a turn is running, and only
 #: then. The request already streaming cannot be re-targeted, so for a few
 #: seconds the band names the new model while the old one is visibly still
@@ -4654,9 +4704,14 @@ def _reload_setup_cues() -> None:
     a language change has to re-materialise them; every use site reads the module
     global at call time and therefore sees the moved text.
     """
-    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE
+    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE, QUEUED_WAIT_NOTICE, BOTH_WAIT_NOTICE
+    global STEER_NOTICE, STEER_JOINED_NOTICE
     SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
     AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+    QUEUED_WAIT_NOTICE = _t_busy(_busy_keys.queue_notice())
+    BOTH_WAIT_NOTICE = _t_busy(_busy_keys.both_notice())
+    STEER_NOTICE = _t_busy(_busy_keys.steer_notice())
+    STEER_JOINED_NOTICE = _t_busy(_busy_keys.steer_joined_notice())
 
 
 register_refresh(_reload_setup_cues)
@@ -20990,6 +21045,81 @@ class OperatorApp(App[None]):
         except Exception:
             return {}
 
+    def _busy_delivery_mode(self) -> str:
+        """The configured busy-send delivery mode, ``steer`` when unset/unreadable.
+
+        Read at SUBMIT time rather than cached at boot, for the same reason
+        ``_config_values`` holds: a LIVE-scope edit must take effect on the very
+        next send in this session. The fallback lives in
+        :mod:`local_operator.tui.busy_delivery` beside the predicate, so a
+        hand-edited ``delivery.busy_default: "sometimes"`` reads as the default rather
+        than reaching the engine as an unknown value the wire would refuse.
+        """
+        return busy_delivery_mode(self._config_values())
+
+    def _busy_notice(self, mode: str) -> str:
+        """The post-send receipt for one busy-send delivery mode."""
+        if mode == "queue":
+            return QUEUED_WAIT_NOTICE
+        if mode == "both":
+            return BOTH_WAIT_NOTICE
+        return STEER_NOTICE
+
+    def _refresh_busy_receipts(self) -> None:
+        """Bring every WAITING receipt's text up to date with the queue's state.
+
+        Derived, never event-driven: the one fact that changes an already
+        painted row is "a steer is waiting beside it", and that fact is read
+        from ``_queued_steer_notices`` itself. A steer row makes every waiting
+        queue/both row say it goes out with the steer (the engine drains the
+        whole queue at the next boundary, so that is what happens); removing
+        the steer — Esc recall, or the undeliverable lift — reverts them to
+        their own mode's promise. Restating only on a text CHANGE keeps the
+        no-op calls from re-building every row on each submit.
+
+        A steer row never restates here: its own receipt already says it
+        interrupts, and the joined wording describes where the WAITING message
+        goes, not what the steer does.
+        """
+        joined = any(block.busy_mode == "steer" for block in self._queued_steer_notices)
+        for block in self._queued_steer_notices:
+            if block.busy_mode == "steer":
+                continue
+            own = BOTH_WAIT_NOTICE if block.busy_mode == "both" else QUEUED_WAIT_NOTICE
+            text = STEER_JOINED_NOTICE if joined else own
+            if block.text() != text:
+                block.restate(text, "note")
+
+    class _DeliverySteer(Protocol):
+        # The delivery-aware twin of SessionProtocol.steer_message. The protocol
+        # deliberately omits the kwarg (older handles keep the legacy shape),
+        # so the call below routes through this narrow cast after the probe.
+        def steer_message(self, message: Any, delivery: str | None = None) -> None: ...
+
+    @staticmethod
+    def _steer_takes_delivery(session: Any) -> bool:
+        """Whether ``session.steer_message`` takes the ``delivery`` keyword.
+
+        The literal-parameter probe the server's ``_takes_delivery`` applies at
+        the wire: a session that predates the keyword must keep the legacy call
+        shape, so a `queue`/`both` preference can never throw a TypeError on
+        an old handle. An unreadable signature answers False (the conservative
+        side).
+        """
+        try:
+            parameters = inspect.signature(session.steer_message).parameters
+        except (TypeError, ValueError):
+            return False
+        return "delivery" in parameters
+
+    @classmethod
+    def _steer_message_with_delivery(cls, session: Any, message: Any, mode: str) -> None:
+        # Reached only when _steer_takes_delivery is true, so this cast is
+        # checked at runtime by the probe — SessionProtocol omits the kwarg
+        # so old doubles stay valid, hence the cast rather than the protocol.
+        steer = cast("OperatorApp._DeliverySteer", session)
+        steer.steer_message(message, delivery=mode)
+
     def session_cwd(self) -> str:
         """The session's working directory, falling back to the process's.
 
@@ -26629,6 +26759,7 @@ class OperatorApp(App[None]):
                 message.attachments,
                 sent=sent,
                 typed=text,
+                delivery=message.delivery,
             )
         finally:
             source.turn.submitted_draft = None
@@ -35720,6 +35851,7 @@ class OperatorApp(App[None]):
         *,
         sent: str | None = None,
         typed: str = "",
+        delivery: str | None = None,
     ) -> None:
         """Paint one user prompt and dispatch it.
 
@@ -35807,7 +35939,53 @@ class OperatorApp(App[None]):
             # took back (`_recall_queued_steers`), so the app and the queue
             # must share one Message rather than each building their own.
             steer_message = Message.user(sent, images)
-            session.steer_message(steer_message)
+            # The delivery mode: only `queue`/`both` ride the keyword, and only
+            # when this session's handle takes it. `steer` keeps the legacy call
+            # shape so a pre-feature session sees byte-identical calls.
+            #
+            # A mode the handle cannot honour is REFUSED, never downgraded:
+            # falling through to the legacy call would queue the message as an
+            # URGENT steer while the row below reads "queued — waits", the
+            # silent downgrade the modes exist to prevent (the server's
+            # `_takes_delivery` exists for the same reason one layer down).
+            # The refusal keeps the user row and parks the payload on a
+            # failure record (``_mark_send_failed``), so `edit` returns the
+            # text to the composer — the same posture as the no-session arm
+            # above, which is why this arm reuses it.
+            # The chord the operator pressed wins over the configured
+            # default for THIS send only (D9); a plain Enter falls back to
+            # the live LIVE-scope setting. Either way the refusal below is
+            # the same: a mode the handle cannot honour is refused, never
+            # downgraded — a chorded queue against a legacy handle must not
+            # become an urgent steer under a "queued" row.
+            mode = delivery or self._busy_delivery_mode()
+            if mode != "steer" and not OperatorApp._steer_takes_delivery(session):
+                from local_operator.session.runtime.types import (
+                    BUSY_DELIVERY_UNSUPPORTED,
+                )
+
+                self._mark_send_failed(
+                    self._interaction,
+                    blocks=(user_block, image_blocks),
+                    text=text,
+                    sent=sent,
+                    typed=typed,
+                    images=images,
+                    accepted=self._interaction.turn.submitted_draft,
+                    failure_class="busy-delivery-unsupported",
+                    sentence=BUSY_DELIVERY_UNSUPPORTED,
+                    kind="warning",
+                    # No resend: re-pushing the same mode against the same
+                    # legacy handle fails identically — a resend here cannot
+                    # succeed, so it is not offered (D9). `edit` alone returns
+                    # the text, where a plain Enter (steer) can still send it.
+                    can_send_again=False,
+                )
+                return
+            if mode != "steer":
+                OperatorApp._steer_message_with_delivery(session, steer_message, mode)
+            else:
+                session.steer_message(steer_message)
             # "boundary" is engine vocabulary the UI never defines, and this is
             # the line answering "did my text just get thrown away?" — so it says
             # when it will be sent, in the tense it will be sent in, at the
@@ -35815,20 +35993,29 @@ class OperatorApp(App[None]):
             # the user is waiting for, and below `warning`, which is an alarm this
             # is not. Three warning-tinted rows on one frame for routine receipts
             # is how the loudest ink in the palette stops meaning anything.
-            # Held, not just appended: this row is a promise about the future
-            # ("sends when this step finishes") and the reference is what lets
-            # `on_steering_delivered` settle it into a statement of fact once
-            # the engine actually takes the message. Without that, the row went
-            # on saying `queued` for the rest of the session and the agent's
-            # eventual reply was the only evidence it had ever been delivered.
+            # Held, not just appended: this row is a promise about the turn
+            # ("steering — may stop a running tool") and the reference is what
+            # lets `on_steering_delivered` settle it into a statement of fact
+            # once the engine actually takes the message. Without that, the row
+            # went on saying the message was on its way for the rest of the
+            # session and the agent's eventual reply was the only evidence it
+            # had ever been delivered.
             #
             # A LIST because a user can queue several messages while one tool
             # runs, and the engine delivers whatever has accumulated at the next
             # boundary — all of them, together. Settling only the newest would
             # leave the earlier rows lying.
-            queued = NoticeBlock(QUEUED_STEER_NOTICE, "note")
+            queued = NoticeBlock(self._busy_notice(mode), "note")
+            # The mode rides ON the row (`NoticeBlock.busy_mode`) so a later
+            # steer's arrival can restate it: the joined wording depends on a
+            # fact that does not exist when the row is built.
+            queued.busy_mode = mode
             self._append_block(queued)
             self._queued_steer_notices.append(queued)
+            # A queue/both row submitted WHILE a steer waits starts joined, and
+            # a steer arriving beside existing rows joins them: both are the
+            # same derivation over the list this row just joined.
+            self._refresh_busy_receipts()
             # The session will announce this steer as a user MessageStartEvent
             # when the drain actually takes it (the mobile→TUI echo channel).
             # The row is already on screen — registered here so that event is
@@ -48973,6 +49160,31 @@ class OperatorApp(App[None]):
         # produces. Narrow so a partial apply cannot pass for a clean one
         # (review round 1, m1).
         resolved, rejected = _keymap.resolved_keymap(values)
+        # The composer-scope send chords have no ``Binding`` to re-key, so
+        # ``set_keymap`` alone would never move them: push them from the
+        # SAME resolved keymap, so a config write (either site) changes the
+        # next send with no relaunch. The map is key name -> mode, read
+        # from the persisted value rather than from any binding map (the
+        # stale-map hazard ``action_holding`` documents).
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — no composer mounted (pre-boot apply)
+            editor = None
+        if editor is not None:
+            chords: dict[str, str] = {}
+            for action_id, mode in _keymap.SEND_MODES.items():
+                raw = values.get(action_id)
+                if raw is None:
+                    continue
+                if _keymap.validate_key(raw, scope="composer", action_id=action_id) is not None:
+                    continue
+                for part in _keymap.normalize_composer_key(str(raw)).split(","):
+                    if part:
+                        chords[part] = mode
+            try:
+                editor.set_send_chords(chords)
+            except Exception:  # noqa: BLE001 — a bad chord map must not break apply
+                logger.debug("keymap: send chords push failed", exc_info=True)
         try:
             self.set_keymap(resolved)
         except Exception:  # noqa: BLE001 — a bad keymap must not take down the app
@@ -63964,6 +64176,10 @@ class OperatorApp(App[None]):
             if held is notice:
                 self._deferred_steer_notices.remove(held)
                 break
+        # Recalling the steer that had joined the older waiting rows reverts
+        # their text: the fact that made them joined has just been removed from
+        # the queue. Derived, so the revert cannot be forgotten here.
+        self._refresh_busy_receipts()
         editor.focus()
 
     def _on_recall_rejected(self, session: Any, command_id: str) -> None:
@@ -64111,6 +64327,9 @@ class OperatorApp(App[None]):
             if held is notice:
                 self._deferred_steer_notices.remove(held)
                 break
+        # The lift removes a steer the owner refused, so the older rows it had
+        # joined go back to their own mode's promise, exactly as on recall.
+        self._refresh_busy_receipts()
         source = self._interaction
         # The row's text, not `message.text`, for the reason the recall gives:
         # a `$skill` steer sends the expanded body while the row keeps the short

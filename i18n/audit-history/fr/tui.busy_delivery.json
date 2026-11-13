@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "tui.busy_delivery",
+  "history_sha256": "4d92bd97b05d913266e8de7fde97e5b9d1b733cea53e78b42c45cf620c9f1b3c",
+  "entries": [
+    {
+      "locale": "fr",
+      "namespace": "tui.busy_delivery",
+      "source_sha256": "210e58899f7c12c8890d1094de9cbcbbd0ff66c140c412d7bacee711ba510f87",
+      "context_sha256": "15bb9b08af850dd39982912dba48ec7510cd9e4a1c550ff87c595ff0e1ac4901",
+      "target_sha256": "df5dbb82b7027e8504194cf4ef41ff246780f1d1f090c7a6d5fb5b7d455e7b20",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes (branch feat/busy-delivery-modes, 2026-11-10): 2 new keys audited in this namespace (tui.busy_delivery queue_notice/both_notice; relay.composer delivery.label/steer/queue/both; wire.settings tui_busy_delivery label/help + choice steer/queue/both label/description). Round 1 (auditor saw en source, translation, style-guide excerpt, shipped steer term): FAIL, 0 blocker. This namespace's round-1 findings: none. Remediation: the auditor's suggested replacement strings were applied verbatim (manager, no wording invented), only the flagged keys changed; all other keys byte-identical to round 1. Round 2 (delta audit of remediated keys only, same auditor): fr/es/hi PASS 0/0 (no findings). en both_notice source was set by the manager on this branch (c67b32de8) before translation to 'queued — waits, then steers if it stalls'. keys_audited lists only the new keys (precedent fr wire.settings 2026-11-07, PR #3570). No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r2",
+      "keys_audited": 2
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.busy_delivery",
+      "source_sha256": "6c1285c73f609f9833ff623f0df8be0c1b66e773159a50269fa35fd2f3b41ac5",
+      "context_sha256": "ad56aac04e7626b408a51952b2260398cb2caec16637fab92df922e314ae7fc5",
+      "target_sha256": "4cc5f26d23244ecf8105e41e400f5991a1bf01d9517c97342e924d6a479dc111",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; each agent reported 'I believe/ran as anthropic/claude-sonnet-5-5'; not independently verifiable)",
+        "date": "2026-11-10"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-10",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Busy-send delivery modes wave 2 (branch feat/busy-delivery-modes, 2026-11-10, after 30f82c12e; PR #3768 design review D1-D3): 2 keys audited in this namespace (queue_notice/both_notice). en source changed in 30f82c12e: tui.busy_delivery queue_notice 'queued — waits, tools keep running', both_notice 'queued — waits, interrupts if slow'; wire.settings choice descriptions \"Interrupt now (today's behaviour)\" / \"Wait; never interrupt tools\" / \"Wait, then interrupt if slow\"; NEW relay.composer delivery steer/queue/both_hint byte-identical to the matching settings description in every locale. Keys not re-audited this wave were audited in wave 1 (receipt r2, df524b47b) and are byte-identical. keys_audited lists only the wave-2 keys (precedent fr wire.settings 2026-11-07, PR #3570). Wave-2 audit: first pass FAIL, 3 major ('si lent' unidiomatic in both_notice, both.description, both_hint). Remediation: both_notice replaced verbatim with auditor's suggestion 'en file — attend, puis interrompt si ça tarde'; description/hint use the auditor's suggestion with 'puis' dropped to fit the 34-cell column: 'Attendre, interrompre si ça tarde' (manager, no other wording invented). Round-2 delta audit (same auditor): PASS 0/0, no findings. Wave-1 finding (steer.description 'l'orientation', 1 major) is unchanged in kind: steer.description was replaced in wave 2 and re-audited ('Interrupt now (today''s behaviour)') and passed. No second independent audit: copy is not high-visibility/safety; no second_audit field.",
+      "round": "r3",
+      "keys_audited": 2
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.busy_delivery",
+      "source_sha256": "36cc49b438a1e3985b31772d69f30a76149c4f03aca5d2fdc2c3e274262955d7",
+      "context_sha256": "268cabb7f783510bb25851c49e937f595ac341f951750be503deab2d6480de24",
+      "target_sha256": "cc6b57be1afe41d752e513361084d4820ae0ca9e2c671fffc46fe1b17e6fbbf6",
+      "keys_audited": 3,
+      "round": "r3",
+      "translator": {
+        "agent": "task subagent tr8-fr (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-fr job)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Wave S8 queue-then-steer rename, backend (branch feat/tui-send-chords at ae5669467, English source in 3b2bc7423, translated strings audited while still uncommitted, 2026-11-11): 3 keys in this namespace: tui.busy_delivery.both_notice (changed), tui.busy_delivery.steer_notice (new), tui.busy_delivery.steer_joined_notice (new). Translator: task subagent tr8-fr (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine); anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-fr job). Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit rounds for fr until PASS: rounds 1-2 FAIL, round 3 PASS, 0 blocker/major at the final round. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's final verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    }
+  ]
+}

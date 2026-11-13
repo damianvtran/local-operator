@@ -2460,7 +2460,11 @@ class SettingsView(Vertical):
         normalized = (
             keymap_mod.normalize_desktop_key(key, action_id=capture.setting_key)
             if scope == "desktop"
-            else keymap_mod.normalize_key(key)
+            else (
+                keymap_mod.normalize_composer_key(key)
+                if scope == "composer"
+                else keymap_mod.normalize_key(key)
+            )
         )
         self._capture = capture._replace(key=normalized, refused="")
         self._repaint()
@@ -4199,20 +4203,26 @@ class SettingsView(Vertical):
                 else:
                     line.append(_t(_x.settings_view_press_key()), style=accent)
                 return line
-            # `display_key`, not `format_key_display`: a desktop value maps its
-            # platform tokens for display in its OWN scope (primary reads
-            # cmd/ctrl), where the app vocabulary would show it verbatim.
-            line.append(
-                keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
-                style=value_style,
-            )
+            # An unbound hotkey (the composer-scope send rows ship unbound)
+            # has an empty value: paint the page's "nothing to show" glyph
+            # in dim ink rather than a blank cell, which reads as an unset
+            # row the user has broken or never opened (D4). The empty string
+            # is the omission encoding of unbound, so it is the only case
+            # that paints this.
+            if not str(value):
+                line.append("—", style=dim)
+            else:
+                line.append(
+                    keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
+                    style=value_style,
+                )
             if selected:
                 # The same cursor-row-only affordance glyph the bool/enum rows
                 # carry, answering "what does `enter` do here?" before the
                 # press rather than after it.
                 line.append(" \u25b8", style=dim)
             return line
-        line.append(_render_value(value), style=value_style)
+        line.append(_collapsed_value(setting, value), style=value_style)
         if setting.kind in (Kind.BOOL, Kind.ENUM):
             if self._expanded == setting.key:
                 line.append(" ▾", style=dim)
@@ -4704,6 +4714,9 @@ class SettingsView(Vertical):
             lead: str
             lead_style: Style
             reason: str
+            # Bound on every path so the style line below reads a definite
+            # value; only the pending arm ever sets it True.
+            enhanced_hint = False
             if capture.refused:
                 # A refusal is a report that the press did not land, so it
                 # takes the danger ink: the one thing here that must not read
@@ -4724,20 +4737,41 @@ class SettingsView(Vertical):
                 # something stopped working. So it is named, and the user
                 # presses enter having read it.
                 reason = self._capture_conflict()
+                # A kitty-only chord needs its terminal limit stated where
+                # it is bound, not only in row help the user may never open
+                # (UX round 1, U1): without it a legacy terminal silently
+                # receives plain Enter for the very press that was bound.
+                # Painted as a hint (dim), not a refusal: it warns and
+                # stores, so the error ink would read as a rejection the
+                # capture never made.
+                if keymap_mod.scope_of(capture.setting_key) == "composer" and (
+                    keymap_mod.composer_chord_needs_enhanced_keys(capture.key)
+                ):
+                    need = "needs enhanced keys"
+                    reason = f"{need} — {reason}" if reason else need
+                    enhanced_hint = not self._capture_conflict()
                 contract_text = "enter confirms · esc cancels"
             else:
                 # Leads with the CONTRACT rather than restating the value
                 # column's `press a key…`; carrying both phrasings made a user
                 # check whether the difference was meaningful (design round 1,
                 # D7). The value column keeps the prompt, this line explains
-                # the way out.
-                lead, lead_style, reason = "listening for a key", dim + Style(bold=True), ""
+                # the way out. On a composer-scope row the lead teaches the
+                # chord grammar instead: a send chord that only works in
+                # kitty terminals must say so where the user binds it, and a
+                # legacy terminal would otherwise receive plain Enter for
+                # the very press the user believed was bound (UX round 1, U1).
+                if keymap_mod.scope_of(capture.setting_key) == "composer":
+                    lead = "alt+<letter> works anywhere, ctrl+enter needs enhanced keys"
+                else:
+                    lead = "listening for a key"
+                lead_style, reason = dim + Style(bold=True), ""
                 contract_text = "esc cancels"
 
             width = self._detail_width()
             contract_part = (contract_text, dim, False)
             lead_part = (lead, lead_style, False)
-            reason_style = error if reason else dim
+            reason_style = error if reason and not enhanced_hint else dim
             capture_rungs: list[list[tuple[str, Style, bool]]] = []
             if reason:
                 capture_rungs.append([lead_part, (reason, reason_style, False), contract_part])
@@ -6748,6 +6782,74 @@ def _value_tail(text: str, cells: int) -> str:
         kept.append(char)
         spent += size
     return "".join(reversed(kept))
+
+
+def _collapsed_value(setting: Setting, value: Any) -> str:
+    """What a collapsed row shows for ``value``: the choice's label, where it says more.
+
+    WHY THE LABEL AND NOT THE STORED WORD. An ENUM stores its WIRE value, and
+    one of them says nothing on the page's own terms: ``delivery.busy_default``
+    holds ``both`` — a word no surface explains — while the picker one keypress
+    away spells it out as ``queue, then steer`` (Q-1). Two surfaces describing
+    one value have to read as one answer, so the collapsed row reads the same
+    ``_choices_for`` the expansion paints and shows the same label.
+
+    DELIBERATELY NARROW, AND KEYED ON IDENTITY: the label is used only for
+    the choices listed in ``_COMBINATION_CHOICES`` — today the one row whose
+    label ENUMERATES a combination the stored word only gestures at
+    (``queue, then steer``). Shown for every differing label, this would also
+    restyle four rows nobody asked about — ``12h`` → ``12-hour``,
+    ``cross-family`` → ``allow cross-vendor``, ``switch`` → ``this terminal``,
+    ``7d`` → ``7 days`` (measured against the registry). Those are the same
+    defect one size smaller, and they belong to a design round that looks at
+    the page, not to this fix; until then their rows read exactly as they did.
+
+    The decision reads the SETTING KEY and the WIRE VALUE, never the label
+    text: the label is localized, and its part separators move with the
+    language (``ur`` separates with ``،`` U+060C, ``zh-CN`` has none at all),
+    which is how splitting the painted label on ASCII commas left this row
+    reading the bare ``both`` in both locales (V2-1/Q-4).
+
+    Display only: the value that is WRITTEN is untouched. A bool, or an ENUM
+    whose stored value is not one of its choices (hand-edited config), falls
+    through to :func:`_render_value` unchanged — a row must show what is there,
+    not the nearest legal answer.
+    """
+    rendered = _render_value(value)
+    if setting.kind is not Kind.ENUM:
+        return rendered
+    for choice in _choices_for(setting):
+        if choice.value != value:
+            continue
+        if _names_a_combination(setting, choice):
+            # The SAME projection the picker applies to a choice label, so the
+            # two surfaces paint one string rather than two spellings of it.
+            return _paint(str(choice.label), source_locale="en")
+        return rendered
+    return rendered
+
+
+#: The ENUM choices whose LABEL names a COMBINATION of behaviours, as
+#: ``(setting key, stored value)``: the collapsed row shows the label for
+#: these, and the stored wire word for every other choice.
+#:
+#: Keyed by IDENTITY, never by reading the label: the label is TRANSLATED and
+#: its part separators move with the language — ``ur`` separates with ``،``
+#: (U+060C), ``zh-CN`` drops the separator altogether — so splitting the
+#: painted label measured the translation instead of the meaning, and the row
+#: read the bare wire word ``both`` in both locales (V2-1/Q-4). A setting key
+#: and a wire value cannot move with the language.
+_COMBINATION_CHOICES = frozenset({("delivery.busy_default", "both")})
+
+
+def _names_a_combination(setting: Setting, choice: settings_io.Choice) -> bool:
+    """Whether ``choice``'s label says more than its stored word, in any locale.
+
+    Named so the rule has ONE spelling: `_collapsed_value` reads it, its
+    docstring explains the restrictiveness, and the tests replace it with the
+    pre-V2-1 comma split to prove the new cases fail against the old logic.
+    """
+    return (setting.key, choice.value) in _COMBINATION_CHOICES
 
 
 def _render_value(value: Any) -> str:

@@ -4,5 +4,13 @@
   "relay.composer.action.stop": "dừng",
   "relay.composer.action.stopping": "đang dừng",
   "relay.composer.action.connecting": "Đang kết nối",
-  "relay.composer.action.stop_agent": "dừng tác nhân"
+  "relay.composer.action.stop_agent": "dừng tác nhân",
+  "relay.composer.delivery.label": "cách gửi",
+  "relay.composer.delivery.steer": "định hướng",
+  "relay.composer.delivery.queue": "hàng đợi",
+  "relay.composer.delivery.both": "hàng đợi, rồi định hướng",
+  "relay.composer.delivery.steer_hint": "Ngắt ngay công cụ đang chạy",
+  "relay.composer.delivery.queue_hint": "Chờ; không ngắt công cụ",
+  "relay.composer.delivery.both_hint": "Chờ, rồi định hướng nếu chậm",
+  "relay.composer.delivery.both_chip": "chờ→ngắt"
 }

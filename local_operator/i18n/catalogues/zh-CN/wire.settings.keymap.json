@@ -8,5 +8,11 @@
   "wire.settings.keymap.push_to_talk.label": "按住说话",
   "wire.settings.keymap.push_to_talk.help": "按住听写（桌面端），松开停止。",
   "wire.settings.keymap.start_recording.label": "开始录音",
-  "wire.settings.keymap.start_recording.help": "在桌面窗口中开始语音转文字录音。"
+  "wire.settings.keymap.start_recording.help": "在桌面窗口中开始语音转文字录音。",
+  "wire.settings.keymap.send_steer.label": "引导发送",
+  "wire.settings.keymap.send_steer.help": "立即发送并打断当前步骤。覆盖“忙碌时的发送方式”。",
+  "wire.settings.keymap.send_queue.label": "排队发送",
+  "wire.settings.keymap.send_queue.help": "等待当前步骤，绝不打断工具。覆盖“忙碌时的发送方式”。",
+  "wire.settings.keymap.send_both.label": "排队后引导发送",
+  "wire.settings.keymap.send_both.help": "先等待，过慢再引导。覆盖“忙碌时的发送方式”。"
 }

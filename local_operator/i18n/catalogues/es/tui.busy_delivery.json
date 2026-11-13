@@ -1,0 +1,6 @@
+{
+  "tui.busy_delivery.queue_notice": "en cola — espera, herramientas siguen",
+  "tui.busy_delivery.both_notice": "en cola — espera, luego guía si tarda",
+  "tui.busy_delivery.steer_notice": "guiando — puede detener una herramienta",
+  "tui.busy_delivery.steer_joined_notice": "guiando — se envía junto con el mensaje que guía"
+}

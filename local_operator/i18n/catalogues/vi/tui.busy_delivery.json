@@ -1,0 +1,6 @@
+{
+  "tui.busy_delivery.queue_notice": "đã xếp hàng — chờ, công cụ vẫn chạy",
+  "tui.busy_delivery.both_notice": "đã xếp hàng — chờ, rồi định hướng nếu chậm",
+  "tui.busy_delivery.steer_notice": "đang định hướng — có thể ngắt công cụ đang chạy",
+  "tui.busy_delivery.steer_joined_notice": "đang định hướng — gửi cùng tin định hướng"
+}

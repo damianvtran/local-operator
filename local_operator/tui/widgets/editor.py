@@ -1200,6 +1200,7 @@ class EditorSubmitted(Message):
         attachments: Mapping[int, Marked] | None = None,
         *,
         shell: bool = False,
+        delivery: str | None = None,
     ) -> None:
         super().__init__()
         self.text = text
@@ -1221,6 +1222,13 @@ class EditorSubmitted(Message):
         #: message, so the flag has to ride along the same way attachments do.
         #: Defaulted so every existing construction site keeps working.
         self.shell = shell
+        #: The busy-send delivery mode the send chord named (``steer`` /
+        #: ``queue`` / ``both``), or ``None`` for a plain Enter. The app's
+        #: busy branch uses ``msg.delivery or _busy_delivery_mode()``; an
+        #: idle session, a shell submit and every non-prompt exit ignore it.
+        #: Defaulted like ``shell`` so every existing construction site
+        #: keeps working unchanged.
+        self.delivery = delivery
 
 
 class EditorDraftStarted(Message):
@@ -2446,6 +2454,18 @@ class Editor(TextArea):
         #: buffer — history, the draft store, undo, ``ctrl+o``, and the submit
         #: path that leaked it in the first place. Nothing can read a secret
         #: out of a document that never contained it.
+        #:
+        #: Delivery mode the current key's send chord named, or ``None``.
+        #: Set at the top of :meth:`_on_key` from the resolved send-chord map
+        #: and consumed once by :meth:`_submit` into ``EditorSubmitted``;
+        #: reset at the START of every ``_on_key`` so it can never leak to
+        #: the next key. The map itself is pushed by the app's
+        #: ``_apply_keymap`` (see :meth:`set_send_chords`).
+        self._chord_delivery: str | None = None
+        #: Resolved send chords, ``event.key`` -> mode, for the three
+        #: ``keymap.send_*`` ids. Empty means no chord fires. Pushed, not
+        #: pulled, so the editor never reads the config itself.
+        self._send_chords: dict[str, str] = {}
         self._credential_typing: int | None = None
         #: The characters typed into the open masked span, in order. The ONLY
         #: place a typed secret lives before it becomes a `PastedCredential`.
@@ -3130,7 +3150,24 @@ class Editor(TextArea):
     # -- key interception ---------------------------------------------------
     async def _on_key(self, event: events.Key) -> None:
         """Handle chat keys before TextArea's insert path sees them."""
+        # Reset FIRST: a chord mode is one key's meaning, and letting it
+        # survive into the next key would steer a submit the operator sent
+        # plain. Every return below leaves it ``None`` unless THIS key set it.
+        self._chord_delivery = None
         key = event.key
+        # A send chord (``ctrl+enter``, ``alt+s``, …) IS Enter with a delivery
+        # mode attached, by the same precedent as the ``ctrl+j`` rewrite just
+        # below: every Enter owner — credential capture, both pickers, the
+        # ambiguity gate, the live-prompt router — treats it as Enter, so a
+        # chord with a picker open accepts the pick and sends nothing, and a
+        # chord in a masked capture confirms only. The mode rides on
+        # :attr:`_chord_delivery` to exactly one :meth:`_submit`. The event
+        # is rewritten as well as the local name so the router, which
+        # re-reads ``event.key``, sees the same Enter.
+        if self._send_chords and key in self._send_chords:
+            self._chord_delivery = self._send_chords[key]
+            key = "enter"
+            event.key = "enter"
         # LF is Enter. sidekick.nvim, tmux send-keys, expect and every editor
         # integration end a line with LF (0x0a); textual 8.2.8 decodes that to
         # the key name `ctrl+j`, and every Enter meaning below gated on the
@@ -4080,7 +4117,21 @@ class Editor(TextArea):
             self._allows_shell and stripped.startswith("!") and not stripped.startswith("/")
         )
 
+    def set_send_chords(self, chords: dict[str, str]) -> None:
+        """Replace the resolved send-chord map (``event.key`` -> mode).
+
+        Pushed from the app's ``_apply_keymap`` so a config write takes
+        effect on the next key with no relaunch. A copy is held: the app's
+        mapping must not alias the widget's, or a later app-side mutation
+        would move the widget's without a call.
+        """
+        self._send_chords = dict(chords)
+
     def _submit(self) -> None:
+        # Consumed ONCE here: the chord named a mode for THIS submit, and a
+        # second Enter on the cleared buffer must read plain. Cleared before
+        # the blocked check below so even a refused submit cannot carry it.
+        delivery, self._chord_delivery = self._chord_delivery, None
         # A session transition leaves the ordinary composer visible and editable,
         # but Enter must not post an event that can still reach the old session.
         # Keeping the draft in place also makes both success and failure paths
@@ -4115,7 +4166,13 @@ class Editor(TextArea):
         # because the deleted markers are the user saying they changed their
         # mind, and silently sending all three is both surprising and expensive.
         self.post_message(
-            EditorSubmitted(text, self.referenced_images(), self._attachments, shell=shell)
+            EditorSubmitted(
+                text,
+                self.referenced_images(),
+                self._attachments,
+                shell=shell,
+                delivery=delivery,
+            )
         )
         # Leave the mode WITH the buffer: a submit that stayed in bang-mode
         # would leave the placeholder saying "Run a command…" over an empty

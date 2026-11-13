@@ -221,6 +221,9 @@ _KEYMAP_COPY = {
     "keymap.quick_send": (_wk.quick_send_label, _wk.quick_send_help),
     "keymap.push_to_talk": (_wk.push_to_talk_label, _wk.push_to_talk_help),
     "keymap.start_recording": (_wk.start_recording_label, _wk.start_recording_help),
+    "keymap.send_steer": (_wk.send_steer_label, _wk.send_steer_help),
+    "keymap.send_queue": (_wk.send_queue_label, _wk.send_queue_help),
+    "keymap.send_both": (_wk.send_both_label, _wk.send_both_help),
 }
 
 
@@ -585,6 +588,18 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ns.title()),
         Scope.LIVE,
         _t(_ns.description()),
+    ),
+    # The busy-send delivery default (``delivery.busy_default``). Its own
+    # section rather than leaving the row under ``appearance``, where it was
+    # born under its old TUI-only name: the row is neutral between the TUI
+    # and the desktop app (one shared config.yml, one LIVE read per send),
+    # and an ``appearance`` header on a ``delivery`` path says nothing. The
+    # section TITLE is the contract's "Message sending" (architect D1).
+    Section(
+        "composer",
+        _t(_ws.composer_title()),
+        Scope.LIVE,
+        _t(_ws.composer_description()),
     ),
     # Its own section rather than a pair of rows under ``appearance``. Scope
     # does not force the split — ``appearance`` is LIVE too — but the section
@@ -3249,6 +3264,36 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices(
             _t(_ws.tui_sidebar_show_subagents_choice_true_description()),
             _t(_ws.tui_sidebar_show_subagents_choice_false_description()),
+        ),
+    ),
+    Setting(
+        key="delivery.busy_default",
+        path=("delivery", "busy_default"),
+        section="composer",
+        # LIVE: read at submit time (``_busy_delivery_mode``), so a /settings
+        # write changes the next send in this session with no relaunch. The
+        # desktop reads the same row at send time, so a write made in the TUI
+        # reaches it at its next focus.
+        label=_t(_ws.delivery_busy_default_label()),
+        kind=Kind.ENUM,
+        default="steer",
+        help=_t(_ws.delivery_busy_default_help()),
+        choices=(
+            Choice(
+                "steer",
+                _t(_ws.delivery_busy_default_choice_steer_label()),
+                _t(_ws.delivery_busy_default_choice_steer_description()),
+            ),
+            Choice(
+                "queue",
+                _t(_ws.delivery_busy_default_choice_queue_label()),
+                _t(_ws.delivery_busy_default_choice_queue_description()),
+            ),
+            Choice(
+                "both",
+                _t(_ws.delivery_busy_default_choice_both_label()),
+                _t(_ws.delivery_busy_default_choice_both_description()),
+            ),
         ),
     ),
     # -- hotkeys ------------------------------------------------------------
@@ -6671,6 +6716,16 @@ def coerce(setting: Setting, text: str) -> Any:
         # a desktop value is an accelerator, not a Textual key string.
         if setting.hotkey_scope == "desktop":
             return _keymap.normalize_desktop_key(text, action_id=setting.key)
+        if setting.hotkey_scope == "composer":
+            # The RAW spelling is what the grammar judges: canonicalising
+            # first would collapse a repeated modifier (``ctrl+ctrl+enter``)
+            # before the refusal sees it and store a chord the operator never
+            # asked for (``ctrl+enter``). Validation raises before the
+            # canonical form below is returned, so order matters here.
+            problem = _keymap.validate_key(text, scope="composer", action_id=setting.key)
+            if problem is not None:
+                raise ValueError(problem)
+            return _keymap.normalize_composer_key(text)
         return _keymap.normalize_key(text)
     if setting.kind is Kind.CASCADE:
         # JSON, because the value is a two-level structure and the page's own
@@ -7017,6 +7072,15 @@ def write_setting(
         # Textual key string).
         if setting.hotkey_scope == "desktop":
             value = _keymap.normalize_desktop_key(value, action_id=setting.key)
+        elif setting.hotkey_scope == "composer":
+            # Validated RAW for the same reason as the `coerce` arm: this
+            # writer receives raw JSON straight from the wire, so a
+            # repeated-modifier spelling must be refused here rather than
+            # canonicalised into the chord it spells as its own collapse.
+            problem = _keymap.validate_key(value, scope="composer", action_id=setting.key)
+            if problem is not None:
+                raise ValueError(problem)
+            value = _keymap.normalize_composer_key(value)
         else:
             value = _keymap.normalize_key(value)
     if setting.validate_value is validate_tier_value:

@@ -4,5 +4,13 @@
   "relay.composer.action.stop": "روکیں",
   "relay.composer.action.stopping": "روکا جا رہا ہے",
   "relay.composer.action.connecting": "جڑ رہا ہے",
-  "relay.composer.action.stop_agent": "ایجنٹ کو روکیں"
+  "relay.composer.action.stop_agent": "ایجنٹ کو روکیں",
+  "relay.composer.delivery.label": "ترسیل",
+  "relay.composer.delivery.steer": "ہدایت دیں",
+  "relay.composer.delivery.queue": "قطار",
+  "relay.composer.delivery.both": "قطار، پھر ہدایت",
+  "relay.composer.delivery.steer_hint": "چلتے ٹول میں فوراً مداخلت",
+  "relay.composer.delivery.queue_hint": "انتظار کریں؛ ٹولز کو کبھی نہ روکیں",
+  "relay.composer.delivery.both_hint": "انتظار، پھر دیر ہو تو ہدایت",
+  "relay.composer.delivery.both_chip": "قطار→ہدایت"
 }

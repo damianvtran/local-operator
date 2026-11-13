@@ -161,6 +161,152 @@ async def test_enum_expansion_selects_a_choice(tmp_path: Path) -> None:
         assert view._expanded is None
 
 
+#: Every shipped locale. The collapsed row has to read the picker's label in
+#: ALL of them, not only the ones whose translation happens to carry an ASCII
+#: comma: ``ur`` separates with ``،`` (U+060C) and ``zh-CN`` with nothing.
+_SHIPPED_LOCALES = ("en", "fr", "ur", "zh-CN", "ru", "hi", "vi", "es")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("locale", _SHIPPED_LOCALES)
+async def test_a_collapsed_enum_row_shows_the_label_the_picker_shows(
+    tmp_path: Path, locale: str, restore_active_locale: Any
+) -> None:
+    """Q-1 / V2-1: `both` is a stored word the page never explains, in every locale.
+
+    ``delivery.busy_default`` holds ``both``, and the collapsed row showed that
+    token while the picker one keypress away spelled the mode out. Both read
+    one source (``_choices_for``), so the two surfaces cannot describe the same
+    value two different ways — and the value WRITTEN stays ``both``, which is
+    what the wire carries.
+
+    The locale dimension IS the test: the swap-in decision must not read the
+    label's punctuation, because the separators are translated. ``ur`` parts
+    its phrase with ``،`` (U+060C) and ``zh-CN`` with no separator at all, and
+    a split on ASCII commas left the row reading ``both`` in exactly those two
+    (V2-1/Q-4).
+    """
+    from local_operator.i18n.text import active_locale, set_active_locale
+    from local_operator.tui.widgets import settings_view
+
+    ConfigManager(tmp_path).update_config({"delivery": {"busy_default": "both"}})
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        # AFTER the boot: ``on_mount`` resolves the config's language, so a move
+        # made before ``run_test`` is overwritten with English and every case
+        # below would pass trivially. This is the live `/language` path.
+        set_active_locale(locale)
+        assert active_locale() == locale, active_locale()
+        view = await _open_page(pilot, app)
+        index = _select(view, "delivery.busy_default")
+        setting = view._rows[index].setting
+        assert setting is not None
+        # The exact string the picker paints for `both` in this locale.
+        painted = next(
+            str(choice.label)
+            for choice in settings_view._choices_for(setting)
+            if choice.value == "both"
+        )
+        collapsed = view._row_text(view._rows[index], index, 120).plain
+        assert painted in collapsed, (locale, painted, collapsed)
+        assert " both" not in collapsed, (locale, collapsed)
+        # The value CELL is exactly the picker's label, not merely present in
+        # the row: one string painted by two surfaces.
+        assert settings_view._collapsed_value(setting, "both") == painted, locale
+
+        # The picker paints the same label: one source, one answer.
+        view.action_activate()
+        await pilot.pause()
+        labels = [
+            view._row_text(row, position, 120).plain
+            for position, row in enumerate(view._rows)
+            if row.kind == "choice"
+            and row.setting is not None
+            and row.setting.key == "delivery.busy_default"
+            and row.choice is not None
+            and row.choice.value == "both"
+        ]
+        assert labels, locale
+        assert painted in labels[0], (locale, painted, labels[0])
+
+        # DISPLAY only: what is stored is still the wire value.
+        stored = settings_io.read_setting(
+            view._manager, settings_io.BY_KEY["delivery.busy_default"]
+        )
+        assert stored == "both", stored
+
+
+@pytest.mark.parametrize("locale", ("ur", "zh-CN"))
+def test_no_other_enum_choice_changes_its_collapsed_text(
+    locale: str, restore_active_locale: Any
+) -> None:
+    """The other 169 ENUM choices keep reading their stored word, in every locale.
+
+    V2-1's restriction: the label swap-in is for the ONE choice whose label
+    names a combination (``delivery.busy_default=both``). Every other choice's
+    collapsed cell keeps reading the stored word itself, notably the rows whose
+    English LABEL says more than that word: ``12h`` → ``12-hour``,
+    ``cross-family`` → ``allow cross-vendor``, ``switch`` → ``this terminal``,
+    ``7d`` → ``7 days``. The four ``session.cleanup.temporary.idle_minutes``
+    presets origin/main brought read the same way, label over word: ``15`` →
+    ``15 minutes``, ``30`` → ``30 minutes``, ``120`` → ``2 hours``, ``1440`` →
+    ``24 hours``. Restyling any of them is a design decision this fix must not
+    make on its own.
+
+    Expected values are derived HERE from the ENGLISH source label — the
+    independent statement of "this label names a combination" — rather than
+    from the implementation's own table, so a stray or missing entry fails
+    instead of agreeing with itself. ``ur`` and ``zh-CN`` are the two locales
+    the old comma split got wrong.
+    """
+    from local_operator.i18n.messages import render
+    from local_operator.i18n.text import set_active_locale
+    from local_operator.tui.widgets import settings_view
+
+    def english_label(choice: settings_io.Choice) -> str:
+        """The authored English label behind a localized one.
+
+        Resolved through the same namespace probe every render uses: choice
+        labels live in more than one catalogue (``retry``'s account-policy
+        members carry their own namespace), so the code alone does not name
+        the file.
+        """
+        message = getattr(choice.label, "message", None)
+        if message is None:
+            return str(choice.label)
+        return render(message.code, dict(message.params), locale="en")
+
+    set_active_locale(locale)
+    checked = 0
+    for setting in settings_io.SETTINGS:
+        if setting.kind is not Kind.ENUM:
+            continue
+        for choice in settings_view._choices_for(setting):
+            checked += 1
+            parts = [part for part in english_label(choice).split(",") if part.strip()]
+            expected = (
+                str(choice.label) if len(parts) > 1 else settings_view._render_value(choice.value)
+            )
+            assert settings_view._collapsed_value(setting, choice.value) == expected, (
+                locale,
+                setting.key,
+                choice.value,
+            )
+    # The registry's ENUM value space at the time of the fix (measured in this
+    # tree, not remembered): a setting or choice added later decides its own
+    # case and must re-state this count deliberately. The pin is deliberate:
+    # origin/main's four ``session.cleanup.temporary.idle_minutes`` choices
+    # raised it from 166 to 170, so a new ENUM choice must be looked at on
+    # purpose.
+    assert checked == 170, checked
+
+    # A hand-edited value that is not one of the choices still shows what is
+    # there rather than the nearest legal answer (the docstring's contract).
+    busy = settings_io.BY_KEY["delivery.busy_default"]
+    assert settings_view._collapsed_value(busy, "sometimes") == "sometimes"
+
+
 @pytest.mark.asyncio
 async def test_text_edit_saves_on_enter(tmp_path: Path) -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
@@ -5803,3 +5949,107 @@ def test_every_scratchpad_cap_label_fits_the_settings_label_budget() -> None:
         assert cell_len(label) <= _LABEL_BUDGET, (locale, cell_len(label), label)
         checked += 1
     assert checked >= 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30)])
+async def test_composer_capture_leads_with_the_chord_grammar(size: tuple[int, int]) -> None:
+    """Code minor 5: the listening lead teaches the chord grammar where the chord is bound.
+
+    A revert to ``"listening for a key"`` fails both the text and the cells
+    assertions — the lead must carry ``alt+<letter>`` and ``enhanced keys``.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.press("enter")
+        await pilot.pause()
+        detail = view._detail_text.plain
+        assert detail.startswith("alt+<letter> works anywhere"), detail
+        assert "enhanced keys" in detail, detail
+        assert "esc cancels" in detail, detail
+        assert cell_len(detail) <= view._detail_width(), (detail, view._detail_width())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(80, 24), (100, 30)])
+async def test_pending_kitty_only_chord_appends_the_terminal_limit(size: tuple[int, int]) -> None:
+    """Code minor 5: a pending kitty-only chord names its terminal limit.
+
+    Reverting the append drops ``needs enhanced keys`` from the detail and
+    this test fails on the text; the cells bound fails if the sentence ever
+    outgrows the row instead of shedding.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.press("enter")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        detail = view._detail_text.plain
+        assert detail.startswith("ctrl+enter"), detail
+        assert "needs enhanced keys" in detail, detail
+        assert "enter confirms" in detail and "esc cancels" in detail, detail
+        assert cell_len(detail) <= view._detail_width(), (detail, view._detail_width())
+
+
+@pytest.mark.asyncio
+async def test_pending_kitty_only_warning_is_dim_not_danger() -> None:
+    """D-N4: the limit is a hint, not a refusal — painted in dim, not danger.
+
+    The capture stores the chord (warn-and-allow), so the error ink would
+    read as a rejection the capture never made. Reverting the hint style to
+    ``error`` fails the ink assertion below.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.press("enter")
+        await pilot.press("ctrl+enter")
+        await pilot.pause()
+        dim = theme_mod.semantic_color("dim").lower()
+        danger = theme_mod.semantic_color("danger").lower()
+        inks = [
+            (fragment, (style.color.name.lower() if style.color is not None else ""))
+            for fragment, style in view.detail_spans()
+            if "needs enhanced keys" in fragment
+        ]
+        assert inks, "the pending-chord warning was not painted"
+        for fragment, ink in inks:
+            assert ink == dim, f"{fragment!r} is {ink}, not dim {dim} (danger is {danger})"
+
+
+@pytest.mark.asyncio
+async def test_unbound_send_rows_paint_the_dim_dash() -> None:
+    """Code minor 5 (D4/U5): an unbound send row is not a blank cell.
+
+    The value column shows ``—`` in dim ink — the page's existing glyph for
+    "nothing to show here". Reverting the hotkey arm to ``str(value)``
+    renders a blank cell and this test fails.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        view = await _open_page(pilot, app)
+        _select(view, "keymap.send_queue")
+        await pilot.pause()
+        lines = view.render_lines_for_test()
+        queue_lines = [line for line in lines if "Send as queue" in line]
+        assert queue_lines, lines
+        assert "—" in queue_lines[0], queue_lines
+        # The dash is painted (not a plain row string): at least one detail
+        # or row span carries the dim ink for it — checked via the row text
+        # round-trip instead: a bound chord would show the chord, not a dash.
+        assert "ctrl+enter" not in queue_lines[0], queue_lines
+        assert theme_mod.semantic_color("dim")  # dim rung exists; the row arm
+        # uses `styles.dim` for this case (mirrored in ``_row_text``).

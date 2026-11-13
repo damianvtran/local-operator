@@ -62,6 +62,7 @@ from local_operator.providers.failover import ProviderError
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.session import (
     _PRE_ABORT_DROP_NOTICE_AT,
+    BUSY_QUEUE_ESCALATE_AFTER_S,
     IMAGE_DROPPED_NOTICE,
     IMAGE_MISSING_MEDIA_NOTICE,
     IMAGE_OMITTED_TEXT_ONLY_NOTICE,
@@ -640,6 +641,83 @@ def _persisted_wakes_payload(schedules) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_queue_delivery_is_not_urgent_and_both_escalates_by_age(tmp_path, monkeypatch):
+    """Busy-send modes at the session's urgent test (design D2/D4).
+
+    ``queue`` never counts urgent; ``both`` counts urgent only after
+    ``BUSY_QUEUE_ESCALATE_AFTER_S``; a later ``steer`` makes the whole queue
+    urgent. A fake clock drives the escalation without waiting 45 s. The
+    session is idle here, so ``steer``'s wake arm is quiesced by marking it
+    streaming: only the map and the peek are under test.
+    """
+    import time as _time
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(_time, "monotonic", lambda: clock["now"])
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+    session._is_streaming = True
+    try:
+        queued = Message.user("held for later")
+        session.steer_message(queued, delivery="queue")
+        assert session._steering_queue.qsize() == 1
+        assert not session._has_urgent_steering(), "a queue item must never count urgent"
+
+        later = Message.user("escalates")
+        session.steer_message(later, delivery="both")
+        assert not session._has_urgent_steering()
+        clock["now"] += BUSY_QUEUE_ESCALATE_AFTER_S - 1
+        assert not session._has_urgent_steering(), "both must not escalate early"
+        clock["now"] += 2
+        assert session._has_urgent_steering(), "both must count urgent after the threshold"
+
+        # D4: a later steer makes the whole FIFO queue urgent, even the queue
+        # item ahead of it.
+        urgent = Message.user("cut in")
+        session.steer_message(urgent)
+        assert session._has_urgent_steering()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_delivery_entries_clear_on_recall_drain_and_dispose(tmp_path):
+    """No count drift: every consumer leaves ``_steer_delivery`` empty."""
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="toolUse")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    try:
+        # Recall: the recalled item's entry is gone, a survivor keeps its own.
+        recalled = Message.user("recalled")
+        survivor = Message.user("survivor")
+        session.steer_message(recalled, delivery="queue")
+        session.steer_message(survivor, delivery="both")
+        assert len(session._steer_delivery) == 2
+        assert session.recall_steering(recalled)
+        assert len(session._steer_delivery) == 1
+        assert id(survivor) in session._steer_delivery
+
+        # Drain: the boundary consumer clears the survivor's entry.
+        await session._drain_steering()
+        assert session._steering_queue.empty()
+        assert session._steer_delivery == {}, "a drained item must not leave an entry"
+
+        # Dispose: entries for still-queued items are cleared with the queue.
+        pending = Message.user("pending")
+        session.steer_message(pending, delivery="queue")
+        assert len(session._steer_delivery) == 1
+        await session.dispose()
+        assert session._steer_delivery == {}
+    finally:
+        # ``dispose`` ran above; a second call must stay a no-op join.
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_wake_delivery_mid_turn_waits_for_the_running_tool(tmp_path):
     """A wake firing mid-turn is courtesy steering: the running tool completes
     untouched, and the wake's text reaches the next model call carrying the
@@ -700,6 +778,79 @@ async def test_wake_delivery_mid_turn_waits_for_the_running_tool(tmp_path):
         m for m in stream.requests[1].messages if isinstance(m, Message) and m.role == "tool"
     ]
     assert any("finished" in m.text for m in tool_messages)
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_both_item_ages_past_the_threshold_and_the_poll_interrupts(tmp_path, monkeypatch):
+    """Loop level: a ``both`` item cancels a running interruptible tool once
+    the 0.25 s poll re-reads the clock past the threshold.
+
+    The session-level twin (``test_queue_delivery_is_not_urgent_and_both_
+    escalates_by_age``) pins the map and the peek; this one pins the wiring:
+    the REAL ``Session._has_urgent_steering`` is the loop's
+    ``has_urgent_steering_messages``, so ageing the item past the threshold
+    mid-tool is what the running tool observes. The tool does not cancel
+    before the threshold, and does after it. The threshold is shrunk rather
+    than waited (45 s), and the clock is the real monotonic clock: patching
+    ``time.monotonic`` also freezes the event loop's own clock and wedges
+    the 0.25 s poll.
+    """
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    outcome: dict[str, str] = {}
+
+    async def blocking_execute(tool_call_id, args, signal, on_update, context):
+        tool_started.set()
+        try:
+            await release_tool.wait()
+        except asyncio.CancelledError:
+            outcome["block"] = "cancelled"
+            raise
+        outcome["block"] = "finished"
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="block",
+            content=[TextContent(text="finished")],
+        )
+
+    tool = AgentTool(
+        name="block",
+        parameters={"type": "object", "properties": {}},
+        interruptible=True,
+        execute=blocking_execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="block", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="ack"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    # Shrink the threshold for this cell only: the wait is the point (the
+    # poll must re-read an aged item), and 45 s of wall clock for it is not.
+    monkeypatch.setattr("local_operator.session.session.BUSY_QUEUE_ESCALATE_AFTER_S", 0.6)
+    session = make_session(tmp_path, stream, tools=[tool])
+
+    prompt_task = asyncio.ensure_future(session.prompt("long task"))
+    await wait_for(lambda: tool_started.is_set())
+
+    # A `both` steer lands mid-tool: queued, recorded with its escalate-at.
+    session.steer_message(Message.user("change course"), delivery="both")
+    assert session._steering_queue.qsize() == 1
+    assert not session._has_urgent_steering(), "both must not cancel before the threshold"
+
+    # Let the poll tick a little (0.25 s cadence); the tool still runs.
+    await asyncio.sleep(0.3)
+    assert outcome == {}, "both cancelled the tool before the threshold"
+
+    # The item ages past the (shrunk) threshold on the real clock: the next
+    # poll read must see it urgent and cancel the running interruptible tool.
+    await wait_for(lambda: outcome.get("block") == "cancelled", timeout=5.0)
+
+    await asyncio.wait_for(prompt_task, timeout=5.0)
     await session.dispose()
 
 

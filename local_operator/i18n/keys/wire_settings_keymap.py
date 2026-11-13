@@ -42,6 +42,30 @@ def resume_label() -> Msg:
     return Msg("wire.settings.keymap.resume.label", {})
 
 
+def send_both_help() -> Msg:
+    return Msg("wire.settings.keymap.send_both.help", {})
+
+
+def send_both_label() -> Msg:
+    return Msg("wire.settings.keymap.send_both.label", {})
+
+
+def send_queue_help() -> Msg:
+    return Msg("wire.settings.keymap.send_queue.help", {})
+
+
+def send_queue_label() -> Msg:
+    return Msg("wire.settings.keymap.send_queue.label", {})
+
+
+def send_steer_help() -> Msg:
+    return Msg("wire.settings.keymap.send_steer.help", {})
+
+
+def send_steer_label() -> Msg:
+    return Msg("wire.settings.keymap.send_steer.label", {})
+
+
 def start_recording_help() -> Msg:
     return Msg("wire.settings.keymap.start_recording.help", {})
 

@@ -1,0 +1,6 @@
+{
+  "tui.busy_delivery.queue_notice": "в очереди — ждёт, инструменты работают",
+  "tui.busy_delivery.both_notice": "в очереди — ждёт, а при долгом ожидании направляется",
+  "tui.busy_delivery.steer_notice": "направляется — может прервать работу инструмента",
+  "tui.busy_delivery.steer_joined_notice": "направляется — уйдёт вместе с вашим сообщением «направить»"
+}

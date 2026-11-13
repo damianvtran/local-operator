@@ -12,6 +12,14 @@ import { contentDir } from "../lib/content-direction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
+import {
+	busyDeliverySupported,
+	deliveryForSend,
+	getDeliveryMode,
+	nextDeliveryMode,
+	setDeliveryMode,
+	type DeliveryMode,
+} from "../lib/delivery";
 import { getCommands, getSkills, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	QUEUED_DETAIL,
@@ -409,6 +417,71 @@ function EffortSheet({
 	);
 }
 
+/** The busy-send delivery-mode picker (busy-delivery-v1). One row per mode,
+    the chosen one marked with the same accent dot effort uses. The mode is a
+    per-device preference (`lib/delivery.ts`), never a command: choosing it
+    writes localStorage and closes; the next busy send carries it. */
+function DeliverySheet({
+	open,
+	onClose,
+	value,
+	onChoose,
+}: {
+	open: boolean;
+	onClose: () => void;
+	value: DeliveryMode;
+	onChoose: (mode: DeliveryMode) => void;
+}) {
+	const modes: Array<{ mode: DeliveryMode; labelKey: "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both"; hintKey: "relay.composer.delivery.steer_hint" | "relay.composer.delivery.queue_hint" | "relay.composer.delivery.both_hint" }> = [
+		{ mode: "steer", labelKey: "relay.composer.delivery.steer", hintKey: "relay.composer.delivery.steer_hint" },
+		{ mode: "queue", labelKey: "relay.composer.delivery.queue", hintKey: "relay.composer.delivery.queue_hint" },
+		{ mode: "both", labelKey: "relay.composer.delivery.both", hintKey: "relay.composer.delivery.both_hint" },
+	];
+	return (
+		<Sheet
+			open={open}
+			onClose={onClose}
+			title={messageRuntime.t("relay.composer.delivery.label")}
+		>
+			<div className="flex flex-col p-2">
+				{modes.map(({ mode, labelKey, hintKey }) => (
+					<button
+						key={mode}
+						type="button"
+						onClick={() => {
+							onChoose(mode);
+							onClose();
+						}}
+						/* The muted hint names what the mode DOES (D1): a bare
+						   word does not say that queue never interrupts tools,
+						   and "queue, then steer" does not say when it steers.
+						   `min-h-11` is the 44 px touch floor; the hint wraps to
+						   two lines at 280 px without pushing the row taller
+						   (sheet padding absorbs it). */
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 py-1 text-start active:bg-surface"
+					>
+						<span
+							className={cn(
+								"size-2 shrink-0 rounded-full",
+								mode === value ? "bg-accent" : "bg-hairline",
+							)}
+							aria-hidden
+						/>
+						<span className="min-w-0 flex-1">
+							<span className="block text-body text-ink">
+								{messageRuntime.t(labelKey)}
+							</span>
+							<span className="block text-body-sm text-ink-dim">
+								{messageRuntime.t(hintKey)}
+							</span>
+						</span>
+					</button>
+				))}
+			</div>
+		</Sheet>
+	);
+}
+
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
@@ -569,7 +642,11 @@ const COMPOSER_LEADING = "-ms-1.5";
    (`SessionStatus` compact), so nothing on the line needs to wrap. */
 const COMPOSER_CHIP_ROW =
 	"order-last flex min-w-0 basis-full items-center gap-1 overflow-x-clip short-column:order-none short-column:basis-0 short-column:flex-1";
-const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
+/* The chip's colour is ONE class, never a stacked override (D4): the
+   generated stylesheet's order let `text-ink-dim` win over an appended
+   `text-accent`, so the non-default mode never looked accent. */
+const COMPOSER_CHIP = (accent: boolean) =>
+	cn("flex min-h-11 min-w-11 items-center text-meta tabular-nums", accent ? "text-accent" : "text-ink-dim");
 
 /** The composer's box, empty, for the frames before a session's projection.
 
@@ -622,7 +699,7 @@ export function ComposerFrame() {
 		<div className={COMPOSER_INPUT_ROW}>
 			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={placeholder} dir={textDirection(placeholder)} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
-			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
+			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP(false)} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
 				{/* The mic's box is held whenever the live composer will hold or draw it
 				    (`micSlot`, the same rule): a browser or daemon that cannot dictate
@@ -830,6 +907,30 @@ export function Composer({
 	/* The `$name` catalogue. Empty while the capability is absent or the fetch
 	   failed — both mean "no picker", never a banner (SKM-D5). */
 	const [skills, setSkills] = useState<SkillEntry[]>([]);
+	/* The busy-send delivery mode (busy-delivery-v1): a per-device preference,
+	   read from localStorage once per composer mount. Re-read when streaming
+	   changes so a mode picked in another conversation applies here without
+	   a reload; a fresh send pins it into the envelope at submit time. */
+	const [delivery, setDelivery] = useState<DeliveryMode>(() => getDeliveryMode());
+	const [deliveryOpen, setDeliveryOpen] = useState(false);
+	const deliveryLabelKey = (delivery === "queue" ? "relay.composer.delivery.queue" : delivery === "both" ? "relay.composer.delivery.both" : "relay.composer.delivery.steer") as "relay.composer.delivery.steer" | "relay.composer.delivery.queue" | "relay.composer.delivery.both";
+	/* The chip's VISIBLE text for queue-then-steer: the full label ("queue,
+	   then steer") runs the composer row past 280 px, so this one mode shows the
+	   short form. The accessible name above and the sheet row keep the full
+	   label; only the glyph-sized chip shortens. */
+	const deliveryChipKey: typeof deliveryLabelKey | "relay.composer.delivery.both_chip" =
+		delivery === "both" ? "relay.composer.delivery.both_chip" : deliveryLabelKey;
+	const deliveryVisibleText = messageRuntime.t(deliveryChipKey);
+	/* WCAG 2.5.3, label in name: the accessible name must CONTAIN the text on
+	   the chip. For `both` the chip reads `queue→steer` while the name carried
+	   only the full label, so a voice-control user saying what the chip shows
+	   could not reach it. Both parts are existing keys — the full mode label
+	   first, the chip's own text after it — so no third string is authored and
+	   the shortened chip stays a display-only decision. */
+	const deliveryAriaLabel =
+		delivery === "both"
+			? `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}: ${deliveryVisibleText}`
+			: `${messageRuntime.t("relay.composer.delivery.label")}: ${messageRuntime.t(deliveryLabelKey)}`;
 	/* Set by a tray pick, consumed by the [text] layout effect to put the caret
 	   where the insertion left it. A ref because it is an instruction to an
 	   effect, not rendered state. */
@@ -1632,6 +1733,11 @@ export function Composer({
 					text: trimmed,
 					images: payloadImages,
 				};
+				/* The busy-send delivery mode is pinned into the envelope for a FRESH
+				   send only (a retained retry replays its stored mode, never the
+				   composer's current preference). `deliveryForSend` keeps `steer`,
+				   idle and unsupported sends byte-identical to the legacy frame. */
+				const deliveryPin = deliveryForSend(delivery, projection.streaming, busyDeliverySupported(capabilities));
 				const receipt = await submitContinuation(
 					pid,
 					submittedEnvelope.op,
@@ -1639,7 +1745,7 @@ export function Composer({
 					payloadImages,
 					/* The annotation is consulted only for a FRESH send (a retry replays
 					   the stored envelope's own bytes, annotation included). */
-					annotationForSend(provenanceRef.current),
+					{ ...annotationForSend(provenanceRef.current), ...(deliveryPin && deliveryPin !== "steer" ? { delivery: deliveryPin } : {}) },
 					/* The user's message leaves the composer HERE, into a row of its own,
 					   before the daemon has answered — the whole point of the optimistic
 					   path. It is painted under the ENVELOPE's id rather than a fresh one,
@@ -1774,7 +1880,15 @@ export function Composer({
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				/* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
+				/* A 400 that names the delivery modes is a REFUSAL with a remedy,
+				   rendered verbatim rather than swallowed as a generic retry line:
+				   the relay could not honour queue/both for this owner, and the
+				   user must see that sentence. Any other 400 keeps the generic
+				   copy below. Keyed on status + message shape so no mode string
+				   is special-cased. */
+				failure instanceof HttpError && failure.status === 400 && failure.message.includes("delivery")
+					? failure.message
+					: /* A skill set over the relay's body budget is a REFUSAL WITH A REMEDY,
 				   not a transient failure: retrying the same draft is refused again,
 				   so the one retry sentence pointed at an action that cannot work and
 				   hid the cause (UX review U6). Keyed on the wire's typed code, so the
@@ -2364,10 +2478,47 @@ export function Composer({
 					   width a `shrink-0` chip would take the whole label's width); every
 					   other level lets it grow into what is left. The mic is an action
 					   and keeps its full touch target at every level. */}
-					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP(false), foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
 						<span data-ltr className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
+					{/* The busy-send delivery-mode chips (busy-delivery-v1) render AFTER
+					   the model chip (D5): a streaming-only chip ahead of the model
+					   pushed its left edge from x=64 idle to x=170 streaming at
+					   375 px and clipped the label to `claude-sonne…` at 280 px;
+					   after the model, the label keeps its edge and the chips take
+					   what is left. Visible ONLY
+					   while the agent is working AND the relay advertised the feature:
+					   an older relay or an idle session never offers a control whose
+					   send would be refused. One tap cycles steer → queue → both and
+					   persists per device. The worded options are the sheet, opened by
+					   a second visible affordance — the sheet button beside the chip
+					   is the door, never a hidden gesture. */}
+					{projection.streaming && busyDeliverySupported(capabilities) ? (
+						<>
+							<button
+								type="button"
+								onClick={() => {
+									const next = nextDeliveryMode(delivery);
+									setDelivery(next);
+									setDeliveryMode(next);
+								}}
+								aria-label={deliveryAriaLabel}
+								className={cn(COMPOSER_CHIP(delivery !== "steer"), "shrink-0 gap-1 px-2")}
+							>
+									<span aria-hidden data-delivery-glyph>‹</span>
+									<span>{deliveryVisibleText}</span>
+								</button>
+								<button
+									type="button"
+									onClick={() => setDeliveryOpen(true)}
+									aria-label={messageRuntime.t("relay.composer.delivery.label")}
+									className={cn(COMPOSER_CHIP(false), "shrink-0 px-1")}
+								>
+									<span aria-hidden>⋯</span>
+								</button>
+							</>
+					) : null}
 					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>
 
@@ -2410,6 +2561,12 @@ export function Composer({
 				onPick={onSlashPick}
 				onSpace={onSlashSpace}
 				query={slashQuery(text) ?? ""}
+			/>
+			<DeliverySheet
+				open={deliveryOpen}
+				onClose={() => setDeliveryOpen(false)}
+				value={delivery}
+				onChoose={(mode) => { setDelivery(mode); setDeliveryMode(mode); }}
 			/>
 			<UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} />
 			<EffortSheet

@@ -8,5 +8,11 @@
   "wire.settings.keymap.push_to_talk.label": "Push to talk",
   "wire.settings.keymap.push_to_talk.help": "Hold to dictate (desktop); release to stop.",
   "wire.settings.keymap.start_recording.label": "Start recording",
-  "wire.settings.keymap.start_recording.help": "Starts speech-to-text recording in the desktop window."
+  "wire.settings.keymap.start_recording.help": "Starts speech-to-text recording in the desktop window.",
+  "wire.settings.keymap.send_steer.label": "Send as steer",
+  "wire.settings.keymap.send_steer.help": "Send now, interrupting the step. Overrides Delivery when busy.",
+  "wire.settings.keymap.send_queue.label": "Send as queue",
+  "wire.settings.keymap.send_queue.help": "Wait for the step; never interrupt tools. Overrides Delivery when busy.",
+  "wire.settings.keymap.send_both.label": "Send as queue, then steer",
+  "wire.settings.keymap.send_both.help": "Wait, then steer if slow. Overrides Delivery when busy."
 }

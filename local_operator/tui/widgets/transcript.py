@@ -1937,6 +1937,18 @@ class NoticeBlock(TranscriptBlock):
     #: (never append beside it) once a live outcome confirms the same failure.
     mcp_failure_history: bool = False
 
+    #: The busy-send delivery mode this row was appended for (``steer``,
+    #: ``queue`` or ``both``), or ``None`` for every other notice.
+    #:
+    #: It lives ON the block for the reason ``mcp_failure_fit`` does: the row
+    #: outlives the event that created it and is restated later from a
+    #: different code path (``_refresh_busy_receipts``), so the mode has to
+    #: travel with the widget — through the presentation swap included — rather
+    #: than sit in a side table an unmounted-but-live row would be pruned from.
+    #: A steer waiting beside a queue/both row is what makes that row restate
+    #: to the joined wording, and the mode is how the refresh tells them apart.
+    busy_mode: str | None = None
+
     #: Five tiers. ``info`` is `dim` — the quietest ink in the app, a step below a
     #: settled tool summary — which is right for a receipt nobody needs to read
     #: and wrong for one that answers a question the user is actively asking
@@ -1997,9 +2009,9 @@ class NoticeBlock(TranscriptBlock):
     def restate(self, text: str, kind: NoticeKind) -> None:
         """Replace what this notice SAYS, after it was already finalized.
 
-        The one notice that outlives its own truth is a PENDING one. "queued —
-        sends when this step finishes" is a promise about the future, and when
-        the future arrives the row goes on promising it: a user who queued a
+        The one notice that outlives its own truth is a PENDING one. A waiting
+        receipt is a promise about the future, and when the future arrives the
+        row goes on promising it: a user who queued a
         message during a turn was left reading `queued` for the rest of the
         session, with the agent's eventual reply as the only evidence it had
         ever been delivered. Reported from the field as exactly that.

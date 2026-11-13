@@ -1035,6 +1035,20 @@ def static_feature_flags() -> dict[str, Any]:
         # renderer reads this key). Two faces, deliberately separate: they
         # gate two different wires, and neither implies the other.
         "input_mode": 1,
+        # THE BUSY-SEND DELIVERY MODES: the optional ``delivery`` enum on a
+        # message body (`POST /v1/desktop/sessions/{id}/messages`,
+        # ``Prompt.delivery``) -- ``steer`` (today's urgent behaviour),
+        # ``queue`` (never cancels a running tool), ``both`` (``queue`` until it
+        # has waited, then urgent). WHY A KEY -- the `input_mode` argument
+        # verbatim: `Prompt` is `extra="forbid"`, so an ungated send to an older
+        # backend would 422 the user's own message. Gated, the composer omits
+        # the field and steers exactly as today; absence is the legacy path.
+        #
+        # THE ATTACH-WIRE HALF is `busy-delivery-v1` in the owner record (the
+        # mobile stream reads that string; the desktop renderer reads this
+        # key). Two faces, deliberately separate: they gate two different
+        # wires, and neither implies the other.
+        "busy_delivery": 1,
         # IMAGES ON A QUEUED-ASK ANSWER: the optional ``images`` list on
         # ``POST /v1/desktop/sessions/{id}/answers`` (``Answer.images``, the
         # Other door's attachments), plus the ``attachments`` refs the folded ask

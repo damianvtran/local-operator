@@ -8,5 +8,11 @@
   "wire.settings.keymap.push_to_talk.label": "दबाकर बोलें",
   "wire.settings.keymap.push_to_talk.help": "बोलकर लिखने के लिए दबाए रखें (डेस्कटॉप); छोड़ने पर रुक जाता है।",
   "wire.settings.keymap.start_recording.label": "रिकॉर्डिंग शुरू करें",
-  "wire.settings.keymap.start_recording.help": "डेस्कटॉप विंडो में स्पीच-टू-टेक्स्ट रिकॉर्डिंग शुरू करता है।"
+  "wire.settings.keymap.start_recording.help": "डेस्कटॉप विंडो में स्पीच-टू-टेक्स्ट रिकॉर्डिंग शुरू करता है।",
+  "wire.settings.keymap.send_steer.label": "दिशा देकर भेजें",
+  "wire.settings.keymap.send_steer.help": "अभी भेजकर चल रहे चरण को रोकता है। उस संदेश के लिए “व्यस्त होने पर भेजने का तरीका” की जगह लागू होता है।",
+  "wire.settings.keymap.send_queue.label": "कतार में भेजें",
+  "wire.settings.keymap.send_queue.help": "चरण पूरा होने तक रुकता है; टूल को कभी नहीं रोकता। उस संदेश के लिए “व्यस्त होने पर भेजने का तरीका” की जगह लागू होता है।",
+  "wire.settings.keymap.send_both.label": "कतार, फिर दिशा देकर भेजें",
+  "wire.settings.keymap.send_both.help": "पहले प्रतीक्षा करता है, देर हो तो दिशा देता है। उस संदेश के लिए “व्यस्त होने पर भेजने का तरीका” की जगह लागू होता है।"
 }

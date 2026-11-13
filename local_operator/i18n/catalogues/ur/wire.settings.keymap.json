@@ -8,5 +8,11 @@
   "wire.settings.keymap.push_to_talk.label": "دبا کر بولیں",
   "wire.settings.keymap.push_to_talk.help": "بولنے کے لیے دبائے رکھیں (ڈیسک ٹاپ)؛ روکنے کے لیے چھوڑ دیں۔",
   "wire.settings.keymap.start_recording.label": "ریکارڈنگ شروع کریں",
-  "wire.settings.keymap.start_recording.help": "ڈیسک ٹاپ ونڈو میں آواز سے متن کی ریکارڈنگ شروع کرتا ہے۔"
+  "wire.settings.keymap.start_recording.help": "ڈیسک ٹاپ ونڈو میں آواز سے متن کی ریکارڈنگ شروع کرتا ہے۔",
+  "wire.settings.keymap.send_steer.label": "ہدایت کے طور پر بھیجیں",
+  "wire.settings.keymap.send_steer.help": "فوراً بھیجتا ہے اور مرحلہ روک دیتا ہے۔ “مصروف ہونے پر ترسیل” کی ترتیب پر فوقیت رکھتا ہے۔",
+  "wire.settings.keymap.send_queue.label": "قطار کے طور پر بھیجیں",
+  "wire.settings.keymap.send_queue.help": "مرحلے کا انتظار کرتا ہے؛ ٹولز کو کبھی نہیں روکتا۔ “مصروف ہونے پر ترسیل” کی ترتیب پر فوقیت رکھتا ہے۔",
+  "wire.settings.keymap.send_both.label": "قطار، پھر ہدایت بھیجیں",
+  "wire.settings.keymap.send_both.help": "انتظار، پھر دیر ہو تو ہدایت۔ “مصروف ہونے پر ترسیل” کی ترتیب پر فوقیت رکھتا ہے۔"
 }

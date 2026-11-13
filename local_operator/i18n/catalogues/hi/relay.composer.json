@@ -4,5 +4,13 @@
   "relay.composer.action.stop": "रोकें",
   "relay.composer.action.stopping": "रोका जा रहा है",
   "relay.composer.action.connecting": "कनेक्ट हो रहा है",
-  "relay.composer.action.stop_agent": "एजेंट को रोकें"
+  "relay.composer.action.stop_agent": "एजेंट को रोकें",
+  "relay.composer.delivery.label": "भेजने का तरीका",
+  "relay.composer.delivery.steer": "दिशा दें",
+  "relay.composer.delivery.queue": "कतार",
+  "relay.composer.delivery.both": "कतार, फिर दिशा",
+  "relay.composer.delivery.steer_hint": "चल रहे टूल को अभी रोकें",
+  "relay.composer.delivery.queue_hint": "प्रतीक्षा करें; टूल को न रोकें",
+  "relay.composer.delivery.both_hint": "प्रतीक्षा करें, देर हो तो दिशा दें",
+  "relay.composer.delivery.both_chip": "कतार→दिशा"
 }

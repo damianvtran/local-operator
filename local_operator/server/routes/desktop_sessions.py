@@ -1355,10 +1355,35 @@ class Prompt(Input):
     # place the same rule lives, and a message the READER refuses is a dropped
     # row, not a refused request, so the refusal belongs at the door.
     input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # THE BUSY-SEND DELIVERY MODE: how a send to a busy session is delivered.
+    # ``steer`` is today's urgent behaviour; ``queue`` never cancels a running
+    # tool; ``both`` is ``queue`` until it has waited, then urgent. The enum is
+    # enforced HERE, at the wire, so a value outside the vocabulary gets a 422
+    # before anything is admitted — never coerced into a mode nobody sent.
+    # Absent/empty reads as ``steer``; ignored when the session is idle.
+    #
+    # RETRY CONTRACT: the receipt journal fingerprints the WHOLE request body
+    # (``server/utils/desktop_receipts.py``), so a retry under the same
+    # ``request_id`` must repeat these bytes BYTE-FOR-BYTE — a pinned delivery
+    # is part of the retry identity, like ``input_mode`` above.
+    delivery: Literal["steer", "queue", "both"] | None = None
     # An OPEN string on purpose (see ``Message.input_path``): the STT cascade
     # owns this vocabulary and the carriage must not fork it behind an enum.
     # Absent/null = the classic server-transcription path.
     input_path: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_delivery(self, handler: Any, info: Any) -> Any:
+        # The receipt journal fingerprints ``model_dump()`` bytes, so a
+        # same-id retry claimed BEFORE the delivery field existed must not
+        # read as a changed body after an upgrade. ``None`` is the absent
+        # reading, so it leaves the dump exactly as the pre-field build
+        # wrote it (the wrap-serializer pattern ``PromptImage.
+        # _omit_absent_origin`` already uses for the same reason).
+        data = handler(self)
+        if isinstance(data, dict) and data.get("delivery") is None:
+            data.pop("delivery", None)
+        return data
 
     @model_validator(mode="after")
     def nonempty(self):
@@ -2096,8 +2121,22 @@ async def _queue_or_refuse(
       delivery nothing is going to make;
     * the message carries attachments: an inbox row is text
       (``inbox.InboxLine``), and dropping the pictures or files to queue the
-      words would answer a question the user did not ask.
+      words would answer a question the user did not ask;
+    * the send pinned a delivery mode the spool cannot carry
+      (``body.delivery`` is ``queue``/``both``): the row below writes
+      ``InboxLine(mode='steer'|...)`` with NO delivery field, so the live
+      drain would deliver it as an URGENT steer (``process._run_owner_prompt``
+      joins it to the turn in flight) — a silent downgrade of the mode the
+      composer watched the user pick. The busy refusal is the honest answer
+      here: the renderer's resend applies, and a resend after the turn moves
+      admits normally.
     """
+    if body.delivery in ("queue", "both"):
+        # See the third arm above: the spool vehicle is text
+        # (``InboxLine.mode``) and carries no delivery mode, so accepting
+        # this send would answer "queued" for a message delivered urgently.
+        # Refuse, never downgrade.
+        raise error
     if body.images or body.files or body.audio:
         raise error
     from local_operator.session.runtime.inbox import (
@@ -4467,6 +4506,11 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                             # owner from before the carriage never sees the keys.
                             input_mode=body.input_mode,
                             input_path=body.input_path,
+                            # Busy-send delivery mode, omitted from the attach frame
+                            # when absent/``steer`` (``admit_prompt`` drops it), so a
+                            # legacy-sender frame stays byte-identical and an owner
+                            # from before the modes never sees the key.
+                            delivery=body.delivery,
                         )
                         admitted = True
                         # Admission can bind a cold viewer while an event

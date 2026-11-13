@@ -3666,6 +3666,7 @@ class AttachedSession:
         input_path: str | None = None,
         audio: list[dict[str, str]] | None = None,
         files: list[dict[str, Any]] | None = None,
+        delivery: str | None = None,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3691,6 +3692,13 @@ class AttachedSession:
         cannot resolve (contract amendment 2). Images keep their peer staging
         (``prepare_peer_images``); documents travel the local owner's frame
         and nothing else in v1.
+
+        ``delivery`` is the busy-send mode (``steer``/``queue``/``both``).
+        Like the carriage fields it is OMITTED when absent/``None`` or
+        ``steer``, so a legacy send stays byte-identical on the wire; unlike
+        them a ``queue``/``both`` against an owner without ``busy-delivery-v1``
+        is REFUSED here, before a frame is dialled — never forwarded without
+        its mode, which would be a silent downgrade to an urgent steer.
         """
         if files and self.runtime_locality == "another-machine":
             # The owner is a PEER: its attachment store is a different one, so a
@@ -3715,6 +3723,20 @@ class AttachedSession:
             from local_operator.session.errors import DocumentCarriageUnsupported
 
             raise DocumentCarriageUnsupported()
+        if (
+            delivery
+            and delivery != "steer"
+            and not getattr(client, "_busy_delivery_supported", False)
+        ):
+            # An owner from before the delivery modes would silently DROP the
+            # key (its dispatch only passes literal parameters), delivering an
+            # urgent steer the sender explicitly did not ask for. The capability
+            # string is the owner's own statement that it honours the mode
+            # (``busy-delivery-v1``); the dispatch's parameter probe is the
+            # second, owner-side guard. Refuse, never downgrade.
+            from local_operator.session.runtime.types import BUSY_DELIVERY_UNSUPPORTED
+
+            raise ValueError(BUSY_DELIVERY_UNSUPPORTED)
         fields: dict[str, Any] = {"text": text, "images": images, "command_id": command_id}
         if input_mode is not None:
             fields["input_mode"] = input_mode
@@ -3730,6 +3752,8 @@ class AttachedSession:
             # (``DocumentCarriageUnsupported`` in the dispatch's parameter
             # probe) rather than forwarding the text without its files.
             fields["files"] = files
+        if delivery and delivery != "steer":
+            fields["delivery"] = delivery
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
     async def bind_runtime(self) -> None:
@@ -8447,8 +8471,8 @@ class AttachedSession:
             # because every other writer of that flag is fed by the owner
             # whose socket just closed — so the spinner never stops and the
             # next message routes into the steer branch, is dropped on the
-            # floor, and is receipted as "sends when this step finishes" for a
-            # step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
+            # floor, and is receipted as "steering — may stop a running tool"
+            # for a step that ended (round-4 MAJOR-3/D4-1). The honest refusal lives
             # on the prompt path, and this is what lets a message reach it.
             self._end_turn_locally()
             self._notify_stopped()
@@ -11168,13 +11192,18 @@ class AttachedSession:
             return
         self._history = list(messages)
 
-    def steer(self, text: str, images: Sequence[ImageContent] | None = None) -> None:
-        self.steer_message(Message.user(text, images))
+    def steer(
+        self,
+        text: str,
+        images: Sequence[ImageContent] | None = None,
+        delivery: str | None = None,
+    ) -> None:
+        self.steer_message(Message.user(text, images), delivery=delivery)
 
-    def steer_message(self, message: Message) -> None:
-        asyncio.create_task(self._send_steer_when_ready(message))
+    def steer_message(self, message: Message, delivery: str | None = None) -> None:
+        asyncio.create_task(self._send_steer_when_ready(message, delivery=delivery))
 
-    async def _send_steer_when_ready(self, message: Message) -> None:
+    async def _send_steer_when_ready(self, message: Message, delivery: str | None = None) -> None:
         """Retain a queued steer across silent reattach/takeover.
 
         THE ONE WRITER PATH WHOSE FAILURE HAS NO SENDER TO REPORT IT TO. Every
@@ -11211,7 +11240,7 @@ class AttachedSession:
             return
         target = self._takeover_target
         if target is not None:
-            target.steer_message(message)
+            target.steer_message(message, delivery=delivery)
             return
         client = self._client
         if client is None or not client.connected:
@@ -11225,6 +11254,7 @@ class AttachedSession:
             command_id=message.id,
             session_id=self._session_id,
             text=message.text,
+            delivery=delivery or "",
             images=[
                 _image_to_wire(block)
                 for block in message.content

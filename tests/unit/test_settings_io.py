@@ -185,6 +185,7 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_STOP_DEFAULT,
     )
     from local_operator.tui import status_command
+    from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
@@ -231,6 +232,10 @@ def _consumer_defaults() -> dict[str, object]:
         "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
         "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
         "tui.sidebar_show_subagents": DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
+        # The submit-time reader's own constant, beside the fallback
+        # ``OperatorApp._busy_delivery_mode`` applies; the registry restates it
+        # rather than importing the TUI (settings_io stays off that path).
+        "delivery.busy_default": DEFAULT_BUSY_DELIVERY,
         "retry.enabled": retry.enabled,
         "retry.maxRetries": retry.max_retries,
         "retry.baseDelayMs": retry.base_delay_ms,
@@ -1098,6 +1103,10 @@ def _sample_value(setting: settings_io.Setting) -> object:
         return setting.default
     if setting.kind is Kind.LIST:
         return list(setting.members[:1]) or []
+    if setting.kind is Kind.HOTKEY and setting.hotkey_scope == "composer":
+        # The composer rows ship unbound (default ""), so the default is not
+        # a writable sample. This row's own deliverable chord is the probe.
+        return "ctrl+enter"
     if setting.kind is Kind.TEXT:
         if setting.validate_value is not None:
             # A validated TEXT setting rejects an arbitrary probe by design
@@ -3500,6 +3509,165 @@ class TestTheLapsedAskWindowRow:
     def test_the_help_fits_with_the_default_clause(self) -> None:
         setting = settings_io.BY_KEY["asks.lapsed_visible_for"]
         assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
+
+
+class TestTheBusyDefaultRow:
+    """``delivery.busy_default`` (architect D1/D2): the neutral busy-send default.
+
+    The row was renamed outright from the TUI-only ``tui.busy_delivery``
+    (nothing shipped, so no alias): a neutral path the TUI and the desktop
+    app share through one config.yml, a LIVE section of its own, an ENUM
+    over the engine vocabulary, and the shipped default pinned to the
+    submit-time reader's constant.
+    """
+
+    def test_the_row_is_a_nested_enum_in_its_own_live_section(self) -> None:
+        setting = settings_io.BY_KEY["delivery.busy_default"]
+        assert setting.path == ("delivery", "busy_default")
+        assert setting.kind is settings_io.Kind.ENUM
+        assert setting.default == "steer"
+        section = next(s for s in settings_io.SECTIONS if s.name == setting.section)
+        assert section.name == "composer"
+        assert section.scope is settings_io.Scope.LIVE
+
+    def test_the_old_tui_key_is_gone_without_an_alias(self) -> None:
+        assert "tui.busy_delivery" not in settings_io.BY_KEY
+
+    def test_the_choices_are_exactly_the_engine_vocabulary(self) -> None:
+        from local_operator.tui.busy_delivery import DEFAULT_BUSY_DELIVERY
+
+        setting = settings_io.BY_KEY["delivery.busy_default"]
+        values = [choice.value for choice in setting.choices]
+        assert values == ["steer", "queue", "both"]
+        assert setting.default == DEFAULT_BUSY_DELIVERY
+
+    @pytest.mark.parametrize("value", ["steer", "queue", "both"])
+    def test_every_choice_validates(self, value: str) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["delivery.busy_default"], value) is None
+
+    @pytest.mark.parametrize("value", ["sometimes", "", "STEER", 0, None])
+    def test_a_value_outside_the_dropdown_is_refused(self, value: object) -> None:
+        assert settings_io.validate(settings_io.BY_KEY["delivery.busy_default"], value) is not None
+
+    def test_the_section_holds_only_this_row(self) -> None:
+        assert [s.key for s in settings_io.settings_for("composer")] == ["delivery.busy_default"]
+
+    def test_the_row_present_advertises_the_busy_delivery_feature(self) -> None:
+        """T2: the settings row and the feature key stand or fall together.
+
+        The desktop composer sends ``delivery`` only when ``busy_delivery``
+        is in ``server/features.py``'s flags, and a backend without the row
+        has no default for the client to resolve. If either side is removed
+        alone the client is left sending a field the gate will not open (or
+        gating on a field nothing defaults), so this asserts both exist.
+        """
+        from local_operator.server.features import feature_flags
+
+        assert "delivery.busy_default" in settings_io.BY_KEY
+        assert "busy_delivery" in feature_flags()
+
+    def test_an_old_body_without_delivery_hashes_as_before(self) -> None:
+        """T2: an absent ``delivery`` must not change the receipt fingerprint.
+
+        The receipt journal (``server/utils/desktop_receipts.py``) fingerprints
+        the whole request body, so a same-``request_id`` retry of a body written
+        before the field existed must read as the same body, not a changed one:
+        ``Prompt``'s wrap-serializer drops a ``None`` delivery.
+
+        The fingerprint here is the REAL journal's: the test drives
+        ``DesktopReceipts.run`` twice — first with the parsed old body,
+        then with the same body again — and requires the second to REPLAY
+        the first's outcome. A changed fingerprint would raise
+        ``ReceiptConflict`` on the retry instead, so any drift between
+        ``Prompt.model_dump`` and the journal's hash breaks this. The
+        literal digest the old body must produce is pinned too (derived
+        once from the journal's canonical form).
+        """
+        import asyncio
+        import hashlib
+        import json
+
+        from local_operator.server.routes.desktop_sessions import Prompt
+        from local_operator.server.utils.desktop_receipts import DesktopReceipts
+
+        old_body = {"text": "hello", "request_id": "00000000-0000-0000-0000-000000000001"}
+        prompt = Prompt.model_validate(old_body)
+        assert prompt.delivery is None
+        dumped = prompt.model_dump()
+        assert "delivery" not in dumped
+        # Pinned literal: sha256 of json.dumps(dumped, sort_keys, separators)
+        # — the journal's canonical form for this exact old body.
+        pinned = hashlib.sha256(
+            json.dumps(dumped, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        assert pinned == "caad6969613c9171da0becc65ed5cb2b8d687be4821fe2f745bd73bfe4bc6481"
+        # And a body that IS an old body (no delivery key at all, as stored
+        # before the field existed) is byte-identical after a round trip.
+        assert Prompt.model_validate(old_body).model_dump() == dumped
+
+        async def _replay() -> tuple[dict[str, object], dict[str, object]]:
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as root:
+                journal = DesktopReceipts(Path(root))
+                calls: list[str] = []
+
+                async def _operation() -> dict[str, object]:
+                    calls.append("run")
+                    return {"status": "ok"}
+
+                first = await journal.run("req-1", dumped, _operation)
+                # Same id, same body (an explicit None delivery round-trips
+                # to the same dumped dict asserted above): must replay, not
+                # conflict and not re-run.
+                second = await journal.run("req-1", dumped, _operation)
+                assert first == {"status": "ok"}
+                assert second == {"status": "ok", "replayed": True}
+                assert calls == ["run"]
+                return first, second
+
+        asyncio.run(_replay())
+
+
+class TestComposerHotkeyRawValidation:
+    """Q-r2-1: a repeated modifier is refused on the RAW spelling.
+
+    ``coerce`` and ``write_setting`` receive the raw string from the wire
+    (``lop config edit`` / ``PATCH /v1/settings``); canonicalising first
+    would collapse ``ctrl+ctrl+enter`` to ``ctrl+enter`` before the
+    validator sees it and store a chord the operator never asked for.
+    """
+
+    def test_coerce_refuses_a_repeated_modifier(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.coerce(setting, "ctrl+ctrl+enter")
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.coerce(setting, "alt+alt+enter")
+
+    def test_coerce_still_canonicalises_a_valid_spelling(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        assert settings_io.coerce(setting, "ctrl+alt+b") == "alt+ctrl+b"
+
+    def test_write_setting_refuses_a_repeated_modifier(self, manager: ConfigManager) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        with pytest.raises(ValueError, match="twice"):
+            settings_io.write_setting(manager, setting, "ctrl+ctrl+enter")
+        # Nothing was stored: the row still reads as unbound.
+        assert settings_io.read_setting(manager, setting) == ""
+
+    def test_write_setting_stores_a_valid_spelling_canonicalised(
+        self, manager: ConfigManager
+    ) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        settings_io.write_setting(manager, setting, "ctrl+alt+b")
+        assert settings_io.read_setting(manager, setting) == "alt+ctrl+b"
+
+    def test_validate_is_the_same_sentence_as_coerce(self) -> None:
+        setting = settings_io.BY_KEY["keymap.send_queue"]
+        assert settings_io.validate(setting, "ctrl+ctrl+enter", {}) is not None
+        assert "twice" in (settings_io.validate(setting, "ctrl+ctrl+enter", {}) or "")
 
 
 def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(

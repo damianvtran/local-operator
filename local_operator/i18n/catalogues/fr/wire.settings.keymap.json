@@ -8,5 +8,11 @@
   "wire.settings.keymap.push_to_talk.label": "Appuyer pour parler",
   "wire.settings.keymap.push_to_talk.help": "Maintenez pour dicter (application de bureau) ; relâchez pour arrêter.",
   "wire.settings.keymap.start_recording.label": "Démarrer l’enregistrement",
-  "wire.settings.keymap.start_recording.help": "Démarre l’enregistrement de dictée dans la fenêtre de l’application de bureau."
+  "wire.settings.keymap.start_recording.help": "Démarre l’enregistrement de dictée dans la fenêtre de l’application de bureau.",
+  "wire.settings.keymap.send_steer.label": "Envoi : orienter",
+  "wire.settings.keymap.send_steer.help": "Envoyer et interrompre l’étape. Remplace « Envoi quand l’agent est occupé ».",
+  "wire.settings.keymap.send_queue.label": "Envoi : file d’attente",
+  "wire.settings.keymap.send_queue.help": "Attendre, sans interrompre d’outil. Remplace « Envoi quand l’agent est occupé ».",
+  "wire.settings.keymap.send_both.label": "Envoi : file, puis orienter",
+  "wire.settings.keymap.send_both.help": "Attendre, puis orienter si ça tarde. Remplace « Envoi quand l’agent est occupé »."
 }

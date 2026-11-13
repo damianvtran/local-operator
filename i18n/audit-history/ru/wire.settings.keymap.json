@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "ru",
   "namespace": "wire.settings.keymap",
-  "history_sha256": "fd4ec74362525fab2a086d1525505df716011c4c0df0c6412261a3fac3bbe95d",
+  "history_sha256": "068ac1e65995f67bc3eacddc6b1c75058820293f6c051b57f3af932700da7124",
   "entries": [
     {
       "locale": "ru",
@@ -40,6 +40,108 @@
       },
       "status": "passed",
       "note": "Round-1 locale-level verdict was `fail` because of a major in wire.language_receipts (since fixed and delta re-audited clean of blocker/major); no blocker/major was located in this namespace, so this row passes on the round-1 audit. The per-namespace attribution of the major is derived by the coder from the key(s) the manager named, not from the auditor's per-namespace verdict. target_sha256 is the namespace file's SHA-256 at recording time; per the manager the file was not edited after this audit. Evidence is the translators' and auditors' own reports as relayed to the coder by the manager, not coder-invented output; verdict counts span all nine namespaces of the locale and are repeated in every row. Per-finding text lives in the audit reports and the PR thread (damianvtran/local-operator#3597); unresolved minors/nits are deferred, not fixed. Dates are the day the coder recorded the row."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "7d7c99be977d274ef0cc085e8c39b835deb8610d20b37cdf3f684f83287f6fea",
+      "context_sha256": "46b2338b08fcaefaf543bf874bf5c48d00ed76401c55ee73e8f7aa4f18c4176c",
+      "target_sha256": "e14216e6ba2d418942192f4bf9c34f3f2078910dae5e467c5b3cecae6126117d",
+      "keys_audited": 6,
+      "round": "r1",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts, new keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S3 TUI send-chord rows 5425d7845 (branch feat/tui-send-chords, 2026-11-11): 6 NEW keys wire.settings.keymap.send_steer/send_queue/send_both (label/help); en source and en context sidecar gained the 6 keys in 77d1fa2ba; keys_audited 6. Translator and auditor as row. Audit: ru PASS r1 with 0 blocker/major, 1 minor accepted and applied (mode names read as verbs; reworded 'в режиме «очередь» ... «направить»'); r2 PASS. Receipt records round r1 with final bytes.  No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "ba8eba05a347b728f6956d2da6292ce98d67857b50a559555c8078250ca267ae",
+      "context_sha256": "69ced296d8ea842453c6c69213c73520c8bf9680e8855d580a92959dfb95c442",
+      "target_sha256": "1ab8b391fbd45b966dbc61af64690f3bd7d28073bc813475d0ac12fd81f4c7dc",
+      "keys_audited": 3,
+      "round": "r2",
+      "translator": {
+        "agent": "task subagent (lopdev manager session 2405ebc40b47; one agent per locale, changed keys only; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (requested; not independently verifiable)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server (independent of translator, different model family, no checkout access, read-only; strings pasted in the prompt)",
+        "model": "gpt-5.6-sol (requested; served model not independently verifiable)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "S6 re-translation (branch feat/tui-send-chords, HEAD 73bb22ca2 + uncommitted catalogues, 2026-11-11): 3 CHANGED-ENGLISH keys wire.settings.keymap.send_steer.help / send_queue.help / send_both.help (en source changed in 73bb22ca2: helps now name Delivery override behaviour); existing translations updated, values changed only in these 3 keys. keys_audited 3. Translator and auditor as row. Audit: es/zh-CN/ru/vi/ur PASS 0/0 first pass; fr FAIL round 1 (3 majors: tu-imperative register + 1 minor) -> auditor replacements applied, round 2 PASS 0/0; hi FAIL round 1 (4 majors: override wording) -> auditor replacements applied, round 2 PASS 0/0. Receipt records round r2 (repo's next round id for this namespace) with final bytes. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "7407d69c7173aaa5390e6ca1f06e0abbab4d0f43dacceef02970432ee3ae5144",
+      "context_sha256": "fdd22221ca4fc3768b486a1690ccd6ce1baae0a69f4a15a0c1291a58f410f964",
+      "target_sha256": "cb19437ba8bdad9e36138a296fdf71da7c511acd857c4a97547aa20c594deead",
+      "keys_audited": 2,
+      "round": "r7",
+      "translator": {
+        "agent": "task subagent tr8-ru (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine)",
+        "model": "anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-ru job)",
+        "date": "2026-11-11"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-11",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "independent_from_translator": true
+      },
+      "status": "passed",
+      "note": "Wave S8 queue-then-steer rename, backend (branch feat/tui-send-chords at ae5669467, English source in 3b2bc7423, translated strings audited while still uncommitted, 2026-11-11): 2 keys in this namespace: wire.settings.keymap.send_both.label (changed), wire.settings.keymap.send_both.help (changed). Translator: task subagent tr8-ru (lopdev manager session 2405ebc40b47; one agent per locale, independent contexts; no i18n-translator role exists on this machine); anthropic/claude-sonnet-5-5 (model the harness reported for the tr8-ru job). Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit rounds for ru until PASS: rounds 1-6 FAIL, round 7 PASS, 0 blocker/major at the final round. Residual fit minor reported by the delegating manager (no tool recorded a width check): send_both.help renders longer than the ~72-cell one-line help budget. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's final verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.keymap",
+      "source_sha256": "7407d69c7173aaa5390e6ca1f06e0abbab4d0f43dacceef02970432ee3ae5144",
+      "context_sha256": "fdd22221ca4fc3768b486a1690ccd6ce1baae0a69f4a15a0c1291a58f410f964",
+      "target_sha256": "4488d38fdf8f0e6c3d7dd1f1c4c9df280c16f8addd77bf1f942d6ffd9beca340",
+      "keys_audited": 3,
+      "round": "r8",
+      "receipt": "2405ebc40b47-fold2-ru",
+      "translator": {
+        "agent": "task subagent coder-tr-converge (lopdev coder subagent in manager session 2405ebc40b47; applied the independent auditor's suggested replacements to these strings; the originals were written by the tr8-ru translator agents)",
+        "model": null,
+        "model_kind": "not recorded: the coder subagent's served model is not independently verifiable in this session, so no model is claimed; the originals were anthropic/claude-sonnet-5-5 as recorded in the tr8-ru rows",
+        "date": "2026-11-13"
+      },
+      "auditor": {
+        "agent": "codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt)",
+        "model": "gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered)",
+        "date": "2026-11-13",
+        "independent_from_translator": true,
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Fold2 wording fold-in, backend (branch feat/tui-send-chords, the commit that carries these rows, translated strings and rows both dated 2026-11-13): 3 keys in this namespace: wire.settings.keymap.send_steer.help, wire.settings.keymap.send_queue.help, wire.settings.keymap.send_both.help (changed). Translator: task subagent coder-tr-converge (lopdev coder subagent in manager session 2405ebc40b47; applied the independent auditor's suggested replacements to these strings; the originals were written by the tr8-ru translator agents); served model not recorded because the coder subagent's model is not independently verifiable here; the originals were anthropic/claude-sonnet-5-5 as recorded in the tr8-ru rows. Auditor: codex MCP server mcp__codex_codex (independent of the translator, different model family, sandbox read-only, no checkout access; the English source, context sidecar and the translated strings were pasted into the prompt); model gpt-5.6-sol (served; the account refused gpt-6.1-terra, gpt-5.2 and gpt-5.2-codex as unsupported before this model answered). The same audit prompts also carried the matching desktop (local-operator-ui) keys; only backend keys are recorded in this row. Audit: fold2 round 2 (audit-fold2-r2) PASS 0/0 first pass. keys_audited counts only this wave's keys. This is an independent cross-family audit of exactly these keys, not a full-file audit and not a human review; `status: passed` records the auditor's verdict. No second independent audit: copy is not high-visibility/safety; no second_audit field. Receipt instance 2405ebc40b47-fold2-ru."
     }
   ]
 }
