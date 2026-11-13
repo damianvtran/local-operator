@@ -6646,7 +6646,7 @@ class RuntimeServer:
             client_nonce=conn.operator_nonce,
             server_salt=conn.operator_salt,
         )
-        signature = self._operator_signature_verdict(frame, conn)
+        signature, challenge = self._operator_signature_check(frame, conn)
         admitted = admit_increasing(capability=capability, signature=signature)
         if admitted and frame.get("op") == "bridge_decide":
             # TB-02 P1: the one-shot ask-bound grant the decision needs is
@@ -6656,11 +6656,27 @@ class RuntimeServer:
             # Memory-only; see approval.py's grant table.
             from local_operator.harness.approval import mint_bridge_decide_grant
 
+            # The signed PROOF rides with the grant ONLY when the signature
+            # verdict is True: a headless node's extension re-verifies it before
+            # approving a site (``browser_bridge/site_approval.py``). A
+            # capability admission (the node's own console) carries none, which
+            # the extension refuses as ``unsigned_decision`` — the operator, not
+            # whoever holds the node, decides a site.
+            proof = (
+                {
+                    "operator_sig": str(frame.get("operator_sig") or ""),
+                    "operator_key_id": str(frame.get("operator_key_id") or ""),
+                    "challenge": challenge,
+                }
+                if signature is True and challenge
+                else None
+            )
             mint_bridge_decide_grant(
                 session_id=str(self._record.session_id),
                 ask_id=str(frame.get("ask_id") or ""),
                 question_id=str(frame.get("question_id") or ""),
                 word=str(frame.get("word") or ""),
+                proof=proof,
             )
         if not admitted:
             # Logged because the two refusals have different causes and only
@@ -6678,7 +6694,16 @@ class RuntimeServer:
         return admitted
 
     def _operator_signature_verdict(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
-        """``True``/``False`` when a signature was offered, ``None`` when not.
+        """The verdict alone; see :meth:`_operator_signature_check`."""
+        return self._operator_signature_check(frame, conn)[0]
+
+    def _operator_signature_check(
+        self, frame: dict[str, Any], conn: _ClientConn
+    ) -> tuple[bool | None, str]:
+        """``(verdict, challenge)``: ``True``/``False`` when a signature was
+        offered, ``None`` when not; the challenge it consumed (``""`` when none
+        was), which a site approval's proof needs because the extension
+        re-verifies the same signed message.
 
         THE CHALLENGE IS CONSUMED HERE, before verification, and that is the
         replay defence rather than a detail: a popped challenge cannot be
@@ -6695,17 +6720,17 @@ class RuntimeServer:
         """
         target = signature_target(frame)
         if target is None:
-            return None
+            return None, ""
         supplied = frame.get("operator_sig")
         if supplied is None:
-            return None
+            return None, ""
         action, request_id = target
         entry = conn.operator_challenges.pop((action, request_id), None)
         if entry is None:
-            return False
+            return False, ""
         challenge, expires_at = entry
         if time.monotonic() > expires_at:
-            return False
+            return False, ""
         # The runtime-wide count follows the CONSUME as well as the mint: a
         # challenge handed back here is spent, and leaving it in the aggregate
         # would let a subject that never signs slowly fill the runtime's budget
@@ -6714,7 +6739,7 @@ class RuntimeServer:
         loaded = self._anchor_cache.get()
         anchor = loaded.anchor if loaded.usable else None
         device_spki = self._device_cert_point(frame.get("operator_cert"), anchor)
-        return operator_verify.signature_verdict(
+        verdict = operator_verify.signature_verdict(
             action=action,
             session_id=self._record.session_id,
             request_id=request_id,
@@ -6726,6 +6751,7 @@ class RuntimeServer:
             device_spki=device_spki,
             now=int(time.time()),
         )
+        return verdict, str(challenge)
 
     def _device_cert_point(self, certificate: object, anchor: Any) -> bytes | None:
         """The device point behind a certificate, verified once per TTL.

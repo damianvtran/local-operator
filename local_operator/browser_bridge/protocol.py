@@ -475,6 +475,15 @@ METHODS = (
     # Requester-bound cancellation removes only this session's exact-origin
     # pending entry; it cannot dismiss another session's consent prompt.
     "cancel_access",
+    # Headless-node site approval (``site_approval.py``): the operator's SIGNED
+    # answer to a node's site ask, sent by the session runtime after its own
+    # authority seam admitted the signed ``decide`` frame. The extension
+    # verifies the signature itself against the managed-policy anchor
+    # (``extension/src/signed-decision.ts``), so holding the bridge token is
+    # not enough to approve a site. Refusals are ``ok`` results with
+    # ``applied: false`` and a ``reason`` — never a new error code, which a
+    # released daemon would fail to decode.
+    "submit_signed_decision",
     # Push a session title that arrived AFTER the tab was opened, so the tab
     # group stops wearing the label the session had at open time. A
     # conversation names itself asynchronously a second or two into its first
@@ -651,6 +660,8 @@ COMMAND_TIMEOUTS = {
     # never needs the awaiting_origin deadline-extension machinery above.
     "await_access": 25.0,
     "cancel_access": 20.0,
+    # One managed-policy read, at most 16 digests and one ECDSA verify.
+    "submit_signed_decision": 20.0,
     # retitle touches chrome.tabGroups and nothing else — no navigation, no
     # settle, no debugger. It rides the ordinary floor rather than a tighter
     # bound because the group queue it joins is shared and briefly serialises

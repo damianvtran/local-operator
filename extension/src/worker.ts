@@ -1,4 +1,4 @@
-import { awaitAccess, cancelAccessCommand, requestAccess } from "./commands/access";
+import { awaitAccess, cancelAccessCommand, requestAccess, submitSignedDecision } from "./commands/access";
 import { close, goto, open, status, tabs } from "./commands/nav";
 import { click, typeText } from "./commands/input";
 import { readPage } from "./commands/read";
@@ -91,6 +91,10 @@ const HANDLERS: Record<
   request_access: requestAccess,
   await_access: awaitAccess,
   cancel_access: cancelAccessCommand,
+  // Headless-node site approval: the operator's SIGNED answer, verified here
+  // against the managed-policy anchor before it decides anything
+  // (signed-decision.ts explains why the extension, not only the runtime).
+  submit_signed_decision: submitSignedDecision,
   // Presentation-only rename of an already-open tab's group, for a session
   // title that arrived after the tab was created. It drives no tab and reads
   // no page, so unlike every other handler it needs no surface admission.

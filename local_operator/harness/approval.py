@@ -66,7 +66,7 @@ import os
 import secrets
 import socket
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, Union, cast
 
@@ -1106,7 +1106,14 @@ def _prune_bridge_grants(now: float) -> None:
             _BRIDGE_DECIDE_GRANTS_CONSUMED.pop(key, None)
 
 
-def mint_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: str, word: str) -> None:
+def mint_bridge_decide_grant(
+    *,
+    session_id: str,
+    ask_id: str,
+    question_id: str,
+    word: str,
+    proof: Mapping[str, str] | None = None,
+) -> None:
     """Record that THIS runtime admitted a human decision for this ask.
 
     TB-02 NIT: a CONSUMED grant is EVIDENCE — it is what the supersede test and
@@ -1121,11 +1128,42 @@ def mint_bridge_decide_grant(*, session_id: str, ask_id: str, question_id: str, 
     now = time.monotonic()
     _prune_bridge_grants(now)
     key = (str(session_id), str(ask_id), str(question_id))
-    _BRIDGE_DECIDE_GRANTS[key] = {
+    entry: dict[str, Any] = {
         "word": str(word).strip().lower(),
         "at": now,
     }
+    if proof:
+        # The SIGNED proof behind this admission (``operator_sig``,
+        # ``operator_key_id``, the spent ``challenge``), kept beside the grant so
+        # a later effect can be RE-VERIFIED by a party that does not trust this
+        # runtime: a headless node's browser extension checks the operator's
+        # signature itself before it approves a site (``site_approval.py``).
+        # The caller stashes it ONLY on a True signature verdict; a
+        # capability-admitted grant carries none, and the extension refuses that
+        # as ``unsigned_decision``. Memory-only, like the grant.
+        entry["proof"] = {str(k): str(v) for k, v in proof.items()}
+    _BRIDGE_DECIDE_GRANTS[key] = entry
     _prune_bridge_grants(now)
+
+
+def bridge_decide_grant_proof(
+    *, session_id: str, ask_id: str, question_id: str, word: str
+) -> dict[str, str] | None:
+    """The signed proof of a LIVE (minted, unspent) grant for exactly this word.
+
+    ``None`` when there is no live grant, the word differs, or the admission
+    was not by signature. Read BEFORE the grant is consumed: the proof belongs
+    to the decision still waiting for its effect.
+    """
+    import time
+
+    now = time.monotonic()
+    _prune_bridge_grants(now)
+    entry = _BRIDGE_DECIDE_GRANTS.get((str(session_id), str(ask_id), str(question_id)))
+    if entry is None or str(entry.get("word")) != str(word).strip().lower():
+        return None
+    proof = entry.get("proof")
+    return dict(proof) if isinstance(proof, Mapping) else None
 
 
 def consume_bridge_decide_grant(

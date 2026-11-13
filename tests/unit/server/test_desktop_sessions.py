@@ -10717,3 +10717,88 @@ async def test_a_local_row_carries_its_agents_picture_identity(draft_api) -> Non
     Image.new("RGB", (32, 32), (1, 2, 3)).save(image, "PNG")
     meta = registry.set_agent_avatar(agent.id, image.getvalue())
     assert (await rows())["chat0000001"]["avatar_sha256"] == meta.sha256
+
+
+class _DecideRemote(_AskRemote):
+    """A viewer facade whose frame carries one signed-door ask (PR-B).
+
+    ``bridge_decide`` answers in the REAL facade's verdict shape
+    (``AttachedSession.bridge_decide`` → ``{"ok": …}``), so a route that read
+    the wrong contract would pass a refusal off as success.
+    """
+
+    def __init__(self, *, question_id: str, verdict: dict[str, Any] | None = None) -> None:
+        super().__init__()
+        self.decisions: list[tuple[str, str, str]] = []
+        self.verdict = verdict or {"ok": True}
+        self.frontend_state = SimpleNamespace(
+            epoch="epoch-current",
+            asks=[
+                SimpleNamespace(
+                    ask_id="a-site",
+                    questions=[
+                        {
+                            "id": "site-access",
+                            "question": "Allow http://127.0.0.1:8765 in the browser on node-a?",
+                            "options": [
+                                {"id": "approve", "label": "Approve"},
+                                {"id": "deny", "label": "Deny"},
+                            ],
+                            "human_required": True,
+                            "question_id": question_id,
+                        }
+                    ],
+                )
+            ],
+        )
+
+    async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
+        self.decisions.append((ask_id, question_id, word))
+        return self.verdict
+
+
+@pytest.mark.asyncio
+async def test_a_signed_door_ask_is_decided_through_bridge_decide(answers_api) -> None:
+    """The desktop dock answers a site:v1: (or Team Bridge) ask through the signed
+    door — the plain ask_respond refuses such an ask by construction, so before
+    this route branch the operator's Approve could never land."""
+    client, app = answers_api
+    remote = _DecideRemote(question_id="site:v1:" + "ab" * 32)
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["Approve"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "decided"}
+    assert remote.decisions == [("a-site", "site:v1:" + "ab" * 32, "approve")]
+    assert remote.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_signed_decision_answers_409_with_its_sentence(answers_api) -> None:
+    client, app = answers_api
+    sentence = "The node's browser refused this answer: it was not signed by your operator key."
+    remote = _DecideRemote(question_id="site:v1:cd", verdict={"ok": False, "error": sentence})
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-site", "answers": {"site-access": ["deny"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == sentence
+    assert remote.decisions == [("a-site", "site:v1:cd", "deny")]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_ask_beside_a_signed_one_keeps_the_plain_door(answers_api) -> None:
+    client, app = answers_api
+    remote = _DecideRemote(question_id="site:v1:ef")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-other", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert remote.decisions == []
+    assert remote.calls == [("a-other", {"q0": ["yes"]}, False, False)]

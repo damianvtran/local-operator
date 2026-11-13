@@ -1,0 +1,10 @@
+{
+  "browser.site_approval.question": "Allow {origin} in the browser on {node}? The agent on {node} asked to open this site. Approve lets it browse {origin} (this exact origin only) until you revoke it; Deny refuses.",
+  "browser.site_approval.option_approve": "Approve",
+  "browser.site_approval.option_deny": "Deny",
+  "browser.site_approval.refused_unsigned": "The node's browser refused this answer: it was not signed by your operator key. Answer from the Local Operator app on your own computer.",
+  "browser.site_approval.refused_bad_signature": "The node's browser refused this answer: its signature did not match the operator key installed on the node.",
+  "browser.site_approval.refused_expired": "This site request expired before your answer reached the node's browser. The agent has to ask again.",
+  "browser.site_approval.refused_unreachable": "Your answer could not reach the node's browser. Nothing was approved; try again in a moment.",
+  "browser.site_approval.card_title": "an agent on another machine asked to open a site — your answer is signed and sent to its browser"
+}

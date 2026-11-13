@@ -7321,7 +7321,24 @@ class ServingSessionHandle(SessionHandle):
         signature over the composite ask#question#word target) and which minted
         the one-shot grant the dispatcher consumes at the point of effect. A
         plain ``ask_respond`` on a bridge ask is refused by the session.
+
+        A ``site:v1:`` question (a headless node's per-site browser approval,
+        ``browser_bridge/site_approval.py``) takes the session's async site door
+        instead: its effect is a browser-bridge call, and it needs no Team
+        Bridge runtime. A refusal keeps its typed ``code`` in the message so
+        the surface can tell "unsigned" from "expired".
         """
+        from local_operator.browser_bridge.site_approval import is_site_question_id
+
+        site_door = getattr(self._session, "site_decide", None)
+        if is_site_question_id(question_id) and site_door is not None:
+            site_outcome = await cast(
+                Callable[[str, str, str], Awaitable[Mapping[str, Any]]], site_door
+            )(ask_id, question_id, word)
+            if not site_outcome.get("ok"):
+                raise ValueError(str(site_outcome.get("error") or "the decision was refused"))
+            await self._session.reconcile_asks()
+            return "decided"
         outcome = self._session.bridge_decide(ask_id, question_id, word)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the decision was refused"))

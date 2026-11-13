@@ -26397,6 +26397,197 @@ def _access_result_text(
     )
 
 
+#: Where a headless node's site approval is decided, said once so the texts
+#: below cannot drift: the card reaches the operator's device through the
+#: forwarded-ask path, which covers sessions that device started.
+_NODE_APPROVAL_REACH = (
+    "The card reaches the operator's own device when this session was started "
+    "from it; a session started directly on the node shows it only on the node, "
+    "where nobody can sign — say so if that is your case."
+)
+
+
+def _node_no_approver_text(origin: str, why: str) -> str:
+    return _wrap_receipt(
+        f"no one can approve {origin} in this machine's browser: {why}\n"
+        "This is a headless mesh node; site approvals here are decided only by the "
+        "operator's signature from their own device. Do not retry request_access. "
+        "Tell the operator and continue without this site; guide://browser "
+        "'Headless nodes' has the setup step that fixes it."
+    )
+
+
+async def _node_site_access(
+    tool_call_id: str,
+    context: ToolContext | None,
+    result: Mapping[str, Any],
+    url: str,
+    origin: str,
+    *,
+    client: Any,
+) -> ToolResult:
+    """``request_access`` on a headless node: raise the operator's SIGNED card.
+
+    The extension queued its entry and reported ``approval: "signed"`` with the
+    entry id, scope and node id. This builds the ask question in CODE from the
+    origin the extension reported (never model text), binds it to that entry
+    with :func:`site_approval.site_question_id`, and queues it through the
+    session's own ask door. The operator answers it on their device; the answer
+    travels back as a signed ``bridge_decide`` and the extension re-verifies the
+    signature before it approves anything. ``await_access`` is unchanged: it
+    polls the extension, which is the truth.
+
+    ``no_approver`` (typed, never a wait): the extension has no usable anchor,
+    or THIS host holds the anchor's private key — then the agent could sign its
+    own approval, so a signature would prove nothing about a human.
+    """
+    from local_operator.browser_bridge import site_approval
+
+    identity_params = _browser_identity_params(context, tool_call_id)
+
+    async def _withdraw_entry() -> None:
+        # Best effort: an entry nobody can decide would otherwise sit in the
+        # extension until its TTL and dedupe the next request onto itself.
+        try:
+            from local_operator.browser_bridge.backend import BridgeClient
+
+            await (client if client is not None else BridgeClient()).call(
+                "cancel_access", {"url": url, **identity_params}
+            )
+        except Exception:  # noqa: BLE001 — the entry's own TTL is the floor
+            logger.debug("node site access: cancel_access failed", exc_info=True)
+
+    details: dict[str, Any] = {"origin": origin, "approval": site_approval.APPROVAL_NO_APPROVER}
+    if str(result.get("approval") or "") == site_approval.APPROVAL_NO_APPROVER:
+        return _error(
+            tool_call_id,
+            "browser",
+            _node_no_approver_text(
+                origin, "its managed policy carries no operator anchor to verify against."
+            ),
+            details={**details, "state": "none"},
+        )
+    from local_operator.operator.trust import load_anchor
+    from local_operator.paths import config_dir as _config_dir
+
+    loaded = load_anchor()
+    anchor = loaded.anchor if loaded.usable else None
+    if anchor is not None and site_approval.anchor_key_held_locally(_config_dir(), anchor.key_id):
+        await _withdraw_entry()
+        return _error(
+            tool_call_id,
+            "browser",
+            _node_no_approver_text(
+                origin,
+                "this machine holds the operator key's private half, so a signature "
+                "made here would not show that a person decided.",
+            ),
+            details={**details, "state": "none"},
+        )
+    enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    entry_id = str(result.get("entryId") or "")
+    if not callable(enqueue) or not entry_id:
+        await _withdraw_entry()
+        return _error(
+            tool_call_id,
+            "browser",
+            _node_no_approver_text(
+                origin,
+                "this session cannot queue an ask for the operator (no queued-ask "
+                "engine), so the card cannot be raised.",
+            ),
+            details={**details, "state": "none"},
+        )
+    question_id = site_approval.site_question_id(
+        node_device_id=str(result.get("node_device_id") or ""),
+        entry_id=entry_id,
+        origin=origin,
+        scope=str(result.get("scope") or site_approval.SITE_SCOPE),
+    )
+    question = site_approval.site_ask_question(
+        origin=origin, node_name=_node_display_name(), question_id=question_id
+    )
+    # The ask lives no longer than the extension entry it binds (10-minute
+    # TTL): a card answered after the entry is gone could only be refused.
+    # Never below the queue's own floor, which refuses a shorter timeout.
+    from local_operator.asks.policy import MIN_TIMEOUT_S
+
+    expires_at_ms = result.get("expires_at")
+    remaining_s = (
+        int(float(expires_at_ms) / 1000.0 - time.time())
+        if isinstance(expires_at_ms, (int, float))
+        else 600
+    )
+    timeout_s = max(MIN_TIMEOUT_S, min(600, remaining_s))
+    outcome = enqueue([question], timeout_s, tool_call_id=tool_call_id)
+    receipt: Mapping[str, Any] = outcome if isinstance(outcome, Mapping) else {}
+    ask_details = receipt.get("details")
+    ask_id = str(ask_details.get("ask_id") or "") if isinstance(ask_details, Mapping) else ""
+    wait = (
+        f"Call action='await_access' url={url} — each call waits at most 240s — until it "
+        "returns allowed or denied. The request expires about 10 minutes after it was "
+        "raised; if await_access then reports no live request, call request_access again."
+    )
+    if not receipt.get("ok"):
+        error = str(receipt.get("error") or "the ask was refused")
+        if "already carries that question" in error:
+            # This origin is already on the operator's card: the extension
+            # deduplicated this session's request onto the same entry, and the
+            # queue refuses the identical question text.
+            return _text(
+                tool_call_id,
+                "browser",
+                _wrap_receipt(
+                    f"the operator has already been asked to allow {origin} on this "
+                    f"node.\n{wait}"
+                ),
+                details={"origin": origin, "state": "pending", "approval": "signed"},
+            )
+        await _withdraw_entry()
+        return _error(
+            tool_call_id,
+            "browser",
+            _wrap_receipt(f"could not raise the operator's card for {origin}: {error}"),
+            details={**details, "state": "none"},
+        )
+    return _text(
+        tool_call_id,
+        "browser",
+        _wrap_receipt(
+            f"asked the operator to allow {origin} on this node (ask {ask_id}).\n"
+            "Nobody can click this headless browser: the operator approves or denies on "
+            "their own device, signed with their operator key, and the browser checks "
+            f"the signature itself.\n{_NODE_APPROVAL_REACH}\n{wait}\n"
+            "Do other work meanwhile; do not ask them again for the same site."
+        ),
+        details={
+            "origin": origin,
+            "state": "pending",
+            "approval": "signed",
+            "ask_id": ask_id,
+            "question_id": question_id,
+            **({"expires_at": result["expires_at"]} if "expires_at" in result else {}),
+        },
+    )
+
+
+def _node_display_name() -> str:
+    """This node's mesh name for the card ("… in the browser on <node>"), falling
+    back to its device id, then the hostname: the operator must be able to tell
+    which machine is asking."""
+    try:
+        from local_operator.network import identity
+
+        device = identity.load()
+    except Exception:  # noqa: BLE001 — a name is cosmetic; never fail the request on it
+        device = None
+    if device is not None and (device.name or device.device_id):
+        return str(device.name or device.device_id)
+    import socket
+
+    return socket.gethostname()
+
+
 async def _bridge_access(
     tool_call_id: str,
     action: str,
@@ -26453,6 +26644,13 @@ async def _bridge_access(
         assert result is not None
         state_value = str(result.get("state", ""))
         origin = str(result.get("origin", url))
+        if str(result.get("approval") or "") in ("signed", "no_approver"):
+            # A HEADLESS NODE's extension answered (``site_approval.py``): no
+            # person can click its popup, so the popup copy below would send the
+            # agent to wait on nothing.
+            return await _node_site_access(
+                tool_call_id, context, result, url, origin, client=client
+            )
         return _text(
             tool_call_id,
             "browser",

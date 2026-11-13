@@ -83,6 +83,10 @@ from textual.worker import Worker
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 
+# ``bridge_decision_target`` lives in ``asks/decision.py`` so the desktop answer
+# route can share it without importing the TUI; re-exported for existing callers.
+from local_operator.asks.decision import bridge_decision_target
+
 # The cross-session view filter's single predicate, shared with the phone fold
 # (`mobile/projection.py`). Import-cheap by construction — its only heavy
 # import, `tui.settings`, is function-local — so the boot path this module's
@@ -4662,45 +4666,6 @@ def _reload_setup_cues() -> None:
 register_refresh(_reload_setup_cues)
 
 
-def bridge_decision_target(
-    row: AskRow, answers: Mapping[str, Sequence[str]]
-) -> tuple[str, str, str] | None:
-    """The ``(ask_id, question_id, word)`` a BRIDGE card answer decides.
-
-    ``None`` for every ordinary ask: a decision exists only for a request whose
-    question carries the producer's ``question_id`` AND whose picked value
-    resolves to one of that question's own option ids. The word sent on the
-    wire is the OPTION ID (``approve``/``deny``), never the drawn label — the
-    door validates the word against the request's closed set, and a label is
-    display copy that can be re-worded without touching the decision.
-
-    Ambiguity is ``None`` rather than a guess: two picked request questions, or
-    a value that maps to no option id, must fall back to the ordinary door and
-    its refusal rather than decide something the human did not choose.
-    """
-
-    picked: list[tuple[str, str]] = []
-    for question in row.questions:
-        if not isinstance(question, Mapping):
-            continue
-        question_id = str(question.get("question_id") or "")
-        if not question_id:
-            continue
-        selected = answers.get(str(question.get("id") or "")) or ()
-        if len(selected) != 1:
-            continue
-        options = {
-            str(option.get("label") or "").strip().lower(): str(option.get("id") or "")
-            for option in (question.get("options") or ())
-            if isinstance(option, Mapping)
-        }
-        value = str(selected[0]).strip()
-        picked.append((question_id, options.get(value.lower()) or value.lower()))
-    if len(picked) != 1:
-        return None
-    return (row.ask_id, picked[0][0], picked[0][1])
-
-
 def _is_bridge_ask_row(row: Any) -> bool:
     """Whether an ask row is a Team Bridge carriage (D2).
 
@@ -4719,6 +4684,22 @@ def _is_bridge_ask_row(row: Any) -> bool:
         if str(question.get("question_id") or "").strip():
             return True
     return False
+
+
+def _is_site_ask_row(row: Any) -> bool:
+    """Whether an ask row is a headless node's per-site browser approval.
+
+    Structural, like :func:`_is_bridge_ask_row`: the ``site:v1:`` question id
+    is stamped only by the browser tool's node path (``site_approval.py``). It
+    rides the bridge DECISION door (signed ``bridge_decide``), so it is also a
+    "bridge row" for routing — this predicate only changes the words.
+    """
+    from local_operator.browser_bridge.site_approval import is_site_question_id
+
+    return any(
+        isinstance(question, Mapping) and is_site_question_id(question.get("question_id"))
+        for question in (getattr(row, "questions", ()) or ())
+    )
 
 
 def _carry_dict(result: dict[str, Any]) -> dict[str, Any]:
@@ -30265,6 +30246,14 @@ class OperatorApp(App[None]):
         """
         from local_operator.tui.widgets.ask_queue import ASK_MARKER
 
+        if _is_site_ask_row(row) and not row.lapsed:
+            # A headless node's per-site browser approval: not another member's
+            # request (the bridge copy below would say so), and the answer is
+            # verified by the node's browser, not merely delivered to an agent.
+            from local_operator.i18n.keys import browser_site_approval as _site_copy
+            from local_operator.i18n.messages import render_resolved
+
+            return f"{ASK_MARKER} {render_resolved(_site_copy.card_title())}"
         bridge = _is_bridge_ask_row(row)
         if row.lapsed:
             # D10: a lapsed card is READ-ONLY, so the title stops promising that an

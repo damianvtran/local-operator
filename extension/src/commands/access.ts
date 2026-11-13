@@ -1,8 +1,16 @@
 import { requesterOriginKey } from "../access-queue";
-import { accessStatus, cancelAccess, enqueueAccess } from "../approval-store";
+import { accessStatus, cancelAccess, decideAccess, enqueueAccess, readQueueSnapshot } from "../approval-store";
 import { BridgeCommandError } from "../cdp";
 import { originAllowed, safeHttpUrl } from "../origins";
 import { getSession } from "../state";
+import { SITE_SCOPE, readNodeApproval, submitSignedDecisionWith } from "../signed-decision";
+
+/* The managed-policy area, or undefined where Chrome offers none (tests, old
+ * builds). Read per call, never cached: setup rewrites the anchor in a running
+ * Chrome, and a revoked anchor must stop verifying at once. */
+function managedArea(): Pick<chrome.storage.StorageArea, "get"> | undefined {
+  return typeof chrome !== "undefined" ? chrome.storage?.managed : undefined;
+}
 
 /* Approval RPCs are surface-free: they are the recovery path after open/goto
  * refused a new origin. Each poll reads only the caller's requester-bound entry
@@ -29,6 +37,15 @@ export async function requestAccess(
   const url = safeHttpUrl(params.url);
   const requester = requesterOf(params, requestId);
   if (await callerAlreadyAllowed(url, requester)) return { origin: url.origin, state: "allowed" };
+  // HEADLESS NODE (signed-decision.ts): nobody can click the popup, so the
+  // decision has to come from the operator's signature. With no usable anchor
+  // there is nobody who can decide at all — say so now (`approval:
+  // "no_approver"`, an ok result, never a new error code) instead of queueing a
+  // prompt that expires unseen ten minutes later.
+  const node = await readNodeApproval(managedArea());
+  if (node.headless && !node.anchor) {
+    return { origin: url.origin, state: "none", approval: "no_approver" };
+  }
   const result = await enqueueAccess(url, requester, "async");
   if (result.full) {
     throw new BridgeCommandError(
@@ -40,7 +57,31 @@ export async function requestAccess(
   // enqueueAccess centrally arms the earliest durable deadline. Arming this
   // request's own expiry here would let a later request delay an earlier one.
   const { entry: _entry, full: _full, ...response } = result;
+  if (node.anchor && response.state === "pending" && response.entryId) {
+    // Everything the session needs to raise the operator's card and bind it to
+    // THIS entry: the question id is derived from these, and the extension
+    // re-derives it from its own entry when the signed answer comes back.
+    return {
+      ...response,
+      approval: "signed",
+      scope: SITE_SCOPE,
+      node_device_id: node.nodeDeviceId,
+    };
+  }
   return { ...response };
+}
+
+/** `submit_signed_decision`: the operator's signed answer to a node site ask.
+ * Requester-free on purpose — the signature, not the caller, is the authority,
+ * and it names its entry through the question id. */
+export async function submitSignedDecision(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const approval = await readNodeApproval(managedArea());
+  const result = await submitSignedDecisionWith(params, {
+    approval,
+    liveEntries: async () => (await readQueueSnapshot()).queue,
+    decide: async (entryId, decision) => (await decideAccess(entryId, decision)).applied,
+  });
+  return { ...result };
 }
 
 export async function awaitAccess(

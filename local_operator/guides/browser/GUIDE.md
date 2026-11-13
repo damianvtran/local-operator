@@ -450,14 +450,16 @@ daemon still checks the code — no extension id is trusted automatically.
 
 **What it does not change.**
 
-- **No site can be opened yet.** Per-site approvals stay default-deny and are
-  the operator's decision, and on a user's machine they are granted in the
-  extension popup — which nobody can reach in a headless Chrome. This build
-  cannot open sites on a headless node yet (a later update adds operator
-  approval from their own device), so every `open` on a node returns
-  `origin_not_allowed` and `request_access` queues nothing: tell the operator
-  which site you needed and why, and stop the browser part of the task; never
-  work around it.
+- **Per-site approvals stay default-deny** and are the operator's decision,
+  once per site, with no pre-approved loopback. Nobody can click a headless
+  Chrome's popup, so on a node the operator decides on **their own device**
+  and signs the answer with their operator key; the node's extension checks
+  that signature itself before it allows anything — see "Per-site
+  permissions", "On a headless node". Setup copies the operator's public key
+  from the node's root-owned operator anchor
+  (`/etc/local-operator/operators/<uid>.json`) into the extension's managed
+  policy; re-run `lop browser setup --node --repair` after that anchor
+  changes. Never work around a refusal.
 - **Node-side boundaries are advisory where sudo is passwordless.** On a node
   whose account has NOPASSWD sudo, the policy file's root ownership and the
   unit's limits are audited, not enforced against that account: anything
@@ -557,6 +559,44 @@ merely resolve to loopback. Settings lists and revokes every scope
 independently (Settings → Allowed sites). A separate **Dangerously allow all
 websites** switch in Settings skips the site prompt entirely; it requires an
 explicit confirmation dialog and is off by default.
+
+### On a headless node: the operator decides on their device
+
+A node's Chrome has no screen, so the popup steps above do not apply there.
+The flow keeps the same three calls; only who answers, and where, changes:
+
+1. `open` fails with `origin_not_allowed`, as above.
+2. `request_access` raises a **card for the operator** — a queued ask whose
+   text the harness writes from the origin ("Allow <origin> in the browser on
+   <node>?", Approve / Deny). Do not write your own ask for it, and do not
+   ask again for the same site: a second `request_access` for a pending
+   origin says it is already asked. The card reaches the operator's own
+   device when this session was started from that device; a session started
+   directly on the node shows the card only on the node, where nobody can
+   sign — tell the operator that if it is your case.
+3. `await_access` as above (each call ≤240 s; the request lives ~10 minutes).
+   Do other work between calls rather than sitting on it. `allowed` means the
+   operator approved **this exact origin** (scheme, host, port) — the only
+   scope a node grants. `denied` is final.
+
+What can go wrong, and what to say:
+
+- `no_approver` from `request_access` — the node's browser has no operator key
+  to verify against (setup ran without a usable anchor), or this machine
+  holds the operator key's private half (then a signature here would not show
+  a person decided). Do not retry; tell the operator, and carry on without the
+  site. The fix is theirs: install the anchor, then `lop browser setup --node
+  --repair`.
+- An answer from the node's own terminal is refused (`unsigned_decision`):
+  only a signed answer from the operator's device decides. Approving from the
+  Local Operator app on their computer is the path.
+- The request expired before the answer reached the browser: the card says
+  so; call `request_access` again and tell the operator once.
+
+The boundary is advisory on a node whose user can run `sudo` without a
+password: whoever holds the node can rewrite the root-owned policy. Doing so
+is a visible, audited act, not a quiet one — never do it, and never try to
+answer your own card.
 
 Other rules:
 

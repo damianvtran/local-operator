@@ -1,0 +1,42 @@
+{
+  "browser.site_approval.question": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "the ask card's question when an agent on a headless mesh node wants to open a new website; {origin} is a URL origin like https://example.org (keep verbatim), {node} is the node's device name"
+  },
+  "browser.site_approval.option_approve": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "button on that card; grants the site"
+  },
+  "browser.site_approval.option_deny": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "button on that card; refuses the site"
+  },
+  "browser.site_approval.refused_unsigned": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when a site approval is answered from a surface that cannot sign (e.g. the node's own terminal)"
+  },
+  "browser.site_approval.refused_bad_signature": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the signature check fails in the node's browser extension"
+  },
+  "browser.site_approval.refused_expired": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the extension's pending request is gone (expired, or already answered)"
+  },
+  "browser.site_approval.refused_unreachable": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "toast when the node's browser extension could not be contacted"
+  },
+  "browser.site_approval.card_title": {
+    "role": "headless-node site approval: the queued ask the operator answers on their own device, and its refusals",
+    "tone": "plain, calm, operator-facing; URLs and product names verbatim",
+    "note": "title line of the terminal ask card for a site approval; starts lowercase after a '?' glyph the code prepends"
+  }
+}

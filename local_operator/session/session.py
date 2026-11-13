@@ -13437,6 +13437,135 @@ class Session:
             if isinstance(question, Mapping)
         )
 
+    async def site_decide(
+        self,
+        ask_id: str,
+        question_id: str,
+        word: str,
+        *,
+        submit: Callable[[dict[str, Any]], Awaitable[Mapping[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """The ``site:v1:`` door: a headless node's per-site browser approval.
+
+        Reached from the runtime's ``bridge_decide`` op for a question id
+        carrying :data:`~local_operator.browser_bridge.site_approval.SITE_QUESTION_PREFIX`
+        — AHEAD of the Team Bridge door, because a site ask has nothing to do
+        with agent messages and must work on a node with no Team Bridge at all.
+        The authority seam already admitted the frame and minted the one-shot
+        grant; when the admission was a verified operator signature it also
+        stashed the signed proof beside it.
+
+        THE EFFECT HAPPENS FIRST, THE RECORD SECOND. The node's browser
+        extension re-verifies the operator's signature against its own
+        managed-policy anchor and decides exactly the entry the question id
+        binds; only when it reports ``applied`` is the grant consumed and the
+        answer recorded. Recording first would let the ask say "approved" for a
+        site the browser refused (bad signature, expired entry). A refusal
+        withdraws the grant (the S-R3-3 rule: a refused frame leaves nothing
+        spendable) and comes back typed, so the card can say why.
+
+        ``submit`` is injectable for tests; production sends
+        ``submit_signed_decision`` over the browser bridge of THIS host.
+        """
+        from local_operator.browser_bridge import site_approval
+        from local_operator.harness.approval import (
+            bridge_decide_grant_proof,
+            consume_bridge_decide_grant,
+            withdraw_bridge_decide_grant,
+        )
+        from local_operator.i18n.keys import browser_site_approval as _copy
+        from local_operator.i18n.messages import render_resolved
+
+        session_id = str(self.session_id)
+        ask_id = str(ask_id)
+        question_id = str(question_id)
+        decision_word = str(word or "").strip().lower()
+
+        def _refuse(text: str, code: str = "") -> dict[str, Any]:
+            withdraw_bridge_decide_grant(
+                session_id=session_id, ask_id=ask_id, question_id=question_id
+            )
+            answer: dict[str, Any] = {"ok": False, "error": text}
+            if code:
+                answer["code"] = code
+            return answer
+
+        queue = self.ask_queue()
+        if queue is None:
+            return _refuse("this session's runtime predates queued asks")
+        record = queue.find(ask_id)
+        if record is None:
+            return _refuse(_ask_refusal_copy(None))
+        question = next(
+            (
+                candidate
+                for candidate in (record.get("questions") or ())
+                if isinstance(candidate, Mapping)
+                and str(candidate.get("question_id") or "") == question_id
+            ),
+            None,
+        )
+        if question is None or not site_approval.is_site_question_id(question_id):
+            return _refuse("that request's question is not on this ask.")
+        if decision_word not in site_approval.SITE_WORDS:
+            return _refuse("that is not an answer this request accepts — choose Approve or Deny.")
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return _refuse(refusal)
+        proof = (
+            bridge_decide_grant_proof(
+                session_id=session_id, ask_id=ask_id, question_id=question_id, word=decision_word
+            )
+            or {}
+        )
+        params = {
+            "session_id": session_id,
+            "ask_id": ask_id,
+            "question_id": question_id,
+            "word": decision_word,
+            # Empty when the frame was admitted WITHOUT a signature (the node's
+            # own console holds the spawn capability): the extension refuses
+            # that as ``unsigned_decision``, by design — see the module doc.
+            "challenge": proof.get("challenge", ""),
+            "sig": proof.get("operator_sig", ""),
+            "key_id": proof.get("operator_key_id", ""),
+        }
+        if submit is None:
+            from local_operator.browser_bridge.backend import BridgeClient
+
+            async def _bridge_submit(payload: dict[str, Any]) -> Mapping[str, Any]:
+                return await BridgeClient().call("submit_signed_decision", payload)
+
+            submit = _bridge_submit
+        try:
+            result = await submit(params)
+        except Exception:  # noqa: BLE001 — any transport failure: nothing was decided
+            logger.warning(
+                "site decide: the browser bridge did not take ask %s", ask_id, exc_info=True
+            )
+            return _refuse(render_resolved(_copy.refused_unreachable()), "site_unreachable")
+        if not result.get("applied"):
+            reason = str(result.get("reason") or "")
+            copy = {
+                "unsigned_decision": _copy.refused_unsigned(),
+                "no_approver": _copy.refused_bad_signature(),
+                "wrong_key": _copy.refused_bad_signature(),
+                "bad_signature": _copy.refused_bad_signature(),
+            }.get(reason, _copy.refused_expired())
+            return _refuse(render_resolved(copy), reason or "no_live_request")
+        consume_bridge_decide_grant(
+            session_id=session_id, ask_id=ask_id, question_id=question_id, word=decision_word
+        )
+        slot = str(question.get("id") or "")
+        outcome = queue.respond(ask_id, {slot: [decision_word]}, by="operator")
+        if not outcome.get("ok"):
+            # The browser HAS the decision; only the record failed. Say so
+            # rather than claim nothing happened — await_access reads the
+            # browser, which is the truth for the agent.
+            logger.warning("site decide: ask %s decided in the browser but not recorded", ask_id)
+            return {"ok": True, "word": decision_word, "recorded": False}
+        return {"ok": True, "word": decision_word, "state": str(result.get("state") or "")}
+
     def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
         """TB-02 P1: the ONLY door a bridge request may be decided through.
 
