@@ -4563,6 +4563,13 @@ class TestTextOnlyContinuationThroughTheDriver:
 #: Captured from the identical scripted run on the base commit ``371ce48ace08``
 #: (see the test's docstring); pinned so a later change to this path is a
 #: visible diff here rather than a silent drift.
+#:
+#: Deliberate drift since that capture: the trailing ``accounting`` row (PR
+#: #3887). ``run_session_episode`` writes it once, after the ``finally`` that
+#: stops the bridge and closes the adapter session (so after ``shutdown``) and
+#: before the seal, carrying the same typed snapshot as ``outcome.json``. It is
+#: additive and terminal: no earlier row moved, and the continuation's
+#: ``action_text_only_continuation`` is still absent on a normal finish.
 BASE_FINISH_EVENT_KINDS: list[str] = [
     "reset",
     "declaration",
@@ -4583,6 +4590,7 @@ BASE_FINISH_EVENT_KINDS: list[str] = [
     "agent_event",
     "requests",
     "shutdown",
+    "accounting",
 ]
 
 
