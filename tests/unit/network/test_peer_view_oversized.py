@@ -29,7 +29,12 @@ from local_operator.harness.types import CustomMessage, Message
 from local_operator.network import relay
 from local_operator.session.history_window import display_window
 from local_operator.session.peer_rows import clear_cache
-from local_operator.session.transcript import Transcript, TranscriptEntry, _entry_to_message
+from local_operator.session.runtime.types import ClientLocality
+from local_operator.session.transcript import (
+    Transcript,
+    TranscriptEntry,
+    _entry_to_message,
+)
 from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixtures
 from tests.unit.network.test_remote_viewer import _open, _user_texts, _wait
 from tests.unit.network.test_session_plane import (
@@ -241,9 +246,7 @@ async def test_a_peer_send_reaches_a_session_whose_newest_entry_is_oversized(
             assert not viewer.is_cold, viewer.cold_reason
             # PEEK'S SOURCE: the bound viewer's synced rows carry the big row,
             # bounded and marked, under its own id.
-            painted = [
-                m for m in viewer.display_history_window() if getattr(m, "id", "") == big.id
-            ]
+            painted = [m for m in viewer.display_history_window() if getattr(m, "id", "") == big.id]
             assert painted, "the oversized row was dropped from the peer's view"
             assert MARKER_WORDS in json.dumps(painted[0].model_dump(mode="json"))
             # And the real peek verb over that viewer answers instead of refusing.
@@ -299,7 +302,7 @@ async def test_a_cold_peer_read_serves_an_oversized_newest_row_marked(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("locality", ["local", "remote"])
 async def test_only_a_non_local_viewer_gets_the_bounded_page(
-    tmp_path: Path, locality: str
+    tmp_path: Path, locality: ClientLocality
 ) -> None:
     """R1-2: the two server routes that pick exact vs bounded by locality.
 
@@ -336,10 +339,11 @@ async def test_only_a_non_local_viewer_gets_the_bounded_page(
     class PagingHandle(FakeHandle):
         def __init__(self) -> None:
             super().__init__()
-            self.calls: list[bool] = []
+            # Not ``calls``: FakeHandle already owns that name with another type.
+            self.bound_flags: list[bool] = []
 
         def history_page(self, before: str, anchor: str, bound_oversized: bool = False):
-            self.calls.append(bound_oversized)
+            self.bound_flags.append(bound_oversized)
             return _window(transcript, bound_oversized=bound_oversized).model_dump(mode="json")
 
     handle = PagingHandle()
@@ -347,7 +351,7 @@ async def test_only_a_non_local_viewer_gets_the_bounded_page(
     page = await server._dispatch_payload(
         "history_page", {"op": "history_page", "before": "t", "anchor": ""}, locality=locality
     )
-    assert handle.calls == [locality != "local"]
+    assert handle.bound_flags == [locality != "local"]
     assert page["status"] == expected
     if locality == "remote":
         assert MARKER_WORDS in json.dumps(page)

@@ -31,7 +31,12 @@ from local_operator.harness.rows import (
     is_hidden_tool_message,
     without_ask_gate_divert,
 )
-from local_operator.harness.types import AgentMessage, CustomMessage, Message, TextContent
+from local_operator.harness.types import (
+    AgentMessage,
+    CustomMessage,
+    Message,
+    TextContent,
+)
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.transcript import (
     audit_slice,
@@ -844,9 +849,7 @@ def bounded_display_message(message: AgentMessage, max_bytes: int) -> AgentMessa
         return message
     marker = TRUNCATED_ENTRY_MARKER.format(size=size)
     if isinstance(message, Message):
-        text = "".join(
-            block.text for block in message.content if isinstance(block, TextContent)
-        )
+        text = "".join(block.text for block in message.content if isinstance(block, TextContent))
         preview = _text_prefix_within(text, max(0, max_bytes // 2 - len(marker) - 256))
         body = f"{preview}\n\n{marker}" if preview else marker
         return message.model_copy(
