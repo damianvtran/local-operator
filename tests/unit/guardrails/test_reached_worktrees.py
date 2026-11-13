@@ -268,14 +268,25 @@ def test_owner_rm_rf_of_locked_busy_or_unknown_own_worktree_is_high(
     assert v.risk is Risk.HIGH and "unknown" in v.targets[0].reason
 
 
-def test_owner_rm_rf_with_pr_lookup_unknown_is_high(
+def test_owner_rm_rf_with_pr_lookup_unknown_keeps_own_clean_tree_low(
     home: Path, mobile: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Both forge lookups fail: the history one is asked first, the open-only
     # one only on a full page (#3782), and either failing is "state unknown".
+    # #3816 (operator escalation 2026-11-11) waived an unknown PR state for an
+    # OWN clean idle tree — removal keeps the branch, so nothing is lost — and
+    # its guide says so for ``rm -rf <exact path>`` too. The reach scan must
+    # not re-impose the forge on that route, literal or glob.
     monkeypatch.setattr(prov, "_gh_prs", lambda repo, branch: None)
     monkeypatch.setattr(prov, "_gh_open_prs", lambda repo, branch: None)
-    assert _rank(home, f"rm -rf {WT}/markdown-tables", S).risk is Risk.HIGH
+    assert _rank(home, f"rm -rf {WT}/markdown-tables", S).risk is Risk.LOW
+    assert _rank(home, f"rm -rf {WT}/markdown-*", S).risk is Risk.LOW
+    # The waiver is for clean trees only: a dirty own tree still goes to the
+    # judge with the PR state unknown, and a foreign one never ranks LOW.
+    (mobile / ".worktrees" / "markdown-tables" / "wip.txt").write_text("work\n")
+    v = _rank(home, f"rm -rf {WT}/markdown-tables", S)
+    assert v.risk is Risk.HIGH and "dirty" in v.targets[0].reason
+    assert _rank(home, f"rm -rf {WT}/markdown-tables", S2).risk is Risk.HIGH
 
 
 # --- 3. M2: own trees keep the nested-repository backstop

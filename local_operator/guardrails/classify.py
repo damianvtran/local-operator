@@ -1418,10 +1418,10 @@ def _reached_worktrees(
       recorded creator in the reason (``build_delete_case`` passes it on).
     - An OWN tree is held to ``git worktree remove``'s bar (review M1): an
       open PR/MR is CRITICAL; any state but clean (dirty, locked, busy,
-      unknown), another running session in it, or an unknown PR state is
-      HIGH. Only own, clean and idle trees fall through to the ordinary
-      ranking — the ledger LOW for a literal path, ``ordinary path`` for a
-      container.
+      unknown) or another running session in it is HIGH. An unknown PR
+      state alone does not hold a clean own tree (#3816's waiver). Only own,
+      clean and idle trees fall through to the ordinary ranking — the ledger
+      LOW for a literal path, ``ordinary path`` for a container.
 
     Cost (MINOR-4/5, PR #3802): a glob is expanded with the SAME bounded walk
     the evidence check uses (``_expand_glob``; past it, HIGH
@@ -1499,7 +1499,12 @@ def _reached_worktrees(
                 f"{root}: branch {activity.branch} has open {activity.pr_ref}; "
                 f"finish or close it first ({facts})",
             )
-        idle = activity.pr_state == "none" and not activity.owners_running
+        # An unknown PR state does not hold an OWN clean tree (#3816, operator
+        # escalation 2026-11-11): removal keeps the branch, so nothing is lost
+        # whatever the forge says — the same waiver ``git worktree remove``
+        # gets in ``_rank``. Only own trees reach this loop; a foreign tree
+        # stays HIGH below, and a dirty/locked/busy own tree stays held.
+        idle = activity.pr_state in ("none", "unknown") and not activity.owners_running
         # Strictly ``clean``: a stale ``initializing`` lock is LOW only for
         # ``git worktree remove -f -f``, which says so; ``rm -rf`` goes to the judge.
         if state != "clean" or not idle:
