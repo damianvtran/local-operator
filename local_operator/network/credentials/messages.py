@@ -285,22 +285,24 @@ def render_broker_error(
         # ``BrokerError.retry_after_is_floor``): say the floor plainly, never as the
         # reset time.
         span = f"at least {left}" if error.retry_after_is_floor else f"another {left}"
+        # SAY ONLY WHAT THIS REFUSAL KNOWS (2026-11-12, lop-remote-node-2). The old
+        # tail, "The usual failover to another of your own logins is already
+        # running", was a promise about the TURN made from the broker, which never
+        # starts one: the turn's failover is the borrower's own fallback chain, and on
+        # a remote whose chain was empty the turn simply stopped under a sentence
+        # saying it had not. What IS known here is what was tried — the owner was
+        # asked and had no free login to lend — so that is the whole sentence; the
+        # failover driver walks the chain (classifying this as ``quota``, see
+        # ``store.no_credential_limit``) and reports what it reached.
+        tried = f"so nothing was borrowed: no login on {owner} was free to lend."
         if accounts and left:
             return (
                 f"'{label}' on {owner} is rate-limited for {span} "
-                f"({', '.join(accounts)}), so nothing was borrowed. The usual failover "
-                "to another of your own logins is already running."
+                f"({', '.join(accounts)}), {tried}"
             )
         if left:
-            return (
-                f"'{label}' on {owner} is rate-limited for {span}, so nothing "
-                "was borrowed. The usual failover to another of your own logins is "
-                "already running."
-            )
-        return (
-            f"'{label}' on {owner} is rate-limited for now, so nothing was borrowed. The "
-            "usual failover to another of your own logins is already running."
-        )
+            return f"'{label}' on {owner} is rate-limited for {span}, {tried}"
+        return f"'{label}' on {owner} is rate-limited for now, {tried}"
     if error.code == "interactive_required":
         # "can run", not "has been asked to": nothing asks the owner (review round 2, M3 —
         # the design's §4.7 ``credential_repair`` op is not built, which is what the

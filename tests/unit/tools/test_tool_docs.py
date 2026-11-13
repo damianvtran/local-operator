@@ -442,7 +442,17 @@ MEASURED_TOKENS: dict[str, int] = {
     # the non-retryable detail). Net -7 chars, so the doc is now 8177. The
     # untrusted rule is deliberately NOT duplicated into the opt-in notes: the
     # wire carries it every turn, and that duplication is what would not fit.
-    "bridge": 1988,
+    # 1986 -> 1991 (+5, withheld-body delay, PR #3874 round 2): the
+    # `channel_history` blurb now says what `delay: transient` and
+    # `receiver_last_active_s` mean — the text an agent actually reads, which
+    # the round-1 draft put in an unserved docstring (QA Q-1). It is paid for by
+    # tightening take_up/ack/send/dm/channels/channel_create/channel_post (net
+    # -127 chars); the rendered doc was 8,171 chars against the 8,192 cap.
+    # MERGE with main (2026-11-13): main's wire description moved this to 1988
+    # on its own ("Peers, not gatekeepers", +7 chars). Re-measured on the
+    # merged tree: 8,178 chars, 1993 tokens — 14 chars of headroom, so the
+    # delay clause needs no further trim.
+    "bridge": 1993,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -758,7 +768,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # -> `cwd`, UX round 1 U6) and pays for the own-session clause in the
     # opening sentence with it. Nothing else moved; the field schema did not
     # change, so `tool_schemas` and `scripts/bench_context_budget.py` stand.
-    "sessions": 867,
+    # RE-MEASURED for the explicit-peer listing fix (PR #3897): 867 -> 868.
+    # `peer` on `list` now SELECTS one remote device instead of narrowing the
+    # remote half of a federated listing, so the `peer`/`scope` descriptions
+    # and the reference's mesh sentence say "selects only that device" and the
+    # `include_stored` refusal names `peer` beside `scope='remote'`. Net +1
+    # token; well inside the soft cap. Nothing else moved.
+    "sessions": 868,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
@@ -1181,6 +1197,22 @@ def test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current(
             "updating MEASURED_TOKENS in this file:\n\n"
             f"MEASURED_TOKENS = {json.dumps(current, indent=4, sort_keys=True)}"
         )
+
+
+def test_the_bridge_doc_explains_the_withheld_body_fields(
+    default_surface: list[AgentTool],
+) -> None:
+    """The fields an agent reads must mean something where the agent reads them.
+
+    A peer agent refused to act on a ``body: null`` row, and the round-1 draft
+    explained ``delay`` in a docstring no reader is served (QA Q-1): the text
+    below is what ``read tool://bridge`` actually returns.
+    """
+
+    doc = render_tool_doc(next(tool for tool in default_surface if tool.name == "bridge"))
+
+    for field in ("delay", "transient", "receiver_last_active_s"):
+        assert field in doc, f"the bridge doc does not explain {field}"
 
 
 def test_the_tier_configured_arm_is_pinned_too(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

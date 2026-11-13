@@ -67,6 +67,11 @@ import tokenize
 import zipfile
 from pathlib import Path
 
+# Spend build CPU, not the fixed PyPI storage budget: level 9 changes only ZIP
+# framing, never runtime bytes/docstrings. Pass it on each ZipInfo write as well;
+# those entries do not inherit ZipFile's default compression level.
+_COMPRESSION_LEVEL = 9
+
 #: Comments a tool other than the compiler reads from installed code. Matched against
 #: the comment token's text, so ``#noqa`` and ``#  type: ignore`` both count.
 _PRAGMA = re.compile(r"#\s*(type:|noqa|pragma|pyright:|fmt:)")
@@ -179,15 +184,13 @@ def slim_wheel(wheel: Path) -> tuple[int, int]:
                 out = zipfile.ZipInfo(info.filename, date_time=info.date_time)
                 out.external_attr = info.external_attr
                 out.compress_type = zipfile.ZIP_DEFLATED
-                # Spend build CPU, not PyPI quota: DEFLATE is lossless and leaves
-                # every verified module and runtime resource byte-identical.
-                dst.writestr(out, data, compresslevel=9)
+                dst.writestr(out, data, compresslevel=_COMPRESSION_LEVEL)
             # RECORD last, as wheel builders write it, with the source entry's metadata.
             source_record = next(i for i in infos if i.filename == record_name)
             out = zipfile.ZipInfo(record_name, date_time=source_record.date_time)
             out.external_attr = source_record.external_attr
             out.compress_type = zipfile.ZIP_DEFLATED
-            dst.writestr(out, record, compresslevel=9)
+            dst.writestr(out, record, compresslevel=_COMPRESSION_LEVEL)
         # mkstemp creates 0600 and os.replace keeps the temp file's mode, so without
         # this a slimmed wheel would be owner-only (measured: -rw------- after vs
         # -rw-r--r-- before). Keep the source wheel's permission bits.
