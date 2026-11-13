@@ -433,6 +433,9 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # Trusted-peer memory sync (network/memory.py): a bounded batch apply into the
             # SQLite store, 60 s like the other whole-bundle appliers.
             "net_memory",
+            # The single-file pull (network/files.py; mesh-file-transfer.md S1): a
+            # ``stat`` hashes up to 256 MiB, so it must not run on a link's reader.
+            "net_file_get",
             # The one CORE op on the lane (relay.py, not a slice): a create holds its
             # first turn for up to ``FIRST_TURN_WAIT_S``, which inline stalled the
             # whole link (#3547 review MAJOR-1/2).
@@ -700,6 +703,10 @@ def test_the_session_move_contract_is_frozen() -> None:
         # Clause 4: the cwd the destination mapped onto this host, when the
         # recorded one did not exist here. Additive inside the optional block.
         "cwd",
+        # remote-session-parity Gap B: the source could not refresh the session's
+        # team/agent and custom instructions on the destination before the move;
+        # names the copy that may be stale. Absent when the refresh landed.
+        "definitions_notice",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every

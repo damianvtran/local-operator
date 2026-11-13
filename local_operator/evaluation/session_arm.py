@@ -127,7 +127,7 @@ from local_operator.evaluation.lifecycle import (
     CleanupPlan,
     aggregate_cleanup,
 )
-from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.protocol import ActionBatch, AskUserAction, Observation
 from local_operator.evaluation.receipts import BudgetAuthorization
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
@@ -546,7 +546,9 @@ _PROSE_SUB_STEP_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: The prose arm's assertion shapes (see :func:`prose_claims_completion`). A
+#: The completion-claim label's assertion shapes (see
+#: :func:`prose_claims_completion`, which now only NAMES an ``agent_stop`` ending
+#: -- the text-only continuation no longer depends on it). A
 #: POSITIVE list on purpose: a terminal message that matches nothing is left
 #: alone, and the shapes below are the ones the sealed session-arm corpus
 #: actually exhibits. Each pattern is pinned by a unit test against the real
@@ -602,10 +604,48 @@ _PROSE_COMPLETION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
-#: ``FinishAction.reason``'s field bound (``protocol.py``); a prose claim is
-#: synthesised into one, so it takes that field's bound rather than inventing
-#: a second one.
+#: Upstream OSWorld's reply to a response that carries NO actions when the
+#: task has no user simulator, VERBATIM: ``DEFAULT_USER_RESPONSE`` in upstream
+#: ``lib_run_single.py`` (L17-19 of the OSWorld 2.0 tree the main29 arm ran
+#: against), sent by its ``ASK_USER`` branch (L745-771). Kept byte-identical on
+#: purpose: :meth:`ActionBridge.text_only_continuation` exists to give this
+#: arm the continuation upstream baselines get, and a paraphrase would make
+#: the two protocols differ in the one sentence the comparison rests on.
+OSWORLD_DEFAULT_USER_RESPONSE = (
+    "I have no further information to provide. "
+    "I trust you can figure it out based on the current observation and the instruction. "
+    "Please proceed with the next action. DO NOT ask me any more questions for this task."
+)
+
+#: The question bound for a text-only continuation: ``AskUserAction.question``
+#: and ``FinishAction.reason`` share this field bound (``protocol.py``), so the
+#: terminal prose is cut to it rather than to a second invented one.
 _PROSE_CLAIM_MAX_CHARS = 10_000
+
+#: The question put to the user simulator for a text-only turn with NO text
+#: (an empty or image-only reply). Upstream calls ``respond("")`` there
+#: (``lib_run_single.py`` L747-749: ``response if response else ""``), but
+#: the wire cannot carry an empty question: ``AskUserAction.question``
+#: (``protocol.py``, ``min_length=1`` and a non-blank pattern) and
+#: ``AskUserExchangeParams.prompt`` (``adapters/api.py``, ``min_length=1``)
+#: both refuse it, and relaxing a digest-bound protocol field for one edge
+#: would ripple into every adapter build. So the simulator IS consulted, as
+#: upstream's is, with this stand-in for the empty string -- the one
+#: deliberate deviation, and the record keeps the real (empty) question.
+EMPTY_REPLY_QUESTION = "(no text)"
+
+#: Said between the continuation's answer and the re-shown screen. The screen
+#: is the one the model last saw, so its ``Step:`` line still carries THAT
+#: observation's sequence number, while the restated budget line already
+#: counts the step this reply took (QA round 1, Q-2: ``Step: 1`` beside
+#: ``Step budget: 2 of 8 steps used`` reads as a contradiction). The render is
+#: shared with every other turn, so it is explained here rather than changed
+#: there, where it would move the bytes of every observation on both arms.
+CONTINUATION_SCREEN_NOTE = (
+    'The screen below is unchanged since your last action. Its "Step:" line '
+    "numbers that screen; the step budget line counts steps used, including "
+    "this reply."
+)
 
 
 def prose_claims_completion(text: str) -> bool:
@@ -618,9 +658,18 @@ def prose_claims_completion(text: str) -> bool:
     ended its final answer as prose -- "Done. Summary of what I determined
     and did: ..." with NO tool call -- and the turn simply ended
     (``agent_stop``): the gate never fired, and the run reads as an unverified
-    finish, which is exactly what the gate exists to prevent. This predicate is
-    the gate's answer-side detector for that terminal message (see
-    ``ActionBridge.prose_completion_challenge`` for when it is consulted).
+    finish, which is exactly what the gate exists to prevent. This predicate
+    USED to be the trigger of a one-shot prose challenge.
+
+    TODAY IT ONLY LABELS. Arm main29's ``t29a-t003`` measured the trigger's
+    false negative ending an episode upstream OSWorld would have continued,
+    so the trigger is gone: EVERY text-only ending now gets the protocol's
+    ``ASK_USER`` continuation (``ActionBridge.text_only_continuation``),
+    whatever its phrasing. This predicate is consulted only by
+    ``_agent_stop_terminal_reason`` to NAME an ending that still lands in
+    ``agent_stop`` (``completion-claim`` vs ``no-tool-call``); it decides
+    nothing about whether the episode goes on. The trade notes below are the
+    label's precision history.
 
     WHAT IT IS AND IS NOT. A narrow positive list of assertion shapes the
     corpus actually exhibits -- not a general "did the model succeed"
@@ -668,6 +717,116 @@ class SessionArmError(RuntimeError):
 # ---------------------------------------------------------------------------
 # The MCP declaration: one server, in the episode's own scratch root
 # ---------------------------------------------------------------------------
+
+#: The harness's ``run_command`` RPC deadline past the command's own
+#: ``timeout_s`` (``_make_run_command``). It must outlast the adapter's
+#: wall-clock bound on the guest reply (the OSWorld adapter's ``timeout_s + 10``)
+#: plus its lost-reply liveness probe (~4 s worst case), or the RPC deadline
+#: fires first and tears the channel down -- losing the episode the probe exists
+#: to keep. Named, not inline, because the action server's MCP request timeout
+#: is derived from it (:func:`action_server_mcp_timeout_s`).
+COMMAND_RPC_MARGIN_S = 20.0
+
+#: Slack between the ``run_command`` RPC deadline and the MCP client's request
+#: timeout for the episode action server. It covers what can still happen
+#: AFTER that deadline before the bridge's reply reaches the client: the RPC
+#: layer's 1 s cancel grace (``rpc.RpcClient.call``) and, on that poisoning
+#: path, the worker teardown (``_terminate_process_group``: up to
+#: ``TERM_GRACE_SECONDS`` for SIGTERM plus the same again after SIGKILL, then a
+#: 1 s drainer join -- 11 s at today's 5 s grace). The bridge -> stdio child ->
+#: MCP client hops are local and millisecond-scale. 30 s is ~2.5x that 12 s
+#: worst case; ``test_action_server_mcp_timeout_nests_*`` pins the inequality.
+ACTION_SERVER_REPLY_SLACK_S = 30.0
+
+
+def action_server_mcp_timeout_s() -> float:
+    """The MCP client request timeout the episode action server is declared with.
+
+    WHY THIS EXISTS. The MCP client bounds every request at
+    ``DEFAULT_MCP_TIMEOUT_MS`` (300 s) unless the server declares its own
+    ``timeout``, and ``run_command`` advertises a 300 s maximum
+    (``action_server.COMMAND_MAX_TIMEOUT_S``) whose downstream deadlines then
+    ADD margins (guest wrapper +5, adapter bound +10, harness RPC +20). So a
+    command near its advertised maximum was guaranteed to be cut by the MCP
+    client first: sealed episode ``t29a-t030-20261111-192648`` called
+    ``timeout_s: 300``, the client gave up at 305.06 s, the cancellation
+    poisoned the adapter session, and the episode was lost unscored.
+
+    The deadlines must NEST: each outer bound exceeds the inner one plus every
+    margin between them. Derived from the constants -- and read at call time,
+    not frozen at import -- so raising the command maximum (or the RPC margin)
+    moves this bound with it; the invariant test fails if anyone breaks that.
+
+    The GUI ``apply_actions`` tool shares this server and therefore this
+    timeout, which is >= the 300 s it had before, so nothing there tightens. A
+    GUI batch may legally declare up to 64 x 60 s of waits
+    (``deadlines.DECLARED_WORK_HEADROOM_S``), which no fixed MCP bound short of
+    an hour covers; that is tolerable because a GUI call cut by the client is
+    NOT forwarded as a cancellation (``action_server.forward_call`` half-closes
+    only for ``run_command``): the bridge finishes the batch, the reply is
+    lost, and the next call re-binds -- a lost reply, never a poisoned session.
+
+    WHAT THIS DOES NOT COVER: QUEUE TIME. The client's timer starts when the
+    request is SENT, but a ``run_command`` dispatches only once it holds the
+    bridge's single mutation lane -- behind an earlier command, a GUI batch, or
+    a command whose caller already left (``ActionBridge._handle`` detaches
+    those). This bound nests only the command's own deadlines; the bridge
+    closes the remainder itself by bounding the lane wait to the headroom this
+    bound leaves (:meth:`ActionBridge.call_command`), refusing an unsent
+    command instead of letting the client cut it, and by never dispatching a
+    command whose caller left while it was queued.
+    """
+
+    from local_operator.evaluation import action_server
+
+    return (
+        float(action_server.COMMAND_MAX_TIMEOUT_S)
+        + COMMAND_RPC_MARGIN_S
+        + ACTION_SERVER_REPLY_SLACK_S
+    )
+
+
+def action_server_client_timeout_s() -> float | None:
+    """The request bound the MCP client will ACTUALLY apply to the action server.
+
+    The declared per-server ``timeout`` run through the manager's own precedence
+    (``resolve_mcp_timeout_s``: ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks it;
+    ``0`` disables it, ``None``). The episode's MCP client lives in THIS process
+    (``sdk.open_session``), so this process's environment is the client's.
+    Resolved here rather than restated so the precheck, the declaration and the
+    bridge's lane-wait bound can never disagree with the client.
+    """
+
+    from local_operator.mcp.config import MCPStdioServerConfig
+    from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+    declared = MCPStdioServerConfig(timeout=int(action_server_mcp_timeout_s() * 1000))
+    return resolve_mcp_timeout_s(declared)
+
+
+def assert_action_server_timeout_nests(resolved_timeout: float | None = None) -> None:
+    """Refuse an episode whose MCP client would cut the longest legal command.
+
+    ``LOCAL_OPERATOR_MCP_TIMEOUT_MS`` outranks a per-server ``timeout``
+    (``resolve_mcp_timeout_s``), so an inherited env override could silently
+    undo the nesting the declaration sets and bring back the measured loss (a
+    300 s command cut by the MCP client, the session poisoned). It depends only
+    on the environment and constants, so ``run_session_episode`` calls it
+    BEFORE ``launch``/``prepare``: a refused run never provisions or resets a
+    target. ``assert_declaration_resolved`` repeats it on the DISCOVERED
+    config (``resolved_timeout``), proving the declaration that was actually
+    read resolves the same way.
+    """
+
+    if resolved_timeout is None:
+        resolved_timeout = action_server_client_timeout_s()
+    required_timeout = action_server_mcp_timeout_s()
+    if resolved_timeout is not None and resolved_timeout < required_timeout:
+        raise SessionArmError(
+            f"the action server's MCP request timeout resolves to {resolved_timeout:g} s, "
+            f"below the {required_timeout:g} s its longest command needs; "
+            "unset LOCAL_OPERATOR_MCP_TIMEOUT_MS (or raise it) for episode runs"
+        )
 
 
 @dataclass(frozen=True)
@@ -737,6 +896,12 @@ def declare_action_server(
         # reserves it for the episode's own turn -- children do not inherit it
         # and the harness refuses an execution carrying a child's job id.
         "ownTurnOnly": True,
+        # Per-server MCP request timeout (milliseconds), so the client's bound
+        # nests OUTSIDE every downstream command deadline instead of cutting a
+        # legitimate 300 s command at the 300 s client default. Scoped to this
+        # one server: ordinary sessions keep ``DEFAULT_MCP_TIMEOUT_MS``. See
+        # ``action_server_mcp_timeout_s`` for the derivation.
+        "timeout": int(action_server_mcp_timeout_s() * 1000),
     }
     if command:
         args.append("--command")
@@ -835,6 +1000,16 @@ def assert_declaration_resolved(
             f"the action server {server_name!r} was not discovered from {resolved_cwd}; "
             "the declaration and the session's cwd disagree"
         )
+    # The env-override refusal, re-checked on the config discovery actually
+    # read. ``run_session_episode`` already ran it before provisioning
+    # anything (``assert_action_server_timeout_nests``); this proves the
+    # discovered declaration resolves the same way.
+    if server_name == SERVER_NAME:
+        from local_operator.mcp.manager import resolve_mcp_timeout_s
+
+        resolved_timeout = resolve_mcp_timeout_s(configs[server_name])
+        if resolved_timeout is not None:
+            assert_action_server_timeout_nests(resolved_timeout)
     return sources
 
 
@@ -1207,11 +1382,12 @@ class ActionBridge:
         #: challenge itself charges a step after the screen was rendered.
         self._initial_shown: tuple[str, list[Any], StepPosition | None] | None = None
         self._last_shown: tuple[str, list[Any], StepPosition | None] | None = None
-        #: The terminal assistant message the prose arm reads. Updated by
+        #: The terminal assistant message the text-only continuation and the
+        #: ``agent_stop`` label read. Updated by
         #: ``fold`` on every ``MessageEndEvent``, so once the turn ends this is
         #: the message the run ended on -- a prose "Done" never reaches
         #: ``call``, so the event stream is the only place the bridge can see
-        #: it (see ``prose_completion_challenge``).
+        #: it (see ``text_only_continuation``).
         self._last_assistant_message: Message | None = None
         #: The ask answer's delivery, staged by ``call`` for THIS call only and
         #: consumed by whichever result path answers it (the normal return, a
@@ -1251,6 +1427,10 @@ class ActionBridge:
         #: list is trimmed to ``RECENT_TURNS_WINDOW`` -- the runner's bound.
         #: Stays empty when the policy is off.
         self._progress_turns: list[EpisodeTurn] = []
+        #: Assistant message ids already answered by
+        #: :meth:`text_only_continuation`: one continuation per message, so a
+        #: delivery that yields no new assistant message cannot loop on it.
+        self._continued_message_ids: set[str] = set()
 
     def arm(self, observation: Observation) -> None:
         """Arm the token with the episode's first observation.
@@ -1518,7 +1698,7 @@ class ActionBridge:
     def last_assistant_message(self) -> Message | None:
         """The last assistant message the stream ended on.
 
-        ``fold`` keeps it for the prose arm; the driver reads it back here so
+        ``fold`` keeps it for the text-only continuation; the driver reads it back here so
         an ``agent_stop``'s ``terminal_reason`` can name the message the turn
         ended on without re-reading the record's ``events.jsonl``.
         """
@@ -1529,10 +1709,9 @@ class ActionBridge:
     def completion_challenges_fired(self) -> int:
         """How many completion-gate challenges this episode delivered.
 
-        One counter for BOTH arms -- the finish-call challenge and the prose
-        claim's -- exactly as the budget is one, so a reader of an
-        ``agent_stop`` can tell an ending that survived the gate from one the
-        gate never saw.
+        The finish-call challenge is the gate's only trigger now (a text-only
+        turn is continued, never challenged), so a reader of an ``agent_stop``
+        can tell an ending that survived the gate from one the gate never saw.
         """
 
         return self._completion_fired
@@ -1563,9 +1742,9 @@ class ActionBridge:
 
         Folding is the DRIVER's job (as in the loop-driven design): the
         engine does not know the token exists, so the arming happens on
-        ``TurnEndEvent`` and the next call reads the result. The prose arm of
-        the completion gate reads the stream from the same seam: the terminal
-        assistant message is the only copy of a prose "Done" the bridge can
+        ``TurnEndEvent`` and the next call reads the result. The text-only
+        continuation reads the stream from the same seam: the terminal
+        assistant message is the only copy of a text-only reply the bridge can
         see, because a message without a tool call never reaches ``call``.
         """
 
@@ -1574,7 +1753,7 @@ class ActionBridge:
         if isinstance(event, MessageEndEvent):
             message = event.message
             # ``AgentMessage`` is a union (``Message | CustomMessage``); the
-            # prose arm only ever reads a real assistant ``Message``, and the
+            # continuation only ever reads a real assistant ``Message``, and the
             # isinstance check is what tells the type checker so.
             if isinstance(message, Message) and message.role == "assistant":
                 self._last_assistant_message = message
@@ -1590,96 +1769,254 @@ class ActionBridge:
         if isinstance(event, (TurnEndEvent, AgentEndEvent)):
             self._finalize_output_group()
 
-    def prose_completion_challenge(self) -> list[Any] | None:
-        """The gate's re-prompt for a terminal message that CLAIMS completion.
+    async def text_only_continuation(
+        self, *, halted: Callable[[], str | None] | None = None
+    ) -> list[Any] | None:
+        """See :meth:`_text_only_continuation`; serialised with :meth:`call`.
 
-        THE BYPASS THIS CLOSES. The gate inside ``call`` only ever sees a claim
-        the model made THROUGH the action tool. Arm 1748's first field run
-        (task_003) ended its final answer as prose -- "Done. Summary of what I
-        determined and did: ..." with no tool call at all -- and the turn
-        simply ended: ``agent_stop``, no challenge, no chance for the model to
-        compare its claim against the screen. This method is the gate's
-        answer-side arm; the driver calls it the moment the turn ends, and the
-        challenge itself -- text builder, reply guidance, bound -- is the ONE
-        already shipped on this channel, so the two arms cannot drift.
+        The bridge's ONE mutation lane: the step clocks, the progress window
+        and the ask seam are the state ``call`` mutates under ``_lock``, so the
+        continuation takes the same lock rather than relying on the turn
+        having ended.
 
-        WHEN IT FIRES (all required, each load-bearing):
+        ``halted`` is the driver's kill-switch probe (the episode wall), read
+        AFTER the answer is obtained: see the method below for why the check
+        at the driver's loop head is not enough.
+        """
 
-        * the episode has NOT already ended (``end_requested is None`` and the
-          token is not terminal): a finish or a truncation has its own ending,
-          and the summary prose that often FOLLOWS an accepted finish (every
-          completed run in the corpus ends that way) must not earn a second
-          exchange;
-        * the gate is enabled and the SHARED budget is not spent -- the prose
-          arm draws from the same ``completion_challenges`` counter as the
-          finish-call arm, so one episode can never exceed the configured
-          number of challenges across BOTH paths;
-        * the terminal assistant message carries NO tool call -- a message with
-          one is ``call``'s business, not this arm's;
-        * its text matches :func:`prose_claims_completion` -- which the
-          round-1 review's eight adversarial narration shapes are the pinned
-          regression table for: next-work announcements, partial-scope
-          statements and ordinal sub-tasks do not fire, nor do plain answers
-          or the silent-provider ending class's empty terminal messages (the
-          residual class is named in the detector's docstring).
+        async with self._lock:
+            return await self._text_only_continuation(halted=halted)
 
-        RETURNS the challenge content (the challenge text plus the SAME
-        rendered blocks the model was last shown, re-attached -- never
-        re-rendered) for the driver to deliver as one harness-injected user
-        turn, or ``None`` when the gate does not apply. The counter and the
-        record are updated HERE, so a firing is counted and auditable even if
-        the delivery then fails.
+    async def _text_only_continuation(
+        self, *, halted: Callable[[], str | None] | None = None
+    ) -> list[Any] | None:
+        """The protocol's continuation for a turn that ended with NO tool call.
+
+        WHY (arm main29, local-operator ``ad1aa4162a6e``, ``t29a-t003``). A
+        session turn ends the moment the model replies with prose and no tool
+        call. The arm used to give such an ending ONE follow-up, and only when
+        a regex list (:func:`prose_claims_completion`) recognised the prose as a
+        completion claim; anything else ended the episode as ``agent_stop`` /
+        ``no-tool-call``. t003's last message claimed completion in prose
+        ("Both slides verified in LibreOffice... Summary of what was done...")
+        that matched none of the patterns, so the episode simply ended -- and
+        the benchmark's own loop would NOT have ended there. Upstream OSWorld's
+        ``lib_run_single.py`` (the ``if not actions:`` branch at L745-771, and
+        the same branch at L1094/L1536/L1731/L1818) treats ANY response
+        without actions as ``ASK_USER``: it answers with the task's user
+        simulator when the environment has one, else with
+        ``DEFAULT_USER_RESPONSE`` (L17-19), counts ONE step, and loops. Upstream
+        baselines get that continuation; this arm now gives the same one, so
+        the decision no longer depends on how the prose happens to be phrased.
+
+        WHAT IT DOES, in the runner's order for an ask step:
+
+        1. eligibility (all required): the episode has not ended (no accepted
+           finish -- the summary prose that follows every accepted finish must
+           not earn an exchange -- no truncation, no wedge); the terminal
+           assistant message carries no tool call and was not already
+           continued (one continuation per message, so a delivery that yields
+           no new message cannot spin); both step clocks have room;
+        2. ONE step is charged on the official output-epoch clock (upstream's
+           ``step_idx += 1``), as an admitted ``ask_user`` batch is;
+        3. the turn enters the progress window as a single-``ask_user`` batch
+           -- exactly what it is in the protocol -- so the EXISTING
+           ``ask-loop`` guard (``runner.guards.AskLoopGuard``) bounds a run of
+           text-only turns, together with any real ``ask_user`` batches, with
+           no new counter. A guard verdict truncates here, BEFORE the simulator
+           is consulted (an answer the model would never read is not spent);
+           a step that exhausts the budget ends ``max-steps`` the same way;
+        4. the answer: the task's user simulator through the adapter's ask
+           seam when the episode has one (the prose is the question, as
+           upstream passes ``response``), else -- or when the simulator
+           declines -- ``DEFAULT_USER_RESPONSE`` verbatim.
+
+        CONSTRAINTS. With the progress policy OFF (``progress_guards`` is
+        ``None``, the arm's historical opt-out) the window is not kept, and a
+        text-only chain is bounded only by the step budget and the wall --
+        upstream's own bound; the operator opted out of no-progress
+        truncation, and this method does not quietly opt them back in. A
+        failed simulator exchange is recorded and ENDS the continuation
+        (``None``): substituting the default for a task that has a simulator
+        would invent an answer the protocol would not give. An empty-text
+        message is still put to the simulator, as upstream's ``respond("")``
+        is, with :data:`EMPTY_REPLY_QUESTION` standing in for the empty string
+        the wire refuses. A simulator answering ``None`` gets the default: the
+        model must be handed text, and upstream would pass ``None`` on into its
+        message list -- a value no model input here can carry. Both are
+        deliberate deviations from ``lib_run_single.py`` L747-749.
+
+        THE WALL CAN FIRE DURING THE ANSWER (review round 1, R1-1). Obtaining
+        it is an adapter RPC -- with a simulator, a model call bounded only by
+        ``step_timeout``. The driver's wall timer aborts the session, but
+        between turns there is no turn to abort, and the next ``prompt``
+        clears the sticky flag ("a fresh user prompt supersedes any earlier
+        interrupt request", ``Session.prompt``), so a continuation delivered
+        then would run a whole turn past the kill switch. ``halted`` is
+        therefore re-read once the answer is in hand, and a reason it returns
+        ends the continuation undelivered under that reason. Nothing awaits
+        between this check and the driver's ``prompt``.
+
+        Every outcome writes one ``text_only_continuation`` row, delivered or
+        not, so the record says why the episode went on or stopped -- the
+        budget sink's cancel included (the driver calls in for that ending
+        too; see ``run_session_episode``).
+
+        RETURNS the content to deliver as one harness-injected user turn (the
+        answer text, then the screen the model was last shown with its budget
+        line restated -- the blocks it must bind its next call to), or
+        ``None`` when the episode ends here.
         """
 
         if self.end_requested is not None:
             return None
-        if self._token is None or self._token.terminal:
-            return None
-        if not self.completion_gate or self._completion_fired >= self.completion_challenges:
+        token = self._token
+        if token is None or token.terminal:
             return None
         message = self._last_assistant_message
         if message is None or message.tool_calls:
             return None
-        text = message.text.strip()
-        if not prose_claims_completion(text):
+        if message.stop_reason in ("error", "aborted"):
+            # A faulted or aborted message is not the model's reply (the
+            # output-group clock treats it the same way); its ending keeps the
+            # driver's label.
             return None
-        observation = self._last_observation
-        if observation is None:  # pragma: no cover - arm() always sets it
+        if message.id in self._continued_message_ids:
             return None
-        # The claim is a CLAIM whether it arrived as a finish action or as
-        # prose; quoting it back through the same builder is what keeps the two
-        # arms' challenges byte-identical above the channel sentence. The
-        # synthesised status is ``done`` because that is what the message
-        # asserts, and it binds to the same last observation the challenge
-        # re-attaches -- the screen the claim is about.
-        claim = FinishAction(
+        observation = token.pending
+        if observation is None:  # pragma: no cover - an armed, non-terminal token holds one
+            return None
+        if self._steps >= self.max_steps or self._attempted_groups >= self.max_steps:
+            # No step left to spend on an answer (the prose message itself may
+            # have taken the last attempted group): nothing is charged, the
+            # budget stop the driver's sink already raised ends the episode,
+            # and the row says why it did not go on. The ending is NAMED as
+            # the budget here, as the post-charge branch below names it: the
+            # attempted clock can be spent while the official one is not
+            # (refused groups charge only the attempted clock), and without
+            # this the driver read the ending as the model's own
+            # ``agent_stop`` while this row said ``max-steps`` (R1-2).
+            token.mark_terminal()
+            self.end_requested = "max-steps"
+            self._continued_message_ids.add(message.id)
+            if self.record is not None:
+                self.record(
+                    "text_only_continuation",
+                    {
+                        "message_id": message.id,
+                        "steps": self._steps,
+                        "delivered": False,
+                        "stopped": "max-steps",
+                    },
+                )
+            return None
+        self._continued_message_ids.add(message.id)
+        text = (message.text or "").strip()
+        question = text[:_PROSE_CLAIM_MAX_CHARS]
+        self._consume_output_epoch("text-only-continuation")
+        row: dict[str, Any] = {
+            "message_id": message.id,
+            "question": question,
+            "steps": self._steps,
+        }
+        if self._steps >= self.max_steps:
+            # Upstream's ``step_idx += 1`` reached ``max_steps``: its loop
+            # exits on that count, so the answer is never read. End here,
+            # named, rather than hand the model a turn whose next action the
+            # bridge can only refuse with the budget ACK.
+            token.mark_terminal()
+            self.end_requested = "max-steps"
+            self._record_continuation(row, delivered=False, stopped="max-steps")
+            return None
+        # The turn as the protocol sees it: ONE ask_user batch on the screen
+        # the model was shown. Bound to the pending observation, never
+        # executed -- nothing on the screen changed, so the token stays armed
+        # on it and the model's next call binds to the same observation.
+        batch = ActionBatch(
+            protocol_version="1.0",
+            task_id=observation.task_id,
+            episode_id=observation.episode_id,
             observation_id=observation.observation_id,
-            status="done",
-            reason=text[:_PROSE_CLAIM_MAX_CHARS],
+            actions=(
+                AskUserAction(
+                    observation_id=observation.observation_id,
+                    request_id=f"text-only-{self._steps}-{uuid.uuid4().hex[:8]}",
+                    question=question or EMPTY_REPLY_QUESTION,
+                ),
+            ),
         )
-        challenge = build_completion_challenge(
-            claim=claim,
-            instruction=self.instruction,
-            observation=observation,
-            reply_guidance=self.reply_guidance,
-        )
-        self._completion_fired += 1
+        verdict = self._evaluate_progress(observation, batch, observation)
+        if verdict is not None:
+            self._apply_progress_stop(token, verdict)
+            self._record_continuation(row, delivered=False, stopped=verdict.code)
+            return None
+        answer: str | None = None
+        # ``ask_exchange`` says what the seam did, so a reader can tell "the
+        # task has no simulator / it declined" (the adapter answers both as a
+        # clean decline) from "no exchange was attempted" (no adapter-owned
+        # seam). An empty message is asked too (see EMPTY_REPLY_QUESTION).
+        row["ask_exchange"] = "none"
+        if self.ask is not None:
+            try:
+                delivery = await self.ask(batch)
+            except Exception as error:  # noqa: BLE001 - recorded, and the episode ends legibly
+                row["ask_exchange"] = "failed"
+                row["error"] = f"{type(error).__name__}: {error}"[:400]
+                self._record_continuation(row, delivered=False, stopped="ask-exchange-failed")
+                return None
+            receipt, answer = _split_ask_delivery(delivery)
+            if self.record is not None and receipt is not None:
+                self.record("ask_exchange", {"receipt": receipt})
+            row["ask_exchange"] = "answered" if answer is not None else "declined"
+        if answer is not None:
+            row["answer_source"] = "user-simulator"
+        else:
+            answer = OSWORLD_DEFAULT_USER_RESPONSE
+            row["answer_source"] = "default-user-response"
+        row["answer"] = answer
+        halt_reason = halted() if halted is not None else None
+        if halt_reason is not None:
+            # The kill switch fired while the answer was being obtained: the
+            # step stays charged (it was spent, as upstream's ``step_idx``
+            # is), the answer is recorded, and nothing is delivered.
+            self._record_continuation(row, delivered=False, stopped=halt_reason)
+            return None
+        self._record_continuation(row, delivered=True, stopped=None)
+        shown = self._shown_blocks(observation)
+        note = [TextContent(text=CONTINUATION_SCREEN_NOTE)] if shown else []
+        return [TextContent(text=answer), *note, *shown]
+
+    def _record_continuation(
+        self, row: dict[str, Any], *, delivered: bool, stopped: str | None
+    ) -> None:
+        """Write the one ``text_only_continuation`` row for a continuation."""
+
+        if self.record is None:
+            return
+        payload = {**row, "delivered": delivered}
+        if stopped is not None:
+            payload["stopped"] = stopped
+        self.record("text_only_continuation", payload)
+
+    def _apply_progress_stop(self, token: Any, verdict: GuardVerdict) -> None:
+        """End the episode on a progress-guard verdict (the runner's truncation).
+
+        One definition for the executed-batch path in :meth:`call` and the
+        text-only continuation: the token goes terminal so any later call is
+        refused before execute, ``end_requested`` carries the guard's stable
+        code, and the driver maps ``progress_stop_code`` to ``truncated`` and
+        asks the session for its graceful stop.
+        """
+
+        token.mark_terminal()
+        self.end_requested = verdict.code
+        self.end_diagnostic = verdict.detail
+        self.progress_stop_code = verdict.code
         if self.record is not None:
-            # Same record kind as the finish-call arm -- one counter, one
-            # budget -- and the ``trigger`` key is the discriminator for
-            # readers counting which arm fired; the finish-call row keeps its
-            # own historical shape.
             self.record(
-                "completion_challenged",
-                {
-                    "status": "done",
-                    "reason": claim.reason,
-                    "challenge": challenge,
-                    "observation_id": observation.observation_id,
-                    "trigger": "terminal-message",
-                },
+                "progress_stop",
+                {"code": verdict.code, "detail": verdict.detail, "steps": self._steps},
             )
-        return [TextContent(text=challenge), *self._shown_blocks(observation)]
 
     async def start(self) -> None:
         self.endpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -1709,19 +2046,122 @@ class ActionBridge:
         except OSError:
             pass
 
-    async def call_command(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    async def call_command(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        caller_gone: asyncio.Event | None = None,
+    ) -> dict[str, Any]:
         """Run a negotiated text operation without consuming a screen token.
 
         Transport failures remain errors, not synthetic exit statuses. Recording
         metadata excludes output: sealed artifacts still identify exactly what ran.
+
+        ``caller_gone`` is set by :meth:`_handle` when the MCP caller left (a
+        client request timeout, an interrupted turn). Before dispatch the
+        command is then never sent (``cancelled_before_dispatch``); after
+        dispatch it is left to settle (see :meth:`_handle`) and its row is
+        sealed as the unknown outcome the caller was left with.
+
+        THE LANE WAIT IS BOUNDED. The MCP client's request timer runs from send,
+        so time spent queued here comes out of the budget
+        :func:`action_server_mcp_timeout_s` nested around the command's own
+        deadlines. A command may wait for the lane only as long as that bound
+        still leaves its full ``timeout_s + COMMAND_RPC_MARGIN_S +
+        ACTION_SERVER_REPLY_SLACK_S`` after dispatch -- i.e. the headroom below
+        the advertised maximum (``COMMAND_MAX_TIMEOUT_S - timeout_s`` at the
+        declared bound; none at the maximum itself). Past it the command is
+        refused UNSENT with a reply the caller still receives, instead of being
+        cut by the client as a generic timeout whose outcome the model cannot
+        know. No new number: the bound is derived from the deadlines already
+        nested, and an unbounded client (``LOCAL_OPERATOR_MCP_TIMEOUT_MS=0``)
+        leaves the wait unbounded.
         """
+        from local_operator.evaluation.action_server import (
+            COMMAND_DEFAULT_TIMEOUT_S,
+            COMMAND_MAX_TIMEOUT_S,
+        )
+
+        requested = arguments.get("timeout_s", COMMAND_DEFAULT_TIMEOUT_S)
+        client_timeout = action_server_client_timeout_s()
+        lane_budget: float | None = None
+        if (
+            client_timeout is not None
+            and type(requested) is int
+            and 1 <= requested <= COMMAND_MAX_TIMEOUT_S
+        ):
+            # Invalid arguments get no budget: the locked path refuses them at
+            # once, and a bound computed from a malformed value means nothing.
+            lane_budget = client_timeout - (
+                requested + COMMAND_RPC_MARGIN_S + ACTION_SERVER_REPLY_SLACK_S
+            )
         # Screen actions, terminal admission and commands share ONE mutation
         # lane. Keep the ended-state check inside it so queued calls cannot run
         # after a finish accepted while they were waiting.
-        async with self._lock:
-            return await self._call_command_locked(arguments)
+        if lane_budget is None:
+            await self._lock.acquire()
+        else:
+            acquired = False
+            if lane_budget > 0:
+                try:
+                    await asyncio.wait_for(self._lock.acquire(), lane_budget)
+                    acquired = True
+                except TimeoutError:
+                    pass
+            elif not self._lock.locked():
+                # No headroom (a command at the advertised maximum): it may
+                # take a FREE lane, but cannot afford to wait for a busy one.
+                # ``wait_for(..., 0)`` would refuse even the free lane.
+                await self._lock.acquire()
+                acquired = True
+            if not acquired:
+                return self._refuse_unsent_command(
+                    arguments,
+                    outcome="refused_lane_busy",
+                    text=(
+                        "Not run: the remote computer is still busy with an earlier "
+                        f"call, and waiting for it would leave this command's "
+                        f"timeout_s of {requested} s too little time before the call "
+                        "itself times out. Nothing was sent. Earlier calls -- "
+                        "including one that was cut short and may still be running "
+                        "-- finish first; retry after they have, or with a smaller "
+                        "timeout_s."
+                    ),
+                )
+        try:
+            return await self._call_command_locked(arguments, caller_gone)
+        finally:
+            self._lock.release()
 
-    async def _call_command_locked(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    def _refuse_unsent_command(
+        self, arguments: Mapping[str, Any], *, outcome: str, text: str
+    ) -> dict[str, Any]:
+        """Refuse a command that was NEVER sent, and say so in the record.
+
+        ``target_may_have_run: False`` is the point: unlike
+        ``cancelled_after_dispatch`` this command provably did not reach the
+        target, so a later reader (and a re-issue) need not treat it as an
+        unknown mutation. No ``command_started`` row precedes it -- that row
+        marks a dispatch.
+        """
+        if self.record is not None:
+            self.record(
+                "command",
+                {
+                    "call_id": f"command-{uuid.uuid4().hex[:12]}",
+                    "command": arguments.get("command"),
+                    "timeout_s": arguments.get("timeout_s"),
+                    "cancelled": outcome == "cancelled_before_dispatch",
+                    "dispatched": False,
+                    "outcome": outcome,
+                    "target_may_have_run": False,
+                },
+            )
+        return {"content": [TextContent(text=text)], "is_error": True}
+
+    async def _call_command_locked(
+        self, arguments: Mapping[str, Any], caller_gone: asyncio.Event | None = None
+    ) -> dict[str, Any]:
         from local_operator.evaluation.action_server import (
             COMMAND_DEFAULT_TIMEOUT_S,
             COMMAND_MAX_TIMEOUT_S,
@@ -1748,6 +2188,18 @@ class ActionBridge:
             return refusal(
                 "Invalid command arguments: supply a command and a bounded integer timeout_s."
             )
+        if caller_gone is not None and caller_gone.is_set():
+            # The caller left while this command was QUEUED on the lane (an
+            # interrupted turn, or a client timeout the lane bound could not
+            # prevent). It was told the call failed, so dispatching it now
+            # would mutate the target unseen -- and twice if it re-issues.
+            # Nothing is awaited between this check and dispatch below, so a
+            # caller leaving after it is the after-dispatch case.
+            return self._refuse_unsent_command(
+                arguments,
+                outcome="cancelled_before_dispatch",
+                text="Not run: the caller cancelled this command before it was sent.",
+            )
         row: dict[str, Any] = {
             "call_id": f"command-{uuid.uuid4().hex[:12]}",
             "command": command,
@@ -1758,7 +2210,7 @@ class ActionBridge:
         if self.record is not None:
             self.record("command_started", dict(row))
 
-        def record_cancellation() -> None:
+        def record_cancellation(settled: dict[str, Any] | None = None) -> None:
             row.update(
                 cancelled=True,
                 outcome="cancelled_after_dispatch",
@@ -1769,8 +2221,18 @@ class ActionBridge:
                 stderr_truncated=None,
                 error="CancelledError: command outcome unknown",
             )
+            # The harness-side settlement of a command whose caller left, kept
+            # BESIDE the model-facing fields rather than in them: the model was
+            # never shown this result, so the row's outcome stays the unknown
+            # it was left with (a late success must never read as green), while
+            # the record still says what the target actually answered.
+            if settled is not None:
+                row["settled_after_cancel"] = settled
             if self.record is not None:
                 self.record("command", row)
+
+        def caller_left() -> bool:
+            return caller_gone is not None and caller_gone.is_set()
 
         try:
             result = await self.run_command(command, float(timeout))
@@ -1788,6 +2250,9 @@ class ActionBridge:
             if task is not None and task.cancelling():
                 record_cancellation()
                 raise asyncio.CancelledError from error
+            if caller_left():
+                record_cancellation({"error": f"{type(error).__name__}: {error}"})
+                return refusal("The caller cancelled this command.")
             row.update(
                 exit_code=None,
                 timed_out=None,
@@ -1801,6 +2266,9 @@ class ActionBridge:
                 f"The target could not run the command ({type(error).__name__}: {error})."
             )
         details = result.model_dump(mode="json", exclude={"stdout", "stderr"})
+        if caller_left():
+            record_cancellation(details)
+            return refusal("The caller cancelled this command.")
         row.update(details)
         if self.record is not None:
             self.record("command", row)
@@ -1828,23 +2296,52 @@ class ActionBridge:
             line = await reader.readline()
             request = decode_call(line)
             if request["tool"] == "run_command":
-                operation = asyncio.create_task(self.call_command(request.get("arguments") or {}))
+                caller_gone = asyncio.Event()
+                operation = asyncio.create_task(
+                    self.call_command(request.get("arguments") or {}, caller_gone=caller_gone)
+                )
                 disconnect = asyncio.create_task(reader.read(1))
                 try:
                     done, _ = await asyncio.wait(
                         (operation, disconnect), return_when=asyncio.FIRST_COMPLETED
                     )
                     if disconnect in done:
-                        # The command client half-closes on cancellation. ACK
-                        # only after forwarding cancellation, so a caller that
-                        # releases a delayed HTTP reply cannot race this signal.
-                        operation.cancel()
-                        writer.write(encode_response([], is_error=True))
-                        await writer.drain()
+                        # The command client half-closes on cancellation (an
+                        # MCP request timeout, an interrupted turn). The command
+                        # is DETACHED, not cancelled: cancelling it could not
+                        # recall what the guest already runs, and cancelling
+                        # the in-flight adapter RPC poisons its channel
+                        # (``RpcClient.call``) and kills the worker -- the
+                        # measured loss, where one cut ``timeout_s: 300``
+                        # command failed every later call and ``score``.
+                        #
+                        # WHY HERE, and with no probe of its own. This is the
+                        # one layer that turns "the caller went away" into a
+                        # cancellation; below it the RPC cannot be cancelled
+                        # without poisoning, so no probe there could save the
+                        # session. Letting the bounded RPC settle (its own
+                        # deadline, ``timeout_s + COMMAND_RPC_MARGIN_S``) makes
+                        # the outcome KNOWN to the harness, and the existing
+                        # liveness rule already runs inside it: a lost guest
+                        # reply takes the adapter's one ``/platform`` probe --
+                        # live guest, an unknown-outcome answer carrying
+                        # ``UNKNOWN_OUTCOME_CAUTION`` and the session lives;
+                        # dead guest, the error escapes and ``_mutating_call``
+                        # poisons as before. Holding the mutation lane until it
+                        # settles keeps later calls (and ``finish``) ordered
+                        # behind it. This matches ``apply_actions``, whose
+                        # cut caller was never forwarded as a cancellation.
+                        # Only a cancellation of THIS handler (bridge teardown)
+                        # still cancels the operation, via ``finally``.
+                        caller_gone.set()
                         try:
-                            await operation
-                        except asyncio.CancelledError:
+                            writer.write(encode_response([], is_error=True))
+                            await writer.drain()
+                        except OSError:
+                            # The caller's bounded ACK wait already gave up;
+                            # the command must still settle, not be cancelled.
                             pass
+                        await operation
                         return
                     reply = await operation
                 finally:
@@ -2081,8 +2578,9 @@ class ActionBridge:
                             "observation_id": pending.observation_id,
                         }
                         # The ``done`` row keeps its historical shape (no
-                        # trigger key); the new rule is discriminated the way
-                        # the prose arm's row is, by ``trigger``.
+                        # trigger key); the premature rule is discriminated by
+                        # ``trigger``, as the retired prose challenge's
+                        # ``terminal-message`` rows in older records are.
                         if kind == "premature-terminal":
                             row["trigger"] = "premature-terminal"
                         self.record("completion_challenged", row)
@@ -2232,16 +2730,11 @@ class ActionBridge:
                 # before execute, and ``end_requested`` carries the guard's
                 # stable code -- the driver maps it to ``truncated`` and asks
                 # the session for the same graceful stop it uses at the budget.
-                token.mark_terminal()
-                self.end_requested = verdict.code
-                self.end_diagnostic = verdict.detail
-                self.progress_stop_code = verdict.code
-                if self.record is not None:
-                    self.record(
-                        "progress_stop",
-                        {"code": verdict.code, "detail": verdict.detail, "steps": self._steps},
-                    )
-                rendered = [*rendered, TextContent(text=PROGRESS_STOP_ACK.format(verdict.detail))]
+                self._apply_progress_stop(token, verdict)
+                rendered = [
+                    *rendered,
+                    TextContent(text=PROGRESS_STOP_ACK.format(verdict.detail)),
+                ]
                 details["terminal"] = PROGRESS_GUARD_TERMINAL
             return {
                 "content": [*self._pending_ask_delivery, *rendered],
@@ -3086,6 +3579,41 @@ def _bounded_text_keeping_tail(text: str, limit: int, *, tail: int) -> str:
     return f"{head} … {kept}"
 
 
+def _turn_ended_cleanly(end: AgentEndEvent | None) -> bool:
+    """Whether a turn ended because the MODEL stopped, not because it was cut.
+
+    The text-only continuation answers the model's own reply; a turn that
+    ended on a provider error, an abort or a stamped cut-off cause ended for a
+    reason the model did not choose, and its ending keeps the label
+    :func:`_agent_stop_terminal_reason` gives it. ``None`` (no end frame seen)
+    is not clean: nothing proves the model stopped.
+    """
+
+    if end is None:
+        return False
+    return not (end.error or end.aborted or end.cut_off_cause)
+
+
+def _budget_cancelled_the_turn(end: AgentEndEvent | None, budget_stop_sent: bool) -> bool:
+    """Whether the turn's abort is the driver's own step-budget cancel.
+
+    The budget sink asks for a graceful cancel at the message that spends the
+    last attempted group, and the session then ends that turn ``aborted``
+    even when the message was a completed text-only reply. Read as unclean,
+    the bridge never saw it: no ``text_only_continuation`` row, and the label
+    fell through to a causeless ``aborted`` although a ``budget_stop`` row was
+    written (QA round 1, Q-1, measured on the real session with progress
+    guards off). Letting this one abort through lets the bridge record the
+    undelivered continuation and end the episode ``max-steps``; it cannot
+    deliver one, since the budget it checks first is the one already spent.
+    A provider error or a stamped cut-off cause is never this.
+    """
+
+    if end is None or not budget_stop_sent:
+        return False
+    return bool(end.aborted) and not (end.error or end.cut_off_cause)
+
+
 def _agent_stop_terminal_reason(
     *,
     wall_fired: bool,
@@ -3106,7 +3634,7 @@ def _agent_stop_terminal_reason(
     THE INPUTS ARE THE SHARED FACTS, never adapter state: the final
     ``AgentEndEvent`` (``aborted`` / ``error`` / ``cut_off_cause`` -- the frame
     the TUI, the phone and ``exec --json`` all read), the terminal assistant
-    message the bridge folds for the prose arm, and the driver's own wall
+    message the bridge folds for the text-only continuation, and the driver's own wall
     bound, whose abort reason never rides the event. Nothing here changes when
     a turn ends, what it scored, or which status it lands in: the same episode
     ends the same way, and the label only names which way that was.
@@ -3328,6 +3856,10 @@ async def run_session_episode(
         rescue_required = True
 
     try:
+        # Before ``launch``: a run whose MCP client would cut its longest
+        # command is refused while nothing is provisioned (QA round 1, Q2 --
+        # the check had run after prepare + reset, i.e. after an AWS VM was up).
+        assert_action_server_timeout_nests()
         # --- launch + prepare (mirrors EpisodeRunner._launch_and_prepare) ----
         supervisor = launch(selector)
         handshake: Handshake = await supervisor.handshake(timeout=config.handshake_timeout)
@@ -3709,25 +4241,41 @@ async def run_session_episode(
                 wall_timer = asyncio.get_running_loop().call_later(max_wall_s, _on_wall)
             try:
                 await handle.session.prompt(prompt, images=images or None)
-                # The completion gate's prose arm: a terminal message that
-                # CLAIMS completion without a tool call gets the SAME challenge
-                # a finish call gets, delivered against the state the model
-                # last saw. Arm 1748's task_003 ended with "Done. Summary ..."
-                # as prose and escaped the gate entirely; the re-prompt is one
-                # harness-injected user turn (the reply channel's re-prompt, in
-                # this channel's vocabulary -- the challenge text is the same
-                # builder the finish-call arm uses). The loop is bounded by the
-                # SHARED challenge budget inside the bridge, and it is skipped
-                # when the wall bound fired: the wall is a kill switch, and a
-                # re-prompt after it would spend past it.
-                while not wall_fired:
-                    challenge = bridge.prose_completion_challenge()
-                    if challenge is None:
+                # THE PROTOCOL'S ASK_USER CONTINUATION. Upstream OSWorld
+                # answers EVERY response without actions (user simulator, or
+                # DEFAULT_USER_RESPONSE), counts a step and loops; a session
+                # turn instead ENDS on prose. Each text-only ending therefore
+                # gets the bridge's continuation, delivered as one
+                # harness-injected user turn. It replaces the regex-gated
+                # prose challenge, whose trigger missed t003's completion
+                # prose (see ``ActionBridge.text_only_continuation``); a
+                # model that then calls finish meets the completion gate on
+                # the finish-call arm, as every finish does. Bounded inside
+                # the bridge by the step budget and the ask-loop guard, one
+                # continuation per message; skipped when the wall bound fired
+                # (a kill switch -- a re-prompt after it would spend past it)
+                # and when the turn did not end cleanly: an error, abort or
+                # cut-off is the harness's or provider's ending, not the
+                # model's text-only reply, and keeps its own label. The ONE
+                # abort let through is this driver's own budget cancel
+                # (``_budget_cancelled_the_turn``): the bridge then writes the
+                # row and names the ending ``max-steps`` instead of the
+                # nameless ``aborted`` (QA round 1, Q-1). The wall is read
+                # again AFTER the answer (``halted``), because obtaining it
+                # can outlast the wall (review round 1, R1-1).
+                while not wall_fired and (
+                    _turn_ended_cleanly(last_turn_end)
+                    or _budget_cancelled_the_turn(last_turn_end, budget_stop_sent)
+                ):
+                    continuation = await bridge.text_only_continuation(
+                        halted=lambda: "wall-bound" if wall_fired else None
+                    )
+                    if continuation is None:
                         break
-                    challenge_text, challenge_images = split_prompt_content(challenge)
+                    continuation_text, continuation_images = split_prompt_content(continuation)
                     await handle.session.prompt(
-                        challenge_text,
-                        images=challenge_images or None,
+                        continuation_text,
+                        images=continuation_images or None,
                         harness_injected=True,
                     )
             finally:
@@ -4461,8 +5009,17 @@ def _make_run_command(
                 timeout_s=timeout_s,
                 max_output_bytes=64 * 1024,
             ),
-            # Leave the target time to stop the child and serialize its result.
-            timeout=timeout_s + 15,
+            # Leave the target time to stop the child and serialize its result,
+            # AND to answer a lost reply. The OSWorld adapter bounds its own
+            # wait at ``timeout_s + 10`` wall-clock and then takes one liveness
+            # probe (worst case ~4 s) before deciding between an unknown-outcome
+            # answer and the poisoning error; at ``+ 15`` that answer would
+            # land within ~1 s of this deadline, and a deadline that fires first
+            # tears the RPC channel down -- losing the episode the probe exists
+            # to keep. ``+ 20`` leaves ~6 s of scheduling margin. Named
+            # (``COMMAND_RPC_MARGIN_S``) because the action server's MCP request
+            # timeout is derived from it and must stay outside it.
+            timeout=timeout_s + COMMAND_RPC_MARGIN_S,
         )
 
     return run

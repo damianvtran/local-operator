@@ -7179,7 +7179,13 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
     if not isinstance(carry, dict):
         return []
     lines: list[str] = []
-    for key in ("running_notice", "notice", "monitors_notice", "session_roles_notice"):
+    for key in (
+        "running_notice",
+        "notice",
+        "monitors_notice",
+        "session_roles_notice",
+        "definitions_notice",
+    ):
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)

@@ -2483,7 +2483,10 @@ def _make_runner(
                 job.wip_ref = ""
             if comms is not None:
                 comms.note_checkpoint(job_id, last_step=checkpoint.step)
-            await _finish_child_browser(child, comms, job_id, "completed")
+            browser_fates = await _finish_child_browser(
+                child, comms, job_id, "completed", parent_session=parent_session
+            )
+            result_text = _with_browser_fates(result_text, browser_fates)
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -2516,9 +2519,20 @@ def _make_runner(
             if checkpoint is not None and take_checkpoint is not None:
                 await take_checkpoint(force=True)
             cancelled_cause = str(final.get("cut_off_cause") or "")
+            # The fate lines are discarded here on purpose (QA Q1, cancelled
+            # half): a cancelled job row has no parent-visible text — ``wait``/
+            # ``jobs`` render only ``[cancelled]`` (``tools.builtin._job_summary``
+            # prints result_text for completed and error_text for failed), and
+            # ``_run_job`` delivers nothing for a cancel. The handed tab still
+            # reaches the parent's ``handed`` list, so its ``tabs`` listing marks
+            # it its own and its dispose closes it; only the line is not shown.
             with contextlib.suppress(BaseException):
                 await _settle_child_cleanup(
-                    asyncio.create_task(_finish_child_browser(child, comms, job_id, "cancelled"))
+                    asyncio.create_task(
+                        _finish_child_browser(
+                            child, comms, job_id, "cancelled", parent_session=parent_session
+                        )
+                    )
                 )
                 await _publish_terminal_outcome(
                     comms,
@@ -2550,7 +2564,10 @@ def _make_runner(
             await stop_checkpoint_background()
             if checkpoint is not None and take_checkpoint is not None:
                 await take_checkpoint(force=True)
-            await _finish_child_browser(child, comms, job_id, "failed")
+            browser_fates = await _finish_child_browser(
+                child, comms, job_id, "failed", parent_session=parent_session
+            )
+            failed_text = _with_browser_fates(str(exc), browser_fates)
             await _publish_terminal_outcome(
                 comms,
                 emit,
@@ -2559,10 +2576,17 @@ def _make_runner(
                 label=label,
                 status="failed",
                 failure_evidence=str(final.get("error") or ""),
-                error_text=str(exc),
+                error_text=failed_text,
                 cut_off_cause=cut_off_cause,
                 cut_off=str(final.get("cut_off") or ""),
             )
+            if browser_fates:
+                # The job ROW is what the parent's `wait`/`jobs` read, and
+                # ``AsyncJobManager._run_job`` writes it as ``str(exc)`` from
+                # what this arm raises (QA Q1) — re-raising the original would
+                # drop the fate lines, leaving the parent unaware it now owns a
+                # handed tab. Chained, so the original stays in the traceback.
+                raise ChildFailedWithBrowserFates(failed_text) from exc
             raise
         finally:
             await stop_checkpoint_background()
@@ -2598,6 +2622,7 @@ def _make_runner(
                     # cancellation cleanup's final provider delta reaches the
                     # manager accumulator even when retention evicts its row.
                     await _dispose_child(child)
+                    await _hand_up_late_browser_surfaces(child, parent_session)
                 finally:
                     # Record the child's cleanup VERDICT on its owning ancestor
                     # BEFORE detaching the job edge (review round 2,
@@ -2721,17 +2746,59 @@ def _answered_prefix(messages: list[Any]) -> list[Any]:
     return messages[:cut]
 
 
+class ChildFailedWithBrowserFates(RuntimeError):
+    """A failed child's error, with the runner's browser fate lines appended.
+
+    Raised from the runner's failed arm in place of the original exception
+    (chained as ``__cause__``) only when the child held a browser surface, so
+    the parent-visible job error carries ``Browser: …`` like a completed
+    child's result does. Every other failure re-raises unchanged.
+    """
+
+
+def _with_browser_fates(text: str | None, fates: list[str]) -> str | None:
+    """Append the harness's browser fate lines to a child's result/error text.
+
+    Appended by the RUNNER, after the settle, so the parent reads what actually
+    happened to each tab rather than the child's claim about it — the claim is
+    how an operator was twice sent to a tab teardown had already closed.
+    """
+    if not fates:
+        return text
+    return f"{text or ''}\n\n" + "\n".join(fates)
+
+
 async def _finish_child_browser(
-    child: "Session | None", comms: Any, job_id: str, outcome: str
-) -> None:
+    child: "Session | None",
+    comms: Any,
+    job_id: str,
+    outcome: str,
+    *,
+    parent_session: Any = None,
+) -> list[str]:
     """Resource settlement precedes authoritative outcome publication.
 
     Pausing cancels the runner too, but is not task completion. Preserve that
     explicit lifecycle hold through dispose rather than classifying cancellation
     (or a dead process) as authority to close a suspended interaction.
+
+    A RETAINED surface (explicit ``retain``, or the retention a pending
+    ``request_access`` writes) is handed to ``parent_session`` instead of being
+    closed: it exists for a human, and the child's lifetime does not bound the
+    human's (see ``browser_bridge.handoff``). Everything else closes as before.
+
+    Returns one fate line per surface (``Browser: closed ui:N`` / ``Browser:
+    handed ui:N to parent <sid>`` / an honest "could not close"), derived from
+    the settle result, for the runner to append to the child's outcome.
     """
+    from local_operator.browser_bridge.handoff import (
+        close_handed_browser_surfaces,
+        hand_off,
+        public_surface_label,
+    )
+
     if child is None:
-        return
+        return []
     record = comms._record(job_id) if comms is not None else None
     resource = getattr(getattr(child, "_browser", None), "resource", None)
     if record is not None and record.paused and resource is not None:
@@ -2742,12 +2809,35 @@ async def _finish_child_browser(
                 resource.remember(child._browser.surface_id, state="retained")
             except (RuntimeError, OSError, ValueError):
                 logger.warning("paused browser ownership changed; retained successor untouched")
-        return
+        return []
     if resource is None or not callable(getattr(child, "finish_browser_scope", None)):
         # A host that built a BrowserSurface without a resource has no durable
         # ownership to settle. Reading the generation anyway raised straight
         # through the completed/failed paths, replacing the child's real outcome.
-        return
+        return []
+    browser = child._browser
+    fates: list[str] = []
+    parent_browser = getattr(parent_session, "_browser", None)
+    parent_sid = str(getattr(parent_session, "session_id", "") or "")
+    if parent_browser is not None and isinstance(getattr(parent_browser, "handed", None), list):
+        fates.extend(
+            hand_off(
+                browser,
+                parent_browser,
+                child_session_id=str(child.session_id),
+                parent_session_id=parent_sid,
+            )
+        )
+        # Grandchildren this child's dispose is about to cancel hand their tabs
+        # here late; the runner passes those up after dispose (review R1).
+        browser.late_handoff_to_parent = True
+    else:
+        # No live parent able to own a tab: whatever grandchildren handed to
+        # this child is closed with it, rather than stranded behind it.
+        fates.extend(await close_handed_browser_surfaces(browser, outcome=outcome))
+    if getattr(browser, "handed_to", ""):
+        return fates
+    surface = str(browser.surface_id or resource.record.get("surface_id", "") or "")
     result = await child.finish_browser_scope(
         scope_id=child.session_id,
         # Off the resource the branch has already proven non-None, not the
@@ -2757,13 +2847,68 @@ async def _finish_child_browser(
     )
     if result.state not in ("closed", "retained"):
         logger.warning("child browser cleanup %s: %s", result.state, result.detail)
+    if surface:
+        label = public_surface_label(surface)
+        if result.state == "closed":
+            fates.append(f"Browser: closed {label}")
+        elif result.state == "retained":
+            # Reachable only without a parent able to take it (a detached run):
+            # say so instead of implying anyone owns it.
+            fates.append(
+                f"Browser: {label} is retained but no parent session could take it; "
+                "'lop browser tabs' lists it"
+            )
+        else:
+            detail = f": {result.detail}" if result.detail else ""
+            fates.append(
+                f"Browser: could not close {label} ({result.state}{detail}); it may still be open"
+            )
+    return fates
+
+
+async def _hand_up_late_browser_surfaces(child: "Session", parent_session: Any) -> None:
+    """Pass up tabs handed to ``child`` AFTER its own handoff ran (review R1).
+
+    The terminal handoff (``_finish_child_browser``) runs before the child is
+    disposed, but disposal is what cancels the child's still-running children,
+    and each of those hands its retained tab to this child on the way out — into
+    a list nobody reads again, stranding a tab a human may still be using. With
+    ``late_handoff_to_parent`` set, dispose leaves them in place and this moves
+    them to the parent, the next session that outlives them. The fate lines were
+    already published with the child's result, so these are logged only; the
+    parent's ``tabs`` listing still marks them its own and its dispose closes
+    them. Teardown path: never raises.
+    """
+    from local_operator.browser_bridge.handoff import (
+        close_handed_browser_surfaces,
+        hand_off,
+    )
+
+    browser = getattr(child, "_browser", None)
+    if browser is None or not getattr(browser, "handed", None):
+        return
+    try:
+        parent_browser = getattr(parent_session, "_browser", None)
+        if parent_browser is not None and isinstance(getattr(parent_browser, "handed", None), list):
+            fates = hand_off(
+                browser,
+                parent_browser,
+                child_session_id=str(child.session_id),
+                parent_session_id=str(getattr(parent_session, "session_id", "") or ""),
+            )
+        else:
+            fates = await close_handed_browser_surfaces(browser, outcome="cancelled")
+        if fates:
+            logger.info("late browser handoff from %s: %s", child.session_id, "; ".join(fates))
+    except Exception:  # noqa: BLE001 - teardown reports, never raises
+        logger.warning("late browser handoff failed", exc_info=True)
 
 
 async def _dispose_child(child: "Session") -> None:
     await _settle_child_cleanup(asyncio.create_task(child.dispose()))
 
 
-async def _settle_child_cleanup(dispose_task: asyncio.Task[None]) -> None:
+async def _settle_child_cleanup(dispose_task: asyncio.Task[Any]) -> None:
     """Finish child teardown even while the runner itself is being cancelled.
 
     Shielding alone is insufficient here: it lets teardown continue but returns

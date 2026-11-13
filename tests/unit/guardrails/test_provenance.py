@@ -612,7 +612,8 @@ def test_preview_reports_the_checkpoint_branch_and_text(home: Path) -> None:
     theirs = preview_tool_call(
         "bash", {"command": "rm -rf ~/theirs"}, ctx, settings=GuardSettings()
     )
-    assert theirs.builtin_risk == "HIGH" and "no evidence" in theirs.render()
+    assert theirs.builtin_risk == "HIGH" and "no history evidence" in theirs.render()
+    assert "ledger: no row for this session" in theirs.render()
     assert "cannot authorise a delete" in theirs.builtin_text
     crit = preview_tool_call(
         "bash", {"command": "rm -rf ~/.local-operator"}, ctx, settings=GuardSettings()
