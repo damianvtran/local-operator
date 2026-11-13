@@ -135,6 +135,28 @@ def test_loop_mkdir_records_each_and_never_a_preexisting_dir(home: Path) -> None
 # -- Gap B: another session's created directory -----------------------------------------
 
 
+def _rerecord(home: Path, path: Path, sid: str, command: str) -> None:
+    """Refresh ``sid``'s ledger row for ``path`` after the test changed that directory.
+
+    WHY: on Linux ``creation_stamp`` is the directory's ``st_ctime_ns`` (no
+    birth time there), and adding an entry moves it, so a row recorded before
+    the fixture filled the directory stops matching and the foreign rule fails
+    OPEN to "ordinary path" — the documented Linux limitation in
+    ``ForeignCreations``. macOS stamps birth time, which is why these tests
+    passed locally and failed on CI's Ubuntu full-suite shard (run
+    43369555175). Same remedy as ``test_own_worktree_removal._record``: the
+    ranking under test is the ledger rule, not the stamp's Linux semantics
+    (``test_ctime_stamp_fails_open_once_the_dir_changes`` pins those).
+    """
+    prov.write_records(
+        [(os.path.realpath(path), "mkdir")],
+        owners=[sid],
+        creator=sid,
+        command=command,
+        state_root=home / ".local-operator",
+    )
+
+
 def _osworld(home: Path, sid: str = OTHER) -> Path:
     base = home / "worktrees" / "osworld"
     base.mkdir(parents=True)
@@ -142,6 +164,7 @@ def _osworld(home: Path, sid: str = OTHER) -> Path:
     runs = base / "osworld-21" / "runs"
     runs.mkdir()
     (runs / "result.json").write_text("{}")
+    _rerecord(home, base / "osworld-21", sid, "mkdir ~/worktrees/osworld/osworld-21")
     return base / "osworld-21"
 
 
@@ -152,6 +175,34 @@ def test_another_sessions_dir_child_or_ancestor_ranks_high(home: Path, rel: str)
     verdict = _verdict(home, f"rm -rf {target}")
     assert verdict.risk is Risk.HIGH
     assert f"created by another session ({OTHER}, mkdir" in verdict.targets[0].reason
+
+
+def test_ctime_stamp_fails_open_once_the_dir_changes(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux stamp semantics, runnable on any host (CI run 43369555175).
+
+    With ``creation_stamp`` forced to ``st_ctime_ns`` (what Linux uses), a
+    foreign row ranks HIGH while its directory is untouched since recording,
+    and stops matching once an entry is added — the documented fail-open, so
+    the rank returns to main's "ordinary path", never something lower.
+    """
+    monkeypatch.setattr(prov, "creation_stamp", lambda st: int(st.st_ctime_ns))
+    (home / "w").mkdir()
+    _run(home, "mkdir -p ~/w/theirs/runs && echo x > ~/w/theirs/runs/r.json", sid=OTHER)
+    verdict = _verdict(home, "rm -rf ~/w/theirs/runs")
+    assert verdict.risk is Risk.HIGH
+    assert f"created by another session ({OTHER}, mkdir" in verdict.targets[0].reason
+    before = os.stat(home / "w" / "theirs").st_ctime_ns
+    # Kernel ctime is tick-granular: repeat the entry change until it moves.
+    for _ in range(100_000):
+        (home / "w" / "theirs" / "later").mkdir()
+        (home / "w" / "theirs" / "later").rmdir()
+        if os.stat(home / "w" / "theirs").st_ctime_ns != before:
+            break
+    assert os.stat(home / "w" / "theirs").st_ctime_ns != before
+    verdict = _verdict(home, "rm -rf ~/w/theirs/runs")
+    assert verdict.risk is Risk.LOW and verdict.targets[0].reason == "ordinary path"
 
 
 def test_landing_recursion_keeps_foreign_ledger_and_critical_ranks(home: Path) -> None:
@@ -296,6 +347,8 @@ def _shared(home: Path) -> None:
     # ``mkdir -p`` records the topmost NEW component: OTHER, first in, owns ~/w/shared.
     _run(home, "mkdir -p ~/w/shared/qa-other", sid=OTHER)
     _run(home, "mkdir -p ~/w/shared/mine/sub", sid=SID)
+    # SID's mkdir moved ~/w/shared's Linux ctime stamp; see ``_rerecord``.
+    _rerecord(home, home / "w" / "shared", OTHER, "mkdir -p ~/w/shared/qa-other")
     assert _rows(home) == [(SID, "~/w/shared/mine"), (OTHER, "~/w/shared")]
 
 
