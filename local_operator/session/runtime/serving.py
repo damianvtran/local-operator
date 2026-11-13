@@ -1825,10 +1825,26 @@ class ServingSessionHandle(SessionHandle):
             return
 
         def announce() -> None:
-            from local_operator.harness.bridge_egress import grant_suspended_notice
+            from local_operator.harness.bridge_egress import (
+                bridge_card_notice,
+                grant_suspended_notice,
+            )
 
+            # Cards parked while the session was clean are re-published as
+            # latched cards (security r7 lead on #3796): every attached viewer,
+            # desktop and phone rebuilds its card from these fields, so without
+            # this a stale card kept offering its S/G escapes after the latch.
+            # The owner's press-time checks stay the guarantee; this is what
+            # the viewers see.
+            relatched = False
+            try:
+                relatched = self._fold.latch_pending(bridge_card_notice(latch))
+            except Exception:  # noqa: BLE001 - the gate still enforces; logged at warning
+                logger.warning("could not re-publish parked cards as latched", exc_info=True)
             if self._bridge_grant_suspended():
                 self._emit_notice(grant_suspended_notice(latch), "warning", headline="Approvals")
+                self._notify()
+            elif relatched:
                 self._notify()
 
         latch.on_latched.append(announce)
@@ -11433,6 +11449,25 @@ class ServingSessionHandle(SessionHandle):
             # locality rule and is documented in full on
             # :meth:`_approvals_default_slash`, together with why the operator
             # on a phone or an attached pane is the same owner the desktop is.
+            #
+            # A LOOSENING DEFAULT NEEDS ``bridge_ack`` WHILE LATCHED (security r7
+            # lead on #3796, team-bridge-egress.md: "bridge_ack"). Global auto
+            # covers a latched session's cards by design (accepted auto/yolo
+            # risk), so an unmarked routed ``default auto`` -- a viewer card
+            # parked before the latch still offers ``G``, which sends exactly
+            # this -- would turn the next egress call into one nobody is asked
+            # about. Same refusal as the session ``auto`` arm below, and it is
+            # checked here, before the facade write, so a refusal writes nothing.
+            # A typed command (the TUI marks it) or an acked desktop frame passes.
+            # Judged by what the form RESOLVES to through the table the TUI owner
+            # shares (security r1 S-1 on #3849), so both owner hosts refuse the
+            # same set; the bare form also lands in the unknown-word arm below.
+            from local_operator.harness.approval import approvals_default_may_loosen
+
+            if approvals_default_may_loosen(argument[len("default") :]) and not bridge_ack:
+                refusal = self._bridge_ack_refusal(SlashResult)
+                if refusal is not None:
+                    return refusal
             return self._approvals_default_slash(argument, SlashResult)
         if not argument:
             live = "auto" if self._auto_approve else "ask"
@@ -11546,18 +11581,9 @@ class ServingSessionHandle(SessionHandle):
             # rendered the latched sentence, from the picker) or a typed command
             # the TUI marks may make a post-latch session grant. Same receipt
             # shape as the unattributed-loosening refusal.
-            from local_operator.harness.bridge_egress import ack_refused_notice
-
-            return SlashResult(
-                kind="notice",
-                text=ack_refused_notice(self._session),
-                style="warning",
-                data={
-                    "approval_mode": "auto" if self._auto_approve else "ask",
-                    "ok": False,
-                    "approval_reason": "bridge_latched",
-                },
-            )
+            refusal = self._bridge_ack_refusal(SlashResult, latched=latched)
+            if refusal is not None:
+                return refusal
         self._auto_approve = wanted_auto
         # Stamped only for a grant made while ALREADY latched: that is the
         # deliberate post-latch loosening, which keeps covering calls and
@@ -11676,6 +11702,32 @@ class ServingSessionHandle(SessionHandle):
             )
         return None
 
+    def _bridge_ack_refusal(self, SlashResult: Any, *, latched: bool | None = None) -> Any:
+        """The receipt refusing an unacknowledged loosening while latched, or ``None``.
+
+        One receipt for both loosening spellings (session ``auto`` and
+        ``default auto``) so a client keys on one ``approval_reason`` and the
+        copy stays the kind-selected ``ack_refused`` text. Writes nothing.
+        ``latched`` lets a caller that already read the latch reuse it; absent,
+        it is read here (fail-closed).
+        """
+        if latched is None:
+            latched = self._session_bridge_latched()
+        if not latched:
+            return None
+        from local_operator.harness.bridge_egress import ack_refused_notice
+
+        return SlashResult(
+            kind="notice",
+            text=ack_refused_notice(self._session),
+            style="warning",
+            data={
+                "approval_mode": "auto" if self._auto_approve else "ask",
+                "ok": False,
+                "approval_reason": "bridge_latched",
+            },
+        )
+
     def _approvals_default_slash(self, argument: str, SlashResult: Any) -> Any:
         """Persist the machine-wide default from this control connection.
 
@@ -11709,10 +11761,11 @@ class ServingSessionHandle(SessionHandle):
         # depends on server state — it reads a bare ``default`` as ordinary. Rather
         # than let an unclassifiable frame reach a loosening sink, the mode is
         # named; the seam stays exact and the receipt teaches the two spellings.
-        if word in ("ask", "on", "prompt"):
-            mode = "ask"
-        elif word in ("auto", "off", "yolo"):
-            mode = "auto"
+        from local_operator.harness.approval import approvals_default_target
+
+        target = approvals_default_target(word, current_auto=None)
+        if target is not None:
+            mode = "auto" if target else "ask"
         else:
             return SlashResult(
                 kind="notice",

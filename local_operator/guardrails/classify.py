@@ -1161,7 +1161,21 @@ def _rank(target: Target, prot: _Protected, session_id: str = "") -> RankedTarge
                     f"finish or close it first ({facts})",
                 )
             idle = activity.pr_state == "none" and not activity.owners_running
-            if own is not None and idle and state == "clean":
+            # OWN + CLEAN does not need the forge (operator escalation
+            # 2026-11-11, session 99c51054bdbd): ``git worktree remove --force``
+            # of its own clean tree for MERGED #1858 was refused twice, once
+            # because "PR state unknown (gh lookup timed out)" sent it to the
+            # judge and the judge then timed out (20 s). What the PR lookup
+            # protects is OTHER people's work in the tree (the 2026-11-09
+            # incident: a tree under QA); for a tree the ledger proves this
+            # session created, with nothing uncommitted and no other running
+            # owner, removal loses nothing (the branch ref survives) whatever
+            # gh says. A KNOWN open PR still refuses above; only an unknown
+            # state is waived, and only here. A dirty own tree, a foreign tree
+            # and an unproven path keep the judge, and a judge timeout there
+            # stays a refusal.
+            own_idle = not activity.owners_running and activity.pr_state in ("none", "unknown")
+            if own is not None and own_idle and state == "clean":
                 # Nothing uncommitted, nobody else in it, no open PR: the
                 # creator removing it loses nothing, ``--force`` or not.
                 return RankedTarget(
@@ -1428,6 +1442,13 @@ def classify_targets(
         return Verdict(Risk.LOW)
     prot = prot or _protected(env, scratchpad, session_id)
     ranked = [_rank(t, prot, session_id) for t in targets]
+    # An alternate parse's word (GNU sed's reading of ``-i ''``) counts only
+    # as CRITICAL: under the other reading it is the script, so a HIGH or LOW
+    # row for it would invent a target (review M1 on PR #3816).
+    ranked = [r for r in ranked if not (r.target.critical_only and r.risk is not Risk.CRITICAL)]
+    evidence_hits = [
+        h for h in evidence_hits if not (h.target.critical_only and h.risk is not Risk.CRITICAL)
+    ]
     # An append that is not forging evidence is not a destructive target at all:
     # drop it so it adds no "destructive" annotation and no target text.
     ranked = [r for r in ranked if not (r.target.op == "append" and r.risk is Risk.LOW)]

@@ -705,7 +705,7 @@ def render_copy_revoke_notice(peer_name: str, key: str, *, copied: bool, wiped: 
 
 
 def render_removal_endings(
-    peer_name: str, *, copies: int, wiped: int, timed_out: int = 0
+    peer_name: str, *, copies: int, wiped: int, timed_out: int = 0, unacknowledged: int = 0
 ) -> list[str]:
     """What a ``member rm`` receipt says about the copies that member holds.
 
@@ -757,6 +757,14 @@ def render_removal_endings(
             f"{missed} of {copies} {noun} on {peer_name} could NOT be confirmed "
             "deleted; a removed member is never contacted again"
         )
+    # SENT IS NOT HELD. A copy the owner sent whose ack never arrived is counted
+    # as open (the member may hold it), but the receipt must not let it read as a
+    # copy the member confirmed: it says which of the open ones that is.
+    pending = min(max(0, unacknowledged), unconfirmed)
+    if pending == 1:
+        lines.append("1 of them was sent but its delivery was never acknowledged")
+    elif pending > 1:
+        lines.append(f"{pending} of them were sent but their delivery was never acknowledged")
     lines.extend(COPY_CEILING_LINES)
     return lines
 

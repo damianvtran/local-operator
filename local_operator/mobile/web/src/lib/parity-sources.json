@@ -4,6 +4,8 @@
 		"repo": "damianvtran/local-operator-ui",
 		"path": "scripts/fixtures/condense.parity.json",
 		"manifest": "scripts/fixtures/condense.parity.manifest.json",
+		"revision": "72043c4ecbfddd734abec28694b05a163786bf0c",
+		"revisionNote": "External retrieval revision, verified against fixture, manifest and all 36 model sources; not a generation-time self-SHA. Authenticates the existing b0edf02e5/#1877 generation retained in relay e7890a59c (proof 6837647988), without changing its content or source hash.",
 		"sha256": "5e0117590743d9e79682bf044c4c07eb8c4053a5ffc9a17765d28545b43fea73",
 		"sourceHash": "5dde7aa3e8d7f53cf61d2386a7b3fd0802577bf0e1a5a310b06b9804a520cebb"
 	},
