@@ -295,32 +295,7 @@ jobs:
     # test/coverage path. Three complete attempt-bound CI runs supply per-file
     # p75 weights; their LPT test-time sums are NOT wall-time margin evidence.
     # See docs/ci-test-durations.md for provenance and post-change limits.
-    #
-    # 38 -> 45 on 2026-11-13, by the SAME formula as the 32 -> 38 step, after
-    # shard 0 was cut by this ceiling with every test green. Reproduction:
-    # #3864's gate run 43470745098, job 132063792182 (12756 passed in
-    # 2214.96s, then the serial controls `6 passed`, run_bounded rc=0 at
-    # 19:17:30.91Z, cancelled 0.03s later at 38:16 wall), and #3898's gate run
-    # 43495430540, job 132157719392 (rc=0 at 21:52:15.28Z, cancelled at
-    # 21:52:15.31Z). Measured from the API over the 30 latest full-suite runs
-    # carrying test jobs (13:02Z-19:03Z, 360 jobs): shard 0 success walls,
-    # p50/p90/max in minutes, were 35.1/37.4/37.7 on 3.12 against <= 30.1 p50
-    # for every other 3.12 shard. The serial controls are NOT the cause: their
-    # step runs 12/14/15 s, so counting them in shard 0's LPT budget (the
-    # first remedy tried) moves ~1 serial test-minute of 110 and cannot reach
-    # the 15% margin (shard 0 would need <= 38/1.15 = 33.0 min; its ordinary
-    # pytest step alone is 36.2 min at p90). Formula: W = 38.32 minutes (job
-    # 132063792182's green rc=0 at 38.18 plus the slowest observed 8 s from
-    # the serial step's end to job end on a green shard 0), and
-    # 45 = ceil(1.15 * W). The worst UNHEALTHY cut, job 131993160666, was at
-    # 99% at 38.35 and projects to ~42.2 with the 3.50-minute 99%->summary
-    # tail above, still inside 45. A hang is unaffected in kind: the stall
-    # and per-test watchdogs below still report it; it only burns 7 more
-    # minutes of one runner. This is runner/partition headroom, NOT a waiver:
-    # shard 0's ordinary run is itself the heaviest shard, which points at
-    # stale weights (308 of 2319 files unmeasured in tests/durations.json),
-    # and regenerating them is the durable fix.
-    timeout-minutes: 45
+    timeout-minutes: 38
     # Pass-through only, for `coverage-report` (whose `needs` must stay
     # `test`). Every leg carries the same value from `changes`, so the
     # last-leg-wins rule for matrix outputs cannot pick a different base.

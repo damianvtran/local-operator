@@ -831,17 +831,10 @@ def test_the_unresolved_error_names_the_string_that_was_tried(
 
 
 def test_unit_shard_capacity_changes_without_relaxing_timeout() -> None:
-    """The fleet repair buys parallel capacity, never fewer tests or an UNDERIVED cap.
-
-    The cap is pinned exactly so a raise cannot ride in unnoticed: 45 is
-    ceil(1.15 * 38.32), the worst healthy wall measured on 2026-11-13 (shard 0
-    cut at 38:16 with every test green, job 132063792182). The derivation lives
-    in the comment above `timeout-minutes` in full-suite.yml; changing this
-    number means re-deriving it there from fresh API walls, not editing a pin.
-    """
+    """The fleet repair buys parallel capacity, never fewer tests or a higher cap."""
     assert _shard_plan("test") == ("unit", 6)
     assert shard_tests.TREES["unit"].default_shards == 6
-    assert _ci_jobs()["test"]["timeout-minutes"] == 45
+    assert _ci_jobs()["test"]["timeout-minutes"] == 38
 
 
 def test_every_shard_matrix_job_uses_a_known_tree() -> None:
